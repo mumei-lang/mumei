@@ -1,7 +1,7 @@
 use crate::codegen::lowering::{
-    bitpreserve_cast, box_payload_to_i64, declare_chan_send_owned, enum_llvm_type,
-    payload_needs_box, release_boxed_payload, resolve_param_type, resolve_return_type,
-    unbox_payload_from_i64, ArrayPtr,
+    array_struct_type, bitpreserve_cast, box_payload_to_i64, declare_chan_send_owned,
+    enum_llvm_type, payload_needs_box, release_boxed_payload, resolve_param_type,
+    resolve_return_type, unbox_payload_from_i64, ArrayPtr,
 };
 use crate::codegen::pattern_emit::{
     bind_pattern_variables, compile_pattern_test, find_field_index, find_field_index_by_name,
@@ -541,7 +541,48 @@ pub(crate) fn compile_hir_expr<'a>(
                     };
 
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                    for arg in args {
+                    for (i, arg) in args.iter().enumerate() {
+                        // `[T]` params take the `{i64, ptr}` fat pointer —
+                        // a bare `compile_hir_expr` on an array var yields
+                        // only the len i64 and emits malformed call IR.
+                        let param_is_array = callee
+                            .params
+                            .get(i)
+                            .and_then(|p| p.type_name.as_deref())
+                            .is_some_and(|tn| {
+                                matches!(
+                                    mumei_core::lowering::lower(&module_env.resolve_base_type(tn)),
+                                    mumei_core::lowering::LoweredType::Array(_)
+                                )
+                            });
+                        if param_is_array {
+                            let slots = match arg {
+                                HirExpr::ArrayLit(elements) => Some(emit_array_literal(
+                                    context, builder, module, function, elements, variables,
+                                    var_types, array_ptrs, module_env,
+                                )?),
+                                HirExpr::Variable(name) => array_ptrs.get(name.as_str()).copied(),
+                                _ => None,
+                            };
+                            let Some((len_val, _elem_ty, data_ptr)) = slots else {
+                                return Err(MumeiError::codegen(format!(
+                                    "array argument to '{}' (param {}) must be an array                                      binding or literal (got {:?})",
+                                    callee_symbol, i, arg
+                                )));
+                            };
+                            let struct_ty = array_struct_type(context);
+                            let mut agg: inkwell::values::AggregateValueEnum =
+                                struct_ty.get_undef().into();
+                            agg = llvm!(builder.build_insert_value(agg, len_val, 0, "arg_arr_len"));
+                            agg =
+                                llvm!(builder.build_insert_value(agg, data_ptr, 1, "arg_arr_data"));
+                            let agg_val: BasicValueEnum = match agg {
+                                inkwell::values::AggregateValueEnum::StructValue(s) => s.into(),
+                                inkwell::values::AggregateValueEnum::ArrayValue(a) => a.into(),
+                            };
+                            arg_vals.push(agg_val.into());
+                            continue;
+                        }
                         let val = compile_hir_expr(
                             context, builder, module, function, arg, variables, var_types,
                             array_ptrs, module_env,

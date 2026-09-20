@@ -101,3 +101,18 @@ body: {
     let a = [x, y, x + y];
     a[0] + a[1]
 };
+
+// A non-mutating callee leaves the caller's tracked chain intact —
+// `head(a)` returns a[0] and `a` keeps its literal contents afterwards.
+atom lit_head(arr: [i64]) -> i64
+requires: len(arr) >= 1;
+ensures: result == arr[0];
+body: {
+    arr[0]
+};
+atom lit_call_pure() -> i64
+ensures: result == 5;
+body: {
+    let a = [5, 6];
+    lit_head(a)
+};

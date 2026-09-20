@@ -49,6 +49,25 @@
   `[1.0, 2.5, 4.0]` because Z3 numerals for whole floats report `Int`.
   Nested `[…[…]…]` and `["x","y"]` fail closed (element sorts Array/Seq
   unsupported — same frontier as `[Str]` array params).
+- **Callee array stores now reach the caller model (unsoundness fix)** —
+  a `[T]` argument hands the callee the `{len, ptr}` fat pointer, so
+  `arr[i] = v` inside a callee lands in the caller-visible buffer; the
+  verifier previously kept the caller's pre-call store chain and could
+  "verify" stale claims like `a[0] == 1` after `mutate(a)`. Call sites now
+  havoc the tracked chain (and every `let b = a` alias sharing its root) of
+  args whose callee parameter may be stored through — detected by
+  `atom_stores_to_array`, a depth-capped transitive scan over
+  `Stmt::ArrayStore`/call-argument positions (unknown or deeply-nested
+  callees assume mutation, fail closed). The same havoc is applied to the
+  callee param's slot in `call_env` before `ensures` evaluation so
+  `arr[i]` in a mutating callee's postcondition means post-call contents.
+  Pure callees keep full precision — `head(a); a[0]` still knows `a`.
+- **Codegen array call arguments emit the fat pointer** — a `[T]` argument
+  previously emitted only the `len` i64 while the callee's signature took
+  `{i64, ptr}`, producing invalid IR (`call i64 @bump(i64 %p_len)` against
+  `declare i64 @bump({i64, ptr})`). Array args now build the `{i64, ptr}`
+  aggregate via `insertvalue` from `array_ptrs` (or materialise a literal
+  inline) — verified parseable by `llvm-as-17`.
 - **While-loop havoc resets tracked array slots (unsoundness fix)** —
   `havoc_vars` rebound `env[name]` for loop-modified vars but left
   `__z3_arr_<name>`/`len_<name>` on the pre-loop store chain, so

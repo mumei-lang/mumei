@@ -23,3 +23,20 @@ body: {
     };
     a[0]
 };
+
+// Negative: a mutating callee writes through the shared data pointer —
+// `a[0]` after `mutate(a)` must NOT verify as the pre-call element.
+atom mutate(arr: [i64]) -> i64
+requires: len(arr) >= 1;
+ensures: result == arr[0];
+body: {
+    arr[0] = arr[0] + 10;
+    arr[0]
+};
+atom post_call_stale() -> i64
+ensures: result == 1;
+body: {
+    let a = [1, 2];
+    mutate(a);
+    a[0]
+};

@@ -1114,6 +1114,17 @@ pub(crate) fn expr_to_z3<'a>(
                             }
                         }
 
+                        // `arr[i]` inside `ensures` means the POST-call
+                        // element — havoc the call_env tracked slot of any
+                        // `[T]` param the callee's body may store through,
+                        // so a mutating callee's ensures can't smuggle in
+                        // the caller's pre-call chain.
+                        for param in callee.params.iter() {
+                            if atom_stores_to_array(vc.module_env, &callee, &param.name) {
+                                havoc_array_name(vc, &param.name, &mut call_env);
+                            }
+                        }
+
                         // ensures を事実として solver に追加（result を呼び出し結果に束縛）
                         //
                         // Equality Ensures Propagation:
@@ -1253,6 +1264,13 @@ pub(crate) fn expr_to_z3<'a>(
                             let taint_marker = Bool::from_bool(ctx, true);
                             env.insert(taint_key, taint_marker.into());
                         }
+
+                        // The callee may have stored through a `[T]` arg's
+                        // data pointer — havoc the caller-side tracked chain
+                        // (and its aliases) for args whose callee param is
+                        // mutated, so post-call reads can't claim pre-call
+                        // elements.
+                        havoc_array_args(vc, &callee, args, env);
 
                         Ok(result_z3)
                     } else {
@@ -2574,6 +2592,10 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                     }
 
+                    // `[T]` args share the caller's data pointer — havoc
+                    // the tracked chain so post-call reads can't claim
+                    // pre-call elements the callee may have overwritten.
+                    havoc_array_args(vc, &callee_atom, args, env);
                     return Ok(result_z3);
                 }
             }
