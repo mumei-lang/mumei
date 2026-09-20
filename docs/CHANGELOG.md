@@ -29,6 +29,59 @@
   `tests/test_generic_call_negative.mm` and the effect-polymorphism
   fixtures.
 
+### 2026-09-20: clause `match` on struct fields resolves the field's type — and must be exhaustive
+
+- `requires:`/`ensures:` clauses lower with `solver_opt = None` so arm-body
+  side effects never leak onto the ambient solver — but that also skipped
+  the exhaustiveness check and the scrutinee's enum-domain assert. A
+  non-exhaustive clause match then fell through the `ite` fold to the
+  **last arm's body on every uncovered input**: `requires: match h.r {
+  Shape::Point => true }` silently lowered to `true`, a vacuous-verify
+  soundness hole.
+- `Expr::Match` now runs domain injection and the exhaustiveness check on
+  a scratch solver (seeded with `vc.clause_context`, the already-lowered
+  clauses of the same spec) whenever no ambient solver is present. A
+  non-exhaustive clause match is a `spec_lowering_failed` error;
+  exhaustive matches lower exactly as before.
+- The `decl_hint` that disambiguates colliding variant names now covers
+  `FieldAccess` chains, calls, and `result`, not just bare variables: a
+  new `declared_type_of_expr` walks `h.r` / `h.a.b` / `f(x).r` /
+  `result.r` through `StructDef.fields` to the field's declared type
+  name (`param h: H → H → field r → Shape`). This complements the
+  const-name walk in `target_param_enum_name`, which dead-ends on
+  scrutinees with no flattened `h_r` const (e.g. `result.r`).
+- `infer_expr_enum_name` uses the same walk, so `let s = h.r` records
+  `s: Shape` and a later `match s` resolves like `match h.r`.
+- Non-enum fields (`match h.n` on `n: i64`) behave exactly like a
+  body-level i64 match: literal patterns + wildcard work, and a
+  non-exhaustive literal-only match fails closed.
+- Tests: `tests/test_clause_match_struct_field.mm` (5 atoms),
+  `tests/test_clause_match_struct_field_negative.mm` (4 atoms).
+
+### 2026-09-20: `len` resolves strings and structural array values; scalar args are type errors
+
+- Previously every non-`Variable` `len(e)` argument collapsed onto one
+  shared uninterpreted `len_arr` symbol, and `len(x)` on an `i64`
+  silently bound a fresh unconstrained constant — so `len("abc") == 3`
+  could fail while `len(5)` was vacuously admissible.
+- `Str` arguments now map to Z3 `str.len` (`Z3_mk_seq_length`), so
+  `len("abc") == 3`, `len(s)` on `Str` params, and `len("ab" + "cde")
+  == 5` all reason about real string length.
+- Non-variable array arguments (literals, `if`/`match` values, call
+  results) resolve through `tail_len_expr`: literals get their concrete
+  length, branch values get the mirrored `ite` length merge. Only an
+  argument that actually produces a tracked array may fall back to a
+  fresh symbol — scalars and untracked variables are a clean type error
+  (`len() expects an array or string argument; \`x\` is neither`).
+- LLVM codegen keeps pace: `len` on `Str` values emits `strlen` (locals
+  and `s + t` results alike), `len` on string/array literals
+  constant-folds, and `len` on `if`/`match`/call array values extracts
+  the fat pointer's `len` field. The old fallthrough that emitted
+  `const 0` for anything it didn't understand is gone — the verify-only
+  `len` would otherwise have compiled to wrong code.
+
+ 9a349ff (verify: len() resolves Str via str.len and array values structurally; scalars are type errors)
+
 ### 2026-09-20: `match`-arm array literals merge their lengths
 
 - `let a = match e { A => [1, 2], B => [3, 4, 5] }` already merged the

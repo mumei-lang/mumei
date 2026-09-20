@@ -390,6 +390,61 @@ fn field_type_at_path(module_env: &ModuleEnv, struct_name: &str, path: &str) -> 
     None
 }
 
+/// Declared type of a bare binding: a parameter's `type_name`, `result`'s
+/// return type, or the inferred enum type recorded for a `let`/`assign`
+/// binding (`let e = Mine::Cons(1)` records `e: Mine`).
+fn binding_declared_type(vc: &VCtx, name: &str) -> Option<String> {
+    let atom = vc.current_atom;
+    if name == "result" {
+        return atom.and_then(|a| a.return_type.clone());
+    }
+    atom.and_then(|a| {
+        a.params
+            .iter()
+            .find(|p| p.name == name)
+            .and_then(|p| p.type_name.clone())
+    })
+    .or_else(|| vc.local_enum_types.borrow().get(name).cloned())
+}
+
+/// Declared type name of an expression, when statically recoverable:
+/// parameters, `result`, `let`-bound enum values, calls to atoms with a
+/// declared return type, and `FieldAccess` chains rooted at a struct-typed
+/// expression (`h.r` on `h: H`, `h.a.b` through nested structs, `result.r`,
+/// `f(x).r`). The chain walks `StructDef.fields` — field names are matched
+/// exactly per segment, so `_`-joined const-name ambiguity does not arise.
+/// The raw declared name is returned; callers apply `type_name_base` and
+/// `get_enum` to use it (a non-enum name is simply ignored downstream).
+pub(crate) fn declared_type_of_expr(vc: &VCtx, expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Variable(name) => binding_declared_type(vc, name),
+        Expr::Call(name, _) => vc
+            .module_env
+            .get_atom(name)
+            .and_then(|a| a.return_type.clone()),
+        Expr::FieldAccess(..) => {
+            let mut fields: Vec<&String> = Vec::new();
+            let mut cur = expr;
+            while let Expr::FieldAccess(inner, field) = cur {
+                fields.push(field);
+                cur = inner;
+            }
+            let mut ty = declared_type_of_expr(vc, cur)?;
+            for field in fields.iter().rev() {
+                let sdef = vc.module_env.get_struct(type_name_base(&ty))?;
+                ty = sdef
+                    .fields
+                    .iter()
+                    .find(|f| f.name == **field)?
+                    .type_name
+                    .clone();
+            }
+            Some(ty)
+        }
+        _ => None,
+    }
+}
+
 /// Signature a `Variant` pattern encodes on the Int-tag path: the variant's
 /// tag index plus its payload field types (recursive `Self` fields project
 /// as `i64` tags). When several enums declare the same variant name and the
@@ -566,16 +621,23 @@ pub(crate) fn infer_expr_enum_name(vc: &VCtx, expr: &Expr) -> Option<String> {
                     .filter(|t| vc.module_env.get_enum(t).is_some())
             }
         }
-        Expr::FieldAccess(inner, field) => match inner.as_ref() {
-            // `E.V` unit constructor or `value.field` — only the qualified
-            // unit-constructor form names an enum.
-            Expr::Variable(base) => vc
-                .module_env
-                .get_enum(base)
-                .filter(|e| e.variants.iter().any(|v| v.name == *field))
-                .map(|e| e.name.clone()),
-            _ => None,
-        },
+        Expr::FieldAccess(inner, field) => {
+            // `E.V` unit constructor: the base names the enum directly.
+            if let Expr::Variable(base) = inner.as_ref() {
+                if let Some(e) = vc
+                    .module_env
+                    .get_enum(base)
+                    .filter(|e| e.variants.iter().any(|v| v.name == *field))
+                {
+                    return Some(e.name.clone());
+                }
+            }
+            // `let s = h.r` — the declared type of a field chain rooted at a
+            // struct-typed binding; `match s` then resolves like `match h.r`.
+            declared_type_of_expr(vc, expr)
+                .map(|t| type_name_base(&t).to_string())
+                .filter(|t| vc.module_env.get_enum(t).is_some())
+        }
         Expr::IfThenElse {
             then_branch,
             else_branch,

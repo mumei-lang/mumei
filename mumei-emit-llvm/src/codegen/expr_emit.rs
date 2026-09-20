@@ -454,22 +454,78 @@ pub(crate) fn compile_hir_expr<'a>(
                 Ok(result.into_float_value().into())
             }
             "len" => {
-                if !args.is_empty() {
-                    if let HirExpr::Variable(arr_name) = &args[0] {
-                        if let Some((len_val, _, _)) = array_ptrs.get(arr_name.as_str()) {
-                            return Ok(*len_val);
+                if args.len() != 1 {
+                    return Err(MumeiError::codegen("len() takes exactly one argument"));
+                }
+                let arg = &args[0];
+                // `Str` values are null-terminated string pointers — the
+                // runtime length is libc `strlen`. Verification (which
+                // `build` runs first) only admits `len` on arrays and `Str`,
+                // so a pointer-typed value reaching codegen is a `Str`.
+                let strlen_call = |module: &inkwell::module::Module<'a>,
+                                   builder: &inkwell::builder::Builder<'a>,
+                                   ptr: inkwell::values::PointerValue<'a>|
+                 -> MumeiResult<inkwell::values::IntValue<'a>> {
+                    let strlen_ty = context
+                        .i64_type()
+                        .fn_type(&[context.ptr_type(AddressSpace::default()).into()], false);
+                    let strlen_fn = module
+                        .get_function("strlen")
+                        .unwrap_or_else(|| module.add_function("strlen", strlen_ty, None));
+                    let call = llvm!(builder.build_call(strlen_fn, &[ptr.into()], "str_len"));
+                    Ok(call.as_any_value_enum().into_int_value())
+                };
+                if let HirExpr::Variable(arr_name) = arg {
+                    if let Some((len_val, _, _)) = array_ptrs.get(arr_name.as_str()) {
+                        return Ok(*len_val);
+                    }
+                    if let Some(val) = variables.get(arr_name.as_str()) {
+                        if val.is_pointer_value() {
+                            return Ok(
+                                strlen_call(module, builder, val.into_pointer_value())?.into()
+                            );
                         }
-                        // A bound non-array value (enum, struct, local array
-                        // literal, Str) has no tracked length — silently
-                        // returning 0 would generate wrong code.
-                        if variables.contains_key(arr_name.as_str()) {
-                            return Err(MumeiError::codegen(format!(
-                                "len() is only supported on array parameters; '{arr_name}' is not an array"
-                            )));
-                        }
+                        return Err(MumeiError::codegen(format!(
+                            "len() is only supported on arrays and Str; '{arr_name}' is neither"
+                        )));
                     }
                 }
-                Ok(context.i64_type().const_int(0, false).into())
+                match arg {
+                    HirExpr::StringLit(s) => {
+                        // Both sides count bytes: Z3 string literals are
+                        // lowered from their UTF-8 encoding, and `strlen` on
+                        // the emitted globals reports bytes too.
+                        Ok(context.i64_type().const_int(s.len() as u64, false).into())
+                    }
+                    HirExpr::ArrayLit(elements) => Ok(context
+                        .i64_type()
+                        .const_int(elements.len() as u64, false)
+                        .into()),
+                    _ => {
+                        // `len(if …)`, `len(match …)`, `len(call())`, `len(s + t)`:
+                        // compile the argument and take the length off the
+                        // runtime value — `{i64 len, ptr}` arrays expose field
+                        // 0, `Str` values go through `strlen`.
+                        let v = compile_hir_expr(
+                            context, builder, module, function, arg, variables, var_types,
+                            array_ptrs, module_env,
+                        )?;
+                        if v.is_pointer_value() {
+                            return Ok(strlen_call(module, builder, v.into_pointer_value())?.into());
+                        }
+                        if v.is_struct_value() {
+                            let len_val = llvm!(builder.build_extract_value(
+                                v.into_struct_value(),
+                                0,
+                                "len_fat"
+                            ));
+                            return Ok(len_val.into_int_value().into());
+                        }
+                        Err(MumeiError::codegen(
+                            "len() is only supported on arrays and Str values",
+                        ))
+                    }
+                }
             }
             "alloc_raw" => {
                 let size_val = compile_hir_expr(

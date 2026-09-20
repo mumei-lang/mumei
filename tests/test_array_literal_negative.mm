@@ -112,3 +112,20 @@ body: {
     }
     a[2]
 };
+
+// Negative: `len` on a literal reports the concrete length — claiming a
+// different length is a genuine counterexample, not a spurious one.
+atom len_literal_wrong() -> i64
+requires: true;
+ensures: result == 4;
+body: {
+    len([1, 2, 3])
+};
+
+// Negative: `len` on a non-array, non-string scalar is a type error.
+atom len_of_int_is_type_error(x: i64) -> i64
+requires: true;
+ensures: result >= 0;
+body: {
+    len(x)
+};
