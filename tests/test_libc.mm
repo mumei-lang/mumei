@@ -80,9 +80,11 @@ atom test_calloc_memset_pipeline()
     ensures: result >= -1;
     body: {
         let ptr = libc::safe_calloc(4, 64);
-        if ptr >= 0 then
+        if ptr >= 0 {
             libc::safe_memset(256, 42, 128)
-        else ptr
+        } else {
+            ptr
+        }
     };
 
 // memmove with exact buffer sizes

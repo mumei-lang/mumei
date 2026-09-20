@@ -1,3 +1,31 @@
+### 2026-09-20: parser body-panics become clean syntax errors; `if`-guard propagated to call-site `requires`
+
+- `verify`/`build` on `tests/test_libc.mm` and `tests/test_libc_contracts.mm`
+  panicked (`internal error (panic)`) at `parse_prefix` — the files used
+  `if cond then … else …`, and the parser's missing-`else` path was a hard
+  `panic!`. `then` is not part of the grammar; the tests now use canonical
+  `if c { … } else { … }`.
+- All three body-level `panic!`s in `mumei-core/src/parser/expr.rs` are now
+  recorded `syntax_failure`s with a poisoned recovery: a missing `else`
+  yields an `__mumei_missing_else_branch` unbound marker (MIR lowering
+  still rejects it if a caller ignores the diagnostics), a `while` without
+  `invariant` binds `__mumei_missing_invariant`, and an unknown
+  `task_group:` join qualifier records the failure and defaults to `all`.
+- New `parse_body_expr_checked` surfaces those diagnostics:
+  `Monomorphizer::collect` accumulates them in `body_parse_failures` and
+  the shared load pipeline returns a clean
+  `Syntax error(s) in atom bodies of '<file>': atom '<name>': <detail>`
+  for verify/check/build — non-zero exit, no panic.
+- Call-site `requires` (and trait `param_constraints`) checks now assert the
+  enclosing `if`/`else` branch guards from `path_cond_stack` before
+  querying the solver — the same pattern the shift-range and
+  div-by-zero checks already used. `libc::safe_free(ptr)` inside
+  `if ptr >= 0` now verifies instead of failing with a spurious
+  `ptr = -1` counterexample.
+- Tests: `tests/test_if_else_required.rs` +
+  `test_if_guard_requires.mm`, `test_if_missing_else_negative.mm`,
+  `test_while_missing_invariant_negative.mm`,
+  `test_task_group_bad_join_negative.mm`.
 ### 2026-09-20: counterexample report no longer flags translated builtins as uninterpreted
 
 - `collect_expr_symbols` (spurious-CE detection) treated every `Expr::Call`
@@ -25,7 +53,6 @@
 - Tests: `tests/test_alias_probe.mm` (alias read/store/chain) +
   `tests/test_array_alias.rs`.
 
-||||||| parent of cf754e4 (verify: translated builtins (len/forall/matches/…) are not uninterpreted CE deps)
 ### 2026-09-20: clause-scope phantom names fail closed; unbound-check exemptions aligned
 
 - `requires` / `ensures` / `invariant` / `forall_constraints` clauses that
@@ -60,12 +87,6 @@
 - Tests: `tests/negative/clause_unbound_name.mm` +
   `tests/test_clause_unbound_name.rs`.
 
-<<<<<<< HEAD
-||||||| parent of 43ac726 (docs(CHANGELOG): array-alias verify entry)
-||||||| parent of cf754e4 (verify: translated builtins (len/forall/matches/…) are not uninterpreted CE deps)
-=======
-||||||| parent of 1f02d7f (verify: translated builtins (len/forall/matches/…) are not uninterpreted CE deps)
->>>>>>> cf754e4 (verify: translated builtins (len/forall/matches/…) are not uninterpreted CE deps)
 ### 2026-09-20: unbound-check follow-up — lambda params bound; bogus generic-call syntax surfaced
 
 - `HirExpr::Lambda` lowering now registers the lambda's parameters as MIR

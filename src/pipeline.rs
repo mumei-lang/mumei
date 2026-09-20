@@ -185,6 +185,13 @@ pub(crate) fn try_load_and_prepare_with_full_options(
 
     let mut mono = ast::Monomorphizer::new();
     mono.collect(&items);
+    if !mono.body_parse_failures.is_empty() {
+        return Err(format!(
+            "Syntax error(s) in atom bodies of '{}':\n  {}",
+            input,
+            mono.body_parse_failures.join("\n  ")
+        ));
+    }
     // Generic defs are dropped from the post-mono item list (only concrete
     // instances remain), but their names are still declared items bodies may
     // reference (`atom_ref(pipe)`, `List::Nil`, generic-call sugar lowered as

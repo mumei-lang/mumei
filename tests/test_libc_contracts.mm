@@ -90,8 +90,10 @@ atom test_calloc_memset_free()
     ensures: result >= -1;
     body: {
         let ptr = libc::safe_calloc(4, 64);
-        if ptr >= 0 then {
+        if ptr >= 0 {
             let filled = libc::safe_memset(256, 42, 128);
             libc::safe_free(ptr)
-        } else ptr
+        } else {
+            ptr
+        }
     };
