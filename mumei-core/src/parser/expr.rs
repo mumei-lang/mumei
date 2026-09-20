@@ -5,7 +5,7 @@
 use super::pattern::parse_pattern;
 use super::token::Token;
 use super::ParseContext;
-use crate::parser::{Expr, JoinSemantics, LambdaParam, MatchArm, Op, Stmt};
+use crate::parser::{Expr, JoinSemantics, LambdaParam, MatchArm, Op, Span, Stmt};
 
 /// Pratt parser binding power for binary operators.
 /// Returns (left_bp, right_bp). Left-associative: left < right.
@@ -449,6 +449,27 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
         Token::False => {
             ctx.advance();
             Expr::Variable("false".to_string())
+        }
+
+        Token::Bang => {
+            // Unary logical not — desugared to `if e { false } else { true }`.
+            // (A relational `e == false` desugar is not safe: the
+            // comparison-chain normalizer would flatten `!(a < b)` into
+            // `a < b && b == false`.) Verify requires a Bool condition; codegen
+            // emits the 0/1 branch, matching `if e { 0 } else { 1 }`.
+            ctx.advance();
+            let operand = parse_prefix(ctx);
+            Expr::IfThenElse {
+                cond: Box::new(operand),
+                then_branch: Box::new(Stmt::Expr(
+                    Expr::Variable("false".to_string()),
+                    Span::default(),
+                )),
+                else_branch: Box::new(Stmt::Expr(
+                    Expr::Variable("true".to_string()),
+                    Span::default(),
+                )),
+            }
         }
 
         Token::Minus => {
