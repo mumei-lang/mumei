@@ -343,6 +343,14 @@ pub fn analyze_moves(body: &MirBody) -> MoveAnalysisResult {
     let mut exit_states: HashMap<BasicBlockId, MirLinearityState> = HashMap::new();
     let mut violations: Vec<MoveViolation> = Vec::new();
 
+    // Liveness for ConflictingMerge filtering: a local that is moved on one
+    // branch and merely unused on the other is dead-after on every path, so
+    // the divergent ownership is unobservable (`let r = …; if c { r } else { 0 }`
+    // moves `r` into the result on the then-path only — legal). Conflicts on
+    // locals that ARE used after the merge stay violations; the merged state
+    // already marks them dead, so any later use is also a UseAfterMove.
+    let liveness = crate::mir_analysis::compute_liveness(body);
+
     // Initialize entry block with all locals alive
     let init_state = MirLinearityState::init_all_alive(&body.locals);
     entry_states.insert(body.entry_block, init_state);
@@ -439,6 +447,15 @@ pub fn analyze_moves(body: &MirBody) -> MoveAnalysisResult {
                             .and_then(|d| d.name.as_ref())
                             .is_some();
                         if !is_named {
+                            continue;
+                        }
+                        // Dead-after-merge locals cannot observe the divergent
+                        // ownership state — suppress (see liveness note above).
+                        let live_at_merge = liveness
+                            .live_in
+                            .get(&succ_id)
+                            .is_some_and(|live| live.contains(&conflict.local));
+                        if !live_at_merge {
                             continue;
                         }
                         violations.push(MoveViolation {

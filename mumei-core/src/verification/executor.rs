@@ -742,9 +742,16 @@ pub(crate) fn verify_inner(
     // Rvalue::Use, so violations are only reported for Move types.
     // Move type violations are hard errors; Copy type false positives are eliminated.
     let phase_start = std::time::Instant::now();
-    let mir_body = crate::mir::lower_hir_to_mir_with_env(hir_atom, Some(module_env));
+    let mut mir_body = crate::mir::lower_hir_to_mir_with_env(hir_atom, Some(module_env));
     let move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
     if mir_body.check_analysis_budget().is_ok() {
+        // Insert drops before move analysis so a local consumed on one branch
+        // but merely unused on the other is dead on both paths at the merge —
+        // otherwise `let r = …; if c { r } else { 0 }` is a spurious
+        // ConflictingMerge (r moved into the result on the then-path, still
+        // alive-but-dead on the else-path).
+        let liveness = crate::mir_analysis::compute_liveness(&mir_body);
+        crate::mir_analysis::insert_drops(&mut mir_body, &liveness);
         let move_result = crate::mir_analysis::analyze_moves(&mir_body);
         if let Some(v) = move_result.violations.first() {
             // Look up the local's name for better error messages
