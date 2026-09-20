@@ -406,6 +406,112 @@ fn bv_binary_op<'a>(
     }
 }
 
+// Collect `let`-bound names anywhere inside a match arm body — including
+// nested blocks, if/match branches, and loop/task bodies whose envs fold
+// back into the arm env. The post-match merge treats them as arm-local
+// shadows, so an arm-body `let x = …` never rewrites an outer `x`.
+fn collect_arm_local_lets(stmt: &Stmt, local: &mut std::collections::HashSet<String>) {
+    match stmt {
+        Stmt::Let { var, value, .. } => {
+            local.insert(var.clone());
+            collect_expr_local_lets(value, local);
+        }
+        Stmt::Assign { value, .. } => collect_expr_local_lets(value, local),
+        Stmt::Expr(e, _) => collect_expr_local_lets(e, local),
+        Stmt::ArrayStore { index, value, .. } => {
+            collect_expr_local_lets(index, local);
+            collect_expr_local_lets(value, local);
+        }
+        Stmt::Block(stmts, _) => {
+            for s in stmts {
+                collect_arm_local_lets(s, local);
+            }
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            ..
+        } => {
+            // The loop body runs on a havoced env clone — its `let`s
+            // never reach the enclosing env.
+            collect_expr_local_lets(cond, local);
+            collect_expr_local_lets(invariant, local);
+            if let Some(d) = decreases {
+                collect_expr_local_lets(d, local);
+            }
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            collect_arm_local_lets(body, local);
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for c in children {
+                collect_arm_local_lets(c, local);
+            }
+        }
+        Stmt::Cancel { .. } => {}
+    }
+}
+
+fn collect_expr_local_lets(expr: &Expr, local: &mut std::collections::HashSet<String>) {
+    match expr {
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_expr_local_lets(cond, local);
+            collect_arm_local_lets(then_branch, local);
+            collect_arm_local_lets(else_branch, local);
+        }
+        Expr::Match { target, arms } => {
+            // Inner match arms have their own local set via the inner
+            // merge — their `let`s never reach this arm's env, and
+            // collecting them here would wrongly skip real assignments
+            // this arm makes to a same-named outer variable.
+            collect_expr_local_lets(target, local);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    collect_expr_local_lets(g, local);
+                }
+            }
+        }
+        Expr::Async { body } => collect_arm_local_lets(body, local),
+        // Lambda bodies run in their own parameter scope — their `let`s
+        // never reach the enclosing env.
+        Expr::BinaryOp(l, _, r) => {
+            collect_expr_local_lets(l, local);
+            collect_expr_local_lets(r, local);
+        }
+        Expr::FieldAccess(base, _) | Expr::Await { expr: base } => {
+            collect_expr_local_lets(base, local)
+        }
+        Expr::ArrayAccess(_, idx) => collect_expr_local_lets(idx, local),
+        Expr::Call(_, args) | Expr::Perform { args, .. } => {
+            for a in args {
+                collect_expr_local_lets(a, local);
+            }
+        }
+        Expr::CallRef { callee, args } => {
+            collect_expr_local_lets(callee, local);
+            for a in args {
+                collect_expr_local_lets(a, local);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, v) in fields {
+                collect_expr_local_lets(v, local);
+            }
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_expr_local_lets(channel, local);
+            collect_expr_local_lets(value, local);
+        }
+        Expr::ChanRecv { channel } => collect_expr_local_lets(channel, local),
+        _ => {}
+    }
+}
+
 pub(crate) fn expr_to_z3<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
@@ -1798,6 +1904,15 @@ pub(crate) fn expr_to_z3<'a>(
             for arm in arms.iter().rev() {
                 let mut arm_env = env.clone();
 
+                // Names bound by the arm's pattern — or by `let`s anywhere
+                // in the arm body — stay arm-local even when they shadow an
+                // outer binding; they must not be folded into the post-match
+                // env like assignments.
+                let mut arm_bound: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                crate::hir::collect_pattern_bindings(&arm.pattern, &mut arm_bound);
+                collect_arm_local_lets(&arm.body, &mut arm_bound);
+
                 // B. ネストパターンの再帰解体:
                 //    pattern_bind_variables が再帰的にパターンを分解し、
                 //    バインド変数を arm_env に登録する。
@@ -1840,7 +1955,13 @@ pub(crate) fn expr_to_z3<'a>(
                         solver.assert(&prior_negation);
                         let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
                         solver.pop(1);
-                        merge_arm_env_into(&mut merged_arm_env, &arm_env, env, &full_cond);
+                        merge_arm_env_into(
+                            &mut merged_arm_env,
+                            &arm_env,
+                            env,
+                            &full_cond,
+                            &arm_bound,
+                        );
                         result = Some(match result {
                             Some(else_val) => {
                                 let (body_val, else_val) = unify_branch_sorts(body_val, else_val)?;
@@ -1854,7 +1975,7 @@ pub(crate) fn expr_to_z3<'a>(
                 }
 
                 let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
-                merge_arm_env_into(&mut merged_arm_env, &arm_env, env, &full_cond);
+                merge_arm_env_into(&mut merged_arm_env, &arm_env, env, &full_cond, &arm_bound);
                 result = Some(match result {
                     Some(else_val) => {
                         let (body_val, else_val) = unify_branch_sorts(body_val, else_val)?;
