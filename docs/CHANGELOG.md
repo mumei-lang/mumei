@@ -1,3 +1,37 @@
+### 2026-09-20: MIR match pattern bindings + merge-aware move analysis
+
+- **MIR lowering** (`mumei-core/src/mir.rs`): `match` arm patterns now emit
+  real locals — `Variable` binds the scrutinee (`Rvalue::Use`), `Variant`
+  field patterns bind positional `Rvalue::FieldAccess` projections (nested
+  variants recurse through a temporary). Previously pattern-bound names had
+  no `var_map` entry, so `lookup_var` fell back to `Local(0)` — the first
+  local — making `let q = p; match q { Mk(a,s,f) => a+s+f }` a spurious
+  "use of moved value `p`" UseAfterMove. Bindings are scoped per arm
+  (`var_map` saved/restored) so a pattern variable shadowing an outer name
+  does not leak past the arm or into sibling arms.
+- **Move analysis** (`move_analysis.rs`): a `ConflictingMerge` is now only
+  reported when the divergent local is live at the merge block
+  (`liveness.live_in`). A local moved on one branch but never used again
+  (`let r = …; if c { r } else { 0 }`) is dead on every continuation path —
+  the divergent ownership is unobservable — so it is no longer a violation.
+  Conflicts on locals used after the merge are unchanged, and the merged
+  state still marks them dead so later uses fail as UseAfterMove.
+  `analyze_moves` computes liveness internally (no signature change); the
+  executor additionally runs `compute_liveness` + `insert_drops` before
+  analysis so scope-end drops are explicit.
+- **`infer_hir_ty`** gained a `HirExpr::Match` arm (infers the result type
+  from arm tail expressions) so `let r = match …` bindings of scalar
+  results are Copy rather than conservatively Move.
+- Tests: `test_move_analysis_merge_unused_move` (unit),
+  `test_mir_match_bindings{,_negative}.mm` + `test_mir_match_bindings.rs`.
+  `test_move_analysis_conflicting_merge` updated — its merge block now
+  returns the moved local so the conflict is observable.
+- Known adjacent gap (separate layer, pre-existing): the *verifier* (Phase
+  5, HIR executor) also leaks pattern bindings past the match — `let x = 99;
+  match p { P(x,b) => … }; if x > 0 …` sees `x` as the arm payload after the
+  match, not the outer `x`. MIR now scopes correctly; the spec-side
+  environment needs the same treatment.
+
 ### 2026-09-19: `match` on `let`-bound enum values resolves the declared type
 
 - **Verify** (`mumei-core`): a `let`/`assign` binding now records the inferred

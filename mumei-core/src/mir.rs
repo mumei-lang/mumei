@@ -424,17 +424,16 @@ impl LowerCtx {
                 then_branch,
                 else_branch,
                 ..
-            } => {
-                fn tail_expr(stmt: &HirStmt) -> Option<&HirExpr> {
-                    match stmt {
-                        HirStmt::Expr(e) => Some(e),
-                        HirStmt::Block { tail_expr, .. } => tail_expr.as_deref(),
-                        _ => None,
-                    }
-                }
-                tail_expr(then_branch)
-                    .and_then(|e| self.infer_hir_ty(e))
-                    .or_else(|| tail_expr(else_branch).and_then(|e| self.infer_hir_ty(e)))
+            } => hir_stmt_tail_expr(then_branch)
+                .and_then(|e| self.infer_hir_ty(e))
+                .or_else(|| hir_stmt_tail_expr(else_branch).and_then(|e| self.infer_hir_ty(e))),
+            HirExpr::Match { arms, .. } => {
+                // Infer the result type from the arm bodies so `let r = match …`
+                // bindings to scalar results are Copy, not Move. Falls back to
+                // None (conservative Move) when no arm's tail type resolves.
+                arms.iter().find_map(|arm| {
+                    hir_stmt_tail_expr(&arm.body).and_then(|e| self.infer_hir_ty(e))
+                })
             }
             // P25: `recv(ch)` yields the channel's declared payload type.
             HirExpr::ChanRecv { channel } => match channel.as_ref() {
@@ -524,6 +523,73 @@ pub fn infer_atom_return_type(atom: &crate::parser::Atom) -> Option<String> {
             tail_expr.as_ref().and_then(|expr| ctx.infer_hir_ty(expr))
         }
         _ => None,
+    }
+}
+
+/// The value expression a statement position evaluates to, if any.
+fn hir_stmt_tail_expr(stmt: &HirStmt) -> Option<&HirExpr> {
+    match stmt {
+        HirStmt::Expr(e) => Some(e),
+        HirStmt::Block { tail_expr, .. } => tail_expr.as_deref(),
+        _ => None,
+    }
+}
+
+/// Emit MIR locals for the variables a match pattern binds.
+///
+/// `Variable` binds the whole scrutinee; `Variant` binds each field pattern to
+/// a `FieldAccess` projection of the scrutinee (nested variants recurse through
+/// a temporary). Wildcards and literals bind nothing. Bound locals get no type
+/// annotation (Move), which is the conservative ownership default.
+fn lower_pattern_bindings(ctx: &mut LowerCtx, pattern: &crate::parser::Pattern, discr: &Operand) {
+    match pattern {
+        crate::parser::Pattern::Variable(name) => {
+            let local = ctx.alloc_local(Some(name.clone()), None);
+            ctx.emit(MirStatement::StorageLive(local.clone()));
+            ctx.emit(MirStatement::Assign(
+                Place::Local(local),
+                Rvalue::Use(discr.clone()),
+            ));
+        }
+        crate::parser::Pattern::Variant { fields, .. } => {
+            for (idx, field_pattern) in fields.iter().enumerate() {
+                lower_variant_field_binding(ctx, field_pattern, discr, idx);
+            }
+        }
+        crate::parser::Pattern::Wildcard | crate::parser::Pattern::Literal(_) => {}
+    }
+}
+
+fn lower_variant_field_binding(
+    ctx: &mut LowerCtx,
+    pattern: &crate::parser::Pattern,
+    discr: &Operand,
+    idx: usize,
+) {
+    match pattern {
+        crate::parser::Pattern::Variable(name) => {
+            let local = ctx.alloc_local(Some(name.clone()), None);
+            ctx.emit(MirStatement::StorageLive(local.clone()));
+            ctx.emit(MirStatement::Assign(
+                Place::Local(local),
+                Rvalue::FieldAccess(discr.clone(), idx.to_string()),
+            ));
+        }
+        crate::parser::Pattern::Variant { fields, .. } => {
+            // Nested variant pattern: bind a temporary to the intermediate
+            // field value, then bind its sub-patterns off the temporary.
+            let tmp = ctx.alloc_temp();
+            ctx.emit(MirStatement::StorageLive(tmp.clone()));
+            ctx.emit(MirStatement::Assign(
+                Place::Local(tmp.clone()),
+                Rvalue::FieldAccess(discr.clone(), idx.to_string()),
+            ));
+            let tmp_op = Operand::Place(Place::Local(tmp));
+            for (sub_idx, sub_pattern) in fields.iter().enumerate() {
+                lower_variant_field_binding(ctx, sub_pattern, &tmp_op, sub_idx);
+            }
+        }
+        crate::parser::Pattern::Wildcard | crate::parser::Pattern::Literal(_) => {}
     }
 }
 
@@ -811,6 +877,17 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
                 let arm_start = ctx.next_block;
                 arm_block_ids.push(arm_start);
 
+                // Bind pattern variables to locals. Without this, names bound
+                // by the pattern (e.g. `Mk(a, s, f)`) have no entry in var_map
+                // and `lookup_var` falls back to Local(0) — the parameter —
+                // producing spurious use-after-move violations on the scrutinee's
+                // source binding.
+                // Pattern bindings are scoped to the arm: a bound name that
+                // shadows an outer variable must not leak past the arm, so the
+                // var_map is restored after the arm body is lowered.
+                let saved_var_map = ctx.var_map.clone();
+                lower_pattern_bindings(ctx, &arm.pattern, &discr_op);
+
                 // Lower the arm body.
                 let arm_val =
                     lower_stmt(ctx, &arm.body).unwrap_or(Operand::Constant(MirConstant::Int(0)));
@@ -839,6 +916,11 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
                         otherwise_id = Some(arm_start);
                     }
                 }
+
+                // Restore the pre-arm scope: pattern bindings (and any `let`s
+                // inside the arm body) do not leak to sibling arms or to code
+                // after the match.
+                ctx.var_map = saved_var_map;
             }
 
             // Merge block.
