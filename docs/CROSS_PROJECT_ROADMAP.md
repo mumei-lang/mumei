@@ -1465,7 +1465,7 @@ graph TD
 **実装状況**: ✅ Implemented（旧計画の `verify-spec` / `spec_verifier.py` / MCP `verify_spec_soundness` / `check_spec_satisfiability` は下記の実装に置き換わった）
 
 - **V1-A-1 仕様充足可能性チェック — 実装済み**: `python -m agent audit` / `validate-spec`（`agent/cross_validation.py` の `main_validate_spec`）が抽出仕様を `mumei verify --enable-vacuity-check --proof-cert` にかけ、`SpecHealthChecker`（`agent/strategies/spec_health_strategy.py`）が矛盾（`ContradictionInfo`）・vacuity・過剰拘束（`_suggest_overconstrained_fix`）・曖昧さを分類して `spec_health_issues` 出力キーに集約する。MCP では `check_spec_health` / `check_spec_contradiction` / `validate_nl_spec` / `scan_and_fix` が同経路を公開する。
-- **V1-A-2 仕様完全性チェック — 残件**: `audit --domain-hint` はドメイン指定の抽出ヒントとして動くが、ドメインテンプレート由来の「必須条件欠落」警告（例: financial の残高保存則が ensures に無い場合の警告）は未実装。
+- **V1-A-2 仕様完全性チェック — 実装済み**（mumei-agent PR #596/#597）: `audit --domain-hint` / `validate-spec --domain` / `extract-spec --domain`（MCP `extract_spec_from_code(domain_hint=)`）が `DOMAIN_CHECKLISTS`（`agent/spec_completeness_checker.py` の `check_domain_completeness` / `check_forge_spec_domain_completeness`）でドメイン必須条件の欠落を検査する。checklist 項目は `clause` スコープ（requires/ensures/any）持ち — 例: financial は残高保存則を ensures に、非負金額を requires に要求し、欠落時は `domain-completeness: financial spec lacks balance conservation (…; expected in ensures)` を `spec_health_issues` / `completeness_warnings` に出す。prose-only 仕様は clause 単位で全文フォールバック。残件: keyword ヒューリスティックのため意味的マッチは限定的。
 - **V1-A-3 人向けフィードバックレポート — 実装済み**: `audit`/`validate-spec` は構造化 JSON（`spec_health_issues` + `next_steps`）と人向けレポートを出力し、mumei-demo Phase 7 `mode_a` でも実行される。
 
 ---
@@ -1477,8 +1477,8 @@ graph TD
 **実装状況**: ✅ Implemented（旧計画の `verify-code` / `code_verifier.py` は `validate-code` + `audit` に置き換わった）
 
 - **V1-B-1 コード→仕様→Z3検証パイプライン — 実装済み**: `python -m agent validate-code`（旧 `verify-foreign` は同サブコマンドに統合）が Python/Rust/TypeScript/Go/Solidity から契約を推定し `mumei verify` で検証、違反は `_with_source_lines` / `_infer_foreign_source_line_map`（`agent/cross_validation.py`）で元コードの行番号に紐付けて `verification_violations` に出す。MCP では `validate_code` / `validate_foreign_code` / `verify_foreign_code` が利用可能。
-- **V1-B-2 言語別の検証ヒューリスティクス — 一部実装・継続改善領域**: 5 言語の契約推定・検証は動作するが、言語別「よくある問題」パターン集（Rust ownership/unwrap、Go goroutine リーク等）の注入は限定的 — 拡充は継続課題。
-- **V1-B-3 差分フィードバック — 一部実装**: 違反箇所の列挙と `next_steps` の方向提示は実装済みだが、修正候補 diff の自動生成は未実装。
+- **V1-B-2 言語別の検証ヒューリスティクス — PR 進行中**（mumei-agent PR #598 open draft）: `agent/language_patterns.py` の宣言的 registry（`LANGUAGE_PATTERNS`）で 5 言語の「よくある問題」パターンを advisory warning として注入 — Python mutable default/bare except、Rust unguarded unwrap/expect、Go defer-in-loop、TS floating promise、Solidity tx.origin/selfdestruct/unchecked low-level call。advisory のみで `success` を反転させない配線（`_language_advisory_issues` 経由、`fix_suggestion` テンプレート連携）。現行の言語別契約推定は `_infer_{go,python,rust}_contracts` 等で動作中。残件: detector は body-text スキャン。
+- **V1-B-3 差分フィードバック — 実装済み**（mumei-agent PR #596/#597）: `validate-code` の各 issue に `_with_fix_suggestions` が `fix_suggestion` を付与 — 違反種別テンプレート（reentrancy→`nonReentrant`、access-control→`require(msg.sender …)`、除算→`divisor != 0`、overflow→operand bound、bounds→`0 <= i && i < len(…)`、null→non-null 前提等）に加え、`source_line`/`location` があれば行アンカー付き `Suggested diff` fenced block（契約コメント挿入・solidity 1 行ガード）。残件: rewrite patch ではなく挿入ヒント；自動適用なし（`next_steps` が唯一の human-review 入口のまま）。
 
 ---
 
@@ -2094,8 +2094,8 @@ Z3 unknown ──> known witness / tactic ladder（決定論、既存） ──>
 
 | # | 由来 | タスク | 着手トリガ |
 |---|---|---|---|
-| R-11 | P10-B | Regular Expression Theory（`Z3_RE_SORT` / RegLan） | `regex_semantics` タグで Lean へ送られる義務が std / benchmark / dogfood に実際に出現し、Priority 25 B-1（translator 拡張の regex 項目）でも lowering できないと判明したとき。それまでは `prefix_of` / `suffix_of` / `contains` 近似 + Lean 委譲を維持 |
-| R-12 | P10-C | Finite Non-recursive ADT（`Z3_DATATYPE_SORT`） | ペイロード付き enum の `match` 網羅性 / セレクタ型安全性の違反が Int タグ経路で検出漏れ・偽陽性として報告されたとき、または vStd forge task が payload 付き variant を要求したとき |
+| R-11 ✅ Implemented（mumei PR #584、2026-09-19） | P10-B | Regular Expression Theory（`Z3_RE_SORT` / RegLan） | `reglan.rs` の regex→Z3 RegLan ミニコンパイラ（literal / `.` / `*+?` / `{n,m}` / `[]` / `[^]` / `|` / `()` / escapes / anchors）で `matches()` / `match_regex()` / `re_match()` を `str.in_re` にコンパイル — where 句制約と atom 契約の両経路。compilable パターンは `regex_semantics` タグから除外され Lean 委譲なしで完結。非 compilable 構文は従来どおり近似 + Lean 委譲 |
+| R-12 ✅ Implemented（mumei PR #585/#587/#588/#591/#592、2026-09-19） | P10-C | Finite Non-recursive ADT（`Z3_DATATYPE_SORT`） | 有限・非再帰・非 generic・全 payload scalar の enum がネイティブ `DatatypeSort` に下降 — `match` 網羅性は tester 被覆 UNSAT、payload は真の sort のセレクタ束縛、`E::V` ctor 式（#588）と enum 間 `==`/`!=` deep equality（#591）まで codegen 連携。決定的 variant-owner 解決（#587: 宣言型 hint + owners-agree + fail-closed ambiguous）と qualified `E::V` match arm（#592: qualifier は宣言型と一致必須・不一致は "belongs to enum" fail-closed、未知 qualifier は leaf 解決、let 束縛 `local_enum_types` で分岐スコープ済み）。再帰/generic/非 scalar payload は Int-tag + `inductive_data_type` 維持（Lean 委譲境界不変） |
 | R-13 | P17 残課題 | 同期プリミティブで保護された共有可変状態の干渉推論 | `std/concurrency` 系 atom または mumei-demo シナリオで lock / unlock を伴う共有状態が必要になったとき。Priority 25 Track A の A-6「リソース取得 / 解放対応」の設計（外部コード側）が先に固まるので、その語彙を流用する |
 | R-14 | Multi-Stage IR Phase 4 | borrow checking / lifetime analysis | 設計未着手。`LinearityCtx` の move / drop 解析で std / demo が回っている間は着手しない。参照型（`&T`）を言語に導入する判断が先 |
 | R-15 | P19 / P29 残課題 | Capability Stage 2〜4 / per-receiver capability 解決 | Priority 15 の需要トリガ T1〜T4（`docs/CAPABILITY_DEMAND_STUDY.md`）。結論は否定的のため保留継続 |
@@ -2119,7 +2119,7 @@ Wave 6（P25、現在）: P31 `task_group` — `task` / `task_group:all` lowerin
 
 - 新規 verdict 語彙・別名 alias の追加、`translator_version` / `bridge_lemma_hash` の変更（必要なら別 Priority）。
 - units of measure の追加機能（直近 PR 群で実装済みの範囲を維持。残課題が出た時点で `docs/ROADMAP.md` に個別起票）。
-- V1-A〜V1-D 節の「未実装」記述は 2026-09-19 の docs-sync で実装実態に改訂済み（audit / validate-spec / validate-code / validate-spec-to-code / validate-code-to-spec / verify-conformance / verify-traceability が計画済み名の実装を担う）。残件は V1-A-2 ドメイン完全性チェックと V1-B-3 修正 diff 自動生成。
+- V1-A〜V1-D 節の「未実装」記述は 2026-09-19 の docs-sync で実装実態に改訂済み（audit / validate-spec / validate-code / validate-spec-to-code / validate-code-to-spec / verify-conformance / verify-traceability が計画済み名の実装を担う）。残件だった V1-A-2 ドメイン完全性チェック（clause スコープ付き `DOMAIN_CHECKLISTS`）と V1-B-3 修正ヒント・行アンカー diff（`fix_suggestion` + `Suggested diff`）は mumei-agent PR #596/#597 で実装済み。V1-B-2 言語別パターン集の registry 拡充は mumei-agent PR #598 で進行中。
 
 ### 関連ファイル
 
