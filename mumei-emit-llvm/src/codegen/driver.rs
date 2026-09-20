@@ -7,7 +7,6 @@ use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
 use inkwell::types::BasicType;
-use inkwell::values::BasicValueEnum;
 use inkwell::OptimizationLevel;
 use mumei_core::hir::HirAtom;
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
@@ -53,7 +52,7 @@ pub fn compile_atom_into_module<'ctx>(
 
     let mut variables = HashMap::new();
     let mut var_types: HashMap<String, String> = HashMap::new();
-    let mut array_ptrs: HashMap<String, (BasicValueEnum, BasicValueEnum)> = HashMap::new();
+    let mut array_ptrs: HashMap<String, crate::codegen::lowering::ArrayPtr> = HashMap::new();
 
     for (i, param) in atom.params.iter().enumerate() {
         let val = function.get_nth_param(i as u32).unwrap();
@@ -90,7 +89,12 @@ pub fn compile_atom_into_module<'ctx>(
                 llvm!(builder.build_extract_value(struct_val, 0, &format!("{}_len", param.name)));
             let data_ptr =
                 llvm!(builder.build_extract_value(struct_val, 1, &format!("{}_data", param.name)));
-            array_ptrs.insert(param.name.clone(), (len_val, data_ptr));
+            let elem_ty = param
+                .type_name
+                .as_deref()
+                .and_then(|name| super::lowering::array_elem_llvm_type(context, name, module_env))
+                .unwrap_or_else(|| context.i64_type().into());
+            array_ptrs.insert(param.name.clone(), (len_val, elem_ty, data_ptr));
             variables.insert(param.name.clone(), len_val);
         } else {
             variables.insert(param.name.clone(), val);
