@@ -116,3 +116,35 @@ body: {
     let a = [5, 6];
     lit_head(a)
 };
+
+// Rebinding to a scalar keeps the scalar value usable (the name itself is
+// not poisoned) — only array access on it is rejected.
+atom rebind_scalar_tail() -> i64
+  requires: true;
+  ensures: result == 5;
+  body: {
+    let a = [1, 2]
+    a = 5
+    a
+  };
+
+// Rebinding back to an array re-wires the slots.
+atom rebind_back_to_array() -> i64
+  requires: true;
+  ensures: result == 7;
+  body: {
+    let a = [1, 2]
+    a = 5
+    a = [7, 8]
+    a[0]
+  };
+
+// Scalar → array rebinding works too.
+atom scalar_to_array() -> i64
+  requires: true;
+  ensures: result == 1;
+  body: {
+    let x = 5
+    x = [1, 2]
+    x[0]
+  };

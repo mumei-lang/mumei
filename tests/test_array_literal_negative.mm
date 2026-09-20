@@ -40,3 +40,27 @@ body: {
     mutate(a);
     a[0]
 };
+
+// Regression: rebinding an array-typed name to a scalar must not leave the
+// stale `__z3_arr_<name>`/`len_<name>` slots behind — `a[0]` after `a = 5`
+// must not read the pre-rebind `[1, 2]` chain.
+atom scalar_rebind_stale_read() -> i64
+  requires: true;
+  ensures: result == 1;
+  body: {
+    let a = [1, 2]
+    a = 5
+    a[0]
+  };
+
+// Same staleness through a store: `a[0] = 9` after `a = 5` must not write
+// into the stale chain.
+atom scalar_rebind_stale_store() -> i64
+  requires: true;
+  ensures: result == 9;
+  body: {
+    let a = [1, 2]
+    a = 5
+    a[0] = 9
+    a[0]
+  };

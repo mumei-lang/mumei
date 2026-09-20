@@ -1,3 +1,20 @@
+### 2026-09-20: rebinding an array var to a scalar clears its tracked array state
+
+- `let a = [1, 2]; a = 5; a[0]` **verified** (`a[0] == 1`) even though
+  `a` is the integer `5` — `wire_array_slots` returned early on the
+  non-array value without removing `__z3_arr_a`/`len_a`, so array
+  indexing kept reading the pre-rebind `[1, 2]` chain.
+- The early return now also drops `env["__z3_arr_<name>"]` and
+  `env["len_<name>"]`: `a[0]` / `a[0] = 9` after `a = 5` fail closed
+  (`Potential Out-of-Bounds`), `len(a)` falls back to an unconstrained
+  length (same class as `len` on a scalar). Rebinding to a scalar keeps
+  the value usable (`a` → `5`), rebinding back to an array re-wires the
+  slots, and scalar → array rebinding works.
+- Tests: `tests/test_array_literal_negative.mm` gained
+  `scalar_rebind_stale_read` / `scalar_rebind_stale_store`;
+  `tests/test_array_literal.mm` gained `rebind_scalar_tail` /
+  `rebind_back_to_array` / `scalar_to_array`.
+
 ### 2026-09-20: string literals re-escape on body re-lex (`\"`, `\\`, `\n`, `\t`)
 
 - The lexer stores DECODED string content (`\n` → real newline, `\"` →

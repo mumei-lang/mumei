@@ -565,7 +565,12 @@ pub(crate) fn wire_array_slots<'a>(
         _ => val.as_array(),
     };
     let Some(arr) = arr else {
-        // Rebound to a non-array value — drop any stale element-type entry.
+        // Rebound to a non-array value — drop the stale tracked chain and
+        // length so a later `name[i]`/`len(name)` cannot read the
+        // pre-rebind array (`let a = [1,2]; a = 5; a[0]` must not see
+        // the old `[1,2]`).
+        env.remove(&format!("__z3_arr_{name}"));
+        env.remove(&format!("len_{name}"));
         vc.local_array_elem_types.borrow_mut().remove(name);
         return;
     };
