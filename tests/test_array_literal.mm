@@ -227,3 +227,43 @@ atom match_arm_three_way(x: i64) -> i64
     }
     a[0]
   };
+
+// Nested `if` inside a `match` arm tail: the length merge recurses
+// through the arm value's own ite children, so `len_<a>` is
+// `ite(c_A, ite(c, 2, 3), 2)` — `a[1]` in bounds on every path.
+enum LitF { LitP, LitQ }
+
+atom match_arm_nested_if(e: LitE, c: bool) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = match e {
+      LitE::LitA => if c { [1, 2] } else { [9, 9, 9] },
+      LitE::LitB => [3, 4],
+    }
+    a[1]
+  };
+
+// And `match` nested inside a `match` arm tail likewise merges.
+atom match_arm_nested_match(e: LitE, f: LitF) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = match e {
+      LitE::LitA => match f {
+        LitF::LitP => [1, 2],
+        LitF::LitQ => [3],
+      },
+      LitE::LitB => [4, 5, 6],
+    }
+    a[0]
+  };
+
+// Nested `if` in an `if` branch tail is no longer conservative either.
+atom if_branch_nested_if(c: bool, d: bool) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = if c { if d { [1, 2] } else { [3] } } else { [4, 5] }
+    a[0]
+  };

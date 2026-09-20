@@ -99,3 +99,16 @@ body: {
     }
     a[2]
 };
+
+// Negative: nested `if` inside a `match` arm — index 2 is OOB when the
+// inner `if` takes the 2-element branch or the outer match hits the
+// 2-element arm.
+atom match_arm_nested_if_oob(e: LitNegE, c: bool) -> i64
+ensures: result >= 0;
+body: {
+    let a = match e {
+        LitNegE::LitNegA => if c { [1, 2] } else { [9, 9, 9] },
+        LitNegE::LitNegB => [3, 4],
+    }
+    a[2]
+};

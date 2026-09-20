@@ -8,14 +8,21 @@
   same conditions on lengths: `len_a = ite(c_A, len_A, ite(c_B, len_B,
   …))`. Arm tails contribute a concrete length for literals, the tracked
   `len_<src>` for variables, and — since arm-local `let`s never reach
-  the merged env — the rhs of `A => { let t = […]; t }` is resolved
-  one level deep. Anything unresolvable gets a fresh `#m<idx>` symbol.
-- Bounds stay per-arm precise: `a[2]` still fails closed on a 2-element
-  arm. Nested `if` inside an arm tail keeps the conservative fresh
-  length (same policy as `if`-branch merges).
+  the merged env — the rhs of `A => { let t = […]; t }` is resolved via
+  `stmt_let_rhs`. Anything unresolvable gets a fresh `#m<idx>` symbol.
+- The merge is recursive: a nested `if`/`match` in an arm (or `if`
+  branch) tail mirrors the value node's own `ite` children, so
+  `match e { A => if c { [1,2] } else { [9,9,9] }, B => [3,4] }` yields
+  `len_a = ite(c_A, ite(c, 2, 3), 2)` — closing the conservative
+  nested-`if` gap left by the previous entry too. Depth is bounded
+  (`TAIL_LEN_DEPTH`) so `let x = x`-style cycles bail out fresh.
+- Bounds stay per-arm precise: `a[2]` fails closed on any path whose
+  arm/branch has 2 elements.
 - Tests: `match_arm_lit_len` / `match_arm_local_let` /
-  `match_arm_var_len` / `match_arm_three_way` in
-  `tests/test_array_literal.mm`, `match_arm_lit_oob` in
+  `match_arm_var_len` / `match_arm_three_way` /
+  `match_arm_nested_if` / `match_arm_nested_match` /
+  `if_branch_nested_if` in `tests/test_array_literal.mm`,
+  `match_arm_lit_oob` / `match_arm_nested_if_oob` in
   `tests/test_array_literal_negative.mm`.
 
 ### 2026-09-20: `if`-branch array literals merge their lengths
