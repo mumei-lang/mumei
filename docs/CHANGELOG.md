@@ -27,6 +27,29 @@
 - Tests: `tests/test_clause_match_struct_field.mm` (5 atoms),
   `tests/test_clause_match_struct_field_negative.mm` (4 atoms).
 
+### 2026-09-20: `len` resolves strings and structural array values; scalar args are type errors
+
+- Previously every non-`Variable` `len(e)` argument collapsed onto one
+  shared uninterpreted `len_arr` symbol, and `len(x)` on an `i64`
+  silently bound a fresh unconstrained constant — so `len("abc") == 3`
+  could fail while `len(5)` was vacuously admissible.
+- `Str` arguments now map to Z3 `str.len` (`Z3_mk_seq_length`), so
+  `len("abc") == 3`, `len(s)` on `Str` params, and `len("ab" + "cde")
+  == 5` all reason about real string length.
+- Non-variable array arguments (literals, `if`/`match` values, call
+  results) resolve through `tail_len_expr`: literals get their concrete
+  length, branch values get the mirrored `ite` length merge. Only an
+  argument that actually produces a tracked array may fall back to a
+  fresh symbol — scalars and untracked variables are a clean type error
+  (`len() expects an array or string argument; \`x\` is neither`).
+- LLVM codegen keeps pace: `len` on `Str` values emits `strlen` (locals
+  and `s + t` results alike), `len` on string/array literals
+  constant-folds, and `len` on `if`/`match`/call array values extracts
+  the fat pointer's `len` field. The old fallthrough that emitted
+  `const 0` for anything it didn't understand is gone — the verify-only
+  `len` would otherwise have compiled to wrong code.
+
+ 9a349ff (verify: len() resolves Str via str.len and array values structurally; scalars are type errors)
 ### 2026-09-20: `match`-arm array literals merge their lengths
 
 - `let a = match e { A => [1, 2], B => [3, 4, 5] }` already merged the
