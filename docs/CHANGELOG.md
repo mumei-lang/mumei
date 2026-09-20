@@ -1,3 +1,26 @@
+### 2026-09-20: rebinding an array var to a scalar clears its tracked array state
+
+- `let a = [1, 2]; a = 5; a[0]` **verified** (`a[0] == 1`) even though
+  `a` is the integer `5` — `wire_array_slots` returned early on the
+  non-array value without removing `__z3_arr_a`/`len_a`, so array
+  indexing kept reading the pre-rebind `[1, 2]` chain.
+- Simply removing the slots is not enough: `z3_dynamic_array` falls back
+  to `Array::new_const(ctx, name)` when `__z3_arr_<name>` is absent, and
+  Z3 interns consts by name — for a `[T]` **parameter** that re-derives
+  the original param const, resurrecting requires-side assertions
+  (`arr = 5; arr[0]` still proved `arr[0] == 4`). The non-array arm now
+  installs a `#`-suffixed fresh array + length (`{name}#rebound`,
+  `len_{name}#rebound` — `#` can never appear in a source identifier, so
+  no interning collision): post-rebind `a[i]`/`a[i] = v`/`len(a)` read an
+  unrelated array and fail closed (`Potential Out-of-Bounds`).
+- Rebinding to a scalar keeps the value usable (`a` → `5`), rebinding
+  back to an array re-wires the slots, scalar → array rebinding works,
+  and `let b = a` aliases stay isolated (`a = 5` does not poison `b`).
+- Tests: `tests/test_array_literal_negative.mm` gained
+  `scalar_rebind_stale_read` / `scalar_rebind_stale_store`;
+  `tests/test_array_literal.mm` gained `rebind_scalar_tail` /
+  `rebind_back_to_array` / `scalar_to_array`.
+
 ### 2026-09-20: string literals re-escape on body re-lex (`\"`, `\\`, `\n`, `\t`)
 
 - The lexer stores DECODED string content (`\n` → real newline, `\"` →
