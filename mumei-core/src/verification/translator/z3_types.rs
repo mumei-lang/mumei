@@ -654,7 +654,7 @@ pub(crate) fn wire_array_slots<'a>(
     };
     let elem_ty = z3_range_type_name(&arr.get_sort());
     let cond_hint = arr.nth_child(0).and_then(|c| c.as_bool());
-    let arr_dyn: Dynamic = arr.into();
+    let arr_dyn: Dynamic = arr.clone().into();
     env.insert(format!("__z3_arr_{name}"), arr_dyn.clone());
     let len: Dynamic = match value {
         Some(Expr::ArrayLit(elements)) => concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64),
@@ -699,7 +699,8 @@ pub(crate) fn wire_array_slots<'a>(
                 array_len_symbol(vc.ctx, &format!("len_{name}#match"), vc.bitvec_i64)
             })
         }
-        _ => array_len_value(vc.ctx, env, name, vc.bitvec_i64, None),
+        _ => call_result_len(vc, &arr)
+            .unwrap_or_else(|| array_len_value(vc.ctx, env, name, vc.bitvec_i64, None)),
     };
     env.insert(format!("len_{name}"), len);
     vc.local_array_elem_types
@@ -891,7 +892,12 @@ pub(crate) fn tail_len_expr<'a>(
             depth + 1,
         )
         .unwrap_or_else(fresh),
-        _ => fresh(),
+        // `len(f(..))` on a call result — or any other array value — picks
+        // up the len symbol the Call arm registered for it.
+        _ => val_node
+            .as_array()
+            .and_then(|a| call_result_len(vc, &a))
+            .unwrap_or_else(fresh),
     }
 }
 
@@ -911,6 +917,16 @@ pub(crate) fn array_root_ast(arr: &z3::ast::Array) -> z3_sys::Z3_ast {
         }
         return cur.get_z3_ast();
     }
+}
+
+/// The len symbol a `Call` arm minted for an array-typed result — keyed by
+/// the result array's root ast, so `store` chains layered by caller writes
+/// still find it. Returns `None` for arrays that didn't come from a call.
+fn call_result_len<'a>(vc: &VCtx<'a>, arr: &z3::ast::Array<'a>) -> Option<Dynamic<'a>> {
+    vc.call_result_lens
+        .borrow()
+        .get(&(array_root_ast(arr) as usize))
+        .map(|(len, _keep)| len.clone())
 }
 
 /// Replace `name`'s tracked array chain — and every `__z3_arr_*`/`env[x]`

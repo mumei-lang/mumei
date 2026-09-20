@@ -1,3 +1,25 @@
+### 2026-09-20: scalar loop-havoc soundness; callee `len(result)` reaches callers
+
+- **Soundness fix**: `havoc_vars`'s catch-all used to rebind a
+  loop-modified `Str`/enum/f64 variable by *cloning the old Z3 const*,
+  so the post-loop environment kept the pre-loop value — `s = "y"`
+  inside a `while` still proved `s == "x"` afterwards. The `_` arm now
+  mints a fresh constant at the same raw sort via `Z3_mk_fresh_const`,
+  so only what the invariant re-establishes survives.
+- `let t = f(..)` now inherits the callee's `ensures: len(result) == k`:
+  the Call arm mints a `len_call_<name>_<id>` symbol, registers it in
+  `VCtx::call_result_lens` keyed by the result array's root ast, and
+  evaluates the callee ensures against it. `wire_array_slots` and
+  `tail_len_expr` recover that symbol for any binding/expression holding
+  the same result (including `if`/`match` merges and `len(f(..))`
+  directly), instead of minting an unconstrained `len_t`. A wrong claim
+  (`len(t) == 4` for a `len == 3` callee) is now rejected for the right
+  reason.
+- Tests: `tests/test_scalar_havoc.mm` +
+  `tests/negative/scalar_havoc_stale.mm` (Str/enum/f64 stale values must
+  not verify) and `tests/test_call_result_len.mm` +
+  `tests/negative/call_result_len.mm`.
+
 ### 2026-09-20: `while` loops havoc param arrays' post-state (stale-read soundness fix)
 
 - **Soundness fix**: a `while` body that only *writes* a param array
@@ -23,6 +45,7 @@
   `tests/test_loop_array_havoc_negative.mm` (stale `[i64]`/`[Str]` reads,
   last-write claim, stale reads through aliases) via
   `tests/test_loop_array_havoc.rs`.
+
 
 ### 2026-09-20: `[Str]` element sort; `[[T]]` nested arrays fail closed
 

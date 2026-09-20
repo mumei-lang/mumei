@@ -1122,6 +1122,33 @@ pub(crate) fn expr_to_z3<'a>(
                         let result_z3: Dynamic =
                             datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type);
 
+                        // Array results: mint the result's `len` symbol up
+                        // front and key it by the result array's ast — the
+                        // callee's `ensures: len(result) == k` asserts on it,
+                        // and `wire_array_slots`/`tail_len_expr` recover the
+                        // same symbol for `let t = f(..)` so the guarantee
+                        // reaches the caller instead of a fresh `len_t`.
+                        let result_len: Option<Dynamic> = result_z3.as_array().map(|_| {
+                            let len_sym = array_len_symbol(
+                                ctx,
+                                &format!("len_{}", result_name),
+                                vc.bitvec_i64,
+                            );
+                            // Array lengths are nonneg regardless of the
+                            // callee's ensures — `array_len_value` asserts
+                            // the same when a solver is in scope.
+                            if let (Some(solver), Some(nn)) =
+                                (solver_opt, nonneg_constraint(ctx, &len_sym))
+                            {
+                                solver.assert(&nn);
+                            }
+                            vc.call_result_lens.borrow_mut().insert(
+                                result_z3.get_z3_ast() as usize,
+                                (len_sym.clone(), result_z3.clone()),
+                            );
+                            len_sym
+                        });
+
                         // 構造体を返す呼び出し: 結果のフィールドをシンボル化し、
                         // 呼び出し先が保証する跨フィールド不変量を事実として仮定する
                         // （呼び出し先自身の検証で Invariant(result) は義務として課される）。
@@ -1179,6 +1206,10 @@ pub(crate) fn expr_to_z3<'a>(
                             && callee_semantics_match_caller(vc, &callee)
                         {
                             call_env.insert("result".to_string(), result_z3.clone());
+                            if let Some(len_sym) = &result_len {
+                                call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
+                                call_env.insert("len_result".to_string(), len_sym.clone());
+                            }
                             let ens_ast = parse_expression(&callee.ensures);
 
                             // Equality ensures の特別処理:
