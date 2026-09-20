@@ -1,3 +1,26 @@
+### 2026-09-20: fragment classifier resolves match owners via declared enum types
+
+- `detect_logic_fragment_tags` now threads a declared-enum-type
+  environment through `stmt_has_inductive_shape` /
+  `expr_has_inductive_shape`: parameters seed it and `let`/`assign`
+  bindings extend it (`expr_enum_name` resolves `E::V(..)`/`E::V`
+  constructors, enum-typed variables, enum-returning atom calls, and
+  `if`/`match` whose branches agree). The environment is scoped — blocks
+  clone it, arm/branch/loop bodies do not leak their `let`s back out.
+- A `match` arm's variant owner now resolves via
+  `ModuleEnv::resolve_variant_owner_by_hint(variant_name, hint)` where
+  `hint` is the scrutinee's inferred declared type. Previously a bare
+  variant name colliding across enums with different tags (e.g. `Ok`
+  declared by both `R1` and `R2`) was irresolvable and the atom kept the
+  `inductive_data_type` tag even though the finite-ADT datatype path
+  verifies it natively — `match r { Ok(v) => …, Err => … }` on `r: R1`
+  (or on `let r = R1::Ok(..)`) now stays in the decidable fragment.
+  Unresolvable owners still keep the tag (the verifier fails closed).
+- `resolve_variant_owner_deterministic` removed — its only caller was the
+  classifier, now on the hint-aware `resolve_variant_owner_by_hint`.
+- Tests: `test_colliding_variant_uses_declared_param_type`,
+  `test_colliding_variant_uses_let_binding_type`.
+
 ### 2026-09-19: `match` on `let`-bound enum values resolves the declared type
 
 - **Verify** (`mumei-core`): a `let`/`assign` binding now records the inferred

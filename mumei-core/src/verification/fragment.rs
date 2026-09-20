@@ -32,9 +32,28 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
     {
         push_unique_tag(&mut tags, "nonlinear_arithmetic");
     }
-    if expr_has_inductive_shape(&requires_expr, module_env)
-        || expr_has_inductive_shape(&ensures_expr, module_env)
-        || stmt_has_inductive_shape(&body_stmt, module_env)
+    // Declared enum types visible to the classifier: parameters seed the
+    // environment and `let` bindings extend it sequentially, so a bare
+    // `match r { Ok(v) => … }` on a `Res2` can disambiguate `Ok` from a
+    // same-named variant of another enum (e.g. prelude `Result`) — the same
+    // declared-type rule the verifier uses. Without the hint the owner is
+    // ambiguous and the atom was tagged `inductive_data_type` even though
+    // the finite-ADT path verifies natively.
+    let mut enum_names: std::collections::HashMap<String, String> = atom
+        .params
+        .iter()
+        .filter_map(|p| {
+            let base =
+                crate::verification::support::datatype::type_name_base(p.type_name.as_deref()?);
+            module_env
+                .get_enum(base)
+                .map(|e| (p.name.clone(), e.name.clone()))
+        })
+        .collect();
+
+    if expr_has_inductive_shape(&requires_expr, module_env, &enum_names)
+        || expr_has_inductive_shape(&ensures_expr, module_env, &enum_names)
+        || stmt_has_inductive_shape(&body_stmt, module_env, &mut enum_names)
     {
         push_unique_tag(&mut tags, "inductive_data_type");
     }
@@ -1730,76 +1749,165 @@ pub(crate) fn stmt_has_regex_semantics(stmt: &Stmt) -> bool {
     }
 }
 
-pub(crate) fn expr_has_inductive_shape(expr: &Expr, module_env: &ModuleEnv) -> bool {
+/// The enum type an expression evaluates to, when statically inferable for
+/// fragment classification: variables resolve through the `names` env
+/// (params + enclosing `let` bindings), `E::V(..)`/`E::V` constructors name
+/// their enum, calls to atoms declared to return an enum resolve via the
+/// return type, and `if`/`match` resolve when every branch agrees.
+fn expr_enum_name(
+    expr: &Expr,
+    names: &std::collections::HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    match expr {
+        Expr::Variable(v) => names.get(v.as_str()).cloned(),
+        Expr::Call(name, _) => {
+            if let Some((enum_name, variant)) = name.split_once("::") {
+                module_env
+                    .get_enum(enum_name)
+                    .filter(|e| e.variants.iter().any(|v| v.name == variant))
+                    .map(|e| e.name.clone())
+            } else {
+                module_env
+                    .get_atom(name)
+                    .and_then(|a| a.return_type.as_deref())
+                    .map(|t| crate::verification::support::datatype::type_name_base(t).to_string())
+                    .filter(|t| module_env.get_enum(t).is_some())
+            }
+        }
+        Expr::FieldAccess(inner, field) => match inner.as_ref() {
+            // `E.V` unit constructor (or `value.field` — only the qualified
+            // unit-constructor form names an enum).
+            Expr::Variable(base) => module_env
+                .get_enum(base)
+                .filter(|e| e.variants.iter().any(|v| v.name == *field))
+                .map(|e| e.name.clone()),
+            _ => None,
+        },
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let t = stmt_enum_name(then_branch, names, module_env);
+            let e = stmt_enum_name(else_branch, names, module_env);
+            if t.is_some() && t == e {
+                t
+            } else {
+                None
+            }
+        }
+        Expr::Match { arms, .. } => {
+            let mut results = arms
+                .iter()
+                .filter_map(|arm| stmt_enum_name(&arm.body, names, module_env));
+            let first = results.next()?;
+            if results.all(|n| n == first) {
+                Some(first)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The enum type a statement position evaluates to (expression statement or
+/// block tail), mirroring `expr_enum_name`.
+fn stmt_enum_name(
+    stmt: &Stmt,
+    names: &std::collections::HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    match stmt {
+        Stmt::Expr(e, _) => expr_enum_name(e, names, module_env),
+        Stmt::Block(stmts, _) => stmts
+            .last()
+            .and_then(|s| stmt_enum_name(s, names, module_env)),
+        _ => None,
+    }
+}
+
+pub(crate) fn expr_has_inductive_shape(
+    expr: &Expr,
+    module_env: &ModuleEnv,
+    names: &std::collections::HashMap<String, String>,
+) -> bool {
     match expr {
         // P10-C: a `match` whose arms resolve to a finite, non-recursive enum
         // is verified natively on the Z3 datatype encoding — it is inductive
         // only when a nested subexpression is. Scalar `match`es and recursive
         // enums keep the historic `inductive_data_type` tag. The owner enum
-        // is resolved the deterministic way (`enums` is a HashMap — the
-        // first-found `find_enum_by_variant` pick was not stable across
-        // runs); when several enums declare the variant with conflicting
-        // tags and no declared type can disambiguate, the match fails
-        // closed at verify time and keeps the tag here too.
+        // is resolved with the scrutinee's declared type as the hint (the
+        // verifier's rule): a bare `Ok` colliding with a same-named variant
+        // of another enum resolves to the declared enum instead of staying
+        // ambiguous; without a resolvable owner the match fails closed at
+        // verify time and keeps the tag here too.
         Expr::Match { target, arms } => {
+            let hint = expr_enum_name(target, names, module_env);
             let on_finite_adt = arms.iter().any(|arm| {
                 matches!(&arm.pattern, crate::parser::ast::Pattern::Variant { variant_name, .. }
-                if crate::verification::support::datatype::resolve_variant_owner_deterministic(
-                    module_env,
-                    variant_name,
-                )
-                .is_some_and(|e| {
-                    crate::verification::support::datatype::is_finite_adt(e, module_env)
-                }))
+                if module_env
+                    .resolve_variant_owner_by_hint(variant_name, hint.as_deref())
+                    .ok()
+                    .flatten()
+                    .is_some_and(|e| {
+                        crate::verification::support::datatype::is_finite_adt(e, module_env)
+                    }))
             });
             !on_finite_adt
-                || expr_has_inductive_shape(target, module_env)
+                || expr_has_inductive_shape(target, module_env, names)
                 || arms.iter().any(|arm| {
+                    // Arm bodies are a fresh scope for `let`-bound enum names.
+                    let mut arm_names = names.clone();
                     arm.guard
                         .as_ref()
-                        .is_some_and(|g| expr_has_inductive_shape(g, module_env))
-                        || stmt_has_inductive_shape(&arm.body, module_env)
+                        .is_some_and(|g| expr_has_inductive_shape(g, module_env, names))
+                        || stmt_has_inductive_shape(&arm.body, module_env, &mut arm_names)
                 })
         }
         Expr::BinaryOp(left, _, right) => {
-            expr_has_inductive_shape(left, module_env)
-                || expr_has_inductive_shape(right, module_env)
+            expr_has_inductive_shape(left, module_env, names)
+                || expr_has_inductive_shape(right, module_env, names)
         }
-        Expr::ArrayAccess(_, idx) => expr_has_inductive_shape(idx, module_env),
+        Expr::ArrayAccess(_, idx) => expr_has_inductive_shape(idx, module_env, names),
         Expr::IfThenElse {
             cond,
             then_branch,
             else_branch,
         } => {
-            expr_has_inductive_shape(cond, module_env)
-                || stmt_has_inductive_shape(then_branch, module_env)
-                || stmt_has_inductive_shape(else_branch, module_env)
+            let mut then_names = names.clone();
+            let mut else_names = names.clone();
+            expr_has_inductive_shape(cond, module_env, names)
+                || stmt_has_inductive_shape(then_branch, module_env, &mut then_names)
+                || stmt_has_inductive_shape(else_branch, module_env, &mut else_names)
         }
         Expr::Call(_, args) => args
             .iter()
-            .any(|arg| expr_has_inductive_shape(arg, module_env)),
+            .any(|arg| expr_has_inductive_shape(arg, module_env, names)),
         Expr::StructInit { fields, .. } => fields
             .iter()
-            .any(|(_, field_expr)| expr_has_inductive_shape(field_expr, module_env)),
-        Expr::FieldAccess(base, _) => expr_has_inductive_shape(base, module_env),
+            .any(|(_, field_expr)| expr_has_inductive_shape(field_expr, module_env, names)),
+        Expr::FieldAccess(base, _) => expr_has_inductive_shape(base, module_env, names),
         Expr::Async { body } | Expr::Lambda { body, .. } => {
-            stmt_has_inductive_shape(body, module_env)
+            let mut body_names = names.clone();
+            stmt_has_inductive_shape(body, module_env, &mut body_names)
         }
-        Expr::Await { expr } => expr_has_inductive_shape(expr, module_env),
+        Expr::Await { expr } => expr_has_inductive_shape(expr, module_env, names),
         Expr::CallRef { callee, args } => {
-            expr_has_inductive_shape(callee, module_env)
+            expr_has_inductive_shape(callee, module_env, names)
                 || args
                     .iter()
-                    .any(|arg| expr_has_inductive_shape(arg, module_env))
+                    .any(|arg| expr_has_inductive_shape(arg, module_env, names))
         }
         Expr::Perform { args, .. } => args
             .iter()
-            .any(|arg| expr_has_inductive_shape(arg, module_env)),
+            .any(|arg| expr_has_inductive_shape(arg, module_env, names)),
         Expr::ChanSend { channel, value } => {
-            expr_has_inductive_shape(channel, module_env)
-                || expr_has_inductive_shape(value, module_env)
+            expr_has_inductive_shape(channel, module_env, names)
+                || expr_has_inductive_shape(value, module_env, names)
         }
-        Expr::ChanRecv { channel } => expr_has_inductive_shape(channel, module_env),
+        Expr::ChanRecv { channel } => expr_has_inductive_shape(channel, module_env, names),
         Expr::Number(_)
         | Expr::Float(_)
         | Expr::StringLit(_)
@@ -1808,35 +1916,64 @@ pub(crate) fn expr_has_inductive_shape(expr: &Expr, module_env: &ModuleEnv) -> b
     }
 }
 
-pub(crate) fn stmt_has_inductive_shape(stmt: &Stmt, module_env: &ModuleEnv) -> bool {
+pub(crate) fn stmt_has_inductive_shape(
+    stmt: &Stmt,
+    module_env: &ModuleEnv,
+    names: &mut std::collections::HashMap<String, String>,
+) -> bool {
     match stmt {
-        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
-            expr_has_inductive_shape(value, module_env)
+        Stmt::Let { var, value, .. } | Stmt::Assign { var, value, .. } => {
+            let inductive = expr_has_inductive_shape(value, module_env, names);
+            // Record (or clear) the binding's enum type so later siblings
+            // resolve `match <var>` against the declared type.
+            match expr_enum_name(value, names, module_env) {
+                Some(enum_name) => {
+                    names.insert(var.clone(), enum_name);
+                }
+                None => {
+                    names.remove(var);
+                }
+            }
+            inductive
         }
-        Stmt::Expr(value, _) => expr_has_inductive_shape(value, module_env),
+        Stmt::Expr(value, _) => expr_has_inductive_shape(value, module_env, names),
         Stmt::ArrayStore { index, value, .. } => {
-            expr_has_inductive_shape(index, module_env)
-                || expr_has_inductive_shape(value, module_env)
+            expr_has_inductive_shape(index, module_env, names)
+                || expr_has_inductive_shape(value, module_env, names)
         }
-        Stmt::Block(stmts, _) => stmts
-            .iter()
-            .any(|s| stmt_has_inductive_shape(s, module_env)),
+        Stmt::Block(stmts, _) => {
+            // `let` bindings are block-scoped: visible to later siblings,
+            // invisible past the block.
+            let mut block_names = names.clone();
+            let mut inductive = false;
+            for s in stmts {
+                inductive |= stmt_has_inductive_shape(s, module_env, &mut block_names);
+            }
+            inductive
+        }
         Stmt::While {
             cond,
             invariant,
             body,
             ..
         } => {
-            expr_has_inductive_shape(cond, module_env)
-                || expr_has_inductive_shape(invariant, module_env)
-                || stmt_has_inductive_shape(body, module_env)
+            let mut body_names = names.clone();
+            expr_has_inductive_shape(cond, module_env, names)
+                || expr_has_inductive_shape(invariant, module_env, names)
+                || stmt_has_inductive_shape(body, module_env, &mut body_names)
         }
         Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
-            stmt_has_inductive_shape(body, module_env)
+            let mut body_names = names.clone();
+            stmt_has_inductive_shape(body, module_env, &mut body_names)
         }
-        Stmt::TaskGroup { children, .. } => children
-            .iter()
-            .any(|s| stmt_has_inductive_shape(s, module_env)),
+        Stmt::TaskGroup { children, .. } => {
+            let mut inductive = false;
+            for child in children {
+                let mut child_names = names.clone();
+                inductive |= stmt_has_inductive_shape(child, module_env, &mut child_names);
+            }
+            inductive
+        }
         Stmt::Cancel { .. } => false,
     }
 }

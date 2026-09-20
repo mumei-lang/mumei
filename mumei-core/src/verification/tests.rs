@@ -3408,6 +3408,63 @@ fn test_empty_enum_param_keeps_inductive_tag() {
 }
 
 #[test]
+fn test_colliding_variant_uses_declared_param_type() {
+    // `Hot` collides between two enums with different tag indices — without
+    // the declared-type hint the owner is ambiguous and the match would
+    // stay tagged inductive even though the finite-ADT path verifies it.
+    let mut module_env = ModuleEnv::new();
+    module_env.enums.insert(
+        "E1".to_string(),
+        test_enum_def("E1", &[("Hot", &[]), ("Cold", &[])], &[], false),
+    );
+    module_env.enums.insert(
+        "E2".to_string(),
+        test_enum_def("E2", &[("Cold", &[]), ("Hot", &[])], &[], false),
+    );
+    let atom = test_atom(
+        "code_of",
+        vec![test_param("c", Some("E1"))],
+        "true",
+        "result >= 0",
+        "match c { Hot => 1, Cold => 0 }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(
+        !tags.iter().any(|tag| tag == "inductive_data_type"),
+        "declared param type should pin the colliding variant's owner, got tags: {tags:?}"
+    );
+}
+
+#[test]
+fn test_colliding_variant_uses_let_binding_type() {
+    // Same collision via a `let`-bound constructor — the binding's inferred
+    // enum type must disambiguate the match arms.
+    let mut module_env = ModuleEnv::new();
+    module_env.enums.insert(
+        "E1".to_string(),
+        test_enum_def("E1", &[("Hot", &[]), ("Cold", &[])], &[], false),
+    );
+    module_env.enums.insert(
+        "E2".to_string(),
+        test_enum_def("E2", &[("Cold", &[]), ("Hot", &[])], &[], false),
+    );
+    let atom = test_atom(
+        "code_of",
+        vec![test_param("x", Some("i64"))],
+        "true",
+        "result >= 0",
+        "{ let c = E1::Hot; match c { Hot => 1, Cold => 0 } }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(
+        !tags.iter().any(|tag| tag == "inductive_data_type"),
+        "let-bound constructor type should pin the colliding variant's owner, got tags: {tags:?}"
+    );
+}
+
+#[test]
 fn test_scalar_match_still_tags_inductive() {
     // Conservative: a `match` whose arms carry no Variant pattern keeps the
     // historic `inductive_data_type` tag (Lean handles it).
