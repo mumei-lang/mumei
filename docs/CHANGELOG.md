@@ -1,3 +1,29 @@
+### 2026-09-20: quantifier binders in body `let` are scoped (unbound-check false positive)
+
+- `let ok = forall(i, 0, n, i <= n)` inside an atom body was rejected by
+  the Phase 1h unbound check (`unresolved variable(s) in body: i`):
+  `forall`/`exists`/`sum`/`all`/`any`/`prod`/`count` lex as ordinary
+  `Expr::Call`s and MIR lowering visited every argument, so the binder
+  name was looked up as a free variable (pre-existing since the unbound
+  check landed; clause-side clauses already exempted the binder via
+  `is_binder_call`).
+- `lower_expr`'s `Call` arm now allocates a dedicated i64 local for the
+  binder and registers it in `var_map` **only while lowering the trailing
+  body argument** — `alloc_local` auto-registers named locals, so the
+  prior binding is restored immediately after allocation and again after
+  the body argument lowers. The binder shadows an outer binding of the
+  same name inside the quantifier body, stays OUT of scope in the bound
+  arguments (`forall(i, i, 5, …)` → `unresolved variable(s) in body: i`)
+  and does not leak past the call (`…; i` after the `let` → same error).
+  Any OTHER name inside the body argument still fails closed
+  (`forall(i, 0, 5, j > 0)` → `unresolved variable(s) in body: j`).
+- `forall`/`exists` in a body remain verification-only constructs:
+  codegen rejects them with a clean `Unknown function forall` error
+  (fail-closed, no silent miscompile).
+- Tests: `tests/test_forall_body_binder.mm` (forall/exists in `let`, true
+  and false predicates) + `tests/negative/forall_body_binder_unbound.mm`
+  + `tests/test_forall_body_binder.rs`.
+
 ### 2026-09-20: parser body-panics become clean syntax errors; `if`-guard propagated to call-site `requires`
 
 - `verify`/`build` on `tests/test_libc.mm` and `tests/test_libc_contracts.mm`

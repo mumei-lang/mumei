@@ -897,7 +897,71 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             Operand::Place(Place::Local(tmp))
         }
         HirExpr::Call { name, args, .. } => {
-            let arg_ops: Vec<Operand> = args.iter().map(|a| lower_expr(ctx, a)).collect();
+            // Quantifier-style calls (`forall(v, lo, hi, body)`, `exists`,
+            // `sum`, `all`, `any`, `prod`, `count`) bind `v` over the
+            // trailing body argument — register the binder in `var_map` for
+            // the duration of that argument's lowering so it is not
+            // reported as unbound. The binder is a dedicated i64 local:
+            // the verifier (Phase 5) treats these calls specially, so MIR
+            // only needs the name to resolve.
+            let binder = if matches!(
+                name.as_str(),
+                "forall" | "exists" | "sum" | "all" | "any" | "prod" | "count"
+            ) && args.len() >= 3
+            {
+                match &args[0] {
+                    HirExpr::Variable(v) => Some(v.clone()),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let saved_prior = binder.as_ref().and_then(|b| ctx.var_map.get(b).cloned());
+            let binder_local = binder
+                .as_ref()
+                .map(|b| ctx.alloc_local(Some(b.clone()), Some("i64".to_string())));
+            // `alloc_local` auto-registers named locals in `var_map` — the
+            // binder must only be visible while lowering the quantifier body
+            // (the trailing argument), not in the bounds or after the call.
+            if let Some(b) = &binder {
+                match &saved_prior {
+                    Some(l) => {
+                        ctx.var_map.insert(b.clone(), l.clone());
+                    }
+                    None => {
+                        ctx.var_map.remove(b);
+                    }
+                }
+            }
+            let arg_ops: Vec<Operand> = args
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    // arg[0] is the binder name itself — lower it to the
+                    // dedicated binder local, not a var_map lookup.
+                    if i == 0 {
+                        if let Some(local) = &binder_local {
+                            return Operand::Place(Place::Local(local.clone()));
+                        }
+                    }
+                    if i == args.len() - 1 {
+                        if let (Some(b), Some(local)) = (&binder, &binder_local) {
+                            let saved = ctx.var_map.insert(b.clone(), local.clone());
+                            let op = lower_expr(ctx, a);
+                            match saved {
+                                Some(l) => {
+                                    ctx.var_map.insert(b.clone(), l);
+                                }
+                                None => {
+                                    ctx.var_map.remove(b);
+                                }
+                            }
+                            return op;
+                        }
+                    }
+                    lower_expr(ctx, a)
+                })
+                .collect();
             let tmp = ctx.alloc_temp();
             ctx.emit(MirStatement::StorageLive(tmp.clone()));
             ctx.emit(MirStatement::Assign(
@@ -1264,6 +1328,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::hir::lower_atom_to_hir;
     use crate::parser::{self, Atom, Expr, Param, Span, Stmt, TrustLevel};
 
