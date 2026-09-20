@@ -492,10 +492,10 @@ pub(crate) fn compile_hir_expr<'a>(
                 }
                 match arg {
                     HirExpr::StringLit(s) => {
-                        // Z3 `str.len` counts codepoints; `chars().count()`
-                        // matches for every string the lexer can produce.
-                        let n = s.chars().count() as u64;
-                        Ok(context.i64_type().const_int(n, false).into())
+                        // Both sides count bytes: Z3 string literals are
+                        // lowered from their UTF-8 encoding, and `strlen` on
+                        // the emitted globals reports bytes too.
+                        Ok(context.i64_type().const_int(s.len() as u64, false).into())
                     }
                     HirExpr::ArrayLit(elements) => Ok(context
                         .i64_type()

@@ -313,3 +313,13 @@ atom len_of_result() -> [i64]
   body: {
     [7, 8]
   };
+
+// `len` counts UTF-8 bytes on both sides: the Z3 string literal is
+// encoded byte-wise, and the emitted code (`strlen`, or a literal fold)
+// reports bytes too. `日本語` is 3 chars = 9 bytes.
+atom len_of_unicode_literal() -> i64
+  requires: true;
+  ensures: result == 9;
+  body: {
+    len("日本語")
+  };
