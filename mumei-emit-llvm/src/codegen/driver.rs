@@ -113,6 +113,55 @@ pub fn compile_atom_into_module<'ctx>(
         module_env,
     )?;
 
+    // Array fat-pointer return: a body tail naming an array resolves through
+    // `variables` to just the `len` scalar, but the declared `{i64, ptr}`
+    // signature needs the whole pair — rebuild it from `array_ptrs`. Any
+    // other tail shape can't supply an array value, so fail with a clean
+    // error instead of emitting a `ret i64` under a struct signature
+    // (previously this produced invalid IR, or a len-only i64 on `[i64]`).
+    let ret_is_array = atom
+        .return_type
+        .as_deref()
+        .map(|name| module_env.resolve_base_type(name))
+        .is_some_and(|base| {
+            matches!(
+                mumei_core::lowering::lower(&base),
+                mumei_core::lowering::LoweredType::Array(_)
+            )
+        });
+    if ret_is_array {
+        let tail_expr = match &hir_atom.body {
+            mumei_core::hir::HirStmt::Expr(e) => Some(e),
+            mumei_core::hir::HirStmt::Block { tail_expr, .. } => tail_expr.as_deref(),
+            _ => None,
+        };
+        let tail_var = match tail_expr {
+            Some(mumei_core::hir::HirExpr::Variable(name)) => Some(name.as_str()),
+            _ => None,
+        };
+        let Some(&(len_val, _, data_ptr)) = tail_var.and_then(|name| array_ptrs.get(name)) else {
+            return Err(MumeiError::codegen(format!(
+                "array return of '{}' requires the body tail to be an array \
+                 parameter or binding (got {:?})",
+                atom.name, tail_expr
+            )));
+        };
+        let struct_ty = super::lowering::array_struct_type(context);
+        let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
+        agg = llvm!(builder.build_insert_value(agg, len_val, 0, "ret_arr_len"));
+        agg = llvm!(builder.build_insert_value(agg, data_ptr, 1, "ret_arr_data"));
+        let agg_val: inkwell::values::BasicValueEnum = match agg {
+            inkwell::values::AggregateValueEnum::StructValue(s) => s.into(),
+            _ => {
+                return Err(MumeiError::codegen(
+                    "array return value is not a struct aggregate",
+                ))
+            }
+        };
+        llvm!(builder.build_return(Some(&agg_val)));
+        return Ok(());
+    }
+
     llvm!(builder.build_return(Some(&result_val)));
 
     Ok(())

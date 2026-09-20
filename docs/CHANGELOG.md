@@ -13,6 +13,13 @@
   4.2e+01`); other mismatches go through `bitpreserve_cast` or a clean
   codegen error. Task bodies capture arrays with their element type, so
   the inner fat pointer is rebuilt correctly.
+- Array returns now rebuild the fat pointer: a tail `arr` emits
+  `insertvalue` len+data into `{ i64, ptr }` and `ret`s it. Previously an
+  array-typed return emitted `ret i64 %arr_len` under a `{i64, ptr}`
+  signature — invalid IR (and on `[i64]` even a silently-wrong len-only
+  `i64` return). Non-array tails under an array return type now fail with
+  a clean codegen error (e.g. `let a = arr; a` aliases and array
+  literals are not yet supported in HIR).
 - `test_polymorphic_array.mm`'s `test_i64_array` declared no `arr`
   parameter at all — the phantom name verified vacuously against an
   unconstrained Z3 array — now `arr: [i64]` like its siblings; the file

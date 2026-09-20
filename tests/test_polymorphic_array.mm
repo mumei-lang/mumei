@@ -40,3 +40,8 @@ body: {
     let x = arr[0];
     x
 };
+
+atom test_array_param_return(arr: [f64]) -> [f64]
+requires: len(arr) >= 0;
+ensures: true;
+body: arr;
