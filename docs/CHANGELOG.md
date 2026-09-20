@@ -40,8 +40,8 @@
   are walked too — a call nested in a literal (`let m = [w(a), 1]`)
   executes at eval and must mark the same way. Calls inside
   `cond`/`invariant`/`decreases` are not marked — they havoc live on the
-  havoced envs at eval, and marking them would over-havoc real proofs
-  (e.g. `len(a)` in an invariant).
+  havoced envs at eval, and marking them would havoc `a` even on envs
+  whose eval never reaches the call (over-havoc → weaker proofs).
 - Precision verified: a loop calling a *pure* callee keeps `a[0] == 7`
   provable post-loop, and only the param the callee stores through is
   havoced (a sibling array arg keeps its entry value).
