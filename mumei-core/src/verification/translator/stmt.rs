@@ -129,13 +129,35 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
                     let width = old.as_bv().map(|b| b.get_size()).unwrap_or(64);
                     BV::fresh_const(ctx, &fresh_name, width).into()
                 }
-                // z3 0.12's `Sort::array_domain/range` returns sorts tied to
-                // the local borrow, so a fresh array const cannot outlive it
-                // here — keep the entry binding (the same conservative
-                // treatment the pre-havoc code had for every variable).
+                z3::SortKind::Array => {
+                    // Fresh `Int -> Elem` array const — `array_domain/range`
+                    // Sorts borrow the temporary, so lift only the (Copy)
+                    // range kind and rebuild through `z3_array_for_sort`.
+                    let range = old.get_sort().array_range().map(|s| s.kind());
+                    let elem_sort = match range {
+                        Some(z3::SortKind::Real) => ArrayElementSort::Real,
+                        Some(z3::SortKind::FloatingPoint) => ArrayElementSort::Float,
+                        Some(z3::SortKind::Bool) => ArrayElementSort::Bool,
+                        _ => ArrayElementSort::Int,
+                    };
+                    z3_array_for_sort(ctx, &fresh_name, elem_sort).into()
+                }
                 _ => old.clone(),
             };
-            env.insert(name.clone(), fresh);
+            env.insert(name.clone(), fresh.clone());
+            // A tracked array's `__z3_arr_`/`len_` slots must havoc with the
+            // binding — otherwise `a[i]` reads the pre-loop store chain.
+            let arr_key = format!("__z3_arr_{name}");
+            if env.contains_key(&arr_key) {
+                env.insert(arr_key, fresh);
+            }
+            let len_key = format!("len_{name}");
+            if env.contains_key(&len_key) {
+                env.insert(
+                    len_key,
+                    Int::fresh_const(ctx, &format!("__havoc_len_{}_{}", name, uid)).into(),
+                );
+            }
         }
     }
 }
