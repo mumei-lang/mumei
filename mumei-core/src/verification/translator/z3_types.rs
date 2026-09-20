@@ -597,16 +597,71 @@ pub(crate) fn wire_array_slots<'a>(
         Some(z3::SortKind::Bool) => "bool",
         _ => "i64",
     };
+    let cond_hint = arr.nth_child(0).and_then(|c| c.as_bool());
     env.insert(format!("__z3_arr_{name}"), arr.into());
     let len: Dynamic = match value {
-        Some(Expr::ArrayLit(elements)) => Int::from_i64(vc.ctx, elements.len() as i64).into(),
+        Some(Expr::ArrayLit(elements)) => concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64),
         Some(Expr::Variable(src)) => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
+        Some(Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        }) => {
+            // `arr` is already `ite(c, then_arr, else_arr)` — merge the
+            // branch lengths the same way so `len_<name>` is
+            // `ite(c, len_t, len_e)` instead of an unconstrained symbol:
+            // `let a = if c { [1,2] } else { [3,4] }; a[1]` is in bounds on
+            // both branches.
+            let len_t = branch_array_len(vc, env, name, "then", then_branch);
+            let len_e = branch_array_len(vc, env, name, "else", else_branch);
+            match cond_hint {
+                Some(cond) => cond.ite(&len_t, &len_e),
+                None => array_len_symbol(vc.ctx, &format!("len_{name}#if"), vc.bitvec_i64),
+            }
+        }
         _ => array_len_value(vc.ctx, env, name, vc.bitvec_i64, None),
     };
     env.insert(format!("len_{name}"), len);
     vc.local_array_elem_types
         .borrow_mut()
         .insert(name.to_string(), elem_ty.to_string());
+}
+
+/// A concrete array length, sorted like `array_len_symbol` under
+/// `--bitvec-i64` (BV(64)) so it can merge with tracked `len_` values.
+fn concrete_len_value<'a>(ctx: &'a Context, n: usize, bitvec_i64: bool) -> Dynamic<'a> {
+    if bitvec_i64 {
+        z3::ast::BV::from_i64(ctx, n as i64, I64_BITS).into()
+    } else {
+        Int::from_i64(ctx, n as i64).into()
+    }
+}
+
+/// Tail expression of a `Stmt`: bare expressions and the last statement of
+/// a block produce the branch value.
+fn stmt_tail_expr(stmt: &Stmt) -> Option<&Expr> {
+    match stmt {
+        Stmt::Expr(e, _) => Some(e),
+        Stmt::Block(stmts, _) => stmts.last().and_then(stmt_tail_expr),
+        _ => None,
+    }
+}
+
+/// Array length contributed by one `if` branch: concrete for a literal
+/// tail, the tracked `len_<src>` for a var tail, a fresh per-side symbol
+/// otherwise.
+fn branch_array_len<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    name: &str,
+    side: &str,
+    stmt: &Stmt,
+) -> Dynamic<'a> {
+    match stmt_tail_expr(stmt) {
+        Some(Expr::ArrayLit(elements)) => concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64),
+        Some(Expr::Variable(src)) => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
+        _ => array_len_symbol(vc.ctx, &format!("len_{name}#{side}"), vc.bitvec_i64),
+    }
 }
 
 /// Walk a tracked array value to the innermost (root) array AST node — the
