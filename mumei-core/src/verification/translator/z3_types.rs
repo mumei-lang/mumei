@@ -85,7 +85,7 @@ pub(crate) const F64_SBITS: u32 = 53;
 /// round-nearest-ties-to-even rounding mode and real→float coercion). Reading
 /// the pointer at offset 0 is sound for a single-field struct: the field lives
 /// at the start of the struct and the pointer value is `Copy`.
-fn raw_z3_context(ctx: &Context) -> z3_sys::Z3_context {
+pub(crate) fn raw_z3_context(ctx: &Context) -> z3_sys::Z3_context {
     // Catch a layout change (e.g. an added field) in a future `z3` upgrade at
     // compile time rather than as silent undefined behavior.
     const _: () =
@@ -653,7 +653,7 @@ pub(crate) fn wire_array_slots<'a>(
 
 /// A concrete array length, sorted like `array_len_symbol` under
 /// `--bitvec-i64` (BV(64)) so it can merge with tracked `len_` values.
-fn concrete_len_value<'a>(ctx: &'a Context, n: usize, bitvec_i64: bool) -> Dynamic<'a> {
+pub(crate) fn concrete_len_value<'a>(ctx: &'a Context, n: usize, bitvec_i64: bool) -> Dynamic<'a> {
     if bitvec_i64 {
         z3::ast::BV::from_i64(ctx, n as i64, I64_BITS).into()
     } else {
@@ -760,7 +760,7 @@ fn branch_tail_len<'a>(
     depth: u32,
 ) -> Dynamic<'a> {
     match stmt_tail_expr(scope) {
-        Some(tail) => tail_len_expr(vc, env, name, side, scope, tail, val_node, depth),
+        Some(tail) => tail_len_expr(vc, env, name, side, Some(scope), tail, val_node, depth),
         None => array_len_symbol(vc.ctx, &format!("len_{name}#{side}"), vc.bitvec_i64),
     }
 }
@@ -773,12 +773,12 @@ fn branch_tail_len<'a>(
 /// per-side symbol (fail-closed: it only makes proofs harder, never
 /// easier).
 #[allow(clippy::too_many_arguments)]
-fn tail_len_expr<'a>(
+pub(crate) fn tail_len_expr<'a>(
     vc: &VCtx<'a>,
     env: &mut Env<'a>,
     name: &str,
     side: &str,
-    scope: &Stmt,
+    scope: Option<&Stmt>,
     tail: &Expr,
     val_node: &Dynamic<'a>,
     depth: u32,
@@ -789,7 +789,7 @@ fn tail_len_expr<'a>(
     }
     match tail {
         Expr::ArrayLit(elements) => concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64),
-        Expr::Variable(src) => match stmt_let_rhs(scope, src) {
+        Expr::Variable(src) => match scope.and_then(|s| stmt_let_rhs(s, src)) {
             Some(rhs) => tail_len_expr(vc, env, name, side, scope, rhs, val_node, depth + 1),
             None => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
         },

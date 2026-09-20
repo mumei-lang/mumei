@@ -267,3 +267,49 @@ atom if_branch_nested_if(c: bool, d: bool) -> i64
     let a = if c { if d { [1, 2] } else { [3] } } else { [4, 5] }
     a[0]
   };
+
+// `len` resolves through the argument's own structure rather than a
+// shared uninterpreted symbol: literals and if/match array values get
+// structural lengths, `Str` maps to `str.len`, and scalar arguments are
+// rejected as type errors instead of binding a fresh symbol.
+atom len_of_literal() -> i64
+  requires: true;
+  ensures: result == 3;
+  body: {
+    len([1, 2, 3])
+  };
+
+atom len_of_if_expr(c: bool) -> i64
+  requires: true;
+  ensures: result == 2 || result == 3;
+  body: {
+    len(if c { [1, 2] } else { [3, 4, 5] })
+  };
+
+atom len_of_string_literal() -> i64
+  requires: true;
+  ensures: result == 3;
+  body: {
+    len("abc")
+  };
+
+atom len_of_string_concat() -> i64
+  requires: true;
+  ensures: result == 5;
+  body: {
+    len("ab" + "cde")
+  };
+
+atom len_of_str_param(s: Str) -> i64
+  requires: len(s) >= 1;
+  ensures: result >= 1;
+  body: {
+    len(s)
+  };
+
+atom len_of_result() -> [i64]
+  requires: true;
+  ensures: len(result) == 2;
+  body: {
+    [7, 8]
+  };

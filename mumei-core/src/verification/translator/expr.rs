@@ -716,23 +716,51 @@ pub(crate) fn expr_to_z3<'a>(
                     Ok(quantifier_expr.into())
                 }
                 "len" => {
-                    // len(arr_name) → 配列名に紐づくシンボリック長を返す
-                    // len_<name> >= 0 の制約を自動付与
-                    let arr_name = if !args.is_empty() {
-                        if let Expr::Variable(name) = &args[0] {
-                            name.clone()
-                        } else {
-                            "arr".to_string()
+                    if args.len() != 1 {
+                        return Err(MumeiError::verification("len() takes exactly one argument"));
+                    }
+                    let arg = &args[0];
+                    let val = expr_to_z3(vc, arg, env, solver_opt)?;
+                    if val.as_string().is_some() {
+                        // `len(s)` on a `Str` is the real sequence length —
+                        // `len("abc") == 3` and `requires: len(s) == n` now
+                        // constrain the actual content rather than a
+                        // detached `len_s` symbol.
+                        let ast = unsafe {
+                            z3_sys::Z3_mk_seq_length(raw_z3_context(ctx), val.get_z3_ast())
+                        };
+                        return Ok(unsafe { Int::wrap(ctx, ast) }.into());
+                    }
+                    if let Expr::Variable(name) = arg {
+                        // len(arr_name) → the tracked symbolic length,
+                        // shared with requires clauses and bounds checks
+                        // via `len_<name>`.
+                        let tracked = env.contains_key(&format!("__z3_arr_{name}"))
+                            || val.as_array().is_some()
+                            || vc
+                                .current_atom
+                                .and_then(|atom| {
+                                    atom.params
+                                        .iter()
+                                        .find(|p| p.name == *name)
+                                        .and_then(|p| p.type_name.clone())
+                                })
+                                .map(|t| t.trim_start().starts_with('['))
+                                .unwrap_or(false);
+                        if tracked {
+                            return Ok(array_len_value(ctx, env, name, vc.bitvec_i64, solver_opt));
                         }
-                    } else {
-                        "arr".to_string()
-                    };
-                    Ok(array_len_value(
-                        ctx,
-                        env,
-                        &arr_name,
-                        vc.bitvec_i64,
-                        solver_opt,
+                        return Err(MumeiError::type_error(format!(
+                            "len() expects an array or string argument; `{name}` is neither"
+                        )));
+                    }
+                    if val.as_array().is_some() {
+                        // `len([1, 2, 3])` / `len(if c { … } else { … })` —
+                        // structural length from the expression itself.
+                        return Ok(tail_len_expr(vc, env, "len_arg", "v", None, arg, &val, 0));
+                    }
+                    Err(MumeiError::type_error(
+                        "len() expects an array or string argument",
                     ))
                 }
                 "sqrt" => {
