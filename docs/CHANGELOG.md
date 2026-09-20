@@ -1,3 +1,18 @@
+### 2026-09-20: prefix `!` (logical not) parses in expressions and spec clauses
+
+- `!e` desugars to `if e { false } else { true }` at parse time — the lexer
+  already produced `Token::Bang`, but `parse_prefix` had no arm for it, so
+  `!x` silently fell through the catch-all to `Number(0)` and the operand
+  token was left dangling. A relational desugar (`e == false`) is not used
+  because the comparison-chain normalizer would flatten `!(a < b)` into
+  `a < b && b == false`.
+- Works in bodies (`if !(b == 0)`), `let` initializers, `requires` /
+  `ensures` / `invariant` clauses, and match-arm guards. The operand must
+  lower to Bool — `!n` on an `i64` fails closed with "If condition must be
+  boolean" (same discipline as `&&`/`||`), and codegen emits the 0/1
+  branch identical to `if e { 0 } else { 1 }`.
+- Tests: `tests/test_bang_not{,_negative}.mm` + `test_bang_not.rs`.
+
 ### 2026-09-19: `match` on `let`-bound enum values resolves the declared type
 
 - **Verify** (`mumei-core`): a `let`/`assign` binding now records the inferred
