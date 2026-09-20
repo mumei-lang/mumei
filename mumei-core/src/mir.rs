@@ -916,9 +916,23 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             } else {
                 None
             };
+            let saved_prior = binder.as_ref().and_then(|b| ctx.var_map.get(b).cloned());
             let binder_local = binder
                 .as_ref()
                 .map(|b| ctx.alloc_local(Some(b.clone()), Some("i64".to_string())));
+            // `alloc_local` auto-registers named locals in `var_map` — the
+            // binder must only be visible while lowering the quantifier body
+            // (the trailing argument), not in the bounds or after the call.
+            if let Some(b) = &binder {
+                match &saved_prior {
+                    Some(l) => {
+                        ctx.var_map.insert(b.clone(), l.clone());
+                    }
+                    None => {
+                        ctx.var_map.remove(b);
+                    }
+                }
+            }
             let arg_ops: Vec<Operand> = args
                 .iter()
                 .enumerate()
@@ -1314,6 +1328,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::hir::lower_atom_to_hir;
     use crate::parser::{self, Atom, Expr, Param, Span, Stmt, TrustLevel};
 
