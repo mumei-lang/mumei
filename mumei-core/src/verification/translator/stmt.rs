@@ -134,6 +134,11 @@ fn collect_expr_assigned_vars(
         Expr::ArrayAccess(_, index) => {
             collect_expr_assigned_vars(env, module_env, index, out, in_stmt_ctx)
         }
+        Expr::ArrayLit(elems) => {
+            for e in elems {
+                collect_expr_assigned_vars(env, module_env, e, out, in_stmt_ctx);
+            }
+        }
         Expr::BinaryOp(l, _, r) => {
             collect_expr_assigned_vars(env, module_env, l, out, in_stmt_ctx);
             collect_expr_assigned_vars(env, module_env, r, out, in_stmt_ctx);

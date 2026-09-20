@@ -36,7 +36,9 @@
   type-arg calls (`g<i64>(a)` → `g<i64>`) hit the instantiated atom;
   `call(f, a)` resolves `AtomRef` callees and `__atom_ref_<var>` bindings,
   and an unresolvable callee marks every variable arg conservatively (if
-  it truly can't resolve, eval errors anyway). Calls inside
+  it truly can't resolve, eval errors anyway). `Expr::ArrayLit` elements
+  are walked too — a call nested in a literal (`let m = [w(a), 1]`)
+  executes at eval and must mark the same way. Calls inside
   `cond`/`invariant`/`decreases` are not marked — they havoc live on the
   havoced envs at eval, and marking them would over-havoc real proofs
   (e.g. `len(a)` in an invariant).
@@ -46,7 +48,8 @@
 - Tests: `tests/test_loop_call_array_havoc.mm` (provable claims under
   havoc, `len` preservation, pure-call precision, per-arg precision) +
   `tests/test_loop_call_array_havoc_negative.mm` (stale `[i64]`/`[Str]`
-  reads via `Call`, `call(f, …)`, `g<i64>(…)`, and moved-alias args) via
+  reads via `Call`, `call(f, …)`, `g<i64>(…)`, an `ArrayLit`-nested call,
+  and moved-alias args) via
   `tests/test_loop_call_array_havoc.rs`.
 
 ### 2026-09-20: `while` loops havoc param arrays' post-state (stale-read soundness fix)

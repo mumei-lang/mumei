@@ -96,6 +96,23 @@ body: {
     a[0]
 };
 
+// A mutating call nested inside an array literal still runs at eval —
+// `__z3_arr_a` must be marked through the literal's element walk.
+atom stale_call_arraylit(a: [i64], n: i64) -> i64
+requires: len(a) >= 1 && n >= 1 && a[0] == 7;
+ensures: result == 7;
+body: {
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n
+    decreases: n - i
+    {
+        let m = [arr_store(a, 0), 1];
+        i = i + 1
+    };
+    a[0]
+};
+
 // Calling the mutating callee on a moved-into local (`b = a`) marks
 // `__z3_arr_b` — `b[0]` must not keep the entry fact post-loop.
 atom stale_call_alias(a: [i64], n: i64) -> i64
