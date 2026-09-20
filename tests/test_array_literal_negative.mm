@@ -64,3 +64,14 @@ atom scalar_rebind_stale_store() -> i64
     a[0] = 9
     a[0]
   };
+
+// Same staleness through a parameter: `arr = 5; arr[0]` must not revive
+// the requires-side array (Z3 interns same-named consts — the fallback
+// must not re-derive the param symbol).
+atom param_rebind_stale(arr: [i64]) -> i64
+  requires: len(arr) >= 1 && arr[0] == 4;
+  ensures: result == 4;
+  body: {
+    arr = 5
+    arr[0]
+  };
