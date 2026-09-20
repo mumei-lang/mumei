@@ -103,3 +103,30 @@ ensures: len(result) == 2 && result[0] == "s" && result[1] == "t";
 body: {
     ["s", "t"]
 };
+
+// A while-loop store havocs `a`, but the havoc'd array keeps its
+// `Int -> Seq` range — `a[0]` stays a string and `x == "q" || x != "q"`
+// (excluded middle on the Seq sort) still proves.
+atom str_while_havoc(a: [Str], n: i64) -> i64
+requires: len(a) >= 1 && n >= 1;
+ensures: result == 1;
+body: {
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n
+    decreases: n - i
+    {
+        a[0] = "q";
+        i = i + 1
+    };
+    if a[0] == "q" || a[0] != "q" { 1 } else { 0 }
+};
+
+// `len` on a bound `[Str]` element resolves through `str.len`.
+atom str_elem_len(a: [Str]) -> i64
+requires: len(a) >= 1 && a[0] == "abc";
+ensures: result == 3;
+body: {
+    let x = a[0];
+    len(x)
+};

@@ -23,9 +23,13 @@
   rejects array stores, and `param_z3_value` builds a genuine
   `Array(Int, Array(Int, …))` sort for any auxiliary path that still
   binds one, so an element select yields `Array` and fails scalar use.
-- Tests: `tests/test_array_str.mm` (13 atoms: param/literal reads,
+- Loop induction havoc (`havoc_vars` in `stmt.rs`) keeps the `Seq`/
+  nested `Array` range too — post-loop `a[i]` on a `[Str]` still
+  type-checks as a string instead of degrading to `Int`.
+- Tests: `tests/test_array_str.mm` (15 atoms: param/literal reads,
   `==`/`!=`, param+local stores, post-state ensures, `len`, `forall`,
-  aliasing, call args, `if`-merge, `-> [Str]` tail),
+  aliasing, call args, `if`-merge, `-> [Str]` tail, loop-havoc range,
+  `len` on a `Str` element),
   `tests/test_array_str_negative.mm` (wrong claim, non-string store,
   mixed literal, wrong return element) and `tests/test_array_nested.mm`
   + `tests/test_array_nested_index.mm` (signature rejection, nested

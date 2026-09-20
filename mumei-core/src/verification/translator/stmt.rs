@@ -138,6 +138,8 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
                         Some(z3::SortKind::Real) => ArrayElementSort::Real,
                         Some(z3::SortKind::FloatingPoint) => ArrayElementSort::Float,
                         Some(z3::SortKind::Bool) => ArrayElementSort::Bool,
+                        Some(z3::SortKind::Seq) => ArrayElementSort::Str,
+                        Some(z3::SortKind::Array) => ArrayElementSort::Nested,
                         _ => ArrayElementSort::Int,
                     };
                     z3_array_for_sort(ctx, &fresh_name, elem_sort).into()
