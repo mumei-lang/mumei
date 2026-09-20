@@ -136,6 +136,20 @@ impl ParseContext {
         self.pos
     }
 
+    /// Snapshot for speculative parsing. `split_shr` mutates the token
+    /// stream (a `>>` becomes two `>` tokens), so rolling back a failed
+    /// lookahead needs the pre-split stream, not just the cursor.
+    pub(crate) fn snapshot(&self) -> (usize, Vec<SpannedToken>) {
+        (self.pos, self.tokens.clone())
+    }
+
+    /// Rewind to a `snapshot` taken before a speculative parse, undoing
+    /// any `split_shr` splices made since.
+    pub(crate) fn rewind(&mut self, snapshot: (usize, Vec<SpannedToken>)) {
+        self.pos = snapshot.0;
+        self.tokens = snapshot.1;
+    }
+
     /// Get a Span from the current token position.
     pub fn current_span(&self) -> crate::parser::Span {
         if let Some(tok) = self.tokens.get(self.pos) {
@@ -422,6 +436,84 @@ mod tests {
             atom.spec_metadata.get("semantics").map(String::as_str),
             Some("bitvec")
         );
+    }
+
+    #[test]
+    fn test_parse_explicit_type_arg_call() {
+        // `name<T, …>(args)` produces `Expr::Call` whose name carries the
+        // instantiation — the same key the monomorphizer/atom registry use.
+        let expr = parse_expression("apply<i64, Network>(42, atom_ref(net_fn))");
+        match expr {
+            Expr::Call(name, args) => {
+                assert_eq!(name, "apply<i64, Network>");
+                assert_eq!(args.len(), 2);
+                assert!(matches!(args[1], Expr::AtomRef { .. }));
+            }
+            other => panic!("expected explicit-type call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_explicit_type_arg_call_spacing_and_nesting() {
+        for (src, expected) in [
+            ("f<i64>(x)", "f<i64>"),
+            ("f < i64 > (x)", "f<i64>"),
+            ("pipe<[i64]>(x)", "pipe<[i64]>"),
+            ("f<Map<String, i64>>(x)", "f<Map<String, i64>>"),
+            ("f<A<B<C>>>(x)", "f<A<B<C>>>"),
+        ] {
+            match parse_expression(src) {
+                Expr::Call(name, _) => assert_eq!(name, expected, "src: {src}"),
+                other => panic!("expected explicit-type call for {src}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_less_than_still_comparison() {
+        // Without the `>` `(` terminator the `<` stays a comparison —
+        // including `>>` that a speculative scan spliced and undid.
+        for src in [
+            "a < b",
+            "a < b > c",
+            "a < 1",
+            "a < f<c >> d",
+            "a < b[i]",
+            "a < b >",
+        ] {
+            assert!(
+                matches!(parse_expression(src), Expr::BinaryOp(..)),
+                "expected comparison for {src}"
+            );
+        }
+        // `a < b > c` normalizes to a conjunction of comparisons.
+        match parse_expression("a < b > c") {
+            Expr::BinaryOp(_, Op::And, _) => {}
+            other => panic!("expected chained comparison, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_explicit_call_nested_in_comparison_rhs() {
+        match parse_expression("a < f<i64>(x)") {
+            Expr::BinaryOp(_, Op::Lt, rhs) => {
+                assert!(matches!(*rhs, Expr::Call(ref n, _) if n == "f<i64>"));
+            }
+            other => panic!("expected `a < f<i64>(x)` comparison, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_while_cond_less_than_not_generic_call() {
+        let stmt = parse_body_expr(
+            "while i < n invariant: i >= 0 && i <= n decreases: n - i { i = i + 1 }",
+        );
+        match stmt {
+            Stmt::While { cond, .. } => {
+                assert!(matches!(*cond, Expr::BinaryOp(_, Op::Lt, _)));
+            }
+            other => panic!("expected while, got {other:?}"),
+        }
     }
 
     #[test]
