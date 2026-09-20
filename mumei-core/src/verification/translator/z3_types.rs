@@ -565,12 +565,30 @@ pub(crate) fn wire_array_slots<'a>(
         _ => val.as_array(),
     };
     let Some(arr) = arr else {
-        // Rebound to a non-array value — drop the stale tracked chain and
-        // length so a later `name[i]`/`len(name)` cannot read the
-        // pre-rebind array (`let a = [1,2]; a = 5; a[0]` must not see
-        // the old `[1,2]`).
-        env.remove(&format!("__z3_arr_{name}"));
-        env.remove(&format!("len_{name}"));
+        // Rebound to a non-array value — poison the tracked slots instead of
+        // removing them: `z3_dynamic_array` falls back to
+        // `Array::new_const(ctx, name)` when the slot is absent, and Z3
+        // interns symbols by name, so a `[T]` parameter's rebound `arr[i]`
+        // would revive the original param const along with its requires-side
+        // assertions (`arr[0] == 4` staying provable after `arr = 5`).
+        // A `#`-suffixed name can never collide with a source identifier.
+        if env.contains_key(&format!("__z3_arr_{name}")) || env.contains_key(&format!("len_{name}"))
+        {
+            let sort = vc
+                .local_array_elem_types
+                .borrow()
+                .get(name)
+                .map(|s| array_element_sort_from_type(s.as_str(), vc.ieee754_f64))
+                .unwrap_or_else(|| array_element_sort(name, vc));
+            env.insert(
+                format!("__z3_arr_{name}"),
+                z3_array_for_sort(vc.ctx, &format!("{name}#rebound"), sort).into(),
+            );
+            env.insert(
+                format!("len_{name}"),
+                array_len_symbol(vc.ctx, &format!("len_{name}#rebound"), vc.bitvec_i64),
+            );
+        }
         vc.local_array_elem_types.borrow_mut().remove(name);
         return;
     };
