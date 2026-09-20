@@ -554,7 +554,17 @@ pub(crate) fn wire_array_slots<'a>(
     val: &Dynamic<'a>,
     env: &mut Env<'a>,
 ) {
-    let Some(arr) = val.as_array() else {
+    // For `var` sources the live array is the tracked `__z3_arr_<src>` chain —
+    // `env[src]` is only the base const, and `src[i] = v` stores never rewrite
+    // it, so using `val` here would drop prior writes.
+    let arr = match value {
+        Some(Expr::Variable(src)) => env
+            .get(&format!("__z3_arr_{src}"))
+            .and_then(|d| d.as_array())
+            .or_else(|| val.as_array()),
+        _ => val.as_array(),
+    };
+    let Some(arr) = arr else {
         // Rebound to a non-array value — drop any stale element-type entry.
         vc.local_array_elem_types.borrow_mut().remove(name);
         return;

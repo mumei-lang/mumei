@@ -41,6 +41,9 @@
   wires **call arguments** (`head([7,8,9])` satisfies `requires: len(arr)>=1`)
   and the **`result` tail** (`atom … -> [i64] { [1,2,3] }` answers
   `ensures: forall(i,0,3, result[i]==i+1)`). Alias `let b = a` copies `len_a`.
+  For `var` sources the wired array is the tracked `__z3_arr_<src>` chain —
+  `env[src]` holds only the base const (stores never rewrite it), so
+  `arr[0] = 9; let a = arr` now sees the post-store array in `a`/`result`/callee.
   Element sort is the *widest* across elements (Float > Real > Int; bool
   literals must be uniformly Bool) — a first-element probe mis-sorted
   `[1.0, 2.5, 4.0]` because Z3 numerals for whole floats report `Int`.

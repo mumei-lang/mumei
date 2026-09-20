@@ -73,6 +73,26 @@ body: {
     head_lit([7, 8, 9])
 };
 
+// A store through the binding must be visible at the `result` tail —
+// `__z3_arr_result` wires the post-store chain, not the original const.
+atom lit_stored_tail(arr: [i64]) -> [i64]
+requires: len(arr) >= 1;
+ensures: result[0] == 99;
+body: {
+    let a = arr;
+    a[0] = 99;
+    a
+};
+
+// `let b = a` on a literal aliases the same tracked array.
+atom lit_let_alias() -> i64
+ensures: result == 2;
+body: {
+    let a = [1, 2, 3];
+    let b = a;
+    b[1]
+};
+
 // Symbolic elements from params are allowed.
 atom lit_symbolic(x: i64, y: i64) -> i64
 requires: x >= 0 && y >= 0;
