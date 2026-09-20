@@ -1,3 +1,29 @@
+### 2026-09-20: match arm bindings stay arm-local (verify)
+
+- `merge_arm_env_into` folded every differing key of the arm env into the
+  post-match env, so names introduced by the arm — pattern bindings and
+  `let`s — leaked outward. A pattern variable shadowing an outer `let`
+  (`let x = 99; match p { P(x, b) => … }`) left `x` bound to the payload
+  after the match, and an arm-body `let` shadowing an outer name folded
+  back as if it were an assignment.
+- The merge now skips the arm-local name set: names collected from the
+  arm's pattern (`collect_pattern_bindings`, now `pub(crate)`) plus `let`
+  names anywhere in the arm body whose envs reach the arm env (blocks,
+  `if` branches, `acquire`/`task`/`task_group` bodies — loop bodies and
+  inner match arms run on cloned envs and are excluded deliberately).
+  Real `Assign`s to pre-existing variables still fold under the arm
+  condition, so `match` bodies can update outer state as before.
+- Known edge (pre-existing, unchanged by this fix): an arm that assigns an
+  outer name and *then* declares a same-named `let` (`{ x = 7; let x = 9 }`)
+  reports the pre-match value for `x` after the match — the outer write is
+  dropped instead of surviving as `7`. Before this fix the same program
+  leaked the shadow value `9`, so the pattern was already wrong; the fix
+  changes which wrong answer it produces. Splitting outer writes from
+  shadowed writes for one name needs ordered env tracking — backlog.
+- Tests: `test_match_arm_scoping.mm` (pattern shadow, let shadow,
+  outer-assign fold), `test_match_arm_scoping_negative.mm` (a write to a
+  shadowed name must not reach the post-match env).
+
 ### 2026-09-20: fragment classifier resolves match owners via declared enum types
 
 - `detect_logic_fragment_tags` now threads a declared-enum-type

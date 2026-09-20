@@ -320,17 +320,23 @@ pub(crate) fn merge_branch_envs<'a>(
 
 /// Fold one match arm's writes to pre-existing variables into the
 /// accumulated post-match env: `acc[k] = ite(cond, arm[k], acc[k])`.
-/// Bindings introduced by the pattern (not present in `base_env`) stay
-/// arm-local and are not merged. Values `dynamic_ite` cannot merge keep the
-/// accumulated value — the previous behavior of dropping arm-side writes.
+/// Bindings introduced by the pattern — including ones that shadow a
+/// pre-existing outer name (`match p { P(x, ..) => .. }` while `x` is
+/// already bound) — stay arm-local and are not merged; names in `bound`
+/// are skipped. Values `dynamic_ite` cannot merge keep the accumulated
+/// value — the previous behavior of dropping arm-side writes.
 pub(crate) fn merge_arm_env_into<'a>(
     merged: &mut Option<Env<'a>>,
     arm_env: &Env<'a>,
     base_env: &Env<'a>,
     cond: &Bool<'a>,
+    bound: &std::collections::HashSet<String>,
 ) {
     let acc = merged.get_or_insert_with(|| base_env.clone());
     for (key, base_val) in base_env.iter() {
+        if bound.contains(key) {
+            continue;
+        }
         let arm_val = arm_env
             .get(key)
             .cloned()
