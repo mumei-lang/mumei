@@ -157,6 +157,34 @@ fn record_binding_enum_type(vc: &VCtx, var: &str, value: &Expr) {
     }
 }
 
+/// `let a = arr` / `a = arr` where `arr` is an array name: alias the backing
+/// Z3 array const and `len_<name>` symbol so `a[i]` accesses and stores share
+/// `arr`'s constraint state instead of starting over with an unconstrained
+/// fresh array (an unconstrained `len_a` would make `a[0]` unprovably in
+/// bounds even when `forall`/store history pinned `len_arr`).
+fn alias_array_symbols<'a>(vc: &VCtx<'a>, var: &str, value: &Expr, env: &mut Env<'a>) {
+    let Expr::Variable(src) = value else {
+        return;
+    };
+    let src_arr_key = format!("__z3_arr_{src}");
+    // Only alias when the source actually is an array: `env[src]` holds the
+    // Array const for `[T]` params, and `__z3_arr_<src>` holds it once the
+    // array has been accessed. A scalar source gets neither, so `let y = x`
+    // on an i64 is left untouched (no phantom `len_x`/`__z3_arr_x` symbols).
+    let Some(arr_val) = env
+        .get(&src_arr_key)
+        .cloned()
+        .or_else(|| env.get(src).cloned())
+        .filter(|d| d.as_array().is_some())
+    else {
+        return;
+    };
+    env.insert(format!("__z3_arr_{var}"), arr_val.clone());
+    env.insert(src_arr_key, arr_val);
+    let len = array_len_value(vc.ctx, env, src, vc.bitvec_i64, None);
+    env.insert(format!("len_{var}"), len);
+}
+
 pub(crate) fn stmt_to_z3<'a>(
     vc: &VCtx<'a>,
     stmt: &Stmt,
@@ -170,6 +198,7 @@ pub(crate) fn stmt_to_z3<'a>(
             record_binding_enum_type(vc, var, value);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
+            alias_array_symbols(vc, var, value, env);
             profile_solver_assertion(vc, &format!("let_{}", var), None);
             Ok(val)
         }
@@ -178,6 +207,7 @@ pub(crate) fn stmt_to_z3<'a>(
             record_binding_enum_type(vc, var, value);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
+            alias_array_symbols(vc, var, value, env);
             profile_solver_assertion(vc, &format!("assign_{}", var), None);
             Ok(val)
         }
