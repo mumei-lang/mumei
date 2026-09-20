@@ -1119,12 +1119,36 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             Operand::Place(Place::Local(tmp))
         }
 
-        HirExpr::Lambda { body, captures, .. } => {
+        HirExpr::Lambda {
+            params,
+            body,
+            captures,
+            ..
+        } => {
             // Lambda: lower captures and body inline.
             // Capture references are already in scope from the enclosing function.
             // Lower the body as statements and return the result.
             let _capture_refs: Vec<Place> = captures.iter().map(|c| ctx.lookup_var(c)).collect();
-            lower_stmt(ctx, body).unwrap_or(Operand::Constant(MirConstant::Int(0)))
+            // Lambda parameters are bound names inside the body — register them
+            // so they don't fall into the unbound fallback (and so uses of a
+            // same-named outer variable inside the body resolve to the param).
+            let saved: Vec<(String, Option<Local>)> = params
+                .iter()
+                .map(|p| (p.name.clone(), ctx.var_map.get(&p.name).cloned()))
+                .collect();
+            for p in params {
+                let ty = p.type_ref.as_ref().map(|t| t.to_string());
+                let local = ctx.alloc_local(Some(p.name.clone()), ty);
+                ctx.var_map.insert(p.name.clone(), local);
+            }
+            let result = lower_stmt(ctx, body).unwrap_or(Operand::Constant(MirConstant::Int(0)));
+            for (name, prior) in saved {
+                match prior {
+                    Some(local) => ctx.var_map.insert(name, local),
+                    None => ctx.var_map.remove(&name),
+                };
+            }
+            result
         }
 
         HirExpr::Async { body } => {
