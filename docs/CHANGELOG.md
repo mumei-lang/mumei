@@ -1,3 +1,20 @@
+### 2026-09-20: unbound-check follow-up — lambda params bound; bogus generic-call syntax surfaced
+
+- `HirExpr::Lambda` lowering now registers the lambda's parameters as MIR
+  locals (with their declared types) before lowering the body and restores
+  outer bindings afterwards. Previously `|a| a` left `a` unbound, so the new
+  unbound check reported the parameter itself. Lambda bodies that call the
+  lambda indirectly (`call(f, x)` on a `let`-bound lambda) still fail closed
+  with a spurious-counterexample report — indirect lambda calls are
+  uninterpreted, a pre-existing verifier limit.
+- `tests/effect_polymorphism_mixed.mm::main` called `apply<i64, Network>(..)`
+  — explicit type-argument call syntax does not exist; it mis-parsed as the
+  comparison `apply < i64` and verified vacuously through the phantom-local
+  path. The atom now calls `net_fn(42)` so the effect-polymorphism path is
+  exercised for real. Generic-atom call sites remain unsupported (both
+  explicit `<T, E>` args and inference-only calls lower to uninterpreted
+  calls).
+
 ### 2026-09-20: MIR unbound-variable check fails closed (phantom `Local(0)` fix)
 
 - `LowerCtx::lookup_var` silently aliased every unbound name to `Local(0)`
