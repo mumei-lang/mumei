@@ -62,6 +62,7 @@ pub(crate) fn verify_atom_invariant(
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global: false,
     };
 

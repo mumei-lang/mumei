@@ -1,3 +1,49 @@
+### 2026-09-20: `let`-bound lambdas resolve at indirect call sites
+
+- `let f = |a| a + 1` already bound the lambda, but `f(3)` /
+  `call(f, 3)` fell through `Expr::Call`/`Expr::CallRef` to
+  `Unknown function: f` — so an `ensures` on the call result was
+  unprovable, and a *wrong* `ensures` surfaced as "Counterexample
+  unvalidated" (spurious) instead of a genuine counterexample.
+- `VCtx` gains `local_lambdas` (`RefCell<HashMap<String, Rc<LocalLambda>>>`,
+  next to `local_enum_types`/`local_array_elem_types`), populated by
+  `let`/`assign` and cleared by `havoc_vars`/non-lambda rebinds.
+  `LocalLambda::Closure` stores the `Expr::Lambda` plus the lambda
+  scope captured at binding time, so free lambda names inside the body
+  resolve lexically — `let g = …; let f = |a| g(a); let g = …; f(x)`
+  keeps the `g` live when `f` was defined.
+- `apply_local_lambda` evaluates args in the caller env (call-by-value)
+  and runs the body with `param <- arg` bindings plus the usual
+  struct-field/array-slot wiring — `f(3)` is the let-in
+  `let a = 3 in a + 1`. Higher-order calls work too: `twice(inc, 4)`
+  re-binds param `f` to `inc`'s closure, and `call(|a| a * 5, 2)`
+  applies an inline literal. A lambda param called while its own body
+  is checked at bind time resolves through `LocalLambda::Opaque` to a
+  fresh symbolic int (the check's value is discarded; the real callee
+  is supplied at each call site).
+- Scoping mirrors `local_enum_types`: if/else merges keep a name when
+  both branches leave the *same* binding (`Rc::ptr_eq` — aliases
+  share the allocation, so `f = g` on both sides survives, while
+  textually identical but distinct lambdas drop); one-sided branch
+  bindings leak like `merge_branch_envs`; while/match arms snapshot and
+  restore the map. Divergent branch bindings, `f = 0` rebinds, arity
+  mismatches, and recursive `|a| f(a)` all fail closed.
+- `spurious_detection` replays `EvalValue::Lambda` closures
+  (params bound in the captured `EvalEnv`), and
+  `collect_expr_symbols`/`collect_stmt_symbols` stop flagging
+  lambda-bound names as `uninterpreted_function` — `f(3)` where the
+  postcondition is wrong now reports a *validated* counterexample.
+- Tests: `tests/test_lambda_indirect_call.mm` (12 atoms: direct,
+  multi-arg, capture, shadowed params, `call(f, x)`, alias, inline
+  literal, higher-order, if/while/match scoping) and
+  `tests/test_lambda_indirect_call_negative.mm` (wrong postcondition →
+  validated counterexample; arity, rebinding, recursion, divergent
+  branches → fail closed), run by `tests/test_lambda_indirect_call.rs`;
+  `tests/test_lambda_basic.mm` also verifies now. MIR/codegen for
+  indirect calls is unchanged — a `f(3)` local is still lowered as a
+  direct `Rvalue::Call`, so `mumei build`/`run` on lambda calls is out
+  of scope.
+
 ### 2026-09-20: `match`-arm array literals merge their lengths
 
 - `let a = match e { A => [1, 2], B => [3, 4, 5] }` already merged the

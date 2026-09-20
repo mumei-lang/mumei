@@ -6,6 +6,33 @@ use crate::lowering::{lower, LoweredType};
 
 pub const DEFAULT_CONSTRAINT_BUDGET: usize = 1000;
 
+/// A lambda-shaped name in `VCtx::local_lambdas`, so an indirect call
+/// `f(args)` / `call(f, args)` can resolve instead of failing as an
+/// unknown function.
+#[derive(Debug, Clone)]
+pub(crate) enum LocalLambda {
+    /// A `let`/`assign`-bound lambda (`let f = |a| a + 1`): the call
+    /// inlines the body with formal parameters bound to the evaluated
+    /// arguments — the call behaves like `let p_i = arg_i in body`.
+    Closure {
+        /// The `Expr::Lambda` the name was bound to.
+        expr: crate::parser::Expr,
+        /// The `local_lambdas` contents captured at the binding site: free
+        /// lambda-variable names inside `expr`'s body resolve against this
+        /// captured scope — not the (possibly rebound) call-site scope — so
+        /// `let g = …; let f = |a| g(a); let g = …; f(x)` keeps the `g`
+        /// that was live when `f` was defined.
+        captured: std::collections::HashMap<String, std::rc::Rc<LocalLambda>>,
+    },
+    /// Placeholder for a lambda's own parameter while the lambda body is
+    /// checked at binding time (`let apply = |f, x| f(x)`): the param's
+    /// arity and return type are unknown until a call site supplies a
+    /// closure, so a call through it yields a fresh symbolic int. Only
+    /// ever present during the bind-time body check — applying a closure
+    /// re-binds params that receive lambdas to real `Closure` entries.
+    Opaque,
+}
+
 /// 検証時に共有するコンテキスト（ctx, module_env を束ねて引数を削減）
 pub(crate) struct VCtx<'a> {
     pub(crate) ctx: &'a Context,
@@ -91,6 +118,16 @@ pub(crate) struct VCtx<'a> {
     /// non-array value.
     pub(crate) local_array_elem_types:
         std::cell::RefCell<std::collections::HashMap<String, String>>,
+    /// `let`/`assign`-bound lambdas (`let f = |a| a + 1` records
+    /// `f -> LocalLambda`) so `f(args)` / `call(f, args)` inline the body
+    /// instead of failing as an unknown function. Entries drop when the
+    /// variable is rebound to a non-lambda value and are branch-scoped
+    /// the same way `local_enum_types` is. `Rc` wrapping keeps binding
+    /// *identity* through map clones — an alias (`let g = f`) shares the
+    /// same `Rc`, which is what lets the if/else merge keep a name only
+    /// when both sides left the same binding in place (`Rc::ptr_eq`).
+    pub(crate) local_lambdas:
+        std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<LocalLambda>>>,
 }
 
 impl<'a> VCtx<'a> {
