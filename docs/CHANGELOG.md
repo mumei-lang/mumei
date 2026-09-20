@@ -1,3 +1,36 @@
+### 2026-09-20: `[Str]` element sort; `[[T]]` nested arrays fail closed
+
+- `[Str]` now encodes on a real `Int -> Seq` (Z3 `String`) range sort
+  instead of falling through to `Int`: `array_element_sort_from_type`
+  maps `LoweredType::Str` to a new `ArrayElementSort::Str`, literals probe
+  `SortKind::Seq` elements (`["x", "y"]` builds an `Int -> Seq` store
+  chain; `["x", 1]` is a "mixes string and non-string elements" type
+  error), `coerce_to_array_elem_sort` gained a `Str` arm so
+  `a[i] = "s"` stores work, `wire_array_slots`/`havoc_array_name` carry
+  `Seq` ranges through, and `dynamic_ite` can merge `Seq` values.
+- `z3_dynamic_array` consults `env[name]`'s array value before
+  synthesizing a const from the declared type — this keeps `result[0]`
+  on `atom -> [Str]` (spec-validation `result` binding) on the `Seq`
+  sort, and `param_z3_value`/`z3_array_for_name` now build element sorts
+  through a recursive `z3_sort_for_lowered` instead of the flat tag.
+- `[[T]]` is now fail-closed instead of silently wrong: `a: [[i64]]`
+  previously gave `a[i]` a phantom `Int` element — enough to
+  wrong-verify `requires: a[0] == 7; ensures: result == 7; body: { a[0] }`.
+  `verify_inner` rejects nested array types in params/return types up
+  front, the parser records a syntax failure on `expr [ … ]` leftovers
+  (`a[i][j]`, `f()[0]` — the trailing bracket used to re-lex as an
+  orphan literal statement), `coerce_to_array_elem_sort(Nested)`
+  rejects array stores, and `param_z3_value` builds a genuine
+  `Array(Int, Array(Int, …))` sort for any auxiliary path that still
+  binds one, so an element select yields `Array` and fails scalar use.
+- Tests: `tests/test_array_str.mm` (13 atoms: param/literal reads,
+  `==`/`!=`, param+local stores, post-state ensures, `len`, `forall`,
+  aliasing, call args, `if`-merge, `-> [Str]` tail),
+  `tests/test_array_str_negative.mm` (wrong claim, non-string store,
+  mixed literal, wrong return element) and `tests/test_array_nested.mm`
+  + `tests/test_array_nested_index.mm` (signature rejection, nested
+  literal, `a[i][j]` syntax error).
+
 ### 2026-09-20: Explicit-type-argument calls `name<T, …>(args)`
 
 - `f<i64>(x)` / `apply<i64, Network>(42, atom_ref(net_fn))` previously

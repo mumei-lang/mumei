@@ -485,6 +485,34 @@ pub(crate) fn verify_inner(
         return Ok(());
     }
 
+    // Nested arrays (`[[T]]` params / return types) have no encoding: an
+    // element select yields a Z3 `Array`, which no scalar operation can
+    // consume, so a phantom `Int` element sort would encode a different
+    // program than the one written — a wrong-verify. Reject the signature
+    // before any clause is lowered. `[Str]` and the scalar element sorts are
+    // unaffected (element names like "Str" never start with '[').
+    {
+        let bad_nested = atom
+            .params
+            .iter()
+            .filter_map(|param| param.type_name.as_deref())
+            .chain(atom.return_type.as_deref())
+            .filter(|ty| ty.starts_with('[') && ty.ends_with(']'))
+            .any(|ty| array_element_type_from_annotation(Some(ty), module_env).starts_with('['));
+        if bad_nested {
+            return Err(MumeiError::type_error_at(
+                format!(
+                    "atom '{}' uses a nested array type ('[[T]]'), which verification does not support",
+                    atom.name
+                ),
+                atom.span.clone(),
+            )
+            .with_help(
+                "bind inner arrays to their own names and verify them separately, or flatten the signature to a scalar element type",
+            ));
+        }
+    }
+
     // Phase 0-units: 単位型（units of measure）の一致検査。AST 上の純粋な型検査で、
     // Z3 エンコードや MIR には影響しない。不一致は TypeError として証明前に拒否する。
     let phase_start = std::time::Instant::now();

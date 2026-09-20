@@ -67,8 +67,17 @@ mod tests {
             ArrayElementSort::Int
         );
         assert_eq!(
+            array_element_sort_from_type("Str", false),
+            ArrayElementSort::Str
+        );
+        // `[[T]]` elements are arrays themselves — no scalar sort exists.
+        assert_eq!(
             array_element_sort_from_type("[f64]", false),
-            ArrayElementSort::Int
+            ArrayElementSort::Nested
+        );
+        assert_eq!(
+            array_element_sort_from_type("[i64]", false),
+            ArrayElementSort::Nested
         );
     }
 

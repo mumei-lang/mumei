@@ -1396,26 +1396,38 @@ pub(crate) fn expr_to_z3<'a>(
             // Range sort = the widest element sort across the literal. Z3
             // numerals built from whole-valued floats (`1.0` → `Int`) make a
             // first-element-only probe choose the wrong sort, so scan them
-            // all: Float > Real > Int; Bool literals must be uniformly Bool.
+            // all: Float > Real > Int; Bool and Str literals must each be
+            // uniformly of their own sort. `Array` elements (`[[T]]`) stay
+            // unsupported — they would need an `Array` range sort.
             let mut has_float = false;
             let mut has_real = false;
             let mut has_int = false;
             let mut has_bool = false;
+            let mut has_str = false;
             for elem in &elem_dynamics {
                 match elem.get_sort().kind() {
                     z3::SortKind::Int | z3::SortKind::BV => has_int = true,
                     z3::SortKind::Real => has_real = true,
                     z3::SortKind::FloatingPoint => has_float = true,
                     z3::SortKind::Bool => has_bool = true,
+                    z3::SortKind::Seq => has_str = true,
                     other => {
                         return Err(MumeiError::type_error(format!(
                             "array literal element type {other:?} is unsupported \
-                             (only i64/f64/bool elements can be lowered)"
+                             (only i64/f64/bool/Str elements can be lowered; \
+                             nested arrays are not supported)"
                         )))
                     }
                 }
             }
-            let range_sort = if has_float {
+            let range_sort = if has_str {
+                if has_float || has_real || has_int || has_bool {
+                    return Err(MumeiError::type_error(
+                        "array literal mixes string and non-string elements",
+                    ));
+                }
+                ArrayElementSort::Str
+            } else if has_float {
                 ArrayElementSort::Float
             } else if has_real {
                 if has_bool {

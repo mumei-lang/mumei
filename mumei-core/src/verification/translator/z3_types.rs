@@ -160,6 +160,14 @@ pub(crate) enum ArrayElementSort {
     /// the opt-in `--ieee754-f64` mode (default `f64` arrays use `Real`).
     Float,
     Bool,
+    /// `Str` elements — encoded on Z3's `Seq`/`String` sort so `a[i] == "s"`
+    /// and `a[i] = "s"` go through the same string theory as scalar `Str`.
+    Str,
+    /// `[[T]]` — the element is itself an array, which no scalar element sort
+    /// can represent. Arrays carrying this tag are built with the genuine
+    /// nested range sort (see `z3_element_sort`), so `a[i]` yields an `Array`
+    /// value that scalar uses reject — never a phantom `Int`.
+    Nested,
 }
 
 pub(crate) fn array_element_type_from_annotation(
@@ -192,6 +200,9 @@ pub(crate) fn array_element_sort_from_type(type_name: &str, ieee754_f64: bool) -
         LoweredType::F64 if ieee754_f64 => ArrayElementSort::Float,
         LoweredType::F64 => ArrayElementSort::Real,
         LoweredType::Bool => ArrayElementSort::Bool,
+        LoweredType::Str => ArrayElementSort::Str,
+        // `[T]` elements — i.e. a `[[U]]` array — have no scalar sort.
+        LoweredType::Array(_) => ArrayElementSort::Nested,
         _ => ArrayElementSort::Int,
     }
 }
@@ -287,6 +298,7 @@ fn dynamic_ite<'a>(c: &Bool<'a>, t: &Dynamic<'a>, e: &Dynamic<'a>) -> Option<Dyn
         z3::SortKind::Array => Some(c.ite(&t.as_array()?, &e.as_array()?).into()),
         z3::SortKind::FloatingPoint => Some(c.ite(&t.as_float()?, &e.as_float()?).into()),
         z3::SortKind::Datatype => Some(c.ite(&t.as_datatype()?, &e.as_datatype()?).into()),
+        z3::SortKind::Seq => Some(c.ite(&t.as_string()?, &e.as_string()?).into()),
         _ => None,
     }
 }
@@ -507,6 +519,35 @@ pub(crate) fn mark_string_constraints(vc: &VCtx<'_>) {
     }
 }
 
+/// Z3 sort for a `lower()`ed type — recursive, so nested `[[T]]` element
+/// types build genuine `Array(Int, …)` range sorts rather than the phantom
+/// `Int` the flat `ArrayElementSort` tag would collapse them to.
+fn z3_sort_for_lowered<'a>(
+    ctx: &'a Context,
+    ty: &crate::lowering::LoweredType,
+    ieee754_f64: bool,
+) -> z3::Sort<'a> {
+    match ty {
+        LoweredType::F64 if ieee754_f64 => z3::Sort::float(ctx, F64_EBITS, F64_SBITS),
+        LoweredType::F64 => z3::Sort::real(ctx),
+        LoweredType::Bool => z3::Sort::bool(ctx),
+        LoweredType::Str => z3::Sort::string(ctx),
+        LoweredType::Array(inner) => {
+            let index = z3::Sort::int(ctx);
+            let range = z3_sort_for_lowered(ctx, inner, ieee754_f64);
+            z3::Sort::array(ctx, &index, &range)
+        }
+        _ => z3::Sort::int(ctx),
+    }
+}
+
+/// Z3 element sort for a resolved element type *name* — the sort-valued
+/// counterpart of `array_element_sort_from_type`, able to express the `Str`
+/// and nested `[T]` elements the flat tag cannot.
+fn z3_element_sort<'a>(ctx: &'a Context, type_name: &str, ieee754_f64: bool) -> z3::Sort<'a> {
+    z3_sort_for_lowered(ctx, &lower(type_name), ieee754_f64)
+}
+
 pub(crate) fn z3_array_for_sort<'a>(
     ctx: &'a Context,
     name: &str,
@@ -527,17 +568,36 @@ pub(crate) fn z3_array_for_sort<'a>(
             let bool_sort = z3::Sort::bool(ctx);
             Array::new_const(ctx, name, &int_sort, &bool_sort)
         }
+        ArrayElementSort::Str => {
+            let string_sort = z3::Sort::string(ctx);
+            Array::new_const(ctx, name, &int_sort, &string_sort)
+        }
+        // The flat tag cannot rebuild the precise inner sort of a `[[T]]` —
+        // callers holding the element type (`param_z3_value`,
+        // `z3_array_for_name`) go through `z3_element_sort` instead. This
+        // generic `Int -> Int -> Int` shape only serves poison/havoc
+        // placeholders, where any unconstrained nested array is sound.
+        ArrayElementSort::Nested => {
+            let inner = z3::Sort::array(ctx, &int_sort, &int_sort);
+            Array::new_const(ctx, name, &int_sort, &inner)
+        }
     }
 }
 
 pub(crate) fn z3_array_for_name<'a>(vc: &VCtx<'a>, name: &str) -> Array<'a> {
-    z3_array_for_sort(vc.ctx, name, array_element_sort(name, vc))
+    let int_sort = z3::Sort::int(vc.ctx);
+    let elem_sort = z3_element_sort(vc.ctx, &array_element_type_name(name, vc), vc.ieee754_f64);
+    Array::new_const(vc.ctx, name, &int_sort, &elem_sort)
 }
 
 pub(crate) fn z3_dynamic_array<'a>(vc: &VCtx<'a>, name: &str, env: &Env<'a>) -> Array<'a> {
     let arr_key = format!("__z3_arr_{}", name);
     env.get(&arr_key)
         .and_then(|d| d.as_array())
+        // `env[name]` already holds the array const for `[T]` params and for
+        // `result` in spec-validation — prefer it over a name-synthesized
+        // const so the declared element sort (`Str`, `[T]`, …) is kept.
+        .or_else(|| env.get(name).and_then(|d| d.as_array()))
         .unwrap_or_else(|| z3_array_for_name(vc, name))
 }
 
@@ -592,11 +652,7 @@ pub(crate) fn wire_array_slots<'a>(
         vc.local_array_elem_types.borrow_mut().remove(name);
         return;
     };
-    let elem_ty = match arr.get_sort().array_range().map(|s| s.kind()) {
-        Some(z3::SortKind::Real) | Some(z3::SortKind::FloatingPoint) => "f64",
-        Some(z3::SortKind::Bool) => "bool",
-        _ => "i64",
-    };
+    let elem_ty = z3_range_type_name(&arr.get_sort());
     let cond_hint = arr.nth_child(0).and_then(|c| c.as_bool());
     let arr_dyn: Dynamic = arr.into();
     env.insert(format!("__z3_arr_{name}"), arr_dyn.clone());
@@ -877,6 +933,8 @@ pub(crate) fn havoc_array_name<'a>(vc: &VCtx<'a>, name: &str, env: &mut Env<'a>)
         Some(z3::SortKind::Real) => ArrayElementSort::Real,
         Some(z3::SortKind::FloatingPoint) => ArrayElementSort::Float,
         Some(z3::SortKind::Bool) => ArrayElementSort::Bool,
+        Some(z3::SortKind::Seq) => ArrayElementSort::Str,
+        Some(z3::SortKind::Array) => ArrayElementSort::Nested,
         _ => ArrayElementSort::Int,
     };
     let uid = POSTCALL_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -910,6 +968,25 @@ pub(crate) fn havoc_array_name<'a>(vc: &VCtx<'a>, name: &str, env: &mut Env<'a>)
     // Ensure the tracked slot exists even when the arg only had a bare
     // `env[name]` const (param arrays before their first access).
     env.insert(arr_key, fresh);
+}
+
+/// Element type name carried by a Z3 array's range sort — the inverse of
+/// `z3_sort_for_lowered`. Recursive so a nested `Array(Int, Int)` range comes
+/// back as `"[i64]"` rather than collapsing to `"i64"`; `Seq` comes back as
+/// `"Str"`.
+fn z3_range_type_name(sort: &z3::Sort<'_>) -> String {
+    match sort.array_range().map(|range| range.kind()) {
+        Some(z3::SortKind::Real) | Some(z3::SortKind::FloatingPoint) => "f64".to_string(),
+        Some(z3::SortKind::Bool) => "bool".to_string(),
+        Some(z3::SortKind::Seq) => "Str".to_string(),
+        Some(z3::SortKind::Array) => format!(
+            "[{}]",
+            sort.array_range()
+                .map(|range| z3_range_type_name(&range))
+                .unwrap_or_else(|| "i64".to_string())
+        ),
+        _ => "i64".to_string(),
+    }
 }
 
 /// Does `callee`'s body possibly store into the array bound to `param_name`?
@@ -1139,6 +1216,13 @@ pub(crate) fn coerce_to_array_elem_sort<'a>(
             .as_bool()
             .map(Into::into)
             .ok_or_else(|| MumeiError::type_error("Array store value must be boolean")),
+        ArrayElementSort::Str => value
+            .as_string()
+            .map(Into::into)
+            .ok_or_else(|| MumeiError::type_error("Array store value must be a string")),
+        ArrayElementSort::Nested => Err(MumeiError::type_error(
+            "array-valued elements (`[[T]]`) are not supported for array stores",
+        )),
     }
 }
 
@@ -1154,15 +1238,13 @@ pub(crate) fn param_z3_value<'a>(
         .map(|t| module_env.resolve_base_type(t))
         .unwrap_or_else(|| "i64".to_string());
     if type_name.is_some_and(|ty| ty.starts_with('[') && ty.ends_with(']')) {
-        z3_array_for_sort(
+        let int_sort = z3::Sort::int(ctx);
+        let elem_sort = z3_element_sort(
             ctx,
-            name,
-            array_element_sort_from_type(
-                &array_element_type_from_annotation(type_name, module_env),
-                ieee754_f64,
-            ),
-        )
-        .into()
+            &array_element_type_from_annotation(type_name, module_env),
+            ieee754_f64,
+        );
+        Array::new_const(ctx, name, &int_sort, &elem_sort).into()
     } else {
         // TODO(strict-preservation): `lower()` unifies `Str`/`String` into
         // `LoweredType::Str`, so `"String"` now encodes as a Z3 string sort.
