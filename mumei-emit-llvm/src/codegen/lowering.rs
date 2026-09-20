@@ -13,6 +13,10 @@ pub(crate) fn array_struct_type(context: &Context) -> inkwell::types::StructType
     context.struct_type(&[i64_type.into(), ptr_type.into()], false)
 }
 
+/// An array fat pointer unpacked for codegen: `(len, element_type, data)`.
+/// `element_type` is the LLVM type used for GEP/load/store on `data`.
+pub(crate) type ArrayPtr<'a> = (BasicValueEnum<'a>, BasicTypeEnum<'a>, BasicValueEnum<'a>);
+
 fn basic_type_rank<'a>(ty: BasicTypeEnum<'a>) -> (u32, bool, bool) {
     match ty {
         BasicTypeEnum::FloatType(float_ty) => {
@@ -411,6 +415,27 @@ pub(crate) fn struct_llvm_type<'a>(
     context.struct_type(&field_types, false)
 }
 
+/// LLVM element type for an array parameter's declared `inner` type.
+/// The fat pointer layout is `{ i64 len, T* data }` regardless of `T`;
+/// this resolves `T` so element loads/stores GEP at the right type.
+/// Bool elements keep the codebase's bool-as-i64 convention.
+pub(crate) fn array_elem_llvm_type<'a>(
+    context: &'a Context,
+    type_name: &str,
+    module_env: &ModuleEnv,
+) -> Option<inkwell::types::BasicTypeEnum<'a>> {
+    let base = module_env.resolve_base_type(type_name);
+    let inner = match lower(&base) {
+        LoweredType::Array(inner) => *inner,
+        _ => return None,
+    };
+    Some(match inner {
+        LoweredType::F64 => context.f64_type().into(),
+        LoweredType::Str => context.ptr_type(inkwell::AddressSpace::default()).into(),
+        _ => context.i64_type().into(),
+    })
+}
+
 /// パラメータの LLVM 型を解決する
 pub(crate) fn resolve_param_type<'a>(
     context: &'a Context,
@@ -432,9 +457,7 @@ pub(crate) fn resolve_param_type<'a>(
             match lower(&base) {
                 LoweredType::F64 => context.f64_type().into(),
                 LoweredType::Str => context.ptr_type(inkwell::AddressSpace::default()).into(),
-                LoweredType::Array(inner) if matches!(inner.as_ref(), LoweredType::I64) => {
-                    array_struct_type(context).into()
-                }
+                LoweredType::Array(_) => array_struct_type(context).into(),
                 _ => {
                     // Plan 14: Check if type is an enum
                     if let Some(enum_def) = module_env.get_enum(name) {
@@ -500,9 +523,7 @@ pub(crate) fn resolve_return_type<'a>(
         match lower(&base) {
             LoweredType::F64 => context.f64_type().into(),
             LoweredType::Str => context.ptr_type(AddressSpace::default()).into(),
-            LoweredType::Array(inner) if matches!(inner.as_ref(), LoweredType::I64) => {
-                array_struct_type(context).into()
-            }
+            LoweredType::Array(_) => array_struct_type(context).into(),
             _ => {
                 if let Some(enum_def) = module_env.get_enum(&base) {
                     return enum_llvm_type(context, enum_def, Some(module_env)).into();

@@ -1,3 +1,30 @@
+### 2026-09-20: `[f64]`/`[bool]`/`[str]` arrays lower to fat pointers in codegen
+
+- `resolve_param_type`/`resolve_return_type` only recognized
+  `[i64]` as the `{ i64 len, T* data }` fat pointer; `[f64]`/`[bool]`/
+  `[str]` params fell through to `i64`, so `arr[i]` failed codegen with
+  `Array 'arr' not found as fat pointer parameter` even though the same
+  code verified. Any `LoweredType::Array` now lowers to the fat pointer.
+- `array_ptrs` is now `(len, elem_ty, data)` — the declared element type
+  (`array_elem_llvm_type`: `f64`→double, `str`→ptr, bool/other→i64 —
+  bool keeps the i64 convention) drives the GEP/load/store in
+  `ArrayAccess` and `ArrayStore` instead of a hardcoded `i64`. Storing an
+  integer into a `[f64]` emits `sitofp` (`arr[0] = 42` → `store double
+  4.2e+01`); other mismatches go through `bitpreserve_cast` or a clean
+  codegen error. Task bodies capture arrays with their element type, so
+  the inner fat pointer is rebuilt correctly.
+- Array returns now rebuild the fat pointer: a tail `arr` emits
+  `insertvalue` len+data into `{ i64, ptr }` and `ret`s it. Previously an
+  array-typed return emitted `ret i64 %arr_len` under a `{i64, ptr}`
+  signature — invalid IR (and on `[i64]` even a silently-wrong len-only
+  `i64` return). Non-array tails under an array return type now fail with
+  a clean codegen error (e.g. `let a = arr; a` aliases and array
+  literals are not yet supported in HIR).
+- `test_polymorphic_array.mm`'s `test_i64_array` declared no `arr`
+  parameter at all — the phantom name verified vacuously against an
+  unconstrained Z3 array — now `arr: [i64]` like its siblings; the file
+  builds end-to-end (`mumei build --emit llvm-ir`) for the first time.
+
 ### 2026-09-20: lowercase `qual::Variant` patterns parse as qualified paths
 
 - `parse_pattern` folded `::`-separated path segments only for uppercase
