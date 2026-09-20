@@ -3,6 +3,7 @@ use super::super::support::*;
 use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
+use crate::verification::translator::z3_types::array_root_ast;
 use serde_json::json;
 
 /// Collect the env names a statement can overwrite: `Assign` targets plus the
@@ -133,6 +134,7 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
                     // Fresh `Int -> Elem` array const — `array_domain/range`
                     // Sorts borrow the temporary, so lift only the (Copy)
                     // range kind and rebuild through `z3_array_for_sort`.
+                    let root = old.as_array().map(|a| array_root_ast(&a));
                     let range = old.get_sort().array_range().map(|s| s.kind());
                     let elem_sort = match range {
                         Some(z3::SortKind::Real) => ArrayElementSort::Real,
@@ -142,7 +144,23 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
                         Some(z3::SortKind::Array) => ArrayElementSort::Nested,
                         _ => ArrayElementSort::Int,
                     };
-                    z3_array_for_sort(ctx, &fresh_name, elem_sort).into()
+                    let fresh_arr: Dynamic = z3_array_for_sort(ctx, &fresh_name, elem_sort).into();
+                    // Aliases (`let b = a`, sibling `__z3_arr_` slots) share
+                    // the same backing root — rebind them too or their reads
+                    // keep answering with the pre-loop entry const.
+                    if let Some(root) = root {
+                        let shared: Vec<String> = env
+                            .iter()
+                            .filter(|(_, v)| {
+                                v.as_array().is_some_and(|a| array_root_ast(&a) == root)
+                            })
+                            .map(|(k, _)| k.clone())
+                            .collect();
+                        for key in shared {
+                            env.insert(key, fresh_arr.clone());
+                        }
+                    }
+                    fresh_arr
                 }
                 _ => old.clone(),
             };
@@ -308,6 +326,22 @@ pub(crate) fn stmt_to_z3<'a>(
                 // state, which would mask violations on later iterations.
                 let mut modified = std::collections::HashSet::new();
                 collect_assigned_vars(body, &mut modified);
+                // `__z3_arr_<v>` for a param array only materializes on first
+                // access, so a loop that stores into `v` without an earlier
+                // `v[i]` read finds no slot in `env` — the retain below would
+                // drop it and the post-loop state would read the *entry*
+                // array, letting stale `requires` facts wrong-verify.
+                // Materialize the slot (aliased to the same const) so the
+                // array is havoced like a local literal's slot is.
+                for name in modified.clone() {
+                    if let Some(var) = name.strip_prefix("__z3_arr_") {
+                        if !env.contains_key(&name) {
+                            if let Some(arr) = env.get(var).and_then(|d| d.as_array()) {
+                                env.insert(name, arr.into());
+                            }
+                        }
+                    }
+                }
                 modified.retain(|name| env.contains_key(name));
 
                 let marks = obligation_marks(vc);
