@@ -61,7 +61,7 @@ body: {
 // 前提 forall(i, 0, map_len, keys[i] <= key) から
 // keys[map_len - 1] <= key が得られ、既存ソート順と合わせて不変量が維持される。
 // Z3 が unknown を返す場合は mumei-lean Lean 4 escalation 対象。
-atom sorted_map_insert(map_len: i64, map_cap: i64, key: i64, value: i64)
+atom sorted_map_insert(keys: [i64], values: [i64], map_len: i64, map_cap: i64, key: i64, value: i64)
 requires: map_len >= 0
     && map_cap > 0
     && map_len < map_cap
@@ -81,7 +81,7 @@ body: {
 };
 
 // 二分探索形の境界更新で key の index witness を返す。見つからない場合は -1。
-atom sorted_map_get(map_len: i64, key: i64)
+atom sorted_map_get(keys: [i64], map_len: i64, key: i64)
 requires: map_len >= 0
     && forall(i, 0, map_len, keys[i] >= key || keys[i] < key);
 ensures: result == 0 - 1 || (result >= 0 && result < map_len);
@@ -117,7 +117,7 @@ body: {
 };
 
 // key を削除した後の長さを返す。末尾要素削除はソート不変量を保存する。
-atom sorted_map_remove(map_len: i64, key: i64)
+atom sorted_map_remove(keys: [i64], map_len: i64, key: i64)
 requires: map_len > 0
     && len(keys) >= map_len
     && forall(i, 0, map_len - 1, keys[i] <= keys[i + 1]);

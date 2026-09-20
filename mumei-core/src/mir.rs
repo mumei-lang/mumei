@@ -132,6 +132,11 @@ pub struct MirBody {
     pub locals: Vec<LocalDecl>,
     pub blocks: Vec<BasicBlock>,
     pub entry_block: BasicBlockId,
+    /// Names referenced in the body with no binding at lowering time.
+    /// The verifier fails closed on any entry — these are typos or
+    /// mis-parsed keywords, not free variables.
+    #[serde(default)]
+    pub unbound_names: Vec<String>,
 }
 
 impl MirBody {
@@ -261,6 +266,9 @@ struct LowerCtx {
     /// Enum definitions keyed by enum name — used to give match pattern
     /// bindings their declared field types so Copy fields stay Copy.
     enum_defs: std::collections::HashMap<String, crate::parser::EnumDef>,
+    /// Variable names that had no binding when they were referenced —
+    /// surfaced to the caller as `MirBody::unbound_names` (fail-closed).
+    unbound_names: std::collections::BTreeSet<String>,
     next_local: usize,
     next_block: usize,
 }
@@ -287,6 +295,7 @@ impl LowerCtx {
             var_map: std::collections::HashMap::new(),
             alias_bases,
             enum_defs,
+            unbound_names: std::collections::BTreeSet::new(),
             next_local: 0,
             next_block: 0,
         }
@@ -358,14 +367,34 @@ impl LowerCtx {
     }
 
     /// Look up a variable by name, returning its Place.
-    fn lookup_var(&self, name: &str) -> Place {
+    fn lookup_var(&mut self, name: &str) -> Place {
         if let Some(local) = self.var_map.get(name) {
             Place::Local(local.clone())
         } else {
-            // Variable not yet seen (e.g. atom parameter or free variable).
-            // Return a placeholder local 0 — will be refined in later phases.
-            Place::Local(Local(0))
+            // Unbound name: allocate a dedicated local instead of silently
+            // aliasing Local(0) — otherwise an unresolved name (typo, or a
+            // mis-parsed keyword like a bare `task`) would consume/move the
+            // atom's first local during ownership analysis.
+            // `result` is exempt: it is the atom's implicit named return
+            // binding (`result = x` in a body assigns the return value).
+            if name != "result" {
+                self.unbound_names.insert(name.to_string());
+            }
+            let local = self.alloc_local(Some(format!("__unbound:{name}")), None);
+            self.var_map.insert(name.to_string(), local.clone());
+            Place::Local(local)
         }
+    }
+
+    /// A bare name that resolves to a nullary variant of a declared enum
+    /// (e.g. `Red` for `enum Color { Red, .. }`) — not an unbound variable.
+    fn is_nullary_enum_variant(&self, name: &str) -> bool {
+        let leaf = name.rsplit_once("::").map(|(_, l)| l).unwrap_or(name);
+        self.enum_defs.values().any(|def| {
+            def.variants
+                .iter()
+                .any(|v| v.name == leaf && v.fields.is_empty())
+        })
     }
 
     /// Look up the recorded type of a named variable, if any.
@@ -585,6 +614,7 @@ pub fn lower_hir_to_mir_with_env(
         locals: ctx.locals,
         blocks: ctx.blocks,
         entry_block: 0,
+        unbound_names: ctx.unbound_names.into_iter().collect(),
     }
 }
 
@@ -814,6 +844,10 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
                 Operand::Constant(MirConstant::Bool(true))
             } else if name == "false" {
                 Operand::Constant(MirConstant::Bool(false))
+            } else if ctx.is_nullary_enum_variant(name) {
+                // Bare nullary enum variant (e.g. `Red`) — a fresh value,
+                // not an unbound variable.
+                Operand::Constant(MirConstant::Int(0))
             } else {
                 Operand::Place(ctx.lookup_var(name))
             }
@@ -1482,6 +1516,7 @@ mod tests {
             locals,
             blocks,
             entry_block: 0,
+            unbound_names: Vec::new(),
         };
 
         assert_eq!(body.block_count(), 100);

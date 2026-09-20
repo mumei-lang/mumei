@@ -743,6 +743,13 @@ pub(crate) fn verify_inner(
     // Move type violations are hard errors; Copy type false positives are eliminated.
     let phase_start = std::time::Instant::now();
     let mut mir_body = crate::mir::lower_hir_to_mir_with_env(hir_atom, Some(module_env));
+    if !mir_body.unbound_names.is_empty() {
+        return Err(MumeiError::verification(format!(
+            "unresolved variable(s) in body: {} — every name must be a parameter, \
+             a `let`/`assign` binding, or a match-arm binding",
+            mir_body.unbound_names.join(", ")
+        )));
+    }
     let move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
     if mir_body.check_analysis_budget().is_ok() {
         // Insert drops before move analysis so a local consumed on one branch

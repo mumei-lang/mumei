@@ -1,3 +1,24 @@
+### 2026-09-20: MIR unbound-variable check fails closed (phantom `Local(0)` fix)
+
+- `LowerCtx::lookup_var` silently aliased every unbound name to `Local(0)`
+  (the atom's first local): a mis-parsed or mistyped name — e.g. a bare
+  `task` used outside a `task`/`task_group` tail — bound to the first
+  parameter and move analysis then reported phantom `use of moved value`
+  / `ConflictingMerge` violations on an innocent local.
+- Unbound names now get a dedicated `__unbound:<name>` local recorded in
+  `MirBody::unbound_names`; Phase 1h fails verification with
+  `unresolved variable(s) in body: <names>` before move analysis runs.
+  `result` (the implicit named return) and bare nullary enum variants
+  (`Red`) are exempt — they are legal unbound idents.
+- Surfaced pre-existing phantom bindings in `std/list.mm`: six fold/sort
+  atoms referenced `arr[i]` without declaring `arr` (vacuous-verified
+  against an unconstrained Z3 array). They now declare `arr: [i64]` —
+  a **signature change**: `fold_sum(n)` is `fold_sum(arr, n)`, etc.
+- Clause-scope references (e.g. `forall(i, 0, n, arr[i] >= 0)` in
+  `requires` without a body/param `arr`) still verify against a fresh
+  unconstrained array — the same pre-existing leniency, unchanged.
+- Tests: `tests/test_mir_unbound_variable{,_negative}.{mm,rs}`.
+
 ### 2026-09-20: `[f64]`/`[bool]`/`[str]` arrays lower to fat pointers in codegen
 
 - `resolve_param_type`/`resolve_return_type` only recognized

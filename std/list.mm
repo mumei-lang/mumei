@@ -157,7 +157,7 @@ atom list_reverse(list: i64)
 // 契約は call 時に自動展開される。
 // Phase B: call_with_contract により f の契約を Z3 で展開する。
 // body 内の arr[i] 境界は len(arr) >= n で明示する。
-atom fold_left(n: i64, init: i64, f: atom_ref(i64, i64) -> i64)
+atom fold_left(arr: [i64], n: i64, init: i64, f: atom_ref(i64, i64) -> i64)
 requires: n >= 0 && init >= 0 && len(arr) >= n;
 ensures: result >= 0;
 contract(f): ensures: result >= 0;
@@ -200,7 +200,7 @@ body: {
 //
 // requires の `forall(i, 0, n, arr[i] >= 0)` は Z3 に E-matching パターン付き
 // で assert され、ループ body 内の `acc + arr[i]` で自動インスタンス化される。
-atom fold_sum(n: i64)
+atom fold_sum(arr: [i64], n: i64)
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result >= 0;
 max_unroll: 5;
@@ -223,7 +223,7 @@ body: {
 //
 // requires の `len(arr) >= n` は body 内の `arr[i]`（0 <= i < n）の境界安全性を
 // Z3 に直接伝える（forall-by-arr パターン経由の自動境界よりも軽い代替手段）。
-atom fold_count_gte(n: i64, threshold: i64)
+atom fold_count_gte(arr: [i64], n: i64, threshold: i64)
 requires: n >= 0 && len(arr) >= n;
 ensures: result >= 0 && result <= n;
 max_unroll: 5;
@@ -295,7 +295,7 @@ body: {
 // Z3 の forall 量化子と同等の実行時チェック。
 //
 // requires の `len(arr) >= n` が body 内の `arr[i]` 境界を保証する。
-atom fold_all_gte(n: i64, threshold: i64)
+atom fold_all_gte(arr: [i64], n: i64, threshold: i64)
 requires: n >= 0 && len(arr) >= n;
 ensures: result >= 0 && result <= 1;
 max_unroll: 5;
@@ -316,7 +316,7 @@ body: {
 // 配列のいずれかの要素が threshold 以上なら 1（true）、そうでなければ 0（false）。
 //
 // requires の `len(arr) >= n` が body 内の `arr[i]` 境界を保証する。
-atom fold_any_gte(n: i64, threshold: i64)
+atom fold_any_gte(arr: [i64], n: i64, threshold: i64)
 requires: n >= 0 && len(arr) >= n;
 ensures: result >= 0 && result <= 1;
 max_unroll: 5;
@@ -419,7 +419,7 @@ body: {
 //   `arr[i]` / `arr[j]` の OOB 推論に必要な `len_arr >= n + 1` を
 //   Z3 に提示している（`tests/test_verified_sort.mm` の
 //   `verify_insertion_sort_skeleton` と同じイディオム）。
-atom verified_insertion_sort(n: i64)
+atom verified_insertion_sort(arr: [i64], n: i64)
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n;
 body: {
