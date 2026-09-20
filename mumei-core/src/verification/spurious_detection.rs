@@ -601,6 +601,27 @@ fn format_eval_value(value: &EvalValue) -> String {
     }
 }
 
+/// Calls the Z3 translator lowers to interpreted constraints instead of an
+/// uninterpreted function symbol — keep them out of the spurious-dependency
+/// report so genuine counterexamples aren't mislabeled.
+fn is_translated_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "forall"
+            | "exists"
+            | "len"
+            | "sqrt"
+            | "cast_to_int"
+            | "matches"
+            | "match_regex"
+            | "re_match"
+            | "starts_with"
+            | "ends_with"
+            | "contains"
+            | "not_contains"
+    )
+}
+
 fn collect_expr_symbols(
     expr: &Expr,
     module_env: &ModuleEnv,
@@ -613,7 +634,10 @@ fn collect_expr_symbols(
                 if atom.trust_level == TrustLevel::Trusted {
                     push_symbol(symbols, seen, name, "trusted_atom", Some(atom.span.clone()));
                 }
-            } else {
+            } else if !is_translated_builtin(name) {
+                // Builtin calls the Z3 translator lowers directly (len, forall,
+                // string predicates, …) are interpreted, not uninterpreted —
+                // flagging them mislabels a genuine counterexample as spurious.
                 push_symbol(symbols, seen, name, "uninterpreted_function", None);
             }
             for arg in args {
