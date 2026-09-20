@@ -716,23 +716,51 @@ pub(crate) fn expr_to_z3<'a>(
                     Ok(quantifier_expr.into())
                 }
                 "len" => {
-                    // len(arr_name) → 配列名に紐づくシンボリック長を返す
-                    // len_<name> >= 0 の制約を自動付与
-                    let arr_name = if !args.is_empty() {
-                        if let Expr::Variable(name) = &args[0] {
-                            name.clone()
-                        } else {
-                            "arr".to_string()
+                    if args.len() != 1 {
+                        return Err(MumeiError::verification("len() takes exactly one argument"));
+                    }
+                    let arg = &args[0];
+                    let val = expr_to_z3(vc, arg, env, solver_opt)?;
+                    if val.as_string().is_some() {
+                        // `len(s)` on a `Str` is the real sequence length —
+                        // `len("abc") == 3` and `requires: len(s) == n` now
+                        // constrain the actual content rather than a
+                        // detached `len_s` symbol.
+                        let ast = unsafe {
+                            z3_sys::Z3_mk_seq_length(raw_z3_context(ctx), val.get_z3_ast())
+                        };
+                        return Ok(unsafe { Int::wrap(ctx, ast) }.into());
+                    }
+                    if let Expr::Variable(name) = arg {
+                        // len(arr_name) → the tracked symbolic length,
+                        // shared with requires clauses and bounds checks
+                        // via `len_<name>`.
+                        let tracked = env.contains_key(&format!("__z3_arr_{name}"))
+                            || val.as_array().is_some()
+                            || vc
+                                .current_atom
+                                .and_then(|atom| {
+                                    atom.params
+                                        .iter()
+                                        .find(|p| p.name == *name)
+                                        .and_then(|p| p.type_name.clone())
+                                })
+                                .map(|t| t.trim_start().starts_with('['))
+                                .unwrap_or(false);
+                        if tracked {
+                            return Ok(array_len_value(ctx, env, name, vc.bitvec_i64, solver_opt));
                         }
-                    } else {
-                        "arr".to_string()
-                    };
-                    Ok(array_len_value(
-                        ctx,
-                        env,
-                        &arr_name,
-                        vc.bitvec_i64,
-                        solver_opt,
+                        return Err(MumeiError::type_error(format!(
+                            "len() expects an array or string argument; `{name}` is neither"
+                        )));
+                    }
+                    if val.as_array().is_some() {
+                        // `len([1, 2, 3])` / `len(if c { … } else { … })` —
+                        // structural length from the expression itself.
+                        return Ok(tail_len_expr(vc, env, "len_arg", "v", None, arg, &val, 0));
+                    }
+                    Err(MumeiError::type_error(
+                        "len() expects an array or string argument",
                     ))
                 }
                 "sqrt" => {
@@ -1901,33 +1929,36 @@ pub(crate) fn expr_to_z3<'a>(
             let target_z3 = expr_to_z3(vc, target, env, solver_opt)?;
 
             // Declared enum type of the scrutinee, when it's a bare
-            // parameter/`result` variable — disambiguates Variant arms
-            // whose names collide across enums (prelude List vs user
-            // `enum IntList`). The const-name lookup inside
-            // `resolve_variant_owner` covers let-aliases; `result` is
+            // parameter/`result` variable or a field chain rooted at a
+            // struct-typed binding (`h.r`, `h.a.b`, `result.r`, `f(x).r`) —
+            // disambiguates Variant arms whose names collide across enums
+            // (prelude List vs user `enum IntList`). The const-name lookup
+            // inside `resolve_variant_owner` covers let-aliases; `result` is
             // rebound to the evaluated body value, so only the Expr knows.
-            let decl_hint: Option<String> = match target.as_ref() {
-                Expr::Variable(v) => {
-                    let ty: Option<String> = if v == "result" {
-                        vc.current_atom.and_then(|atom| atom.return_type.clone())
-                    } else {
-                        vc.current_atom
-                            .and_then(|atom| {
-                                atom.params
-                                    .iter()
-                                    .find(|p| p.name == *v)
-                                    .and_then(|p| p.type_name.clone())
-                            })
-                            // `let`-bound enum values carry their inferred
-                            // declared type — `let e = Mine::Cons(1); match e`
-                            // resolves the same owner a parameter type would.
-                            .or_else(|| vc.local_enum_types.borrow().get(v).cloned())
-                    };
-                    ty.map(|t| {
-                        crate::verification::support::datatype::type_name_base(&t).to_string()
-                    })
+            let decl_hint: Option<String> =
+                crate::verification::support::datatype::declared_type_of_expr(vc, target).map(
+                    |t| crate::verification::support::datatype::type_name_base(&t).to_string(),
+                );
+
+            // Clause lowering (`requires`/`ensures`, struct invariants, match
+            // guards) runs with `solver_opt = None` so arm-body side effects
+            // never leak onto the ambient solver — but exhaustiveness is a
+            // language-level obligation. Without a check, a non-exhaustive
+            // clause match silently evaluates to its last arm's body on
+            // uncovered inputs (e.g. a one-arm `requires: match h.r { V =>
+            // e }` would lower to just `e`). Run the check on a scratch
+            // solver seeded with the already-asserted clause context.
+            let scratch_solver;
+            let check_solver = match solver_opt {
+                Some(solver) => solver,
+                None => {
+                    let scratch = Solver::new(ctx);
+                    for clause in vc.clause_context.borrow().iter() {
+                        scratch.assert(clause);
+                    }
+                    scratch_solver = scratch;
+                    &scratch_solver
                 }
-                _ => None,
             };
 
             // ========================================================
@@ -1937,16 +1968,14 @@ pub(crate) fn expr_to_z3<'a>(
             // target の値域を 0..n_variants に制約する。
             // これにより Z3 が「これら以外のバリアントは存在しない」ことを知り、
             // 網羅性チェックの信頼性が 100% になる。
-            if let Some(solver) = solver_opt {
-                if let Some(enum_def) =
-                    detect_enum_from_arms(arms, vc, &target_z3, decl_hint.as_deref())
-                {
-                    let n = enum_def.variants.len() as i64;
-                    if let Some(tag_int) = target_z3.as_int() {
-                        // tag ∈ [0, n_variants)
-                        solver.assert(&tag_int.ge(&Int::from_i64(ctx, 0)));
-                        solver.assert(&tag_int.lt(&Int::from_i64(ctx, n)));
-                    }
+            if let Some(enum_def) =
+                detect_enum_from_arms(arms, vc, &target_z3, decl_hint.as_deref())
+            {
+                let n = enum_def.variants.len() as i64;
+                if let Some(tag_int) = target_z3.as_int() {
+                    // tag ∈ [0, n_variants)
+                    check_solver.assert(&tag_int.ge(&Int::from_i64(ctx, 0)));
+                    check_solver.assert(&tag_int.lt(&Int::from_i64(ctx, n)));
                 }
             }
 
@@ -1955,7 +1984,7 @@ pub(crate) fn expr_to_z3<'a>(
             // ========================================================
             // 各アームの条件 P_i を構築し、¬(P_1 ∨ P_2 ∨ ... ∨ P_n) が
             // Unsat であることを証明する。Sat なら網羅性欠如エラー。
-            if let Some(solver) = solver_opt {
+            {
                 let mut arm_conditions: Vec<Bool> = Vec::new();
                 for arm in arms {
                     let cond = pattern_to_z3_condition(
@@ -1964,7 +1993,7 @@ pub(crate) fn expr_to_z3<'a>(
                         &target_z3,
                         env,
                         vc,
-                        solver_opt,
+                        Some(check_solver),
                         decl_hint.as_deref(),
                     )?;
                     // ガード条件がある場合は AND で結合
@@ -1982,18 +2011,18 @@ pub(crate) fn expr_to_z3<'a>(
                 // 網羅性: ¬(P_1 ∨ ... ∨ P_n) が Unsat か？
                 let arm_refs: Vec<&Bool> = arm_conditions.iter().collect();
                 let coverage = Bool::or(ctx, &arm_refs);
-                solver.push();
-                solver.assert(&coverage.not());
-                let exhaustive = solver.check() == SatResult::Unsat;
-                solver.pop(1);
+                check_solver.push();
+                check_solver.assert(&coverage.not());
+                let exhaustive = check_solver.check() == SatResult::Unsat;
+                check_solver.pop(1);
 
                 if !exhaustive {
                     // 反例（Counter-example）の取得と表示
                     // solver はまだ Sat 状態なので、再度チェックして model を取得
-                    solver.push();
-                    solver.assert(&coverage.not());
-                    if solver.check() == SatResult::Sat {
-                        let counterexample = if let Some(model) = solver.get_model() {
+                    check_solver.push();
+                    check_solver.assert(&coverage.not());
+                    if check_solver.check() == SatResult::Sat {
+                        let counterexample = if let Some(model) = check_solver.get_model() {
                             // ターゲット変数の具体的な値を取得
                             format_counterexample(
                                 &model,
@@ -2005,7 +2034,7 @@ pub(crate) fn expr_to_z3<'a>(
                         } else {
                             "unknown value".to_string()
                         };
-                        solver.pop(1);
+                        check_solver.pop(1);
                         let ce_value = serde_json::json!({
                             "target": counterexample,
                         });
@@ -2016,7 +2045,7 @@ pub(crate) fn expr_to_z3<'a>(
                             )
                         ).with_counterexample(Some(ce_value)));
                     }
-                    solver.pop(1);
+                    check_solver.pop(1);
                     return Err(MumeiError::verification(
                         "Match is not exhaustive: there exist values not covered by any arm.",
                     ));
