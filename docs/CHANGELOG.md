@@ -13,6 +13,13 @@
   inner match arms run on cloned envs and are excluded deliberately).
   Real `Assign`s to pre-existing variables still fold under the arm
   condition, so `match` bodies can update outer state as before.
+- Known edge (pre-existing, unchanged by this fix): an arm that assigns an
+  outer name and *then* declares a same-named `let` (`{ x = 7; let x = 9 }`)
+  reports the pre-match value for `x` after the match — the outer write is
+  dropped instead of surviving as `7`. Before this fix the same program
+  leaked the shadow value `9`, so the pattern was already wrong; the fix
+  changes which wrong answer it produces. Splitting outer writes from
+  shadowed writes for one name needs ordered env tracking — backlog.
 - Tests: `test_match_arm_scoping.mm` (pattern shadow, let shadow,
   outer-assign fold), `test_match_arm_scoping_negative.mm` (a write to a
   shadowed name must not reach the post-match env).
