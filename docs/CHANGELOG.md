@@ -1,3 +1,28 @@
+### 2026-09-20: string literals re-escape on body re-lex (`\"`, `\\`, `\n`, `\t`)
+
+- The lexer stores DECODED string content (`\n` → real newline, `\"` →
+  real quote), but three re-serialization sites wrote it back raw:
+  `append_token` (`collect_brace_body` — the atom-body round-trip),
+  `Token::StringLit`'s `Display`, and `legacy_tokenize`'s source
+  reconstruction. Any escaped char corrupted the body: `"a\"b"` closed
+  the literal early and left `b"…` to parse as bare identifiers
+  (`unresolved variable(s) in body`), and `"a\\nb"` (backslash-n, two
+  chars) silently re-lexed as `"a<newline>b"` — a different value, so
+  e.g. comparing the two literals produced a wrong equality result with
+  no error.
+- New `escape_string_content` re-encodes `\`, `"`, newline and tab;
+  all three sites use it. Backslash-n and newline literals stay
+  distinct; embedded quotes round-trip.
+- The same raw-write pattern existed at the `Expr::StringLit` level in
+  `expr_to_source_string` (call_graph.rs — feeds requires-substitution
+  text that is re-lexed), `trace_evaluated_expression`
+  (dataflow_inference.rs) and `expr_to_source` (loop_detector.rs, which
+  used Rust `{:?}` — mostly-correct but diverges on chars the Mumei
+  lexer doesn't decode); all three now use the same helper.
+- Tests: `tests/test_string_literal_escape.mm` (quote / tab /
+  distinct-escape verified) + `tests/negative/string_literal_escape_collapse.mm`
+  (`"a\\nb" == "a\nb"` correctly fails) + `tests/test_string_literal_escape.rs`.
+
 ### 2026-09-20: quantifier binders in body `let` are scoped (unbound-check false positive)
 
 - `let ok = forall(i, 0, n, i <= n)` inside an atom body was rejected by

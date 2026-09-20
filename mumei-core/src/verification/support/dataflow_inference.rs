@@ -364,7 +364,9 @@ fn trace_evaluated_expression(expr: &Expr, env: &HashMap<String, i64>) -> String
     match expr {
         Expr::Number(value) => value.to_string(),
         Expr::Float(value) => value.to_string(),
-        Expr::StringLit(value) => format!("\"{}\"", value),
+        Expr::StringLit(value) => {
+            format!("\"{}\"", crate::parser::token::escape_string_content(value))
+        }
         Expr::Variable(name) if name == "true" || name == "false" => name.clone(),
         Expr::Variable(name) => env.get(name).map_or_else(|| name.clone(), i64::to_string),
         Expr::BinaryOp(left, op, right) => format!(

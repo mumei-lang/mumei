@@ -378,7 +378,9 @@ pub fn legacy_tokenize(input: &str) -> Vec<String> {
                     format!("{}.0", s)
                 }
             }
-            Token::StringLit(s) => format!("\"{}\"", s),
+            Token::StringLit(s) => {
+                format!("\"{}\"", crate::parser::token::escape_string_content(s))
+            }
             Token::Ident(s) => s.clone(),
             // Keywords and operators use their Display impl
             other => format!("{}", other),

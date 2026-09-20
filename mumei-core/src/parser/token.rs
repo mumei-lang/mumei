@@ -137,6 +137,25 @@ impl Token {
     }
 }
 
+/// Re-encode a decoded string literal for round-tripping. The lexer stores
+/// the DECODED content (`\n` is a real newline, `\"` a real quote), so a bare
+/// `"{s}"` corrupts the value when the atom body is re-lexed: `"a\nb"` —
+/// backslash-n — would come back as a real newline, and a real `"` would
+/// close the literal early. Escape exactly the characters the lexer decodes.
+pub(crate) fn escape_string_content(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 impl std::fmt::Display for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -202,7 +221,7 @@ impl std::fmt::Display for Token {
             // "1" — the atom body is re-lexed from this text, so a whole-valued
             // float must round-trip as FloatLit, not IntLit.
             Token::FloatLit(n) => write!(f, "{n:?}"),
-            Token::StringLit(s) => write!(f, "\"{}\"", s),
+            Token::StringLit(s) => write!(f, "\"{}\"", escape_string_content(s)),
             Token::Ident(s) => write!(f, "{}", s),
             Token::Plus => write!(f, "+"),
             Token::Minus => write!(f, "-"),

@@ -522,7 +522,7 @@ fn append_token(text: &mut String, tok: &Token) {
     match tok {
         Token::StringLit(s) => {
             text.push('"');
-            text.push_str(s);
+            text.push_str(&crate::parser::token::escape_string_content(s));
             text.push('"');
         }
         other => text.push_str(&format!("{}", other)),
