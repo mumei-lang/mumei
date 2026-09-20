@@ -167,10 +167,18 @@ fn alias_array_symbols<'a>(vc: &VCtx<'a>, var: &str, value: &Expr, env: &mut Env
         return;
     };
     let src_arr_key = format!("__z3_arr_{src}");
-    let arr_val: Dynamic = env
+    // Only alias when the source actually is an array: `env[src]` holds the
+    // Array const for `[T]` params, and `__z3_arr_<src>` holds it once the
+    // array has been accessed. A scalar source gets neither, so `let y = x`
+    // on an i64 is left untouched (no phantom `len_x`/`__z3_arr_x` symbols).
+    let Some(arr_val) = env
         .get(&src_arr_key)
         .cloned()
-        .unwrap_or_else(|| z3_array_for_name(vc, src).into());
+        .or_else(|| env.get(src).cloned())
+        .filter(|d| d.as_array().is_some())
+    else {
+        return;
+    };
     env.insert(format!("__z3_arr_{var}"), arr_val.clone());
     env.insert(src_arr_key, arr_val);
     let len = array_len_value(vc.ctx, env, src, vc.bitvec_i64, None);
