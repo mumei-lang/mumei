@@ -103,3 +103,34 @@ ensures: len(result) == 2 && result[0] == "s" && result[1] == "t";
 body: {
     ["s", "t"]
 };
+
+// A while-loop store havocs the tracked `__z3_arr_a` slot of a local
+// `[Str]` literal — the havoc'd array must keep its `Int -> Seq` range.
+// (Before the `havoc_vars` Seq arm this rebuilt the slot with an `Int`
+// range and storing `"q"` crashed Z3 with `!ast.is_null()`.) Post-loop
+// the element stays a string, so `len(x)` type-checks.
+atom str_while_havoc_local(n: i64) -> i64
+requires: n >= 1;
+ensures: result == 1;
+body: {
+    let a = ["x", "y"];
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n
+    decreases: n - i
+    {
+        a[0] = "q";
+        i = i + 1
+    };
+    let x = a[0];
+    if len(x) >= 0 { 1 } else { 0 }
+};
+
+// `len` on a bound `[Str]` element resolves through `str.len`.
+atom str_elem_len(a: [Str]) -> i64
+requires: len(a) >= 1 && a[0] == "abc";
+ensures: result == 3;
+body: {
+    let x = a[0];
+    len(x)
+};
