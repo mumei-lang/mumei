@@ -34,11 +34,13 @@
   the matching `__z3_arr_<arg>` slots. Resolution mirrors the runtime:
   `Call` names try the FQN form (`mod.f` → `mod::f`) so explicit
   type-arg calls (`g<i64>(a)` → `g<i64>`) hit the instantiated atom;
-  `call(f, a)` resolves `AtomRef` callees and `__atom_ref_<var>` bindings,
-  and an unresolvable callee marks every variable arg conservatively (if
-  it truly can't resolve, eval errors anyway). `Expr::ArrayLit` elements
-  are walked too — a call nested in a literal (`let m = [w(a), 1]`)
-  executes at eval and must mark the same way. Calls inside
+  `call(f, a)`/`CallRef` resolves `AtomRef{name}` callees directly and
+  `Variable` callees bound as `__atom_ref_<var>` under the variable's own
+  name — `get_atom(var)` failing means eval takes the dynamic-call path
+  (fresh result, no arg havoc), so unresolvable callees stay unmarked as
+  a precise mirror. `Expr::ArrayLit` elements are walked too — a call
+  nested in a literal (`let m = [w(a), 1]`) executes at eval and must
+  mark the same way. Calls inside
   `cond`/`invariant`/`decreases` are not marked — they havoc live on the
   havoced envs at eval, and marking them would havoc `a` even on envs
   whose eval never reaches the call (over-havoc → weaker proofs).

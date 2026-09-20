@@ -59,20 +59,18 @@ body: {
     if a[0] == "x" { 1 } else { 0 }
 };
 
-// `call(f, a)` through a `let`-bound `atom_ref` mutates `a` at eval;
-// the let-bound callee isn't in the pre-loop env, so the arg is marked
-// conservatively — the stale entry read must still be rejected.
+// `call(atom_ref(w), a)` resolves the atom directly at eval — the
+// callee name is known statically, so `__z3_arr_a` must be marked.
 atom stale_call_ref(a: [i64], n: i64) -> i64
 requires: len(a) >= 1 && n >= 1 && a[0] == 7;
 ensures: result == 7;
 body: {
-    let f = atom_ref(arr_store);
     let i = 0;
     while i < n
     invariant: i >= 0 && i <= n
     decreases: n - i
     {
-        let t = call(f, a, 0);
+        let t = call(atom_ref(arr_store), a, 0);
         i = i + 1
     };
     a[0]

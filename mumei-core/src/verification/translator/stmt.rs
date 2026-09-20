@@ -164,10 +164,10 @@ fn collect_expr_assigned_vars(
             if in_stmt_ctx {
                 // Same resolution as the runtime `CallRef` path: `AtomRef`
                 // names the atom; a `Variable` resolves only when bound to
-                // an atom_ref (`__atom_ref_<var>` in env). A var bound inside
-                // the loop isn't in the pre-loop env yet — unresolvable
-                // callees mark every variable arg conservatively: if it truly
-                // can't resolve, the call errors at eval anyway.
+                // an atom_ref (`__atom_ref_<var>` in env) and only under the
+                // variable's own name — `get_atom(var)` failing means eval
+                // takes the dynamic-call path, which never havocs args, so
+                // unresolvable callees are left unmarked (precise mirror).
                 let name = match callee.as_ref() {
                     Expr::AtomRef { name } => Some(name.as_str()),
                     Expr::Variable(var) if env.contains_key(&format!("__atom_ref_{var}")) => {
@@ -175,15 +175,8 @@ fn collect_expr_assigned_vars(
                     }
                     _ => None,
                 };
-                match name {
-                    Some(name) => mark_array_store_args(module_env, name, args, out),
-                    None => {
-                        for arg in args {
-                            if let Expr::Variable(var) = arg {
-                                out.insert(format!("__z3_arr_{var}"));
-                            }
-                        }
-                    }
+                if let Some(name) = name {
+                    mark_array_store_args(module_env, name, args, out);
                 }
             }
         }

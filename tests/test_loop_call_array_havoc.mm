@@ -95,3 +95,24 @@ body: {
     };
     keep[0]
 };
+
+// `call(f, a)` through a `let`-bound `atom_ref` takes the dynamic-call
+// path at eval (the callee name is the *variable* `f`, which no atom is
+// named) — that path never havocs args, so `a[0]` keeps its entry fact.
+// This pins the existing semantics; whether dynamic calls SHOULD havoc
+// array args is a separate pre-existing question.
+atom call_let_bound_ref_keeps_value(a: [i64], n: i64) -> i64
+requires: len(a) >= 1 && n >= 1 && a[0] == 7;
+ensures: result == 7;
+body: {
+    let f = atom_ref(arr_store);
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n
+    decreases: n - i
+    {
+        let t = call(f, a, 0);
+        i = i + 1
+    };
+    a[0]
+};
