@@ -20,6 +20,40 @@
   not verify) and `tests/test_call_result_len.mm` +
   `tests/negative/call_result_len.mm`.
 
+### 2026-09-20: `while` loops havoc array args of mutating calls (stale-read soundness fix)
+
+- **Soundness fix**: a `while` body that *calls* an atom storing through
+  an array param (`let t = w(a)` where `w` does `a[i] = v`) mutated the
+  caller's array at eval (`havoc_array_args` on the step env) but the
+  loop-carried `modified` set never marked `__z3_arr_<v>` — the post-loop
+  env kept the entry const, so `a[i]` read pre-loop values and stale
+  `ensures` wrong-verified (e.g. `result == 7` after `w` wrote `a[0]=0`
+  under `requires: a[0] == 7`). `collect_assigned_vars` now resolves each
+  statement-context call's callee with the *same* predicate eval applies
+  (`atom_stores_to_array` per param, `Expr::Variable` args only) and marks
+  the matching `__z3_arr_<arg>` slots. Resolution mirrors the runtime:
+  `Call` names try the FQN form (`mod.f` → `mod::f`) so explicit
+  type-arg calls (`g<i64>(a)` → `g<i64>`) hit the instantiated atom;
+  `call(f, a)`/`CallRef` resolves `AtomRef{name}` callees directly and
+  `Variable` callees bound as `__atom_ref_<var>` under the variable's own
+  name — `get_atom(var)` failing means eval takes the dynamic-call path
+  (fresh result, no arg havoc), so unresolvable callees stay unmarked as
+  a precise mirror. `Expr::ArrayLit` elements are walked too — a call
+  nested in a literal (`let m = [w(a), 1]`) executes at eval and must
+  mark the same way. Calls inside
+  `cond`/`invariant`/`decreases` are not marked — they havoc live on the
+  havoced envs at eval, and marking them would havoc `a` even on envs
+  whose eval never reaches the call (over-havoc → weaker proofs).
+- Precision verified: a loop calling a *pure* callee keeps `a[0] == 7`
+  provable post-loop, and only the param the callee stores through is
+  havoced (a sibling array arg keeps its entry value).
+- Tests: `tests/test_loop_call_array_havoc.mm` (provable claims under
+  havoc, `len` preservation, pure-call precision, per-arg precision) +
+  `tests/test_loop_call_array_havoc_negative.mm` (stale `[i64]`/`[Str]`
+  reads via `Call`, `call(f, …)`, `g<i64>(…)`, an `ArrayLit`-nested call,
+  and moved-alias args) via
+  `tests/test_loop_call_array_havoc.rs`.
+
 ### 2026-09-20: `while` loops havoc param arrays' post-state (stale-read soundness fix)
 
 - **Soundness fix**: a `while` body that only *writes* a param array
