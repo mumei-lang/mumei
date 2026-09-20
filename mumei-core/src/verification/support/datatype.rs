@@ -610,33 +610,6 @@ fn infer_stmt_enum_name(vc: &VCtx, stmt: &Stmt) -> Option<String> {
     }
 }
 
-/// `resolve_variant_owner` minus the declared-parameter-type preference,
-/// for callers with no verification context (fragment classification):
-/// returns the deterministic owner — sole owner, or any owner when all
-/// signatures agree — and `None` when the pick would be arbitrary (the
-/// verifier may still resolve it via the match target's declared type, or
-/// fail closed).
-pub(crate) fn resolve_variant_owner_deterministic<'m>(
-    module_env: &'m ModuleEnv,
-    variant_name: &str,
-) -> Option<&'m EnumDef> {
-    if let Some((qual, leaf)) = variant_name.rsplit_once("::") {
-        if let Some(qe) = module_env.get_enum(qual) {
-            return qe.variants.iter().any(|v| v.name == leaf).then_some(qe);
-        }
-        return resolve_variant_owner_deterministic(module_env, leaf);
-    }
-    let owners = variant_owners(module_env, variant_name);
-    if owners.len() == 1 {
-        return Some(owners[0]);
-    }
-    let first = int_tag_sig(module_env, *owners.first()?, variant_name);
-    owners
-        .iter()
-        .all(|e| int_tag_sig(module_env, e, variant_name) == first)
-        .then_some(owners[0])
-}
-
 /// `param_z3_value`, but enum-typed names lower to real `Datatype` constants
 /// when the type is a finite ADT. All scalar/array behaviour is delegated to
 /// `param_z3_value` unchanged.
