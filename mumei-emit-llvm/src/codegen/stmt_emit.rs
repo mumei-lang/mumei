@@ -1,6 +1,6 @@
 use crate::codegen::expr_emit::{
-    chan_payload_key, chan_payload_type_name, compile_hir_expr, infer_struct_type_name,
-    resolve_named_type,
+    chan_payload_key, chan_payload_type_name, compile_hir_expr, emit_array_literal,
+    infer_struct_type_name, resolve_named_type,
 };
 use crate::codegen::lowering::ArrayPtr;
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
@@ -10,7 +10,7 @@ use inkwell::module::Module;
 use inkwell::values::{BasicValueEnum, FunctionValue, PhiValue};
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
-use mumei_core::hir::HirStmt;
+use mumei_core::hir::{HirExpr, HirStmt};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
 
@@ -40,11 +40,33 @@ pub(crate) fn compile_hir_stmt<'a>(
     stmt: &HirStmt,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match stmt {
         HirStmt::Let { var, ty, value } => {
+            // `let a = [e0, e1, …]` — materialise the literal into an alloca'd
+            // array and register it as a fat pointer `(len, elem_ty, data_ptr)`
+            // exactly like an `[T]` parameter, so `a[i]` reads, `a[i] = x`
+            // stores, and `len(a)` share the existing array_ptrs machinery.
+            if let HirExpr::ArrayLit(elements) = value.as_ref() {
+                let (len_val, elem_ty, data_ptr) = emit_array_literal(
+                    context, builder, module, function, elements, variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                variables.insert(var.clone(), len_val);
+                return Ok(len_val);
+            }
+            // `let a = arr` — the binding aliases the tracked fat pointer so
+            // `a[i]`/`len(a)`/`a[i] = x` hit the source's slots.
+            if let HirExpr::Variable(src) = value.as_ref() {
+                if let Some(&(len_val, elem_ty, data_ptr)) = array_ptrs.get(src.as_str()) {
+                    array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                    variables.insert(var.clone(), len_val);
+                    return Ok(len_val);
+                }
+            }
             let val = compile_hir_expr(
                 context, builder, module, function, value, variables, var_types, array_ptrs,
                 module_env,

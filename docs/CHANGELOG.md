@@ -26,6 +26,78 @@
   `test_if_guard_requires.mm`, `test_if_missing_else_negative.mm`,
   `test_while_missing_invariant_negative.mm`,
   `test_task_group_bad_join_negative.mm`.
+### 2026-09-20: array literals `let a = [e0, e1, …]` — parse, verify, codegen
+
+- **`Expr::ArrayLit`** — a `[` at expression position (prefix) now parses an
+  element list instead of falling through to the catch-all that silently
+  produced `Expr::Number(0)`. `[]` alone cannot infer an element type, so it
+  records a `syntax_failure` and emits a `__mumei_empty_array_literal`
+  marker (the checked body-parse path turns it into a clean error, and the
+  marker is unbound downstream if a caller ignores the diagnostics).
+- **Verify** — the literal lowers to a fresh `Int -> Elem` store chain. A
+  `let`/`assign` binding wires the name-keyed slots
+  (`__z3_arr_<var>`, `len_<var>` = concrete `n`, `local_array_elem_types`)
+  via the new shared `wire_array_slots` helper — the same helper now also
+  wires **call arguments** (`head([7,8,9])` satisfies `requires: len(arr)>=1`)
+  and the **`result` tail** (`atom … -> [i64] { [1,2,3] }` answers
+  `ensures: forall(i,0,3, result[i]==i+1)`). Alias `let b = a` copies `len_a`.
+  For `var` sources the wired array is the tracked `__z3_arr_<src>` chain —
+  `env[src]` holds only the base const (stores never rewrite it), so
+  `arr[0] = 9; let a = arr` now sees the post-store array in `a`/`result`/callee.
+  Element sort is the *widest* across elements (Float > Real > Int; bool
+  literals must be uniformly Bool) — a first-element probe mis-sorted
+  `[1.0, 2.5, 4.0]` because Z3 numerals for whole floats report `Int`.
+  Nested `[…[…]…]` and `["x","y"]` fail closed (element sorts Array/Seq
+  unsupported — same frontier as `[Str]` array params).
+- **Callee array stores now reach the caller model (unsoundness fix)** —
+  a `[T]` argument hands the callee the `{len, ptr}` fat pointer, so
+  `arr[i] = v` inside a callee lands in the caller-visible buffer; the
+  verifier previously kept the caller's pre-call store chain and could
+  "verify" stale claims like `a[0] == 1` after `mutate(a)`. Call sites now
+  havoc the tracked chain (and every `let b = a` alias sharing its root) of
+  args whose callee parameter may be stored through — detected by
+  `atom_stores_to_array`, a depth-capped transitive scan over
+  `Stmt::ArrayStore`/call-argument positions (unknown or deeply-nested
+  callees assume mutation, fail closed). The same havoc is applied to the
+  callee param's slot in `call_env` before `ensures` evaluation so
+  `arr[i]` in a mutating callee's postcondition means post-call contents.
+  Pure callees keep full precision — `head(a); a[0]` still knows `a`.
+- **Codegen array call arguments emit the fat pointer** — a `[T]` argument
+  previously emitted only the `len` i64 while the callee's signature took
+  `{i64, ptr}`, producing invalid IR (`call i64 @bump(i64 %p_len)` against
+  `declare i64 @bump({i64, ptr})`). Array args now build the `{i64, ptr}`
+  aggregate via `insertvalue` from `array_ptrs` (or materialise a literal
+  inline) — verified parseable by `llvm-as-17`.
+- **While-loop havoc resets tracked array slots (unsoundness fix)** —
+  `havoc_vars` rebound `env[name]` for loop-modified vars but left
+  `__z3_arr_<name>`/`len_<name>` on the pre-loop store chain, so
+  `let a = [1,2]; while …{ a = [3,4,5] }; a[0]` could "verify" the stale
+  claim `result == 1`. Havoc now swaps in a fresh array const of the same
+  element sort plus a fresh `len_` symbol; post-loop proofs need an
+  `invariant:` pinning `len(a)` and/or elements.
+- **Codegen** — `emit_array_literal` materialises the elements into an
+  `alloca`'d `[n x elem]` with element-typed GEP stores (int→f64 widens via
+  `sitofp`), returning the `(len, elem_ty, data_ptr)` fat pointer that
+  `array_ptrs` already tracks. `let a = […]` registers `a` exactly like an
+  `[T]` parameter; `let a = arr` now aliases the fat pointer too (was
+  "Array 'a' not found as fat pointer parameter"). A `-> [T]` tail of
+  `ArrayLit`/`Variable` rebuilds the `{i64, ptr}` return aggregate.
+- **Pre-existing fix surfaced by this work** — `Token::FloatLit` Display
+  printed `1.0` as `"1"`, and `collect_brace_body` re-lexes the atom body
+  from token text, so every whole-valued float literal in a *body*
+  (`let x = 1.0`) silently became `Expr::Number(1)`. Display now emits
+  `{n:?}` so whole floats round-trip. (Clause text like `result == 1.0`
+  was already collected losslessly.)
+- Tests: `tests/test_array_literal.mm` (10 atoms: read/store/alias/f64/bool/
+  reassign/tail-forall/call-arg/symbolic/…) + `tests/test_array_literal.rs`
+  (+ `test_array_literal_negative.mm` — `a[3]` on a len-3 literal rejected).
+
+- Backlog edges noted: rebinding an array name to a scalar (`a = 5`) leaves
+  `__z3_arr_a`/`len_a` stale (same class as the `#603` alias edge — MIR has
+  no reassign typecheck yet); `StringLit` re-quoting in `collect_brace_body`
+  loses escapes (`"a\nb"`); struct-field scrutinees in `requires`/`ensures`
+  clauses still lack declared-type resolution.
+
 ### 2026-09-20: counterexample report no longer flags translated builtins as uninterpreted
 
 - `collect_expr_symbols` (spurious-CE detection) treated every `Expr::Call`

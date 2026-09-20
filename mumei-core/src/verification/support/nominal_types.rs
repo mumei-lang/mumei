@@ -159,6 +159,12 @@ impl<'a> NominalChecker<'a> {
             | Expr::StringLit(_)
             | Expr::Variable(_)
             | Expr::AtomRef { .. } => Ok(()),
+            Expr::ArrayLit(elements) => {
+                for element in elements {
+                    self.expr(element, span)?;
+                }
+                Ok(())
+            }
             Expr::ArrayAccess(_, index) => self.expr(index, span),
             Expr::BinaryOp(lhs, _, rhs) => {
                 self.expr(lhs, span)?;
@@ -419,7 +425,7 @@ impl<'a> NominalChecker<'a> {
 }
 
 /// The expression a statement evaluates to, if it has one.
-fn tail_expr(stmt: &Stmt) -> Option<&Expr> {
+pub(crate) fn tail_expr(stmt: &Stmt) -> Option<&Expr> {
     match stmt {
         Stmt::Expr(e, _) => Some(e),
         Stmt::Block(stmts, _) => stmts.last().and_then(tail_expr),

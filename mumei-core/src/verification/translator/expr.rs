@@ -889,6 +889,9 @@ pub(crate) fn expr_to_z3<'a>(
                                 call_env.insert(param.name.clone(), val.clone());
                                 // 構造体引数: `<param>.<field>` が実引数のフィールドを指すようにする
                                 alias_struct_fields(&mut call_env, &param.name, val);
+                                // 配列引数: `__z3_arr_`/`len_`/要素型スロットを
+                                // callee パラメータ名で配線（リテラルは len 実値）。
+                                wire_array_slots(vc, &param.name, args.get(i), val, &mut call_env);
                             }
                         }
 
@@ -1111,6 +1114,17 @@ pub(crate) fn expr_to_z3<'a>(
                             }
                         }
 
+                        // `arr[i]` inside `ensures` means the POST-call
+                        // element — havoc the call_env tracked slot of any
+                        // `[T]` param the callee's body may store through,
+                        // so a mutating callee's ensures can't smuggle in
+                        // the caller's pre-call chain.
+                        for param in callee.params.iter() {
+                            if atom_stores_to_array(vc.module_env, &callee, &param.name) {
+                                havoc_array_name(vc, &param.name, &mut call_env);
+                            }
+                        }
+
                         // ensures を事実として solver に追加（result を呼び出し結果に束縛）
                         //
                         // Equality Ensures Propagation:
@@ -1251,6 +1265,13 @@ pub(crate) fn expr_to_z3<'a>(
                             env.insert(taint_key, taint_marker.into());
                         }
 
+                        // The callee may have stored through a `[T]` arg's
+                        // data pointer — havoc the caller-side tracked chain
+                        // (and its aliases) for args whose callee param is
+                        // mutated, so post-call reads can't claim pre-call
+                        // elements.
+                        havoc_array_args(vc, &callee, args, env);
+
                         Ok(result_z3)
                     } else {
                         // P10-C: `Enum::Variant(args)` / `Variant(args)`
@@ -1319,6 +1340,71 @@ pub(crate) fn expr_to_z3<'a>(
                     }
                 }
             }
+        }
+        Expr::ArrayLit(elements) => {
+            // `[e0, e1, …]` lowers to an `Int -> Elem` Z3 array built by a
+            // `store` chain over a fresh constant base. The literal has no
+            // name of its own: the `let`/`assign` binding that receives it
+            // (stmt.rs) records `__z3_arr_<var>`/`len_<var>` and the element
+            // type so reads, stores, and `len()` resolve against this chain.
+            static ARRAY_LIT_UID: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let uid = ARRAY_LIT_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let name = format!("__array_lit_{uid}");
+            let mut elem_dynamics = Vec::with_capacity(elements.len());
+            for element in elements {
+                elem_dynamics.push(expr_to_z3(vc, element, env, solver_opt)?);
+            }
+            // Range sort = the widest element sort across the literal. Z3
+            // numerals built from whole-valued floats (`1.0` → `Int`) make a
+            // first-element-only probe choose the wrong sort, so scan them
+            // all: Float > Real > Int; Bool literals must be uniformly Bool.
+            let mut has_float = false;
+            let mut has_real = false;
+            let mut has_int = false;
+            let mut has_bool = false;
+            for elem in &elem_dynamics {
+                match elem.get_sort().kind() {
+                    z3::SortKind::Int | z3::SortKind::BV => has_int = true,
+                    z3::SortKind::Real => has_real = true,
+                    z3::SortKind::FloatingPoint => has_float = true,
+                    z3::SortKind::Bool => has_bool = true,
+                    other => {
+                        return Err(MumeiError::type_error(format!(
+                            "array literal element type {other:?} is unsupported \
+                             (only i64/f64/bool elements can be lowered)"
+                        )))
+                    }
+                }
+            }
+            let range_sort = if has_float {
+                ArrayElementSort::Float
+            } else if has_real {
+                if has_bool {
+                    return Err(MumeiError::type_error(
+                        "array literal mixes bool and numeric elements",
+                    ));
+                }
+                ArrayElementSort::Real
+            } else if has_int {
+                if has_bool {
+                    return Err(MumeiError::type_error(
+                        "array literal mixes bool and integer elements",
+                    ));
+                }
+                ArrayElementSort::Int
+            } else if has_bool {
+                ArrayElementSort::Bool
+            } else {
+                unreachable!("non-empty array literal has an element sort")
+            };
+            let mut arr = z3_array_for_sort(ctx, &name, range_sort);
+            for (i, elem) in elem_dynamics.iter().enumerate() {
+                let idx = Int::from_i64(ctx, i as i64);
+                let coerced = coerce_to_array_elem_sort(vc, range_sort, elem)?;
+                arr = arr.store(&idx, &coerced);
+            }
+            Ok(arr.into())
         }
         Expr::ArrayAccess(name, index_expr) => {
             if name == "result" {
@@ -2411,6 +2497,7 @@ pub(crate) fn expr_to_z3<'a>(
                         if let Some(arg_val) = arg_vals.get(i) {
                             call_env.insert(param.name.clone(), arg_val.clone());
                             alias_struct_fields(&mut call_env, &param.name, arg_val);
+                            wire_array_slots(vc, &param.name, args.get(i), arg_val, &mut call_env);
                         }
                     }
 
@@ -2505,6 +2592,10 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                     }
 
+                    // `[T]` args share the caller's data pointer — havoc
+                    // the tracked chain so post-call reads can't claim
+                    // pre-call elements the callee may have overwritten.
+                    havoc_array_args(vc, &callee_atom, args, env);
                     return Ok(result_z3);
                 }
             }

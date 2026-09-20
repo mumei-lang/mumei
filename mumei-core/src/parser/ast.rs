@@ -182,6 +182,9 @@ pub enum Expr {
     /// Plan 9: First-class string literal
     StringLit(String),
     Variable(String),
+    /// Array literal: `[e0, e1, …]` — element type is inferred from the first
+    /// element; an empty literal is a parse error (no annotation syntax).
+    ArrayLit(Vec<Expr>),
     ArrayAccess(String, Box<Expr>),
     BinaryOp(Box<Expr>, Op, Box<Expr>),
     IfThenElse {

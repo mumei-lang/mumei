@@ -1,7 +1,7 @@
 use crate::codegen::lowering::{
-    bitpreserve_cast, box_payload_to_i64, declare_chan_send_owned, enum_llvm_type,
-    payload_needs_box, release_boxed_payload, resolve_param_type, resolve_return_type,
-    unbox_payload_from_i64, ArrayPtr,
+    array_struct_type, bitpreserve_cast, box_payload_to_i64, declare_chan_send_owned,
+    enum_llvm_type, payload_needs_box, release_boxed_payload, resolve_param_type,
+    resolve_return_type, unbox_payload_from_i64, ArrayPtr,
 };
 use crate::codegen::pattern_emit::{
     bind_pattern_variables, compile_pattern_test, find_field_index, find_field_index_by_name,
@@ -223,6 +223,66 @@ fn infer_stmt_struct_type_name(
     }
 }
 
+/// Materialise an array literal `[e0, e1, …]`: alloca the backing array,
+/// store each element, and return `(len, elem_ty, data_ptr)` — the same
+/// fat-pointer triple `array_ptrs` carries for `[T]` parameters.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_array_literal<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    function: &FunctionValue<'a>,
+    elements: &[HirExpr],
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    var_types: &mut HashMap<String, String>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<(BasicValueEnum<'a>, BasicTypeEnum<'a>, BasicValueEnum<'a>)> {
+    let mut elem_vals = Vec::with_capacity(elements.len());
+    for element in elements {
+        elem_vals.push(compile_hir_expr(
+            context, builder, module, function, element, variables, var_types, array_ptrs,
+            module_env,
+        )?);
+    }
+    let elem_ty = elem_vals[0].get_type();
+    let n = elements.len() as u32;
+    let array_ty = elem_ty.array_type(n);
+    let data_ptr = llvm!(builder.build_alloca(array_ty, "arrlit_data"));
+    for (i, elem) in elem_vals.iter().enumerate() {
+        // Int elements in an f64 literal widen via sitofp — matching the
+        // verifier's int→real coercion for array literals.
+        let stored = if elem_ty.is_float_type() && elem.is_int_value() {
+            llvm!(builder.build_signed_int_to_float(
+                elem.into_int_value(),
+                context.f64_type(),
+                "lit_widen"
+            ))
+            .into()
+        } else if elem.get_type() == elem_ty {
+            *elem
+        } else {
+            return Err(MumeiError::codegen(format!(
+                "array literal elements must share a type (element {i} differs)"
+            )));
+        };
+        let slot = unsafe {
+            llvm!(builder.build_gep(
+                array_ty,
+                data_ptr,
+                &[
+                    context.i64_type().const_int(0, false),
+                    context.i64_type().const_int(i as u64, false)
+                ],
+                "lit_slot"
+            ))
+        };
+        llvm!(builder.build_store(slot, stored));
+    }
+    let len_val: BasicValueEnum = context.i64_type().const_int(n as u64, false).into();
+    Ok((len_val, elem_ty, data_ptr.into()))
+}
+
 /// Emit `E::V(..)` / `E::V` as a tagged-union struct value. Fail-closed on a
 /// recursive enum (the eager `enum_llvm_type` layout cannot represent it) and
 /// on arity/unknown-variant mismatches — verification rejects those first, so
@@ -235,7 +295,7 @@ fn emit_enum_variant_init<'a>(
     function: &FunctionValue<'a>,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
     enum_name: &str,
     variant_name: &str,
@@ -320,7 +380,7 @@ pub(crate) fn compile_hir_expr<'a>(
     expr: &HirExpr,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match expr {
@@ -334,6 +394,36 @@ pub(crate) fn compile_hir_expr<'a>(
                 MumeiError::codegen(format!("Failed to build string literal: {:?}", e))
             })?;
             Ok(global.as_pointer_value().into())
+        }
+
+        HirExpr::ArrayLit(elements) => {
+            // Literal in expression position (e.g. a call argument):
+            // materialise the backing store and return the `{i64 len, ptr}`
+            // fat-pointer aggregate — the same value shape `[T]` parameters
+            // carry, so it can be passed to a callee directly. A `let`
+            // binding registers the name into `array_ptrs` before this arm
+            // (see stmt_emit), so this path only runs for anonymous literals.
+            let (len_val, elem_ty, data_ptr) = emit_array_literal(
+                context, builder, module, function, elements, variables, var_types, array_ptrs,
+                module_env,
+            )?;
+            let _ = elem_ty;
+            let struct_ty = context.struct_type(
+                &[
+                    context.i64_type().into(),
+                    context.ptr_type(AddressSpace::default()).into(),
+                ],
+                false,
+            );
+            let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
+            agg = llvm!(builder.build_insert_value(agg, len_val, 0, "arrlit_len"));
+            agg = llvm!(builder.build_insert_value(agg, data_ptr, 1, "arrlit_data"));
+            match agg {
+                inkwell::values::AggregateValueEnum::StructValue(s) => Ok(s.into()),
+                _ => Err(MumeiError::codegen(
+                    "array literal aggregate is not a struct value",
+                )),
+            }
         }
 
         HirExpr::Variable(name) => variables
@@ -451,7 +541,48 @@ pub(crate) fn compile_hir_expr<'a>(
                     };
 
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                    for arg in args {
+                    for (i, arg) in args.iter().enumerate() {
+                        // `[T]` params take the `{i64, ptr}` fat pointer —
+                        // a bare `compile_hir_expr` on an array var yields
+                        // only the len i64 and emits malformed call IR.
+                        let param_is_array = callee
+                            .params
+                            .get(i)
+                            .and_then(|p| p.type_name.as_deref())
+                            .is_some_and(|tn| {
+                                matches!(
+                                    mumei_core::lowering::lower(&module_env.resolve_base_type(tn)),
+                                    mumei_core::lowering::LoweredType::Array(_)
+                                )
+                            });
+                        if param_is_array {
+                            let slots = match arg {
+                                HirExpr::ArrayLit(elements) => Some(emit_array_literal(
+                                    context, builder, module, function, elements, variables,
+                                    var_types, array_ptrs, module_env,
+                                )?),
+                                HirExpr::Variable(name) => array_ptrs.get(name.as_str()).copied(),
+                                _ => None,
+                            };
+                            let Some((len_val, _elem_ty, data_ptr)) = slots else {
+                                return Err(MumeiError::codegen(format!(
+                                    "array argument to '{}' (param {}) must be an array                                      binding or literal (got {:?})",
+                                    callee_symbol, i, arg
+                                )));
+                            };
+                            let struct_ty = array_struct_type(context);
+                            let mut agg: inkwell::values::AggregateValueEnum =
+                                struct_ty.get_undef().into();
+                            agg = llvm!(builder.build_insert_value(agg, len_val, 0, "arg_arr_len"));
+                            agg =
+                                llvm!(builder.build_insert_value(agg, data_ptr, 1, "arg_arr_data"));
+                            let agg_val: BasicValueEnum = match agg {
+                                inkwell::values::AggregateValueEnum::StructValue(s) => s.into(),
+                                inkwell::values::AggregateValueEnum::ArrayValue(a) => a.into(),
+                            };
+                            arg_vals.push(agg_val.into());
+                            continue;
+                        }
                         let val = compile_hir_expr(
                             context, builder, module, function, arg, variables, var_types,
                             array_ptrs, module_env,
@@ -1757,7 +1888,7 @@ mod tests {
 
         let mut variables = HashMap::new();
         let mut var_types = HashMap::new();
-        let array_ptrs = HashMap::new();
+        let mut array_ptrs = HashMap::new();
         let result = compile_hir_expr(
             &context,
             &builder,
@@ -1766,7 +1897,7 @@ mod tests {
             &expr,
             &mut variables,
             &mut var_types,
-            &array_ptrs,
+            &mut array_ptrs,
             &module_env,
         );
 
@@ -1866,7 +1997,7 @@ mod tests {
         variables.insert("B".to_string(), a_struct.into());
         let mut var_types = HashMap::new();
         var_types.insert("B".to_string(), "A".to_string());
-        let array_ptrs = HashMap::new();
+        let mut array_ptrs = HashMap::new();
         let result = compile_hir_expr(
             &context,
             &builder,
@@ -1875,7 +2006,7 @@ mod tests {
             &expr,
             &mut variables,
             &mut var_types,
-            &array_ptrs,
+            &mut array_ptrs,
             &module_env,
         )?;
 

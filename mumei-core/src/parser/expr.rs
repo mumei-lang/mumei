@@ -444,6 +444,35 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             expr
         }
 
+        Token::LBracket => {
+            // Array literal `[e0, e1, …]` at expression position (a `[` after an
+            // identifier is parsed as `Expr::ArrayAccess` by
+            // `parse_ident_continuation`, so this arm only sees genuine literals).
+            ctx.advance();
+            let mut elements = Vec::new();
+            while ctx.peek() != &Token::RBracket && ctx.peek() != &Token::Eof {
+                elements.push(parse_expr(ctx, 0));
+                if ctx.peek() == &Token::Comma {
+                    ctx.advance();
+                } else {
+                    break;
+                }
+            }
+            ctx.expect(Token::RBracket);
+            if elements.is_empty() {
+                // `[]` cannot infer an element type — record a checked
+                // syntax failure (the marker variable fails closed if a
+                // caller ignores the diagnostics).
+                ctx.syntax_failure(
+                    "empty array literal `[]` needs an element type — annotate \
+                     via a non-empty literal or a typed let binding"
+                        .to_string(),
+                );
+                return Expr::Variable("__mumei_empty_array_literal".to_string());
+            }
+            Expr::ArrayLit(elements)
+        }
+
         Token::IntLit(n) => {
             let val = n;
             ctx.advance();

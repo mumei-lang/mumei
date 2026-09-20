@@ -177,6 +177,9 @@ pub(crate) fn array_element_type_from_annotation(
 }
 
 pub(crate) fn array_element_type_name(name: &str, vc: &VCtx<'_>) -> String {
+    if let Some(local_ty) = vc.local_array_elem_types.borrow().get(name) {
+        return local_ty.clone();
+    }
     vc.current_atom
         .and_then(|atom| atom.params.iter().find(|param| param.name == name))
         .and_then(|param| param.type_name.as_deref())
@@ -538,23 +541,344 @@ pub(crate) fn z3_dynamic_array<'a>(vc: &VCtx<'a>, name: &str, env: &Env<'a>) -> 
         .unwrap_or_else(|| z3_array_for_name(vc, name))
 }
 
+/// Wire a name-bound array value into the tracking slots reads and stores
+/// consult: `__z3_arr_<name>` carries the Z3 array, `len_<name>` the length
+/// (concrete for a `[e0, …]` literal, the source's `len` for a `var` alias, a
+/// fresh tracked symbol otherwise), and `local_array_elem_types` records the
+/// element type so `array_element_type_name` resolves it like a declared
+/// `[T]` parameter.
+pub(crate) fn wire_array_slots<'a>(
+    vc: &VCtx<'a>,
+    name: &str,
+    value: Option<&Expr>,
+    val: &Dynamic<'a>,
+    env: &mut Env<'a>,
+) {
+    // For `var` sources the live array is the tracked `__z3_arr_<src>` chain —
+    // `env[src]` is only the base const, and `src[i] = v` stores never rewrite
+    // it, so using `val` here would drop prior writes.
+    let arr = match value {
+        Some(Expr::Variable(src)) => env
+            .get(&format!("__z3_arr_{src}"))
+            .and_then(|d| d.as_array())
+            .or_else(|| val.as_array()),
+        _ => val.as_array(),
+    };
+    let Some(arr) = arr else {
+        // Rebound to a non-array value — drop any stale element-type entry.
+        vc.local_array_elem_types.borrow_mut().remove(name);
+        return;
+    };
+    let elem_ty = match arr.get_sort().array_range().map(|s| s.kind()) {
+        Some(z3::SortKind::Real) | Some(z3::SortKind::FloatingPoint) => "f64",
+        Some(z3::SortKind::Bool) => "bool",
+        _ => "i64",
+    };
+    env.insert(format!("__z3_arr_{name}"), arr.into());
+    let len: Dynamic = match value {
+        Some(Expr::ArrayLit(elements)) => Int::from_i64(vc.ctx, elements.len() as i64).into(),
+        Some(Expr::Variable(src)) => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
+        _ => array_len_value(vc.ctx, env, name, vc.bitvec_i64, None),
+    };
+    env.insert(format!("len_{name}"), len);
+    vc.local_array_elem_types
+        .borrow_mut()
+        .insert(name.to_string(), elem_ty.to_string());
+}
+
+/// Walk a tracked array value to the innermost (root) array AST node — the
+/// base const that `store(store(base, …), …)` chains share. Aliases created
+/// by `let b = a` hold the same root even after either side stores.
+fn array_root_ast(arr: &z3::ast::Array) -> z3_sys::Z3_ast {
+    let mut cur: Dynamic = arr.clone().into();
+    loop {
+        if cur.kind() == z3::AstKind::App && cur.decl().kind() == z3::DeclKind::STORE {
+            if let Some(child) = cur.nth_child(0) {
+                if child.get_sort().kind() == z3::SortKind::Array {
+                    cur = child;
+                    continue;
+                }
+            }
+        }
+        return cur.get_z3_ast();
+    }
+}
+
+/// Replace `name`'s tracked array chain — and every `__z3_arr_*`/`env[x]`
+/// slot rooting at the same backing chain (i.e. `let b = a` aliases) — with
+/// a fresh unconstrained array of the same element sort. `len_<name>` is
+/// kept: a callee receives the `{len, ptr}` fat pointer by value, so it can
+/// write elements but cannot resize the caller's buffer.
+pub(crate) fn havoc_array_name<'a>(vc: &VCtx<'a>, name: &str, env: &mut Env<'a>) {
+    static POSTCALL_UID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    // `[T]` params bind `env[name]` to the array const eagerly and may not
+    // yet have a `__z3_arr_` slot; bound locals carry it.
+    let arr_key = format!("__z3_arr_{name}");
+    let arg_arr = env
+        .get(&arr_key)
+        .and_then(|d| d.as_array())
+        .or_else(|| env.get(name).and_then(|d| d.as_array()));
+    let Some(arg_arr) = arg_arr else { return };
+    let root = array_root_ast(&arg_arr);
+    let elem_sort = match arg_arr.get_sort().array_range().map(|s| s.kind()) {
+        Some(z3::SortKind::Real) => ArrayElementSort::Real,
+        Some(z3::SortKind::FloatingPoint) => ArrayElementSort::Float,
+        Some(z3::SortKind::Bool) => ArrayElementSort::Bool,
+        _ => ArrayElementSort::Int,
+    };
+    let uid = POSTCALL_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let fresh: Dynamic =
+        z3_array_for_sort(vc.ctx, &format!("__postcall_arr_{uid}"), elem_sort).into();
+    // Every tracked slot rooting at the same backing chain aliases the
+    // shared buffer — havoc them together.
+    let keys: Vec<String> = env
+        .iter()
+        .filter(|(k, v)| {
+            k.starts_with("__z3_arr_") && v.as_array().is_some_and(|a| array_root_ast(&a) == root)
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in &keys {
+        env.insert(key.clone(), fresh.clone());
+    }
+    // `env[x]` itself holds the array const for `[T]` params, literals, and
+    // `let` aliases — rebind every var bound to an array sharing this root
+    // so aliased reads see the same havoc'd elements.
+    let var_keys: Vec<String> = env
+        .iter()
+        .filter(|(k, v)| {
+            !k.starts_with("__z3_arr_") && v.as_array().is_some_and(|a| array_root_ast(&a) == root)
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    for var in var_keys {
+        env.insert(var, fresh.clone());
+    }
+    // Ensure the tracked slot exists even when the arg only had a bare
+    // `env[name]` const (param arrays before their first access).
+    env.insert(arr_key, fresh);
+}
+
+/// Does `callee`'s body possibly store into the array bound to `param_name`?
+/// Direct `name[i] = v` in any nested block/loop/task/if/match arm, or
+/// passing `name` to a call whose callee may store to that parameter
+/// (transitive, depth-capped; unparseable bodies and unknown callees are
+/// assumed mutable — fail closed).
+pub(crate) fn atom_stores_to_array(
+    module_env: &ModuleEnv,
+    callee: &crate::parser::Atom,
+    param_name: &str,
+) -> bool {
+    let mut visited = std::collections::HashSet::new();
+    atom_stores_to_array_depth(module_env, callee, param_name, &mut visited, 0)
+}
+
+fn atom_stores_to_array_depth(
+    module_env: &ModuleEnv,
+    callee: &crate::parser::Atom,
+    param_name: &str,
+    visited: &mut std::collections::HashSet<String>,
+    depth: u8,
+) -> bool {
+    if depth > 6 {
+        return true;
+    }
+    if !visited.insert(format!("{}::{}", callee.name, param_name)) {
+        return false;
+    }
+    let Ok(body) = crate::parser::parse_body_expr_checked(&callee.body_expr) else {
+        return true;
+    };
+    stmt_stores_to_array(module_env, &body, param_name, visited, depth)
+}
+
+fn stmt_stores_to_array(
+    module_env: &ModuleEnv,
+    stmt: &Stmt,
+    name: &str,
+    visited: &mut std::collections::HashSet<String>,
+    depth: u8,
+) -> bool {
+    match stmt {
+        Stmt::ArrayStore { array, .. } => array == name,
+        Stmt::Block(stmts, _) => stmts
+            .iter()
+            .any(|s| stmt_stores_to_array(module_env, s, name, visited, depth)),
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            expr_stores_to_array(module_env, cond, name, visited, depth)
+                || expr_stores_to_array(module_env, invariant, name, visited, depth)
+                || decreases
+                    .as_deref()
+                    .is_some_and(|d| expr_stores_to_array(module_env, d, name, visited, depth))
+                || stmt_stores_to_array(module_env, body, name, visited, depth)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            stmt_stores_to_array(module_env, body, name, visited, depth)
+        }
+        Stmt::TaskGroup { children, .. } => children
+            .iter()
+            .any(|s| stmt_stores_to_array(module_env, s, name, visited, depth)),
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            expr_stores_to_array(module_env, value, name, visited, depth)
+        }
+        Stmt::Expr(e, _) => expr_stores_to_array(module_env, e, name, visited, depth),
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+/// `name` passed as a call argument: the callee receives a `{len, ptr}` fat
+/// pointer and may store through it. Resolve the callee and check the
+/// matching parameter transitively; unknown callees fail closed.
+fn call_may_store_arg(
+    module_env: &ModuleEnv,
+    callee_name: &str,
+    arg_index: usize,
+    visited: &mut std::collections::HashSet<String>,
+    depth: u8,
+) -> bool {
+    let fqn = callee_name.replace('.', "::");
+    match module_env
+        .get_atom(callee_name)
+        .or_else(|| module_env.get_atom(&fqn))
+    {
+        Some(callee) => callee.params.get(arg_index).is_none_or(|p| {
+            atom_stores_to_array_depth(module_env, callee, &p.name, visited, depth + 1)
+        }),
+        None => true,
+    }
+}
+
+fn expr_stores_to_array(
+    module_env: &ModuleEnv,
+    expr: &Expr,
+    name: &str,
+    visited: &mut std::collections::HashSet<String>,
+    depth: u8,
+) -> bool {
+    match expr {
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_stores_to_array(module_env, cond, name, visited, depth)
+                || stmt_stores_to_array(module_env, then_branch, name, visited, depth)
+                || stmt_stores_to_array(module_env, else_branch, name, visited, depth)
+        }
+        Expr::Match { target, arms } => {
+            expr_stores_to_array(module_env, target, name, visited, depth)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_deref()
+                        .is_some_and(|g| expr_stores_to_array(module_env, g, name, visited, depth))
+                        || stmt_stores_to_array(module_env, &arm.body, name, visited, depth)
+                })
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => {
+            stmt_stores_to_array(module_env, body, name, visited, depth)
+        }
+        Expr::Call(callee_name, args)
+        | Expr::Perform {
+            operation: callee_name,
+            args,
+            ..
+        } => {
+            args.iter()
+                .any(|a| expr_stores_to_array(module_env, a, name, visited, depth))
+                || args.iter().enumerate().any(|(i, a)| {
+                    matches!(a, Expr::Variable(v) if v == name)
+                        && call_may_store_arg(module_env, callee_name, i, visited, depth)
+                })
+        }
+        Expr::CallRef { callee, args } => {
+            expr_stores_to_array(module_env, callee, name, visited, depth)
+                || args.iter().any(|a| expr_stores_to_array(module_env, a, name, visited, depth))
+                // indirect calls are opaque — passing the array is assumed mutating
+                || args.iter().any(|a| matches!(a, Expr::Variable(v) if v == name))
+        }
+        Expr::ArrayLit(elems) => elems
+            .iter()
+            .any(|e| expr_stores_to_array(module_env, e, name, visited, depth)),
+        Expr::ArrayAccess(_, idx) => expr_stores_to_array(module_env, idx, name, visited, depth),
+        Expr::BinaryOp(l, _, r) => {
+            expr_stores_to_array(module_env, l, name, visited, depth)
+                || expr_stores_to_array(module_env, r, name, visited, depth)
+        }
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, e)| expr_stores_to_array(module_env, e, name, visited, depth)),
+        Expr::FieldAccess(e, _) => expr_stores_to_array(module_env, e, name, visited, depth),
+        Expr::Await { expr } => expr_stores_to_array(module_env, expr, name, visited, depth),
+        Expr::ChanSend { channel, value } => {
+            expr_stores_to_array(module_env, channel, name, visited, depth)
+                || expr_stores_to_array(module_env, value, name, visited, depth)
+        }
+        Expr::ChanRecv { channel } => {
+            expr_stores_to_array(module_env, channel, name, visited, depth)
+        }
+        _ => false,
+    }
+}
+
+/// After `callee(args)` returns, havoc the caller-side tracked chain of each
+/// `var` argument whose callee parameter may be stored through — the callee
+/// receives the `{len, ptr}` fat pointer by value, so its `arr[i] = v`
+/// writes land in the caller-visible buffer and post-call reads cannot
+/// claim pre-call elements.
+pub(crate) fn havoc_array_args<'a>(
+    vc: &VCtx<'a>,
+    callee: &crate::parser::Atom,
+    args: &[Expr],
+    env: &mut Env<'a>,
+) {
+    for (i, arg) in args.iter().enumerate() {
+        let Expr::Variable(name) = arg else { continue };
+        let Some(param) = callee.params.get(i) else {
+            continue;
+        };
+        if atom_stores_to_array(vc.module_env, callee, &param.name) {
+            havoc_array_name(vc, name, env);
+        }
+    }
+}
+
 pub(crate) fn coerce_array_store_value<'a>(
     vc: &VCtx<'a>,
     array: &str,
     value: Dynamic<'a>,
 ) -> DynResult<'a> {
-    match array_element_sort(array, vc) {
-        ArrayElementSort::Int => as_int_like(&value)
-            .map(Into::into)
-            .ok_or_else(|| MumeiError::type_error("Array store value must be integer")),
+    coerce_to_array_elem_sort(vc, array_element_sort(array, vc), &value)
+}
+
+/// Coerce `value` to the given array element sort (the name-keyed version
+/// above resolves the sort from the array's declared type; array literals
+/// carry their sort alongside the value instead).
+pub(crate) fn coerce_to_array_elem_sort<'a>(
+    vc: &VCtx<'a>,
+    sort: ArrayElementSort,
+    value: &Dynamic<'a>,
+) -> DynResult<'a> {
+    match sort {
+        ArrayElementSort::Int => as_int_like(value).map(Into::into).ok_or_else(|| {
+            MumeiError::type_error(format!(
+                "Array store value must be integer (got sort {:?})",
+                value.get_sort()
+            ))
+        }),
         ArrayElementSort::Real => value
             .as_real()
-            .or_else(|| as_int_like(&value).map(|i| i.to_real()))
+            .or_else(|| as_int_like(value).map(|i| i.to_real()))
             .map(Into::into)
             .ok_or_else(|| MumeiError::type_error("Array store value must be real")),
         ArrayElementSort::Float => {
             let rne = round_nearest_even(vc.ctx);
-            coerce_to_float(vc.ctx, &value, &rne)
+            coerce_to_float(vc.ctx, value, &rne)
                 .map(Into::into)
                 .ok_or_else(|| MumeiError::type_error("Array store value must be float"))
         }

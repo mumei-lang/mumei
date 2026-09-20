@@ -63,6 +63,8 @@ pub enum Rvalue {
         operation: String,
         args: Vec<Operand>,
     },
+    /// Array literal `[e0, e1, …]` — the produced value is an array (Move type).
+    ArrayLit(Vec<Operand>),
 }
 
 /// An operand: either a place (variable) or a constant.
@@ -537,6 +539,13 @@ impl LowerCtx {
                 }
                 _ => self.infer_hir_ty(lhs).or_else(|| self.infer_hir_ty(rhs)),
             },
+            // `[e0, …]` — element type from the first element; the binding is
+            // an array (Move) so later `a[i]` reads and `let b = a` moves are
+            // tracked correctly. Empty literals can't reach HIR (parse error).
+            HirExpr::ArrayLit(elements) => elements
+                .first()
+                .and_then(|e| self.infer_hir_ty(e))
+                .map(|elem| format!("[{elem}]")),
             HirExpr::ArrayAccess(name, _) => self
                 .lookup_var_ty(name)
                 .and_then(|ty| {
@@ -994,6 +1003,16 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
                     operation: operation.clone(),
                     args: arg_ops,
                 },
+            ));
+            Operand::Place(Place::Local(tmp))
+        }
+        HirExpr::ArrayLit(elements) => {
+            let elem_ops: Vec<Operand> = elements.iter().map(|e| lower_expr(ctx, e)).collect();
+            let tmp = ctx.alloc_temp();
+            ctx.emit(MirStatement::StorageLive(tmp.clone()));
+            ctx.emit(MirStatement::Assign(
+                Place::Local(tmp.clone()),
+                Rvalue::ArrayLit(elem_ops),
             ));
             Operand::Place(Place::Local(tmp))
         }

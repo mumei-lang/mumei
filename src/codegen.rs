@@ -316,6 +316,11 @@ pub(crate) fn collect_hir_calls_from_expr(expr: &hir::HirExpr, calls: &mut Vec<S
         }
         hir::HirExpr::FieldAccess(inner, _) => collect_hir_calls_from_expr(inner, calls),
         hir::HirExpr::ArrayAccess(_, index) => collect_hir_calls_from_expr(index, calls),
+        hir::HirExpr::ArrayLit(elements) => {
+            for element in elements {
+                collect_hir_calls_from_expr(element, calls);
+            }
+        }
         hir::HirExpr::Match { target, arms } => {
             collect_hir_calls_from_expr(target, calls);
             for arm in arms {

@@ -198,7 +198,10 @@ impl std::fmt::Display for Token {
             Token::Recv => write!(f, "recv"),
             Token::Cancel => write!(f, "cancel"),
             Token::IntLit(n) => write!(f, "{}", n),
-            Token::FloatLit(n) => write!(f, "{}", n),
+            // `{n:?}` keeps the fraction (`1.0` → "1.0") where `{}` would print
+            // "1" — the atom body is re-lexed from this text, so a whole-valued
+            // float must round-trip as FloatLit, not IntLit.
+            Token::FloatLit(n) => write!(f, "{n:?}"),
             Token::StringLit(s) => write!(f, "\"{}\"", s),
             Token::Ident(s) => write!(f, "{}", s),
             Token::Plus => write!(f, "+"),

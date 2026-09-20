@@ -149,6 +149,12 @@ impl<'a> UnitCtx<'a> {
         match expr {
             Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) => Ok(Ty::default()),
             Expr::Variable(name) => Ok(self.vars.get(name).cloned().unwrap_or_default()),
+            Expr::ArrayLit(elements) => {
+                for element in elements {
+                    self.infer(element)?;
+                }
+                Ok(Ty::default())
+            }
             Expr::ArrayAccess(_, idx) => {
                 self.infer(idx)?;
                 Ok(Ty::default())

@@ -85,6 +85,8 @@ pub enum HirExpr {
     /// Plan 9: First-class string literal
     StringLit(String),
     Variable(String),
+    /// Array literal `[e0, e1, …]` — element type inferred from elements.
+    ArrayLit(Vec<HirExpr>),
     ArrayAccess(String, Box<HirExpr>),
     BinaryOp(Box<HirExpr>, Op, Box<HirExpr>),
     IfThenElse {
@@ -323,6 +325,12 @@ pub fn lower_expr_with_env(
         // Plan 9: String literal lowering
         Expr::StringLit(s) => HirExpr::StringLit(s.clone()),
         Expr::Variable(s) => HirExpr::Variable(s.clone()),
+        Expr::ArrayLit(elements) => HirExpr::ArrayLit(
+            elements
+                .iter()
+                .map(|e| lower_expr_with_env(e, module_env))
+                .collect(),
+        ),
         Expr::ArrayAccess(name, idx) => {
             HirExpr::ArrayAccess(name.clone(), Box::new(lower_expr_with_env(idx, module_env)))
         }
@@ -795,6 +803,11 @@ pub fn collect_free_variables_expr(expr: &HirExpr) -> HashSet<String> {
             }
         }
         HirExpr::Number(_) | HirExpr::Float(_) | HirExpr::StringLit(_) => {}
+        HirExpr::ArrayLit(elements) => {
+            for element in elements {
+                vars.extend(collect_free_variables_expr(element));
+            }
+        }
         HirExpr::ArrayAccess(name, idx) => {
             vars.insert(name.clone());
             vars.extend(collect_free_variables_expr(idx));

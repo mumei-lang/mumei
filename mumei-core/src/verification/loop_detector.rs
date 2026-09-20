@@ -117,6 +117,11 @@ fn detect_loops_in_expr(expr: &Expr, loops: &mut Vec<LoopInfo>, atom: &Atom) {
             detect_loops_in_expr(left, loops, atom);
             detect_loops_in_expr(right, loops, atom);
         }
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                detect_loops_in_expr(element, loops, atom);
+            }
+        }
         Expr::Call(_, args) => {
             for arg in args {
                 detect_loops_in_expr(arg, loops, atom);
@@ -250,6 +255,11 @@ fn collect_expr_variables(expr: &Expr, variables: &mut HashSet<String>) {
             variables.insert(array.clone());
             collect_expr_variables(index, variables);
         }
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_expr_variables(element, variables);
+            }
+        }
         Expr::BinaryOp(left, _, right) => {
             collect_expr_variables(left, variables);
             collect_expr_variables(right, variables);
@@ -370,6 +380,14 @@ fn expr_to_source(expr: &Expr) -> String {
         Expr::Float(value) => value.to_string(),
         Expr::StringLit(value) => format!("{value:?}"),
         Expr::Variable(name) => name.clone(),
+        Expr::ArrayLit(elements) => format!(
+            "[{}]",
+            elements
+                .iter()
+                .map(expr_to_source)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Expr::ArrayAccess(array, index) => format!("{}[{}]", array, expr_to_source(index)),
         Expr::BinaryOp(left, op, right) => {
             format!(
