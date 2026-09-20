@@ -49,6 +49,13 @@
   `[1.0, 2.5, 4.0]` because Z3 numerals for whole floats report `Int`.
   Nested `[…[…]…]` and `["x","y"]` fail closed (element sorts Array/Seq
   unsupported — same frontier as `[Str]` array params).
+- **While-loop havoc resets tracked array slots (unsoundness fix)** —
+  `havoc_vars` rebound `env[name]` for loop-modified vars but left
+  `__z3_arr_<name>`/`len_<name>` on the pre-loop store chain, so
+  `let a = [1,2]; while …{ a = [3,4,5] }; a[0]` could "verify" the stale
+  claim `result == 1`. Havoc now swaps in a fresh array const of the same
+  element sort plus a fresh `len_` symbol; post-loop proofs need an
+  `invariant:` pinning `len(a)` and/or elements.
 - **Codegen** — `emit_array_literal` materialises the elements into an
   `alloca`'d `[n x elem]` with element-typed GEP stores (int→f64 widens via
   `sitofp`), returning the `(len, elem_ty, data_ptr)` fat pointer that
