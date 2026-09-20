@@ -1,3 +1,32 @@
+### 2026-09-20: clause `match` on struct fields resolves the field's type — and must be exhaustive
+
+- `requires:`/`ensures:` clauses lower with `solver_opt = None` so arm-body
+  side effects never leak onto the ambient solver — but that also skipped
+  the exhaustiveness check and the scrutinee's enum-domain assert. A
+  non-exhaustive clause match then fell through the `ite` fold to the
+  **last arm's body on every uncovered input**: `requires: match h.r {
+  Shape::Point => true }` silently lowered to `true`, a vacuous-verify
+  soundness hole.
+- `Expr::Match` now runs domain injection and the exhaustiveness check on
+  a scratch solver (seeded with `vc.clause_context`, the already-lowered
+  clauses of the same spec) whenever no ambient solver is present. A
+  non-exhaustive clause match is a `spec_lowering_failed` error;
+  exhaustive matches lower exactly as before.
+- The `decl_hint` that disambiguates colliding variant names now covers
+  `FieldAccess` chains, calls, and `result`, not just bare variables: a
+  new `declared_type_of_expr` walks `h.r` / `h.a.b` / `f(x).r` /
+  `result.r` through `StructDef.fields` to the field's declared type
+  name (`param h: H → H → field r → Shape`). This complements the
+  const-name walk in `target_param_enum_name`, which dead-ends on
+  scrutinees with no flattened `h_r` const (e.g. `result.r`).
+- `infer_expr_enum_name` uses the same walk, so `let s = h.r` records
+  `s: Shape` and a later `match s` resolves like `match h.r`.
+- Non-enum fields (`match h.n` on `n: i64`) behave exactly like a
+  body-level i64 match: literal patterns + wildcard work, and a
+  non-exhaustive literal-only match fails closed.
+- Tests: `tests/test_clause_match_struct_field.mm` (5 atoms),
+  `tests/test_clause_match_struct_field_negative.mm` (4 atoms).
+
 ### 2026-09-20: `match`-arm array literals merge their lengths
 
 - `let a = match e { A => [1, 2], B => [3, 4, 5] }` already merged the
