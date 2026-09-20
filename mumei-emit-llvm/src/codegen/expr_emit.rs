@@ -183,6 +183,21 @@ pub(crate) fn infer_struct_type_name(
                 None
             }
         }
+        // `if c { E::V(..) } else { E::W }` types as `E` when both branches
+        // agree — `let e = if …; match e` resolves the owner like a
+        // declared parameter type.
+        HirExpr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let t = infer_stmt_struct_type_name(then_branch, var_types, module_env);
+            let e = infer_stmt_struct_type_name(else_branch, var_types, module_env);
+            match (t, e) {
+                (Some(t), Some(e)) if t == e => Some(t),
+                _ => None,
+            }
+        }
         // P25: a joined `task` carries its body's tail value.
         HirExpr::Task { body, .. } => infer_stmt_struct_type_name(body, var_types, module_env),
         // P25: a joined `task_group` carries a child's tail value (all children

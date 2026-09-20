@@ -1563,15 +1563,31 @@ pub(crate) fn expr_to_z3<'a>(
             // surrounding else-guard, while still keeping `let left =
             // merge_sort(mid)` ensures-asserts (`left == mid`) live for the
             // outer postcondition check.
+            // Binding types are scoped like the value env: each branch runs
+            // on a fresh snapshot, and afterwards only entries the two
+            // branches agree on survive (an if-local `let` must not leak its
+            // inferred type onto an outer binding).
+            let types_before = vc.local_enum_types.borrow().clone();
             vc.path_cond_stack.borrow_mut().push(c.clone());
             let mut then_env = env.clone();
             let t = stmt_to_z3(vc, then_branch, &mut then_env, solver_opt);
             vc.path_cond_stack.borrow_mut().pop();
             let t = t?;
+            let then_types = vc.local_enum_types.borrow().clone();
+            *vc.local_enum_types.borrow_mut() = types_before.clone();
             vc.path_cond_stack.borrow_mut().push(c.not());
             let mut else_env = env.clone();
             let e = stmt_to_z3(vc, else_branch, &mut else_env, solver_opt);
             vc.path_cond_stack.borrow_mut().pop();
+            let else_types = vc.local_enum_types.borrow().clone();
+            let mut merged = types_before;
+            merged.retain(|k, v| then_types.get(k) == Some(v) && else_types.get(k) == Some(v));
+            for (k, v) in then_types.iter() {
+                if else_types.get(k) == Some(v) {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+            *vc.local_enum_types.borrow_mut() = merged;
             let (t, e) = unify_branch_sorts(t, e?)?;
             // Branches ran on isolated env copies — merge their writes with
             // `ite(c, then, else)` per variable. Running both on the shared
@@ -1649,18 +1665,29 @@ pub(crate) fn expr_to_z3<'a>(
             // `enum IntList`). The const-name lookup inside
             // `resolve_variant_owner` covers let-aliases; `result` is
             // rebound to the evaluated body value, so only the Expr knows.
-            let decl_hint: Option<String> = vc.current_atom.and_then(|atom| {
-                let ty = match target.as_ref() {
-                    Expr::Variable(v) if v == "result" => atom.return_type.as_deref()?,
-                    Expr::Variable(v) => atom
-                        .params
-                        .iter()
-                        .find(|p| p.name == *v)
-                        .and_then(|p| p.type_name.as_deref())?,
-                    _ => return None,
-                };
-                Some(crate::verification::support::datatype::type_name_base(ty).to_string())
-            });
+            let decl_hint: Option<String> = match target.as_ref() {
+                Expr::Variable(v) => {
+                    let ty: Option<String> = if v == "result" {
+                        vc.current_atom.and_then(|atom| atom.return_type.clone())
+                    } else {
+                        vc.current_atom
+                            .and_then(|atom| {
+                                atom.params
+                                    .iter()
+                                    .find(|p| p.name == *v)
+                                    .and_then(|p| p.type_name.clone())
+                            })
+                            // `let`-bound enum values carry their inferred
+                            // declared type — `let e = Mine::Cons(1); match e`
+                            // resolves the same owner a parameter type would.
+                            .or_else(|| vc.local_enum_types.borrow().get(v).cloned())
+                    };
+                    ty.map(|t| {
+                        crate::verification::support::datatype::type_name_base(&t).to_string()
+                    })
+                }
+                _ => None,
+            };
 
             // ========================================================
             // Enum ドメイン制約の自動注入

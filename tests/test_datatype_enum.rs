@@ -79,3 +79,31 @@ fn datatype_enum_missing_arm_fails_with_ctor_name() {
         "expected uncovered-constructor counterexample naming 'Blue', got:\n{combined}"
     );
 }
+
+#[test]
+fn qualified_variant_arms_resolve_the_qualifier_enum() {
+    let output = mumei_verify("tests/test_enum_qualified_pattern.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "qualified `E::V` arms should verify on datatype, Int-tag, and let-bound targets:\n{combined}"
+    );
+}
+
+#[test]
+fn qualified_arm_mismatching_target_type_fails_closed() {
+    let output = mumei_verify("tests/test_enum_qualified_pattern_negative.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("belongs to enum"),
+        "a `Qual::V` arm on a differently-typed target must fail closed:\n{combined}"
+    );
+}

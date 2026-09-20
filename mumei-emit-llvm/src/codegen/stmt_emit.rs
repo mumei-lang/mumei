@@ -1,5 +1,6 @@
 use crate::codegen::expr_emit::{
     chan_payload_key, chan_payload_type_name, compile_hir_expr, infer_struct_type_name,
+    resolve_named_type,
 };
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
 use inkwell::builder::Builder;
@@ -50,8 +51,10 @@ pub(crate) fn compile_hir_stmt<'a>(
             variables.insert(var.clone(), val);
             let inferred_ty = ty
                 .as_deref()
-                .map(|ty_name| module_env.resolve_base_type(ty_name))
-                .filter(|base| module_env.get_struct(base).is_some())
+                .map(|ty_name| resolve_named_type(module_env, ty_name))
+                .filter(|base| {
+                    module_env.get_struct(base).is_some() || module_env.get_enum(base).is_some()
+                })
                 .or_else(|| infer_struct_type_name(value, var_types, module_env));
             if let Some(struct_ty) = inferred_ty {
                 var_types.insert(var.clone(), struct_ty);

@@ -20,7 +20,7 @@ use z3::ast::{Ast, Bool, Datatype, Dynamic};
 use z3::{Context, DatatypeAccessor, DatatypeSort, Sort};
 
 use crate::lowering::{lower, LoweredType};
-use crate::parser::ast::EnumDef;
+use crate::parser::ast::{EnumDef, Expr, Stmt};
 use crate::verification::module_env::ModuleEnv;
 use crate::verification::translator::{VCtx, F64_EBITS, F64_SBITS};
 use crate::verification::types::{MumeiError, MumeiResult};
@@ -201,7 +201,21 @@ pub(crate) fn variant_tester_condition<'a>(
 ) -> Option<(Rc<DatatypeSort<'a>>, Bool<'a>, usize)> {
     let dt = target.as_datatype()?;
     let target_sort = dt.get_sort();
+    // Qualified `E::V` pins the enum by its qualifier — a qualifier that
+    // names a different enum yields no tester and falls through to
+    // `resolve_variant_owner`, which reports the mismatch. A qualifier that
+    // is not a known enum name resolves by the leaf, like a bare name.
+    let (qual, variant_name) = match variant_name.rsplit_once("::") {
+        Some((q, leaf)) => (Some(q), leaf),
+        None => (None, variant_name),
+    };
+    let qual_enum = qual.and_then(|q| vc.module_env.get_enum(q));
     for enum_def in vc.module_env.enums.values() {
+        if let Some(qe) = qual_enum {
+            if enum_def.name != qe.name {
+                continue;
+            }
+        }
         let Some(idx) = enum_def
             .variants
             .iter()
@@ -239,14 +253,21 @@ pub(crate) fn variant_selector_apply<'a>(
 
 /// All enums declaring `variant_name`, sorted by name — `module_env.enums`
 /// is a `HashMap`, so iteration order is not stable between processes.
+/// `E::V` → `V`; bare `V` → `V`. `EnumVariant.name` stores the leaf segment
+/// only, so qualified pattern names (`Mine::Cons`) compare by the leaf.
+pub(crate) fn variant_leaf(variant_name: &str) -> &str {
+    variant_name.rsplit("::").next().unwrap_or(variant_name)
+}
+
 pub(crate) fn variant_owners<'m>(
     module_env: &'m ModuleEnv,
     variant_name: &str,
 ) -> Vec<&'m EnumDef> {
+    let leaf = variant_leaf(variant_name);
     let mut owners: Vec<_> = module_env
         .enums
         .values()
-        .filter(|e| e.variants.iter().any(|v| v.name == variant_name))
+        .filter(|e| e.variants.iter().any(|v| v.name == leaf))
         .collect();
     owners.sort_by(|a, b| a.name.cmp(&b.name));
     owners
@@ -266,12 +287,15 @@ pub(crate) fn type_name_base(ty: &str) -> &str {
 /// `match result` on `-> IntList`) yields `Some("IntList")`.
 fn target_param_enum_name(vc: &VCtx, target: &Dynamic) -> Option<String> {
     let sym = target.as_int()?.decl().name();
-    // `__proj_{Enum}_{Variant}_{i}` — projector consts carry their enum
-    // name, so `match t` on a bound tail (`Cons(h, t)`) resolves the same
-    // enum the outer arm used. Enum/variant names may themselves contain
-    // `_`, so take the longest prefix that is a known enum.
+    // `__proj_{Enum}_{Variant}_{i}` — a bound field const's declared type
+    // is that variant's i-th field type (`Self` → the enum itself), so
+    // `match t` on a bound tail (`Cons(h, t)`) resolves the same enum the
+    // outer arm used, while `match m` on a field of a *different* enum
+    // type (`Outer::Wrap(m)`) resolves `Mine`, not `Outer`. Enum/variant
+    // names may themselves contain `_`, so take the longest prefix that is
+    // a known enum.
     if let Some(rest) = sym.strip_prefix("__proj_") {
-        if let Some((head, _idx)) = rest.rsplit_once('_') {
+        if let Some((head, idx)) = rest.rsplit_once('_') {
             let mut best: Option<usize> = None;
             for (pos, _) in head.match_indices('_') {
                 if vc.module_env.get_enum(&head[..pos]).is_some() {
@@ -279,7 +303,31 @@ fn target_param_enum_name(vc: &VCtx, target: &Dynamic) -> Option<String> {
                 }
             }
             if let Some(pos) = best {
-                return Some(head[..pos].to_string());
+                let enum_name = &head[..pos];
+                let variant_name = &head[pos + 1..];
+                // The const is a bound field — its declared type is the
+                // variant's i-th field type (`Self` → the enum itself), not
+                // the outer enum: `match m` on `Outer::Wrap(m)`'s `m`
+                // resolves `Wrap`'s field type, not `Outer`. A non-enum
+                // field means the const is not enum-typed at all.
+                if let (Some(edef), Ok(i)) =
+                    (vc.module_env.get_enum(enum_name), idx.parse::<usize>())
+                {
+                    if let Some(ft) = edef
+                        .variants
+                        .iter()
+                        .find(|v| v.name == variant_name)
+                        .and_then(|v| v.fields.get(i))
+                    {
+                        let resolved = if *ft == enum_name {
+                            enum_name.to_string()
+                        } else {
+                            vc.module_env.resolve_base_type(ft)
+                        };
+                        return vc.module_env.get_enum(&resolved).map(|e| e.name.clone());
+                    }
+                }
+                return Some(enum_name.to_string());
             }
         }
     }
@@ -294,6 +342,12 @@ fn target_param_enum_name(vc: &VCtx, target: &Dynamic) -> Option<String> {
     };
     if let Some(ty) = declared {
         return Some(type_name_base(ty).to_string());
+    }
+    // `let`-bound enum values record their inferred declared type in
+    // `local_enum_types` — `match e` after `let e = Mine::Cons(1)` resolves
+    // the same owner a declared parameter type would.
+    if let Some(local) = vc.local_enum_types.borrow().get(sym.as_str()) {
+        return Some(local.clone());
     }
     // Struct-field projections are seeded as `<binding>_<field>` consts
     // (e.g. `match th.t` on `th: Thermo` yields `th_t`), so the match
@@ -348,7 +402,7 @@ fn int_tag_sig(
     enum_def
         .variants
         .iter()
-        .position(|v| v.name == variant_name)
+        .position(|v| v.name == variant_leaf(variant_name))
         .map(|i| {
             (
                 i,
@@ -387,6 +441,51 @@ pub(crate) fn resolve_variant_owner<'a>(
     variant_name: &str,
     decl_hint: Option<&str>,
 ) -> MumeiResult<Option<&'a EnumDef>> {
+    // Qualified `E::V`: a qualifier naming a known enum pins the owner and
+    // must agree with the target's declared type — `match e { Other::V }`
+    // on `e: Mine` must not fall back to Mine's bare `V`. An unknown
+    // qualifier (module path etc.) resolves by the leaf name, as before.
+    if let Some((qual, leaf)) = variant_name.rsplit_once("::") {
+        if let Some(qual_enum) = vc.module_env.get_enum(qual) {
+            let declared = decl_hint
+                .map(str::to_string)
+                .into_iter()
+                .chain(target_param_enum_name(vc, target))
+                // A `Datatype`-sorted target's declared enum is the enum
+                // whose sort it carries — `target_param_enum_name` only
+                // recovers Int-sorted const names.
+                .chain(
+                    target
+                        .as_datatype()
+                        .and_then(|dt| {
+                            let tsort = dt.get_sort();
+                            vc.module_env.enums.values().find(|e| {
+                                enum_datatype_sort(vc, e).is_some_and(|s| s.sort == tsort)
+                            })
+                        })
+                        .map(|e| e.name.clone()),
+                );
+            for decl in declared {
+                if let Some(decl_enum) = vc.module_env.get_enum(&decl) {
+                    if decl_enum.name != qual_enum.name {
+                        return Err(MumeiError::verification(format!(
+                            "Match arm '{variant_name}' belongs to enum '{}' but the match target is declared as '{}'",
+                            qual_enum.name, decl_enum.name
+                        )));
+                    }
+                }
+            }
+            return if qual_enum.variants.iter().any(|v| v.name == leaf) {
+                Ok(Some(qual_enum))
+            } else {
+                Err(MumeiError::verification(format!(
+                    "Enum '{}' has no variant named '{leaf}'",
+                    qual_enum.name
+                )))
+            };
+        }
+        return resolve_variant_owner(vc, target, leaf, decl_hint);
+    }
     let owners = variant_owners(vc.module_env, variant_name);
     if owners.is_empty() {
         return Ok(None);
@@ -427,6 +526,90 @@ pub(crate) fn resolve_variant_owner<'a>(
     )))
 }
 
+/// Declared enum type of an expression whose value is being bound
+/// (`let e = …` / `e = …`), inferred statically from the AST: qualified
+/// constructor calls `E::V(..)` and unit constructors `E::V`, variables
+/// already recorded in `local_enum_types` (or declared enum parameters),
+/// `if`/nested blocks whose arms agree, `match` whose arm bodies agree, and
+/// calls to atoms declared to return an enum. Lets `match e` on a `let`-
+/// bound enum resolve variant owners the same way `match m` on `m: Mine`
+/// does — without this the owner set is ambiguous across prelude enums.
+pub(crate) fn infer_expr_enum_name(vc: &VCtx, expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Variable(v) => vc
+            .local_enum_types
+            .borrow()
+            .get(v.as_str())
+            .cloned()
+            .or_else(|| {
+                vc.current_atom
+                    .and_then(|atom| {
+                        atom.params
+                            .iter()
+                            .find(|p| p.name == *v)
+                            .and_then(|p| p.type_name.as_deref())
+                    })
+                    .map(|t| type_name_base(t).to_string())
+                    .filter(|t| vc.module_env.get_enum(t).is_some())
+            }),
+        Expr::Call(name, _) => {
+            if let Some((enum_name, variant)) = name.split_once("::") {
+                vc.module_env
+                    .get_enum(enum_name)
+                    .filter(|e| e.variants.iter().any(|v| v.name == variant))
+                    .map(|e| e.name.clone())
+            } else {
+                vc.module_env
+                    .get_atom(name)
+                    .and_then(|a| a.return_type.as_deref())
+                    .map(|t| type_name_base(t).to_string())
+                    .filter(|t| vc.module_env.get_enum(t).is_some())
+            }
+        }
+        Expr::FieldAccess(inner, field) => match inner.as_ref() {
+            // `E.V` unit constructor or `value.field` — only the qualified
+            // unit-constructor form names an enum.
+            Expr::Variable(base) => vc
+                .module_env
+                .get_enum(base)
+                .filter(|e| e.variants.iter().any(|v| v.name == *field))
+                .map(|e| e.name.clone()),
+            _ => None,
+        },
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let t = infer_stmt_enum_name(vc, then_branch);
+            let e = infer_stmt_enum_name(vc, else_branch);
+            if t.is_some() && t == e {
+                t
+            } else {
+                None
+            }
+        }
+        Expr::Match { arms, .. } => {
+            let mut names = arms
+                .iter()
+                .filter_map(|arm| infer_stmt_enum_name(vc, &arm.body));
+            let first = names.next()?;
+            names.all(|n| n == first).then_some(first)
+        }
+        _ => None,
+    }
+}
+
+/// The enum type produced by a statement when it ends in a value expression
+/// (`Stmt::Expr`) or a block whose tail does.
+fn infer_stmt_enum_name(vc: &VCtx, stmt: &Stmt) -> Option<String> {
+    match stmt {
+        Stmt::Expr(e, _) => infer_expr_enum_name(vc, e),
+        Stmt::Block(stmts, _) => stmts.last().and_then(|s| infer_stmt_enum_name(vc, s)),
+        _ => None,
+    }
+}
+
 /// `resolve_variant_owner` minus the declared-parameter-type preference,
 /// for callers with no verification context (fragment classification):
 /// returns the deterministic owner — sole owner, or any owner when all
@@ -437,6 +620,12 @@ pub(crate) fn resolve_variant_owner_deterministic<'m>(
     module_env: &'m ModuleEnv,
     variant_name: &str,
 ) -> Option<&'m EnumDef> {
+    if let Some((qual, leaf)) = variant_name.rsplit_once("::") {
+        if let Some(qe) = module_env.get_enum(qual) {
+            return qe.variants.iter().any(|v| v.name == leaf).then_some(qe);
+        }
+        return resolve_variant_owner_deterministic(module_env, leaf);
+    }
     let owners = variant_owners(module_env, variant_name);
     if owners.len() == 1 {
         return Some(owners[0]);

@@ -283,6 +283,33 @@ impl ModuleEnv {
         variant_name: &str,
         decl_hint: Option<&str>,
     ) -> MumeiResult<Option<&EnumDef>> {
+        // Qualified `E::V`: a qualifier naming a known enum pins the owner
+        // and must agree with `decl_hint` — `match e { Other::V }` on an
+        // `e: Mine` must not silently pick Mine's bare `V`. An unknown
+        // qualifier resolves by the leaf name, as before.
+        if let Some((qual, leaf)) = variant_name.rsplit_once("::") {
+            if let Some(qual_enum) = self.get_enum(qual) {
+                if let Some(hint) = decl_hint {
+                    if let Some(hint_enum) = self.get_enum(hint) {
+                        if hint_enum.name != qual_enum.name {
+                            return Err(MumeiError::verification(format!(
+                                "Match arm '{variant_name}' belongs to enum '{}' but the match target is declared as '{}'",
+                                qual_enum.name, hint_enum.name
+                            )));
+                        }
+                    }
+                }
+                return if qual_enum.variants.iter().any(|v| v.name == leaf) {
+                    Ok(Some(qual_enum))
+                } else {
+                    Err(MumeiError::verification(format!(
+                        "Enum '{}' has no variant named '{leaf}'",
+                        qual_enum.name
+                    )))
+                };
+            }
+            return self.resolve_variant_owner_by_hint(leaf, decl_hint);
+        }
         let mut owners: Vec<&EnumDef> = self
             .enums
             .values()

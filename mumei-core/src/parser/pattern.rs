@@ -36,6 +36,23 @@ pub fn parse_pattern(ctx: &mut ParseContext) -> Pattern {
             ctx.advance();
 
             if name.chars().next().is_some_and(|c| c.is_uppercase()) {
+                // `Qual::Variant` — fold `::`-separated path segments into
+                // the variant name so resolvers can pin the owning enum by
+                // its qualifier. Previously `Mine::Cons` parsed as a dead
+                // `Variant{"Mine"}` arm plus a bare `Cons` arm, silently
+                // dropping the qualifier.
+                let mut name = name;
+                while ctx.peek() == &Token::ColonColon {
+                    if let Some(Token::Ident(seg)) = ctx.peek_at(1) {
+                        let seg = seg.clone();
+                        ctx.advance(); // ::
+                        ctx.advance(); // segment
+                        name.push_str("::");
+                        name.push_str(&seg);
+                    } else {
+                        break;
+                    }
+                }
                 // Uppercase → Variant pattern
                 if ctx.peek() == &Token::LParen {
                     ctx.advance(); // (
