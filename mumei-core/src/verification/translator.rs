@@ -15,7 +15,7 @@ pub(crate) use constraints::{
 pub use context::DEFAULT_CONSTRAINT_BUDGET;
 pub(crate) use context::{
     check_constraint_budget, profile_solver_assertion, profile_solver_check, profiler_checkpoint,
-    VCtx,
+    LocalLambda, VCtx,
 };
 
 pub(crate) use expr::{

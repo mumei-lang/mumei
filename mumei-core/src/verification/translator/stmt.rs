@@ -145,6 +145,11 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
                 _ => old.clone(),
             };
             env.insert(name.clone(), fresh.clone());
+            // Havoc forgets the variable's value, so a lambda bound before
+            // the loop must not keep answering `name(args)` inside the
+            // induction step — drop the binding and let the call fail
+            // closed as an unknown function instead.
+            vc.local_lambdas.borrow_mut().remove(name);
             // A tracked array's `__z3_arr_`/`len_` slots must havoc with the
             // binding — otherwise `a[i]` reads the pre-loop store chain.
             let arr_key = format!("__z3_arr_{name}");
@@ -179,6 +184,29 @@ fn record_binding_enum_type(vc: &VCtx, var: &str, value: &Expr) {
     }
 }
 
+/// Record (or clear) the lambda bound by a `let`/`assign` so a later
+/// `var(args)` / `call(var, args)` can inline the body. `let g = f`
+/// where `f` is lambda-bound aliases the binding; rebinding to any other
+/// value drops the entry so a stale lambda never answers a call issued
+/// to a re-bound name.
+fn record_binding_lambda(vc: &VCtx, var: &str, value: &Expr) {
+    let bound = match value {
+        Expr::Lambda { .. } => Some(std::rc::Rc::new(LocalLambda::Closure {
+            expr: value.clone(),
+            captured: vc.local_lambdas.borrow().clone(),
+        })),
+        Expr::Variable(src) => vc.local_lambdas.borrow().get(src).cloned(),
+        _ => None,
+    };
+    match bound {
+        Some(lambda) => vc
+            .local_lambdas
+            .borrow_mut()
+            .insert(var.to_string(), lambda),
+        None => vc.local_lambdas.borrow_mut().remove(var),
+    };
+}
+
 /// `let a = arr` / `a = arr` where `arr` is an array name: alias the backing
 /// Z3 array const and `len_<name>` symbol so `a[i]` accesses and stores share
 /// `arr`'s constraint state instead of starting over with an unconstrained
@@ -195,6 +223,7 @@ pub(crate) fn stmt_to_z3<'a>(
         Stmt::Let { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             record_binding_enum_type(vc, var, value);
+            record_binding_lambda(vc, var, value);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
             wire_array_slots(vc, var, Some(value), &val, env);
@@ -204,6 +233,7 @@ pub(crate) fn stmt_to_z3<'a>(
         Stmt::Assign { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             record_binding_enum_type(vc, var, value);
+            record_binding_lambda(vc, var, value);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
             wire_array_slots(vc, var, Some(value), &val, env);
@@ -303,6 +333,7 @@ pub(crate) fn stmt_to_z3<'a>(
                 {
                     let env_snapshot = env.clone();
                     let types_snapshot = vc.local_enum_types.borrow().clone();
+                    let lambdas_snapshot = vc.local_lambdas.borrow().clone();
                     let mut step_env = env.clone();
                     havoc_vars(vc, &mut step_env, &modified);
                     let marks = obligation_marks(vc);
@@ -332,12 +363,14 @@ pub(crate) fn stmt_to_z3<'a>(
                     solver.pop(1);
                     *env = env_snapshot;
                     *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
+                    *vc.local_lambdas.borrow_mut() = lambdas_snapshot.clone();
                 }
 
                 // Termination Check — again under havoced pre-state.
                 if let Some(dec_expr) = decreases {
                     let env_snapshot = env.clone();
                     let types_snapshot = vc.local_enum_types.borrow().clone();
+                    let lambdas_snapshot = vc.local_lambdas.borrow().clone();
                     let mut term_env = env.clone();
                     havoc_vars(vc, &mut term_env, &modified);
                     let marks = obligation_marks(vc);
@@ -364,6 +397,7 @@ pub(crate) fn stmt_to_z3<'a>(
                         solver.pop(1);
                         *env = env_snapshot;
                         *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
+                        *vc.local_lambdas.borrow_mut() = lambdas_snapshot.clone();
                         return Err(MumeiError::verification(
                             "Termination check failed: decreases expression may be negative",
                         ));
@@ -382,6 +416,7 @@ pub(crate) fn stmt_to_z3<'a>(
                         solver.pop(1);
                         *env = env_snapshot;
                         *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
+                        *vc.local_lambdas.borrow_mut() = lambdas_snapshot.clone();
                         return Err(MumeiError::verification(
                             "Termination check failed: decreases expression does not strictly decrease"
                         ));
@@ -389,6 +424,7 @@ pub(crate) fn stmt_to_z3<'a>(
                     solver.pop(1);
                     *env = env_snapshot;
                     *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
+                    *vc.local_lambdas.borrow_mut() = lambdas_snapshot.clone();
                 }
 
                 // Post-loop state: havoc the loop-carried vars once more and

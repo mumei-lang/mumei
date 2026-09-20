@@ -890,6 +890,16 @@ pub(crate) fn expr_to_z3<'a>(
                     }
                 }
                 _ => {
+                    // `let f = |params| body; f(args)` — the callee name
+                    // resolves to a `let`/`assign`-bound lambda: inline the
+                    // body with each formal bound to the evaluated actual
+                    // (call-by-value, a `let p_i = arg_i in body` step). A
+                    // local binding shadows a same-named atom, matching how
+                    // `Expr::Variable` shadows env entries.
+                    let local_lambda = vc.local_lambdas.borrow().get(name).cloned();
+                    if let Some(lambda) = local_lambda {
+                        return apply_local_lambda(vc, name, &lambda, args, env, solver_opt);
+                    }
                     // ユーザー定義関数呼び出し: 契約による検証（Compositional Verification）
                     // 呼び出し先の requires を現在のコンテキストで証明し、
                     // 成功すれば ensures を事実として追加する
@@ -1799,18 +1809,22 @@ pub(crate) fn expr_to_z3<'a>(
             // branches agree on survive (an if-local `let` must not leak its
             // inferred type onto an outer binding).
             let types_before = vc.local_enum_types.borrow().clone();
+            let lambdas_before = vc.local_lambdas.borrow().clone();
             vc.path_cond_stack.borrow_mut().push(c.clone());
             let mut then_env = env.clone();
             let t = stmt_to_z3(vc, then_branch, &mut then_env, solver_opt);
             vc.path_cond_stack.borrow_mut().pop();
             let t = t?;
             let then_types = vc.local_enum_types.borrow().clone();
+            let then_lambdas = vc.local_lambdas.borrow().clone();
             *vc.local_enum_types.borrow_mut() = types_before.clone();
+            *vc.local_lambdas.borrow_mut() = lambdas_before.clone();
             vc.path_cond_stack.borrow_mut().push(c.not());
             let mut else_env = env.clone();
             let e = stmt_to_z3(vc, else_branch, &mut else_env, solver_opt);
             vc.path_cond_stack.borrow_mut().pop();
             let else_types = vc.local_enum_types.borrow().clone();
+            let else_lambdas = vc.local_lambdas.borrow().clone();
             let mut merged = types_before;
             merged.retain(|k, v| then_types.get(k) == Some(v) && else_types.get(k) == Some(v));
             for (k, v) in then_types.iter() {
@@ -1819,6 +1833,30 @@ pub(crate) fn expr_to_z3<'a>(
                 }
             }
             *vc.local_enum_types.borrow_mut() = merged;
+            // Same merge rule as the value env: a binding only on one
+            // branch keeps that side's (branch-local bindings leak, like
+            // `merge_branch_envs`), while a name bound on both survives
+            // only when both sides bound it to the *same* lambda — an
+            // `ite` over two different closures has no Z3 encoding, so a
+            // disagreeing rebind must drop the entry (a post-branch call
+            // then fails closed as an unknown function rather than
+            // picking one side's body).
+            let mut merged_lambdas = then_lambdas;
+            let mut conflicting = std::collections::HashSet::new();
+            merged_lambdas.retain(|k, v| match else_lambdas.get(k) {
+                Some(else_lambda) if same_local_lambda(v, else_lambda) => true,
+                Some(_) => {
+                    conflicting.insert(k.clone());
+                    false
+                }
+                None => true,
+            });
+            for (k, v) in else_lambdas.iter() {
+                if !merged_lambdas.contains_key(k) && !conflicting.contains(k) {
+                    merged_lambdas.insert(k.clone(), v.clone());
+                }
+            }
+            *vc.local_lambdas.borrow_mut() = merged_lambdas;
             let (t, e) = unify_branch_sorts(t, e?)?;
             // Branches ran on isolated env copies — merge their writes with
             // `ite(c, then, else)` per variable. Running both on the shared
@@ -2026,8 +2064,13 @@ pub(crate) fn expr_to_z3<'a>(
             // back under each arm's condition — previously they were dropped
             // with the per-arm env clone, so post-match code saw stale values.
             let mut merged_arm_env: Option<Env> = None;
+            // Lambda `let`s inside an arm body stay arm-local — restore the
+            // map before each arm and after the match, mirroring the
+            // per-arm `env.clone()` scoping below.
+            let lambdas_before = vc.local_lambdas.borrow().clone();
 
             for arm in arms.iter().rev() {
+                *vc.local_lambdas.borrow_mut() = lambdas_before.clone();
                 let mut arm_env = env.clone();
 
                 // Names bound by the arm's pattern — or by `let`s anywhere
@@ -2115,6 +2158,7 @@ pub(crate) fn expr_to_z3<'a>(
             if let Some(merged_env) = merged_arm_env {
                 *env = merged_env;
             }
+            *vc.local_lambdas.borrow_mut() = lambdas_before;
 
             result.ok_or_else(|| MumeiError::verification("Match expression has no arms"))
         }
@@ -2493,6 +2537,22 @@ pub(crate) fn expr_to_z3<'a>(
             // callee が AtomRef の場合、参照先の atom の契約を展開して検証する。
             // - requires を呼び出し元のコンテキストで検証
             // - ensures を事実として solver に追加
+
+            // `call(f, …)` where `f` is a `let`-bound lambda — or an inline
+            // `call(|a| …, …)` — inlines the lambda body the same way a
+            // direct `f(…)` does. A lambda-bound variable shadows the
+            // atom_ref/param-contract resolution below.
+            let lambda_callee = match callee.as_ref() {
+                Expr::Variable(var) => vc.local_lambdas.borrow().get(var).cloned(),
+                Expr::Lambda { .. } => Some(std::rc::Rc::new(LocalLambda::Closure {
+                    expr: callee.as_ref().clone(),
+                    captured: vc.local_lambdas.borrow().clone(),
+                })),
+                _ => None,
+            };
+            if let Some(lambda) = lambda_callee {
+                return apply_local_lambda(vc, "call", &lambda, args, env, solver_opt);
+            }
 
             // callee を評価
             let _callee_val = expr_to_z3(vc, callee, env, solver_opt)?;
@@ -2915,8 +2975,23 @@ pub(crate) fn expr_to_z3<'a>(
                 lambda_env.insert(p.name.clone(), p_sym.into());
             }
 
+            // A param shadows a same-named outer lambda binding for the
+            // body's duration, and lambda `let`s bound inside the body
+            // stay body-local — both fall out of restoring the map.
+            // Params bind as `Opaque` rather than dropping outright so a
+            // body like `|f, x| f(x)` still translates — the callee shape
+            // is only known once a call site supplies a real closure.
+            let saved_lambdas = vc.local_lambdas.borrow().clone();
+            {
+                let mut map = vc.local_lambdas.borrow_mut();
+                for p in params {
+                    map.insert(p.name.clone(), std::rc::Rc::new(LocalLambda::Opaque));
+                }
+            }
             // Verify the lambda body in the sub-environment
-            let _body_val = stmt_to_z3(vc, body, &mut lambda_env, solver_opt)?;
+            let body_result = stmt_to_z3(vc, body, &mut lambda_env, solver_opt);
+            *vc.local_lambdas.borrow_mut() = saved_lambdas;
+            let _body_val = body_result?;
 
             Ok(lambda_sym.into())
         }
@@ -2936,4 +3011,110 @@ pub(crate) fn expr_to_z3<'a>(
             Ok(recv_sym.into())
         }
     }
+}
+
+/// Binding identity for two `LocalLambda` entries — the `if`/`else`
+/// merge keeps a name bound on both sides only when both left the *same*
+/// binding in place (untouched, or re-aliased to the same `Rc` — e.g.
+/// `let g = f` shares `f`'s allocation); an `ite` over two different
+/// closures has no Z3 encoding, and textually identical lambdas written
+/// in both branches are still distinct bindings, so they drop.
+fn same_local_lambda(a: &std::rc::Rc<LocalLambda>, b: &std::rc::Rc<LocalLambda>) -> bool {
+    std::rc::Rc::ptr_eq(a, b)
+}
+
+/// Apply a `let`/`assign`-bound lambda to call-site arguments:
+/// `f(args)` and `call(f, args)` evaluate the lambda's `body` with each
+/// formal parameter bound to the evaluated actual — the call is the
+/// let-in expression `let p_i = arg_i in body`.
+///
+/// Free lambda-variable names inside the body resolve against
+/// `lambda.captured` — the scope live where the lambda was bound — not
+/// the call-site `local_lambdas`, so a same-named later rebind cannot
+/// redirect calls the body makes. Parameter names are removed from that
+/// scope so a param like `|g| g(1)` shadows an outer lambda `g`.
+/// `local_lambdas`, `local_enum_types`, and `local_array_elem_types`
+/// are all restored afterwards: `let`s inside the body stay call-local
+/// (they land in the cloned `call_env`, but the type/lambda side tables
+/// are shared and would otherwise leak).
+fn apply_local_lambda<'a>(
+    vc: &VCtx<'a>,
+    call_name: &str,
+    lambda: &LocalLambda,
+    args: &[Expr],
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> DynResult<'a> {
+    let LocalLambda::Closure { expr, captured } = lambda else {
+        // `Opaque` — a lambda param called inside its own body while the
+        // body is being translated at binding time. The call's arity and
+        // return type are unknowable until a real closure reaches the
+        // param at a call site, so yield a fresh symbolic int and let the
+        // check continue (its value is discarded anyway).
+        static OPAQUE_CALL_COUNTER: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let call_id = OPAQUE_CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        return Ok(Int::new_const(
+            vc.ctx,
+            format!("__lam_param_call_{}_{}", call_name, call_id).as_str(),
+        )
+        .into());
+    };
+    let Expr::Lambda { params, body, .. } = expr else {
+        return Err(MumeiError::verification(format!(
+            "Call to '{call_name}': binding is not a lambda"
+        )));
+    };
+    if params.len() != args.len() {
+        return Err(MumeiError::verification(format!(
+            "Call to lambda '{call_name}' takes {} argument(s), got {}",
+            params.len(),
+            args.len()
+        )));
+    }
+
+    // Arguments evaluate in the caller's env (call-by-value) before the
+    // param bindings overwrite anything.
+    let mut arg_vals = Vec::with_capacity(args.len());
+    for arg in args {
+        arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
+    }
+
+    let mut call_env = env.clone();
+    for (i, param) in params.iter().enumerate() {
+        call_env.insert(param.name.clone(), arg_vals[i].clone());
+        alias_struct_fields(&mut call_env, &param.name, &arg_vals[i]);
+        wire_array_slots(vc, &param.name, args.get(i), &arg_vals[i], &mut call_env);
+    }
+
+    let mut call_lambdas = captured.clone();
+    {
+        let caller_lambdas = vc.local_lambdas.borrow();
+        for (i, param) in params.iter().enumerate() {
+            // A param shadows any same-named outer lambda; when the actual
+            // is itself a lambda (a bound name or a literal), the param
+            // re-binds to it so `apply(f, x)`-style higher-order calls keep
+            // a real body behind `f(…)` inside the callee.
+            call_lambdas.remove(&param.name);
+            let passed = match args.get(i) {
+                Some(Expr::Variable(src)) => caller_lambdas.get(src).cloned(),
+                Some(Expr::Lambda { .. }) => Some(std::rc::Rc::new(LocalLambda::Closure {
+                    expr: args[i].clone(),
+                    captured: caller_lambdas.clone(),
+                })),
+                _ => None,
+            };
+            if let Some(passed) = passed {
+                call_lambdas.insert(param.name.clone(), passed);
+            }
+        }
+    }
+    let saved_lambdas = std::mem::replace(&mut *vc.local_lambdas.borrow_mut(), call_lambdas);
+    let enum_types_before = vc.local_enum_types.borrow().clone();
+    let elem_types_before = vc.local_array_elem_types.borrow().clone();
+    let result = stmt_to_z3(vc, body, &mut call_env, solver_opt);
+    *vc.local_lambdas.borrow_mut() = saved_lambdas;
+    *vc.local_enum_types.borrow_mut() = enum_types_before;
+    *vc.local_array_elem_types.borrow_mut() = elem_types_before;
+    result
 }

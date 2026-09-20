@@ -1149,6 +1149,7 @@ fn test_constraint_budget_exceeded() {
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
         bitvec_i64_global: false,
     };
 
@@ -1192,6 +1193,7 @@ fn test_constraint_budget_no_limit() {
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
         bitvec_i64_global: false,
     };
 
@@ -2008,6 +2010,7 @@ fn test_subsumption_check_holds_with_requires() {
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2085,6 +2088,7 @@ fn test_subsumption_check_fails_without_requires() {
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2165,6 +2169,7 @@ fn test_subsumption_check_crossed_param_names() {
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2252,6 +2257,7 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2321,6 +2327,7 @@ fn test_subsumption_check_concrete_true_ensures_warns() {
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2782,6 +2789,7 @@ fn test_expr_to_z3_true_false_are_bool() {
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -2848,6 +2856,7 @@ fn test_expr_to_z3_pow_constant_folds_full_precision() {
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -2907,6 +2916,7 @@ fn test_tuple_result_indexing_uses_typed_components() {
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -3066,6 +3076,7 @@ fn test_chained_comparison_normalizes_before_lowering() {
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();

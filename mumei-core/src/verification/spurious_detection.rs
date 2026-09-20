@@ -26,12 +26,34 @@ pub struct UnusedHypothesisReport {
     pub minimal_constraint_set: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Value produced by replaying a body under concrete counterexample
+/// inputs. `Lambda` is the closure a `let f = |…| …` binding produces:
+/// its param names and body plus the env captured at the binding site,
+/// so `f(args)` can be replayed just like the Z3 translator inlines it.
+#[derive(Debug, Clone)]
 enum EvalValue {
     Int(i64),
     Float(f64),
     Bool(bool),
     String(String),
+    Lambda {
+        params: Vec<String>,
+        body: Box<Stmt>,
+        env: EvalEnv,
+    },
+}
+
+impl PartialEq for EvalValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (EvalValue::Int(a), EvalValue::Int(b)) => a == b,
+            (EvalValue::Float(a), EvalValue::Float(b)) => a == b,
+            (EvalValue::Bool(a), EvalValue::Bool(b)) => a == b,
+            (EvalValue::String(a), EvalValue::String(b)) => a == b,
+            // Two closures are never proven equal for replay purposes.
+            _ => false,
+        }
+    }
 }
 
 /// A concrete counterexample value extracted from a Z3 model.
@@ -139,6 +161,14 @@ pub fn validate_counterexample(
                 "string result is not replayable in Z3 integer model".to_string(),
             );
         }
+        Ok(EvalValue::Lambda { .. }) => {
+            return invalid_counterexample_result(
+                atom,
+                symbol_provenance,
+                false,
+                "lambda result is not replayable in Z3 integer model".to_string(),
+            );
+        }
         Err(err) => {
             return invalid_counterexample_result(
                 atom,
@@ -200,16 +230,141 @@ pub fn detect_uninterpreted_symbols(
     let mut symbols = Vec::new();
     let mut seen = HashSet::new();
 
+    let body = parse_body_expr(&atom.body_expr);
+    // `let f = |…| …` binds a real body — `f(…)`/`call(f, …)` is
+    // interpreted, so the name must not be flagged as uninterpreted.
+    let lambda_names = collect_lambda_binding_names(&body);
     for expr in [
         parse_expression(&atom.requires),
         parse_expression(&atom.ensures),
     ] {
-        collect_expr_symbols(&expr, module_env, &mut symbols, &mut seen);
+        collect_expr_symbols(&expr, module_env, &mut symbols, &mut seen, &lambda_names);
     }
-    let body = parse_body_expr(&atom.body_expr);
-    collect_stmt_symbols(&body, module_env, &mut symbols, &mut seen);
+    collect_stmt_symbols(&body, module_env, &mut symbols, &mut seen, &lambda_names);
 
     symbols
+}
+
+/// Names `let`/`assign`-bound to a lambda literal (`let f = |…| …`) or
+/// aliased from one (`let g = f`), walked in binding order. Used to keep
+/// indirect calls out of the uninterpreted-symbol report — the call has
+/// a real body behind it.
+fn collect_lambda_binding_names(stmt: &Stmt) -> HashSet<String> {
+    let mut names = HashSet::new();
+    collect_lambda_binding_names_stmt(stmt, &mut names);
+    names
+}
+
+fn collect_lambda_binding_names_stmt(stmt: &Stmt, out: &mut HashSet<String>) {
+    match stmt {
+        Stmt::Let { var, value, .. } | Stmt::Assign { var, value, .. } => {
+            match value.as_ref() {
+                Expr::Lambda { .. } => {
+                    out.insert(var.clone());
+                }
+                Expr::Variable(src) if out.contains(src) => {
+                    out.insert(var.clone());
+                }
+                _ => {
+                    // Rebinding to a non-lambda clears the binding — a
+                    // `f(…)` issued against the new value is uninterpreted.
+                    out.remove(var);
+                }
+            }
+            collect_lambda_binding_names_expr(value, out);
+        }
+        Stmt::Block(stmts, _)
+        | Stmt::TaskGroup {
+            children: stmts, ..
+        } => {
+            for stmt in stmts {
+                collect_lambda_binding_names_stmt(stmt, out);
+            }
+        }
+        Stmt::Expr(expr, _) => collect_lambda_binding_names_expr(expr, out),
+        Stmt::ArrayStore { index, value, .. } => {
+            collect_lambda_binding_names_expr(index, out);
+            collect_lambda_binding_names_expr(value, out);
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            collect_lambda_binding_names_expr(cond, out);
+            collect_lambda_binding_names_expr(invariant, out);
+            if let Some(decreases) = decreases {
+                collect_lambda_binding_names_expr(decreases, out);
+            }
+            collect_lambda_binding_names_stmt(body, out);
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            collect_lambda_binding_names_stmt(body, out)
+        }
+        Stmt::Cancel { .. } => {}
+    }
+}
+
+fn collect_lambda_binding_names_expr(expr: &Expr, out: &mut HashSet<String>) {
+    match expr {
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_lambda_binding_names_expr(cond, out);
+            collect_lambda_binding_names_stmt(then_branch, out);
+            collect_lambda_binding_names_stmt(else_branch, out);
+        }
+        Expr::Match { target, arms } => {
+            collect_lambda_binding_names_expr(target, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_lambda_binding_names_expr(guard, out);
+                }
+                collect_lambda_binding_names_stmt(&arm.body, out);
+            }
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => {
+            collect_lambda_binding_names_stmt(body, out)
+        }
+        Expr::Await { expr } | Expr::FieldAccess(expr, _) | Expr::ChanRecv { channel: expr } => {
+            collect_lambda_binding_names_expr(expr, out)
+        }
+        Expr::BinaryOp(l, _, r) => {
+            collect_lambda_binding_names_expr(l, out);
+            collect_lambda_binding_names_expr(r, out);
+        }
+        Expr::Call(_, args) | Expr::Perform { args, .. } => {
+            for arg in args {
+                collect_lambda_binding_names_expr(arg, out);
+            }
+        }
+        Expr::CallRef { callee, args } => {
+            collect_lambda_binding_names_expr(callee, out);
+            for arg in args {
+                collect_lambda_binding_names_expr(arg, out);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_lambda_binding_names_expr(value, out);
+            }
+        }
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_lambda_binding_names_expr(element, out);
+            }
+        }
+        Expr::ArrayAccess(_, index) => collect_lambda_binding_names_expr(index, out),
+        Expr::ChanSend { channel, value } => {
+            collect_lambda_binding_names_expr(channel, out);
+            collect_lambda_binding_names_expr(value, out);
+        }
+        _ => {}
+    }
 }
 
 pub fn detect_unused_hypotheses(
@@ -279,7 +434,9 @@ fn eval_bool_clause(
         EvalValue::Bool(value) => Ok(value),
         EvalValue::Int(value) => Ok(value != 0),
         EvalValue::Float(value) => Ok(value != 0.0),
-        EvalValue::String(_) => Err("string clause cannot be evaluated as bool".to_string()),
+        EvalValue::String(_) | EvalValue::Lambda { .. } => {
+            Err("non-scalar clause cannot be evaluated as bool".to_string())
+        }
     }
 }
 
@@ -293,9 +450,12 @@ fn eval_stmt(
         Stmt::Let { var, value, .. } | Stmt::Assign { var, value, .. } => {
             let eval = eval_expr(value, env, module_env, depth)?;
             match eval {
-                EvalValue::Int(_) | EvalValue::Float(_) | EvalValue::Bool(_) => {
-                    env.insert(var.clone(), eval.clone());
-                    Ok(eval)
+                scalar @ (EvalValue::Int(_)
+                | EvalValue::Float(_)
+                | EvalValue::Bool(_)
+                | EvalValue::Lambda { .. }) => {
+                    env.insert(var.clone(), scalar.clone());
+                    Ok(scalar)
                 }
                 EvalValue::String(_) => Err(format!("{} is not a scalar binding", var)),
             }
@@ -358,9 +518,35 @@ fn eval_expr(
                 eval_stmt(then_branch, env, module_env, depth)
             }
             EvalValue::Float(_) => eval_stmt(else_branch, env, module_env, depth),
-            EvalValue::String(_) => Err("if condition is not boolean".to_string()),
+            EvalValue::String(_) | EvalValue::Lambda { .. } => {
+                Err("if condition is not boolean".to_string())
+            }
         },
-        Expr::Call(name, args) => eval_atom_call(name, args, env, module_env, depth + 1),
+        Expr::Call(name, args) => {
+            // `let f = |…| …; f(args)` — the call replays by binding the
+            // params to the concrete args inside the lambda's captured env,
+            // mirroring the translator's apply_local_lambda.
+            let lambda = match env.get(name) {
+                Some(lambda @ EvalValue::Lambda { .. }) => Some(lambda.clone()),
+                _ => None,
+            };
+            match lambda {
+                Some(lambda) => eval_lambda_call(name, &lambda, args, env, module_env, depth + 1),
+                None => eval_atom_call(name, args, env, module_env, depth + 1),
+            }
+        }
+        Expr::Lambda { params, body, .. } => Ok(EvalValue::Lambda {
+            params: params.iter().map(|p| p.name.clone()).collect(),
+            body: body.clone(),
+            env: env.clone(),
+        }),
+        // `call(f, …)` / `call(|a| …, …)` — replay a lambda-valued callee.
+        Expr::CallRef { callee, args } => match eval_expr(callee, env, module_env, depth + 1)? {
+            lambda @ EvalValue::Lambda { .. } => {
+                eval_lambda_call("call", &lambda, args, env, module_env, depth + 1)
+            }
+            _ => Err("call_ref callee is not a replayable lambda".to_string()),
+        },
         Expr::ArrayAccess(_, _)
         | Expr::StructInit { .. }
         | Expr::FieldAccess(_, _)
@@ -368,14 +554,52 @@ fn eval_expr(
         | Expr::Async { .. }
         | Expr::Await { .. }
         | Expr::AtomRef { .. }
-        | Expr::CallRef { .. }
         | Expr::Perform { .. }
-        | Expr::Lambda { .. }
         | Expr::ChanSend { .. }
         | Expr::ChanRecv { .. } => {
             Err("expression form is not evaluable in counterexample replay".to_string())
         }
     }
+}
+
+/// Replay `lambda(args)` concretely: params bind inside the closure's
+/// captured env, then the body evaluates under it. Keeps counterexample
+/// validation honest for `f(3)`-style indirect calls.
+fn eval_lambda_call(
+    name: &str,
+    lambda: &EvalValue,
+    args: &[Expr],
+    env: &mut EvalEnv,
+    module_env: &ModuleEnv,
+    depth: usize,
+) -> Result<EvalValue, String> {
+    let EvalValue::Lambda {
+        params,
+        body,
+        env: captured,
+    } = lambda
+    else {
+        return Err(format!("'{name}' is not a replayable lambda"));
+    };
+    if params.len() != args.len() {
+        return Err(format!("arity mismatch for lambda '{name}'"));
+    }
+    let mut call_env = captured.clone();
+    for (param, arg) in params.iter().zip(args) {
+        let value = eval_expr(arg, env, module_env, depth)?;
+        match value {
+            scalar @ (EvalValue::Int(_)
+            | EvalValue::Float(_)
+            | EvalValue::Bool(_)
+            | EvalValue::Lambda { .. }) => {
+                call_env.insert(param.clone(), scalar);
+            }
+            EvalValue::String(_) => {
+                return Err(format!("non-scalar argument for lambda '{name}'"));
+            }
+        }
+    }
+    eval_stmt(body, &mut call_env, module_env, depth)
 }
 
 fn eval_atom_call(
@@ -398,7 +622,10 @@ fn eval_atom_call(
     let mut call_env: EvalEnv = HashMap::new();
     for (param, arg) in callee.params.iter().zip(args) {
         match eval_expr(arg, env, module_env, depth)? {
-            value @ (EvalValue::Int(_) | EvalValue::Float(_) | EvalValue::Bool(_)) => {
+            value @ (EvalValue::Int(_)
+            | EvalValue::Float(_)
+            | EvalValue::Bool(_)
+            | EvalValue::Lambda { .. }) => {
                 call_env.insert(param.name.clone(), value);
             }
             EvalValue::String(_) => return Err(format!("non-scalar argument for atom '{}'", name)),
@@ -411,7 +638,7 @@ fn eval_atom_call(
     let body = parse_body_expr(&callee.body_expr);
     let result = eval_stmt(&body, &mut call_env, module_env, depth)?;
     match &result {
-        EvalValue::Int(_) | EvalValue::Float(_) | EvalValue::Bool(_) => {
+        EvalValue::Int(_) | EvalValue::Float(_) | EvalValue::Bool(_) | EvalValue::Lambda { .. } => {
             call_env.insert("result".to_string(), result.clone());
         }
         EvalValue::String(_) => {}
@@ -518,7 +745,7 @@ fn value_as_f64(value: &EvalValue) -> Option<f64> {
     match value {
         EvalValue::Int(value) => Some(*value as f64),
         EvalValue::Float(value) => Some(*value),
-        EvalValue::Bool(_) | EvalValue::String(_) => None,
+        EvalValue::Bool(_) | EvalValue::String(_) | EvalValue::Lambda { .. } => None,
     }
 }
 
@@ -527,7 +754,7 @@ fn value_as_bool(value: &EvalValue) -> Option<bool> {
         EvalValue::Bool(value) => Some(*value),
         EvalValue::Int(value) => Some(*value != 0),
         EvalValue::Float(value) => Some(*value != 0.0),
-        EvalValue::String(_) => None,
+        EvalValue::String(_) | EvalValue::Lambda { .. } => None,
     }
 }
 
@@ -599,6 +826,7 @@ fn format_eval_value(value: &EvalValue) -> String {
         EvalValue::Float(value) => value.to_string(),
         EvalValue::Bool(value) => value.to_string(),
         EvalValue::String(value) => value.clone(),
+        EvalValue::Lambda { .. } => "<lambda>".to_string(),
     }
 }
 
@@ -628,6 +856,7 @@ fn collect_expr_symbols(
     module_env: &ModuleEnv,
     symbols: &mut Vec<SymbolProvenance>,
     seen: &mut HashSet<(String, String)>,
+    lambda_names: &HashSet<String>,
 ) {
     match expr {
         Expr::Call(name, args) => {
@@ -635,19 +864,21 @@ fn collect_expr_symbols(
                 if atom.trust_level == TrustLevel::Trusted {
                     push_symbol(symbols, seen, name, "trusted_atom", Some(atom.span.clone()));
                 }
-            } else if !is_translated_builtin(name) {
+            } else if !is_translated_builtin(name) && !lambda_names.contains(name) {
                 // Builtin calls the Z3 translator lowers directly (len, forall,
                 // string predicates, …) are interpreted, not uninterpreted —
                 // flagging them mislabels a genuine counterexample as spurious.
+                // The same holds for `let f = |…| …` callees: `f(…)` applies
+                // the bound lambda body.
                 push_symbol(symbols, seen, name, "uninterpreted_function", None);
             }
             for arg in args {
-                collect_expr_symbols(arg, module_env, symbols, seen);
+                collect_expr_symbols(arg, module_env, symbols, seen, lambda_names);
             }
         }
         Expr::ArrayLit(elements) => {
             for element in elements {
-                collect_expr_symbols(element, module_env, symbols, seen);
+                collect_expr_symbols(element, module_env, symbols, seen, lambda_names);
             }
         }
         Expr::AtomRef { name } => {
@@ -660,56 +891,69 @@ fn collect_expr_symbols(
             }
         }
         Expr::CallRef { callee, args } => {
-            push_symbol(symbols, seen, "call_ref", "uninterpreted_function", None);
-            collect_expr_symbols(callee, module_env, symbols, seen);
+            let lambda_callee = match callee.as_ref() {
+                Expr::Variable(var) => lambda_names.contains(var),
+                Expr::Lambda { .. } => true,
+                _ => false,
+            };
+            if !lambda_callee {
+                push_symbol(symbols, seen, "call_ref", "uninterpreted_function", None);
+            }
+            collect_expr_symbols(callee, module_env, symbols, seen, lambda_names);
             for arg in args {
-                collect_expr_symbols(arg, module_env, symbols, seen);
+                collect_expr_symbols(arg, module_env, symbols, seen, lambda_names);
             }
         }
         Expr::BinaryOp(left, _, right) => {
-            collect_expr_symbols(left, module_env, symbols, seen);
-            collect_expr_symbols(right, module_env, symbols, seen);
+            collect_expr_symbols(left, module_env, symbols, seen, lambda_names);
+            collect_expr_symbols(right, module_env, symbols, seen, lambda_names);
         }
         Expr::IfThenElse {
             cond,
             then_branch,
             else_branch,
         } => {
-            collect_expr_symbols(cond, module_env, symbols, seen);
-            collect_stmt_symbols(then_branch, module_env, symbols, seen);
-            collect_stmt_symbols(else_branch, module_env, symbols, seen);
+            collect_expr_symbols(cond, module_env, symbols, seen, lambda_names);
+            collect_stmt_symbols(then_branch, module_env, symbols, seen, lambda_names);
+            collect_stmt_symbols(else_branch, module_env, symbols, seen, lambda_names);
         }
-        Expr::ArrayAccess(_, index) => collect_expr_symbols(index, module_env, symbols, seen),
+        Expr::ArrayAccess(_, index) => {
+            collect_expr_symbols(index, module_env, symbols, seen, lambda_names)
+        }
         Expr::StructInit { fields, .. } => {
             for (_, value) in fields {
-                collect_expr_symbols(value, module_env, symbols, seen);
+                collect_expr_symbols(value, module_env, symbols, seen, lambda_names);
             }
         }
-        Expr::FieldAccess(base, _) => collect_expr_symbols(base, module_env, symbols, seen),
+        Expr::FieldAccess(base, _) => {
+            collect_expr_symbols(base, module_env, symbols, seen, lambda_names)
+        }
         Expr::Match { target, arms } => {
-            collect_expr_symbols(target, module_env, symbols, seen);
+            collect_expr_symbols(target, module_env, symbols, seen, lambda_names);
             for arm in arms {
                 if let Some(guard) = &arm.guard {
-                    collect_expr_symbols(guard, module_env, symbols, seen);
+                    collect_expr_symbols(guard, module_env, symbols, seen, lambda_names);
                 }
-                collect_stmt_symbols(&arm.body, module_env, symbols, seen);
+                collect_stmt_symbols(&arm.body, module_env, symbols, seen, lambda_names);
             }
         }
         Expr::Async { body } | Expr::Lambda { body, .. } => {
-            collect_stmt_symbols(body, module_env, symbols, seen)
+            collect_stmt_symbols(body, module_env, symbols, seen, lambda_names)
         }
-        Expr::Await { expr } => collect_expr_symbols(expr, module_env, symbols, seen),
+        Expr::Await { expr } => collect_expr_symbols(expr, module_env, symbols, seen, lambda_names),
         Expr::Perform { effect, args, .. } => {
             push_symbol(symbols, seen, effect, "uninterpreted_function", None);
             for arg in args {
-                collect_expr_symbols(arg, module_env, symbols, seen);
+                collect_expr_symbols(arg, module_env, symbols, seen, lambda_names);
             }
         }
         Expr::ChanSend { channel, value } => {
-            collect_expr_symbols(channel, module_env, symbols, seen);
-            collect_expr_symbols(value, module_env, symbols, seen);
+            collect_expr_symbols(channel, module_env, symbols, seen, lambda_names);
+            collect_expr_symbols(value, module_env, symbols, seen, lambda_names);
         }
-        Expr::ChanRecv { channel } => collect_expr_symbols(channel, module_env, symbols, seen),
+        Expr::ChanRecv { channel } => {
+            collect_expr_symbols(channel, module_env, symbols, seen, lambda_names)
+        }
         Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Variable(_) => {}
     }
 }
@@ -719,21 +963,22 @@ fn collect_stmt_symbols(
     module_env: &ModuleEnv,
     symbols: &mut Vec<SymbolProvenance>,
     seen: &mut HashSet<(String, String)>,
+    lambda_names: &HashSet<String>,
 ) {
     match stmt {
         Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
-            collect_expr_symbols(value, module_env, symbols, seen)
+            collect_expr_symbols(value, module_env, symbols, seen, lambda_names)
         }
         Stmt::ArrayStore { index, value, .. } => {
-            collect_expr_symbols(index, module_env, symbols, seen);
-            collect_expr_symbols(value, module_env, symbols, seen);
+            collect_expr_symbols(index, module_env, symbols, seen, lambda_names);
+            collect_expr_symbols(value, module_env, symbols, seen, lambda_names);
         }
         Stmt::Block(stmts, _)
         | Stmt::TaskGroup {
             children: stmts, ..
         } => {
             for stmt in stmts {
-                collect_stmt_symbols(stmt, module_env, symbols, seen);
+                collect_stmt_symbols(stmt, module_env, symbols, seen, lambda_names);
             }
         }
         Stmt::While {
@@ -743,17 +988,17 @@ fn collect_stmt_symbols(
             body,
             ..
         } => {
-            collect_expr_symbols(cond, module_env, symbols, seen);
-            collect_expr_symbols(invariant, module_env, symbols, seen);
+            collect_expr_symbols(cond, module_env, symbols, seen, lambda_names);
+            collect_expr_symbols(invariant, module_env, symbols, seen, lambda_names);
             if let Some(decreases) = decreases {
-                collect_expr_symbols(decreases, module_env, symbols, seen);
+                collect_expr_symbols(decreases, module_env, symbols, seen, lambda_names);
             }
-            collect_stmt_symbols(body, module_env, symbols, seen);
+            collect_stmt_symbols(body, module_env, symbols, seen, lambda_names);
         }
         Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
-            collect_stmt_symbols(body, module_env, symbols, seen)
+            collect_stmt_symbols(body, module_env, symbols, seen, lambda_names)
         }
-        Stmt::Expr(expr, _) => collect_expr_symbols(expr, module_env, symbols, seen),
+        Stmt::Expr(expr, _) => collect_expr_symbols(expr, module_env, symbols, seen, lambda_names),
         Stmt::Cancel { .. } => {}
     }
 }
