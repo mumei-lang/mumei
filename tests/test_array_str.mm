@@ -104,13 +104,16 @@ body: {
     ["s", "t"]
 };
 
-// A while-loop store havocs `a`, but the havoc'd array keeps its
-// `Int -> Seq` range — `a[0]` stays a string and `x == "q" || x != "q"`
-// (excluded middle on the Seq sort) still proves.
-atom str_while_havoc(a: [Str], n: i64) -> i64
-requires: len(a) >= 1 && n >= 1;
+// A while-loop store havocs the tracked `__z3_arr_a` slot of a local
+// `[Str]` literal — the havoc'd array must keep its `Int -> Seq` range.
+// (Before the `havoc_vars` Seq arm this rebuilt the slot with an `Int`
+// range and storing `"q"` crashed Z3 with `!ast.is_null()`.) Post-loop
+// the element stays a string, so `len(x)` type-checks.
+atom str_while_havoc_local(n: i64) -> i64
+requires: n >= 1;
 ensures: result == 1;
 body: {
+    let a = ["x", "y"];
     let i = 0;
     while i < n
     invariant: i >= 0 && i <= n
@@ -119,7 +122,8 @@ body: {
         a[0] = "q";
         i = i + 1
     };
-    if a[0] == "q" || a[0] != "q" { 1 } else { 0 }
+    let x = a[0];
+    if len(x) >= 0 { 1 } else { 0 }
 };
 
 // `len` on a bound `[Str]` element resolves through `str.len`.

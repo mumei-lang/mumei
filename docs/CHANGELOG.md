@@ -24,8 +24,10 @@
   `Array(Int, Array(Int, …))` sort for any auxiliary path that still
   binds one, so an element select yields `Array` and fails scalar use.
 - Loop induction havoc (`havoc_vars` in `stmt.rs`) keeps the `Seq`/
-  nested `Array` range too — post-loop `a[i]` on a `[Str]` still
-  type-checks as a string instead of degrading to `Int`.
+  nested `Array` range too — a local `[Str]` literal stored inside a
+  `while` previously came back `Int`-elemented and the next `a[i] = "s"`
+  store crashed Z3 (`!ast.is_null()` panic); post-loop `a[i]` now stays
+  a string.
 - Tests: `tests/test_array_str.mm` (15 atoms: param/literal reads,
   `==`/`!=`, param+local stores, post-state ensures, `len`, `forall`,
   aliasing, call args, `if`-merge, `-> [Str]` tail, loop-havoc range,
