@@ -1,3 +1,6 @@
+// An `if`-guard must be usable to discharge a callee's `requires`:
+// `callee` needs `x >= 0`, and the call sits inside `if x >= 0`.
+// Regression for call-site requires checks ignoring branch conditions.
 atom callee(x: i64)
     requires: x >= 0;
     ensures: result >= 0;
