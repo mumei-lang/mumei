@@ -1134,6 +1134,14 @@ pub(crate) fn expr_to_z3<'a>(
                                 &format!("len_{}", result_name),
                                 vc.bitvec_i64,
                             );
+                            // Array lengths are nonneg regardless of the
+                            // callee's ensures — `array_len_value` asserts
+                            // the same when a solver is in scope.
+                            if let (Some(solver), Some(nn)) =
+                                (solver_opt, nonneg_constraint(ctx, &len_sym))
+                            {
+                                solver.assert(&nn);
+                            }
                             vc.call_result_lens.borrow_mut().insert(
                                 result_z3.get_z3_ast() as usize,
                                 (len_sym.clone(), result_z3.clone()),
