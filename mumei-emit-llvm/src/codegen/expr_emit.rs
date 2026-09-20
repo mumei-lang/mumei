@@ -1,7 +1,7 @@
 use crate::codegen::lowering::{
     bitpreserve_cast, box_payload_to_i64, declare_chan_send_owned, enum_llvm_type,
     payload_needs_box, release_boxed_payload, resolve_param_type, resolve_return_type,
-    unbox_payload_from_i64,
+    unbox_payload_from_i64, ArrayPtr,
 };
 use crate::codegen::pattern_emit::{
     bind_pattern_variables, compile_pattern_test, find_field_index, find_field_index_by_name,
@@ -235,7 +235,7 @@ fn emit_enum_variant_init<'a>(
     function: &FunctionValue<'a>,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
     enum_name: &str,
     variant_name: &str,
@@ -320,7 +320,7 @@ pub(crate) fn compile_hir_expr<'a>(
     expr: &HirExpr,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match expr {
@@ -366,7 +366,7 @@ pub(crate) fn compile_hir_expr<'a>(
             "len" => {
                 if !args.is_empty() {
                     if let HirExpr::Variable(arr_name) = &args[0] {
-                        if let Some((len_val, _)) = array_ptrs.get(arr_name.as_str()) {
+                        if let Some((len_val, _, _)) = array_ptrs.get(arr_name.as_str()) {
                             return Ok(*len_val);
                         }
                         // A bound non-array value (enum, struct, local array
@@ -486,7 +486,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 module_env,
             )?
             .into_int_value();
-            if let Some((len_val, data_ptr_val)) = array_ptrs.get(name.as_str()) {
+            if let Some((len_val, elem_ty, data_ptr_val)) = array_ptrs.get(name.as_str()) {
                 let data_ptr = data_ptr_val.into_pointer_value();
                 let len_int = len_val.into_int_value();
                 let in_bounds = llvm!(builder.build_int_compare(
@@ -510,10 +510,9 @@ pub(crate) fn compile_hir_expr<'a>(
                 llvm!(builder.build_conditional_branch(safe, safe_block, oob_block));
 
                 builder.position_at_end(safe_block);
-                let elem_ptr = unsafe {
-                    llvm!(builder.build_gep(context.i64_type(), data_ptr, &[idx], "elem_ptr"))
-                };
-                let loaded = llvm!(builder.build_load(context.i64_type(), elem_ptr, "elem_val"));
+                let elem_ptr =
+                    unsafe { llvm!(builder.build_gep(*elem_ty, data_ptr, &[idx], "elem_ptr")) };
+                let loaded = llvm!(builder.build_load(*elem_ty, elem_ptr, "elem_val"));
                 let safe_end = builder.get_insert_block().unwrap();
                 llvm!(builder.build_unconditional_branch(merge_block));
 

@@ -1,4 +1,6 @@
-use crate::codegen::lowering::{box_payload_to_i64, release_boxed_payload, unbox_payload_from_i64};
+use crate::codegen::lowering::{
+    box_payload_to_i64, release_boxed_payload, unbox_payload_from_i64, ArrayPtr,
+};
 use crate::codegen::stmt_emit::compile_hir_stmt;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -294,7 +296,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
     body: &HirStmt,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
-    array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
     task_group_any: Option<TaskGroupAnyContext<'a>>,
 ) -> MumeiResult<PendingTask<'a>> {
@@ -308,10 +310,15 @@ pub(crate) fn emit_task_spawn_only<'a>(
     //    body shares the parent's element storage.
     let free_vars = collect_free_variables_stmt(body);
     let mut captures: Vec<(String, BasicValueEnum<'a>)> = Vec::new();
-    let mut array_captures: Vec<(String, BasicValueEnum<'a>, BasicValueEnum<'a>)> = Vec::new();
+    let mut array_captures: Vec<(
+        String,
+        BasicValueEnum<'a>,
+        BasicTypeEnum<'a>,
+        BasicValueEnum<'a>,
+    )> = Vec::new();
     for name in &free_vars {
-        if let Some((len, data)) = array_ptrs.get(name.as_str()) {
-            array_captures.push((name.clone(), *len, *data));
+        if let Some((len, elem_ty, data)) = array_ptrs.get(name.as_str()) {
+            array_captures.push((name.clone(), *len, *elem_ty, *data));
         } else if let Some(v) = variables.get(name.as_str()) {
             captures.push((name.clone(), *v));
         }
@@ -326,7 +333,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
         .map(|(_, v)| v.get_type())
         .collect::<Vec<inkwell::types::BasicTypeEnum>>();
     let mut array_fields: Vec<(String, u32, u32)> = Vec::new();
-    for (name, len, data) in &array_captures {
+    for (name, len, _elem_ty, data) in &array_captures {
         let len_idx = field_types.len() as u32;
         field_types.push(len.get_type());
         let data_idx = field_types.len() as u32;
@@ -386,9 +393,8 @@ pub(crate) fn emit_task_spawn_only<'a>(
 
     // Rebuild the array fat pointers the body needs from the args struct, so
     // element reads / stores hit the parent's allocation.
-    let mut inner_array_ptrs: HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)> =
-        HashMap::new();
-    for ((name, len_val, data_val), (_, len_idx, data_idx)) in
+    let mut inner_array_ptrs: HashMap<String, ArrayPtr<'a>> = HashMap::new();
+    for ((name, len_val, elem_ty, data_val), (_, len_idx, data_idx)) in
         array_captures.iter().zip(array_fields.iter())
     {
         let len_field_ptr = llvm!(builder.build_struct_gep(
@@ -413,7 +419,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
             data_field_ptr,
             &format!("task_capture_{}_data", name),
         ));
-        inner_array_ptrs.insert(name.clone(), (len_loaded, data_loaded));
+        inner_array_ptrs.insert(name.clone(), (len_loaded, *elem_ty, data_loaded));
         inner_vars.insert(name.clone(), len_loaded);
     }
 
@@ -591,7 +597,7 @@ pub(crate) fn emit_task_spawn_only<'a>(
     }
     // Store the captured arrays' fat pointers (len + data) so the wrapper reads
     // the same allocation the parent holds.
-    for ((name, len_val, data_val), (_, len_idx, data_idx)) in
+    for ((name, len_val, _elem_ty, data_val), (_, len_idx, data_idx)) in
         array_captures.iter().zip(array_fields.iter())
     {
         let len_field_ptr = llvm!(builder.build_struct_gep(
@@ -711,7 +717,7 @@ pub(crate) fn compile_task_spawn<'a>(
     body: &HirStmt,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
-    array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     let pending = emit_task_spawn_only(

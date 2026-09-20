@@ -1,6 +1,6 @@
 // Polymorphic array type verification tests.
 
-atom test_i64_array(n: i64)
+atom test_i64_array(arr: [i64], n: i64) -> i64
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n;
 body: {
@@ -40,3 +40,8 @@ body: {
     let x = arr[0];
     x
 };
+
+atom test_array_param_return(arr: [f64]) -> [f64]
+requires: len(arr) >= 0;
+ensures: true;
+body: arr;

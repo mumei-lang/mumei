@@ -2,6 +2,7 @@ use crate::codegen::expr_emit::{
     chan_payload_key, chan_payload_type_name, compile_hir_expr, infer_struct_type_name,
     resolve_named_type,
 };
+use crate::codegen::lowering::ArrayPtr;
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -39,7 +40,7 @@ pub(crate) fn compile_hir_stmt<'a>(
     stmt: &HirStmt,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match stmt {
@@ -96,7 +97,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                 module_env,
             )?
             .into_int_value();
-            if let Some((len_val, data_ptr_val)) = array_ptrs.get(array.as_str()) {
+            if let Some((len_val, elem_ty, data_ptr_val)) = array_ptrs.get(array.as_str()) {
                 let data_ptr = data_ptr_val.into_pointer_value();
                 let len_int = len_val.into_int_value();
 
@@ -122,10 +123,26 @@ pub(crate) fn compile_hir_stmt<'a>(
                 llvm!(builder.build_conditional_branch(safe, safe_block, merge_block));
 
                 builder.position_at_end(safe_block);
-                let elem_ptr = unsafe {
-                    llvm!(builder.build_gep(context.i64_type(), data_ptr, &[idx], "store_elem_ptr"))
+                // Coerce the stored value to the array's declared element
+                // type — `arr[i] = 42` on a `[f64]` stores 42.0.
+                let stored = match (elem_ty, val) {
+                    (
+                        inkwell::types::BasicTypeEnum::FloatType(ft),
+                        BasicValueEnum::IntValue(iv),
+                    ) => llvm!(builder.build_signed_int_to_float(iv, *ft, "store_i2f")).into(),
+                    _ if *elem_ty == val.get_type() => val,
+                    _ => crate::codegen::lowering::bitpreserve_cast(builder, val, *elem_ty)
+                        .map_err(|e| {
+                            MumeiError::codegen(format!(
+                                "Array store value type mismatch on '{}': {}",
+                                array, e
+                            ))
+                        })?,
                 };
-                llvm!(builder.build_store(elem_ptr, val.into_int_value()));
+                let elem_ptr = unsafe {
+                    llvm!(builder.build_gep(*elem_ty, data_ptr, &[idx], "store_elem_ptr"))
+                };
+                llvm!(builder.build_store(elem_ptr, stored));
                 llvm!(builder.build_unconditional_branch(merge_block));
 
                 builder.position_at_end(merge_block);
