@@ -47,7 +47,7 @@ struct SortedMap {
 }
 
 // 空のソート済みマップを作成する。空配列は自明にソート済み。
-atom sorted_map_new(initial_cap: i64)
+atom sorted_map_new(keys: [i64], initial_cap: i64)
 requires: initial_cap > 0;
 ensures: result == 0 && result <= initial_cap
     && forall(i, 0, result - 1, keys[i] <= keys[i + 1]);
@@ -141,7 +141,7 @@ body: {
 };
 
 // ソート不変量を 0/1 witness として公開する。
-atom sorted_map_is_sorted(n: i64)
+atom sorted_map_is_sorted(keys: [i64], n: i64)
 requires: n >= 0
     && forall(i, 0, n - 1, keys[i] <= keys[i + 1]);
 ensures: result == 1;

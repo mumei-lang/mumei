@@ -14,7 +14,7 @@
 // 入力配列を変更しなければ ensures の forall は requires と同型なので
 // pattern 強化なしでも通るが、smt.mbqi / qi.eager_threshold の
 // 自動チューニングが効いていないと timeout しやすいケース。
-atom forall_ensures_identity(n: i64)
+atom forall_ensures_identity(arr: [i64], n: i64)
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n && forall(i, 0, n, arr[i] >= 0);
 body: n;
@@ -24,7 +24,7 @@ body: n;
 // ensures の `forall(i, 0, n, arr[i] >= 0)` は post-store 配列に対して
 // E-matching pattern (`select(__z3_arr_arr, i)`) を介してインスタンス化されないと
 // 証明できない。
-atom forall_ensures_after_store(n: i64, k: i64)
+atom forall_ensures_after_store(arr: [i64], n: i64, k: i64)
 requires: n >= 0 && k >= 0 && k < n && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n && forall(i, 0, n, arr[i] >= 0);
 body: {
@@ -34,7 +34,7 @@ body: {
 
 // --- Test 3: ループ store でも forall が保たれる ---
 // 0..n を 0 で埋め直す。ensures の forall は post-store 配列を参照する。
-atom forall_ensures_loop_zero(n: i64)
+atom forall_ensures_loop_zero(arr: [i64], n: i64)
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n && forall(i, 0, n, arr[i] >= 0);
 body: {

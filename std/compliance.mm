@@ -82,7 +82,7 @@ atom check_transaction(customer_type: i64, amount: TransactionAmount)
 
 // --- 合成 atom: 全取引の限度額遵守チェック ---
 // forall 量化子で配列内の全取引が限度額以下であることを保証
-atom verify_all_transactions_compliant(n: i64, limit: i64)
+atom verify_all_transactions_compliant(arr: [i64], n: i64, limit: i64)
     requires: n >= 0 && limit > 0 && forall(i, 0, n, arr[i] >= 0 && arr[i] <= limit);
     ensures: result == 1;
     body: {
@@ -91,7 +91,7 @@ atom verify_all_transactions_compliant(n: i64, limit: i64)
 
 // --- 合成 atom: 顧客リスクスコアの閾値チェック ---
 // forall 量化子で全顧客のリスクスコアが閾値以下であることを保証
-atom verify_all_risk_scores_within_threshold(n: i64, threshold: RiskScore)
+atom verify_all_risk_scores_within_threshold(arr: [i64], n: i64, threshold: RiskScore)
     requires: n >= 0 && threshold >= 0 && threshold <= 100 && forall(i, 0, n, arr[i] >= 0 && arr[i] <= threshold);
     ensures: result == 1;
     body: {
@@ -103,7 +103,7 @@ atom verify_all_risk_scores_within_threshold(n: i64, threshold: RiskScore)
 // match カバレッジ + forall 量化子の両方を活用。
 // なお `arr[]` / `n_history` / `limit` は requires で呼び出し側に
 // 履歴配列の事前条件を課すためのもので、本体ではカレント取引のみを評価する。
-atom full_kyc_check(customer_type: i64, amount: TransactionAmount, n_history: i64, limit: i64)
+atom full_kyc_check(arr: [i64], customer_type: i64, amount: TransactionAmount, n_history: i64, limit: i64)
     requires: customer_type >= 0 && customer_type <= 3 && amount >= 0 && n_history >= 0 && limit > 0 && forall(i, 0, n_history, arr[i] >= 0 && arr[i] <= limit);
     ensures: result >= 0 && result <= 1;
     body: {

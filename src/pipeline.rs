@@ -185,6 +185,18 @@ pub(crate) fn try_load_and_prepare_with_full_options(
 
     let mut mono = ast::Monomorphizer::new();
     mono.collect(&items);
+    // Generic defs are dropped from the post-mono item list (only concrete
+    // instances remain), but their names are still declared items bodies may
+    // reference (`atom_ref(pipe)`, `List::Nil`, generic-call sugar lowered as
+    // a path). Register them so such names resolve in the env.
+    for item in &items {
+        match item {
+            Item::Atom(a) if !a.type_params.is_empty() => module_env.register_atom(a),
+            Item::EnumDef(e) if !e.type_params.is_empty() => module_env.register_enum(e),
+            Item::StructDef(s) if !s.type_params.is_empty() => module_env.register_struct(s),
+            _ => {}
+        }
+    }
     let mut items = if mono.has_generics() {
         let mono_items = mono.monomorphize(&items, Some(&module_env));
         eprintln!(

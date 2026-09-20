@@ -750,6 +750,62 @@ pub(crate) fn verify_inner(
             mir_body.unbound_names.join(", ")
         )));
     }
+
+    // Clause-scope counterpart of the body check: requires/ensures/invariant
+    // must not reference undeclared names. A phantom name in `requires` makes
+    // the precondition trivially satisfiable (vacuous verify); in `ensures` it
+    // produces a spurious postcondition failure — both hide real typos.
+    for (clause_name, clause_src, allow_result) in [
+        ("requires", hir_atom.atom.requires.as_str(), false),
+        ("ensures", hir_atom.atom.ensures.as_str(), true),
+        (
+            "invariant",
+            hir_atom.atom.invariant.as_deref().unwrap_or(""),
+            false,
+        ),
+    ] {
+        if clause_src.trim().is_empty() || clause_src.trim() == "true" {
+            continue;
+        }
+        let clause_expr = crate::parser::parse_expression(clause_src);
+        let bad = clause_unbound_names(&clause_expr, &hir_atom.atom, module_env, allow_result);
+        if !bad.is_empty() {
+            return Err(MumeiError::verification(format!(
+                "unresolved name(s) in {clause_name}: {} — every name must be a parameter, \
+                 `result`, a quantifier binder, or a match-arm binding",
+                bad.join(", ")
+            )));
+        }
+    }
+    // `forall <var> in [start, end]: <condition>` constraints declared at atom
+    // level — `var` is bound inside condition, everything else resolves against
+    // the same allowed set.
+    for q in &hir_atom.atom.forall_constraints {
+        for src in [&q.start, &q.end] {
+            if src.trim().is_empty() {
+                continue;
+            }
+            let e = crate::parser::parse_expression(src);
+            let bad = clause_unbound_names(&e, &hir_atom.atom, module_env, false);
+            if !bad.is_empty() {
+                return Err(MumeiError::verification(format!(
+                    "unresolved name(s) in forall bound: {} — every name must be a parameter",
+                    bad.join(", ")
+                )));
+            }
+        }
+        let e = crate::parser::parse_expression(&q.condition);
+        let mut bad = clause_unbound_names(&e, &hir_atom.atom, module_env, false);
+        bad.retain(|n| n != &q.var);
+        if !bad.is_empty() {
+            return Err(MumeiError::verification(format!(
+                "unresolved name(s) in forall condition: {} — every name must be a parameter \
+                 or the bound variable '{}'",
+                bad.join(", "),
+                q.var
+            )));
+        }
+    }
     let move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
     if mir_body.check_analysis_budget().is_ok() {
         // Insert drops before move analysis so a local consumed on one branch
@@ -2296,6 +2352,219 @@ pub(crate) fn verify_inner(
         Some(&diagnostics),
     );
     Ok(())
+}
+
+/// Collect variable names referenced in a clause expression that are bound
+/// neither by the allowed set (params, `result`, literals, type/atom names)
+/// nor by an inner binder (`forall`/`exists`/`sum`-style quantifier variables,
+/// match-arm patterns, lambda params, clause-local `let`s).
+fn clause_unbound_names(
+    expr: &crate::parser::Expr,
+    atom: &crate::parser::Atom,
+    module_env: &crate::verification::ModuleEnv,
+    allow_result: bool,
+) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut allowed: BTreeSet<String> = BTreeSet::new();
+    for p in &atom.params {
+        // `consume x` params keep the keyword in `name` (parser quirk).
+        if let Some(last) = p.name.rsplit(' ').next() {
+            allowed.insert(last.to_string());
+        }
+    }
+    allowed.extend(atom.consumed_params.iter().cloned());
+    allowed.extend(atom.type_params.iter().cloned());
+    allowed.insert("true".to_string());
+    allowed.insert("false".to_string());
+    if allow_result {
+        allowed.insert("result".to_string());
+    }
+    // Enum/struct/atom names appear as bare leaves in `Shape::Point`-style
+    // field access and `atom_ref(name)` arguments.
+    allowed.extend(module_env.enums.keys().cloned());
+    allowed.extend(module_env.structs.keys().cloned());
+    allowed.extend(module_env.atoms.keys().cloned());
+
+    let mut out = BTreeSet::new();
+    let bound = BTreeSet::new();
+    collect_clause_free(expr, &bound, &allowed, &mut out);
+    out.into_iter().collect()
+}
+
+/// Call names whose first argument is a quantifier-style binder variable
+/// scoped over the remaining body argument: `forall(i, lo, hi, body)`.
+fn is_binder_call(name: &str) -> bool {
+    matches!(
+        name,
+        "forall" | "exists" | "sum" | "all" | "any" | "prod" | "count"
+    )
+}
+
+fn collect_clause_free(
+    expr: &crate::parser::Expr,
+    bound: &std::collections::BTreeSet<String>,
+    allowed: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    use crate::parser::Expr;
+    match expr {
+        Expr::Variable(name) => {
+            if !bound.contains(name) && !allowed.contains(name) {
+                out.insert(name.clone());
+            }
+        }
+        Expr::ArrayAccess(name, index) => {
+            if !bound.contains(name) && !allowed.contains(name) {
+                out.insert(name.clone());
+            }
+            collect_clause_free(index, bound, allowed, out);
+        }
+        Expr::BinaryOp(l, _, r) => {
+            collect_clause_free(l, bound, allowed, out);
+            collect_clause_free(r, bound, allowed, out);
+        }
+        Expr::Call(name, args)
+            if is_binder_call(name) && args.len() >= 3 && matches!(args[0], Expr::Variable(_)) =>
+        {
+            // forall(i, lo, hi, body): lo/hi see the outer scope, body sees `i`.
+            for a in &args[1..args.len() - 1] {
+                collect_clause_free(a, bound, allowed, out);
+            }
+            let mut inner = bound.clone();
+            if let Expr::Variable(binder) = &args[0] {
+                inner.insert(binder.clone());
+            }
+            if let Some(body) = args.last() {
+                collect_clause_free(body, &inner, allowed, out);
+            }
+        }
+        Expr::Call(_, args) => {
+            for a in args {
+                collect_clause_free(a, bound, allowed, out);
+            }
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_clause_free(cond, bound, allowed, out);
+            collect_clause_free_stmt(then_branch, &bound.clone(), allowed, out);
+            collect_clause_free_stmt(else_branch, &bound.clone(), allowed, out);
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, v) in fields {
+                collect_clause_free(v, bound, allowed, out);
+            }
+        }
+        Expr::FieldAccess(e, _) => collect_clause_free(e, bound, allowed, out),
+        Expr::Match { target, arms } => {
+            collect_clause_free(target, bound, allowed, out);
+            for arm in arms {
+                let mut inner = bound.clone();
+                collect_pattern_bindings(&arm.pattern, &mut inner);
+                if let Some(g) = &arm.guard {
+                    collect_clause_free(g, &inner, allowed, out);
+                }
+                collect_clause_free_stmt(&arm.body, &inner, allowed, out);
+            }
+        }
+        Expr::Async { body } => collect_clause_free_stmt(body, bound, allowed, out),
+        Expr::Await { expr } => collect_clause_free(expr, bound, allowed, out),
+        Expr::AtomRef { .. } => {}
+        Expr::CallRef { callee, args } => {
+            collect_clause_free(callee, bound, allowed, out);
+            for a in args {
+                collect_clause_free(a, bound, allowed, out);
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for a in args {
+                collect_clause_free(a, bound, allowed, out);
+            }
+        }
+        Expr::Lambda { params, body, .. } => {
+            let mut inner = bound.clone();
+            for p in params {
+                inner.insert(p.name.clone());
+            }
+            collect_clause_free_stmt(body, &inner, allowed, out);
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_clause_free(channel, bound, allowed, out);
+            collect_clause_free(value, bound, allowed, out);
+        }
+        Expr::ChanRecv { channel } => collect_clause_free(channel, bound, allowed, out),
+        _ => {}
+    }
+}
+
+fn collect_clause_free_stmt(
+    stmt: &crate::parser::Stmt,
+    bound: &std::collections::BTreeSet<String>,
+    allowed: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    use crate::parser::Stmt;
+    match stmt {
+        Stmt::Expr(e, _) => collect_clause_free(e, bound, allowed, out),
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            collect_clause_free(value, bound, allowed, out)
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            collect_clause_free(index, bound, allowed, out);
+            collect_clause_free(value, bound, allowed, out);
+        }
+        Stmt::Block(stmts, _) => {
+            let mut scope = bound.clone();
+            for s in stmts {
+                collect_clause_free_stmt(s, &scope, allowed, out);
+                if let Stmt::Let { var, .. } = s {
+                    scope.insert(var.clone());
+                }
+            }
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            collect_clause_free(cond, bound, allowed, out);
+            collect_clause_free(invariant, bound, allowed, out);
+            if let Some(d) = decreases {
+                collect_clause_free(d, bound, allowed, out);
+            }
+            collect_clause_free_stmt(body, bound, allowed, out);
+        }
+        Stmt::Acquire { body, .. } => collect_clause_free_stmt(body, bound, allowed, out),
+        Stmt::Task { body, .. } => collect_clause_free_stmt(body, bound, allowed, out),
+        Stmt::TaskGroup { children, .. } => {
+            for c in children {
+                collect_clause_free_stmt(c, bound, allowed, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_pattern_bindings(
+    pattern: &crate::parser::Pattern,
+    bound: &mut std::collections::BTreeSet<String>,
+) {
+    use crate::parser::Pattern;
+    match pattern {
+        Pattern::Variable(name) => {
+            bound.insert(name.clone());
+        }
+        Pattern::Variant { fields, .. } => {
+            for f in fields {
+                collect_pattern_bindings(f, bound);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn z3_dynamic_to_i64(value: &Dynamic) -> Option<i64> {

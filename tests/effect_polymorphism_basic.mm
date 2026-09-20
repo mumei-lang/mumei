@@ -21,4 +21,8 @@ atom main()
     effects: [FileWrite];
     requires: true;
     ensures: result >= 0;
-    body: pipe<FileWrite>(atom_ref(writer));
+    // `pipe<FileWrite>(atom_ref(writer))` is not valid call syntax (generic
+    // call sites remain unsupported — the type argument list parses as a
+    // comparison chain). Call `writer` directly so the FileWrite effect
+    // propagates for real instead of verifying a misparsed expression.
+    body: writer(42);

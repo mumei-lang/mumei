@@ -1,3 +1,37 @@
+### 2026-09-20: clause-scope phantom names fail closed; unbound-check exemptions aligned
+
+- `requires` / `ensures` / `invariant` / `forall_constraints` clauses that
+  reference undeclared names now fail verification with
+  `unresolved name(s) in <clause>: <names>` — the clause counterpart of the
+  Phase-1h body check. A phantom name in `requires` made the precondition
+  trivially satisfiable (vacuous verify); in `ensures` it produced spurious
+  postcondition failures. Quantifier binders (`forall(i, ...)`), clause-local
+  `let`s, match-arm bindings, `result` (ensures only), `true`/`false`, and
+  module-level type/atom names are recognised as bound.
+- Body-check follow-up (`unbound_names` exemptions): names of declared
+  module items — enums (`Shape` in `Shape::Point`), structs, atoms
+  (`atom_ref(name)`), type aliases, and effects (`FileWrite` in
+  `perform FileWrite.write`) — no longer count as unbound variables.
+  `consume x`/`ref x` params are bound under their bare identifier so `x`
+  resolves in the body (the parser keeps the keyword in `Param.name`).
+- Generic type-parameter items (`atom pipe<E>` etc.) are dropped from the
+  post-monomorphization item list; their names are now registered in the
+  module env anyway so references from other bodies stay resolvable.
+- Surfaced phantom-name sites fixed honestly: `std/{compliance,settlement,
+  container/verified_vector}.mm` and ten `tests/*.mm` files referenced `arr`
+  (or `brr`) in requires/body without declaring it — they now declare
+  `arr: [i64]` params (**signature changes**, e.g.
+  `verify_all_transactions_compliant(arr, n, limit)`). `negative/*.mm`
+  fixtures declare their arrays so they fail on the intended violation.
+- `tests/test_untyped_array_access.mm::uses_untyped_array` declares
+  `arr: i64` (annotated but non-`[T]`) — the `untyped_array_access`
+  diagnostic still fires; fully-undeclared names are now a hard error.
+- `tests/effect_polymorphism_basic.mm::main` called `pipe<FileWrite>(..)` —
+  generic call-site syntax does not exist (parses as a comparison chain);
+  it now calls `writer(42)` directly.
+- Tests: `tests/negative/clause_unbound_name.mm` +
+  `tests/test_clause_unbound_name.rs`.
+
 ### 2026-09-20: unbound-check follow-up — lambda params bound; bogus generic-call syntax surfaced
 
 - `HirExpr::Lambda` lowering now registers the lambda's parameters as MIR

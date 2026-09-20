@@ -14,7 +14,7 @@
 // Z3 が「`brr` への store は `arr` に影響しない」と結論できる
 // ことを確認する。
 
-atom test_multi_array_isolation(n: i64, k: i64)
+atom test_multi_array_isolation(arr: [i64], brr: [i64], n: i64, k: i64)
 requires:
     n >= 1 && k >= 0 && k < n
     && forall(i, 0, n, arr[i] == 0)
@@ -26,7 +26,7 @@ body: {
 };
 
 // --- 対称確認: `arr[k] = 7` の store 後でも brr は不変 ---
-atom test_multi_array_isolation_rev(n: i64, k: i64)
+atom test_multi_array_isolation_rev(arr: [i64], brr: [i64], n: i64, k: i64)
 requires:
     n >= 1 && k >= 0 && k < n
     && forall(i, 0, n, arr[i] == 0)
@@ -38,7 +38,7 @@ body: {
 };
 
 // --- 同一配列への store は従来どおり select で観測できる ---
-atom test_same_array_store_select(n: i64, k: i64)
+atom test_same_array_store_select(arr: [i64], n: i64, k: i64)
 requires:
     n >= 1 && k >= 0 && k < n
     && forall(i, 0, n, arr[i] == 0);

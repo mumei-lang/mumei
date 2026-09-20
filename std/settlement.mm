@@ -105,7 +105,7 @@ atom process_queue(n: i64, total_balance: i64)
     };
 
 // --- 残高不変量 atom: forall 量化子による全口座残高の非負性保証 ---
-atom verify_all_balances_non_negative(n: i64)
+atom verify_all_balances_non_negative(arr: [i64], n: i64)
     requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
     ensures: result == 1;
     body: {
