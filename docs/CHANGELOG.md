@@ -9,6 +9,13 @@
   "use of moved value `p`" UseAfterMove. Bindings are scoped per arm
   (`var_map` saved/restored) so a pattern variable shadowing an outer name
   does not leak past the arm or into sibling arms.
+- **MIR binding types** (`mumei-core/src/mir.rs`): pattern-bound locals now
+  carry the variant field's declared type (resolved through `enum_defs`,
+  `Self` → the owning enum), and `infer_hir_ty` resolves a `match` arm's
+  tail variable to that same field type. An `i64` payload binding is
+  therefore Copy — `let r = match p { P(a,b) => a }; let m = r` no longer
+  reports `r` as moved — while `Str` payloads stay Move and still trigger
+  `UseAfterMove`/`ConflictingMerge`.
 - **Move analysis** (`move_analysis.rs`): a `ConflictingMerge` is now only
   reported when the divergent local is live at the merge block
   (`liveness.live_in`). A local moved on one branch but never used again

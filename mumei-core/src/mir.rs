@@ -258,6 +258,9 @@ struct LowerCtx {
     /// User type aliases (`type Usd = i64 ...;`) resolved to their base type,
     /// so movability follows the underlying representation.
     alias_bases: std::collections::HashMap<String, String>,
+    /// Enum definitions keyed by enum name — used to give match pattern
+    /// bindings their declared field types so Copy fields stay Copy.
+    enum_defs: std::collections::HashMap<String, crate::parser::EnumDef>,
     next_local: usize,
     next_block: usize,
 }
@@ -276,12 +279,14 @@ impl LowerCtx {
                     .collect()
             })
             .unwrap_or_default();
+        let enum_defs = module_env.map(|env| env.enums.clone()).unwrap_or_default();
         Self {
             locals: Vec::new(),
             blocks: Vec::new(),
             current_stmts: Vec::new(),
             var_map: std::collections::HashMap::new(),
             alias_bases,
+            enum_defs,
             next_local: 0,
             next_block: 0,
         }
@@ -372,6 +377,79 @@ impl LowerCtx {
             .and_then(|d| d.ty.clone())
     }
 
+    /// The enum a match `Variant` pattern belongs to: a qualified `E::V` name
+    /// pins `E`; otherwise the scrutinee's declared type supplies it.
+    fn pattern_enum_name(&self, variant_name: &str, scrutinee_ty: Option<&str>) -> Option<String> {
+        if let Some((qual, _)) = variant_name.rsplit_once("::") {
+            if self.enum_defs.contains_key(qual) {
+                return Some(qual.to_string());
+            }
+        }
+        let ty = scrutinee_ty?;
+        if self.enum_defs.contains_key(ty) {
+            Some(ty.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// The declared type of variant field `idx`, with `Self` resolved to the
+    /// owning enum. `variant_name` may be qualified (`E::V`) or a leaf (`V`).
+    fn variant_field_ty(
+        &self,
+        enum_name: Option<&str>,
+        variant_name: &str,
+        idx: usize,
+    ) -> Option<String> {
+        let def = self.enum_defs.get(enum_name?)?;
+        let leaf = variant_name
+            .rsplit_once("::")
+            .map(|(_, l)| l)
+            .unwrap_or(variant_name);
+        let variant = def.variants.iter().find(|v| v.name == leaf)?;
+        let name = variant.field_types.get(idx)?.name.clone();
+        Some(if name == "Self" {
+            def.name.clone()
+        } else {
+            name
+        })
+    }
+
+    /// Type of the variable a match pattern binds at position `name` — either
+    /// the scrutinee's type (whole-scrutinee `Variable`) or a variant field's
+    /// declared type. Used by `infer_hir_ty` on `Match` values, which runs
+    /// before the arm's locals exist in `var_map`.
+    fn pattern_binding_ty(
+        &self,
+        scrutinee_ty: Option<&str>,
+        pattern: &crate::parser::Pattern,
+        name: &str,
+    ) -> Option<String> {
+        match pattern {
+            crate::parser::Pattern::Variable(bound) if bound == name => {
+                scrutinee_ty.map(std::string::ToString::to_string)
+            }
+            crate::parser::Pattern::Variant {
+                variant_name,
+                fields,
+            } => {
+                let enum_name = self.pattern_enum_name(variant_name, scrutinee_ty);
+                fields.iter().enumerate().find_map(|(idx, fp)| match fp {
+                    crate::parser::Pattern::Variable(bound) if bound == name => {
+                        self.variant_field_ty(enum_name.as_deref(), variant_name, idx)
+                    }
+                    crate::parser::Pattern::Variant { .. } => {
+                        let nested_ty =
+                            self.variant_field_ty(enum_name.as_deref(), variant_name, idx);
+                        self.pattern_binding_ty(nested_ty.as_deref(), fp, name)
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Best-effort type inference for a HIR expression. Used to populate
     /// `LocalDecl::ty` when the surface syntax does not annotate `let` /
     /// induction-variable types. Only the common cases that influence
@@ -427,12 +505,21 @@ impl LowerCtx {
             } => hir_stmt_tail_expr(then_branch)
                 .and_then(|e| self.infer_hir_ty(e))
                 .or_else(|| hir_stmt_tail_expr(else_branch).and_then(|e| self.infer_hir_ty(e))),
-            HirExpr::Match { arms, .. } => {
+            HirExpr::Match { target, arms } => {
                 // Infer the result type from the arm bodies so `let r = match …`
-                // bindings to scalar results are Copy, not Move. Falls back to
-                // None (conservative Move) when no arm's tail type resolves.
+                // bindings to scalar results are Copy, not Move. A tail that
+                // is a pattern-bound variable resolves to the variant field's
+                // declared type — `var_map` has no entry yet because inference
+                // runs before the arm bodies are lowered. Falls back to None
+                // (conservative Move) when no arm's tail type resolves.
+                let scrutinee_ty = self.infer_hir_ty(target);
                 arms.iter().find_map(|arm| {
-                    hir_stmt_tail_expr(&arm.body).and_then(|e| self.infer_hir_ty(e))
+                    hir_stmt_tail_expr(&arm.body).and_then(|e| match e {
+                        HirExpr::Variable(name) => self
+                            .pattern_binding_ty(scrutinee_ty.as_deref(), &arm.pattern, name)
+                            .or_else(|| self.infer_hir_ty(e)),
+                        _ => self.infer_hir_ty(e),
+                    })
                 })
             }
             // P25: `recv(ch)` yields the channel's declared payload type.
@@ -539,21 +626,35 @@ fn hir_stmt_tail_expr(stmt: &HirStmt) -> Option<&HirExpr> {
 ///
 /// `Variable` binds the whole scrutinee; `Variant` binds each field pattern to
 /// a `FieldAccess` projection of the scrutinee (nested variants recurse through
-/// a temporary). Wildcards and literals bind nothing. Bound locals get no type
-/// annotation (Move), which is the conservative ownership default.
-fn lower_pattern_bindings(ctx: &mut LowerCtx, pattern: &crate::parser::Pattern, discr: &Operand) {
+/// a temporary). Wildcards and literals bind nothing. Bound locals carry the
+/// field's declared type when it resolves (`enum_defs`), so `i64` payloads stay
+/// Copy instead of defaulting to Move.
+fn lower_pattern_bindings(
+    ctx: &mut LowerCtx,
+    pattern: &crate::parser::Pattern,
+    discr: &Operand,
+    scrutinee_ty: Option<&str>,
+) {
     match pattern {
         crate::parser::Pattern::Variable(name) => {
-            let local = ctx.alloc_local(Some(name.clone()), None);
+            let local = ctx.alloc_local(
+                Some(name.clone()),
+                scrutinee_ty.map(std::string::ToString::to_string),
+            );
             ctx.emit(MirStatement::StorageLive(local.clone()));
             ctx.emit(MirStatement::Assign(
                 Place::Local(local),
                 Rvalue::Use(discr.clone()),
             ));
         }
-        crate::parser::Pattern::Variant { fields, .. } => {
+        crate::parser::Pattern::Variant {
+            variant_name,
+            fields,
+        } => {
+            let enum_name = ctx.pattern_enum_name(variant_name, scrutinee_ty);
             for (idx, field_pattern) in fields.iter().enumerate() {
-                lower_variant_field_binding(ctx, field_pattern, discr, idx);
+                let field_ty = ctx.variant_field_ty(enum_name.as_deref(), variant_name, idx);
+                lower_variant_field_binding(ctx, field_pattern, discr, idx, field_ty);
             }
         }
         crate::parser::Pattern::Wildcard | crate::parser::Pattern::Literal(_) => {}
@@ -565,28 +666,36 @@ fn lower_variant_field_binding(
     pattern: &crate::parser::Pattern,
     discr: &Operand,
     idx: usize,
+    field_ty: Option<String>,
 ) {
     match pattern {
         crate::parser::Pattern::Variable(name) => {
-            let local = ctx.alloc_local(Some(name.clone()), None);
+            let local = ctx.alloc_local(Some(name.clone()), field_ty);
             ctx.emit(MirStatement::StorageLive(local.clone()));
             ctx.emit(MirStatement::Assign(
                 Place::Local(local),
                 Rvalue::FieldAccess(discr.clone(), idx.to_string()),
             ));
         }
-        crate::parser::Pattern::Variant { fields, .. } => {
+        crate::parser::Pattern::Variant {
+            variant_name,
+            fields,
+        } => {
             // Nested variant pattern: bind a temporary to the intermediate
             // field value, then bind its sub-patterns off the temporary.
-            let tmp = ctx.alloc_temp();
+            let tmp = ctx.alloc_local(None, field_ty.clone());
             ctx.emit(MirStatement::StorageLive(tmp.clone()));
             ctx.emit(MirStatement::Assign(
                 Place::Local(tmp.clone()),
                 Rvalue::FieldAccess(discr.clone(), idx.to_string()),
             ));
             let tmp_op = Operand::Place(Place::Local(tmp));
+            // A qualified nested pattern (`Mine::Yes(v)`) names its own enum;
+            // otherwise the parent field's declared type supplies it.
+            let enum_name = ctx.pattern_enum_name(variant_name, field_ty.as_deref());
             for (sub_idx, sub_pattern) in fields.iter().enumerate() {
-                lower_variant_field_binding(ctx, sub_pattern, &tmp_op, sub_idx);
+                let sub_ty = ctx.variant_field_ty(enum_name.as_deref(), variant_name, sub_idx);
+                lower_variant_field_binding(ctx, sub_pattern, &tmp_op, sub_idx, sub_ty);
             }
         }
         crate::parser::Pattern::Wildcard | crate::parser::Pattern::Literal(_) => {}
@@ -853,6 +962,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
         HirExpr::Match { target, arms } => {
             // Lower match target to a discriminant operand.
             let discr_op = lower_expr(ctx, target);
+            let scrutinee_ty = ctx.infer_hir_ty(target);
             let result_local = ctx.alloc_temp();
             ctx.emit(MirStatement::StorageLive(result_local.clone()));
 
@@ -886,7 +996,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
                 // shadows an outer variable must not leak past the arm, so the
                 // var_map is restored after the arm body is lowered.
                 let saved_var_map = ctx.var_map.clone();
-                lower_pattern_bindings(ctx, &arm.pattern, &discr_op);
+                lower_pattern_bindings(ctx, &arm.pattern, &discr_op, scrutinee_ty.as_deref());
 
                 // Lower the arm body.
                 let arm_val =

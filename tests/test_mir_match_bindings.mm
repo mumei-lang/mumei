@@ -51,3 +51,14 @@ atom var_arm_consumes(p: Pair) -> i64
     let r = match p { whole => 1 }
     r + 1
   }
+
+// A binding whose declared field type is Copy (i64) stays copyable: `let m = r`
+// must not consume `r`, so `r` remains readable afterwards.
+atom copy_field_binding_not_moved(p: Pair) -> i64
+  requires: true;
+  ensures: result == result;
+  body: {
+    let r = match p { Pair::P(a, b) => a }
+    let m = r
+    r + m
+  }
