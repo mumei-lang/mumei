@@ -37,7 +37,6 @@
 - Tests: `test_pattern_lowercase_qual.mm` — lowercase qualifier binds the
   payload; unknown module qualifier resolves by leaf.
 
-||||||| 8888765
 ### 2026-09-20: prefix `!` (logical not) parses in expressions and spec clauses
 
 - `!e` desugars to `if e { false } else { true }` at parse time — the lexer
