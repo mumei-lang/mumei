@@ -222,7 +222,7 @@ pub(crate) fn expr_to_source_string(expr: &Expr) -> String {
     match expr {
         Expr::Number(n) => n.to_string(),
         Expr::Float(f) => format!("{}", f),
-        Expr::StringLit(s) => format!("\"{}\"", s),
+        Expr::StringLit(s) => format!("\"{}\"", crate::parser::token::escape_string_content(s)),
         Expr::Variable(v) => v.clone(),
         Expr::BinaryOp(l, op, r) => {
             let op_str = match op {

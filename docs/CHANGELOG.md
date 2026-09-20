@@ -13,6 +13,12 @@
 - New `escape_string_content` re-encodes `\`, `"`, newline and tab;
   all three sites use it. Backslash-n and newline literals stay
   distinct; embedded quotes round-trip.
+- The same raw-write pattern existed at the `Expr::StringLit` level in
+  `expr_to_source_string` (call_graph.rs — feeds requires-substitution
+  text that is re-lexed), `trace_evaluated_expression`
+  (dataflow_inference.rs) and `expr_to_source` (loop_detector.rs, which
+  used Rust `{:?}` — mostly-correct but diverges on chars the Mumei
+  lexer doesn't decode); all three now use the same helper.
 - Tests: `tests/test_string_literal_escape.mm` (quote / tab /
   distinct-escape verified) + `tests/negative/string_literal_escape_collapse.mm`
   (`"a\\nb" == "a\nb"` correctly fails) + `tests/test_string_literal_escape.rs`.

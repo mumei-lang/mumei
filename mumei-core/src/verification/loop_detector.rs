@@ -378,7 +378,9 @@ fn expr_to_source(expr: &Expr) -> String {
     match expr {
         Expr::Number(value) => value.to_string(),
         Expr::Float(value) => value.to_string(),
-        Expr::StringLit(value) => format!("{value:?}"),
+        Expr::StringLit(value) => {
+            format!("\"{}\"", crate::parser::token::escape_string_content(value))
+        }
         Expr::Variable(name) => name.clone(),
         Expr::ArrayLit(elements) => format!(
             "[{}]",
