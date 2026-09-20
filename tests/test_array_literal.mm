@@ -174,3 +174,56 @@ atom if_branch_block_tail(c: bool) -> i64
     let a = if c { let t = [1, 2]; t } else { [3, 4, 5] }
     a[1]
   };
+
+// `let a = match e { … }` merges each arm's array length under its own
+// pattern condition — `len_<a>` mirrors the arm chain
+// `ite(c_A, 2, ite(c_B, 3, …))` instead of an unconstrained symbol.
+enum LitE { LitA, LitB }
+
+atom match_arm_lit_len(e: LitE) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = match e {
+      LitE::LitA => [1, 2],
+      LitE::LitB => [3, 4, 5],
+    }
+    a[1]
+  };
+
+// Arm-local `let`s resolve to their literal rhs — arm slots never reach
+// the merged env, so the tail variable's own length would be lost.
+atom match_arm_local_let(e: LitE) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = match e {
+      LitE::LitA => { let t = [1, 2]; t },
+      LitE::LitB => [3, 4, 5],
+    }
+    a[1]
+  };
+
+// Var tails contribute the source's tracked length under the arm cond.
+atom match_arm_var_len(a1: [i64], e: LitE) -> i64
+  requires: len(a1) >= 2;
+  ensures: result == result;
+  body: {
+    let a = match e {
+      LitE::LitA => a1,
+      LitE::LitB => [3, 4, 5],
+    }
+    a[1]
+  };
+
+// Three+ arms: the len merge folds the whole `ite` spine, not just two.
+atom match_arm_three_way(x: i64) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: {
+    let a = match x {
+      0 => [1],
+      _ => [1, 2, 3],
+    }
+    a[0]
+  };

@@ -1,3 +1,23 @@
+### 2026-09-20: `match`-arm array literals merge their lengths
+
+- `let a = match e { A => [1, 2], B => [3, 4, 5] }` already merged the
+  array contents (`ite(c_A, arr_A, ite(c_B, arr_B, …))`), but `len_a`
+  stayed an unconstrained symbol — `a[1]` failed the bounds check even
+  though it is in bounds on every arm.
+- `wire_array_slots` now walks the result's `ite` spine and mirrors the
+  same conditions on lengths: `len_a = ite(c_A, len_A, ite(c_B, len_B,
+  …))`. Arm tails contribute a concrete length for literals, the tracked
+  `len_<src>` for variables, and — since arm-local `let`s never reach
+  the merged env — the rhs of `A => { let t = […]; t }` is resolved
+  one level deep. Anything unresolvable gets a fresh `#m<idx>` symbol.
+- Bounds stay per-arm precise: `a[2]` still fails closed on a 2-element
+  arm. Nested `if` inside an arm tail keeps the conservative fresh
+  length (same policy as `if`-branch merges).
+- Tests: `match_arm_lit_len` / `match_arm_local_let` /
+  `match_arm_var_len` / `match_arm_three_way` in
+  `tests/test_array_literal.mm`, `match_arm_lit_oob` in
+  `tests/test_array_literal_negative.mm`.
+
 ### 2026-09-20: `if`-branch array literals merge their lengths
 
 - `let a = if c { [1, 2] } else { [3, 4, 5] }` already merged the array

@@ -598,7 +598,8 @@ pub(crate) fn wire_array_slots<'a>(
         _ => "i64",
     };
     let cond_hint = arr.nth_child(0).and_then(|c| c.as_bool());
-    env.insert(format!("__z3_arr_{name}"), arr.into());
+    let arr_dyn: Dynamic = arr.into();
+    env.insert(format!("__z3_arr_{name}"), arr_dyn.clone());
     let len: Dynamic = match value {
         Some(Expr::ArrayLit(elements)) => concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64),
         Some(Expr::Variable(src)) => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
@@ -617,6 +618,42 @@ pub(crate) fn wire_array_slots<'a>(
             match cond_hint {
                 Some(cond) => cond.ite(&len_t, &len_e),
                 None => array_len_symbol(vc.ctx, &format!("len_{name}#if"), vc.bitvec_i64),
+            }
+        }
+        Some(Expr::Match { arms, .. }) => {
+            // The Match eval folds arms in reverse, producing the chain
+            // `ite(c_1, v_1, ite(c_2, v_2, …, v_n))` — the last arm's value
+            // is the innermost else child and carries no condition of its
+            // own (exhaustiveness implies it when all earlier conds fail).
+            // Mirror the spine on lengths: `len_<name> = ite(c_1, len_1, …)`.
+            // Only child-2 is descended, so `ite`s inside arm values do not
+            // confuse the walk; an unexpected shape falls back to a fresh
+            // symbol rather than misaligning conds with arm lengths.
+            let mut conds: Vec<Bool> = Vec::new();
+            let mut spine: Option<Dynamic> = Some(arr_dyn.clone());
+            while conds.len() < arms.len().saturating_sub(1) {
+                let Some(node) = spine else { break };
+                match node.nth_child(0).and_then(|c| c.as_bool()) {
+                    Some(cond) => {
+                        conds.push(cond);
+                        spine = node.nth_child(2);
+                    }
+                    None => break,
+                }
+            }
+            if !arms.is_empty() && conds.len() == arms.len() - 1 {
+                let mut lens: Vec<Dynamic> = arms
+                    .iter()
+                    .enumerate()
+                    .map(|(i, arm)| arm_array_len(vc, env, name, i, arm))
+                    .collect();
+                let mut acc = lens.pop().expect("non-empty arms");
+                for (cond, len_arm) in conds.iter().zip(lens.iter()).rev() {
+                    acc = cond.ite(len_arm, &acc);
+                }
+                acc
+            } else {
+                array_len_symbol(vc.ctx, &format!("len_{name}#match"), vc.bitvec_i64)
             }
         }
         _ => array_len_value(vc.ctx, env, name, vc.bitvec_i64, None),
@@ -661,6 +698,43 @@ fn branch_array_len<'a>(
         Some(Expr::ArrayLit(elements)) => concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64),
         Some(Expr::Variable(src)) => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
         _ => array_len_symbol(vc.ctx, &format!("len_{name}#{side}"), vc.bitvec_i64),
+    }
+}
+
+/// The most recent `let <name> = <rhs>` before `stmt`'s tail — match-arm
+/// `let`s stay arm-local and never reach the merged env, so resolving the
+/// arm tail's variable here recovers e.g. `A => { let t = [1,2]; t }`.
+fn stmt_let_rhs<'e>(stmt: &'e Stmt, name: &str) -> Option<&'e Expr> {
+    match stmt {
+        Stmt::Let { var, value, .. } if var == name => Some(value.as_ref()),
+        Stmt::Block(stmts, _) => stmts.iter().rev().find_map(|s| stmt_let_rhs(s, name)),
+        _ => None,
+    }
+}
+
+/// Array length contributed by one match arm, resolving arm-local `let`s
+/// before falling back to the merged env (correct for outer vars because
+/// the reverse-order env fold makes each binding apply under its own arm
+/// condition). Anything unresolvable gets a fresh per-arm symbol.
+fn arm_array_len<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    name: &str,
+    index: usize,
+    arm: &MatchArm,
+) -> Dynamic<'a> {
+    let fresh = || array_len_symbol(vc.ctx, &format!("len_{name}#m{index}"), vc.bitvec_i64);
+    match stmt_tail_expr(&arm.body) {
+        Some(Expr::ArrayLit(elements)) => concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64),
+        Some(Expr::Variable(src)) => match stmt_let_rhs(&arm.body, src) {
+            Some(Expr::ArrayLit(elements)) => {
+                concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64)
+            }
+            Some(Expr::Variable(rhs)) => array_len_value(vc.ctx, env, rhs, vc.bitvec_i64, None),
+            Some(_) => fresh(),
+            None => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
+        },
+        _ => fresh(),
     }
 }
 

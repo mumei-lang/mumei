@@ -85,3 +85,17 @@ atom if_branch_lit_oob(c: bool) -> i64
     let a = if c { [1, 2] } else { [3, 4] }
     a[2]
   };
+
+// Negative: `match` arm lengths merge per-arm — index 2 is out of bounds
+// on the `[1, 2]` arm even though the other arm has 3 elements.
+enum LitNegE { LitNegA, LitNegB }
+
+atom match_arm_lit_oob(e: LitNegE) -> i64
+ensures: result >= 0;
+body: {
+    let a = match e {
+        LitNegE::LitNegA => [1, 2],
+        LitNegE::LitNegB => [3, 4, 5],
+    }
+    a[2]
+};
