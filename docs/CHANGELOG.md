@@ -1,3 +1,15 @@
+### 2026-09-20: lowercase `qual::Variant` patterns parse as qualified paths
+
+- `parse_pattern` folded `::`-separated path segments only for uppercase
+  idents, so `mine::Cons(v)` bound `mine` as a variable pattern and
+  orphaned `::Cons(v)` into the arm tail — the qualifier was silently
+  dropped (and the arm could misbind or mis-verify). `::` folding is now
+  case-independent: any `ident::seg` path parses as a qualified variant
+  reference — lowercase qualifiers resolve by leaf name through the same
+  module-path semantics as before.
+- Tests: `test_pattern_lowercase_qual.mm` — lowercase qualifier binds the
+  payload; unknown module qualifier resolves by leaf.
+
 ### 2026-09-19: `match` on `let`-bound enum values resolves the declared type
 
 - **Verify** (`mumei-core`): a `let`/`assign` binding now records the inferred
