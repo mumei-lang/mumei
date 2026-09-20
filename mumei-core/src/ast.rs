@@ -270,8 +270,8 @@ impl std::fmt::Display for TypeRef {
 // - 実行時の型消去やオーバーヘッドがない
 
 use crate::parser::{
-    parse_body_expr_checked, parse_type_ref, Atom, Effect, EnumDef, EnumVariant, Expr, Item, Param,
-    Stmt, StructDef, StructField,
+    parse_body_expr_checked, parse_expression, parse_type_ref, Atom, Effect, EnumDef, EnumVariant,
+    Expr, Item, Param, Stmt, StructDef, StructField,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -333,6 +333,22 @@ impl Monomorphizer {
                                 self.body_parse_failures
                                     .push(format!("atom '{}': {failure}", atom.name));
                             }
+                        }
+                    }
+                    // requires/ensures/invariant/forall 節も `f<T>(...)`
+                    // 呼び出しを含み得る — 節評価時に単相化インスタンスが
+                    // 解決するよう、同じくインスタンス収集の対象にする。
+                    for clause in [&atom.requires, &atom.ensures]
+                        .into_iter()
+                        .chain(atom.invariant.iter())
+                    {
+                        if clause.trim() != "true" {
+                            self.collect_from_expr(&parse_expression(clause));
+                        }
+                    }
+                    for quantifier in &atom.forall_constraints {
+                        for part in [&quantifier.start, &quantifier.end, &quantifier.condition] {
+                            self.collect_from_expr(&parse_expression(part));
                         }
                     }
                 }

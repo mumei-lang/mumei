@@ -1,6 +1,7 @@
 // NOTE: This file tests that effect polymorphism violations are detected.
-// Expected: verification error reporting that Network is not in effects: [FileWrite].
-// The expression parser does not yet support generic calls like `pipe<Network>(...)`.
+// `pipe<Network>(...)` parses as an explicit-type-argument call, so main
+// really invokes the monomorphized instance — expected failure: verification
+// reports that Network is not in effects: [FileWrite].
 // Run with: cargo run -- verify tests/effect_polymorphism_violation.mm
 
 effect FileWrite;

@@ -1,3 +1,34 @@
+### 2026-09-20: Explicit-type-argument calls `name<T, …>(args)`
+
+- `f<i64>(x)` / `apply<i64, Network>(42, atom_ref(net_fn))` previously
+  misparsed as comparisons — `apply < i64` then `>` — silently
+  producing nonsense expressions or vacuous passes.
+  `tests/effect_polymorphism_mixed.mm` carried such a misparse before
+  its call was worked around; it is restored to the real
+  explicit-type form.
+- The parser now speculatively matches `ident` `<` type-ref-list `>`
+  `(` and, only on that exact shape, produces a `Call` whose callee
+  name carries the instantiation (`apply<i64, Network>`) — matching
+  the monomorphizer's `parse_type_ref(call_name)` collection and the
+  atom registry's `display_name()` keys, so lookup, HIR lowering, and
+  MIR unbound-name checks work unchanged. Every other shape (`a < b`,
+  `a < b > c`, `a < f<c >> d`, `f < i64 > x` with no `(` after `>`)
+  rewinds and stays a comparison; `>>` splits are rolled back via a
+  token-stream snapshot.
+- The monomorphizer also scans `requires`/`ensures`/`invariant`/`forall`
+  clause expressions for instantiated call names, so
+  `ensures: result == id<i64>(3)` resolves instead of skipping the
+  clause as unsupported.
+- Unknown callees or unsatisfied `where` bounds stay fail-closed:
+  `mystery<i64>(x)` reports `Unknown function: mystery<i64>`; a call
+  site violating the monomorphized callee's `requires` fails as a real
+  precondition error.
+- Tests: parser coverage in `parser/mod.rs` (`test_parse_explicit_type_arg_call`,
+  spacing/nesting, comparison regressions, while-cond), CLI harness
+  `tests/test_generic_call.rs` over `tests/test_generic_call.mm` /
+  `tests/test_generic_call_negative.mm` and the effect-polymorphism
+  fixtures.
+
 ### 2026-09-20: clause `match` on struct fields resolves the field's type — and must be exhaustive
 
 - `requires:`/`ensures:` clauses lower with `solver_opt = None` so arm-body
