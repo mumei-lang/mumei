@@ -1,3 +1,17 @@
+### 2026-09-20: `let a = arr` aliases share the tracked array (len + store history)
+
+- `Stmt::Let`/`Stmt::Assign` with a bare `Variable` value now propagate the
+  source's `__z3_arr_<name>` backing const and `len_<name>` symbol to the
+  alias: `let a = arr` then `a[i]` reads/stores share `arr`'s constraint
+  state. Previously the alias lowered to a fresh unconstrained array, so
+  `a[0]` failed bounds checks even when `forall(i,0,n,arr[i]…)` pinned
+  `len_arr >= n`.
+- Chained aliases (`let b = a` where `a` aliases `arr`) propagate
+  transitively. Arrays are Move types — `arr` is consumed by the alias, so
+  post-move reads/writes go through the alias name.
+- Tests: `tests/test_alias_probe.mm` (alias read/store/chain) +
+  `tests/test_array_alias.rs`.
+
 ### 2026-09-20: clause-scope phantom names fail closed; unbound-check exemptions aligned
 
 - `requires` / `ensures` / `invariant` / `forall_constraints` clauses that
@@ -32,6 +46,7 @@
 - Tests: `tests/negative/clause_unbound_name.mm` +
   `tests/test_clause_unbound_name.rs`.
 
+||||||| parent of 43ac726 (docs(CHANGELOG): array-alias verify entry)
 ### 2026-09-20: unbound-check follow-up — lambda params bound; bogus generic-call syntax surfaced
 
 - `HirExpr::Lambda` lowering now registers the lambda's parameters as MIR
