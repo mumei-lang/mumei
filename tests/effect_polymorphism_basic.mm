@@ -1,5 +1,4 @@
 // NOTE: This file tests effect polymorphism end-to-end.
-// The expression parser does not yet support generic calls like `pipe<FileWrite>(...)`.
 // Run with: cargo run -- verify tests/effect_polymorphism_basic.mm
 // The monomorphizer requires item-level instance registration (see src/ast.rs tests).
 
@@ -21,8 +20,7 @@ atom main()
     effects: [FileWrite];
     requires: true;
     ensures: result >= 0;
-    // `pipe<FileWrite>(atom_ref(writer))` is not valid call syntax (generic
-    // call sites remain unsupported — the type argument list parses as a
-    // comparison chain). Call `writer` directly so the FileWrite effect
-    // propagates for real instead of verifying a misparsed expression.
+    // `pipe<FileWrite>(atom_ref(writer))` parses fine now, but `pipe`'s
+    // `ensures: true` can't propagate writer's `result >= 0` — call `writer`
+    // directly so the FileWrite effect and the postcondition check stay real.
     body: writer(42);

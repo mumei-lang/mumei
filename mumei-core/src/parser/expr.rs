@@ -5,6 +5,7 @@
 use super::pattern::parse_pattern;
 use super::token::Token;
 use super::ParseContext;
+use crate::ast::TypeRef;
 use crate::parser::{Expr, JoinSemantics, LambdaParam, MatchArm, Op, Span, Stmt};
 
 /// Pratt parser binding power for binary operators.
@@ -673,8 +674,62 @@ fn parse_ident_continuation(ctx: &mut ParseContext, name: String) -> Expr {
             Expr::ArrayAccess(name, Box::new(index))
         }
 
+        Token::Lt => {
+            // `name<T, …>(args)`: an explicit type-argument call. The `<`
+            // is ambiguous with a comparison (`a < b`), so commit only
+            // when the full `<` type-list `>` `(` shape matches; otherwise
+            // rewind and let the Pratt loop parse `<` as `Op::Lt`.
+            // The callee name carries the instantiation
+            // (`apply<i64, Network>`), matching the monomorphizer's
+            // `parse_type_ref(call_name)` convention and the atom
+            // registry's `display_name()` keys.
+            if let Some(type_args) = parse_explicit_type_args(ctx) {
+                let callee = TypeRef::generic(&name, type_args).display_name();
+                Expr::Call(callee, parse_call_args(ctx))
+            } else {
+                Expr::Variable(name)
+            }
+        }
+
         _ => Expr::Variable(name),
     }
+}
+
+/// Speculatively parse an explicit type-argument list at `ident<`…: the
+/// shape `<` type-ref (`,` type-ref)* `>` `(`. Returns the `TypeRef`s
+/// with the cursor on the argument list's `(` when the shape matches,
+/// else rewinds the stream — including any `>>` splits
+/// `parse_type_ref_from_ctx` spliced in — so `<` stays a comparison.
+fn parse_explicit_type_args(ctx: &mut ParseContext) -> Option<Vec<TypeRef>> {
+    let snapshot = ctx.snapshot();
+    ctx.advance(); // consume '<'
+    let mut type_args = Vec::new();
+    let closed = loop {
+        let entry_start = ctx.pos();
+        let type_ref = crate::parser::item::parse_type_ref_from_ctx(ctx);
+        if ctx.pos() == entry_start {
+            // No type-shaped token consumed: `a < 1`, `a < >`, `a < <b`.
+            break false;
+        }
+        type_args.push(type_ref);
+        match ctx.peek() {
+            Token::Comma => {
+                ctx.advance();
+            }
+            Token::Gt => {
+                ctx.advance();
+                break true;
+            }
+            _ => break false,
+        }
+    };
+    // Only `>` directly followed by `(` makes this a call: `a < b > c`,
+    // `f<T> { … }` and `a < b > (x)`-less shapes all stay comparisons.
+    if !closed || ctx.peek() != &Token::LParen {
+        ctx.rewind(snapshot);
+        return None;
+    }
+    Some(type_args)
 }
 
 /// Parse match arm body.
