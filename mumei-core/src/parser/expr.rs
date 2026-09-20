@@ -240,6 +240,18 @@ pub fn parse_expr(ctx: &mut ParseContext, min_bp: u8) -> Expr {
         }
     }
 
+    // `a[i][j]` / `f()[0]` cannot be expressed: `ArrayAccess`/`ArrayStore`
+    // only accept a bare identifier in the array position. Left unparsed,
+    // the trailing `[…]` re-lexes as a stray array-literal statement, so the
+    // intended index silently evaluates a different program. Flag it.
+    if ctx.peek() == &Token::LBracket {
+        ctx.syntax_failure(
+            "indexing into an expression (e.g. `a[i][j]` or `f()[0]`) is not supported; \
+             bind the value to a variable first"
+                .to_string(),
+        );
+    }
+
     lhs
 }
 
