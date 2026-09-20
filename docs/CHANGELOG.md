@@ -1,3 +1,24 @@
+### 2026-09-20: `while` loops havoc param arrays' post-state (stale-read soundness fix)
+
+- **Soundness fix**: a `while` body that only *writes* a param array
+  (`a[i] = v` with no prior read) left the array's post-loop state at its
+  *entry* binding. `collect_assigned_vars` marks `__z3_arr_<v>` modified,
+  but a param's slot materializes lazily on first access, so it was absent
+  from `env` when `modified` was filtered — the havoc never ran, and
+  post-loop `a[i]` reads resolved the entry const, still constrained by
+  `requires`. `a[0] = 9` in a loop followed by `ensures: result == 7`
+  (with `requires: a[0] == 7`) wrong-verified. The while translator now
+  materializes `__z3_arr_<v>` (aliased to the entry const) before
+  filtering `modified`, so param arrays are havoced exactly like local
+  literals. `len_<v>` is still not havoced — stores cannot resize.
+- Verified on `[i64]` and `[Str]` params: stale claims (`a[0] == 7` after
+  `a[0] = 9`) and last-write claims (`a[0] == 9`) both fail now; claims
+  that survive a fresh-unconstrained element still prove.
+- Tests: `tests/test_loop_array_havoc.mm` (post-loop provable claims,
+  `len` preservation, read-then-write mix) +
+  `tests/test_loop_array_havoc_negative.mm` (stale `[i64]`/`[Str]` reads,
+  last-write claim) via `tests/test_loop_array_havoc.rs`.
+
 ### 2026-09-20: `[Str]` element sort; `[[T]]` nested arrays fail closed
 
 - `[Str]` now encodes on a real `Int -> Seq` (Z3 `String`) range sort

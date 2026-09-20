@@ -308,6 +308,22 @@ pub(crate) fn stmt_to_z3<'a>(
                 // state, which would mask violations on later iterations.
                 let mut modified = std::collections::HashSet::new();
                 collect_assigned_vars(body, &mut modified);
+                // `__z3_arr_<v>` for a param array only materializes on first
+                // access, so a loop that stores into `v` without an earlier
+                // `v[i]` read finds no slot in `env` — the retain below would
+                // drop it and the post-loop state would read the *entry*
+                // array, letting stale `requires` facts wrong-verify.
+                // Materialize the slot (aliased to the same const) so the
+                // array is havoced like a local literal's slot is.
+                for name in modified.clone() {
+                    if let Some(var) = name.strip_prefix("__z3_arr_") {
+                        if !env.contains_key(&name) {
+                            if let Some(arr) = env.get(var).and_then(|d| d.as_array()) {
+                                env.insert(name, arr.into());
+                            }
+                        }
+                    }
+                }
                 modified.retain(|name| env.contains_key(name));
 
                 let marks = obligation_marks(vc);
