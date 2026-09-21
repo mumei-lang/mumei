@@ -593,7 +593,7 @@ pub(crate) fn emit_lambda_selector<'a>(
     );
 
     // Body scope: sel + union caps + args bound by position.
-    let sel_name = format!("__sel_{var_name}");
+    let sel_name = format!("__sel#{var_name}");
     let lam_builder = context.create_builder();
     let entry = context.append_basic_block(lam_fn, "entry");
     lam_builder.position_at_end(entry);

@@ -7,8 +7,8 @@
   fail-closed (`Unknown function h`), as do `match` arms for v1.
 - Codegen lifts a `__lamsel_*` dispatcher function whose leading `i64`
   selector param picks the branch: the binding site folds the branch
-  conditions into a frozen `select` chain (`__sel_<h>`), and `h`'s
-  `@lam:` marker records `__sel_<h>` + the union of branch captures, so
+  conditions into a frozen `select` chain (`__sel#<h>` — a `#`-suffixed internal name users cannot write, so it can never collide with a program variable), and `h`'s
+  `@lam:` marker records `__sel#<h>` + the union of branch captures, so
   `h(args)` / `call(h, args)` / `let h2 = h` all route through the
   dispatcher. Captures and the selector index are evaluated once at the
   binding site — a later rebind of a condition variable can't re-pick

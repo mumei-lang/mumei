@@ -105,7 +105,7 @@ fn bind_lambda_selector<'a>(
     };
     let lam_fn = module.get_function(&fn_name).unwrap();
     let ptr: BasicValueEnum = lam_fn.as_global_value().as_pointer_value().into();
-    let sel_name = format!("__sel_{var}");
+    let sel_name = format!("__sel#{var}");
     variables.insert(sel_name, sel);
     variables.insert(var.to_string(), ptr);
     var_types.insert(

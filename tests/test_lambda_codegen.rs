@@ -375,3 +375,24 @@ body: {
         output.status.code()
     );
 }
+
+#[test]
+fn lambda_if_branch_sel_does_not_collide_with_user_var() {
+    let fixture = write_fixture(
+        "lamsel_collision",
+        r#"
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let __sel_h = 999;
+    let f = |a: i64| a * 0 + __sel_h;
+    let g = |a: i64| a + 100;
+    let h = if true { f } else { g };
+    h(5) - 999
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert_eq!(output.status.code(), Some(0));
+}
