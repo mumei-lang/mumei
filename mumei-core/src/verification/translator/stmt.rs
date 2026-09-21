@@ -301,21 +301,91 @@ fn record_binding_enum_type(vc: &VCtx, var: &str, value: &Expr) {
     }
 }
 
+/// Parameter count of a `LocalLambda`, following `Ite` branches — a call
+/// through a conditional lambda can only pick one arity, so `Ite` reports
+/// a count only when both sides agree.
+fn local_lambda_arity(lambda: &LocalLambda) -> Option<usize> {
+    match lambda {
+        LocalLambda::Closure { expr, .. } => match expr {
+            Expr::Lambda { params, .. } => Some(params.len()),
+            _ => None,
+        },
+        LocalLambda::Ite {
+            then_lam, else_lam, ..
+        } => {
+            let t = local_lambda_arity(then_lam)?;
+            (local_lambda_arity(else_lam)? == t).then_some(t)
+        }
+        LocalLambda::Opaque => None,
+    }
+}
+
+/// Resolve an expression to the lambda it denotes: a `Lambda` literal wraps
+/// directly, a `Variable` aliases the current binding, and `if c { f }
+/// else { g }` (branches resolving recursively) becomes an `Ite` whose
+/// `cond` is evaluated in the current env — the let-site snapshot that
+/// fixes which body a later `h(args)` inlines.
+fn resolve_lambda_expr<'a>(
+    vc: &VCtx<'a>,
+    expr: &Expr,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> Option<std::rc::Rc<LocalLambda<'a>>> {
+    match expr {
+        Expr::Lambda { .. } => Some(std::rc::Rc::new(LocalLambda::Closure {
+            expr: expr.clone(),
+            captured: vc.local_lambdas.borrow().clone(),
+        })),
+        Expr::Variable(src) => vc.local_lambdas.borrow().get(src).cloned(),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            let then_lam = resolve_lambda_stmt(vc, then_branch, env, solver_opt)?;
+            let else_lam = resolve_lambda_stmt(vc, else_branch, env, solver_opt)?;
+            if local_lambda_arity(&then_lam) != local_lambda_arity(&else_lam) {
+                return None;
+            }
+            let cond_ast = expr_to_z3(vc, cond, env, solver_opt).ok()?.as_bool()?;
+            Some(std::rc::Rc::new(LocalLambda::Ite {
+                cond: cond_ast,
+                then_lam,
+                else_lam,
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn resolve_lambda_stmt<'a>(
+    vc: &VCtx<'a>,
+    stmt: &Stmt,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> Option<std::rc::Rc<LocalLambda<'a>>> {
+    match stmt {
+        Stmt::Expr(e, _) => resolve_lambda_expr(vc, e, env, solver_opt),
+        Stmt::Block(stmts, _) => stmts
+            .last()
+            .and_then(|s| resolve_lambda_stmt(vc, s, env, solver_opt)),
+        _ => None,
+    }
+}
+
 /// Record (or clear) the lambda bound by a `let`/`assign` so a later
 /// `var(args)` / `call(var, args)` can inline the body. `let g = f`
 /// where `f` is lambda-bound aliases the binding; rebinding to any other
 /// value drops the entry so a stale lambda never answers a call issued
 /// to a re-bound name.
-fn record_binding_lambda(vc: &VCtx, var: &str, value: &Expr) {
-    let bound = match value {
-        Expr::Lambda { .. } => Some(std::rc::Rc::new(LocalLambda::Closure {
-            expr: value.clone(),
-            captured: vc.local_lambdas.borrow().clone(),
-        })),
-        Expr::Variable(src) => vc.local_lambdas.borrow().get(src).cloned(),
-        _ => None,
-    };
-    match bound {
+fn record_binding_lambda<'a>(
+    vc: &VCtx<'a>,
+    var: &str,
+    value: &Expr,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) {
+    match resolve_lambda_expr(vc, value, env, solver_opt) {
         Some(lambda) => vc
             .local_lambdas
             .borrow_mut()
@@ -340,7 +410,7 @@ pub(crate) fn stmt_to_z3<'a>(
         Stmt::Let { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             record_binding_enum_type(vc, var, value);
-            record_binding_lambda(vc, var, value);
+            record_binding_lambda(vc, var, value, env, solver_opt);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
             wire_array_slots(vc, var, Some(value), &val, env);
@@ -350,7 +420,7 @@ pub(crate) fn stmt_to_z3<'a>(
         Stmt::Assign { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             record_binding_enum_type(vc, var, value);
-            record_binding_lambda(vc, var, value);
+            record_binding_lambda(vc, var, value, env, solver_opt);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
             wire_array_slots(vc, var, Some(value), &val, env);

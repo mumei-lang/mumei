@@ -349,6 +349,379 @@ pub(crate) fn emit_lambda_function<'a>(
     unreachable!()
 }
 
+/// Push the leading capture arguments for a lifted-lambda call: each cap
+/// name resolves to the current `variables` value, repacking array slots
+/// into the `{i64, ptr}` fat pointer.
+fn push_lambda_captures<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    caps: &[String],
+    variables: &HashMap<String, BasicValueEnum<'a>>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+) -> MumeiResult<Vec<BasicMetadataValueEnum<'a>>> {
+    let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(caps.len());
+    for cap in caps {
+        if let Some(&(len_val, _elem_ty, data_ptr)) = array_ptrs.get(cap.as_str()) {
+            let struct_ty = array_struct_type(context);
+            let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
+            agg = builder
+                .build_insert_value(agg, len_val, 0, "lamcap_len")
+                .map_err(|e| MumeiError::codegen(format!("array capture pack failed: {e:?}")))?;
+            agg = builder
+                .build_insert_value(agg, data_ptr, 1, "lamcap_data")
+                .map_err(|e| MumeiError::codegen(format!("array capture pack failed: {e:?}")))?;
+            let agg_val: BasicValueEnum = match agg {
+                inkwell::values::AggregateValueEnum::StructValue(s) => s.into(),
+                inkwell::values::AggregateValueEnum::ArrayValue(a) => a.into(),
+            };
+            arg_vals.push(agg_val.into());
+        } else if let Some(v) = variables.get(cap.as_str()) {
+            arg_vals.push((*v).into());
+        } else {
+            return Err(MumeiError::codegen(format!(
+                "lambda capture `{cap}` is not bound at the call site"
+            )));
+        }
+    }
+    Ok(arg_vals)
+}
+
+/// Collect the `let h = if c { f } else { g }` branch shape into
+/// `(conditions, marker)` leaves: a leaf is a `Variable` carrying a `@lam:`
+/// marker (or an inline `Lambda` literal, lifted on the spot), an
+/// `IfThenElse` recurses with `cond` accumulated onto each leaf.
+/// Returns None when any leaf isn't a lambda — the caller then falls back
+/// to the generic expression compile and the name stays uncallable.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(crate) fn collect_lambda_branches<'e, 'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+    caller_fn: &FunctionValue<'a>,
+    expr: &'e HirExpr,
+    conds: Vec<&'e HirExpr>,
+    variables: &HashMap<String, BasicValueEnum<'a>>,
+    var_types: &HashMap<String, String>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+    depth: usize,
+) -> MumeiResult<Option<Vec<(Vec<&'e HirExpr>, String)>>> {
+    const MAX_DEPTH: usize = 8;
+    if depth > MAX_DEPTH {
+        return Ok(None);
+    }
+    match expr {
+        HirExpr::Variable(name) => Ok(var_types
+            .get(name.as_str())
+            .filter(|m| m.starts_with(LAMBDA_MARK))
+            .map(|mark| vec![(conds, mark.clone())])),
+        HirExpr::Lambda {
+            params,
+            return_type,
+            captures,
+            body,
+        } => {
+            // An inline `|…| …` leaf lifts like any other bound lambda; the
+            // lifted fn's marker is what the branch entry records.
+            let (fn_name, all_caps) = emit_lambda_function(
+                context,
+                module,
+                caller_fn,
+                "branch",
+                params,
+                return_type.as_ref(),
+                captures,
+                body,
+                variables,
+                var_types,
+                array_ptrs,
+                module_env,
+            )?;
+            Ok(Some(vec![(conds, lambda_marker(&fn_name, &all_caps))]))
+        }
+        HirExpr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            let Some(then_tail) = hir_stmt_tail_expr(then_branch) else {
+                return Ok(None);
+            };
+            let Some(else_tail) = hir_stmt_tail_expr(else_branch) else {
+                return Ok(None);
+            };
+            let mut then_conds = conds.clone();
+            then_conds.push(cond);
+            let Some(mut then_branches) = collect_lambda_branches(
+                context,
+                module,
+                caller_fn,
+                then_tail,
+                then_conds,
+                variables,
+                var_types,
+                array_ptrs,
+                module_env,
+                depth + 1,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(mut else_branches) = collect_lambda_branches(
+                context,
+                module,
+                caller_fn,
+                else_tail,
+                conds,
+                variables,
+                var_types,
+                array_ptrs,
+                module_env,
+                depth + 1,
+            )?
+            else {
+                return Ok(None);
+            };
+            then_branches.append(&mut else_branches);
+            Ok(Some(then_branches))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The tail expression of a lambda-shaped branch body — a bare `Expr` stmt
+/// or the last stmt of a `Block`.
+fn hir_stmt_tail_expr(stmt: &HirStmt) -> Option<&HirExpr> {
+    match stmt {
+        HirStmt::Expr(e) => Some(e),
+        HirStmt::Block { tail_expr, .. } => tail_expr.as_ref().map(|e| e.as_ref()),
+        _ => None,
+    }
+}
+
+/// Emit `__lamsel_<caller>_<var>` — a dispatcher for
+/// `let h = if c { f } else { g }`. Signature:
+/// `(i64 sel, <union of every branch's captures>, <shared arg params>)`.
+/// `sel` picks the branch: index 0..n-1 for conditional leaves, n-1 for the
+/// trailing unconditional else leaf. The body's `sel`-indexed switch calls
+/// the chosen lifted function with its own capture list.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_lambda_selector<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+    caller_fn: &FunctionValue<'a>,
+    var_name: &str,
+    branches: &[String],
+    variables: &HashMap<String, BasicValueEnum<'a>>,
+    var_types: &HashMap<String, String>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<Option<(String, Vec<String>)>> {
+    // Resolve each branch's lifted fn and marker captures.
+    let mut branch_fns: Vec<FunctionValue<'a>> = Vec::with_capacity(branches.len());
+    let mut branch_caps: Vec<Vec<String>> = Vec::with_capacity(branches.len());
+    for mark in branches {
+        let Some((fn_name, caps)) = parse_lambda_marker(mark) else {
+            return Ok(None);
+        };
+        let Some(lam_fn) = module.get_function(&fn_name) else {
+            return Ok(None);
+        };
+        branch_fns.push(lam_fn);
+        branch_caps.push(caps);
+    }
+
+    // Arity + argument types + return type must agree across branches —
+    // otherwise no single dispatcher signature exists (fail closed).
+    let arg_arity = |i: usize| branch_fns[i].count_params() as usize - branch_caps[i].len();
+    let arity = arg_arity(0);
+    if branch_fns
+        .iter()
+        .enumerate()
+        .any(|(i, _)| arg_arity(i) != arity)
+    {
+        return Ok(None);
+    }
+    let arg_types_of = |i: usize| -> Vec<BasicMetadataTypeEnum<'a>> {
+        branch_fns[i]
+            .get_type()
+            .get_param_types()
+            .into_iter()
+            .skip(branch_caps[i].len())
+            .map(|t| t.into())
+            .collect()
+    };
+    let arg_types = arg_types_of(0);
+    if (1..branches.len()).any(|i| arg_types_of(i) != arg_types) {
+        return Ok(None);
+    }
+    let ret_ty = branch_fns[0].get_type().get_return_type();
+    if branch_fns
+        .iter()
+        .any(|f| f.get_type().get_return_type() != ret_ty)
+    {
+        return Ok(None);
+    }
+    let Some(ret_ty) = ret_ty else {
+        return Ok(None);
+    };
+
+    // Ordered union of all branch captures.
+    let mut union_caps: Vec<String> = Vec::new();
+    for caps in &branch_caps {
+        for c in caps {
+            if !union_caps.contains(c) {
+                union_caps.push(c.clone());
+            }
+        }
+    }
+
+    // Dispatcher signature: (i64 sel, union caps, args).
+    let mut param_types: Vec<BasicMetadataTypeEnum> = vec![context.i64_type().into()];
+    for cap in &union_caps {
+        if array_ptrs.contains_key(cap.as_str()) {
+            param_types.push(array_struct_type(context).into());
+        } else if let Some(v) = variables.get(cap.as_str()) {
+            param_types.push(v.get_type().into());
+        } else {
+            return Ok(None);
+        }
+    }
+    param_types.extend(arg_types.iter().cloned());
+
+    let fn_name = format!(
+        "__lamsel_{}_{}",
+        caller_fn.get_name().to_string_lossy(),
+        var_name
+    );
+    let fn_name = if module.get_function(&fn_name).is_some() {
+        let mut n = 1;
+        loop {
+            let cand = format!("{fn_name}_{n}");
+            if module.get_function(&cand).is_none() {
+                break cand;
+            }
+            n += 1;
+        }
+    } else {
+        fn_name
+    };
+    let lam_fn = module.add_function(
+        &fn_name,
+        ret_ty.fn_type(&param_types, false),
+        Some(inkwell::module::Linkage::Private),
+    );
+
+    // Body scope: sel + union caps + args bound by position.
+    let sel_name = format!("__sel_{var_name}");
+    let lam_builder = context.create_builder();
+    let entry = context.append_basic_block(lam_fn, "entry");
+    lam_builder.position_at_end(entry);
+    let mut scope_vars: HashMap<String, BasicValueEnum> = HashMap::new();
+    let mut scope_var_types: HashMap<String, String> = HashMap::new();
+    let mut array_ptrs_local: HashMap<String, ArrayPtr> = HashMap::new();
+    let mut arg_vals: Vec<BasicValueEnum> = Vec::new();
+
+    let sel_val = lam_fn.get_nth_param(0).unwrap().into_int_value();
+    scope_vars.insert(sel_name.clone(), sel_val.into());
+    for (i, cap) in union_caps.iter().enumerate() {
+        let val = lam_fn.get_nth_param(1 + i as u32).unwrap();
+        bind_lambda_arg(
+            context,
+            &lam_builder,
+            cap,
+            val,
+            None,
+            array_ptrs.get(cap.as_str()).copied(),
+            var_types.get(cap.as_str()),
+            &mut scope_vars,
+            &mut scope_var_types,
+            &mut array_ptrs_local,
+            module_env,
+        )?;
+    }
+    for i in 0..arity {
+        arg_vals.push(
+            lam_fn
+                .get_nth_param((1 + union_caps.len() + i) as u32)
+                .unwrap(),
+        );
+    }
+
+    // Dispatch chain: `sel == i` → call branch i; the final leaf is the
+    // unconditional else (its conds vec is empty).
+    let n = branches.len();
+    for i in 0..n {
+        if i + 1 < n {
+            // `sel == i` → call branch i, else fall through to the next check.
+            let cond_i = lam_builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    sel_val,
+                    context.i64_type().const_int(i as u64, false),
+                    "sel_eq",
+                )
+                .map_err(|e| MumeiError::codegen(format!("sel compare failed: {e:?}")))?;
+            let call_block = context.append_basic_block(lam_fn, &format!("sel_call_{i}"));
+            let next_block = context.append_basic_block(lam_fn, &format!("sel_next_{i}"));
+            lam_builder
+                .build_conditional_branch(cond_i, call_block, next_block)
+                .map_err(|e| MumeiError::codegen(format!("sel branch failed: {e:?}")))?;
+            lam_builder.position_at_end(call_block);
+            let mut vals = push_lambda_captures(
+                context,
+                &lam_builder,
+                &branch_caps[i],
+                &scope_vars,
+                &array_ptrs_local,
+            )?;
+            vals.extend(
+                arg_vals
+                    .iter()
+                    .map(|v| -> BasicMetadataValueEnum { (*v).into() }),
+            );
+            let call = lam_builder
+                .build_call(branch_fns[i], &vals, "sel_call")
+                .map_err(|e| MumeiError::codegen(format!("lambda dispatch call failed: {e:?}")))?;
+            let result: BasicValueEnum = call
+                .try_as_basic_value()
+                .left()
+                .unwrap_or_else(|| context.i64_type().const_int(0, false).into());
+            lam_builder
+                .build_return(Some(&result))
+                .map_err(|e| MumeiError::codegen(format!("lambda dispatch ret failed: {e:?}")))?;
+            lam_builder.position_at_end(next_block);
+        } else {
+            // The trailing else leaf is unconditional: emit its call inline
+            // at the current position.
+            let mut vals = push_lambda_captures(
+                context,
+                &lam_builder,
+                &branch_caps[i],
+                &scope_vars,
+                &array_ptrs_local,
+            )?;
+            vals.extend(
+                arg_vals
+                    .iter()
+                    .map(|v| -> BasicMetadataValueEnum { (*v).into() }),
+            );
+            let call = lam_builder
+                .build_call(branch_fns[i], &vals, "sel_call")
+                .map_err(|e| MumeiError::codegen(format!("lambda dispatch call failed: {e:?}")))?;
+            let result: BasicValueEnum = call
+                .try_as_basic_value()
+                .left()
+                .unwrap_or_else(|| context.i64_type().const_int(0, false).into());
+            lam_builder
+                .build_return(Some(&result))
+                .map_err(|e| MumeiError::codegen(format!("lambda dispatch ret failed: {e:?}")))?;
+        }
+    }
+    let mut all_caps = vec![sel_name];
+    all_caps.extend(union_caps);
+    Ok(Some((fn_name, all_caps)))
+}
+
 /// Emit a call through a `@lam:` marker: `f(args)` on a `let`/`assign`-bound
 /// lambda resolves to the lifted private function; capture values are read
 /// from `variables` at the call site and passed as leading arguments.
@@ -384,30 +757,8 @@ fn emit_lambda_call<'a>(
             expected
         )));
     }
-    let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(expected);
-    for cap in &caps {
-        if let Some(&(len_val, _elem_ty, data_ptr)) = array_ptrs.get(cap.as_str()) {
-            let struct_ty = array_struct_type(context);
-            let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
-            agg = builder
-                .build_insert_value(agg, len_val, 0, "lamcap_len")
-                .map_err(|e| MumeiError::codegen(format!("array capture pack failed: {e:?}")))?;
-            agg = builder
-                .build_insert_value(agg, data_ptr, 1, "lamcap_data")
-                .map_err(|e| MumeiError::codegen(format!("array capture pack failed: {e:?}")))?;
-            let agg_val: BasicValueEnum = match agg {
-                inkwell::values::AggregateValueEnum::StructValue(s) => s.into(),
-                inkwell::values::AggregateValueEnum::ArrayValue(a) => a.into(),
-            };
-            arg_vals.push(agg_val.into());
-        } else if let Some(v) = variables.get(cap.as_str()) {
-            arg_vals.push((*v).into());
-        } else {
-            return Err(MumeiError::codegen(format!(
-                "lambda capture `{cap}` is not bound at the call site"
-            )));
-        }
-    }
+    let mut arg_vals: Vec<BasicMetadataValueEnum> =
+        push_lambda_captures(context, builder, &caps, variables, array_ptrs)?;
     for arg in args {
         arg_vals.push(
             compile_hir_expr(

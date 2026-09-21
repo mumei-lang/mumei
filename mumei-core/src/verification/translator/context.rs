@@ -10,7 +10,7 @@ pub const DEFAULT_CONSTRAINT_BUDGET: usize = 1000;
 /// `f(args)` / `call(f, args)` can resolve instead of failing as an
 /// unknown function.
 #[derive(Debug, Clone)]
-pub(crate) enum LocalLambda {
+pub(crate) enum LocalLambda<'a> {
     /// A `let`/`assign`-bound lambda (`let f = |a| a + 1`): the call
     /// inlines the body with formal parameters bound to the evaluated
     /// arguments — the call behaves like `let p_i = arg_i in body`.
@@ -22,7 +22,16 @@ pub(crate) enum LocalLambda {
         /// captured scope — not the (possibly rebound) call-site scope — so
         /// `let g = …; let f = |a| g(a); let g = …; f(x)` keeps the `g`
         /// that was live when `f` was defined.
-        captured: std::collections::HashMap<String, std::rc::Rc<LocalLambda>>,
+        captured: std::collections::HashMap<String, std::rc::Rc<LocalLambda<'a>>>,
+    },
+    /// `let h = if c { f } else { g }` where both branch tails resolve to
+    /// lambdas: `h(args)` applies as `ite(cond, f(args), g(args))`. `cond`
+    /// is evaluated once at the binding site, so a later `c = …` rebind
+    /// cannot silently re-pick the branch the call inlines.
+    Ite {
+        cond: z3::ast::Bool<'a>,
+        then_lam: std::rc::Rc<LocalLambda<'a>>,
+        else_lam: std::rc::Rc<LocalLambda<'a>>,
     },
     /// Placeholder for a lambda's own parameter while the lambda body is
     /// checked at binding time (`let apply = |f, x| f(x)`): the param's
@@ -127,7 +136,7 @@ pub(crate) struct VCtx<'a> {
     /// same `Rc`, which is what lets the if/else merge keep a name only
     /// when both sides left the same binding in place (`Rc::ptr_eq`).
     pub(crate) local_lambdas:
-        std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<LocalLambda>>>,
+        std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<LocalLambda<'a>>>>,
     /// Len symbol minted for an array-returning call, keyed by the result
     /// array's raw `Z3_ast` pointer. A callee's `ensures: len(result) == k`
     /// asserts on that symbol; the map lets `let t = f(..)` bind `len_t` to
