@@ -1,3 +1,9 @@
+### 2026-09-21: Lean bridge contract catalog sync
+
+- Added the generated `schema/bridge_lemma_catalog.json` mirror and wired
+  `scripts/check_contract_vocabulary.py` to check or regenerate contract
+  constants from it, matching mumei-lean's single-source catalog workflow.
+
 ### 2026-09-20 (review fixes): selector rebinding + match CE replay
 
 - `let m = match …; let m = match u { …, _ => m }` rebinding no longer

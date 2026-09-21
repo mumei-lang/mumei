@@ -1,0 +1,132 @@
+{
+  "$schema_note": "Single source of truth for translator_version and the obligation-class bridge lemma catalog; bridge_lemma_hash is derived by scripts/sync_contract_constants.py.",
+  "translator_version": "mumei-lean-translator-ir-v2",
+  "obligation_classes": {
+    "quantifier_obligation": [
+      "MumeiLean.Quantifiers.skolemize_exists",
+      "MumeiLean.Quantifiers.herbrand_forall",
+      "MumeiLean.Quantifiers.bounded_forall_of_unrestricted",
+      "MumeiLean.Quantifiers.bounded_exists_of_witness",
+      "MumeiLean.Quantifiers.forall_and_intro",
+      "MumeiLean.Quantifiers.nested_forall_intro",
+      "MumeiLean.Quantifiers.nested_exists_intro",
+      "MumeiLean.Quantifiers.forall_exists_swap_of_finite",
+      "MumeiLean.Quantifiers.bounded_forall_split_at",
+      "MumeiLean.Quantifiers.bounded_forall_shift",
+      "MumeiLean.Quantifiers.bounded_exists_of_nonempty_forall",
+      "MumeiLean.Quantifiers.bounded_forall_imp",
+      "MumeiLean.Quantifiers.bounded_forall_of_field_range",
+      "MumeiLean.Quantifiers.nested_bounded_forall_intro",
+      "MumeiLean.AdvancedPatterns.bounded_forall_weaken",
+      "MumeiLean.AdvancedPatterns.bounded_exists_map",
+      "MumeiLean.AdvancedPatterns.nested_forall_swap",
+      "MumeiLean.AdvancedPatterns.int_nonnegative_induction_pattern"
+    ],
+    "finite_field_obligation": [
+      "MumeiLean.Algebra.ff_add_in_field",
+      "MumeiLean.Algebra.ff_mul_in_field",
+      "MumeiLean.Algebra.ff_sub_in_field",
+      "MumeiLean.Algebra.ff_neg_in_field",
+      "MumeiLean.Algebra.ff_zero_in_field",
+      "MumeiLean.Algebra.ff_one_in_field",
+      "MumeiLean.Algebra.ff_eq_refl",
+      "MumeiLean.Algebra.ff_eq_symm",
+      "MumeiLean.Algebra.ff_eq_trans",
+      "MumeiLean.Algebra.ff_add_comm",
+      "MumeiLean.Algebra.ff_mul_comm",
+      "MumeiLean.Algebra.ff_add_zero",
+      "MumeiLean.Algebra.ff_mul_one",
+      "MumeiLean.Algebra.ff_sub_self_eq_zero_mod",
+      "MumeiLean.Algebra.ff_add_comm_eq",
+      "MumeiLean.Algebra.ff_mul_comm_eq",
+      "MumeiLean.Algebra.ff_add_assoc_mod",
+      "MumeiLean.Algebra.ff_mul_assoc_mod",
+      "MumeiLean.Algebra.ff_pow_zero",
+      "MumeiLean.Algebra.ff_inv_zero",
+      "MumeiLean.AdvancedPatterns.finite_field_binary_closed",
+      "MumeiLean.AdvancedPatterns.finite_field_commutativity_pattern",
+      "MumeiLean.AdvancedPatterns.finite_field_obligation_closure"
+    ],
+    "group_theory_obligation": [
+      "MumeiLean.Algebra.group_mul_assoc",
+      "MumeiLean.Algebra.group_left_inv",
+      "MumeiLean.Algebra.group_right_inv",
+      "MumeiLean.Algebra.group_mul_one",
+      "MumeiLean.Algebra.group_one_mul",
+      "MumeiLean.Algebra.group_inv_inv",
+      "MumeiLean.Algebra.group_mul_inv_rev",
+      "MumeiLean.Algebra.mumei_group_comm_int",
+      "MumeiLean.Algebra.group_mul_left_cancel",
+      "MumeiLean.Algebra.group_pow_zero",
+      "MumeiLean.Algebra.group_pow_add",
+      "MumeiLean.Algebra.group_conj_inv",
+      "MumeiLean.Algebra.mumei_group_pow_zero_int",
+      "MumeiLean.AdvancedPatterns.group_conjugation_pattern",
+      "MumeiLean.AdvancedPatterns.group_hom_preserves_mul",
+      "MumeiLean.AdvancedPatterns.group_theory_obligation_assoc_law"
+    ],
+    "crypto_primitive_obligation": [
+      "MumeiLean.Crypto.hash_deterministic",
+      "MumeiLean.Crypto.hash_modulus_bounds",
+      "MumeiLean.Crypto.encryption_roundtrip",
+      "MumeiLean.Crypto.rsa_signature_correct",
+      "MumeiLean.Crypto.signature_verify_sound",
+      "MumeiLean.Crypto.kdf_deterministic",
+      "MumeiLean.Crypto.hmac_deterministic",
+      "MumeiLean.Crypto.commitment_binding_pattern",
+      "MumeiLean.Crypto.zk_verify_soundness",
+      "MumeiLean.Crypto.commitment_deterministic",
+      "MumeiLean.Crypto.commitment_same_inputs",
+      "MumeiLean.Crypto.zk_verify_stable_under_equal_inputs",
+      "MumeiLean.Crypto.hmac_modulus_bounds",
+      "MumeiLean.Crypto.commitment_modulus_bounds",
+      "MumeiLean.AdvancedPatterns.hash_stability_under_equal_inputs",
+      "MumeiLean.AdvancedPatterns.signature_pattern",
+      "MumeiLean.AdvancedPatterns.encryption_pattern",
+      "MumeiLean.AdvancedPatterns.crypto_obligation_roundtrip"
+    ],
+    "arithmetic_obligation": [
+      "MumeiLean.Algebra.sc_subtraction_nonnegative",
+      "MumeiLean.Algebra.arith_add_upper_bound",
+      "MumeiLean.Algebra.arith_add_monotone",
+      "MumeiLean.Algebra.arith_mul_nonneg_of_nonneg",
+      "MumeiLean.Algebra.arith_square_nonneg",
+      "MumeiLean.Algebra.arith_bounded_of_interval",
+      "MumeiLean.AdvancedPatterns.arithmetic_obligation_bounded_combination",
+      "MumeiLean.AdvancedPatterns.arithmetic_obligation_monotone_step"
+    ],
+    "smart_contract_obligation": [
+      "MumeiLean.AdvancedPatterns.sc_withdraw_allowed_intro",
+      "MumeiLean.AdvancedPatterns.sc_no_negative_after_withdraw",
+      "MumeiLean.AdvancedPatterns.smart_contract_obligation_guard_preserved",
+      "MumeiLean.AdvancedPatterns.smart_contract_obligation_balance_preserved"
+    ],
+    "smart_contract_guard_trace_obligation": [
+      "MumeiLean.SmartContract.no_external_call_without_lock"
+    ],
+    "smart_contract_access_control_obligation": [
+      "MumeiLean.SmartContract.no_state_write_without_auth"
+    ],
+    "smart_contract_cei_obligation": [
+      "MumeiLean.SmartContract.effect_after_interaction_is_none"
+    ],
+    "rtgs_obligation": [
+      "MumeiLean.AdvancedPatterns.rtgs_balance_conserved_refl",
+      "MumeiLean.AdvancedPatterns.rtgs_trace_safe_intro",
+      "MumeiLean.AdvancedPatterns.rtgs_obligation_conservation",
+      "MumeiLean.AdvancedPatterns.rtgs_obligation_trace_safe",
+      "MumeiLean.Algebra.rtgs_transfer_conserves_sum",
+      "MumeiLean.Algebra.rtgs_transfer_conserves_sum_of_amounts",
+      "MumeiLean.Algebra.rtgs_debit_leaves_nonnegative"
+    ],
+    "concurrency_obligation": [
+      "MumeiLean.Concurrency.task_group_all_result_last",
+      "MumeiLean.Concurrency.task_group_any_result_mem",
+      "MumeiLean.Concurrency.task_value_result"
+    ],
+    "unknown_obligation": [
+      "MumeiLean.AdvancedPatterns.unknown_obligation_intro",
+      "MumeiLean.AdvancedPatterns.unknown_obligation_discharged_by_manual_lemma"
+    ]
+  }
+}

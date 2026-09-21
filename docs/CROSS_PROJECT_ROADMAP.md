@@ -1914,7 +1914,7 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 **目的**: paper §8 の Known limitation #2「Lean escalation still depends on translation coverage」を縮小する。Z3 `unknown` atom が**手書き bridge lemma を要さずに** `lean_verified` へ昇格する割合を上げ、`manual_lemma_reason` を保持したまま残る obligation を減らす。
 
 **方針**: 拡張は次の 2 系統のいずれか最小のものに限る。
-1. 新規 bridge lemma を `MumeiLean/*.lean` に追加し catalog（`docs/LEAN_TRANSLATOR_SPEC.md` §10）へ登録する。この場合 `compute_bridge_lemma_hash()` が変わるため、pinned doc 4 本 / `scripts/export_cert.py` / mumei-agent `_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH` を**同一 diff で lockstep 更新**する。
+1. `mumei-lang/mumei-lean/bridge_lemma_catalog.json` だけを編集し、mumei-lean repo から `python scripts/sync_contract_constants.py --write` を実行する（兄弟 repo を隣接 checkout に置くか、`--mumei-repo` / `--mumei-agent-repo` で指定）。3 repo の diff をレビューする。
 2. tactic ladder（§12.2）へ新候補を**末尾追記**する（既存の採用結果を変えないため interleave しない）。bridge lemma catalog が不変なら `bridge_lemma_hash` も不変。
 
 **第 1 弾の実装**（2026-08-30、方針 2）:
@@ -1970,7 +1970,7 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 1. **健全性**: AI 出力・LLM 推論を信頼して verdict を上げることはしない。Track A は LLM を呼ばない純決定論解析、Track B は `lake build` 成功のみを `lean_verified` の根拠とする。情報が欠けるときは保守側（偽陰性を出さない / unknown のまま）に倒す。
 2. **既存互換**: 新機能はすべて opt-in（Track B は `--enable-lean-fallback` の内側に `--enable-lean-ai-proof` を追加）とし、無効時と no-LLM / `CI_FIXTURE_MODE` / `MUMEI_LEAN_SKIP_LIVE=1` 経路の出力は byte-identical に保つ。
 3. **語彙固定**: `verification_status`（`verified` / `refuted` / `unverifiable`）、8 固定キーの audit 契約、`lean_verified` / `manual_lemma_reason` / `known_witness_used` に新 verdict や別名 alias を追加しない。`ForeignSafetyIssue` / `requires` 文字列 / counterexample のインタフェースも不変。
-4. **契約定数の lockstep**: `translator_version` / `bridge_lemma_hash` が動く変更は、mumei-lean pinned docs 4 本 / `scripts/export_cert.py` / `mumei-core/src/verification/types.rs` の `LEAN_TRANSLATOR_VERSION` / `LEAN_BRIDGE_LEMMA_HASH` / mumei-agent `_SOLIDITY_GUARD_TRACE_*` を同一変更セットで更新し、各 repo の `tests/test_contract_vocabulary.py` を同時に green にする。
+4. **契約定数の lockstep**: `mumei-lang/mumei-lean/bridge_lemma_catalog.json` だけを編集し、mumei-lean から `python scripts/sync_contract_constants.py --write` を実行する（兄弟 repo は隣接 checkout または `--mumei-repo` / `--mumei-agent-repo` で指定）→ 3 repo の diff をレビューする。CI gate は mumei-lean `--check`（`tests/test_contract_vocabulary.py` 経由）、mumei `scripts/check_contract_vocabulary.py --check`、mumei-agent `tests/test_contract_vocabulary.py` とし、各 repo は in-repo の `schema/bridge_lemma_catalog.json` mirror を読む。
 5. **完了報告の形式**: 各タスクの完了は本節の表と各 repo roadmap の該当節を同一 diff で「✅ Implemented（測定日・回帰ゲート・件数）」に更新することで確定する（Priority 16〜24 と同じ書式）。
 
 ### Track A: 外部コード安全性のデータフロー層（mumei-agent 単独）
