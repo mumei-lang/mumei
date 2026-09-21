@@ -22,6 +22,7 @@ docstring.  A count assertion ensures silent extraction failures are caught.
 """
 from __future__ import annotations
 
+import argparse
 import ast
 import hashlib
 import json
@@ -200,13 +201,26 @@ def _replace_contract_target(
     return [] if write else violations
 
 
-def _sync_contract_constants(write: bool) -> list[Violation]:
-    catalog = load_bridge_lemma_catalog()
+def _sync_contract_constants(
+    write: bool, catalog_path: Path = BRIDGE_LEMMA_CATALOG
+) -> list[Violation]:
+    catalog = load_bridge_lemma_catalog(catalog_path)
     translator_version = catalog["translator_version"]
     bridge_lemma_hash = compute_bridge_lemma_hash(catalog["obligation_classes"])
     violations: list[Violation] = []
     for target in contract_constant_targets(translator_version, bridge_lemma_hash):
         violations.extend(_replace_contract_target(*target, write=write))
+    if catalog_path.resolve() != BRIDGE_LEMMA_CATALOG.resolve():
+        mirror_in_sync = (
+            BRIDGE_LEMMA_CATALOG.exists()
+            and BRIDGE_LEMMA_CATALOG.read_bytes() == catalog_path.read_bytes()
+        )
+        if write and not mirror_in_sync:
+            shutil.copyfile(catalog_path, BRIDGE_LEMMA_CATALOG)
+        elif not mirror_in_sync:
+            violations.append(
+                Violation(BRIDGE_LEMMA_CATALOG, f"catalog mirror differs from {catalog_path}")
+            )
     return violations
 
 
@@ -539,8 +553,6 @@ def _check_no_mm_language_sync(path: Path) -> list[Violation]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    import argparse
-
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true")
@@ -562,26 +574,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # CLI help and MCP docstring forbidden-alias checks
     violations.extend(_check_mcp_forbidden_aliases(MCP_SERVER))
     violations.extend(_check_cli_forbidden_aliases(CLI_SOURCE))
-    if args.catalog != BRIDGE_LEMMA_CATALOG:
-        catalog = load_bridge_lemma_catalog(args.catalog)
-        translator_version = catalog["translator_version"]
-        bridge_lemma_hash = compute_bridge_lemma_hash(catalog["obligation_classes"])
-        targets = contract_constant_targets(translator_version, bridge_lemma_hash)
-        for path, field, pattern, expected in targets:
-            target_path = path.relative_to(REPO_ROOT)
-            violations.extend(
-                _replace_contract_target(
-                    REPO_ROOT / target_path,
-                    field,
-                    pattern,
-                    expected,
-                    write=args.write,
-                )
-            )
-        if args.write:
-            shutil.copyfile(args.catalog, BRIDGE_LEMMA_CATALOG)
-    else:
-        violations.extend(_sync_contract_constants(args.write))
+    violations.extend(_sync_contract_constants(args.write, args.catalog))
 
     if violations:
         print("Contract vocabulary check failed:", file=sys.stderr)
