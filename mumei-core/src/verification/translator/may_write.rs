@@ -28,9 +28,10 @@ pub(crate) enum CalleeRef<'e> {
 ///   under `name` or its FQN spelling (`mod.f` → `mod::f`); an unresolvable
 ///   callee fails closed (every variable arg — it may bind later inside
 ///   the body and no body is available to inspect).
-/// * `Expr`: `AtomRef{name}` names the atom; `Variable` is a local lambda
-///   first, else an atom only when the variable was bound through
-///   `atom_ref` (`__atom_ref_<var>` in `env`); an inline `Lambda` literal
+/// * `Expr`: `AtomRef{name}` names the atom under `name` only (no FQN
+///   respelling on this path); `Variable` is a local lambda first, else an
+///   atom only when the variable was bound through `atom_ref`
+///   (`__atom_ref_<var>` in `env`); an inline `Lambda` literal
 ///   is applied as a closure over the current lambda scope; anything else
 ///   lands on the dynamic path where every variable arg is havoced.
 pub(crate) fn callee_may_write_args(
@@ -50,7 +51,7 @@ pub(crate) fn callee_may_write_args(
                 None => all_var_args(args),
             }
         }
-        CalleeRef::Expr(Expr::AtomRef { name }) => match resolve_atom(module_env, name) {
+        CalleeRef::Expr(Expr::AtomRef { name }) => match module_env.get_atom(name) {
             Some(atom) => atom_may_write_args(module_env, atom, args),
             None => all_var_args(args),
         },

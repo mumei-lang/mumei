@@ -2748,8 +2748,9 @@ pub(crate) fn expr_to_z3<'a>(
             // The callee didn't resolve to a known atom — a concrete
             // `atom_ref` target or contract callee may still store through
             // its params, and nothing above models that mutation. Havoc
-            // every variable arg bound to an array (fail closed);
-            // `havoc_array_name` no-ops on non-array bindings.
+            // the shared may-write set (every variable arg on this dynamic
+            // path — fail closed); `havoc_array_name` no-ops on non-array
+            // bindings.
             for name in
                 super::may_write::callee_may_write_args(vc, CalleeRef::Expr(callee), args, env)
             {
