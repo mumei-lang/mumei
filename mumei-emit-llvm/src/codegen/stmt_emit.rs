@@ -45,6 +45,39 @@ pub(crate) fn compile_hir_stmt<'a>(
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match stmt {
         HirStmt::Let { var, ty, value } => {
+            // `let f = |params| body` — lift the lambda to a private
+            // module-level function and mark `f` so `f(args)` /
+            // `call(f, args)` resolve it. Captures pass as leading args.
+            if let HirExpr::Lambda {
+                params,
+                return_type,
+                body,
+                captures,
+            } = value.as_ref()
+            {
+                let (fn_name, all_caps) = super::expr_emit::emit_lambda_function(
+                    context,
+                    module,
+                    function,
+                    var,
+                    params,
+                    return_type.as_ref(),
+                    captures,
+                    body,
+                    variables,
+                    var_types,
+                    array_ptrs,
+                    module_env,
+                )?;
+                let lam_fn = module.get_function(&fn_name).unwrap();
+                let ptr: BasicValueEnum = lam_fn.as_global_value().as_pointer_value().into();
+                variables.insert(var.clone(), ptr);
+                var_types.insert(
+                    var.clone(),
+                    super::expr_emit::lambda_marker(&fn_name, &all_caps),
+                );
+                return Ok(ptr);
+            }
             // `let a = [e0, e1, …]` — materialise the literal into an alloca'd
             // array and register it as a fat pointer `(len, elem_ty, data_ptr)`
             // exactly like an `[T]` parameter, so `a[i]` reads, `a[i] = x`
@@ -65,6 +98,20 @@ pub(crate) fn compile_hir_stmt<'a>(
                     array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
                     variables.insert(var.clone(), len_val);
                     return Ok(len_val);
+                }
+                // `let g = f` on a lambda binding: alias the same lifted fn
+                // (same captures) by copying the `@lam:` marker.
+                if let Some(mark) = var_types.get(src.as_str()) {
+                    if mark.starts_with(super::expr_emit::LAMBDA_MARK) {
+                        let mark = mark.clone();
+                        let ptr = variables
+                            .get(src.as_str())
+                            .copied()
+                            .unwrap_or_else(|| context.i64_type().const_int(0, false).into());
+                        variables.insert(var.clone(), ptr);
+                        var_types.insert(var.clone(), mark);
+                        return Ok(ptr);
+                    }
                 }
             }
             let val = compile_hir_expr(
@@ -90,6 +137,39 @@ pub(crate) fn compile_hir_stmt<'a>(
             Ok(val)
         }
         HirStmt::Assign { var, value } => {
+            // `f = |params| body` — rebind the name to a freshly lifted fn,
+            // replacing any earlier `@lam:` marker like the verifier's
+            // `local_lambdas` rebind does.
+            if let HirExpr::Lambda {
+                params,
+                return_type,
+                body,
+                captures,
+            } = value.as_ref()
+            {
+                let (fn_name, all_caps) = super::expr_emit::emit_lambda_function(
+                    context,
+                    module,
+                    function,
+                    var,
+                    params,
+                    return_type.as_ref(),
+                    captures,
+                    body,
+                    variables,
+                    var_types,
+                    array_ptrs,
+                    module_env,
+                )?;
+                let lam_fn = module.get_function(&fn_name).unwrap();
+                let ptr: BasicValueEnum = lam_fn.as_global_value().as_pointer_value().into();
+                variables.insert(var.clone(), ptr);
+                var_types.insert(
+                    var.clone(),
+                    super::expr_emit::lambda_marker(&fn_name, &all_caps),
+                );
+                return Ok(ptr);
+            }
             let val = compile_hir_expr(
                 context, builder, module, function, value, variables, var_types, array_ptrs,
                 module_env,
