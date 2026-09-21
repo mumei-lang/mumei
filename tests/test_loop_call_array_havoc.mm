@@ -154,3 +154,14 @@ body: {
     };
     a[0]
 };
+
+// A lambda that only READS a captured array is not a store — `a[0]`
+// keeps its entry fact (capture sweep precision).
+atom call_lambda_capture_read_keeps(a: [i64]) -> i64
+requires: len(a) >= 1 && a[0] == 7;
+ensures: result == 7;
+body: {
+    let g = |x| { a[0] + x };
+    let t = call(g, 1);
+    a[0]
+};

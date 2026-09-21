@@ -3183,6 +3183,25 @@ fn apply_local_lambda<'a>(
                 }
             }
         }
+        // Captured variables share the caller's bindings (call_env was
+        // cloned from env), so a store to an outer name mutates caller
+        // state too. Sweep every caller-visible name the body may store
+        // through — `havoc_array_name` no-ops on non-array bindings, and a
+        // lambda-local binding shadowing the name only over-havocs
+        // (fail closed).
+        let caller_names: Vec<String> = env
+            .keys()
+            .filter(|k| !k.starts_with("__"))
+            .cloned()
+            .collect();
+        for name in caller_names {
+            if params.iter().any(|p| p.name == name) {
+                continue;
+            }
+            if stmt_stores_to_var(vc.module_env, body, &name) {
+                havoc_array_name(vc, &name, env);
+            }
+        }
     }
     result
 }

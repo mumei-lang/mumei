@@ -205,3 +205,33 @@ body: {
     };
     a[0]
 };
+
+// A lambda storing through a CAPTURED variable (not a param) mutates
+// the caller's array — the cloned call_env shares the slot, so the
+// post-call read must not keep the entry fact.
+atom stale_call_lambda_capture(a: [i64]) -> i64
+requires: len(a) >= 1 && a[0] == 7;
+ensures: result == 7;
+body: {
+    let g = |x| { a[0] = 0; x };
+    let t = call(g, 1);
+    a[0]
+};
+
+// Same capture-store through a loop-bound... bound before the loop:
+// `__z3_arr_a` must be marked via the lambda's capture sweep.
+atom stale_call_lambda_capture_loop(a: [i64], n: i64) -> i64
+requires: len(a) >= 1 && n >= 1 && a[0] == 7;
+ensures: result == 7;
+body: {
+    let g = |x| { a[0] = 0; x };
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n
+    decreases: n - i
+    {
+        let t = g(0);
+        i = i + 1
+    };
+    a[0]
+};

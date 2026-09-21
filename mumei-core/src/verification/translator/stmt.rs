@@ -36,11 +36,13 @@ fn mark_array_store_args(
 }
 
 /// Mirror `apply_local_lambda`: mark `__z3_arr_<var>` for each variable arg
-/// whose lambda param the body stores through.
+/// whose lambda param the body stores through, plus every caller-visible
+/// name the body stores to directly (captures share the caller's slots).
 fn mark_lambda_store_args(
     module_env: &ModuleEnv,
     lambda: &LocalLambda,
     args: &[Expr],
+    env: &Env,
     out: &mut std::collections::HashSet<String>,
 ) {
     // `Opaque` bindings return a fresh result without running a body.
@@ -56,6 +58,14 @@ fn mark_lambda_store_args(
         };
         if stmt_stores_to_var(module_env, body, &param.name) {
             out.insert(format!("__z3_arr_{var}"));
+        }
+    }
+    for name in env.keys().filter(|k| !k.starts_with("__")) {
+        if params.iter().any(|p| p.name == *name) {
+            continue;
+        }
+        if stmt_stores_to_var(module_env, body, name) {
+            out.insert(format!("__z3_arr_{name}"));
         }
     }
 }
@@ -185,11 +195,19 @@ fn collect_expr_assigned_vars(
             }
             if in_stmt_ctx {
                 // Runtime resolves a local lambda BEFORE the atom registry —
-                // mirror that order.
+                // mirror that order. An unresolvable callee fails at eval
+                // (unknown function) unless it binds later (a lambda bound
+                // inside the body) — fail closed and mark every arg.
                 if let Some(lambda) = vc.local_lambdas.borrow().get(callee_name).cloned() {
-                    mark_lambda_store_args(module_env, &lambda, args, out);
-                } else {
+                    mark_lambda_store_args(module_env, &lambda, args, env, out);
+                } else if module_env.get_atom(callee_name).is_some()
+                    || module_env
+                        .get_atom(&callee_name.replace('.', "::"))
+                        .is_some()
+                {
                     mark_array_store_args(module_env, callee_name, args, out);
+                } else {
+                    mark_all_var_args(args, out);
                 }
             }
         }
@@ -215,7 +233,7 @@ fn collect_expr_assigned_vars(
                     Expr::AtomRef { name } => mark_array_store_args(module_env, name, args, out),
                     Expr::Variable(var) => {
                         if let Some(lambda) = vc.local_lambdas.borrow().get(var).cloned() {
-                            mark_lambda_store_args(module_env, &lambda, args, out);
+                            mark_lambda_store_args(module_env, &lambda, args, env, out);
                         } else if env.contains_key(&format!("__atom_ref_{var}"))
                             && vc.module_env.get_atom(var).is_some()
                         {
@@ -231,6 +249,7 @@ fn collect_expr_assigned_vars(
                             captured: vc.local_lambdas.borrow().clone(),
                         },
                         args,
+                        env,
                         out,
                     ),
                     _ => mark_all_var_args(args, out),
