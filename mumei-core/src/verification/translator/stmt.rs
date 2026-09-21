@@ -3,80 +3,23 @@ use super::super::support::*;
 use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
-use crate::verification::translator::z3_types::{
-    array_root_ast, atom_stores_to_array, stmt_stores_to_var,
-};
+use crate::verification::translator::may_write::{callee_may_write_args, CalleeRef};
+use crate::verification::translator::z3_types::array_root_ast;
 use serde_json::json;
 
-/// Mark `__z3_arr_<var>` for each variable arg whose callee param the callee
-/// (transitively) stores through — the same predicate `havoc_array_args`
-/// applies at call evaluation, so loop-carried havoc matches it.
-fn mark_array_store_args(
-    module_env: &ModuleEnv,
-    callee_name: &str,
-    args: &[Expr],
-    out: &mut std::collections::HashSet<String>,
-) {
-    // Mirrors the runtime Call resolution: `mod.f` tries `mod::f` too.
-    let fqn_name = callee_name.replace('.', "::");
-    let Some(callee) = module_env
-        .get_atom(callee_name)
-        .or_else(|| module_env.get_atom(&fqn_name))
-    else {
-        return;
-    };
-    for (i, arg) in args.iter().enumerate() {
-        let (Expr::Variable(var), Some(param)) = (arg, callee.params.get(i)) else {
-            continue;
-        };
-        if atom_stores_to_array(module_env, callee, &param.name) {
-            out.insert(format!("__z3_arr_{var}"));
-        }
-    }
-}
-
-/// Mirror `apply_local_lambda`: mark `__z3_arr_<var>` for each variable arg
-/// whose lambda param the body stores through, plus every caller-visible
-/// name the body stores to directly (captures share the caller's slots).
-fn mark_lambda_store_args(
-    module_env: &ModuleEnv,
-    lambda: &LocalLambda,
+/// Insert `__z3_arr_<var>` for every caller variable the call may store
+/// through — the same may-write set `havoc_array_args` /
+/// `apply_local_lambda` havoc at call evaluation, so loop-carried havoc
+/// matches it exactly.
+fn mark_call_store_args(
+    vc: &VCtx<'_>,
+    callee: CalleeRef<'_>,
     args: &[Expr],
     env: &Env,
     out: &mut std::collections::HashSet<String>,
 ) {
-    // `Opaque` bindings return a fresh result without running a body.
-    let LocalLambda::Closure { expr, .. } = lambda else {
-        return;
-    };
-    let Expr::Lambda { params, body, .. } = expr else {
-        return;
-    };
-    for (i, arg) in args.iter().enumerate() {
-        let (Expr::Variable(var), Some(param)) = (arg, params.get(i)) else {
-            continue;
-        };
-        if stmt_stores_to_var(module_env, body, &param.name) {
-            out.insert(format!("__z3_arr_{var}"));
-        }
-    }
-    for name in env.keys().filter(|k| !k.starts_with("__")) {
-        if params.iter().any(|p| p.name == *name) {
-            continue;
-        }
-        if stmt_stores_to_var(module_env, body, name) {
-            out.insert(format!("__z3_arr_{name}"));
-        }
-    }
-}
-
-/// The call landed on the dynamic path (unresolvable callee): eval havoc's
-/// every array-bound variable arg — mark them all.
-fn mark_all_var_args(args: &[Expr], out: &mut std::collections::HashSet<String>) {
-    for arg in args {
-        if let Expr::Variable(var) = arg {
-            out.insert(format!("__z3_arr_{var}"));
-        }
+    for var in callee_may_write_args(vc, callee, args, env) {
+        out.insert(format!("__z3_arr_{var}"));
     }
 }
 
@@ -153,7 +96,6 @@ fn collect_expr_assigned_vars(
     out: &mut std::collections::HashSet<String>,
     in_stmt_ctx: bool,
 ) {
-    let module_env = vc.module_env;
     match expr {
         Expr::IfThenElse {
             cond,
@@ -194,21 +136,7 @@ fn collect_expr_assigned_vars(
                 collect_expr_assigned_vars(env, vc, a, out, in_stmt_ctx);
             }
             if in_stmt_ctx {
-                // Runtime resolves a local lambda BEFORE the atom registry —
-                // mirror that order. An unresolvable callee fails at eval
-                // (unknown function) unless it binds later (a lambda bound
-                // inside the body) — fail closed and mark every arg.
-                if let Some(lambda) = vc.local_lambdas.borrow().get(callee_name).cloned() {
-                    mark_lambda_store_args(module_env, &lambda, args, env, out);
-                } else if module_env.get_atom(callee_name).is_some()
-                    || module_env
-                        .get_atom(&callee_name.replace('.', "::"))
-                        .is_some()
-                {
-                    mark_array_store_args(module_env, callee_name, args, out);
-                } else {
-                    mark_all_var_args(args, out);
-                }
+                mark_call_store_args(vc, CalleeRef::Name(callee_name), args, env, out);
             }
         }
         Expr::Perform { args, .. } => {
@@ -222,38 +150,7 @@ fn collect_expr_assigned_vars(
                 collect_expr_assigned_vars(env, vc, a, out, in_stmt_ctx);
             }
             if in_stmt_ctx {
-                // Mirrors the runtime `CallRef` precedence: a local-lambda
-                // callee applies its body inline (stores through params are
-                // havoced back onto the caller's args); `AtomRef` names the
-                // atom; `Variable` resolves to an atom only under the
-                // variable's own name via `__atom_ref_<var>`; anything else
-                // lands on the dynamic path where every array-bound arg is
-                // havoced — mark them all.
-                match callee.as_ref() {
-                    Expr::AtomRef { name } => mark_array_store_args(module_env, name, args, out),
-                    Expr::Variable(var) => {
-                        if let Some(lambda) = vc.local_lambdas.borrow().get(var).cloned() {
-                            mark_lambda_store_args(module_env, &lambda, args, env, out);
-                        } else if env.contains_key(&format!("__atom_ref_{var}"))
-                            && vc.module_env.get_atom(var).is_some()
-                        {
-                            mark_array_store_args(module_env, var, args, out);
-                        } else {
-                            mark_all_var_args(args, out);
-                        }
-                    }
-                    Expr::Lambda { .. } => mark_lambda_store_args(
-                        module_env,
-                        &LocalLambda::Closure {
-                            expr: (**callee).clone(),
-                            captured: vc.local_lambdas.borrow().clone(),
-                        },
-                        args,
-                        env,
-                        out,
-                    ),
-                    _ => mark_all_var_args(args, out),
-                }
+                mark_call_store_args(vc, CalleeRef::Expr(callee), args, env, out);
             }
         }
         Expr::StructInit { fields, .. } => {
