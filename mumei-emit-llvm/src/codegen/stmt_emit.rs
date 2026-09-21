@@ -31,6 +31,90 @@ fn rebind_chan_payload(
     }
 }
 
+/// `let/assign h = if c { f } else { g }` where every branch tail resolves
+/// to a lambda binding: lift a `__lamsel_*` dispatcher whose first param is
+/// the branch index computed at the binding site, and mark `h` so calls
+/// route through it. Returns `Ok(None)` when any leaf isn't lambda-shaped —
+/// the caller then takes the generic path and `h` stays uncallable.
+#[allow(clippy::too_many_arguments)]
+fn bind_lambda_selector<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    function: &FunctionValue<'a>,
+    var: &str,
+    value: &HirExpr,
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    var_types: &mut HashMap<String, String>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<Option<BasicValueEnum<'a>>> {
+    let Some(branches) = super::expr_emit::collect_lambda_branches(
+        context,
+        module,
+        function,
+        value,
+        Vec::new(),
+        variables,
+        var_types,
+        array_ptrs,
+        module_env,
+    )?
+    else {
+        return Ok(None);
+    };
+    let marks: Vec<String> = branches.iter().map(|(_, m)| m.clone()).collect();
+    // The selector index is frozen at the binding site: fold the branch
+    // conditions back-to-front into a nested `select` so a later rebind of a
+    // cond variable cannot re-pick the branch.
+    let n = branches.len();
+    let mut sel: BasicValueEnum = context.i64_type().const_int((n - 1) as u64, false).into();
+    for i in (0..n - 1).rev() {
+        let mut taken = context.bool_type().const_int(1, false);
+        for cond in &branches[i].0 {
+            let c = compile_hir_expr(
+                context, builder, module, function, cond, variables, var_types, array_ptrs,
+                module_env,
+            )?;
+            let c_bool = builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    c.into_int_value(),
+                    context.i64_type().const_int(0, false),
+                    "sel_cond",
+                )
+                .map_err(|e| MumeiError::codegen(format!("lambda sel cond failed: {e:?}")))?;
+            taken = builder
+                .build_and(taken, c_bool, "sel_and")
+                .map_err(|e| MumeiError::codegen(format!("lambda sel and failed: {e:?}")))?;
+        }
+        sel = builder
+            .build_select(
+                taken,
+                context.i64_type().const_int(i as u64, false),
+                sel.into_int_value(),
+                "sel_pick",
+            )
+            .map_err(|e| MumeiError::codegen(format!("lambda sel select failed: {e:?}")))?;
+    }
+    let Some((fn_name, all_caps)) = super::expr_emit::emit_lambda_selector(
+        context, module, function, var, &marks, variables, var_types, array_ptrs, module_env,
+    )?
+    else {
+        return Ok(None);
+    };
+    let lam_fn = module.get_function(&fn_name).unwrap();
+    let ptr: BasicValueEnum = lam_fn.as_global_value().as_pointer_value().into();
+    let sel_name = format!("__sel#{var}");
+    variables.insert(sel_name, sel);
+    variables.insert(var.to_string(), ptr);
+    var_types.insert(
+        var.to_string(),
+        super::expr_emit::lambda_marker(&fn_name, &all_caps),
+    );
+    Ok(Some(ptr))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_hir_stmt<'a>(
     context: &'a Context,
@@ -45,6 +129,17 @@ pub(crate) fn compile_hir_stmt<'a>(
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match stmt {
         HirStmt::Let { var, ty, value } => {
+            // `let h = if c { f } else { g }` where every branch resolves to
+            // a lambda: emit a selector dispatcher `__lamsel_*` and bind `h`
+            // to it so `h(args)` calls the branch the let-site cond picked.
+            if let HirExpr::IfThenElse { .. } = value.as_ref() {
+                if let Some(ptr) = bind_lambda_selector(
+                    context, builder, module, function, var, value, variables, var_types,
+                    array_ptrs, module_env,
+                )? {
+                    return Ok(ptr);
+                }
+            }
             // `let f = |params| body` — lift the lambda to a private
             // module-level function and mark `f` so `f(args)` /
             // `call(f, args)` resolve it. Captures pass as leading args.
@@ -137,6 +232,15 @@ pub(crate) fn compile_hir_stmt<'a>(
             Ok(val)
         }
         HirStmt::Assign { var, value } => {
+            // `h = if c { f } else { g }` — same selector binding as `let`.
+            if let HirExpr::IfThenElse { .. } = value.as_ref() {
+                if let Some(ptr) = bind_lambda_selector(
+                    context, builder, module, function, var, value, variables, var_types,
+                    array_ptrs, module_env,
+                )? {
+                    return Ok(ptr);
+                }
+            }
             // `f = |params| body` — rebind the name to a freshly lifted fn,
             // replacing any earlier `@lam:` marker like the verifier's
             // `local_lambdas` rebind does.

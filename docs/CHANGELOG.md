@@ -1,3 +1,23 @@
+### 2026-09-20: conditional lambda propagation (`let h = if c {f} else {g}`)
+
+- The verifier now resolves an if/match-free conditional whose leaf tails
+  are all lambdas into `LocalLambda::Ite{cond, then_lam, else_lam}`:
+  `h(args)` inlines `ite(c, f(args), g(args))`, so `h(5)` proves the
+  branch the let-site condition picked. Arity-mismatched leaves stay
+  fail-closed (`Unknown function h`), as do `match` arms for v1.
+- Codegen lifts a `__lamsel_*` dispatcher function whose leading `i64`
+  selector param picks the branch: the binding site folds the branch
+  conditions into a frozen `select` chain (`__sel#<h>` — a `#`-suffixed internal name users cannot write, so it can never collide with a program variable), and `h`'s
+  `@lam:` marker records `__sel#<h>` + the union of branch captures, so
+  `h(args)` / `call(h, args)` / `let h2 = h` all route through the
+  dispatcher. Captures and the selector index are evaluated once at the
+  binding site — a later rebind of a condition variable can't re-pick
+  the branch, matching the verifier's frozen `ite` condition.
+- Non-lambda leaves and diverging arities/arg types/return types fall
+  back to the generic path and stay uncallable (fail-closed on both
+  sides); nesting depth matches the verifier's uncapped recursion so a
+  deep `if`-chain never diverges between verify and codegen.
+
 ### 2026-09-20: indirect lambda calls compile to native code (`f(args)` / `call(f, args)`)
 
 - `let f = |a: i64| …` now lifts the lambda to a module-level private

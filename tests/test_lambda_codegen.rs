@@ -237,3 +237,162 @@ body: {
     let output = mumei_run(&fixture);
     assert_eq!(output.status.code(), Some(101));
 }
+
+#[test]
+fn lambda_if_branch_selector_picks_taken_branch() {
+    let fixture = write_fixture(
+        "lamsel_if",
+        r#"
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let f = |a: i64| a + 10;
+    let g = |a: i64| a * 3;
+    let h = if 1 > 2 { f } else { g };
+    h(5)
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert_eq!(output.status.code(), Some(15));
+}
+
+#[test]
+fn lambda_if_branch_selector_param_cond() {
+    let fixture = write_fixture(
+        "lamsel_param",
+        r#"
+atom pick(c: i64) -> i64
+requires: c == 0 || c == 1;
+ensures: result >= 0;
+effects: [io];
+body: {
+    let k = 100;
+    let f = |a: i64| a + k;
+    let g = |a: i64| a * 2;
+    let h = if c == 0 { f } else { g };
+    h(5)
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    if pick(0) == 105 && pick(1) == 10 { 0 } else { 1 }
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn lambda_if_branch_nested_three_way() {
+    let fixture = write_fixture(
+        "lamsel_nested",
+        r#"
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let c1 = false;
+    let c2 = true;
+    let f = |a: i64| a + 1;
+    let g = |a: i64| a + 2;
+    let h = |a: i64| a + 3;
+    let m = if c1 { f } else { if c2 { g } else { h } };
+    m(0)
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn lambda_if_branch_capture_flows_through_dispatch() {
+    let fixture = write_fixture(
+        "lamsel_capture",
+        r#"
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let k = 7;
+    let f = |a: i64| a + k;
+    let g = |a: i64| a + 100;
+    let h = if k > 5 { f } else { g };
+    h(1)
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert_eq!(output.status.code(), Some(8));
+}
+
+#[test]
+fn lambda_if_branch_alias_and_call() {
+    let fixture = write_fixture(
+        "lamsel_alias",
+        r#"
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let f = |a: i64| a + 10;
+    let g = |a: i64| a * 3;
+    let h = if 1 > 2 { f } else { g };
+    let h2 = h;
+    call(h2, 5)
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert_eq!(output.status.code(), Some(15));
+}
+
+#[test]
+fn lambda_if_branch_arity_mismatch_fails_closed() {
+    let fixture = write_fixture(
+        "lamsel_mismatch",
+        r#"
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let f = |a: i64| a + 1;
+    let g = |a: i64, b: i64| a + b;
+    let h = if true { f } else { g };
+    h(5)
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert!(
+        !output.status.success() || output.status.code() == Some(1),
+        "arity-mismatched selector must not run: {:?}",
+        output.status.code()
+    );
+}
+
+#[test]
+fn lambda_if_branch_sel_does_not_collide_with_user_var() {
+    let fixture = write_fixture(
+        "lamsel_collision",
+        r#"
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let __sel_h = 999;
+    let f = |a: i64| a * 0 + __sel_h;
+    let g = |a: i64| a + 100;
+    let h = if true { f } else { g };
+    h(5) - 999
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert_eq!(output.status.code(), Some(0));
+}

@@ -3073,7 +3073,10 @@ pub(crate) fn expr_to_z3<'a>(
 /// `let g = f` shares `f`'s allocation); an `ite` over two different
 /// closures has no Z3 encoding, and textually identical lambdas written
 /// in both branches are still distinct bindings, so they drop.
-fn same_local_lambda(a: &std::rc::Rc<LocalLambda>, b: &std::rc::Rc<LocalLambda>) -> bool {
+fn same_local_lambda<'a>(
+    a: &std::rc::Rc<LocalLambda<'a>>,
+    b: &std::rc::Rc<LocalLambda<'a>>,
+) -> bool {
     std::rc::Rc::ptr_eq(a, b)
 }
 
@@ -3094,25 +3097,41 @@ fn same_local_lambda(a: &std::rc::Rc<LocalLambda>, b: &std::rc::Rc<LocalLambda>)
 fn apply_local_lambda<'a>(
     vc: &VCtx<'a>,
     call_name: &str,
-    lambda: &LocalLambda,
+    lambda: &LocalLambda<'a>,
     args: &[Expr],
     env: &mut Env<'a>,
     solver_opt: Option<&Solver<'a>>,
 ) -> DynResult<'a> {
     let LocalLambda::Closure { expr, captured } = lambda else {
-        // `Opaque` — a lambda param called inside its own body while the
-        // body is being translated at binding time. The call's arity and
-        // return type are unknowable until a real closure reaches the
-        // param at a call site, so yield a fresh symbolic int and let the
-        // check continue (its value is discarded anyway).
-        static OPAQUE_CALL_COUNTER: std::sync::atomic::AtomicUsize =
-            std::sync::atomic::AtomicUsize::new(0);
-        let call_id = OPAQUE_CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        return Ok(Int::new_const(
-            vc.ctx,
-            format!("__lam_param_call_{}_{}", call_name, call_id).as_str(),
-        )
-        .into());
+        match lambda {
+            // `let h = if c { f } else { g }`: applying `h` inlines both
+            // bodies behind the let-site condition.
+            LocalLambda::Ite {
+                cond,
+                then_lam,
+                else_lam,
+            } => {
+                let t = apply_local_lambda(vc, call_name, then_lam, args, env, solver_opt)?;
+                let e = apply_local_lambda(vc, call_name, else_lam, args, env, solver_opt)?;
+                return Ok(cond.ite(&t, &e));
+            }
+            // `Opaque` — a lambda param called inside its own body while the
+            // body is being translated at binding time. The call's arity and
+            // return type are unknowable until a real closure reaches the
+            // param at a call site, so yield a fresh symbolic int and let the
+            // check continue (its value is discarded anyway).
+            LocalLambda::Opaque => {
+                static OPAQUE_CALL_COUNTER: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(0);
+                let call_id = OPAQUE_CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(Int::new_const(
+                    vc.ctx,
+                    format!("__lam_param_call_{}_{}", call_name, call_id).as_str(),
+                )
+                .into());
+            }
+            LocalLambda::Closure { .. } => unreachable!(),
+        }
     };
     let Expr::Lambda { params, body, .. } = expr else {
         return Err(MumeiError::verification(format!(
