@@ -1,3 +1,18 @@
+### 2026-09-20: lambda bindings are Copy in MIR move analysis
+
+- `let f = |params| …` locals now carry the internal type `__lambda`
+  (added to `movability_from_type`'s Copy set): a lambda binding is an
+  immutable closure reference, not an owned resource, so reading it
+  copies rather than moves. Previously `let h = if c {f} else {g}` —
+  or `let h = f` — consumed `f`/`g` at the branch merge, so reusing
+  them (a second selector, `h = g`, calling `f` afterwards) failed
+  with "consumed on another path" / "moved twice". Reuse now works on
+  both sides, matching the verifier's name-based lambda resolution
+  (`local_lambdas` lookup never consumes).
+- `infer_hir_ty` propagates `__lambda` through `Variable`,
+  `IfThenElse`, and `Match` tails, so `let h = if c {f} else {g}`
+  itself binds a Copy local.
+
 ### 2026-09-20: conditional lambda propagation (`let h = if c {f} else {g}`)
 
 - The verifier now resolves an if/match-free conditional whose leaf tails

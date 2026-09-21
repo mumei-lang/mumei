@@ -396,3 +396,25 @@ body: {
     let output = mumei_run(&fixture);
     assert_eq!(output.status.code(), Some(0));
 }
+
+#[test]
+fn lambda_reusable_after_conditional_binding() {
+    let fixture = write_fixture(
+        "lamsel_reuse",
+        r#"
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let c = true;
+    let f = |a: i64| a + 1;
+    let g = |a: i64| a + 100;
+    let h = if c { f } else { g };
+    let h2 = if c { g } else { f };
+    h(5) - 6 + h2(5) - 105
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert_eq!(output.status.code(), Some(0));
+}
