@@ -232,7 +232,11 @@ pub fn movability_from_type(ty: &Option<String>) -> Movability {
             "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "f64" | "f32" | "Int"
             | "Nat" | "Pos" | "Float" | "bool" | "Bool"
             // Standard library refined types (all i64-based)
-            | "RawPtr" | "NullablePtr" | "HumanAge",
+            | "RawPtr" | "NullablePtr" | "HumanAge"
+            // `let f = |params| …` — a lambda binding is an immutable
+            // closure reference, not an owned resource: reads copy, never
+            // move, so `if c {f} else {g}` doesn't consume f/g.
+            | "__lambda",
         ) => Movability::Copy,
         _ => Movability::Move,
     }
@@ -511,6 +515,12 @@ impl LowerCtx {
             HirExpr::Number(_) => Some("i64".to_string()),
             HirExpr::Float(_) => Some("f64".to_string()),
             HirExpr::StringLit(_) => Some("Str".to_string()),
+            // `|params| body` — mark the bound local with the internal
+            // lambda type so `movability_from_type` makes it Copy: lambda
+            // locals are immutable references, and reuse after a
+            // conditional binding (`let h = if c {f} else {g}`) must not
+            // trip move analysis.
+            HirExpr::Lambda { .. } => Some("__lambda".to_string()),
             HirExpr::Variable(name) => {
                 if name == "true" || name == "false" {
                     Some("bool".to_string())
