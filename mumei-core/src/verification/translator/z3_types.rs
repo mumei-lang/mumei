@@ -1195,14 +1195,8 @@ pub(crate) fn havoc_array_args<'a>(
     args: &[Expr],
     env: &mut Env<'a>,
 ) {
-    for (i, arg) in args.iter().enumerate() {
-        let Expr::Variable(name) = arg else { continue };
-        let Some(param) = callee.params.get(i) else {
-            continue;
-        };
-        if atom_stores_to_array(vc.module_env, callee, &param.name) {
-            havoc_array_name(vc, name, env);
-        }
+    for name in super::may_write::atom_may_write_args(vc.module_env, callee, args) {
+        havoc_array_name(vc, &name, env);
     }
 }
 

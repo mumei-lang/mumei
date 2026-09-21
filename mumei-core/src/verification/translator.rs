@@ -2,6 +2,7 @@
 mod constraints;
 mod context;
 mod expr;
+mod may_write;
 mod pattern;
 mod stmt;
 mod struct_invariants;
