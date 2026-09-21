@@ -1112,10 +1112,9 @@ fn late_stale_reads_are_rejected() {
     assert!(ran > 0, "no seed produced a late stale-read probe");
 }
 
-/// Every generated array program mixes at least two of the store / loop /
-/// call / lambda mechanisms over the first `fuzz_cases()` seeds, and across
-/// them the generator reaches every havoc kind — the negative twins are not
-/// re-testing a single fixture shape.
+/// Every generated array program keeps the array and stores into it, and
+/// across the first 64 seeds the generator reaches every havoc kind — so the
+/// negative twins are not re-testing a single fixture shape.
 #[test]
 fn array_generator_covers_havoc_kind_space() {
     let mut kinds: std::collections::BTreeSet<HavocKind> = Default::default();
