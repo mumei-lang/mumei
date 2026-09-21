@@ -30,6 +30,402 @@ pub(crate) fn chan_payload_key(var: &str) -> String {
     format!("<chan>{}", var)
 }
 
+/// Marker recorded in `var_types[name]` when `let f = |…| …` or `f = |…|`
+/// binds a lambda: `@lam:<lifted_fn>:<cap1,cap2,…>`. `@` never appears in a
+/// Mumei identifier, so the marker cannot collide with a real type entry.
+pub(crate) const LAMBDA_MARK: &str = "@lam:";
+
+pub(crate) fn lambda_marker(fn_name: &str, captures: &[String]) -> String {
+    format!("{}{}:{}", LAMBDA_MARK, fn_name, captures.join(","))
+}
+
+/// Parse a `@lam:` marker into (lifted fn name, capture names).
+fn parse_lambda_marker(mark: &str) -> Option<(String, Vec<String>)> {
+    let rest = mark.strip_prefix(LAMBDA_MARK)?;
+    let (fn_name, caps) = rest.split_once(':')?;
+    let caps = if caps.is_empty() {
+        Vec::new()
+    } else {
+        caps.split(',').map(|s| s.to_string()).collect()
+    };
+    Some((fn_name.to_string(), caps))
+}
+
+/// Snapshot/merge helpers for branch-scoped lambda bindings: a lambda bound
+/// on only one `if`/`else` side — or bound to different lifted functions —
+/// must not stay callable after the merge, mirroring the verifier's
+/// branch-scoped `local_lambdas` merge.
+pub(crate) fn lambda_marks(var_types: &HashMap<String, String>) -> HashMap<String, String> {
+    var_types
+        .iter()
+        .filter(|(_, v)| v.starts_with(LAMBDA_MARK))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Merge lambda markers after an `if`/`else` — mirrors the verifier's
+/// `local_lambdas` merge: a binding on only one branch leaks through, while
+/// a name bound on both survives only when both sides kept the *same*
+/// lifted function (a conflicting rebind drops the entry so a post-branch
+/// call fails closed instead of picking one side's body).
+pub(crate) fn merge_lambda_marks(
+    var_types: &mut HashMap<String, String>,
+    then_marks: &HashMap<String, String>,
+    else_marks: &HashMap<String, String>,
+) {
+    var_types.retain(|_, v| !v.starts_with(LAMBDA_MARK));
+    for (name, mark) in then_marks {
+        match else_marks.get(name) {
+            Some(m) if m != mark => {}
+            _ => {
+                var_types.insert(name.clone(), mark.clone());
+            }
+        }
+    }
+    for (name, mark) in else_marks {
+        if !then_marks.contains_key(name) {
+            var_types.insert(name.clone(), mark.clone());
+        }
+    }
+}
+
+/// Bind a value that arrived as a lifted-function argument: array fat
+/// pointers decompose into `array_ptrs` + the len scalar (mirroring how
+/// `driver.rs` binds `[T]` atom params); struct/enum/lambda type entries
+/// carry over so field access and nested indirect calls still resolve.
+#[allow(clippy::too_many_arguments)]
+fn bind_lambda_arg<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    name: &str,
+    val: BasicValueEnum<'a>,
+    declared_ty: Option<&str>,
+    src_array: Option<ArrayPtr<'a>>,
+    src_var_ty: Option<&String>,
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    var_types: &mut HashMap<String, String>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<()> {
+    let is_fat_array = src_array.is_some()
+        || declared_ty.is_some_and(|t| {
+            matches!(
+                mumei_core::lowering::lower(&module_env.resolve_base_type(t)),
+                mumei_core::lowering::LoweredType::Array(_)
+            )
+        });
+    if is_fat_array {
+        let Some(struct_val) = val.is_struct_value().then(|| val.into_struct_value()) else {
+            return Err(MumeiError::codegen(format!(
+                "lambda arg `{name}` must be an array fat pointer"
+            )));
+        };
+        let len_val = builder
+            .build_extract_value(struct_val, 0, &format!("{name}_len"))
+            .map_err(|e| MumeiError::codegen(format!("lambda arg extract failed: {e:?}")))?;
+        let data_ptr = builder
+            .build_extract_value(struct_val, 1, &format!("{name}_data"))
+            .map_err(|e| MumeiError::codegen(format!("lambda arg extract failed: {e:?}")))?;
+        let elem_ty = src_array
+            .map(|(_, e, _)| e)
+            .or_else(|| {
+                declared_ty
+                    .and_then(|t| super::lowering::array_elem_llvm_type(context, t, module_env))
+            })
+            .unwrap_or_else(|| context.i64_type().into());
+        array_ptrs.insert(name.to_string(), (len_val, elem_ty, data_ptr));
+        variables.insert(name.to_string(), len_val);
+        return Ok(());
+    }
+    variables.insert(name.to_string(), val);
+    if let Some(t) = src_var_ty {
+        var_types.insert(name.to_string(), t.clone());
+    }
+    Ok(())
+}
+
+/// Lift `|params| body` into a private module-level function whose leading
+/// parameters are the lambda's captures — a later `f(args)` passes the
+/// call-site values of the captured names, matching how the verifier
+/// inlines the body under `local_lambdas`. Returns the lifted fn name.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_lambda_function<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+    caller_fn: &FunctionValue<'a>,
+    var_name: &str,
+    params: &[mumei_core::hir::HirLambdaParam],
+    return_type: Option<&String>,
+    captures: &[String],
+    body: &HirStmt,
+    outer_variables: &HashMap<String, BasicValueEnum<'a>>,
+    outer_var_types: &HashMap<String, String>,
+    outer_array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<(String, Vec<String>)> {
+    let base = format!(
+        "__lam_{}_{}",
+        caller_fn.get_name().to_string_lossy(),
+        var_name
+    );
+    let mut fn_name = base.clone();
+    let mut counter = 0u32;
+    while module.get_function(&fn_name).is_some() {
+        counter += 1;
+        fn_name = format!("{base}_{counter}");
+    }
+
+    // Lambdas visible at the let site seed the body's `@lam:` scope (a call
+    // to one inside the body resolves the lifted fn by name — no param
+    // needed), but their *value* captures must ride along as extra params:
+    // `let f = |x| x+k; let g = |y| f(y)` — `f`'s `k` is read from
+    // `variables` inside `g`'s body, so `g` must take `k` too.
+    let mut extra_caps: Vec<String> = Vec::new();
+    let lam_marks = lambda_marks(outer_var_types);
+    let mut seed: Vec<String> = lam_marks
+        .values()
+        .filter_map(|m| parse_lambda_marker(m).map(|(_, c)| c))
+        .flatten()
+        .collect();
+    let mut seen: std::collections::HashSet<String> = seed.iter().cloned().collect();
+    while let Some(cap) = seed.pop() {
+        if let Some(m) = lam_marks.get(&cap) {
+            // A captured lambda needs no value param (its marker resolves);
+            // but its own captures contribute transitively.
+            if let Some((_, sub_caps)) = parse_lambda_marker(m) {
+                for c in sub_caps {
+                    if seen.insert(c.clone()) {
+                        seed.push(c);
+                    }
+                }
+            }
+            continue;
+        }
+        let in_scope = params.iter().any(|p| p.name == cap);
+        if captures.contains(&cap) || extra_caps.contains(&cap) || in_scope {
+            continue;
+        }
+        extra_caps.push(cap);
+    }
+    let all_caps: Vec<String> = captures.iter().cloned().chain(extra_caps).collect();
+
+    // Signature: captures first (LLVM types from the binding site's values —
+    // `let f = |x| x + k` needs no annotation on `k`), then declared params.
+    let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+    for cap in &all_caps {
+        if outer_array_ptrs.contains_key(cap.as_str()) {
+            // Array captures travel as the `{i64, ptr}` fat pointer, not
+            // the len scalar `variables[cap]` holds.
+            param_types.push(array_struct_type(context).into());
+            continue;
+        }
+        if lam_marks.contains_key(cap) {
+            // Lambda captures pass the fn pointer (uniformity); the body's
+            // marker resolves the call by name regardless.
+            param_types.push(context.ptr_type(AddressSpace::default()).into());
+            continue;
+        }
+        let Some(v) = outer_variables.get(cap.as_str()) else {
+            return Err(MumeiError::codegen(format!(
+                "lambda `{var_name}` captures `{cap}`, which is not bound at the let site"
+            )));
+        };
+        param_types.push(v.get_type().into());
+    }
+    for p in params {
+        param_types.push(
+            resolve_param_type(
+                context,
+                p.type_ref.as_ref().map(|t| t.to_string()).as_deref(),
+                module_env,
+            )
+            .into(),
+        );
+    }
+    let mut ret_ty = resolve_param_type(context, return_type.map(|s| s.as_str()), module_env);
+
+    // An undeclared `|x: f64| x * 2.0` returns `double`, not `i64` — probe
+    // the body's actual result type by compiling once, then rebuild with
+    // the discovered return type. Nested lambdas lifted during the probe
+    // stay in the module as dead private fns (re-emit gets a `_N` suffix
+    // and the body's marker names the re-emitted one consistently).
+    for attempt in 0..2 {
+        let lam_fn = module.add_function(
+            &fn_name,
+            ret_ty.fn_type(&param_types, false),
+            Some(inkwell::module::Linkage::Private),
+        );
+
+        // Compile the body on a separate builder so the caller's insertion
+        // point is preserved; the body gets a fresh scope seeded with args.
+        let lam_builder = context.create_builder();
+        let entry = context.append_basic_block(lam_fn, "entry");
+        lam_builder.position_at_end(entry);
+
+        let mut variables: HashMap<String, BasicValueEnum> = HashMap::new();
+        let mut var_types: HashMap<String, String> = HashMap::new();
+        let mut array_ptrs: HashMap<String, ArrayPtr> = HashMap::new();
+        // Seed the body with the lambda scope live at the let site — a call
+        // to an outer lambda inside the body resolves its `@lam:` marker.
+        var_types.extend(lam_marks.iter().map(|(k, v)| (k.clone(), v.clone())));
+
+        for (i, cap) in all_caps.iter().enumerate() {
+            let val = lam_fn.get_nth_param(i as u32).unwrap();
+            bind_lambda_arg(
+                context,
+                &lam_builder,
+                cap,
+                val,
+                None,
+                outer_array_ptrs.get(cap.as_str()).copied(),
+                outer_var_types.get(cap.as_str()),
+                &mut variables,
+                &mut var_types,
+                &mut array_ptrs,
+                module_env,
+            )?;
+        }
+        for (i, p) in params.iter().enumerate() {
+            let val = lam_fn.get_nth_param((all_caps.len() + i) as u32).unwrap();
+            let ty = p.type_ref.as_ref().map(|t| t.to_string());
+            let ty_hint = ty
+                .as_deref()
+                .map(|t| resolve_named_type(module_env, t))
+                .filter(|base| {
+                    module_env.get_struct(base).is_some() || module_env.get_enum(base).is_some()
+                });
+            bind_lambda_arg(
+                context,
+                &lam_builder,
+                &p.name,
+                val,
+                ty.as_deref(),
+                None,
+                ty_hint.as_ref(),
+                &mut variables,
+                &mut var_types,
+                &mut array_ptrs,
+                module_env,
+            )?;
+            // `|f| f(1)` shadows an outer lambda `f` — the seeded marker
+            // must not redirect calls meant for the parameter.
+            if ty_hint.is_none() {
+                var_types.remove(&p.name);
+            }
+        }
+
+        let result = compile_hir_stmt(
+            context,
+            &lam_builder,
+            module,
+            &lam_fn,
+            body,
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            module_env,
+        )?;
+
+        let last_block = lam_builder.get_insert_block().unwrap();
+        if last_block.get_terminator().is_none() {
+            if result.get_type() != ret_ty {
+                if return_type.is_none() && attempt == 0 {
+                    ret_ty = result.get_type();
+                    unsafe { lam_fn.delete() };
+                    continue;
+                }
+                return Err(MumeiError::codegen(format!(
+                    "lambda `{var_name}` returns {:?} but its signature expects {:?}",
+                    result.get_type(),
+                    ret_ty
+                )));
+            }
+            lam_builder
+                .build_return(Some(&result))
+                .map_err(|e| MumeiError::codegen(format!("lambda return failed: {e:?}")))?;
+        }
+        return Ok((fn_name, all_caps));
+    }
+    unreachable!()
+}
+
+/// Emit a call through a `@lam:` marker: `f(args)` on a `let`/`assign`-bound
+/// lambda resolves to the lifted private function; capture values are read
+/// from `variables` at the call site and passed as leading arguments.
+#[allow(clippy::too_many_arguments)]
+fn emit_lambda_call<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    function: &FunctionValue<'a>,
+    mark: &str,
+    args: &[HirExpr],
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    var_types: &mut HashMap<String, String>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<BasicValueEnum<'a>> {
+    let Some((fn_name, caps)) = parse_lambda_marker(mark) else {
+        return Err(MumeiError::codegen(format!(
+            "malformed lambda binding marker: {mark}"
+        )));
+    };
+    let Some(lam_fn) = module.get_function(&fn_name) else {
+        return Err(MumeiError::codegen(format!(
+            "lifted lambda function {fn_name} not found"
+        )));
+    };
+    let expected = lam_fn.count_params() as usize;
+    if args.len() + caps.len() != expected {
+        return Err(MumeiError::codegen(format!(
+            "lambda call arity mismatch: {} args + {} captures != {} params",
+            args.len(),
+            caps.len(),
+            expected
+        )));
+    }
+    let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(expected);
+    for cap in &caps {
+        if let Some(&(len_val, _elem_ty, data_ptr)) = array_ptrs.get(cap.as_str()) {
+            let struct_ty = array_struct_type(context);
+            let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
+            agg = builder
+                .build_insert_value(agg, len_val, 0, "lamcap_len")
+                .map_err(|e| MumeiError::codegen(format!("array capture pack failed: {e:?}")))?;
+            agg = builder
+                .build_insert_value(agg, data_ptr, 1, "lamcap_data")
+                .map_err(|e| MumeiError::codegen(format!("array capture pack failed: {e:?}")))?;
+            let agg_val: BasicValueEnum = match agg {
+                inkwell::values::AggregateValueEnum::StructValue(s) => s.into(),
+                inkwell::values::AggregateValueEnum::ArrayValue(a) => a.into(),
+            };
+            arg_vals.push(agg_val.into());
+        } else if let Some(v) = variables.get(cap.as_str()) {
+            arg_vals.push((*v).into());
+        } else {
+            return Err(MumeiError::codegen(format!(
+                "lambda capture `{cap}` is not bound at the call site"
+            )));
+        }
+    }
+    for arg in args {
+        arg_vals.push(
+            compile_hir_expr(
+                context, builder, module, function, arg, variables, var_types, array_ptrs,
+                module_env,
+            )?
+            .into(),
+        );
+    }
+    let call_result = builder
+        .build_call(lam_fn, &arg_vals, "lam_call")
+        .map_err(|e| MumeiError::codegen(format!("lambda call failed: {e:?}")))?;
+    Ok(call_result
+        .try_as_basic_value()
+        .left()
+        .unwrap_or(context.i64_type().const_int(0, false).into()))
+}
+
 /// Numerically convert `val` to a channel's declared payload type before it is
 /// bit-preserved into the runtime's i64 slot, so `send(ch, 1)` on a
 /// `chan<f64>` transports `1.0` rather than the integer's bit pattern (which
@@ -662,6 +1058,18 @@ pub(crate) fn compile_hir_expr<'a>(
                         Ok(result.into_int_value().into())
                     }
                 } else {
+                    // `f(args)` on a `let`/`assign`-bound lambda resolves
+                    // through its `@lam:` marker to the lifted private fn.
+                    if let Some(mark) = var_types
+                        .get(name.as_str())
+                        .filter(|m| m.starts_with(LAMBDA_MARK))
+                        .cloned()
+                    {
+                        return emit_lambda_call(
+                            context, builder, module, function, &mark, args, variables, var_types,
+                            array_ptrs, module_env,
+                        );
+                    }
                     Err(MumeiError::codegen(format!("Unknown function {}", name)))
                 }
             }
@@ -1065,6 +1473,11 @@ pub(crate) fn compile_hir_expr<'a>(
             let else_block = context.append_basic_block(*function, "else");
             let merge_block = context.append_basic_block(*function, "merge");
 
+            // Lambda bindings are branch-scoped like the verifier's
+            // `local_lambdas`: restore the pre-branch markers before the
+            // else side, then keep only markers both sides agree on.
+            let pre_marks = lambda_marks(var_types);
+
             llvm!(builder.build_conditional_branch(cond_bool, then_block, else_block));
 
             builder.position_at_end(then_block);
@@ -1079,6 +1492,9 @@ pub(crate) fn compile_hir_expr<'a>(
                 array_ptrs,
                 module_env,
             )?;
+            let then_marks = lambda_marks(var_types);
+            var_types.retain(|_, v| !v.starts_with(LAMBDA_MARK));
+            var_types.extend(pre_marks.iter().map(|(k, v)| (k.clone(), v.clone())));
             let then_end_block = builder.get_insert_block().unwrap();
             llvm!(builder.build_unconditional_branch(merge_block));
 
@@ -1094,6 +1510,8 @@ pub(crate) fn compile_hir_expr<'a>(
                 array_ptrs,
                 module_env,
             )?;
+            let else_marks = lambda_marks(var_types);
+            merge_lambda_marks(var_types, &then_marks, &else_marks);
             let else_end_block = builder.get_insert_block().unwrap();
             llvm!(builder.build_unconditional_branch(merge_block));
 
@@ -1477,6 +1895,49 @@ pub(crate) fn compile_hir_expr<'a>(
             Ok(ptr_int.into())
         }
         HirExpr::CallRef { callee, args } => {
+            // `call(f, …)` on a `let`/`assign`-bound lambda — the variable's
+            // `@lam:` marker resolves to the lifted private fn directly.
+            if let HirExpr::Variable(lam_var) = callee.as_ref() {
+                if let Some(mark) = var_types
+                    .get(lam_var.as_str())
+                    .filter(|m| m.starts_with(LAMBDA_MARK))
+                    .cloned()
+                {
+                    return emit_lambda_call(
+                        context, builder, module, function, &mark, args, variables, var_types,
+                        array_ptrs, module_env,
+                    );
+                }
+            }
+            // `call(|x| …, args)` — lift the inline lambda on the spot and
+            // call it; captures bind at this site.
+            if let HirExpr::Lambda {
+                params,
+                return_type,
+                body,
+                captures,
+            } = callee.as_ref()
+            {
+                let (fn_name, all_caps) = emit_lambda_function(
+                    context,
+                    module,
+                    function,
+                    "inline",
+                    params,
+                    return_type.as_ref(),
+                    captures,
+                    body,
+                    variables,
+                    var_types,
+                    array_ptrs,
+                    module_env,
+                )?;
+                let mark = lambda_marker(&fn_name, &all_caps);
+                return emit_lambda_call(
+                    context, builder, module, function, &mark, args, variables, var_types,
+                    array_ptrs, module_env,
+                );
+            }
             let callee_val = compile_hir_expr(
                 context, builder, module, function, callee, variables, var_types, array_ptrs,
                 module_env,

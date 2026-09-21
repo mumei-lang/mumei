@@ -1,3 +1,25 @@
+### 2026-09-20: indirect lambda calls compile to native code (`f(args)` / `call(f, args)`)
+
+- `let f = |a: i64| …` now lifts the lambda to a module-level private
+  function (`__lam_<caller>_<var>`) instead of storing a `const 0`
+  placeholder: the pointer is bound to `f` and an `@lam:<fn>:<caps>`
+  marker rides `var_types` so `f(3)` / `call(f, 3)` emit a real call.
+  `#615`'s verifier-side semantics already inlined the body; codegen now
+  matches it, so `mumei run`/`--emit binary` produce working binaries.
+- Captures ride as leading extra params: `let k = 10; f = |a| a + k`
+  calls `__lam(k, a)`. Lambda *call targets* (`g = |y| f(y)`) aren't
+  syntactic free vars, so `emit_lambda_function` transitively collects
+  the value captures of every `@lam:` marker in scope and passes them
+  too — call-site values flow in, matching the verifier's env-at-apply.
+- Scope rules mirror the verifier: `let g = f` aliases copy the marker,
+  `f = …` rebinds lift a fresh function, `if`/`match` merges drop
+  divergent/single-side bindings, params shadow outer lambda names, and
+  undeclared-`f64`-returning lambdas compile via a two-attempt
+  signature probe.
+- Tests: `tests/test_lambda_codegen.rs` — 8 `mumei run` fixtures
+  (basic/captures/call()/inline literal/alias/transitive capture/array
+  capture/branch+rebind/param shadow/loop survival) asserting exit codes.
+
 ### 2026-09-20: scalar loop-havoc soundness; callee `len(result)` reaches callers
 
 - **Soundness fix**: `havoc_vars`'s catch-all used to rebind a
