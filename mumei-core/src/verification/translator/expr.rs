@@ -2744,6 +2744,17 @@ pub(crate) fn expr_to_z3<'a>(
                 arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
             }
 
+            // The callee didn't resolve to a known atom — a concrete
+            // `atom_ref` target or contract callee may still store through
+            // its params, and nothing above models that mutation. Havoc
+            // every variable arg bound to an array (fail closed);
+            // `havoc_array_name` no-ops on non-array bindings.
+            for arg in args {
+                if let Expr::Variable(name) = arg {
+                    havoc_array_name(vc, name, env);
+                }
+            }
+
             static DYNAMIC_CALL_COUNTER: std::sync::atomic::AtomicUsize =
                 std::sync::atomic::AtomicUsize::new(0);
             let id = DYNAMIC_CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -3159,5 +3170,38 @@ fn apply_local_lambda<'a>(
     *vc.local_lambdas.borrow_mut() = saved_lambdas;
     *vc.local_enum_types.borrow_mut() = enum_types_before;
     *vc.local_array_elem_types.borrow_mut() = elem_types_before;
+    // The body ran on a cloned `call_env`, so stores through a lambda
+    // param (`x[i] = v`) never reached the caller's tracked slot — but at
+    // real execution the `[T]` arg shares the caller's backing. Havoc the
+    // caller's slot for each storing param so post-call reads can't claim
+    // pre-call elements.
+    if result.is_ok() {
+        for (i, param) in params.iter().enumerate() {
+            if let Some(Expr::Variable(src)) = args.get(i) {
+                if stmt_stores_to_var(vc.module_env, body, &param.name) {
+                    havoc_array_name(vc, src, env);
+                }
+            }
+        }
+        // Captured variables share the caller's bindings (call_env was
+        // cloned from env), so a store to an outer name mutates caller
+        // state too. Sweep every caller-visible name the body may store
+        // through — `havoc_array_name` no-ops on non-array bindings, and a
+        // lambda-local binding shadowing the name only over-havocs
+        // (fail closed).
+        let caller_names: Vec<String> = env
+            .keys()
+            .filter(|k| !k.starts_with("__"))
+            .cloned()
+            .collect();
+        for name in caller_names {
+            if params.iter().any(|p| p.name == name) {
+                continue;
+            }
+            if stmt_stores_to_var(vc.module_env, body, &name) {
+                havoc_array_name(vc, &name, env);
+            }
+        }
+    }
     result
 }
