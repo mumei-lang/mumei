@@ -133,7 +133,10 @@ fn bind_lambda_selector<'a>(
     };
     let lam_fn = module.get_function(&fn_name).unwrap();
     let ptr: BasicValueEnum = lam_fn.as_global_value().as_pointer_value().into();
-    let sel_name = format!("__sel#{var}");
+    // `all_caps[0]` is the per-binding sel name the dispatcher minted —
+    // unique across rebindings so a nested `_ => m` leaf keeps resolving
+    // to the older selector's frozen index.
+    let sel_name = all_caps[0].clone();
     variables.insert(sel_name, sel);
     variables.insert(var.to_string(), ptr);
     var_types.insert(

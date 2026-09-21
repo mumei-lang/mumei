@@ -640,8 +640,11 @@ pub(crate) fn emit_lambda_selector<'a>(
         Some(inkwell::module::Linkage::Private),
     );
 
-    // Body scope: sel + union caps + args bound by position.
-    let sel_name = format!("__sel#{var_name}");
+    // Body scope: sel + union caps + args bound by position. The sel
+    // binding name derives from the deduped dispatcher name so a rebinding
+    // (`let m = …; let m = …`) mints a fresh slot — the old binding's sel
+    // value must stay reachable for nested references like `_ => m`.
+    let sel_name = format!("__sel#{var_name}#{fn_name}");
     let lam_builder = context.create_builder();
     let entry = context.append_basic_block(lam_fn, "entry");
     lam_builder.position_at_end(entry);
@@ -747,7 +750,11 @@ pub(crate) fn emit_lambda_selector<'a>(
         }
     }
     let mut all_caps = vec![sel_name];
-    all_caps.extend(union_caps);
+    for cap in union_caps {
+        if !all_caps.contains(&cap) {
+            all_caps.push(cap);
+        }
+    }
     Ok(Some((fn_name, all_caps)))
 }
 
