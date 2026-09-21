@@ -184,6 +184,36 @@ body: {
 }
 
 #[test]
+fn lambda_shadows_same_named_atom() {
+    // `let inc = |a| a * 10` must shadow the atom `inc` — the verifier
+    // resolves local lambdas before the atom table, so codegen must too;
+    // otherwise it calls the atom and returns 2 where verification proved 10.
+    let fixture = write_fixture(
+        "atom_shadow",
+        r#"
+atom inc(a: i64) -> i64
+requires: true;
+ensures: result == a + 1;
+body: { a + 1 };
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let inc = |a: i64| a * 10;
+    inc(1)
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert_eq!(
+        output.status.code(),
+        Some(10),
+        "local lambda must shadow atom"
+    );
+}
+
+#[test]
 fn lambda_survives_while_loop() {
     let fixture = write_fixture(
         "while",

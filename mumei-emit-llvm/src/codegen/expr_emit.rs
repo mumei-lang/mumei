@@ -965,6 +965,19 @@ pub(crate) fn compile_hir_expr<'a>(
                 Ok(context.i64_type().const_int(0, false).into())
             }
             _ => {
+                // A `let`/`assign`-bound lambda shadows a same-named atom —
+                // the verifier resolves `local_lambdas` before the atom
+                // table, so the marker check must come first.
+                if let Some(mark) = var_types
+                    .get(name.as_str())
+                    .filter(|m| m.starts_with(LAMBDA_MARK))
+                    .cloned()
+                {
+                    return emit_lambda_call(
+                        context, builder, module, function, &mark, args, variables, var_types,
+                        array_ptrs, module_env,
+                    );
+                }
                 let fqn_name = name.replace('.', "::");
                 let resolved_callee = module_env
                     .get_atom(name)
@@ -1058,18 +1071,6 @@ pub(crate) fn compile_hir_expr<'a>(
                         Ok(result.into_int_value().into())
                     }
                 } else {
-                    // `f(args)` on a `let`/`assign`-bound lambda resolves
-                    // through its `@lam:` marker to the lifted private fn.
-                    if let Some(mark) = var_types
-                        .get(name.as_str())
-                        .filter(|m| m.starts_with(LAMBDA_MARK))
-                        .cloned()
-                    {
-                        return emit_lambda_call(
-                            context, builder, module, function, &mark, args, variables, var_types,
-                            array_ptrs, module_env,
-                        );
-                    }
                     Err(MumeiError::codegen(format!("Unknown function {}", name)))
                 }
             }
