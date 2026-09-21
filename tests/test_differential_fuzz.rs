@@ -400,6 +400,8 @@ struct ArrProgram {
     store_callees: Vec<usize>,
     pure_callees: Vec<(usize, i64)>,
     probes: Vec<StaleProbe>,
+    /// Concrete array after every statement ran.
+    final_arr: [i64; ARR_LEN],
 }
 
 /// Interpreter + verifier-knowledge state threaded through generation.
@@ -610,6 +612,7 @@ fn gen_array_program(seed: u64) -> ArrProgram {
             store_callees: Vec::new(),
             pure_callees: Vec::new(),
             probes: Vec::new(),
+            final_arr: init,
         };
         let num_vars = rng.below(3) as usize;
         let mut ok = true;
@@ -660,6 +663,7 @@ fn gen_array_program(seed: u64) -> ArrProgram {
         if let Some(expected) = eval_iexpr_with_arr(&final_expr, &state.vars, &state.arr) {
             prog.final_expr = final_expr;
             prog.expected = expected;
+            prog.final_arr = state.arr;
             return prog;
         }
     }
@@ -821,7 +825,19 @@ fn array_program_source(prog: &ArrProgram, expected_eq: i64, want_match: bool) -
 /// with `ensures: result >= 0` it verifies trivially and the native exit code
 /// (1, the values differ) shows the runtime observed the write.
 fn stale_probe_source(prog: &ArrProgram, probe: &StaleProbe, claim_stale: bool) -> String {
-    let mut body = arr_body_prefix(prog, probe.after_stmt + 1);
+    stale_probe_source_at(prog, probe, probe.after_stmt + 1, claim_stale)
+}
+
+/// Like `stale_probe_source`, but runs `stmts[..upto]` before the read, so a
+/// stale belief can also be probed after *later* statements (pure calls,
+/// other loops) that must not resurrect the pre-write value.
+fn stale_probe_source_at(
+    prog: &ArrProgram,
+    probe: &StaleProbe,
+    upto: usize,
+    claim_stale: bool,
+) -> String {
+    let mut body = arr_body_prefix(prog, upto);
     let _ = writeln!(
         body,
         "    if a[{}] == {} {{ 0 }} else {{ 1 }}",
@@ -1046,7 +1062,7 @@ fn stale_reads_after_every_havoc_kind_are_rejected() {
     let mut seed = 1u64;
     while ran < budget || covered.len() < ALL_HAVOC_KINDS.len() {
         assert!(
-            seed <= 512,
+            ran < budget || seed <= 512,
             "no seed below 512 exercised every havoc kind; covered {covered:?}"
         );
         let prog = gen_array_program(seed.wrapping_mul(ARRAY_SEED_MIX));
@@ -1066,6 +1082,34 @@ fn stale_reads_after_every_havoc_kind_are_rejected() {
         }
         seed += 1;
     }
+}
+
+/// Late stale reads: a pre-write value the verifier forgot at a havoc point
+/// must not be resurrected by the statements that follow (pure calls, other
+/// loops' invariants, unrelated stores). For every probe whose element still
+/// differs from `old_val` at the end of the program, the full program plus
+/// `a[idx] == old_val` must be rejected and must exit 1 natively.
+#[test]
+fn late_stale_reads_are_rejected() {
+    let mut ran = 0u64;
+    for seed in 1..=fuzz_cases() {
+        let prog = gen_array_program(seed.wrapping_mul(ARRAY_SEED_MIX));
+        for (n, probe) in prog.probes.iter().enumerate() {
+            if probe.after_stmt + 1 == prog.stmts.len()
+                || prog.final_arr[probe.idx] == probe.old_val
+            {
+                continue;
+            }
+            let what = format!("arr_late_{seed}_{n}_{:?}", probe.kind);
+            let upto = prog.stmts.len();
+            assert_rejected(&stale_probe_source_at(&prog, probe, upto, true), &what);
+            let observed = stale_probe_source_at(&prog, probe, upto, false);
+            assert_verifies(&observed, &what);
+            assert_runs_with(&observed, 1, &what);
+            ran += 1;
+        }
+    }
+    assert!(ran > 0, "no seed produced a late stale-read probe");
 }
 
 /// Every generated array program mixes at least two of the store / loop /

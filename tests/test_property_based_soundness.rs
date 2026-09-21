@@ -14,7 +14,6 @@
 //! cross-check is known to be able to disagree with a wrong claim.
 
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 
 use mumei_core::parser::{parse_atom, parse_module, Item};
@@ -56,7 +55,7 @@ fn atom_source(case: &Case, ensures: &str) -> String {
 }
 
 fn verify(source: &str, tag: &str) -> bool {
-    let dir = PathBuf::from(format!("/tmp/mumei_pbt_sound_{}_{tag}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("mumei_pbt_sound_{}_{tag}", std::process::id()));
     fs::create_dir_all(&dir).expect("fixture dir");
     let file = dir.join("main.mm");
     fs::write(&file, source).expect("fixture");
