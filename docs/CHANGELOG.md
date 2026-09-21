@@ -1,3 +1,21 @@
+### 2026-09-20 (review fixes): selector rebinding + match CE replay
+
+- `let m = match …; let m = match u { …, _ => m }` rebinding no longer
+  corrupts dispatch: `__sel#<var>` and the cap list were keyed by the
+  bare variable name, so the second binding clobbered the first
+  selector's frozen index and shifted dispatcher args (verify proved
+  pick(1,0)==105 while the binary returned 205 — real divergence). Sel
+  binding names are now minted per binding (`__sel#<var>#<fn>`), and the
+  union-cap list dedupes against the sel slot. Regression test added.
+- Spurious-counterexample diagnosis: `let h = if … {f} else {g}` and
+  `let m = match …` bindings are now registered as lambda names in
+  `collect_lambda_binding_names` (mirror of `resolve_lambda_expr`'s
+  flatness gate), and the CE replay evaluator handles `Expr::Match`
+  (Literal/Wildcard/Variable patterns, arm-local binding restore).
+  A genuine postcondition violation through a match-bound selector now
+  reports "Postcondition (ensures) is not satisfied" instead of the
+  misleading "Spurious counterexample" hint to escalate to Lean.
+
 ### 2026-09-20: match-result lambda propagation (v2)
 
 - `let m = match t { 1 => f, 2 => g, _ => h }; m(args)` now works on
