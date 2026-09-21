@@ -59,7 +59,6 @@ fn bind_lambda_selector<'a>(
         var_types,
         array_ptrs,
         module_env,
-        0,
     )?
     else {
         return Ok(None);

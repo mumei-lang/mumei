@@ -13,9 +13,10 @@
   dispatcher. Captures and the selector index are evaluated once at the
   binding site — a later rebind of a condition variable can't re-pick
   the branch, matching the verifier's frozen `ite` condition.
-- Non-lambda leaves, diverging arities/arg types/return types, and
-  depth > 8 all fall back to the generic path and stay uncallable
-  (fail-closed on both sides).
+- Non-lambda leaves and diverging arities/arg types/return types fall
+  back to the generic path and stay uncallable (fail-closed on both
+  sides); nesting depth matches the verifier's uncapped recursion so a
+  deep `if`-chain never diverges between verify and codegen.
 
 ### 2026-09-20: indirect lambda calls compile to native code (`f(args)` / `call(f, args)`)
 

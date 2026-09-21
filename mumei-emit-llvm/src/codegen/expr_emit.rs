@@ -403,12 +403,9 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
     var_types: &HashMap<String, String>,
     array_ptrs: &HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
-    depth: usize,
 ) -> MumeiResult<Option<Vec<(Vec<&'e HirExpr>, String)>>> {
-    const MAX_DEPTH: usize = 8;
-    if depth > MAX_DEPTH {
-        return Ok(None);
-    }
+    // No depth cap: the verifier's `resolve_lambda_stmt` recurses without a
+    // limit, so a cap here would make codegen reject programs verify accepts.
     match expr {
         HirExpr::Variable(name) => Ok(var_types
             .get(name.as_str())
@@ -452,31 +449,15 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
             let mut then_conds = conds.clone();
             then_conds.push(cond);
             let Some(mut then_branches) = collect_lambda_branches(
-                context,
-                module,
-                caller_fn,
-                then_tail,
-                then_conds,
-                variables,
-                var_types,
-                array_ptrs,
-                module_env,
-                depth + 1,
+                context, module, caller_fn, then_tail, then_conds, variables, var_types,
+                array_ptrs, module_env,
             )?
             else {
                 return Ok(None);
             };
             let Some(mut else_branches) = collect_lambda_branches(
-                context,
-                module,
-                caller_fn,
-                else_tail,
-                conds,
-                variables,
-                var_types,
-                array_ptrs,
+                context, module, caller_fn, else_tail, conds, variables, var_types, array_ptrs,
                 module_env,
-                depth + 1,
             )?
             else {
                 return Ok(None);
