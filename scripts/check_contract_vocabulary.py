@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Check cross-project contract vocabulary in mumei docs, CLI help, and MCP docstrings.
+"""Check cross-project vocabulary and Lean bridge contract constants.
 
 The canonical source is docs/CROSS_PROJECT_ROADMAP.md.  This script keeps the
 small fixed vocabulary mirrored by local docs from drifting into alternate audit
 keys or a broader Lean fallback contract.
+
+The generated schema/bridge_lemma_catalog.json mirror is also checked against
+the Rust constants and proof-certificate fixture. ``--write`` regenerates those
+targets from a catalog override, while the default ``--check`` mode is the CI
+gate.
 
 Since ws-cli-mcp this gate also checks:
 - ``mcp_server.py`` tool docstrings for forbidden aliases
@@ -17,13 +22,23 @@ docstring.  A count assertion ensures silent extraction failures are caught.
 """
 from __future__ import annotations
 
+import argparse
 import ast
+import hashlib
+import json
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Pattern, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+BRIDGE_LEMMA_CATALOG = REPO_ROOT / "schema" / "bridge_lemma_catalog.json"
+TYPES_RS = REPO_ROOT / "mumei-core" / "src" / "verification" / "types.rs"
+VERIFIED_SAMPLE_FIXTURE = (
+    REPO_ROOT / "tests" / "fixtures" / "proof-cert" / "verified_sample.proof-cert.json"
+)
 CANONICAL_DOC = REPO_ROOT / "docs" / "CROSS_PROJECT_ROADMAP.md"
 SYNC_DOCS = [
     REPO_ROOT / "docs" / "ROADMAP.md",
@@ -96,6 +111,117 @@ class Violation:
         if self.line_number is None:
             return f"{rel}: {self.message}"
         return f"{rel}:{self.line_number}: {self.message}"
+
+
+def load_bridge_lemma_catalog(path: Path = BRIDGE_LEMMA_CATALOG) -> dict:
+    with path.open(encoding="utf-8") as handle:
+        catalog = json.load(handle)
+    if (
+        not isinstance(catalog, dict)
+        or not isinstance(catalog.get("translator_version"), str)
+        or not isinstance(catalog.get("obligation_classes"), dict)
+        or any(
+            not isinstance(cls, str)
+            or not isinstance(lemmas, list)
+            or any(not isinstance(lemma, str) for lemma in lemmas)
+            for cls, lemmas in catalog["obligation_classes"].items()
+        )
+    ):
+        raise ValueError("invalid bridge lemma catalog")
+    return catalog
+
+
+def compute_bridge_lemma_hash(obligation_classes: dict[str, list[str]]) -> str:
+    """Match mumei-lean ``expr_translator.bridge_lemma_hash_for`` exactly."""
+    canonical = "\n".join(
+        f"{obligation_class}:{lemma}"
+        for obligation_class in sorted(obligation_classes)
+        for lemma in sorted(obligation_classes[obligation_class])
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+_TRANSLATOR_RE = re.compile(
+    r'(?m)^pub const LEAN_TRANSLATOR_VERSION: &str = "([^"]*)";'
+)
+_HASH_RE = re.compile(
+    r'(?m)^pub const LEAN_BRIDGE_LEMMA_HASH: &str =\s*\n\s*"([^"]*)";'
+)
+_JSON_TRANSLATOR_RE = re.compile(r'(?m)"translator_version"\s*:\s*"([^"]*)"')
+_JSON_HASH_RE = re.compile(r'(?m)"bridge_lemma_hash"\s*:\s*"([^"]*)"')
+
+
+def contract_constant_targets(
+    translator_version: str, bridge_lemma_hash: str
+) -> list[tuple[Path, str, Pattern[str], str]]:
+    return [
+        (TYPES_RS, "translator_version", _TRANSLATOR_RE, translator_version),
+        (TYPES_RS, "bridge_lemma_hash", _HASH_RE, bridge_lemma_hash),
+        (
+            VERIFIED_SAMPLE_FIXTURE,
+            "translator_version",
+            _JSON_TRANSLATOR_RE,
+            translator_version,
+        ),
+        (
+            VERIFIED_SAMPLE_FIXTURE,
+            "bridge_lemma_hash",
+            _JSON_HASH_RE,
+            bridge_lemma_hash,
+        ),
+    ]
+
+
+def _replace_contract_target(
+    path: Path,
+    field: str,
+    pattern: Pattern[str],
+    expected: str,
+    write: bool,
+) -> list[Violation]:
+    if not path.exists():
+        return [Violation(path, "target is missing")]
+    text = path.read_text(encoding="utf-8")
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return [Violation(path, f"{field} anchor not found")]
+    violations = [
+        Violation(path, f"{field} is {match.group(1)}, expected {expected}")
+        for match in matches
+        if match.group(1) != expected
+    ]
+    if write and violations:
+        text = pattern.sub(
+            lambda match: match.group(0)[: match.start(1) - match.start(0)]
+            + expected
+            + match.group(0)[match.end(1) - match.start(0) :],
+            text,
+        )
+        path.write_text(text, encoding="utf-8")
+    return [] if write else violations
+
+
+def _sync_contract_constants(
+    write: bool, catalog_path: Path = BRIDGE_LEMMA_CATALOG
+) -> list[Violation]:
+    catalog = load_bridge_lemma_catalog(catalog_path)
+    translator_version = catalog["translator_version"]
+    bridge_lemma_hash = compute_bridge_lemma_hash(catalog["obligation_classes"])
+    violations: list[Violation] = []
+    for target in contract_constant_targets(translator_version, bridge_lemma_hash):
+        violations.extend(_replace_contract_target(*target, write=write))
+    if catalog_path.resolve() != BRIDGE_LEMMA_CATALOG.resolve():
+        mirror_in_sync = (
+            BRIDGE_LEMMA_CATALOG.exists()
+            and BRIDGE_LEMMA_CATALOG.read_bytes() == catalog_path.read_bytes()
+        )
+        if write and not mirror_in_sync:
+            shutil.copyfile(catalog_path, BRIDGE_LEMMA_CATALOG)
+        elif not mirror_in_sync:
+            violations.append(
+                Violation(BRIDGE_LEMMA_CATALOG, f"catalog mirror differs from {catalog_path}")
+            )
+    return violations
 
 
 def _line_number(text: str, needle: str) -> int | None:
@@ -426,7 +552,14 @@ def _check_no_mm_language_sync(path: Path) -> list[Violation]:
     return violations
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true")
+    mode.add_argument("--write", action="store_true")
+    parser.add_argument("--catalog", type=Path, default=BRIDGE_LEMMA_CATALOG)
+    args = parser.parse_args([] if argv is None else argv)
+
     violations = _check_canonical_doc()
     for path in SYNC_DOCS:
         if not path.exists():
@@ -441,6 +574,7 @@ def main() -> int:
     # CLI help and MCP docstring forbidden-alias checks
     violations.extend(_check_mcp_forbidden_aliases(MCP_SERVER))
     violations.extend(_check_cli_forbidden_aliases(CLI_SOURCE))
+    violations.extend(_sync_contract_constants(args.write, args.catalog))
 
     if violations:
         print("Contract vocabulary check failed:", file=sys.stderr)
@@ -462,4 +596,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))
