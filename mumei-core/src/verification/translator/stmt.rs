@@ -430,6 +430,74 @@ fn resolve_lambda_expr<'a>(
                 else_lam,
             }))
         }
+        // `let m = match t { 1 => f, _ => g }` — each arm's tail resolves to
+        // a lambda; the binding becomes the ite chain
+        // `ite(t==1, f, ite(…, g))` with first-match order preserved.
+        // Scoped to Literal / Wildcard / Variable patterns without guards:
+        // those conditions evaluate to a plain `target == lit` (or true),
+        // which the LLVM selector can reproduce exactly — richer patterns
+        // stay unbound so `m(args)` fails closed on both sides.
+        Expr::Match { target, arms } => {
+            if arms.is_empty() {
+                return None;
+            }
+            let ctx = vc.ctx;
+            let target_z3 = expr_to_z3(vc, target, env, solver_opt).ok()?;
+            let mut chain: Vec<(z3::ast::Bool<'a>, std::rc::Rc<LocalLambda<'a>>)> = Vec::new();
+            let mut arity: Option<usize> = None;
+            for arm in arms {
+                if arm.guard.is_some() {
+                    return None;
+                }
+                let arm_cond = match &arm.pattern {
+                    crate::parser::Pattern::Wildcard | crate::parser::Pattern::Variable(_) => {
+                        z3::ast::Bool::from_bool(ctx, true)
+                    }
+                    crate::parser::Pattern::Literal(n) => {
+                        if let Some(bv) = target_z3.as_bv() {
+                            let lit = z3::ast::BV::from_i64(ctx, *n, bv.get_size());
+                            bv._eq(&lit)
+                        } else {
+                            let t_int = target_z3.as_int()?;
+                            t_int._eq(&z3::ast::Int::from_i64(ctx, *n))
+                        }
+                    }
+                    _ => return None,
+                };
+                // Arm tail must be a syntactically-flat Variable/Lambda
+                // (nested if inside an arm stays unbound: codegen can't
+                // compose the arm condition with inner branch conditions
+                // without a deeper merge).
+                let tail_expr = match arm.body.as_ref() {
+                    Stmt::Expr(e, _) => e,
+                    Stmt::Block(stmts, _) => match stmts.last() {
+                        Some(Stmt::Expr(e, _)) => e,
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                if !matches!(tail_expr, Expr::Variable(_) | Expr::Lambda { .. }) {
+                    return None;
+                }
+                let lam = resolve_lambda_expr(vc, tail_expr, env, solver_opt)?;
+                let a = local_lambda_arity(&lam)?;
+                match arity {
+                    Some(prev) if prev != a => return None,
+                    _ => arity = Some(a),
+                }
+                chain.push((arm_cond, lam));
+            }
+            // First-match order: the last arm is the else leaf.
+            let (_, mut acc) = chain.pop()?;
+            for (cond_i, lam_i) in chain.into_iter().rev() {
+                acc = std::rc::Rc::new(LocalLambda::Ite {
+                    cond: cond_i,
+                    then_lam: lam_i,
+                    else_lam: acc,
+                });
+            }
+            Some(acc)
+        }
         _ => None,
     }
 }

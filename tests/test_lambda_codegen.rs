@@ -418,3 +418,52 @@ body: {
     let output = mumei_run(&fixture);
     assert_eq!(output.status.code(), Some(0));
 }
+
+#[test]
+fn lambda_match_selector_first_match_order() {
+    let fixture = write_fixture(
+        "lamsel_match",
+        r#"
+atom pick(t: i64) -> i64
+requires: t == 1 || t == 2 || t == 9;
+ensures: result > 0;
+effects: [io];
+body: {
+    let f = |a: i64| a + 100;
+    let g = |a: i64| a * 3;
+    let h = |a: i64| a + 35;
+    let m = match t { 1 => f, 2 => g, _ => h };
+    m(5)
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    if pick(1) == 105 && pick(2) == 15 && pick(9) == 40 { 0 } else { 1 }
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn lambda_match_selector_wildcard_default() {
+    let fixture = write_fixture(
+        "lamsel_match_wild",
+        r#"
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let f = |a: i64| a + 1;
+    let g = |a: i64| a + 100;
+    let m = match 7 { 1 => f, _ => g };
+    call(m, 4)
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert_eq!(output.status.code(), Some(104));
+}

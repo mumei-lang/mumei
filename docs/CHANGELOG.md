@@ -1,3 +1,19 @@
+### 2026-09-20: match-result lambda propagation (v2)
+
+- `let m = match t { 1 => f, 2 => g, _ => h }; m(args)` now works on
+  both sides, completing the conditional-lambda family started with
+  `if`-bindings. The verifier resolves the match into a nested
+  `LocalLambda::Ite` chain — `ite(t==1, f, ite(t==2, g, h))` in
+  first-match order — and codegen folds the arm conditions into the
+  same `__lamsel_*` dispatcher via a new `SelCond::MatchEq(target, lit)`
+  condition kind evaluated once at the binding site.
+- Scoped to `Literal`/`Wildcard`/`Variable` arm patterns without guards
+  and flat `Variable`/`Lambda` arm tails — `Variant` patterns, guards,
+  nested `if` tails, and non-i64 scrutinees all fall back to the
+  generic path where `m(args)` stays uncallable (fail-closed, identical
+  on both sides). Non-i64 scrutinees bail before IR emission rather
+  than panicking on `into_int_value`.
+
 ### 2026-09-20: lambda bindings are Copy in MIR move analysis
 
 - `let f = |params| …` locals now carry the internal type `__lambda`
