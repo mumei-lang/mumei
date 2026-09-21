@@ -1038,6 +1038,18 @@ fn atom_stores_to_array_depth(
     stmt_stores_to_array(module_env, &body, param_name, visited, depth)
 }
 
+/// `stmt` may store through the variable `name` — Stmt-level sibling of
+/// `atom_stores_to_array` for bodies without an `Atom` wrapper (lambdas).
+pub(crate) fn stmt_stores_to_var(module_env: &ModuleEnv, stmt: &Stmt, name: &str) -> bool {
+    stmt_stores_to_array(
+        module_env,
+        stmt,
+        name,
+        &mut std::collections::HashSet::new(),
+        0,
+    )
+}
+
 fn stmt_stores_to_array(
     module_env: &ModuleEnv,
     stmt: &Stmt,

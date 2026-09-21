@@ -98,20 +98,58 @@ body: {
 
 // `call(f, a)` through a `let`-bound `atom_ref` takes the dynamic-call
 // path at eval (the callee name is the *variable* `f`, which no atom is
-// named) — that path never havocs args, so `a[0]` keeps its entry fact.
-// This pins the existing semantics; whether dynamic calls SHOULD havoc
-// array args is a separate pre-existing question.
-atom call_let_bound_ref_keeps_value(a: [i64], n: i64) -> i64
+// named) — that path cannot see which atom `f` refers to, so it havoc's
+// every array-bound arg. The array is havoced, so only trivially-true
+// claims about it survive.
+atom call_let_bound_ref_bounded(a: [i64], n: i64) -> i64
 requires: len(a) >= 1 && n >= 1 && a[0] == 7;
-ensures: result == 7;
+ensures: result >= 0;
 body: {
-    let f = atom_ref(arr_store);
+    let f = atom_ref(arr_read);
     let i = 0;
     while i < n
     invariant: i >= 0 && i <= n
     decreases: n - i
     {
-        let t = call(f, a, 0);
+        let t = call(f, a);
+        i = i + 1
+    };
+    if a[0] >= -1000000 { 1 } else { 0 }
+};
+
+// A non-storing lambda callee is havoced precisely: `x[0]` is only read,
+// so `a[0]` keeps its entry fact — this must stay provable.
+atom call_lambda_pure_keeps_value(a: [i64]) -> i64
+requires: len(a) >= 1 && a[0] == 7;
+ensures: result == 7;
+body: {
+    let t = call(|x| { x[0] }, a);
+    a[0]
+};
+
+// A storing lambda havoc's the array — the element is unconstrained
+// post-call, so only claims that hold of any element still verify
+// (and `len` is never havoced).
+atom call_lambda_store_bounded(a: [i64]) -> i64
+requires: len(a) >= 1 && a[0] == 7;
+ensures: result >= 0;
+body: {
+    let t = call(|x| { if len(x) >= 1 { x[0] = 0; 0 } else { 0 } }, a);
+    if a[0] >= -1000000 && len(a) >= 1 { 1 } else { 0 }
+};
+
+// A non-storing lambda inside the loop is likewise unmarked — `a[0]`
+// keeps its entry fact post-loop.
+atom call_lambda_pure_loop_keeps_value(a: [i64], n: i64) -> i64
+requires: len(a) >= 1 && n >= 1 && a[0] == 7;
+ensures: result == 7;
+body: {
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n
+    decreases: n - i
+    {
+        let t = call(|x| { x[0] }, a);
         i = i + 1
     };
     a[0]

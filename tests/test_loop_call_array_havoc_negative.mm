@@ -128,3 +128,80 @@ body: {
     };
     b[0]
 };
+
+// `call(f, a)` through a `let`-bound `atom_ref` lands on the dynamic
+// path — the concrete target (`arr_store`, which writes a[0]=0) cannot
+// be seen, so every array-bound arg is havoced and the stale `a[0]==7`
+// claim must fail closed.
+atom stale_dyn_call_let_bound_ref(a: [i64], n: i64) -> i64
+requires: len(a) >= 1 && n >= 1 && a[0] == 7;
+ensures: result == 7;
+body: {
+    let f = atom_ref(arr_store);
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n
+    decreases: n - i
+    {
+        let t = call(f, a, 0);
+        i = i + 1
+    };
+    a[0]
+};
+
+// Straight-line version: the dynamic `call(f, a, 0)` havoc's `a`
+// immediately, so the post-call `a[0] == 7` read must fail closed.
+atom stale_dyn_call_straightline(a: [i64]) -> i64
+requires: len(a) >= 1 && a[0] == 7;
+ensures: result == 7;
+body: {
+    let f = atom_ref(arr_store);
+    let t = call(f, a, 0);
+    a[0]
+};
+
+// A storing lambda callee writes through its param — the straight-line
+// read after it must not keep the entry fact. (The store is guarded so
+// the failure is the stale read itself, not a bounds error.)
+atom stale_call_lambda_straightline(a: [i64]) -> i64
+requires: len(a) >= 1 && a[0] == 7;
+ensures: result == 7;
+body: {
+    let t = call(|x| { if len(x) >= 1 { x[0] = 0; 0 } else { 0 } }, a);
+    a[0]
+};
+
+// Same storing lambda inside a loop: `__z3_arr_a` must be marked so the
+// post-loop read can't claim the pre-loop element.
+atom stale_call_lambda_in_loop(a: [i64], n: i64) -> i64
+requires: len(a) >= 1 && n >= 1 && a[0] == 7;
+ensures: result == 7;
+body: {
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n
+    decreases: n - i
+    {
+        let t = call(|x| { if len(x) >= 1 { x[0] = 0; 0 } else { 0 } }, a);
+        i = i + 1
+    };
+    a[0]
+};
+
+// A let-bound lambda (`let g = |x| {...}; g(a)`) resolves through
+// `local_lambdas` on the `Call` path — same stale read must fail.
+atom stale_call_let_bound_lambda(a: [i64], n: i64) -> i64
+requires: len(a) >= 1 && n >= 1 && a[0] == 7;
+ensures: result == 7;
+body: {
+    let g = |x| { if len(x) >= 1 { x[0] = 0; 0 } else { 0 } };
+    let i = 0;
+    while i < n
+    invariant: i >= 0 && i <= n
+    decreases: n - i
+    {
+        let t = g(a);
+        i = i + 1
+    };
+    a[0]
+};

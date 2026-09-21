@@ -20,6 +20,39 @@
   (basic/captures/call()/inline literal/alias/transitive capture/array
   capture/branch+rebind/param shadow/loop survival) asserting exit codes.
 
+### 2026-09-20: dynamic `call(f, …)` and lambda callees havoc array args (stale-read soundness fix)
+
+- **Soundness fix**: `call(f, a)` whose callee is not statically
+  resolvable — a `let`-bound `atom_ref` variable (`let f = atom_ref(w)`,
+  which binds `__atom_ref_w`, never `__atom_ref_f`), an unbound variable,
+  or a non-atom callee expression — always took the dynamic/contract
+  path, which mints a fresh result but never havoced array args. The
+  concrete `atom_ref` target may still store through its params, so
+  straight-line and post-loop reads claimed pre-call elements and
+  wrong-verified (`a[0] == 7` after `w` wrote `a[0] = 0`). The dynamic
+  path now havoc's every array-bound variable arg via
+  `havoc_array_name` (a no-op for non-array bindings).
+- **Same class, lambda callees**: `apply_local_lambda` ran the body on a
+  cloned `call_env`, so `|x| { x[0] = 0; 0 }`'s store never reached the
+  caller — post-call `a[0]` kept the pre-call element. After a
+  successful body translation the caller's slot is now havoced for each
+  param the body may store through (`stmt_stores_to_var`, the
+  `atom_stores_to_array` walk lifted to bare `Stmt`s), so a storing
+  lambda's arg is fresh while a pure lambda's arg keeps its entry fact.
+- `collect_assigned_vars`/`collect_expr_assigned_vars` now take `&VCtx`
+  and mirror the runtime callee-resolution precedence: a `local_lambdas`
+  hit marks per-param (`mark_lambda_store_args`), `AtomRef`/`Variable`
+  resolved atoms mark per-param (`mark_array_store_args`), and
+  unresolvable `CallRef` callees mark every array-bound variable arg —
+  matching the eval-time havoc exactly.
+- Fixtures: `tests/test_loop_call_array_havoc.mm` gained
+  `call_let_bound_ref_bounded`, `call_lambda_pure_keeps_value`,
+  `call_lambda_store_bounded`, `call_lambda_pure_loop_keeps_value`;
+  `tests/test_loop_call_array_havoc_negative.mm` gained
+  `stale_dyn_call_let_bound_ref`, `stale_dyn_call_straightline`,
+  `stale_call_lambda_straightline`, `stale_call_lambda_in_loop`,
+  `stale_call_let_bound_lambda` (all must fail).
+
 ### 2026-09-20: scalar loop-havoc soundness; callee `len(result)` reaches callers
 
 - **Soundness fix**: `havoc_vars`'s catch-all used to rebind a
