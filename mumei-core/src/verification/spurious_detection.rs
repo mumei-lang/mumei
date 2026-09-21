@@ -258,18 +258,12 @@ fn collect_lambda_binding_names(stmt: &Stmt) -> HashSet<String> {
 fn collect_lambda_binding_names_stmt(stmt: &Stmt, out: &mut HashSet<String>) {
     match stmt {
         Stmt::Let { var, value, .. } | Stmt::Assign { var, value, .. } => {
-            match value.as_ref() {
-                Expr::Lambda { .. } => {
-                    out.insert(var.clone());
-                }
-                Expr::Variable(src) if out.contains(src) => {
-                    out.insert(var.clone());
-                }
-                _ => {
-                    // Rebinding to a non-lambda clears the binding — a
-                    // `f(…)` issued against the new value is uninterpreted.
-                    out.remove(var);
-                }
+            if expr_resolves_to_lambda(value, out) {
+                out.insert(var.clone());
+            } else {
+                // Rebinding to a non-lambda clears the binding — a
+                // `f(…)` issued against the new value is uninterpreted.
+                out.remove(var);
             }
             collect_lambda_binding_names_expr(value, out);
         }
@@ -304,6 +298,51 @@ fn collect_lambda_binding_names_stmt(stmt: &Stmt, out: &mut HashSet<String>) {
             collect_lambda_binding_names_stmt(body, out)
         }
         Stmt::Cancel { .. } => {}
+    }
+}
+
+/// Whether a `let`/`assign` right-hand side resolves to a lambda binding:
+/// a literal, an alias of a known lambda name, or a conditional
+/// (`if`/`match`) whose every leaf tail does. Mirrors the verifier's
+/// `resolve_lambda_expr` flatness gate so `let h = if … {f} else {g}`
+/// and `let m = match t { 1 => f, _ => g }` keep `h`/`m` out of the
+/// uninterpreted-symbol report.
+fn expr_resolves_to_lambda(expr: &Expr, out: &HashSet<String>) -> bool {
+    match expr {
+        Expr::Lambda { .. } => true,
+        Expr::Variable(src) => out.contains(src),
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            stmt_tail_resolves_to_lambda(then_branch, out)
+                && stmt_tail_resolves_to_lambda(else_branch, out)
+        }
+        Expr::Match { arms, .. } => {
+            !arms.is_empty()
+                && arms.iter().all(|arm| {
+                    arm.guard.is_none()
+                        && matches!(
+                            arm.pattern,
+                            crate::parser::Pattern::Wildcard
+                                | crate::parser::Pattern::Variable(_)
+                                | crate::parser::Pattern::Literal(_)
+                        )
+                        && stmt_tail_resolves_to_lambda(&arm.body, out)
+                })
+        }
+        _ => false,
+    }
+}
+
+fn stmt_tail_resolves_to_lambda(stmt: &Stmt, out: &HashSet<String>) -> bool {
+    match stmt {
+        Stmt::Expr(e, _) => expr_resolves_to_lambda(e, out),
+        Stmt::Block(stmts, _) => stmts
+            .last()
+            .is_some_and(|s| stmt_tail_resolves_to_lambda(s, out)),
+        _ => false,
     }
 }
 
@@ -547,10 +586,63 @@ fn eval_expr(
             }
             _ => Err("call_ref callee is not a replayable lambda".to_string()),
         },
+        // `match t { 1 => f, _ => g }` — replay first-match order over the
+        // concrete scrutinee; the arm value can be a lambda (selector
+        // bindings) or any scalar. Pattern forms the replay can't decide
+        // (Variant tag machinery) stay unevaluable.
+        Expr::Match { target, arms } => {
+            let target_value = eval_expr(target, env, module_env, depth + 1)?;
+            for arm in arms {
+                let (matched, bound) = match &arm.pattern {
+                    crate::parser::Pattern::Wildcard => (true, None),
+                    crate::parser::Pattern::Variable(name) => (true, Some(name.clone())),
+                    crate::parser::Pattern::Literal(n) => match &target_value {
+                        EvalValue::Int(v) => (v == n, None),
+                        _ => (false, None),
+                    },
+                    _ => {
+                        return Err(
+                            "match pattern is not evaluable in counterexample replay".to_string()
+                        )
+                    }
+                };
+                if !matched {
+                    continue;
+                }
+                if let Some(guard) = &arm.guard {
+                    match eval_expr(guard, env, module_env, depth + 1) {
+                        Ok(EvalValue::Bool(true)) => {}
+                        Ok(EvalValue::Bool(false)) => continue,
+                        _ => {
+                            return Err(
+                                "match guard is not evaluable in counterexample replay".to_string()
+                            )
+                        }
+                    }
+                }
+                if let Some(name) = bound {
+                    // Pattern bindings are arm-local: restore the prior
+                    // binding (or absence) so the name doesn't leak into the
+                    // post-match replay env.
+                    let prior = env.insert(name.clone(), target_value.clone());
+                    let result = eval_stmt(&arm.body, env, module_env, depth + 1);
+                    match prior {
+                        Some(old) => {
+                            env.insert(name, old);
+                        }
+                        None => {
+                            env.remove(&name);
+                        }
+                    }
+                    return result;
+                }
+                return eval_stmt(&arm.body, env, module_env, depth + 1);
+            }
+            Err("non-exhaustive match in counterexample replay".to_string())
+        }
         Expr::ArrayAccess(_, _)
         | Expr::StructInit { .. }
         | Expr::FieldAccess(_, _)
-        | Expr::Match { .. }
         | Expr::Async { .. }
         | Expr::Await { .. }
         | Expr::AtomRef { .. }

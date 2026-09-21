@@ -418,3 +418,85 @@ body: {
     let output = mumei_run(&fixture);
     assert_eq!(output.status.code(), Some(0));
 }
+
+#[test]
+fn lambda_match_selector_first_match_order() {
+    let fixture = write_fixture(
+        "lamsel_match",
+        r#"
+atom pick(t: i64) -> i64
+requires: t == 1 || t == 2 || t == 9;
+ensures: result > 0;
+effects: [io];
+body: {
+    let f = |a: i64| a + 100;
+    let g = |a: i64| a * 3;
+    let h = |a: i64| a + 35;
+    let m = match t { 1 => f, 2 => g, _ => h };
+    m(5)
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    if pick(1) == 105 && pick(2) == 15 && pick(9) == 40 { 0 } else { 1 }
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn lambda_match_selector_wildcard_default() {
+    let fixture = write_fixture(
+        "lamsel_match_wild",
+        r#"
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    let f = |a: i64| a + 1;
+    let g = |a: i64| a + 100;
+    let m = match 7 { 1 => f, _ => g };
+    call(m, 4)
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert_eq!(output.status.code(), Some(104));
+}
+
+#[test]
+fn lambda_match_selector_rebind_uses_frozen_outer_selector() {
+    // `let m = match t {..}; let m = match u {.., _ => m}` — the second
+    // binding shadows `m`, but the `_` arm must still dispatch through the
+    // FIRST selector's frozen index (`__sel#` names are per-binding).
+    let fixture = write_fixture(
+        "lamsel_match_rebind",
+        r#"
+atom pick(t: i64, u: i64) -> i64
+requires: (t == 1 || t == 2) && (u == 0 || u == 1);
+ensures: result == 105 || result == 205 || result == 305;
+effects: [io];
+body: {
+    let f = |a: i64| a + 100;
+    let g = |a: i64| a + 200;
+    let h = |a: i64| a + 300;
+    let m = match t { 1 => f, _ => g };
+    let m = match u { 1 => h, _ => m };
+    m(5)
+};
+
+trusted atom main()
+requires: true;
+ensures: true;
+body: {
+    if pick(1, 1) == 305 && pick(1, 0) == 105 && pick(2, 0) == 205 { 0 } else { 1 }
+};
+"#,
+    );
+    let output = mumei_run(&fixture);
+    assert_eq!(output.status.code(), Some(0));
+}

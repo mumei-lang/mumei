@@ -392,18 +392,27 @@ fn push_lambda_captures<'a>(
 /// `IfThenElse` recurses with `cond` accumulated onto each leaf.
 /// Returns None when any leaf isn't a lambda — the caller then falls back
 /// to the generic expression compile and the name stays uncallable.
+/// One conjunct of a lambda-selector leaf's taken-condition: an `if`
+/// condition evaluated as truthy (`!= 0`), or a match arm's
+/// `target == literal` equality. A leaf's conds are ANDed.
+#[derive(Clone)]
+pub(crate) enum SelCond<'e> {
+    Truthy(&'e HirExpr),
+    MatchEq(&'e HirExpr, i64),
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn collect_lambda_branches<'e, 'a>(
     context: &'a Context,
     module: &Module<'a>,
     caller_fn: &FunctionValue<'a>,
     expr: &'e HirExpr,
-    conds: Vec<&'e HirExpr>,
+    conds: Vec<SelCond<'e>>,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
     array_ptrs: &HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
-) -> MumeiResult<Option<Vec<(Vec<&'e HirExpr>, String)>>> {
+) -> MumeiResult<Option<Vec<(Vec<SelCond<'e>>, String)>>> {
     // No depth cap: the verifier's `resolve_lambda_stmt` recurses without a
     // limit, so a cap here would make codegen reject programs verify accepts.
     match expr {
@@ -447,7 +456,7 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
                 return Ok(None);
             };
             let mut then_conds = conds.clone();
-            then_conds.push(cond);
+            then_conds.push(SelCond::Truthy(cond));
             let Some(mut then_branches) = collect_lambda_branches(
                 context, module, caller_fn, then_tail, then_conds, variables, var_types,
                 array_ptrs, module_env,
@@ -464,6 +473,45 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
             };
             then_branches.append(&mut else_branches);
             Ok(Some(then_branches))
+        }
+        // `let m = match t { 1 => f, _ => g }` — each arm tail is a
+        // lambda leaf guarded by a `MatchEq`/`Always` condition, in
+        // first-match order. Same scoping as the verifier: only
+        // Literal/Wildcard/Variable patterns and no guards.
+        HirExpr::Match { target, arms } => {
+            if arms.is_empty() {
+                return Ok(None);
+            }
+            let mut out: Vec<(Vec<SelCond<'e>>, String)> = Vec::new();
+            for arm in arms {
+                if arm.guard.is_some() {
+                    return Ok(None);
+                }
+                let Some(tail) = hir_stmt_tail_expr(&arm.body) else {
+                    return Ok(None);
+                };
+                if !matches!(tail, HirExpr::Variable(_) | HirExpr::Lambda { .. }) {
+                    return Ok(None);
+                }
+                let mut leaf_conds = conds.clone();
+                match &arm.pattern {
+                    mumei_core::parser::Pattern::Wildcard
+                    | mumei_core::parser::Pattern::Variable(_) => {}
+                    mumei_core::parser::Pattern::Literal(n) => {
+                        leaf_conds.push(SelCond::MatchEq(target.as_ref(), *n));
+                    }
+                    _ => return Ok(None),
+                }
+                let Some(mut leaves) = collect_lambda_branches(
+                    context, module, caller_fn, tail, leaf_conds, variables, var_types, array_ptrs,
+                    module_env,
+                )?
+                else {
+                    return Ok(None);
+                };
+                out.append(&mut leaves);
+            }
+            Ok(Some(out))
         }
         _ => Ok(None),
     }
@@ -592,8 +640,11 @@ pub(crate) fn emit_lambda_selector<'a>(
         Some(inkwell::module::Linkage::Private),
     );
 
-    // Body scope: sel + union caps + args bound by position.
-    let sel_name = format!("__sel#{var_name}");
+    // Body scope: sel + union caps + args bound by position. The sel
+    // binding name derives from the deduped dispatcher name so a rebinding
+    // (`let m = …; let m = …`) mints a fresh slot — the old binding's sel
+    // value must stay reachable for nested references like `_ => m`.
+    let sel_name = format!("__sel#{var_name}#{fn_name}");
     let lam_builder = context.create_builder();
     let entry = context.append_basic_block(lam_fn, "entry");
     lam_builder.position_at_end(entry);
@@ -699,7 +750,11 @@ pub(crate) fn emit_lambda_selector<'a>(
         }
     }
     let mut all_caps = vec![sel_name];
-    all_caps.extend(union_caps);
+    for cap in union_caps {
+        if !all_caps.contains(&cap) {
+            all_caps.push(cap);
+        }
+    }
     Ok(Some((fn_name, all_caps)))
 }
 

@@ -72,18 +72,46 @@ fn bind_lambda_selector<'a>(
     for i in (0..n - 1).rev() {
         let mut taken = context.bool_type().const_int(1, false);
         for cond in &branches[i].0 {
-            let c = compile_hir_expr(
-                context, builder, module, function, cond, variables, var_types, array_ptrs,
-                module_env,
-            )?;
-            let c_bool = builder
-                .build_int_compare(
-                    IntPredicate::NE,
-                    c.into_int_value(),
-                    context.i64_type().const_int(0, false),
-                    "sel_cond",
-                )
-                .map_err(|e| MumeiError::codegen(format!("lambda sel cond failed: {e:?}")))?;
+            let c_bool = match cond {
+                super::expr_emit::SelCond::Truthy(e) => {
+                    let c = compile_hir_expr(
+                        context, builder, module, function, e, variables, var_types, array_ptrs,
+                        module_env,
+                    )?;
+                    builder
+                        .build_int_compare(
+                            IntPredicate::NE,
+                            c.into_int_value(),
+                            context.i64_type().const_int(0, false),
+                            "sel_cond",
+                        )
+                        .map_err(|e| {
+                            MumeiError::codegen(format!("lambda sel cond failed: {e:?}"))
+                        })?
+                }
+                super::expr_emit::SelCond::MatchEq(t, lit) => {
+                    let tv = compile_hir_expr(
+                        context, builder, module, function, t, variables, var_types, array_ptrs,
+                        module_env,
+                    )?;
+                    // Literal patterns only compare integer targets — a
+                    // non-i64 scrutinee (f64, Str) can't form this selector,
+                    // so fall back to the generic path instead of panicking.
+                    if !tv.is_int_value() {
+                        return Ok(None);
+                    }
+                    builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            tv.into_int_value(),
+                            context.i64_type().const_int(*lit as u64, true),
+                            "sel_eq",
+                        )
+                        .map_err(|e| {
+                            MumeiError::codegen(format!("lambda sel match cond failed: {e:?}"))
+                        })?
+                }
+            };
             taken = builder
                 .build_and(taken, c_bool, "sel_and")
                 .map_err(|e| MumeiError::codegen(format!("lambda sel and failed: {e:?}")))?;
@@ -105,7 +133,10 @@ fn bind_lambda_selector<'a>(
     };
     let lam_fn = module.get_function(&fn_name).unwrap();
     let ptr: BasicValueEnum = lam_fn.as_global_value().as_pointer_value().into();
-    let sel_name = format!("__sel#{var}");
+    // `all_caps[0]` is the per-binding sel name the dispatcher minted —
+    // unique across rebindings so a nested `_ => m` leaf keeps resolving
+    // to the older selector's frozen index.
+    let sel_name = all_caps[0].clone();
     variables.insert(sel_name, sel);
     variables.insert(var.to_string(), ptr);
     var_types.insert(
@@ -129,10 +160,14 @@ pub(crate) fn compile_hir_stmt<'a>(
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match stmt {
         HirStmt::Let { var, ty, value } => {
-            // `let h = if c { f } else { g }` where every branch resolves to
-            // a lambda: emit a selector dispatcher `__lamsel_*` and bind `h`
-            // to it so `h(args)` calls the branch the let-site cond picked.
-            if let HirExpr::IfThenElse { .. } = value.as_ref() {
+            // `let h = if c { f } else { g }` / `let m = match t { … => f }`
+            // where every branch resolves to a lambda: emit a selector
+            // dispatcher `__lamsel_*` and bind the name so `h(args)` calls
+            // the branch the let-site condition picked.
+            if matches!(
+                value.as_ref(),
+                HirExpr::IfThenElse { .. } | HirExpr::Match { .. }
+            ) {
                 if let Some(ptr) = bind_lambda_selector(
                     context, builder, module, function, var, value, variables, var_types,
                     array_ptrs, module_env,
@@ -232,8 +267,12 @@ pub(crate) fn compile_hir_stmt<'a>(
             Ok(val)
         }
         HirStmt::Assign { var, value } => {
-            // `h = if c { f } else { g }` — same selector binding as `let`.
-            if let HirExpr::IfThenElse { .. } = value.as_ref() {
+            // `h = if c { f } else { g }` / `m = match …` — same selector
+            // binding as `let`.
+            if matches!(
+                value.as_ref(),
+                HirExpr::IfThenElse { .. } | HirExpr::Match { .. }
+            ) {
                 if let Some(ptr) = bind_lambda_selector(
                     context, builder, module, function, var, value, variables, var_types,
                     array_ptrs, module_env,
