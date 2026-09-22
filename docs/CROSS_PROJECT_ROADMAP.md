@@ -2101,7 +2101,7 @@ Z3 unknown ──> known witness / tactic ladder（決定論、既存） ──>
 | R-13 | P17 残課題 | 同期プリミティブで保護された共有可変状態の干渉推論 | `std/concurrency` 系 atom または mumei-demo シナリオで lock / unlock を伴う共有状態が必要になったとき。Priority 25 Track A の A-6「リソース取得 / 解放対応」の設計（外部コード側）が先に固まるので、その語彙を流用する |
 | R-14 | Multi-Stage IR Phase 4 | borrow checking / lifetime analysis | 設計未着手。`LinearityCtx` の move / drop 解析で std / demo が回っている間は着手しない。参照型（`&T`）を言語に導入する判断が先 |
 | R-15 | P19 / P29 残課題 | Capability Stage 2〜4 / per-receiver capability 解決 | Priority 15 の需要トリガ T1〜T4（`docs/CAPABILITY_DEMAND_STUDY.md`）。結論は否定的のため保留継続 |
-| R-16 | mumei-agent Layer B | C / C++ / Java / JavaScript の Layer B（strict Z3 verification） | dogfood corpus に当該言語の実 OSS を追加する判断がされたとき。Priority 25 Track A の `DataflowFacts` が言語非依存に設計されていれば、tree-sitter grammar 追加 + 言語別 `semantic_safety` 述語で足りる想定のため、**A-5 完了後** に再評価 |
+| R-16 | mumei-agent Layer B | C / C++ / Java / JavaScript の Layer B（strict Z3 verification） | 再評価済み（2026-09-22、A-5 完了後）: `DataflowFacts` / `Statement` IR は言語非依存設計どおりだが、`tree_sitter_extract.extract_statements` の statement 分類器は **Go 専用実装**（`_go_statements` 〜225 行・`inc`/`dec`/`defer`/`range`/`define` 等の kind 正規化）で非 Go は `None` フォールバック。よって見積もりは「grammar dep + `_<lang>_statements` 分類器（〜200 行級/言語）+ `semantic_safety` 述語 + `language_patterns`」に修正。JavaScript は `"js"/"jsx"` → typescript grammar の alias で Layer B 機械部は共有済み — 残は `SUPPORTED_AUDIT_LANGUAGES` への追加と JS 固有 semantics で規模は小さい。着手トリガは変わらず dogfood corpus への当該言語実 OSS 追加判断（① 集計待ち）— **Deferred 維持** |
 | R-17 | mumei-agent P-Deferred-B | `extract_spec_from_code` の Ruby / Swift / Kotlin 等 | 未対応言語でも LLM extractor が `unknown` として扱えるため、ユーザー要求が出るまで保留 |
 | R-18 | P7-C / SI-4 | Wasm target / no_std | 既存どおり Deferred。R-9 の runtime ABI 起票がこれらの前提整理を兼ねる |
 
@@ -2114,7 +2114,7 @@ Z3 unknown ──> known witness / tactic ladder（決定論、既存） ──>
 完了（P25）:      Wave 4: B-4 の B-2 経路接続 ✅（mumei-agent #579）, B-7 + R-7 ✅（mumei #558 / papers #6、同一 PR 群）, B-2 敵対行列 ✅（mumei-lean #118）   ※ 2026-09-13
 Wave 5（P25、現在）: C-2(=R-8) ✅ Implemented（mumei PR #562、2026-09-14）+ B-7 再測定 ✅（同一 PR 群）, C-1(=R-10) ✅ 分類（P30、群 2 は P31 起票）, B-1 群 1 全 4 構文 lowering ✅（mumei-lean PR #121〜#124、live path 18）, A-6 全種別 ✅（PR #588〜#590）, A-5 全 3 弾 ✅（PR #592 / #593）
 Wave 6（P25、現在）: P31 `task_group` — `task` / `task_group:all` lowering + `concurrency_obligation` class + `bridge_lemma_hash` lockstep（`5716cfdd…`、live path 19: `join_all_last_result`）+ `task_group:any`（`List Int` メンバーシップ形状、live path 20: `race_two_replicas`）+ seq 中段 `task_group` lowering（`read_cancellable_write` 型、反例 atom につき live 化対象外）— **P31 完了**
-その後:           R-16 再評価（A-5 完了済み）, 群 3 はトリガ発生時に個別起票
+その後:           群 3 はトリガ発生時に個別起票（R-16 再評価済み・Deferred 維持、見積もりは Priority 26 表を参照）
 ```
 
 ### スコープ外
