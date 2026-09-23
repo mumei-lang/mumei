@@ -76,6 +76,28 @@ Testing tips:
   render as ONE literal label, with no extra injected node), and the pair `a_b` / `a.b` verifies that
   `sanitize_node_id` is injective (they must stay two separate nodes, not merge into one).
 
+## Tri-state `edges[].is_consistent` (PR #633 era)
+
+- `is_consistent` is `Option<bool>` in JSON: `true`/`false` = checked pair, `null` = pair cross-spec
+  never examined. DOT render: `false` → `color="#dc3545", style=dashed`; `null` →
+  `color="#6c757d", style=dotted`; `true` → no attrs (plain edge). app.py's "Contract mismatches"
+  list includes only `is False` edges — a `null` edge's dependency still shows under "Depends on"
+  but produces no mismatch entry.
+- A real `mumei verify` run cannot currently emit a `null` edge: `dependencies_for()`
+  (mumei-core/src/cross_spec/mod.rs) retains only callees in `module_env.atoms`, and both
+  `build_dependency_graph` and `verify_contract_consistency` iterate that same filtered set, so
+  every dep-graph edge gets a `contract_consistency[]` entry. To exercise the `null` render,
+  hand-craft: copy a real emitted `proof_graph.json`, append nodes (copy an existing node's shape)
+  plus an edge with `"is_consistent": null`. Add `null`/`true`/`false` edges to one file to compare
+  all three edge styles in a single Fullscreen screenshot.
+- `sanitize_node_id` doubles literal underscores: `cross_file_caller` → `atom_cross__file__caller`.
+  Account for this when asserting on DOT edge lines.
+- Pin emit-side serialization with `cargo test -p mumei-core --lib
+  an_unchecked_pair_reports_null_consistency` (asserts `is_consistent == None`; serde writes `null`).
+- In the sidebar Atom selectbox, type the atom name to filter before clicking — clicking rows by
+  position is error-prone with longer atom lists.
+- `streamlit` is not in the repo blueprint's pip installs: `pip install --user streamlit` first.
+
 ## Known cosmetic issues (verify whether still present before reporting as new)
 
 - Clicking a dependency/dependent navigation button can surface a Streamlit banner: *The widget with
