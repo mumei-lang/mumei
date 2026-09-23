@@ -145,7 +145,7 @@ def build_graph_elements(graph: dict) -> dict:
                 "target": sanitize_node_id(callee),
                 "from": caller,
                 "to": callee,
-                "is_consistent": bool(edge.get("is_consistent", True)),
+                "is_consistent": edge.get("is_consistent"),
                 "violations": list(edge.get("violations", []) or []),
                 "warnings": list(edge.get("warnings", []) or []),
             }
@@ -159,6 +159,8 @@ def render_proof_graph_dot(graph: dict, selected_atom: str = "") -> str:
 
     Inconsistent contract calls are drawn as red dashed edges so the pair that
     breaks a ``requires`` chain is visible without selecting either endpoint.
+    Calls cross-spec never checked (``is_consistent`` is ``null``) are drawn
+    gray and dotted rather than silently green.
     """
     elements = build_graph_elements(graph)
     lines = [
@@ -180,9 +182,12 @@ def render_proof_graph_dot(graph: dict, selected_atom: str = "") -> str:
         lines.append(f"    {node['id']} [{', '.join(attrs)}];")
     for edge in elements["edges"]:
         attrs = []
-        if not edge["is_consistent"]:
+        if edge["is_consistent"] is False:
             attrs.append('color="#dc3545"')
             attrs.append('style=dashed')
+        elif edge["is_consistent"] is None:
+            attrs.append('color="#6c757d"')
+            attrs.append('style=dotted')
         suffix = f" [{', '.join(attrs)}]" if attrs else ""
         lines.append(f"    {edge['source']} -> {edge['target']}{suffix};")
     lines.append("}")

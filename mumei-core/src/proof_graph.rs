@@ -76,10 +76,10 @@ pub struct ProofGraphEdge {
     pub from: String,
     /// Callee atom (the dependency).
     pub to: String,
-    /// "No contract mismatch was detected" rather than "the pair was checked":
-    /// a call `contract_consistency[]` never examined is also reported as
-    /// consistent.
-    pub is_consistent: bool,
+    /// `Some(true)`/`Some(false)` when `contract_consistency[]` examined the
+    /// pair; `None` (serialized `null`) when the call was never checked, so
+    /// "not checked" is not reported as "no mismatch was detected".
+    pub is_consistent: Option<bool>,
     pub violations: Vec<String>,
     pub warnings: Vec<String>,
 }
@@ -472,7 +472,7 @@ fn build_edges(cross_spec: &CrossSpecResult) -> Vec<ProofGraphEdge> {
             edges.push(ProofGraphEdge {
                 from: node.atom_name.clone(),
                 to: callee.clone(),
-                is_consistent: checked.map(|result| result.is_consistent).unwrap_or(true),
+                is_consistent: checked.map(|result| result.is_consistent),
                 violations: checked
                     .map(|result| result.violations.clone())
                     .unwrap_or_default(),
@@ -602,7 +602,7 @@ mod tests {
         assert_eq!(graph.summary.edge_count, 1);
         assert_eq!(graph.edges[0].from, "charge");
         assert_eq!(graph.edges[0].to, "validate");
-        assert!(graph.edges[0].is_consistent);
+        assert_eq!(graph.edges[0].is_consistent, Some(true));
         assert_eq!(node(&graph, "charge").dependencies, vec!["validate"]);
         assert_eq!(node(&graph, "validate").dependents, vec!["charge"]);
     }
@@ -651,11 +651,51 @@ mod tests {
         let env = module_env_with(vec![]);
         let graph = build_proof_graph(&env, &cross_spec, &BTreeMap::new());
 
-        assert!(!graph.edges[0].is_consistent);
+        assert_eq!(graph.edges[0].is_consistent, Some(false));
         assert_eq!(graph.edges[0].violations, vec!["amount bound mismatch"]);
         // Atoms outside the module env still appear, with placeholder contracts.
         assert_eq!(node(&graph, "charge").requires, "true");
         assert_eq!(node(&graph, "charge").source_file, "<unknown>");
+    }
+
+    #[test]
+    fn an_unchecked_pair_reports_null_consistency() {
+        let cross_spec = CrossSpecResult {
+            contract_consistency: vec![],
+            global_invariants: vec![],
+            global_invariant_conflicts: vec![],
+            circular_dependencies: vec![],
+            session_protocol_violations: vec![],
+            session_analysis_skips: vec![],
+            dependency_graph: vec![
+                DependencyNode {
+                    atom_name: "charge".to_string(),
+                    dependencies: vec!["validate".to_string()],
+                    dependents: vec![],
+                },
+                DependencyNode {
+                    atom_name: "validate".to_string(),
+                    dependencies: vec![],
+                    dependents: vec!["charge".to_string()],
+                },
+            ],
+            agent_artifact_mapping: vec![],
+            summary: CrossSpecSummary {
+                total_atoms: 2,
+                consistent_calls: 0,
+                inconsistent_calls: 0,
+                circular_dependency_count: 0,
+                global_invariant_count: 0,
+                global_invariant_conflict_count: 0,
+                session_protocol_violation_count: 0,
+                session_analysis_skipped_count: 0,
+            },
+        };
+        let env = module_env_with(vec![]);
+        let graph = build_proof_graph(&env, &cross_spec, &BTreeMap::new());
+
+        assert_eq!(graph.edges.len(), 1);
+        assert_eq!(graph.edges[0].is_consistent, None);
     }
 
     #[test]
