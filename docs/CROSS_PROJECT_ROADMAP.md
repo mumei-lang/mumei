@@ -1480,7 +1480,7 @@ graph TD
 **実装状況**: ✅ Implemented（旧計画の `verify-code` / `code_verifier.py` は `validate-code` + `audit` に置き換わった）
 
 - **V1-B-1 コード→仕様→Z3検証パイプライン — 実装済み**: `python -m agent validate-code`（旧 `verify-foreign` は同サブコマンドに統合）が Python/Rust/TypeScript/Go/Solidity から契約を推定し `mumei verify` で検証、違反は `_with_source_lines` / `_infer_foreign_source_line_map`（`agent/cross_validation.py`）で元コードの行番号に紐付けて `verification_violations` に出す。MCP では `validate_code` / `validate_foreign_code` / `verify_foreign_code` が利用可能。
-- **V1-B-2 言語別の検証ヒューリスティクス — PR 進行中**（mumei-agent PR #598 open draft）: `agent/language_patterns.py` の宣言的 registry（`LANGUAGE_PATTERNS`）で 5 言語の「よくある問題」パターンを advisory warning として注入 — Python mutable default/bare except、Rust unguarded unwrap/expect、Go defer-in-loop、TS floating promise、Solidity tx.origin/selfdestruct/unchecked low-level call。advisory のみで `success` を反転させない配線（`_language_advisory_issues` 経由、`fix_suggestion` テンプレート連携）。現行の言語別契約推定は `_infer_{go,python,rust}_contracts` 等で動作中。残件: detector は body-text スキャン。
+- **V1-B-2 言語別の検証ヒューリスティクス — ✅ Implemented**（mumei-agent PR #598、マージ済み）: `agent/language_patterns.py` の宣言的 registry（`LANGUAGE_PATTERNS`）で 5 言語の「よくある問題」パターンを advisory warning として注入 — Python mutable default/bare except、Rust unguarded unwrap/expect、Go defer-in-loop、TS floating promise、Solidity tx.origin/selfdestruct/unchecked low-level call。advisory のみで `success` を反転させない配線（`_language_advisory_issues` 経由、`fix_suggestion` テンプレート連携）。現行の言語別契約推定は `_infer_{go,python,rust}_contracts` 等で動作中。残件: detector は body-text スキャン。
 - **V1-B-3 差分フィードバック — 実装済み**（mumei-agent PR #596/#597）: `validate-code` の各 issue に `_with_fix_suggestions` が `fix_suggestion` を付与 — 違反種別テンプレート（reentrancy→`nonReentrant`、access-control→`require(msg.sender …)`、除算→`divisor != 0`、overflow→operand bound、bounds→`0 <= i && i < len(…)`、null→non-null 前提等）に加え、`source_line`/`location` があれば行アンカー付き `Suggested diff` fenced block（契約コメント挿入・solidity 1 行ガード）。残件: rewrite patch ではなく挿入ヒント；自動適用なし（`next_steps` が唯一の human-review 入口のまま）。
 
 ---
@@ -2122,7 +2122,7 @@ Wave 6（P25、現在）: P31 `task_group` — `task` / `task_group:all` lowerin
 
 - 新規 verdict 語彙・別名 alias の追加、`translator_version` / `bridge_lemma_hash` の変更（必要なら別 Priority）。
 - units of measure の追加機能（直近 PR 群で実装済みの範囲を維持。残課題が出た時点で `docs/ROADMAP.md` に個別起票）。
-- V1-A〜V1-D 節の「未実装」記述は 2026-09-19 の docs-sync で実装実態に改訂済み（audit / validate-spec / validate-code / validate-spec-to-code / validate-code-to-spec / verify-conformance / verify-traceability が計画済み名の実装を担う）。残件だった V1-A-2 ドメイン完全性チェック（clause スコープ付き `DOMAIN_CHECKLISTS`）と V1-B-3 修正ヒント・行アンカー diff（`fix_suggestion` + `Suggested diff`）は mumei-agent PR #596/#597 で実装済み。V1-B-2 言語別パターン集の registry 拡充は mumei-agent PR #598 で進行中。
+- V1-A〜V1-D 節の「未実装」記述は 2026-09-19 の docs-sync で実装実態に改訂済み（audit / validate-spec / validate-code / validate-spec-to-code / validate-code-to-spec / verify-conformance / verify-traceability が計画済み名の実装を担う）。残件だった V1-A-2 ドメイン完全性チェック（clause スコープ付き `DOMAIN_CHECKLISTS`）と V1-B-3 修正ヒント・行アンカー diff（`fix_suggestion` + `Suggested diff`）は mumei-agent PR #596/#597 で実装済み。V1-B-2 言語別パターン集の registry 拡充も mumei-agent PR #598 で実装済み。
 
 ### 関連ファイル
 
