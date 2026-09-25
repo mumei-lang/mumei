@@ -138,6 +138,29 @@ The flag is threaded through atom contract verification (`requires`/`ensures`/`b
 
 **Known limitation**: the opt-in vacuity check (`verification/vacuity.rs`) and property-based concrete validation (`verification/property_based.rs`) still construct their `VCtx` with `ieee754_f64: false` and evaluate under the `Real` encoding regardless of the flag.
 
+### `Str` Verification Sort: Z3 `String`/`Seq` theory
+
+`Str` parameters and literals are represented with Z3's native `String`/`Seq`
+sort during verification. The translator uses interpreted operations for
+`len`, prefix/suffix checks, `contains`, `index_of`, `substr`, and `char_at`.
+
+- **Pro**: Z3 decides native `str.len`, `prefixof`, `suffixof`, `contains`,
+  `indexof`, `extract`, and `at` constraints directly. Content is not opaque:
+  facts such as `len(a + b) == len(a) + len(b)` and prefix relationships need
+  no user axioms.
+- **Con**: Z3's string theory is not decidable in general. Unbounded length,
+  concatenation, `indexof`, and `extract` can return `unknown`; such atoms
+  become Lean escalation candidates rather than false passes. Keep contracts
+  within length, prefix/suffix, contains, and bounded extract properties.
+  Under `--bitvec-i64`, `len(substr(..)) == n` mixes the `Int` sequence length
+  with a `bv2int` conversion, so Z3 may return `unknown`; verification fails
+  closed in that case.
+
+We deliberately do not encode strings as uninterpreted functions with
+hand-written axioms or bounded-length bit-vectors. The former adds an axiom
+soundness burden, while Z3's native string theory already covers the
+standard-library needs.
+
 ---
 
 ## ModuleEnv
