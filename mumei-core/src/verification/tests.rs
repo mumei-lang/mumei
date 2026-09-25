@@ -2324,6 +2324,59 @@ fn test_subsumption_check_array_length_does_not_alias_caller_symbol() {
 }
 
 #[test]
+fn test_subsumption_check_array_length_aliases_follow_callback_position() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: None,
+        effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
+        ieee754_f64: false,
+        bitvec_i64: false,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        bitvec_i64_global: false,
+    };
+    let concrete = test_atom(
+        "arr_len",
+        vec![test_param("a", Some("[i64]"))],
+        "true",
+        "result == len(a)",
+        "len(a)",
+        Some("i64"),
+    );
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result == len(x)",
+        None,
+        "apply_array",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_ok(),
+        "contract len(x) should use the first callback array length: {result:?}"
+    );
+}
+
+#[test]
 fn test_subsumption_check_fails_without_requires() {
     // negate: requires x >= 0, ensures result == 0 - x
     // contract: ensures result >= 0
