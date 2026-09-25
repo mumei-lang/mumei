@@ -58,7 +58,7 @@ fn str_builtins_verify() {
 #[test]
 fn str_builtins_verify_in_bitvec_mode() {
     let (ok, out) =
-        mumei_verify_uncached_with_args("tests/test_str_builtins.mm", &["--bitvec-i64"]);
+        mumei_verify_uncached_with_args("tests/test_str_builtins_bitvec.mm", &["--bitvec-i64"]);
     assert!(
         ok,
         "Str builtin fixture must verify in bit-vector mode:\n{out}"

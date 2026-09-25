@@ -152,6 +152,9 @@ sort during verification. The translator uses interpreted operations for
   concatenation, `indexof`, and `extract` can return `unknown`; such atoms
   become Lean escalation candidates rather than false passes. Keep contracts
   within length, prefix/suffix, contains, and bounded extract properties.
+  Under `--bitvec-i64`, `len(substr(..)) == n` mixes the `Int` sequence length
+  with a `bv2int` conversion, so Z3 may return `unknown`; verification fails
+  closed in that case.
 
 We deliberately do not encode strings as uninterpreted functions with
 hand-written axioms or bounded-length bit-vectors. The former adds an axiom
