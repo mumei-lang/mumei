@@ -8,6 +8,10 @@ use super::ParseContext;
 use crate::ast::TypeRef;
 use crate::parser::{Expr, JoinSemantics, LambdaParam, MatchArm, Op, Span, Stmt};
 
+// This must exceed FatArrow's left binding power so guards and arm bodies
+// stop before `=>`.
+const ABOVE_FAT_ARROW_BP: u8 = 5;
+
 /// Pratt parser binding power for binary operators.
 /// Returns (left_bp, right_bp). Left-associative: left < right.
 /// Right-associative: left > right.
@@ -443,8 +447,7 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
                 // Optional guard: if cond
                 let guard = if ctx.peek() == &Token::If {
                     ctx.advance();
-                    // Parse guard at binding power above => (l_bp=1, so min_bp=3 excludes it)
-                    Some(Box::new(parse_expr(ctx, 3)))
+                    Some(Box::new(parse_expr(ctx, ABOVE_FAT_ARROW_BP)))
                 } else {
                     None
                 };
@@ -769,7 +772,8 @@ fn parse_explicit_type_args(ctx: &mut ParseContext) -> Option<Vec<TypeRef>> {
 }
 
 /// Parse match arm body.
-/// Uses parse_expr with binding power above => to avoid consuming => as implies.
+/// Uses parse_expr with binding power above FatArrow to avoid consuming `=>`
+/// as implies.
 fn parse_match_arm_body(ctx: &mut ParseContext) -> Stmt {
     if ctx.peek() == &Token::LBrace {
         parse_block_or_stmt(ctx)
@@ -778,8 +782,7 @@ fn parse_match_arm_body(ctx: &mut ParseContext) -> Stmt {
         if ctx.peek() == &Token::Match || ctx.peek() == &Token::If {
             Stmt::Expr(parse_expr(ctx, 0), arm_span)
         } else {
-            // Parse at binding power 3, above => (l_bp=1) so => is not consumed
-            Stmt::Expr(parse_expr(ctx, 3), arm_span)
+            Stmt::Expr(parse_expr(ctx, ABOVE_FAT_ARROW_BP), arm_span)
         }
     }
 }

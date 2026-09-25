@@ -30,3 +30,15 @@ atom pipe_demo(x: i64) -> i64
     requires: true;
     ensures: result == 2 * x + 2;
     body: x |> inc |> dbl;
+
+atom approval_level_fixture(amount: i64) -> i64
+    requires: amount >= 0;
+    ensures: result >= 0 && result <= 3;
+    body: {
+        match amount {
+            a if a <= 10000 => 0,
+            a if a <= 100000 => 1,
+            a if a <= 1000000 => 2,
+            _ => 3
+        }
+    };

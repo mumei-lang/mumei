@@ -32,7 +32,14 @@ fn mumei_verify_uncached(file: &str) -> (bool, String) {
 fn for_range_and_pipeline_fixture_verifies() {
     let (ok, out) = mumei_verify_uncached("tests/test_for_range_sugar.mm");
     assert!(ok, "for-range and pipeline fixture must verify:\n{out}");
-    for atom in ["count_range", "sum_range_nonneg", "inc", "dbl", "pipe_demo"] {
+    for atom in [
+        "count_range",
+        "sum_range_nonneg",
+        "inc",
+        "dbl",
+        "pipe_demo",
+        "approval_level_fixture",
+    ] {
         assert!(
             out.contains(&format!("'{atom}': verified")),
             "expected {atom} to verify:\n{out}"
