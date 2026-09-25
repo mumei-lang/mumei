@@ -152,6 +152,8 @@ fn witness_lost_on_some_path_is_rejected() {
         "tests/negative/test_replay_branch_drop.mm",
         "tests/negative/test_replay_mixed_branch_value.mm",
         "tests/negative/test_replay_loop_drop.mm",
+        "tests/negative/test_replay_lambda_drop.mm",
+        "tests/negative/test_replay_array_store_drop.mm",
     ] {
         let (ok, out) = mumei_verify(fixture);
         assert!(
