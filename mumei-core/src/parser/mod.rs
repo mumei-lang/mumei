@@ -1385,6 +1385,31 @@ atom transfer(x: i64)
     }
 
     #[test]
+    fn test_parse_match_guards() {
+        let expr = parse_expression("match amount { a if a <= 10 => 0, _ => 3 }");
+        match expr {
+            Expr::Match { arms, .. } => {
+                assert_eq!(arms.len(), 2);
+                assert!(matches!(
+                    arms[0].guard.as_deref(),
+                    Some(Expr::BinaryOp(left, Op::Le, right))
+                        if matches!(left.as_ref(), Expr::Variable(name) if name == "a")
+                            && matches!(right.as_ref(), Expr::Number(10))
+                ));
+                assert!(matches!(
+                    arms[0].body.as_ref(),
+                    Stmt::Expr(Expr::Number(0), _)
+                ));
+                assert!(matches!(
+                    arms[1].body.as_ref(),
+                    Stmt::Expr(Expr::Number(3), _)
+                ));
+            }
+            _ => panic!("Expected guarded Match"),
+        }
+    }
+
+    #[test]
     fn test_parse_body_while() {
         let stmt = parse_body_expr("{ while x > 0 invariant: x >= 0 { x = x - 1 } }");
         match stmt {
