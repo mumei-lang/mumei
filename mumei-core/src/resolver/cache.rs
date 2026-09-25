@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 /// Bump when verifier semantics change so cached proofs are re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 1;
+pub const VERIFIER_POLICY_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {

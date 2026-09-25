@@ -1420,14 +1420,16 @@ pub(crate) fn expr_to_z3<'a>(
                         // =============================================================
                         // Subsumption Check: atom_ref argument vs contract ensures
                         // =============================================================
-                        // When a callee parameter has fn_contract_ensures and the
-                        // corresponding argument is atom_ref(concrete_name), verify
-                        // that the concrete atom's ensures implies the contract's
-                        // ensures.  Fail closed when the implication cannot be
-                        // established.
+                        // When a callee parameter has either callback contract
+                        // clause and the corresponding argument is
+                        // atom_ref(concrete_name), verify both subsumption
+                        // directions. Fail closed when either implication cannot
+                        // be established.
                         if let Some(solver) = solver_opt {
                             for (i, param) in callee.params.iter().enumerate() {
-                                if let Some(ref contract_ensures) = param.fn_contract_ensures {
+                                if param.fn_contract_ensures.is_some()
+                                    || param.fn_contract_requires.is_some()
+                                {
                                     if let Some(Expr::AtomRef {
                                         name: ref concrete_name,
                                     }) = args.get(i)
@@ -1438,7 +1440,10 @@ pub(crate) fn expr_to_z3<'a>(
                                             check_contract_subsumption(
                                                 vc,
                                                 &concrete_atom,
-                                                contract_ensures,
+                                                param
+                                                    .fn_contract_ensures
+                                                    .as_deref()
+                                                    .unwrap_or("true"),
                                                 param.fn_contract_requires.as_deref(),
                                                 name,
                                                 &param.name,

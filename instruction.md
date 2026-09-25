@@ -89,7 +89,7 @@ atom apply(x: i64, f: atom_ref(i64) -> i64)
 
 This mechanism replaces the need for `trusted` on higher-order functions like `map`, `fold_left`, and `result_map`.
 
-**Subsumption check**: When calling `apply(5, atom_ref(increment))`, the verifier checks that `increment`'s actual ensures clause, under its requires precondition, implies the declared `contract(f): ensures`. Formally: `(concrete.requires ∧ concrete.ensures) ⇒ contract.ensures`. If the implication is violated, or Z3 cannot decide it, verification fails closed with an error. A violated implication reports `Contract subsumption failed: atom_ref(foo) passed to apply.f — concrete ensures '...' does not imply contract ensures '...'`.
+**Subsumption check**: When calling `apply(5, atom_ref(increment))`, the verifier checks both directions of the callback contract. The declared callback precondition must imply the concrete atom's precondition, `contract.requires ⇒ concrete.requires`, and the concrete atom's postcondition must imply the declared callback postcondition under its precondition, `(concrete.requires ∧ concrete.ensures) ⇒ contract.ensures`. If either implication is violated, or Z3 cannot decide it, verification fails closed with an error. A precondition violation reports `Contract subsumption failed: atom_ref(foo) passed to apply.f — contract requires '...' does not imply concrete requires '...'`; a postcondition violation reports `Contract subsumption failed: atom_ref(foo) passed to apply.f — concrete ensures '...' does not imply contract ensures '...'`.
 
 ### 3.6 Effect-Polymorphic Higher-Order Functions
 

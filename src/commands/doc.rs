@@ -1191,7 +1191,7 @@ atom increment(x: i64)
 atom apply(x: i64, f: atom_ref(i64) -> i64)
     requires: x >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
     body: call(f, x);
 
 atom test_apply()
@@ -1241,7 +1241,7 @@ atom add(a: i64, b: i64)
 atom fold_two(a: i64, b: i64, f: atom_ref(i64, i64) -> i64)
     requires: a >= 0 && b >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0 && y >= 0, ensures: result >= 0;
     body: call(f, a, b);
 
 atom test_fold()
@@ -1265,7 +1265,7 @@ atom test_fold()
 atom option_map(opt: i64, f: atom_ref(i64) -> i64)
     requires: opt >= 0 && opt <= 1;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
     body: {
         match opt {
             0 => 0,
@@ -1315,7 +1315,7 @@ atom increment(x: i64)
 atom apply(x: i64, f: atom_ref(i64) -> i64)
     requires: x >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
     body: call(f, x);
 
 atom test_apply()
@@ -1352,7 +1352,7 @@ atom negate(x: i64)
 atom apply(x: i64, f: atom_ref(i64) -> i64)
     requires: x >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
     body: call(f, x);
 
 atom test_apply_negate()
@@ -1383,7 +1383,7 @@ atom add(a: i64, b: i64)
 atom fold_two(a: i64, b: i64, f: atom_ref(i64, i64) -> i64)
     requires: a >= 0 && b >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0 && y >= 0, ensures: result >= 0;
     body: call(f, a, b);
 
 atom test_fold()

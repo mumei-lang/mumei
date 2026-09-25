@@ -71,10 +71,12 @@ pub(crate) fn apply_refinement_constraint<'a>(
 // =============================================================================
 //
 // When `atom_ref(concrete)` is passed to a parameter with `contract(f)`,
-// verify that the concrete atom's ensures clause *implies* the contract's
-// ensures clause under the concrete atom's precondition.  This is a
-// universal validity check:
+// verify that the contract's requires clause implies the concrete atom's
+// requires clause, and that the concrete atom's ensures clause implies the
+// contract's ensures clause under the concrete atom's precondition.  These
+// are universal validity checks:
 //
+//   ∀ params. contract.requires ⇒ concrete.requires
 //   ∀ params. (concrete.requires ∧ concrete.ensures) ⇒ contract.ensures
 //
 // If the implication does not hold, verification fails closed.
@@ -88,21 +90,12 @@ pub(crate) fn check_contract_subsumption<'a>(
     vc: &VCtx<'a>,
     concrete_atom: &Atom,
     contract_ensures: &str,
-    _contract_requires: Option<&str>, // reserved for future use
+    contract_requires: Option<&str>,
     callee_name: &str,
     param_name: &str,
     solver: &Solver<'a>,
     ctx: &'a Context,
 ) -> Result<(), MumeiError> {
-    // Skip when the contract requires nothing — any ensures trivially implies "true".
-    // NOTE: We intentionally do NOT skip when concrete_atom.ensures == "true".
-    // An atom with ensures: true guarantees nothing, so it cannot imply a
-    // non-trivial contract like `result >= 0`. The Z3 check below will correctly
-    // find a counterexample in that case.
-    if contract_ensures.trim() == "true" {
-        return Ok(());
-    }
-
     // Build separate environments for the concrete atom and the contract.
     // Both environments share the same position-indexed Z3 values, but the
     // contract uses CallRef's positional aliases rather than concrete names.
@@ -204,6 +197,59 @@ pub(crate) fn check_contract_subsumption<'a>(
     } else {
         None
     };
+
+    let contract_req = contract_requires.unwrap_or("true").trim();
+    let contract_requires_bool_opt = if contract_req != "true" && !contract_req.is_empty() {
+        let req_ast = parse_expression(contract_req);
+        let value = expr_to_z3(vc, &req_ast, &mut contract_env, None).map_err(|error| {
+            MumeiError::verification(format!(
+                "Contract subsumption could not lower contract requires '{}': {}",
+                contract_req, error
+            ))
+        })?;
+        Some(value.as_bool().ok_or_else(|| {
+            MumeiError::verification(format!(
+                "Contract subsumption contract requires '{}' must be boolean",
+                contract_req
+            ))
+        })?)
+    } else {
+        None
+    };
+
+    // Check: contract_requires ⇒ concrete_requires
+    //        ⟺ contract_requires ∧ ¬concrete_requires is UNSAT
+    // A trivially true concrete requires clause needs no obligation.
+    if let Some(ref concrete_requires_bool) = requires_bool_opt {
+        solver.push();
+        for constraint in &array_len_constraints {
+            solver.assert(constraint);
+        }
+        if let Some(ref contract_requires_bool) = contract_requires_bool_opt {
+            solver.assert(contract_requires_bool);
+        }
+        solver.assert(&concrete_requires_bool.not());
+        let sat_result = solver.check();
+        solver.pop(1);
+
+        if sat_result == SatResult::Sat {
+            return Err(MumeiError::verification(format!(
+                "Contract subsumption failed: atom_ref({}) passed to {}.{} — contract requires '{}' does not imply concrete requires '{}'",
+                concrete_atom.name, callee_name, param_name, contract_req, concrete_req
+            )));
+        }
+        if sat_result == SatResult::Unknown {
+            return Err(MumeiError::verification(format!(
+                "Contract subsumption for atom_ref({}) passed to {}.{} — contract requires '{}' could not be decided (Z3 unknown)",
+                concrete_atom.name, callee_name, param_name, contract_req
+            )));
+        }
+    }
+
+    // A true contract ensures clause skips only the ensures-direction check.
+    if contract_ensures.trim() == "true" {
+        return Ok(());
+    }
 
     // Parse and evaluate the concrete atom's ensures.
     let concrete_ens_ast = parse_expression(&concrete_atom.ensures);
