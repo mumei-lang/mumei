@@ -2,7 +2,7 @@ use std::fs;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn mumei_verify_uncached(file: &str) -> (bool, String) {
+fn mumei_verify_uncached_with_args(file: &str, args: &[&str]) -> (bool, String) {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -16,9 +16,11 @@ fn mumei_verify_uncached(file: &str) -> (bool, String) {
     fs::create_dir_all(&dir).expect("fixture dir");
     let dst = dir.join("main.mm");
     fs::copy(&src, &dst).expect("copy fixture");
-    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
-        .arg("verify")
-        .arg(&dst)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+    command.arg("verify");
+    command.args(args);
+    command.arg(&dst);
+    let output = command
         .current_dir(&dir)
         .output()
         .expect("run mumei verify");
@@ -29,6 +31,10 @@ fn mumei_verify_uncached(file: &str) -> (bool, String) {
         String::from_utf8_lossy(&output.stderr)
     );
     (output.status.success(), combined)
+}
+
+fn mumei_verify_uncached(file: &str) -> (bool, String) {
+    mumei_verify_uncached_with_args(file, &[])
 }
 
 #[test]
@@ -47,6 +53,16 @@ fn str_builtins_verify() {
             "expected {atom} to verify:\n{out}"
         );
     }
+}
+
+#[test]
+fn str_builtins_verify_in_bitvec_mode() {
+    let (ok, out) =
+        mumei_verify_uncached_with_args("tests/test_str_builtins.mm", &["--bitvec-i64"]);
+    assert!(
+        ok,
+        "Str builtin fixture must verify in bit-vector mode:\n{out}"
+    );
 }
 
 #[test]

@@ -972,11 +972,9 @@ pub(crate) fn expr_to_z3<'a>(
                     let str_z3 = str_val
                         .as_string()
                         .ok_or_else(|| MumeiError::type_error("substr() expects a Str string"))?;
-                    let start = start_val
-                        .as_int()
+                    let start = as_int_like(&start_val)
                         .ok_or_else(|| MumeiError::type_error("substr() expects an Int start"))?;
-                    let count = count_val
-                        .as_int()
+                    let count = as_int_like(&count_val)
                         .ok_or_else(|| MumeiError::type_error("substr() expects an Int count"))?;
                     mark_string_constraints(vc);
                     let ast = unsafe {
@@ -1000,8 +998,7 @@ pub(crate) fn expr_to_z3<'a>(
                     let str_z3 = str_val
                         .as_string()
                         .ok_or_else(|| MumeiError::type_error("char_at() expects a Str string"))?;
-                    let index = index_val
-                        .as_int()
+                    let index = as_int_like(&index_val)
                         .ok_or_else(|| MumeiError::type_error("char_at() expects an Int index"))?;
                     mark_string_constraints(vc);
                     let ast = unsafe {
