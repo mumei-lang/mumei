@@ -2058,7 +2058,7 @@ fn test_subsumption_check_holds_with_requires() {
         &ctx,
     );
     assert!(
-        result,
+        result.is_ok(),
         "subsumption should hold: x >= 0 ∧ result == x + 1 ⇒ result >= 0"
     );
 }
@@ -2137,7 +2137,7 @@ fn test_subsumption_check_fails_without_requires() {
         &ctx,
     );
     assert!(
-        !result,
+        result.is_err(),
         "subsumption should fail: x >= 0 ∧ result == -x does NOT imply result >= 0"
     );
 }
@@ -2230,7 +2230,7 @@ fn test_subsumption_check_crossed_param_names() {
         &ctx,
     );
     assert!(
-        !result,
+        result.is_err(),
         "subsumption should fail: y/x can be negative (e.g. y=-1, x=1)"
     );
 }
@@ -2301,15 +2301,15 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
     let result =
         check_contract_subsumption(&vc, &concrete, "true", None, "apply", "f", &solver, &ctx);
     assert!(
-        result,
+        result.is_ok(),
         "trivial contract ensures 'true' should be skipped (returns true)"
     );
 }
 
 #[test]
-fn test_subsumption_check_concrete_true_ensures_warns() {
+fn test_subsumption_check_concrete_true_ensures_fails() {
     // If concrete_atom.ensures is "true" but contract requires "result >= 0",
-    // the concrete atom guarantees nothing → subsumption should FAIL (warn).
+    // the concrete atom guarantees nothing → subsumption should fail closed.
     let cfg = Config::new();
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
@@ -2381,8 +2381,8 @@ fn test_subsumption_check_concrete_true_ensures_warns() {
         &ctx,
     );
     assert!(
-        !result,
-        "concrete ensures 'true' cannot imply 'result >= 0' — should warn (return false)"
+        result.is_err(),
+        "concrete ensures 'true' cannot imply 'result >= 0' — should return an error"
     );
 }
 

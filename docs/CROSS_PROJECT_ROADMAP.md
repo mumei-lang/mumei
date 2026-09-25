@@ -115,7 +115,7 @@ mumeiの差別化は「Z3による完全自動検証」。この強みをさら�
 - ✅ `get_traits_for_method()` returns all candidates; callers use `find_impl()` to disambiguate
 - ✅ `infer_requires` callee argument substitution with simultaneous placeholder-based replacement
 - ✅ `collect_callees_with_args_expr/stmt` and `expr_to_source_string` helpers added
-- ✅ `check_contract_subsumption()`: when `atom_ref(concrete)` is passed to a `contract(f)` parameter, verifies that concrete ensures implies contract ensures (warning, not hard error)
+- ✅ `check_contract_subsumption()`: when `atom_ref(concrete)` is passed to a `contract(f)` parameter, verifies that concrete ensures implies contract ensures and fails closed on a violated or undecidable implication
 - ✅ Unit tests for all items (replace_constraint_placeholder, method_trait_index, infer_requires substitution, subsumption check)
 
 ### P2-C: Struct method parsing（`impl Struct { atom ... }` 構文） ✅ Implemented
