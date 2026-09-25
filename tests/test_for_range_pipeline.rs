@@ -38,6 +38,7 @@ fn for_range_and_pipeline_fixture_verifies() {
         "inc",
         "dbl",
         "pipe_demo",
+        "apply_pipe",
         "approval_level_fixture",
     ] {
         assert!(

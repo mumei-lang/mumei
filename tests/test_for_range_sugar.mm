@@ -31,6 +31,12 @@ atom pipe_demo(x: i64) -> i64
     ensures: result == 2 * x + 2;
     body: x |> inc |> dbl;
 
+atom apply_pipe(x: i64, f: atom_ref(i64) -> i64)
+    requires: x >= 0;
+    ensures: result >= 0;
+    contract(f): ensures: result >= 0;
+    body: x |> call(f);
+
 atom approval_level_fixture(amount: i64) -> i64
     requires: amount >= 0;
     ensures: result >= 0 && result <= 3;
