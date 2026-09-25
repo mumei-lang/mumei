@@ -50,15 +50,25 @@ fn str_builtins_verify() {
 }
 
 #[test]
-fn invalid_str_builtins_are_rejected() {
-    let (ok, out) = mumei_verify_uncached("tests/negative/test_str_builtins_bad.mm");
-    assert!(!ok, "invalid Str builtin fixture must fail:\n{out}");
+fn false_str_builtin_ensures_are_rejected() {
+    let (ok, out) = mumei_verify_uncached("tests/negative/test_str_builtins_false_ensures.mm");
+    assert!(!ok, "false Str builtin ensures must fail:\n{out}");
     assert!(
-        out.contains("bad_is_empty") || out.contains("bad_index_of"),
-        "expected a named failing atom:\n{out}"
+        out.contains("bad_is_empty"),
+        "expected bad_is_empty to fail:\n{out}"
     );
     assert!(
-        out.contains("Str") || out.contains("is_empty") || out.contains("index_of"),
-        "expected a builtin/type diagnostic:\n{out}"
+        !out.contains("syntax"),
+        "false ensures should reach verification rather than fail parsing:\n{out}"
+    );
+}
+
+#[test]
+fn str_builtin_type_errors_are_rejected() {
+    let (ok, out) = mumei_verify_uncached("tests/negative/test_str_builtins_type_error.mm");
+    assert!(!ok, "wrong-type Str builtin use must fail:\n{out}");
+    assert!(
+        out.contains("index_of() expects a Str"),
+        "expected index_of type diagnostic:\n{out}"
     );
 }
