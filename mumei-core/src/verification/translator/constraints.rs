@@ -77,18 +77,12 @@ pub(crate) fn apply_refinement_constraint<'a>(
 //
 //   ∀ params. (concrete.requires ∧ concrete.ensures) ⇒ contract.ensures
 //
-// If the implication does not hold, a **warning** (not a hard error) is
-// emitted to stderr.  This preserves backward compatibility while giving
-// the user early feedback about potential contract mismatches.
+// If the implication does not hold, verification fails closed.
 
 /// Check that `concrete_atom.requires ∧ concrete_atom.ensures` implies
 /// `contract_ensures`.
 ///
 /// Uses a Z3 solver scope (push/pop) to avoid polluting the caller's context.
-/// Emits `eprintln!` warnings on subsumption failure or evaluation errors.
-///
-/// Returns `true` if the subsumption holds (or is trivially skipped),
-/// `false` if a warning was emitted (implication does not hold).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_contract_subsumption<'a>(
     vc: &VCtx<'a>,
@@ -99,39 +93,91 @@ pub(crate) fn check_contract_subsumption<'a>(
     param_name: &str,
     solver: &Solver<'a>,
     ctx: &'a Context,
-) -> bool {
+) -> Result<(), MumeiError> {
     // Skip when the contract requires nothing — any ensures trivially implies "true".
     // NOTE: We intentionally do NOT skip when concrete_atom.ensures == "true".
     // An atom with ensures: true guarantees nothing, so it cannot imply a
     // non-trivial contract like `result >= 0`. The Z3 check below will correctly
-    // find a counterexample and emit a warning in that case.
+    // find a counterexample in that case.
     if contract_ensures.trim() == "true" {
-        return true;
+        return Ok(());
     }
 
-    // Build an environment mapping concrete atom's parameters to fresh Z3
-    // variables so that we universally quantify over the parameter space.
-    // Only the concrete atom's own parameter names are bound — no hardcoded
-    // aliases — so there is no risk of accidental name collisions.
-    let mut sub_env: Env<'_> = HashMap::new();
+    // Build separate environments for the concrete atom and the contract.
+    // Both environments share the same position-indexed Z3 values, but the
+    // contract uses CallRef's positional aliases rather than concrete names.
+    let mut concrete_env: Env<'_> = HashMap::new();
+    let mut contract_env: Env<'_> = HashMap::new();
+    let mut param_values = Vec::with_capacity(concrete_atom.params.len());
+    let mut array_len_constraints = Vec::new();
     for (i, param) in concrete_atom.params.iter().enumerate() {
-        let z3_var: Dynamic =
-            Int::new_const(ctx, format!("__sub_p{}_{}", i, param.name).as_str()).into();
-        sub_env.insert(param.name.clone(), z3_var);
+        let z3_var = param_z3_value(
+            ctx,
+            &format!("__sub_{}", param.name),
+            param.type_name.as_deref(),
+            vc.module_env,
+            vc.ieee754_f64,
+            vc.bitvec_i64,
+        );
+        if param
+            .type_name
+            .as_deref()
+            .is_some_and(|type_name| type_name.trim_start().starts_with('['))
+        {
+            let len = array_len_symbol(ctx, &format!("__sub_len_{}", param.name), vc.bitvec_i64);
+            if let Some(nonneg) = nonneg_constraint(ctx, &len) {
+                array_len_constraints.push(nonneg);
+            }
+            concrete_env.insert(format!("len_{}", param.name), len.clone());
+            contract_env.insert(format!("len_arg{i}"), len.clone());
+            if i == 0 {
+                contract_env.insert("len_x".to_string(), len.clone());
+            } else if i == 1 {
+                contract_env.insert("len_y".to_string(), len.clone());
+            }
+        }
+        param_values.push(z3_var.clone());
+        concrete_env.insert(param.name.clone(), z3_var);
+    }
+
+    for (i, value) in param_values.iter().enumerate() {
+        contract_env.insert(format!("arg{i}"), value.clone());
+    }
+    if let Some(first) = param_values.first() {
+        contract_env.insert("x".to_string(), first.clone());
+    }
+    if let Some(second) = param_values.get(1) {
+        contract_env.insert("y".to_string(), second.clone());
     }
 
     // Create a fresh symbolic result that both ensures clauses reference.
-    let result_var: Dynamic = Int::new_const(ctx, "__sub_result").into();
-    sub_env.insert("result".to_string(), result_var);
+    let result_var = param_z3_value(
+        ctx,
+        "__sub_result",
+        concrete_atom.return_type.as_deref(),
+        vc.module_env,
+        vc.ieee754_f64,
+        vc.bitvec_i64,
+    );
+    concrete_env.insert("result".to_string(), result_var.clone());
+    contract_env.insert("result".to_string(), result_var);
 
     // The parser represents `true` / `false` as Expr::Variable("true"|"false").
     // Pre-bind them to Z3 Bool constants so expr_to_z3 produces Bool sort
     // instead of an unbound Int, which would fail the as_bool() gate below.
-    sub_env.insert(
+    concrete_env.insert(
         "true".to_string(),
         z3::ast::Bool::from_bool(ctx, true).into(),
     );
-    sub_env.insert(
+    concrete_env.insert(
+        "false".to_string(),
+        z3::ast::Bool::from_bool(ctx, false).into(),
+    );
+    contract_env.insert(
+        "true".to_string(),
+        z3::ast::Bool::from_bool(ctx, true).into(),
+    );
+    contract_env.insert(
         "false".to_string(),
         z3::ast::Bool::from_bool(ctx, false).into(),
     );
@@ -143,42 +189,60 @@ pub(crate) fn check_contract_subsumption<'a>(
     let concrete_req = concrete_atom.requires.trim();
     let requires_bool_opt = if concrete_req != "true" && !concrete_req.is_empty() {
         let req_ast = parse_expression(concrete_req);
-        match expr_to_z3(vc, &req_ast, &mut sub_env, None) {
-            Ok(v) => v.as_bool(),
-            Err(_) => None,
-        }
+        let value = expr_to_z3(vc, &req_ast, &mut concrete_env, None).map_err(|error| {
+            MumeiError::verification(format!(
+                "Contract subsumption could not lower {}.requires: {}",
+                concrete_atom.name, error
+            ))
+        })?;
+        Some(value.as_bool().ok_or_else(|| {
+            MumeiError::verification(format!(
+                "Contract subsumption requires '{}' to be boolean",
+                concrete_atom.requires
+            ))
+        })?)
     } else {
         None
     };
 
     // Parse and evaluate the concrete atom's ensures.
     let concrete_ens_ast = parse_expression(&concrete_atom.ensures);
-    let concrete_ens_z3 = match expr_to_z3(vc, &concrete_ens_ast, &mut sub_env, None) {
-        Ok(v) => v,
-        Err(_e) => {
-            return true;
-        }
-    };
+    let concrete_ens_z3 =
+        expr_to_z3(vc, &concrete_ens_ast, &mut concrete_env, None).map_err(|error| {
+            MumeiError::verification(format!(
+                "Contract subsumption could not lower {}.ensures: {}",
+                concrete_atom.name, error
+            ))
+        })?;
 
     // Parse and evaluate the contract's ensures.
     let contract_ens_ast = parse_expression(contract_ensures);
-    let contract_ens_z3 = match expr_to_z3(vc, &contract_ens_ast, &mut sub_env, None) {
-        Ok(v) => v,
-        Err(_e) => {
-            return true;
-        }
-    };
+    let contract_ens_z3 =
+        expr_to_z3(vc, &contract_ens_ast, &mut contract_env, None).map_err(|error| {
+            MumeiError::verification(format!(
+                "Contract subsumption could not lower contract ensures '{}': {}",
+                contract_ensures, error
+            ))
+        })?;
 
     // Both must be booleans for an implication check.
     let (concrete_bool, contract_bool) =
         match (concrete_ens_z3.as_bool(), contract_ens_z3.as_bool()) {
             (Some(c), Some(ct)) => (c, ct),
-            _ => return true, // non-boolean ensures — cannot check subsumption
+            _ => {
+                return Err(MumeiError::verification(format!(
+                    "Contract subsumption ensures must be boolean: concrete '{}' and contract '{}'",
+                    concrete_atom.ensures, contract_ensures
+                )))
+            }
         };
 
     // Check: requires ∧ concrete_ensures ∧ ¬contract_ensures is UNSAT
     //        ⟺  (requires ∧ concrete_ensures) ⇒ contract_ensures
     solver.push();
+    for constraint in &array_len_constraints {
+        solver.assert(constraint);
+    }
     if let Some(ref req_bool) = requires_bool_opt {
         solver.assert(req_bool);
     }
@@ -188,17 +252,18 @@ pub(crate) fn check_contract_subsumption<'a>(
     solver.pop(1);
 
     if sat_result == SatResult::Sat {
-        eprintln!(
-            "\u{26a0}\u{fe0f}  Subsumption warning: atom_ref({}) passed to {}.{} \u{2014} \
-             concrete ensures '{}' may not imply contract ensures '{}'",
+        return Err(MumeiError::verification(format!(
+            "Contract subsumption failed: atom_ref({}) passed to {}.{} — concrete ensures '{}' does not imply contract ensures '{}'",
             concrete_atom.name, callee_name, param_name, concrete_atom.ensures, contract_ensures
-        );
-        return false;
+        )));
     }
-    // NOTE: SatResult::Unknown (e.g., Z3 timeout) falls through to `true` here.
-    // This is the conservative choice for a warning-only check: we only warn when
-    // we have a definite counterexample (SAT), never on inconclusive results.
-    true
+    if sat_result == SatResult::Unknown {
+        return Err(MumeiError::verification(format!(
+            "Contract subsumption for atom_ref({}) passed to {}.{} could not be decided (Z3 unknown)",
+            concrete_atom.name, callee_name, param_name
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn propagate_equality_from_ensures<'a>(

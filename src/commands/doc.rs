@@ -1299,9 +1299,9 @@ atom apply_no_contract(x: i64, f: atom_ref(i64) -> i64)
     // --- Subsumption check tests ---
 
     #[test]
-    fn test_subsumption_check_no_warning_when_implies() {
+    fn test_subsumption_check_when_implies() {
         // Integration test: increment ensures: result == x + 1, with x >= 0
-        // this implies result >= 0. Subsumption holds, so no warning is emitted.
+        // this implies result >= 0. Subsumption holds.
         // The full verification pipeline should succeed for both atoms.
         //
         // NOTE: The subsumption check return value is tested directly in
@@ -1335,16 +1335,14 @@ atom test_apply()
     }
 
     #[test]
-    fn test_subsumption_check_warning_when_not_implies() {
+    fn test_subsumption_check_fails_when_not_implies() {
         // Integration test: negate ensures: result == 0 - x, which does NOT
         // imply result >= 0 even under requires: x >= 0.
-        // The subsumption check emits a warning to stderr, but verification
-        // of the caller still passes because the contract is trusted
-        // (warning only, not a hard error).
+        // The subsumption check rejects the caller because the contract is
+        // not implied by the concrete callback.
         //
-        // NOTE: The subsumption check return value (false = warning emitted)
-        // is tested directly in
-        // mumei-core/src/verification.rs::tests::test_subsumption_check_fails_without_requires.
+        // NOTE: The subsumption check return value is tested directly in
+        // mumei-core/src/verification/tests.rs.
         let source = r#"
 atom negate(x: i64)
     requires: x >= 0;
@@ -1362,13 +1360,13 @@ atom test_apply_negate()
     ensures: result >= 0;
     body: apply(5, atom_ref(negate));
 "#;
-        // test_apply_negate should still verify (subsumption is a warning, not error)
-        // The compositional verification trusts the contract's ensures.
+        // test_apply_negate should fail because callback subsumption is a
+        // hard verification error.
         let result = verify_atom_from_source(source, "test_apply_negate");
         assert!(
-            result.is_ok(),
-            "test_apply_negate should verify (subsumption warning only, not error): {:?}",
-            result.err()
+            result.is_err(),
+            "test_apply_negate should fail on callback subsumption: {:?}",
+            result
         );
     }
 

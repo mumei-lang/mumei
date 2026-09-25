@@ -2058,8 +2058,321 @@ fn test_subsumption_check_holds_with_requires() {
         &ctx,
     );
     assert!(
-        result,
+        result.is_ok(),
         "subsumption should hold: x >= 0 ∧ result == x + 1 ⇒ result >= 0"
+    );
+}
+
+#[test]
+fn test_subsumption_check_bool_param_and_result() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: None,
+        effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
+        ieee754_f64: false,
+        bitvec_i64: false,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        bitvec_i64_global: false,
+    };
+    let concrete = Atom {
+        name: "neg".to_string(),
+        type_params: vec![],
+        where_bounds: vec![],
+        params: vec![Param {
+            name: "b".to_string(),
+            type_name: Some("bool".to_string()),
+            type_ref: None,
+            is_ref: false,
+            is_ref_mut: false,
+            fn_contract_requires: None,
+            fn_contract_ensures: None,
+        }],
+        trace_id: None,
+        spec_metadata: std::collections::HashMap::new(),
+        requires: "true".to_string(),
+        forall_constraints: vec![],
+        ensures: "result == !b".to_string(),
+        body_expr: "!b".to_string(),
+        consumed_params: vec![],
+        resources: vec![],
+        is_async: false,
+        trust_level: TrustLevel::Verified,
+        max_unroll: None,
+        invariant: None,
+        effects: vec![],
+        return_type: Some("bool".to_string()),
+        span: Span::default(),
+        effect_pre: std::collections::HashMap::new(),
+        effect_post: std::collections::HashMap::new(),
+    };
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result == !x",
+        None,
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_ok(),
+        "boolean callback parameter/result should lower during subsumption: {result:?}"
+    );
+}
+
+#[test]
+fn test_subsumption_check_call_ref_alias_x() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: None,
+        effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
+        ieee754_f64: false,
+        bitvec_i64: false,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        bitvec_i64_global: false,
+    };
+    let concrete = Atom {
+        name: "identity".to_string(),
+        type_params: vec![],
+        where_bounds: vec![],
+        params: vec![Param {
+            name: "n".to_string(),
+            type_name: Some("i64".to_string()),
+            type_ref: None,
+            is_ref: false,
+            is_ref_mut: false,
+            fn_contract_requires: None,
+            fn_contract_ensures: None,
+        }],
+        trace_id: None,
+        spec_metadata: std::collections::HashMap::new(),
+        requires: "true".to_string(),
+        forall_constraints: vec![],
+        ensures: "result == n".to_string(),
+        body_expr: "n".to_string(),
+        consumed_params: vec![],
+        resources: vec![],
+        is_async: false,
+        trust_level: TrustLevel::Verified,
+        max_unroll: None,
+        invariant: None,
+        effects: vec![],
+        return_type: Some("i64".to_string()),
+        span: Span::default(),
+        effect_pre: std::collections::HashMap::new(),
+        effect_post: std::collections::HashMap::new(),
+    };
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result == x",
+        None,
+        "apply_identity",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_ok(),
+        "CallRef alias x should map to the first callback parameter: {result:?}"
+    );
+}
+
+#[test]
+fn test_subsumption_check_call_ref_aliases_do_not_follow_concrete_names() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: None,
+        effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
+        ieee754_f64: false,
+        bitvec_i64: false,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        bitvec_i64_global: false,
+    };
+    let concrete = test_atom(
+        "second",
+        vec![test_param("y", Some("i64")), test_param("x", Some("i64"))],
+        "true",
+        "result == x",
+        "x",
+        Some("i64"),
+    );
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result == x",
+        None,
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_err(),
+        "contract x must mean the first callback argument, not concrete parameter x"
+    );
+}
+
+#[test]
+fn test_subsumption_check_array_length_does_not_alias_caller_symbol() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let caller_len = Int::new_const(&ctx, "len_a");
+    solver.assert(&caller_len._eq(&Int::from_i64(&ctx, 0)));
+    let module_env = ModuleEnv::new();
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: None,
+        effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
+        ieee754_f64: false,
+        bitvec_i64: false,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        bitvec_i64_global: false,
+    };
+    let concrete = test_atom(
+        "arr_len",
+        vec![test_param("a", Some("[i64]"))],
+        "true",
+        "result == len(a)",
+        "len(a)",
+        Some("i64"),
+    );
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result == 0",
+        None,
+        "apply_array",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_err(),
+        "callback length must not reuse the caller's len_a solver symbol"
+    );
+}
+
+#[test]
+fn test_subsumption_check_array_length_aliases_follow_callback_position() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: None,
+        effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
+        ieee754_f64: false,
+        bitvec_i64: false,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        bitvec_i64_global: false,
+    };
+    let concrete = test_atom(
+        "arr_len",
+        vec![test_param("a", Some("[i64]"))],
+        "true",
+        "result == len(a)",
+        "len(a)",
+        Some("i64"),
+    );
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result == len(x)",
+        None,
+        "apply_array",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_ok(),
+        "contract len(x) should use the first callback array length: {result:?}"
     );
 }
 
@@ -2137,7 +2450,7 @@ fn test_subsumption_check_fails_without_requires() {
         &ctx,
     );
     assert!(
-        !result,
+        result.is_err(),
         "subsumption should fail: x >= 0 ∧ result == -x does NOT imply result >= 0"
     );
 }
@@ -2230,7 +2543,7 @@ fn test_subsumption_check_crossed_param_names() {
         &ctx,
     );
     assert!(
-        !result,
+        result.is_err(),
         "subsumption should fail: y/x can be negative (e.g. y=-1, x=1)"
     );
 }
@@ -2301,15 +2614,15 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
     let result =
         check_contract_subsumption(&vc, &concrete, "true", None, "apply", "f", &solver, &ctx);
     assert!(
-        result,
+        result.is_ok(),
         "trivial contract ensures 'true' should be skipped (returns true)"
     );
 }
 
 #[test]
-fn test_subsumption_check_concrete_true_ensures_warns() {
+fn test_subsumption_check_concrete_true_ensures_fails() {
     // If concrete_atom.ensures is "true" but contract requires "result >= 0",
-    // the concrete atom guarantees nothing → subsumption should FAIL (warn).
+    // the concrete atom guarantees nothing → subsumption should fail closed.
     let cfg = Config::new();
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
@@ -2381,8 +2694,8 @@ fn test_subsumption_check_concrete_true_ensures_warns() {
         &ctx,
     );
     assert!(
-        !result,
-        "concrete ensures 'true' cannot imply 'result >= 0' — should warn (return false)"
+        result.is_err(),
+        "concrete ensures 'true' cannot imply 'result >= 0' — should return an error"
     );
 }
 

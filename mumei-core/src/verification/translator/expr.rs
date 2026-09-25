@@ -1423,8 +1423,8 @@ pub(crate) fn expr_to_z3<'a>(
                         // When a callee parameter has fn_contract_ensures and the
                         // corresponding argument is atom_ref(concrete_name), verify
                         // that the concrete atom's ensures implies the contract's
-                        // ensures.  Emit a warning (not a hard error) to maintain
-                        // backward compatibility.
+                        // ensures.  Fail closed when the implication cannot be
+                        // established.
                         if let Some(solver) = solver_opt {
                             for (i, param) in callee.params.iter().enumerate() {
                                 if let Some(ref contract_ensures) = param.fn_contract_ensures {
@@ -1444,7 +1444,7 @@ pub(crate) fn expr_to_z3<'a>(
                                                 &param.name,
                                                 solver,
                                                 ctx,
-                                            );
+                                            )?;
                                         }
                                     }
                                 }
