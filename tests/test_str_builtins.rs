@@ -91,6 +91,13 @@ fn str_substr_len_fails_closed_in_bitvec_mode() {
 }
 
 #[test]
+fn str_len_param_collision_is_rejected() {
+    let (ok, out) =
+        mumei_verify_uncached_with_args("tests/negative/test_str_len_param_collision.mm", &[]);
+    assert!(!ok, "declared len_s must not be overwritten:\n{out}");
+}
+
+#[test]
 fn string_counterexample_replays_lengths_and_builtins() {
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .arg("verify")

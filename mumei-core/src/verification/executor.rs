@@ -1634,13 +1634,14 @@ pub(crate) fn verify_inner(
     // 2c. 全パラメータに対して配列長シンボルを事前生成
     #[allow(clippy::map_entry)]
     for param in &atom.params {
+        let len_name = format!("len_{}", param.name);
+        if env.contains_key(&len_name) {
+            continue;
+        }
         if let Some(string) = env.get(&param.name).and_then(|value| value.as_string()) {
             let ast =
                 unsafe { z3_sys::Z3_mk_seq_length(raw_z3_context(&ctx), string.get_z3_ast()) };
-            env.insert(
-                format!("len_{}", param.name),
-                unsafe { Int::wrap(&ctx, ast) }.into(),
-            );
+            env.insert(len_name, unsafe { Int::wrap(&ctx, ast) }.into());
         } else {
             array_len_value(&ctx, &mut env, &param.name, bitvec_i64, Some(&solver));
         }

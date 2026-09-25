@@ -491,11 +491,11 @@ fn eval_stmt(
                 scalar @ (EvalValue::Int(_)
                 | EvalValue::Float(_)
                 | EvalValue::Bool(_)
+                | EvalValue::String(_)
                 | EvalValue::Lambda { .. }) => {
                     env.insert(var.clone(), scalar.clone());
                     Ok(scalar)
                 }
-                EvalValue::String(_) => Err(format!("{} is not a scalar binding", var)),
             }
         }
         Stmt::Block(stmts, _) => {
@@ -561,6 +561,15 @@ fn eval_expr(
             }
         },
         Expr::Call(name, args) => {
+            // These names are always handled as string builtins by the Z3
+            // translator, even when a user atom or lambda has the same name.
+            if matches!(
+                name.as_str(),
+                "len" | "starts_with" | "ends_with" | "contains" | "not_contains"
+            ) {
+                return eval_string_builtin(name, args, env, module_env, depth + 1)
+                    .expect("known string builtin");
+            }
             // `let f = |…| …; f(args)` — the call replays by binding the
             // params to the concrete args inside the lambda's captured env,
             // mirroring the translator's apply_local_lambda.
