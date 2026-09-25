@@ -45,6 +45,104 @@ fn param(name: &str, type_name: &str) -> Param {
 }
 
 #[test]
+fn test_string_counterexample_replay() {
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("false_empty");
+    atom.params = vec![param("s", "Str")];
+    atom.ensures = "result == true".to_string();
+    atom.body_expr = "is_empty(s)".to_string();
+    let model = HashMap::from([
+        ("s".to_string(), CexValue::Str("A".to_string())),
+        ("result".to_string(), CexValue::Bool(false)),
+    ]);
+    let validation = validate_counterexample(&atom, &model, &module_env);
+    assert!(validation.is_valid);
+    assert_eq!(validation.validation_status, "validated");
+}
+
+#[test]
+fn test_string_counterexample_result_mismatch() {
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("false_empty_mismatch");
+    atom.params = vec![param("s", "Str")];
+    atom.ensures = "result == true".to_string();
+    atom.body_expr = "is_empty(s)".to_string();
+    let model = HashMap::from([
+        ("s".to_string(), CexValue::Str("A".to_string())),
+        ("result".to_string(), CexValue::Bool(true)),
+    ]);
+    let validation = validate_counterexample(&atom, &model, &module_env);
+    assert!(!validation.is_valid);
+    assert_eq!(validation.validation_status, "spurious_candidate");
+}
+
+#[test]
+fn test_string_builtin_substr_and_index_of_replay() {
+    let module_env = ModuleEnv::new();
+
+    let mut substr = base_atom("substr_replay");
+    substr.params = vec![param("s", "Str")];
+    substr.ensures = "result == \"x\"".to_string();
+    substr.body_expr = "substr(s, 1, 2)".to_string();
+    let substr_model = HashMap::from([
+        ("s".to_string(), CexValue::Str("abc".to_string())),
+        ("result".to_string(), CexValue::Str("bc".to_string())),
+    ]);
+    let substr_validation = validate_counterexample(&substr, &substr_model, &module_env);
+    assert!(substr_validation.is_valid);
+
+    let mut index_of = base_atom("index_of_replay");
+    index_of.ensures = "result == 0".to_string();
+    index_of.body_expr = "index_of(\"abc\", \"z\")".to_string();
+    let index_model = HashMap::from([("result".to_string(), CexValue::Int(-1))]);
+    let index_validation = validate_counterexample(&index_of, &index_model, &module_env);
+    assert!(index_validation.is_valid);
+}
+
+#[test]
+fn test_string_builtin_substr_let_binding_replay() {
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("substr_let_replay");
+    atom.params = vec![param("s", "Str")];
+    atom.return_type = Some("Str".to_string());
+    atom.ensures = "result == \"B\"".to_string();
+    atom.body_expr = "{ let t = substr(s, 0, 1); t }".to_string();
+    let model = HashMap::from([
+        ("s".to_string(), CexValue::Str("ABC".to_string())),
+        ("result".to_string(), CexValue::Str("A".to_string())),
+    ]);
+
+    let validation = validate_counterexample(&atom, &model, &module_env);
+    assert!(validation.is_valid);
+    assert_eq!(validation.validation_status, "validated");
+}
+
+#[test]
+fn test_string_builtin_precedence_over_user_atom() {
+    let mut module_env = ModuleEnv::new();
+    let mut user_starts_with = base_atom("starts_with");
+    user_starts_with.params = vec![param("s", "Str"), param("prefix", "Str")];
+    user_starts_with.return_type = Some("bool".to_string());
+    user_starts_with.ensures = "result == false".to_string();
+    user_starts_with.body_expr = "false".to_string();
+    module_env.register_atom(&user_starts_with);
+
+    let mut atom = base_atom("builtin_precedence");
+    atom.params = vec![param("s", "Str"), param("prefix", "Str")];
+    atom.ensures = "result == false".to_string();
+    atom.body_expr = "starts_with(s, prefix)".to_string();
+    let model = HashMap::from([
+        ("s".to_string(), CexValue::Str("ABC".to_string())),
+        ("prefix".to_string(), CexValue::Str("A".to_string())),
+        ("result".to_string(), CexValue::Bool(true)),
+    ]);
+
+    let validation = validate_counterexample(&atom, &model, &module_env);
+    assert!(validation.is_valid);
+    assert_eq!(validation.validation_status, "validated");
+}
+
+#[test]
 fn test_validated_counterexample() {
     let module_env = ModuleEnv::new();
     let mut atom = base_atom("validated_counterexample");
