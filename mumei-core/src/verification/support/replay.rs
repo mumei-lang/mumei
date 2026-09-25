@@ -294,8 +294,21 @@ fn collect_vars<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
                 collect_vars(value, out);
             }
         }
-        Expr::IfThenElse { cond, .. } => collect_vars(cond, out),
-        Expr::Match { target, .. } => collect_vars(target, out),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_vars(cond, out);
+            collect_vars_stmt(then_branch, out);
+            collect_vars_stmt(else_branch, out);
+        }
+        Expr::Match { target, arms } => {
+            collect_vars(target, out);
+            for arm in arms {
+                collect_vars_stmt(&arm.body, out);
+            }
+        }
         Expr::ChanSend { channel, value } => {
             collect_vars(channel, out);
             collect_vars(value, out);
@@ -307,6 +320,36 @@ fn collect_vars<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
         | Expr::AtomRef { .. }
         | Expr::Async { .. }
         | Expr::Lambda { .. } => {}
+    }
+}
+
+/// Variables read anywhere in a value-yielding block (the branches of an
+/// `if`/`match` used as an expression), so `let x = if c { seed } else { 0 }`
+/// makes `x` a carrier of `seed`.
+fn collect_vars_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<&'a str>) {
+    match stmt {
+        Stmt::Block(stmts, _) => {
+            for s in stmts {
+                collect_vars_stmt(s, out);
+            }
+        }
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => collect_vars(value, out),
+        Stmt::ArrayStore { index, value, .. } => {
+            collect_vars(index, out);
+            collect_vars(value, out);
+        }
+        Stmt::While { cond, body, .. } => {
+            collect_vars(cond, out);
+            collect_vars_stmt(body, out);
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => collect_vars_stmt(body, out),
+        Stmt::TaskGroup { children, .. } => {
+            for child in children {
+                collect_vars_stmt(child, out);
+            }
+        }
+        Stmt::Expr(e, _) => collect_vars(e, out),
+        Stmt::Cancel { .. } => {}
     }
 }
 

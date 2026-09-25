@@ -879,8 +879,11 @@ const ND_APP_PREFIX: &str = "__nd___perform_";
 
 /// Pin every application `__nd___perform_<effect>_<op>(args)` reachable from
 /// the body value or a local to `replay_source_value` of its model-evaluated
-/// arguments. The solver must be satisfiable on entry (the model supplies the
-/// concrete argument values); returns `None` if a model is unavailable.
+/// arguments. Applications are visited children-first and the model is
+/// refreshed after each pin, so a perform whose argument is itself the result
+/// of an earlier perform (`Random.next(Random.next(seed))`) sees the pinned
+/// inner value. The solver must be satisfiable on entry; returns `None` if a
+/// model is unavailable.
 fn bind_nondeterministic_sources<'a>(
     solver: &Solver<'a>,
     module_env: &ModuleEnv,
@@ -888,7 +891,7 @@ fn bind_nondeterministic_sources<'a>(
     env: &Env<'a>,
 ) -> Option<()> {
     let ctx = solver.get_context();
-    let model = solver.get_model()?;
+    let mut model = solver.get_model()?;
     let mut seen = std::collections::HashSet::new();
     let mut apps = Vec::new();
     let mut roots: Vec<&Dynamic<'a>> = vec![value];
@@ -919,7 +922,13 @@ fn bind_nondeterministic_sources<'a>(
             solver.assert(&int_value._eq(&Int::from_i64(ctx, replay)));
         } else if let Some(bv_value) = app.as_bv() {
             solver.assert(&bv_value._eq(&z3::ast::BV::from_i64(ctx, replay, I64_BITS)));
+        } else {
+            continue;
         }
+        if !matches!(solver.check(), SatResult::Sat) {
+            return None;
+        }
+        model = solver.get_model()?;
     }
     Some(())
 }
@@ -932,11 +941,11 @@ fn collect_nd_apps<'a>(
     if !node.is_app() || !seen.insert(node.to_string()) {
         return;
     }
-    if node.decl().name().starts_with(ND_APP_PREFIX) {
-        out.push(node.clone());
-    }
     for child in node.children() {
         collect_nd_apps(&child, seen, out);
+    }
+    if node.decl().name().starts_with(ND_APP_PREFIX) {
+        out.push(node.clone());
     }
 }
 
@@ -1236,4 +1245,70 @@ fn array_element_type(type_name: &str) -> &str {
         .and_then(|value| value.strip_suffix(']'))
         .map(str::trim)
         .unwrap_or("i64")
+}
+
+#[cfg(test)]
+mod replay_binding_tests {
+    use super::*;
+    use crate::parser::{parse_module, Item};
+
+    fn seeded_atom(body: &str) -> (Atom, ModuleEnv) {
+        let source = format!(
+            "effect Random;\natom roll(seed: i64) -> i64\neffects: [Random];\nensures: true;\nbody: {{ {body} }};\n"
+        );
+        let mut module_env = ModuleEnv::new();
+        let mut atom = None;
+        for item in parse_module(&source) {
+            match item {
+                Item::EffectDef(def) => {
+                    module_env.effect_defs.insert(def.name.clone(), def);
+                }
+                Item::Atom(a) => atom = Some(a),
+                _ => {}
+            }
+        }
+        (atom.expect("atom"), module_env)
+    }
+
+    fn eval(body: &str, seed: i64) -> GeneratedValue {
+        let (atom, module_env) = seeded_atom(body);
+        let mut assignment = HashMap::new();
+        assignment.insert("seed".to_string(), GeneratedValue::Int(seed));
+        evaluate_body(&atom, &module_env, &assignment, false).expect("decodable body")
+    }
+
+    #[test]
+    fn single_perform_is_pinned_to_replay_value_of_its_arguments() {
+        let expected = replay_source_value("Random", "next", &[7]);
+        assert_eq!(
+            eval("perform Random.next(seed)", 7),
+            GeneratedValue::Int(expected)
+        );
+    }
+
+    #[test]
+    fn chained_perform_is_pinned_to_the_pinned_inner_value() {
+        let inner = replay_source_value("Random", "next", &[7]);
+        let expected = replay_source_value("Random", "next", &[inner]);
+        assert_eq!(
+            eval(
+                "let a = perform Random.next(seed); perform Random.next(a)",
+                7
+            ),
+            GeneratedValue::Int(expected)
+        );
+    }
+
+    #[test]
+    fn performs_with_different_arguments_are_pinned_independently() {
+        let a = replay_source_value("Random", "next", &[7]);
+        let b = replay_source_value("Random", "next", &[8]);
+        assert_eq!(
+            eval(
+                "let a = perform Random.next(seed); let b = perform Random.next(seed + 1); a - b",
+                7
+            ),
+            GeneratedValue::Int(a - b)
+        );
+    }
 }

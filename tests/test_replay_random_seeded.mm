@@ -51,3 +51,13 @@ body: {
     let r2 = perform Random.next(r);
     if r2 >= 0 { r2 } else { 0 - r2 }
 };
+
+// A conditional expression selecting the witness still carries it.
+atom roll_branch(seed: i64, flag: i64) -> i64
+effects: [Random];
+ensures: result >= 0;
+body: {
+    let s = if flag > 0 { seed } else { seed + 1 };
+    let r = perform Random.next(s);
+    if r >= 0 { r } else { 0 - r }
+};

@@ -61,6 +61,12 @@ fn seeded_nondeterministic_atoms_verify() {
         out.contains("'replay_twice': verified"),
         "two performs with the same witness must denote the same value:\n{out}"
     );
+    for atom in ["roll_derived", "roll_branch"] {
+        assert!(
+            out.contains(&format!("'{atom}': verified")),
+            "derived witness must be accepted for {atom}:\n{out}"
+        );
+    }
 }
 
 #[test]
