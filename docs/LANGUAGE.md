@@ -413,7 +413,9 @@ A parameter matches a witness name exactly or with a `_suffix` (`seed_a`, `times
 
 An atom that declares one of these effects must **isolate the source at the type
 level**: the non-deterministic value enters only through the witness parameter and
-the witness is passed to every `perform` of that effect.
+every `perform` of that effect receives the witness or a local derived from it
+(`let s2 = seed + 1; perform Random.next(s2)` is accepted; a result of such a
+`perform` is itself derived from the witness, so chaining is allowed).
 
 ```mumei
 effect Random;

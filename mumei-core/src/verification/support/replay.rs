@@ -18,10 +18,9 @@
 use super::super::module_env::ModuleEnv;
 use super::super::nlae_reporter::FAILURE_EFFECT_NOT_ALLOWED;
 use super::super::types::{MumeiError, MumeiResult};
-use super::call_graph::expr_mentions_var;
 use crate::parser::{Atom, Expr, Stmt};
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
 
@@ -98,86 +97,197 @@ pub(crate) fn witness_params<'a>(atom: &'a Atom, effect: &str) -> Vec<&'a str> {
         .collect()
 }
 
-fn collect_performs_expr<'a>(expr: &'a Expr, out: &mut Vec<(&'a str, &'a str, &'a [Expr])>) {
-    match expr {
-        Expr::Perform {
-            effect,
-            operation,
-            args,
-        } => {
-            out.push((effect.as_str(), operation.as_str(), args.as_slice()));
-            for arg in args {
-                collect_performs_expr(arg, out);
-            }
+/// A `perform <effect>.<operation>(args)` site together with the witness
+/// parameters its arguments are (transitively) derived from.
+struct PerformSite<'a> {
+    effect: &'a str,
+    operation: &'a str,
+    witnesses: BTreeSet<&'a str>,
+}
+
+/// Walks the body in program order, tracking which locals are derived from a
+/// witness parameter (`let s2 = seed + 1;` makes `s2` a carrier of `seed`).
+struct PerformCollector<'a> {
+    /// local / parameter name -> witness parameters it carries
+    derived: HashMap<&'a str, BTreeSet<&'a str>>,
+    sites: Vec<PerformSite<'a>>,
+}
+
+impl<'a> PerformCollector<'a> {
+    fn new(witnesses: impl IntoIterator<Item = &'a str>) -> Self {
+        Self {
+            derived: witnesses
+                .into_iter()
+                .map(|w| (w, BTreeSet::from([w])))
+                .collect(),
+            sites: Vec::new(),
         }
-        Expr::Call(_, args) => {
-            for arg in args {
-                collect_performs_expr(arg, out);
-            }
+    }
+
+    fn carried_by(&self, expr: &'a Expr) -> BTreeSet<&'a str> {
+        let mut names = Vec::new();
+        collect_vars(expr, &mut names);
+        names
+            .into_iter()
+            .filter_map(|name| self.derived.get(name))
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    fn bind(&mut self, var: &'a str, value: &'a Expr) {
+        let carried = self.carried_by(value);
+        if carried.is_empty() {
+            self.derived.remove(var);
+        } else {
+            self.derived.insert(var, carried);
         }
-        Expr::CallRef { callee, args } => {
-            collect_performs_expr(callee, out);
-            for arg in args {
-                collect_performs_expr(arg, out);
-            }
-        }
-        Expr::IfThenElse {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            collect_performs_expr(cond, out);
-            collect_performs_stmt(then_branch, out);
-            collect_performs_stmt(else_branch, out);
-        }
-        Expr::BinaryOp(l, _, r) => {
-            collect_performs_expr(l, out);
-            collect_performs_expr(r, out);
-        }
-        Expr::Async { body } | Expr::Lambda { body, .. } => collect_performs_stmt(body, out),
-        Expr::Await { expr } => collect_performs_expr(expr, out),
-        Expr::Match { target, arms } => {
-            collect_performs_expr(target, out);
-            for arm in arms {
-                if let Some(guard) = &arm.guard {
-                    collect_performs_expr(guard, out);
+    }
+
+    fn expr(&mut self, expr: &'a Expr) {
+        match expr {
+            Expr::Perform {
+                effect,
+                operation,
+                args,
+            } => {
+                let witnesses = args.iter().flat_map(|arg| self.carried_by(arg)).collect();
+                self.sites.push(PerformSite {
+                    effect,
+                    operation,
+                    witnesses,
+                });
+                for arg in args {
+                    self.expr(arg);
                 }
-                collect_performs_stmt(&arm.body, out);
             }
+            Expr::Call(_, args) | Expr::ArrayLit(args) => {
+                for arg in args {
+                    self.expr(arg);
+                }
+            }
+            Expr::CallRef { callee, args } => {
+                self.expr(callee);
+                for arg in args {
+                    self.expr(arg);
+                }
+            }
+            Expr::StructInit { fields, .. } => {
+                for (_, value) in fields {
+                    self.expr(value);
+                }
+            }
+            Expr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                self.expr(cond);
+                self.stmt(then_branch);
+                self.stmt(else_branch);
+            }
+            Expr::BinaryOp(l, _, r) => {
+                self.expr(l);
+                self.expr(r);
+            }
+            Expr::ArrayAccess(_, idx) => self.expr(idx),
+            Expr::FieldAccess(e, _) | Expr::Await { expr: e } => self.expr(e),
+            Expr::Async { body } | Expr::Lambda { body, .. } => self.stmt(body),
+            Expr::Match { target, arms } => {
+                self.expr(target);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        self.expr(guard);
+                    }
+                    self.stmt(&arm.body);
+                }
+            }
+            Expr::ChanSend { channel, value } => {
+                self.expr(channel);
+                self.expr(value);
+            }
+            Expr::ChanRecv { channel } => self.expr(channel),
+            Expr::Number(_)
+            | Expr::Float(_)
+            | Expr::StringLit(_)
+            | Expr::Variable(_)
+            | Expr::AtomRef { .. } => {}
         }
-        Expr::ChanSend { channel, value } => {
-            collect_performs_expr(channel, out);
-            collect_performs_expr(value, out);
+    }
+
+    fn stmt(&mut self, stmt: &'a Stmt) {
+        match stmt {
+            Stmt::Block(stmts, _) => {
+                for s in stmts {
+                    self.stmt(s);
+                }
+            }
+            Stmt::Let { var, value, .. } | Stmt::Assign { var, value, .. } => {
+                self.expr(value);
+                self.bind(var, value);
+            }
+            Stmt::ArrayStore { index, value, .. } => {
+                self.expr(index);
+                self.expr(value);
+            }
+            Stmt::While { cond, body, .. } => {
+                self.expr(cond);
+                self.stmt(body);
+            }
+            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => self.stmt(body),
+            Stmt::TaskGroup { children, .. } => {
+                for child in children {
+                    self.stmt(child);
+                }
+            }
+            Stmt::Expr(e, _) => self.expr(e),
+            Stmt::Cancel { .. } => {}
         }
-        Expr::ChanRecv { channel } => collect_performs_expr(channel, out),
-        _ => {}
     }
 }
 
-fn collect_performs_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<(&'a str, &'a str, &'a [Expr])>) {
-    match stmt {
-        Stmt::Block(stmts, _) => {
-            for s in stmts {
-                collect_performs_stmt(s, out);
+/// Variable names an expression reads (same shape as `call_graph::expr_mentions_var`).
+fn collect_vars<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
+    match expr {
+        Expr::Variable(name) => out.push(name),
+        Expr::ArrayAccess(name, idx) => {
+            out.push(name);
+            collect_vars(idx, out);
+        }
+        Expr::BinaryOp(l, _, r) => {
+            collect_vars(l, out);
+            collect_vars(r, out);
+        }
+        Expr::FieldAccess(e, _) | Expr::Await { expr: e } => collect_vars(e, out),
+        Expr::Call(_, args) | Expr::Perform { args, .. } | Expr::ArrayLit(args) => {
+            for arg in args {
+                collect_vars(arg, out);
             }
         }
-        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => collect_performs_expr(value, out),
-        Stmt::ArrayStore { index, value, .. } => {
-            collect_performs_expr(index, out);
-            collect_performs_expr(value, out);
-        }
-        Stmt::While { cond, body, .. } => {
-            collect_performs_expr(cond, out);
-            collect_performs_stmt(body, out);
-        }
-        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => collect_performs_stmt(body, out),
-        Stmt::TaskGroup { children, .. } => {
-            for child in children {
-                collect_performs_stmt(child, out);
+        Expr::CallRef { callee, args } => {
+            collect_vars(callee, out);
+            for arg in args {
+                collect_vars(arg, out);
             }
         }
-        Stmt::Expr(e, _) => collect_performs_expr(e, out),
-        Stmt::Cancel { .. } => {}
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_vars(value, out);
+            }
+        }
+        Expr::IfThenElse { cond, .. } => collect_vars(cond, out),
+        Expr::Match { target, .. } => collect_vars(target, out),
+        Expr::ChanSend { channel, value } => {
+            collect_vars(channel, out);
+            collect_vars(value, out);
+        }
+        Expr::ChanRecv { channel } => collect_vars(channel, out),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::AtomRef { .. }
+        | Expr::Async { .. }
+        | Expr::Lambda { .. } => {}
     }
 }
 
@@ -200,7 +310,7 @@ impl ReplayViolation {
 
 /// Verify that every non-deterministic effect declared by `atom` is fed through
 /// an explicit witness parameter (signature) and that each `perform` of the
-/// effect mentions that witness (body).
+/// effect receives a value derived from that witness (body).
 pub(crate) fn check_replayability(
     atom: &Atom,
     body_stmt: &Stmt,
@@ -211,8 +321,9 @@ pub(crate) fn check_replayability(
         return Ok(());
     }
 
-    let mut performs = Vec::new();
-    collect_performs_stmt(body_stmt, &mut performs);
+    let mut collector =
+        PerformCollector::new(roots.iter().flat_map(|root| witness_params(atom, root)));
+    collector.stmt(body_stmt);
 
     for root in roots {
         let accepted = nondeterministic_witnesses(root).unwrap_or(&[]).to_vec();
@@ -225,19 +336,16 @@ pub(crate) fn check_replayability(
                 perform_operation: None,
             });
         }
-        for (effect, operation, args) in &performs {
-            if nondeterministic_root(module_env, effect) != Some(root) {
+        for site in &collector.sites {
+            if nondeterministic_root(module_env, site.effect) != Some(root) {
                 continue;
             }
-            let threaded = args
-                .iter()
-                .any(|arg| witnesses.iter().any(|w| expr_mentions_var(arg, w)));
-            if !threaded {
+            if !witnesses.iter().any(|w| site.witnesses.contains(w)) {
                 return Err(ReplayViolation {
                     atom: atom.name.clone(),
                     effect: root,
                     accepted_witnesses: accepted,
-                    perform_operation: Some((*operation).to_string()),
+                    perform_operation: Some(site.operation.to_string()),
                 });
             }
         }

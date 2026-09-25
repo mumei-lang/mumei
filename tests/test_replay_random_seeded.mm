@@ -40,3 +40,14 @@ body: {
     let b = perform Random.next(seed);
     a - b
 };
+
+// A local derived from the witness carries it into the perform.
+atom roll_derived(seed: i64) -> i64
+effects: [Random];
+ensures: result >= 0;
+body: {
+    let s2 = seed + 1;
+    let r = perform Random.next(s2);
+    let r2 = perform Random.next(r);
+    if r2 >= 0 { r2 } else { 0 - r2 }
+};

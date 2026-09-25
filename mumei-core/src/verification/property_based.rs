@@ -896,10 +896,7 @@ fn bind_nondeterministic_sources<'a>(
             .collect();
         keys.sort();
         for key in keys {
-            let Some(rest) = key.strip_prefix("__perform_") else {
-                continue;
-            };
-            let Some((effect, operation)) = rest.split_once('_') else {
+            let Some((effect, operation)) = split_perform_key(key, module_env) else {
                 continue;
             };
             if nondeterministic_root(module_env, effect) != Some(root) {
@@ -914,6 +911,30 @@ fn bind_nondeterministic_sources<'a>(
             }
         }
     }
+}
+
+/// Split `__perform_<effect>_<operation>` on the longest known effect name, so
+/// effect names containing `_` are recovered correctly.
+fn split_perform_key<'k>(key: &'k str, module_env: &ModuleEnv) -> Option<(&'k str, &'k str)> {
+    let rest = key.strip_prefix("__perform_")?;
+    let known = module_env
+        .effect_defs
+        .keys()
+        .chain(module_env.effects.keys())
+        .map(String::as_str)
+        .chain(["Random", "Clock", "ExternalInput"]);
+    let mut best: Option<(&str, &str)> = None;
+    for name in known {
+        if let Some(op) = rest
+            .strip_prefix(name)
+            .and_then(|tail| tail.strip_prefix('_'))
+        {
+            if best.is_none_or(|(e, _)| name.len() > e.len()) {
+                best = Some((&rest[..name.len()], op));
+            }
+        }
+    }
+    best.or_else(|| rest.split_once('_'))
 }
 
 fn dynamic_to_generated(value: &Dynamic<'_>, solver: &Solver<'_>) -> Option<GeneratedValue> {

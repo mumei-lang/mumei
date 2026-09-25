@@ -23,10 +23,8 @@ pub(crate) use effects::{
 };
 pub use effects::{AllowedEffect, SecurityPolicy};
 
-pub use replay::ReplayViolation;
 pub(crate) use replay::{
-    check_replayability, declared_nondeterministic_effects, nondeterministic_root,
-    verify_replayability, witness_params,
+    declared_nondeterministic_effects, nondeterministic_root, verify_replayability, witness_params,
 };
 
 pub(crate) use resource_safety::{
