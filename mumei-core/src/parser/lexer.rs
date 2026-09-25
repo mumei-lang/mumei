@@ -117,7 +117,14 @@ impl<'a> Lexer<'a> {
             '[' => Token::LBracket,
             ']' => Token::RBracket,
             '@' => Token::At,
-            '.' => Token::Dot,
+            '.' => {
+                if self.peek() == Some('.') {
+                    self.advance();
+                    Token::DotDot
+                } else {
+                    Token::Dot
+                }
+            }
 
             '-' => {
                 if self.peek() == Some('>') {

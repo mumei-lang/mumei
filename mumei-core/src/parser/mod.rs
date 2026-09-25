@@ -1556,8 +1556,165 @@ extern "Rust" {
     }
 
     #[test]
+    fn test_lexer_range_and_field_tokens() {
+        let mut lexer = lexer::Lexer::new("0..10 a.b");
+        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        assert_eq!(tokens[0], token::Token::IntLit(0));
+        assert_eq!(tokens[1], token::Token::DotDot);
+        assert_eq!(tokens[2], token::Token::IntLit(10));
+        assert_eq!(tokens[3], token::Token::Ident("a".to_string()));
+        assert_eq!(tokens[4], token::Token::Dot);
+        assert_eq!(tokens[5], token::Token::Ident("b".to_string()));
+    }
+
+    #[test]
+    fn test_parse_for_range_desugars_to_while() {
+        let stmt = parse_body_expr("for i in 0..n { acc = acc + i }");
+        match stmt {
+            Stmt::Block(stmts, _) => {
+                assert_eq!(stmts.len(), 2);
+                assert!(matches!(
+                    &stmts[0],
+                    Stmt::Let { var, value, .. }
+                        if var == "i" && matches!(value.as_ref(), Expr::Number(0))
+                ));
+                match &stmts[1] {
+                    Stmt::While {
+                        cond,
+                        invariant,
+                        decreases: Some(decreases),
+                        body,
+                        ..
+                    } => {
+                        assert!(matches!(
+                            cond.as_ref(),
+                            Expr::BinaryOp(left, Op::Lt, right)
+                                if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
+                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "n")
+                        ));
+                        assert!(matches!(
+                            invariant.as_ref(),
+                            Expr::BinaryOp(auto, Op::And, rest)
+                                if matches!(
+                                    auto.as_ref(),
+                                    Expr::BinaryOp(left, Op::Le, right)
+                                        if matches!(left.as_ref(), Expr::Number(0))
+                                            && matches!(right.as_ref(), Expr::Variable(name) if name == "i")
+                                ) && matches!(
+                                    rest.as_ref(),
+                                    Expr::BinaryOp(bounds, Op::Or, start)
+                                        if matches!(
+                                            bounds.as_ref(),
+                                            Expr::BinaryOp(left, Op::Le, right)
+                                                if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
+                                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "n")
+                                        ) && matches!(
+                                            start.as_ref(),
+                                            Expr::BinaryOp(left, Op::Eq, right)
+                                                if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
+                                                    && matches!(right.as_ref(), Expr::Number(0))
+                                        )
+                                )
+                        ));
+                        assert!(matches!(
+                            decreases.as_ref(),
+                            Expr::BinaryOp(left, Op::Sub, right)
+                                if matches!(left.as_ref(), Expr::Variable(name) if name == "n")
+                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "i")
+                        ));
+                        match body.as_ref() {
+                            Stmt::Block(body_stmts, _) => {
+                                assert_eq!(body_stmts.len(), 2);
+                                assert!(
+                                    matches!(body_stmts[0], Stmt::Assign { ref var, .. } if var == "acc")
+                                );
+                                assert!(matches!(
+                                    &body_stmts[1],
+                                    Stmt::Assign { ref var, value, .. }
+                                        if var == "i"
+                                            && matches!(
+                                                value.as_ref(),
+                                                Expr::BinaryOp(left, Op::Add, right)
+                                                    if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
+                                                        && matches!(right.as_ref(), Expr::Number(1))
+                                            )
+                                ));
+                            }
+                            other => panic!("expected loop body block, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected desugared while, got {other:?}"),
+                }
+            }
+            other => panic!("expected desugared outer block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_for_range_custom_invariant_and_decreases() {
+        let stmt = parse_body_expr(
+            "for i in lo..hi invariant: acc >= 0 decreases: hi - i { acc = acc + 1 }",
+        );
+        let Stmt::Block(stmts, _) = stmt else {
+            panic!("expected desugared outer block");
+        };
+        let Stmt::While {
+            invariant,
+            decreases: Some(decreases),
+            ..
+        } = &stmts[1]
+        else {
+            panic!("expected desugared while");
+        };
+        assert!(matches!(
+            invariant.as_ref(),
+            Expr::BinaryOp(auto, Op::And, user)
+                if matches!(user.as_ref(), Expr::BinaryOp(_, Op::Ge, _))
+                    && matches!(auto.as_ref(), Expr::BinaryOp(_, Op::And, _))
+        ));
+        assert!(matches!(
+            decreases.as_ref(),
+            Expr::BinaryOp(left, Op::Sub, right)
+                if matches!(left.as_ref(), Expr::Variable(name) if name == "hi")
+                    && matches!(right.as_ref(), Expr::Variable(name) if name == "i")
+        ));
+    }
+
+    #[test]
+    fn test_parse_pipeline() {
+        assert!(matches!(
+            parse_expression("x |> f |> g"),
+            Expr::Call(name, args)
+                if name == "g"
+                    && args.len() == 1
+                    && matches!(
+                        &args[0],
+                        Expr::Call(inner_name, inner_args)
+                            if inner_name == "f"
+                                && matches!(&inner_args[..], [Expr::Variable(x)] if x == "x")
+                    )
+        ));
+        assert!(matches!(
+            parse_expression("x |> add(1)"),
+            Expr::Call(name, args)
+                if name == "add"
+                    && matches!(&args[..], [Expr::Number(1), Expr::Variable(x)] if x == "x")
+        ));
+        assert!(matches!(
+            parse_expression("a + 1 |> f"),
+            Expr::Call(name, args)
+                if name == "f"
+                    && matches!(
+                        &args[..],
+                        [Expr::BinaryOp(left, Op::Add, right)]
+                            if matches!(left.as_ref(), Expr::Variable(x) if x == "a")
+                                && matches!(right.as_ref(), Expr::Number(1))
+                    )
+        ));
+    }
+
+    #[test]
     fn test_parse_pipeline_ready() {
-        // The lexer can tokenize |> even though the parser doesn't use it yet
         let mut lexer = lexer::Lexer::new("x |> f |> g");
         let tokens = lexer.tokenize();
         let pipes: Vec<_> = tokens

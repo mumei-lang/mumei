@@ -13,22 +13,23 @@ use crate::parser::{Expr, JoinSemantics, LambdaParam, MatchArm, Op, Span, Stmt};
 /// Right-associative: left > right.
 fn binding_power(tok: &Token) -> Option<(u8, u8)> {
     match tok {
-        Token::FatArrow => Some((1, 2)), // left-assoc => (matches old parser's while-loop behavior)
-        Token::Or => Some((3, 4)),
-        Token::And => Some((5, 6)),
-        Token::Eq | Token::Neq | Token::Gt | Token::Lt | Token::Ge | Token::Le => Some((7, 8)),
+        Token::Pipe => Some((1, 2)),
+        Token::FatArrow => Some((3, 4)), // left-assoc => (matches old parser's while-loop behavior)
+        Token::Or => Some((5, 6)),
+        Token::And => Some((7, 8)),
+        Token::Eq | Token::Neq | Token::Gt | Token::Lt | Token::Ge | Token::Le => Some((9, 10)),
         // Bitwise operators bind tighter than comparison and looser than
         // arithmetic, following the C/Rust ordering `| < ^ < & < shift`.
         // `Token::Bar` is only a bitwise OR in infix position; in prefix
         // position it still opens a lambda parameter list (`|x| x + 1`).
-        Token::Bar => Some((9, 10)),
-        Token::Caret => Some((11, 12)),
-        Token::Amp => Some((13, 14)),
-        Token::Shl | Token::Shr => Some((15, 16)),
-        Token::Plus | Token::Minus => Some((17, 18)),
-        Token::Star | Token::Slash => Some((19, 20)),
-        Token::StarStar => Some((21, 20)),
-        Token::Dot | Token::ColonColon => Some((23, 24)),
+        Token::Bar => Some((11, 12)),
+        Token::Caret => Some((13, 14)),
+        Token::Amp => Some((15, 16)),
+        Token::Shl | Token::Shr => Some((17, 18)),
+        Token::Plus | Token::Minus => Some((19, 20)),
+        Token::Star | Token::Slash => Some((21, 22)),
+        Token::StarStar => Some((23, 22)),
+        Token::Dot | Token::ColonColon => Some((25, 26)),
         _ => None,
     }
 }
@@ -227,6 +228,22 @@ pub fn parse_expr(ctx: &mut ParseContext, min_bp: u8) -> Expr {
         if let Some((l_bp, r_bp)) = binding_power(&tok) {
             if l_bp < min_bp {
                 break;
+            }
+            if tok == Token::Pipe {
+                ctx.advance();
+                let rhs = parse_expr(ctx, r_bp);
+                lhs = match rhs {
+                    Expr::Variable(name) => Expr::Call(name, vec![lhs]),
+                    Expr::Call(name, mut args) => {
+                        args.push(lhs);
+                        Expr::Call(name, args)
+                    }
+                    rhs => Expr::CallRef {
+                        callee: Box::new(rhs),
+                        args: vec![lhs],
+                    },
+                };
+                continue;
             }
             let op = match token_to_op(&tok) {
                 Some(op) => op,
@@ -855,6 +872,129 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                     span: stmt_span,
                 }
             }
+        }
+
+        Token::For => {
+            ctx.advance();
+            let var = ctx.expect_ident();
+            match ctx.peek().clone() {
+                Token::Ident(name) if name == "in" => {
+                    ctx.advance();
+                }
+                found => {
+                    let (line, col) = ctx
+                        .tokens_ref()
+                        .get(ctx.pos())
+                        .map(|tok| (tok.line, tok.col))
+                        .unwrap_or((0, 0));
+                    panic!(
+                        "for loop requires 'in' after loop variable, found {found} at {line}:{col}"
+                    );
+                }
+            }
+            let lo = parse_expr(ctx, 0);
+            if ctx.peek() != &Token::DotDot {
+                let (line, col) = ctx
+                    .tokens_ref()
+                    .get(ctx.pos())
+                    .map(|tok| (tok.line, tok.col))
+                    .unwrap_or((0, 0));
+                panic!(
+                    "for loop requires '..' between bounds, found {} at {line}:{col}",
+                    ctx.peek()
+                );
+            }
+            ctx.advance();
+            let hi = parse_expr(ctx, 0);
+            let user_invariant = if ctx.peek() == &Token::Invariant {
+                ctx.advance();
+                if ctx.peek() == &Token::Colon {
+                    ctx.advance();
+                }
+                Some(parse_expr(ctx, 0))
+            } else {
+                None
+            };
+            let user_decreases = if ctx.peek() == &Token::Decreases {
+                ctx.advance();
+                if ctx.peek() == &Token::Colon {
+                    ctx.advance();
+                }
+                Some(parse_expr(ctx, 0))
+            } else {
+                None
+            };
+            let user_body = parse_block_or_stmt(ctx);
+            let increment = Stmt::Assign {
+                var: var.clone(),
+                value: Box::new(Expr::BinaryOp(
+                    Box::new(Expr::Variable(var.clone())),
+                    Op::Add,
+                    Box::new(Expr::Number(1)),
+                )),
+                span: stmt_span.clone(),
+            };
+            let loop_body = match user_body {
+                Stmt::Block(mut stmts, _) => {
+                    stmts.push(increment);
+                    Stmt::Block(stmts, stmt_span.clone())
+                }
+                stmt => Stmt::Block(vec![stmt, increment], stmt_span.clone()),
+            };
+            let auto_invariant = Expr::BinaryOp(
+                Box::new(Expr::BinaryOp(
+                    Box::new(lo.clone()),
+                    Op::Le,
+                    Box::new(Expr::Variable(var.clone())),
+                )),
+                Op::And,
+                Box::new(Expr::BinaryOp(
+                    Box::new(Expr::BinaryOp(
+                        Box::new(Expr::Variable(var.clone())),
+                        Op::Le,
+                        Box::new(hi.clone()),
+                    )),
+                    Op::Or,
+                    Box::new(Expr::BinaryOp(
+                        Box::new(Expr::Variable(var.clone())),
+                        Op::Eq,
+                        Box::new(lo.clone()),
+                    )),
+                )),
+            );
+            let invariant = if let Some(user_invariant) = user_invariant {
+                Expr::BinaryOp(Box::new(auto_invariant), Op::And, Box::new(user_invariant))
+            } else {
+                auto_invariant
+            };
+            let decreases = user_decreases.unwrap_or_else(|| {
+                Expr::BinaryOp(
+                    Box::new(hi.clone()),
+                    Op::Sub,
+                    Box::new(Expr::Variable(var.clone())),
+                )
+            });
+            Stmt::Block(
+                vec![
+                    Stmt::Let {
+                        var: var.clone(),
+                        value: Box::new(lo),
+                        span: stmt_span.clone(),
+                    },
+                    Stmt::While {
+                        cond: Box::new(Expr::BinaryOp(
+                            Box::new(Expr::Variable(var)),
+                            Op::Lt,
+                            Box::new(hi),
+                        )),
+                        invariant: Box::new(invariant),
+                        decreases: Some(Box::new(decreases)),
+                        body: Box::new(loop_body),
+                        span: stmt_span.clone(),
+                    },
+                ],
+                stmt_span,
+            )
         }
 
         Token::Acquire => {
