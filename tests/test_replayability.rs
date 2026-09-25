@@ -116,6 +116,32 @@ fn lambda_parameter_shadowing_witness_is_rejected() {
 }
 
 #[test]
+fn witness_read_only_in_condition_is_rejected() {
+    let (ok, out) = mumei_verify("tests/negative/test_replay_guard_only.mm");
+    assert!(
+        !ok,
+        "`if seed > 0 {{ x }} else {{ x }}` is not seed-derived:\n{out}"
+    );
+    assert!(
+        out.contains("without threading its witness parameter"),
+        "expected threading diagnostic:\n{out}"
+    );
+}
+
+#[test]
+fn binding_inside_uncalled_lambda_does_not_leak_witness() {
+    let (ok, out) = mumei_verify("tests/negative/test_replay_lambda_leak.mm");
+    assert!(
+        !ok,
+        "lambda-internal `s = seed` must not witness the outer perform:\n{out}"
+    );
+    assert!(
+        out.contains("without threading its witness parameter"),
+        "expected threading diagnostic:\n{out}"
+    );
+}
+
+#[test]
 fn pure_atom_performing_nondeterministic_source_is_rejected_by_containment() {
     let (ok, out) = mumei_verify("tests/negative/test_replay_pure_atom.mm");
     assert!(!ok, "pure atom performing Random must fail:\n{out}");

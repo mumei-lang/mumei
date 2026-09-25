@@ -194,23 +194,15 @@ impl<'a> PerformCollector<'a> {
             Expr::FieldAccess(e, _) | Expr::Await { expr: e } => self.expr(e),
             Expr::Async { body } => self.stmt(body),
             Expr::Lambda { params, body, .. } => {
-                // Lambda parameters shadow atom parameters: a lambda-local
-                // `seed` is not the witness.
-                let saved: Vec<(&'a str, Option<BTreeSet<&'a str>>)> = params
-                    .iter()
-                    .map(|p| (p.name.as_str(), self.derived.remove(p.name.as_str())))
-                    .collect();
-                self.stmt(body);
-                for (name, carried) in saved {
-                    match carried {
-                        Some(carried) => {
-                            self.derived.insert(name, carried);
-                        }
-                        None => {
-                            self.derived.remove(name);
-                        }
-                    }
+                // The lambda body is its own scope: its parameters shadow the
+                // witness, and bindings made inside it (which only happen if
+                // the lambda is ever called) do not flow to the enclosing body.
+                let outer = self.derived.clone();
+                for p in params {
+                    self.derived.remove(p.name.as_str());
                 }
+                self.stmt(body);
+                self.derived = outer;
             }
             Expr::Match { target, arms } => {
                 self.expr(target);
@@ -294,17 +286,17 @@ fn collect_vars<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
                 collect_vars(value, out);
             }
         }
+        // The value of an `if`/`match` comes from its branches; the condition
+        // or scrutinee only selects among them and carries no provenance.
         Expr::IfThenElse {
-            cond,
             then_branch,
             else_branch,
+            ..
         } => {
-            collect_vars(cond, out);
             collect_vars_stmt(then_branch, out);
             collect_vars_stmt(else_branch, out);
         }
-        Expr::Match { target, arms } => {
-            collect_vars(target, out);
+        Expr::Match { arms, .. } => {
             for arm in arms {
                 collect_vars_stmt(&arm.body, out);
             }
@@ -323,9 +315,9 @@ fn collect_vars<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
     }
 }
 
-/// Variables read anywhere in a value-yielding block (the branches of an
-/// `if`/`match` used as an expression), so `let x = if c { seed } else { 0 }`
-/// makes `x` a carrier of `seed`.
+/// Variables that can flow into the value of a block used as an expression
+/// (the branches of an `if`/`match`), so `let x = if c { seed } else { 0 }`
+/// makes `x` a carrier of `seed`, while `if seed > 0 { x } else { x }` does not.
 fn collect_vars_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<&'a str>) {
     match stmt {
         Stmt::Block(stmts, _) => {
