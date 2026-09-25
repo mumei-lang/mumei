@@ -13,7 +13,8 @@ use z3::{FuncDecl, Sort};
 /// witness parameter (seed/timestamp/input) is universally quantified like any
 /// other input, and two performs with equal arguments denote the same value.
 /// That is exactly the replay guarantee — the result may be anything, but it
-/// is a deterministic function of the explicit inputs.
+/// is a deterministic function of the explicit inputs. An argument-free
+/// perform becomes a zero-arity function (a single unknown constant).
 pub(crate) fn nondeterministic_perform_result<'a>(
     ctx: &'a Context,
     result_name: &str,
@@ -26,13 +27,6 @@ pub(crate) fn nondeterministic_perform_result<'a>(
     } else {
         Sort::int(ctx)
     };
-    if domain_args.is_empty() {
-        return if bitvec_i64 {
-            BV::new_const(ctx, result_name, I64_BITS).into()
-        } else {
-            Int::new_const(ctx, result_name).into()
-        };
-    }
     let domain: Vec<Sort<'a>> = domain_args.iter().map(|arg| arg.get_sort()).collect();
     let domain_refs: Vec<&Sort<'a>> = domain.iter().collect();
     let decl = FuncDecl::new(ctx, format!("__nd_{}", result_name), &domain_refs, &range);

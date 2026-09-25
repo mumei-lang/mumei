@@ -192,7 +192,26 @@ impl<'a> PerformCollector<'a> {
             }
             Expr::ArrayAccess(_, idx) => self.expr(idx),
             Expr::FieldAccess(e, _) | Expr::Await { expr: e } => self.expr(e),
-            Expr::Async { body } | Expr::Lambda { body, .. } => self.stmt(body),
+            Expr::Async { body } => self.stmt(body),
+            Expr::Lambda { params, body, .. } => {
+                // Lambda parameters shadow atom parameters: a lambda-local
+                // `seed` is not the witness.
+                let saved: Vec<(&'a str, Option<BTreeSet<&'a str>>)> = params
+                    .iter()
+                    .map(|p| (p.name.as_str(), self.derived.remove(p.name.as_str())))
+                    .collect();
+                self.stmt(body);
+                for (name, carried) in saved {
+                    match carried {
+                        Some(carried) => {
+                            self.derived.insert(name, carried);
+                        }
+                        None => {
+                            self.derived.remove(name);
+                        }
+                    }
+                }
+            }
             Expr::Match { target, arms } => {
                 self.expr(target);
                 for arm in arms {
