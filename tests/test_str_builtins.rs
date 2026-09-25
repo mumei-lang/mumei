@@ -56,6 +56,18 @@ fn str_builtins_verify() {
 }
 
 #[test]
+fn user_atoms_shadow_string_builtin_names() {
+    let (ok, out) = mumei_verify_uncached("tests/test_str_builtins_list_shadow.mm");
+    assert!(ok, "user atoms must shadow Str builtin names:\n{out}");
+    for atom in ["unqualified_list_is_empty", "qualified_list_is_empty"] {
+        assert!(
+            out.contains(&format!("'{atom}': verified")),
+            "expected {atom} to verify:\n{out}"
+        );
+    }
+}
+
+#[test]
 fn str_builtins_verify_in_bitvec_mode() {
     let (ok, out) =
         mumei_verify_uncached_with_args("tests/test_str_builtins_bitvec.mm", &["--bitvec-i64"]);

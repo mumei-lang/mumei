@@ -52,6 +52,7 @@ atom find(s: Str, p: Str) -> i64
         index_of(s, p)
     };
 
+// 字句的な検査のみ（接頭辞と ".." の不在）であり、ファイルシステムやシンボリックリンクは解決しない。
 atom is_safe_tmp_path(path: Str) -> i64
     requires: true;
     ensures:

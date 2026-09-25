@@ -947,6 +947,15 @@ fn is_translated_builtin(name: &str) -> bool {
     )
 }
 
+fn lookup_call_atom<'a>(module_env: &'a ModuleEnv, name: &str) -> Option<&'a Atom> {
+    module_env.get_atom(name).or_else(|| {
+        let fqn_name = name.replace('.', "::");
+        (fqn_name != name)
+            .then(|| module_env.get_atom(&fqn_name))
+            .flatten()
+    })
+}
+
 fn collect_expr_symbols(
     expr: &Expr,
     module_env: &ModuleEnv,
@@ -956,7 +965,7 @@ fn collect_expr_symbols(
 ) {
     match expr {
         Expr::Call(name, args) => {
-            if let Some(atom) = module_env.get_atom(name) {
+            if let Some(atom) = lookup_call_atom(module_env, name) {
                 if atom.trust_level == TrustLevel::Trusted {
                     push_symbol(symbols, seen, name, "trusted_atom", Some(atom.span.clone()));
                 }

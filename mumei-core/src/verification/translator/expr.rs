@@ -158,6 +158,10 @@ fn callee_semantics_match_caller(vc: &VCtx<'_>, callee: &Atom) -> bool {
     callee_bv == vc.bitvec_i64
 }
 
+fn user_defines_callee(vc: &VCtx<'_>, name: &str) -> bool {
+    vc.local_lambdas.borrow().contains_key(name) || vc.module_env.get_atom(name).is_some()
+}
+
 /// Discharge the shift-range obligations collected while lowering clauses
 /// without a solver (`requires`, `ensures`, invariants). Called once the
 /// atom's solver holds the preconditions, so a shift amount that a `requires`
@@ -917,7 +921,7 @@ pub(crate) fn expr_to_z3<'a>(
                         Ok(Bool::from_bool(ctx, true).into())
                     }
                 }
-                "is_empty" => {
+                "is_empty" if !user_defines_callee(vc, name) => {
                     if args.len() != 1 {
                         return Err(MumeiError::verification(
                             "is_empty() requires exactly 1 argument: (string)",
@@ -934,7 +938,7 @@ pub(crate) fn expr_to_z3<'a>(
                     let length = unsafe { Int::wrap(ctx, ast) };
                     Ok(length._eq(&Int::from_i64(ctx, 0)).into())
                 }
-                "index_of" => {
+                "index_of" if !user_defines_callee(vc, name) => {
                     if args.len() != 2 {
                         return Err(MumeiError::verification(
                             "index_of() requires exactly 2 arguments: (string, pattern)",
@@ -960,7 +964,7 @@ pub(crate) fn expr_to_z3<'a>(
                     };
                     Ok(unsafe { Int::wrap(ctx, ast) }.into())
                 }
-                "substr" => {
+                "substr" if !user_defines_callee(vc, name) => {
                     if args.len() != 3 {
                         return Err(MumeiError::verification(
                             "substr() requires exactly 3 arguments: (string, start, count)",
@@ -987,7 +991,7 @@ pub(crate) fn expr_to_z3<'a>(
                     };
                     Ok(unsafe { Z3String::wrap(ctx, ast) }.into())
                 }
-                "char_at" => {
+                "char_at" if !user_defines_callee(vc, name) => {
                     if args.len() != 2 {
                         return Err(MumeiError::verification(
                             "char_at() requires exactly 2 arguments: (string, index)",
