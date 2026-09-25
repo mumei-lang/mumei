@@ -235,12 +235,23 @@ pub fn parse_expr(ctx: &mut ParseContext, min_bp: u8) -> Expr {
             }
             if tok == Token::Pipe {
                 ctx.advance();
+                let rhs_starts_bare_lambda = ctx.peek() == &Token::Bar;
                 let rhs = parse_expr(ctx, r_bp);
+                if rhs_starts_bare_lambda {
+                    ctx.syntax_failure(
+                        "pipeline lambda must be parenthesized: x |> (|y| ...)".to_string(),
+                    );
+                    continue;
+                }
                 lhs = match rhs {
                     Expr::Variable(name) => Expr::Call(name, vec![lhs]),
                     Expr::Call(name, mut args) => {
                         args.push(lhs);
                         Expr::Call(name, args)
+                    }
+                    Expr::CallRef { callee, mut args } => {
+                        args.push(lhs);
+                        Expr::CallRef { callee, args }
                     }
                     Expr::Lambda { .. } => Expr::CallRef {
                         callee: Box::new(rhs),
@@ -808,6 +819,87 @@ pub fn parse_block_or_stmt(ctx: &mut ParseContext) -> Stmt {
     }
 }
 
+fn stmt_assigns_var(stmt: &Stmt, var: &str) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } => expr_assigns_var(value, var),
+        Stmt::Assign {
+            var: assigned_var,
+            value,
+            ..
+        } => assigned_var == var || expr_assigns_var(value, var),
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_assigns_var(index, var) || expr_assigns_var(value, var)
+        }
+        Stmt::Block(stmts, _) => stmts.iter().any(|stmt| stmt_assigns_var(stmt, var)),
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            expr_assigns_var(cond, var)
+                || expr_assigns_var(invariant, var)
+                || decreases
+                    .as_deref()
+                    .is_some_and(|expr| expr_assigns_var(expr, var))
+                || stmt_assigns_var(body, var)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_assigns_var(body, var),
+        Stmt::TaskGroup { children, .. } => children.iter().any(|stmt| stmt_assigns_var(stmt, var)),
+        Stmt::Cancel { .. } => false,
+        Stmt::Expr(expr, _) => expr_assigns_var(expr, var),
+    }
+}
+
+fn expr_assigns_var(expr: &Expr, var: &str) -> bool {
+    match expr {
+        Expr::ArrayLit(items) => items.iter().any(|expr| expr_assigns_var(expr, var)),
+        Expr::ArrayAccess(_, index) => expr_assigns_var(index, var),
+        Expr::BinaryOp(left, _, right) => {
+            expr_assigns_var(left, var) || expr_assigns_var(right, var)
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_assigns_var(cond, var)
+                || stmt_assigns_var(then_branch, var)
+                || stmt_assigns_var(else_branch, var)
+        }
+        Expr::Call(_, args) => args.iter().any(|expr| expr_assigns_var(expr, var)),
+        Expr::StructInit { fields, .. } => {
+            fields.iter().any(|(_, expr)| expr_assigns_var(expr, var))
+        }
+        Expr::FieldAccess(base, _) => expr_assigns_var(base, var),
+        Expr::Match { target, arms } => {
+            expr_assigns_var(target, var)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_deref()
+                        .is_some_and(|expr| expr_assigns_var(expr, var))
+                        || stmt_assigns_var(&arm.body, var)
+                })
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_assigns_var(body, var),
+        Expr::Await { expr } => expr_assigns_var(expr, var),
+        Expr::CallRef { callee, args } => {
+            expr_assigns_var(callee, var) || args.iter().any(|expr| expr_assigns_var(expr, var))
+        }
+        Expr::Perform { args, .. } => args.iter().any(|expr| expr_assigns_var(expr, var)),
+        Expr::ChanSend { channel, value } => {
+            expr_assigns_var(channel, var) || expr_assigns_var(value, var)
+        }
+        Expr::ChanRecv { channel } => expr_assigns_var(channel, var),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+    }
+}
+
 /// Parse a single statement.
 pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
     let stmt_span = ctx.current_span();
@@ -920,6 +1012,10 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
             } else {
                 Expr::Variable("__mumei_missing_range_bound".to_string())
             };
+            let lo_var = format!("__for_lo_{var}");
+            let hi_var = format!("__for_hi_{var}");
+            let lo_ref = Expr::Variable(lo_var.clone());
+            let hi_ref = Expr::Variable(hi_var.clone());
             let user_invariant = if ctx.peek() == &Token::Invariant {
                 ctx.advance();
                 if ctx.peek() == &Token::Colon {
@@ -939,22 +1035,7 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                 None
             };
             let user_body = parse_block_or_stmt(ctx);
-            let assigns_loop_var = match &user_body {
-                Stmt::Block(stmts, _) => stmts.iter().any(|stmt| {
-                    matches!(
-                        stmt,
-                        Stmt::Assign {
-                            var: assigned_var,
-                            ..
-                        } if assigned_var == &var
-                    )
-                }),
-                Stmt::Assign {
-                    var: assigned_var, ..
-                } => assigned_var == &var,
-                _ => false,
-            };
-            if assigns_loop_var {
+            if stmt_assigns_var(&user_body, &var) {
                 ctx.syntax_failure(format!(
                     "for loop body must not assign to loop variable `{var}`"
                 ));
@@ -977,7 +1058,7 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
             };
             let auto_invariant = Expr::BinaryOp(
                 Box::new(Expr::BinaryOp(
-                    Box::new(lo.clone()),
+                    Box::new(lo_ref.clone()),
                     Op::Le,
                     Box::new(Expr::Variable(var.clone())),
                 )),
@@ -986,13 +1067,13 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                     Box::new(Expr::BinaryOp(
                         Box::new(Expr::Variable(var.clone())),
                         Op::Le,
-                        Box::new(hi.clone()),
+                        Box::new(hi_ref.clone()),
                     )),
                     Op::Or,
                     Box::new(Expr::BinaryOp(
                         Box::new(Expr::Variable(var.clone())),
                         Op::Eq,
-                        Box::new(lo.clone()),
+                        Box::new(lo_ref.clone()),
                     )),
                 )),
             );
@@ -1003,7 +1084,7 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
             };
             let decreases = user_decreases.unwrap_or_else(|| {
                 Expr::BinaryOp(
-                    Box::new(hi.clone()),
+                    Box::new(hi_ref.clone()),
                     Op::Sub,
                     Box::new(Expr::Variable(var.clone())),
                 )
@@ -1011,15 +1092,25 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
             Stmt::Block(
                 vec![
                     Stmt::Let {
-                        var: var.clone(),
+                        var: lo_var,
                         value: Box::new(lo),
+                        span: stmt_span.clone(),
+                    },
+                    Stmt::Let {
+                        var: hi_var,
+                        value: Box::new(hi),
+                        span: stmt_span.clone(),
+                    },
+                    Stmt::Let {
+                        var: var.clone(),
+                        value: Box::new(lo_ref),
                         span: stmt_span.clone(),
                     },
                     Stmt::While {
                         cond: Box::new(Expr::BinaryOp(
                             Box::new(Expr::Variable(var)),
                             Op::Lt,
-                            Box::new(hi),
+                            Box::new(hi_ref),
                         )),
                         invariant: Box::new(invariant),
                         decreases: Some(Box::new(decreases)),

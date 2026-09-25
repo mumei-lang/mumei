@@ -1597,13 +1597,25 @@ extern "Rust" {
         let stmt = parse_body_expr("for i in 0..n { acc = acc + i }");
         match stmt {
             Stmt::Block(stmts, _) => {
-                assert_eq!(stmts.len(), 2);
+                assert_eq!(stmts.len(), 4);
                 assert!(matches!(
                     &stmts[0],
                     Stmt::Let { var, value, .. }
-                        if var == "i" && matches!(value.as_ref(), Expr::Number(0))
+                        if var == "__for_lo_i" && matches!(value.as_ref(), Expr::Number(0))
                 ));
-                match &stmts[1] {
+                assert!(matches!(
+                    &stmts[1],
+                    Stmt::Let { var, value, .. }
+                        if var == "__for_hi_i"
+                            && matches!(value.as_ref(), Expr::Variable(name) if name == "n")
+                ));
+                assert!(matches!(
+                    &stmts[2],
+                    Stmt::Let { var, value, .. }
+                        if var == "i"
+                            && matches!(value.as_ref(), Expr::Variable(name) if name == "__for_lo_i")
+                ));
+                match &stmts[3] {
                     Stmt::While {
                         cond,
                         invariant,
@@ -1615,15 +1627,15 @@ extern "Rust" {
                             cond.as_ref(),
                             Expr::BinaryOp(left, Op::Lt, right)
                                 if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
-                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "n")
+                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "__for_hi_i")
                         ));
                         assert!(matches!(
                             invariant.as_ref(),
                             Expr::BinaryOp(auto, Op::And, rest)
                                 if matches!(
                                     auto.as_ref(),
-                                    Expr::BinaryOp(left, Op::Le, right)
-                                        if matches!(left.as_ref(), Expr::Number(0))
+                                Expr::BinaryOp(left, Op::Le, right)
+                                        if matches!(left.as_ref(), Expr::Variable(name) if name == "__for_lo_i")
                                             && matches!(right.as_ref(), Expr::Variable(name) if name == "i")
                                 ) && matches!(
                                     rest.as_ref(),
@@ -1632,19 +1644,19 @@ extern "Rust" {
                                             bounds.as_ref(),
                                             Expr::BinaryOp(left, Op::Le, right)
                                                 if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
-                                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "n")
+                                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "__for_hi_i")
                                         ) && matches!(
                                             start.as_ref(),
                                             Expr::BinaryOp(left, Op::Eq, right)
                                                 if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
-                                                    && matches!(right.as_ref(), Expr::Number(0))
+                                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "__for_lo_i")
                                         )
                                 )
                         ));
                         assert!(matches!(
                             decreases.as_ref(),
                             Expr::BinaryOp(left, Op::Sub, right)
-                                if matches!(left.as_ref(), Expr::Variable(name) if name == "n")
+                                if matches!(left.as_ref(), Expr::Variable(name) if name == "__for_hi_i")
                                     && matches!(right.as_ref(), Expr::Variable(name) if name == "i")
                         ));
                         match body.as_ref() {
@@ -1687,14 +1699,14 @@ extern "Rust" {
             invariant,
             decreases: Some(decreases),
             ..
-        } = &stmts[1]
+        } = &stmts[3]
         else {
             panic!("expected desugared while");
         };
         assert!(matches!(
             invariant.as_ref(),
             Expr::BinaryOp(auto, Op::And, user)
-                if matches!(user.as_ref(), Expr::BinaryOp(_, Op::Ge, _))
+                    if matches!(user.as_ref(), Expr::BinaryOp(_, Op::Ge, _))
                     && matches!(auto.as_ref(), Expr::BinaryOp(_, Op::And, _))
         ));
         assert!(matches!(
@@ -1734,6 +1746,15 @@ extern "Rust" {
             }),
             "expected loop variable assignment diagnostic, got {failures:?}"
         );
+
+        let nested_failures = parse_body_expr_checked("for i in 0..n { if i >= 0 { i = i } }")
+            .expect_err("nested loop-variable assignment must be rejected");
+        assert!(
+            nested_failures.iter().any(|failure| {
+                failure.contains("for loop body must not assign to loop variable `i`")
+            }),
+            "expected nested loop variable assignment diagnostic, got {nested_failures:?}"
+        );
     }
 
     #[test]
@@ -1771,10 +1792,26 @@ extern "Rust" {
 
     #[test]
     fn test_parse_pipeline_lambda_and_rejects_unsupported_rhs() {
+        let failures = parse_body_expr_checked("x |> |y| y + 1 |> g")
+            .expect_err("bare pipeline lambda must be rejected");
+        assert!(
+            failures.iter().any(|failure| {
+                failure.contains("pipeline lambda must be parenthesized: x |> (|y| ...)")
+            }),
+            "expected bare pipeline lambda diagnostic, got {failures:?}"
+        );
+
         assert!(matches!(
-            parse_expression("x |> |y| y + 1"),
+            parse_expression("x |> (|y| y + 1)"),
             Expr::CallRef { callee, args }
                 if matches!(callee.as_ref(), Expr::Lambda { .. })
+                    && matches!(&args[..], [Expr::Variable(name)] if name == "x")
+        ));
+
+        assert!(matches!(
+            parse_expression("x |> call(f)"),
+            Expr::CallRef { callee, args }
+                if matches!(callee.as_ref(), Expr::Variable(name) if name == "f")
                     && matches!(&args[..], [Expr::Variable(name)] if name == "x")
         ));
 
