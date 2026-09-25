@@ -10,12 +10,12 @@ fresh on every push to `std/`.
 
 ## Summary
 
-- **Modules:** 59 (58 OK / 1 FAIL / 0 SKIP)
+- **Modules:** 59 (59 OK / 0 FAIL / 0 SKIP)
 - **Atoms total:** 356 (356 proven · 0 trusted)
 - **Trusted atoms (reviewed contracts):** 0
 - **Trusted atom modules:** none
 - **TODO/FIXME/XXX/HACK markers:** 0
-- **Weighted health score:** 0.990 / 1.000
+- **Weighted health score:** 1.000 / 1.000
 
 ## Trusted atom inventory
 
@@ -28,7 +28,7 @@ _No trusted atoms remain in std/._
 | `std/algebra/finite_field.mm` | 3 | 0 | 0 | OK | 1.000 |
 | `std/alloc.mm` | 26 | 0 | 0 | OK | 1.000 |
 | `std/bitwise.mm` | 5 | 0 | 0 | OK | 1.000 |
-| `std/compliance.mm` | 7 | 0 | 0 | FAIL | 0.500 |
+| `std/compliance.mm` | 7 | 0 | 0 | OK | 1.000 |
 | `std/concurrency/aviation.mm` | 1 | 0 | 0 | OK | 1.000 |
 | `std/container/binary_heap.mm` | 5 | 0 | 0 | OK | 1.000 |
 | `std/container/bounded_array.mm` | 8 | 0 | 0 | OK | 1.000 |

@@ -1,7 +1,7 @@
 {
   "total_modules": 59,
   "total_atoms": 356,
-  "proven_atoms": 349,
+  "proven_atoms": 350,
   "lean_verified_atoms": 0,
   "trusted_atoms": 0,
   "modules": {
@@ -17,12 +17,6 @@
       {
         "name": "ff_zero_eq_zero",
         "z3_check_result": "unknown"
-      }
-    ],
-    "std/compliance": [
-      {
-        "name": "approval_level",
-        "z3_check_result": "skipped"
       }
     ],
     "std/prelude": [
