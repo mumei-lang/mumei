@@ -6,6 +6,7 @@ mod effects;
 mod law_verification;
 mod nominal_types;
 pub(crate) mod reglan;
+mod replay;
 mod resource_safety;
 mod task_ownership;
 mod units;
@@ -21,6 +22,12 @@ pub(crate) use effects::{
     verify_effect_consistency, verify_effect_containment, verify_effect_params, EffectCtx,
 };
 pub use effects::{AllowedEffect, SecurityPolicy};
+
+pub use replay::ReplayViolation;
+pub(crate) use replay::{
+    check_replayability, declared_nondeterministic_effects, nondeterministic_root,
+    verify_replayability, witness_params,
+};
 
 pub(crate) use resource_safety::{
     collect_acquire_resources_expr, collect_acquire_resources_stmt, verify_async_recursion_depth,

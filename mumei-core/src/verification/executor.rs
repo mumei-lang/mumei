@@ -724,6 +724,13 @@ pub(crate) fn verify_inner(
     }
     metrics.record_phase("Phase 1f: effect containment", phase_start.elapsed());
 
+    // Phase 1f-1: Replayability — non-deterministic effects (Random/Clock/ExternalInput)
+    // must be received through an explicit witness parameter and threaded into
+    // every perform, so the same inputs reproduce the same trace.
+    let phase_start = std::time::Instant::now();
+    verify_replayability(atom, &hir_atom.body_stmt, module_env, output_dir)?;
+    metrics.record_phase("Phase 1f-1: replayability", phase_start.elapsed());
+
     // Phase 1b: 有界モデル検査（ループ内 acquire パターン）
     let phase_start = std::time::Instant::now();
     verify_bmc_resource_safety(atom, &hir_atom.body_stmt, module_env, global_max_unroll)?;

@@ -399,6 +399,52 @@ atom process_json(input: Str)
 | `http::free(handle)` | Release HTTP response handle |
 
 ---
+## Non-deterministic Effects and Replayability
+
+`std/effects.mm` declares three built-in effects for sources outside the program:
+
+| Effect | Source | Required witness parameter |
+|---|---|---|
+| `Random` | pseudo-random values | `seed` |
+| `Clock` | wall-clock / monotonic time | `timestamp` (also `now`, `clock`) |
+| `ExternalInput` | user / sensor / network input | `input` (also `external_input`) |
+
+A parameter matches a witness name exactly or with a `_suffix` (`seed_a`, `timestamp_ms`).
+
+An atom that declares one of these effects must **isolate the source at the type
+level**: the non-deterministic value enters only through the witness parameter and
+the witness is passed to every `perform` of that effect.
+
+```mumei
+effect Random;
+
+atom roll(seed: i64) -> i64
+effects: [Random];
+ensures: result >= 0;
+body: {
+    let r = perform Random.next(seed);
+    if r >= 0 { r } else { 0 - r }
+};
+```
+
+Rejected at compile time (`Replayability violation`):
+
+- `effects: [Random]` with no `seed` parameter (`atom roll(x: i64)`).
+- `perform Random.next(x)` where `x` is not derived from `seed`.
+
+A pure atom (no `effects:`) that performs `Random`/`Clock`/`ExternalInput` is
+rejected by the ordinary effect containment check, as for any other effect.
+
+**Guarantee.** Because every non-deterministic value is a function of explicit
+parameters, `roll(seed)` is replayable: the same arguments reproduce the same
+trace. In `ensures` verification the witness is universally quantified like any
+other input, and `perform Random.next(seed)` is modelled as an uninterpreted
+function of its arguments — two performs with equal arguments denote the same
+value, but nothing else is assumed about it. Under `--property-based-test` the
+source value is derived deterministically from the generated witness, so a fixed
+`--property-based-test-seed` replays the same inputs and the same counterexample.
+
+---
 ## Stateful Effects (Temporal Ordering)
 
 Keep state machines finite with explicit transitions; see [Effects and temporal state](SPEC_GUIDE.md#effects-and-temporal-state).

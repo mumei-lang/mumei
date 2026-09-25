@@ -1,4 +1,5 @@
 use super::module_env::ModuleEnv;
+use super::support::{declared_nondeterministic_effects, nondeterministic_root, witness_params};
 use super::translator::{
     apply_refinement_constraint, expr_to_z3, param_z3_value, stmt_to_z3, VCtx,
     DEFAULT_CONSTRAINT_BUDGET, I64_BITS,
@@ -10,6 +11,7 @@ use super::{
 use crate::parser::{Expr, Op, Param, RefinedType, Stmt};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use z3::ast::Ast;
 
 const DEFAULT_INTEGER_BOUND: i64 = 100;
 const MAX_ARRAY_LEN: usize = 8;
@@ -838,10 +840,80 @@ fn evaluate_body(
     let mut env = seed_concrete_env(&ctx, atom, module_env, assignment, None, bitvec_i64);
     let body = parse_body_expr(&atom.body_expr);
     let value = stmt_to_z3(&vc, &body, &mut env, Some(&solver)).ok()?;
+    bind_nondeterministic_sources(&solver, atom, module_env, assignment, &env);
     if !matches!(solver.check(), SatResult::Sat) {
         return None;
     }
     dynamic_to_generated(&value, &solver)
+}
+
+/// Deterministic stand-in for a non-deterministic source during property-based
+/// testing: the value `perform <effect>.<operation>(...)` yields when the atom's
+/// witness parameters take `witness_values`.
+///
+/// It is derived from the witnesses alone (through `DeterministicRng`), so a
+/// generated input replays the same trace on every run, and the same witness
+/// values produce the same source value across atoms and runs.
+pub fn replay_source_value(effect: &str, operation: &str, witness_values: &[i64]) -> i64 {
+    let mut seed: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in effect
+        .bytes()
+        .chain(b".".iter().copied())
+        .chain(operation.bytes())
+    {
+        seed ^= u64::from(byte);
+        seed = seed.wrapping_mul(0x0100_0000_01b3);
+    }
+    for value in witness_values {
+        seed ^= *value as u64;
+        seed = seed.wrapping_mul(0x0100_0000_01b3);
+    }
+    DeterministicRng::new(seed).gen_range(-DEFAULT_INTEGER_BOUND, DEFAULT_INTEGER_BOUND)
+}
+
+/// Pin every `__perform_<effect>_<op>` value of a non-deterministic effect to
+/// `replay_source_value` of the atom's concrete witness parameters.
+fn bind_nondeterministic_sources<'a>(
+    solver: &Solver<'a>,
+    atom: &Atom,
+    module_env: &ModuleEnv,
+    assignment: &HashMap<String, GeneratedValue>,
+    env: &Env<'a>,
+) {
+    let ctx = solver.get_context();
+    for root in declared_nondeterministic_effects(atom, module_env) {
+        let witness_values: Vec<i64> = witness_params(atom, root)
+            .into_iter()
+            .filter_map(|name| match assignment.get(name) {
+                Some(GeneratedValue::Int(value)) => Some(*value),
+                Some(GeneratedValue::Bool(value)) => Some(i64::from(*value)),
+                _ => None,
+            })
+            .collect();
+        let mut keys: Vec<&String> = env
+            .keys()
+            .filter(|key| key.starts_with("__perform_"))
+            .collect();
+        keys.sort();
+        for key in keys {
+            let Some(rest) = key.strip_prefix("__perform_") else {
+                continue;
+            };
+            let Some((effect, operation)) = rest.split_once('_') else {
+                continue;
+            };
+            if nondeterministic_root(module_env, effect) != Some(root) {
+                continue;
+            }
+            let replay = replay_source_value(effect, operation, &witness_values);
+            let source = &env[key];
+            if let Some(int_value) = source.as_int() {
+                solver.assert(&int_value._eq(&Int::from_i64(ctx, replay)));
+            } else if let Some(bv_value) = source.as_bv() {
+                solver.assert(&bv_value._eq(&z3::ast::BV::from_i64(ctx, replay, I64_BITS)));
+            }
+        }
+    }
 }
 
 fn dynamic_to_generated(value: &Dynamic<'_>, solver: &Solver<'_>) -> Option<GeneratedValue> {
@@ -962,6 +1034,12 @@ fn seed_concrete_env<'a>(
     let mut env: Env<'a> = HashMap::new();
     env.insert("true".to_string(), Bool::from_bool(ctx, true).into());
     env.insert("false".to_string(), Bool::from_bool(ctx, false).into());
+    for effect_name in module_env.resolve_effect_set_from_effects(&atom.effects) {
+        env.insert(
+            format!("__effect_allowed_{}", effect_name),
+            Bool::from_bool(ctx, true).into(),
+        );
+    }
     for param in &atom.params {
         let value = assignment
             .get(&param.name)

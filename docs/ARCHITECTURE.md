@@ -706,6 +706,35 @@ Sort solving is significantly slower than Int Sort.
 **Constraint Budget**: Each Z3 String constraint creation is tracked against the
 per-atom constraint budget (default: 1000) to prevent solver explosion.
 
+### Non-deterministic Effects and Replayability
+
+`Random`, `Clock` and `ExternalInput` (`std/effects.mm`) mark atoms whose behaviour
+depends on a source outside the program. `verification/support/replay.rs` isolates
+those sources so that agent / distributed logic is replayable:
+
+1. **Phase 1f-1 (replayability, after effect containment)** — for each declared
+   non-deterministic leaf effect (composites and `parent:` children are resolved
+   through `ModuleEnv::is_subeffect`), the atom must have a *witness* parameter
+   (`seed` / `timestamp` / `input`, or `<witness>_suffix`) and every
+   `perform <Effect>.<op>(args)` must mention that witness in `args`
+   (`check_replayability`). Violations produce a `Replayability violation`
+   diagnostic and a `report.json` with `violation_type: "replayability"` and
+   `failure_type: effect_not_allowed`.
+2. **Z3 modelling** — `translator/expr.rs::nondeterministic_perform_result` encodes
+   the perform result as an uninterpreted function `__nd___perform_<Effect>_<op>`
+   of its numeric arguments (`Int` or `BV(64)` under `bitvec_i64`), instead of a
+   fresh constant. The witness parameter is therefore universally quantified in
+   `ensures` verification while equal arguments denote equal results, so the
+   generation path is statically deterministic.
+3. **Property-based testing** — `property_based.rs::bind_nondeterministic_sources`
+   pins each non-deterministic perform to `replay_source_value(effect, op, witnesses)`,
+   a `DeterministicRng` value derived only from the effect name and the concrete
+   witness values. With a fixed `PropertyBasedTestConfig::seed`, generated inputs,
+   source values and shrunk counterexamples are bit-for-bit reproducible.
+
+Pure atoms never reach phase 1f-1: performing a non-deterministic source without
+declaring it is rejected by effect containment (`__effect_allowed_*`).
+
 ### Stateful Effects (Temporal Effect Verification)
 
 Mumei supports **stateful effects** — effects with defined states and transitions that
