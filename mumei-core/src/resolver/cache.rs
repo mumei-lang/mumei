@@ -6,6 +6,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
+/// Bump when verifier semantics change so cached proofs are re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
     /// ソースファイルの SHA-256 ハッシュ
@@ -185,6 +188,7 @@ pub fn compute_proof_hash_with_flags(
     flags: &[&str],
 ) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(format!("|policy:{VERIFIER_POLICY_VERSION}").as_bytes());
 
     // 1. Include everything from the basic atom hash
     hasher.update(atom.name.as_bytes());

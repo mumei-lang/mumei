@@ -108,6 +108,8 @@ pub(crate) fn check_contract_subsumption<'a>(
     // Only the concrete atom's own parameter names are bound — no hardcoded
     // aliases — so there is no risk of accidental name collisions.
     let mut sub_env: Env<'_> = HashMap::new();
+    let mut param_values = Vec::with_capacity(concrete_atom.params.len());
+    let mut array_len_constraints = Vec::new();
     for param in &concrete_atom.params {
         let z3_var = param_z3_value(
             ctx,
@@ -117,7 +119,34 @@ pub(crate) fn check_contract_subsumption<'a>(
             vc.ieee754_f64,
             vc.bitvec_i64,
         );
+        if param
+            .type_name
+            .as_deref()
+            .is_some_and(|type_name| type_name.trim_start().starts_with('['))
+        {
+            let len = array_len_symbol(ctx, &format!("len_{}", param.name), vc.bitvec_i64);
+            if let Some(nonneg) = nonneg_constraint(ctx, &len) {
+                array_len_constraints.push(nonneg);
+            }
+            sub_env.insert(format!("len_{}", param.name), len);
+        }
+        param_values.push(z3_var.clone());
         sub_env.insert(param.name.clone(), z3_var);
+    }
+
+    for (i, value) in param_values.iter().enumerate() {
+        let alias = format!("arg{i}");
+        sub_env.entry(alias).or_insert_with(|| value.clone());
+    }
+    if let Some(first) = param_values.first() {
+        sub_env
+            .entry("x".to_string())
+            .or_insert_with(|| first.clone());
+    }
+    if let Some(second) = param_values.get(1) {
+        sub_env
+            .entry("y".to_string())
+            .or_insert_with(|| second.clone());
     }
 
     // Create a fresh symbolic result that both ensures clauses reference.
@@ -201,6 +230,9 @@ pub(crate) fn check_contract_subsumption<'a>(
     // Check: requires ∧ concrete_ensures ∧ ¬contract_ensures is UNSAT
     //        ⟺  (requires ∧ concrete_ensures) ⇒ contract_ensures
     solver.push();
+    for constraint in &array_len_constraints {
+        solver.assert(constraint);
+    }
     if let Some(ref req_bool) = requires_bool_opt {
         solver.assert(req_bool);
     }

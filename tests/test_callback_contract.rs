@@ -35,3 +35,15 @@ fn callback_contract_subsumption_accepts_string_callback() {
     let (ok, output) = verify_fixture("tests/positive/test_callback_contract_str_ok.mm");
     assert!(ok, "{output}");
 }
+
+#[test]
+fn callback_contract_subsumption_accepts_alias_callback() {
+    let (ok, output) = verify_fixture("tests/positive/test_callback_contract_alias_ok.mm");
+    assert!(ok, "{output}");
+}
+
+#[test]
+fn callback_contract_subsumption_accepts_array_callback() {
+    let (ok, output) = verify_fixture("tests/positive/test_callback_contract_array_ok.mm");
+    assert!(ok, "{output}");
+}

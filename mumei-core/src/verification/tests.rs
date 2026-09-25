@@ -2140,6 +2140,82 @@ fn test_subsumption_check_bool_param_and_result() {
 }
 
 #[test]
+fn test_subsumption_check_call_ref_alias_x() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: None,
+        effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
+        ieee754_f64: false,
+        bitvec_i64: false,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        bitvec_i64_global: false,
+    };
+    let concrete = Atom {
+        name: "identity".to_string(),
+        type_params: vec![],
+        where_bounds: vec![],
+        params: vec![Param {
+            name: "n".to_string(),
+            type_name: Some("i64".to_string()),
+            type_ref: None,
+            is_ref: false,
+            is_ref_mut: false,
+            fn_contract_requires: None,
+            fn_contract_ensures: None,
+        }],
+        trace_id: None,
+        spec_metadata: std::collections::HashMap::new(),
+        requires: "true".to_string(),
+        forall_constraints: vec![],
+        ensures: "result == n".to_string(),
+        body_expr: "n".to_string(),
+        consumed_params: vec![],
+        resources: vec![],
+        is_async: false,
+        trust_level: TrustLevel::Verified,
+        max_unroll: None,
+        invariant: None,
+        effects: vec![],
+        return_type: Some("i64".to_string()),
+        span: Span::default(),
+        effect_pre: std::collections::HashMap::new(),
+        effect_post: std::collections::HashMap::new(),
+    };
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result == x",
+        None,
+        "apply_identity",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_ok(),
+        "CallRef alias x should map to the first callback parameter: {result:?}"
+    );
+}
+
+#[test]
 fn test_subsumption_check_fails_without_requires() {
     // negate: requires x >= 0, ensures result == 0 - x
     // contract: ensures result >= 0
