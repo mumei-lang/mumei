@@ -940,6 +940,10 @@ fn is_translated_builtin(name: &str) -> bool {
             | "ends_with"
             | "contains"
             | "not_contains"
+            | "is_empty"
+            | "index_of"
+            | "substr"
+            | "char_at"
     )
 }
 

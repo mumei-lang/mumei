@@ -917,6 +917,102 @@ pub(crate) fn expr_to_z3<'a>(
                         Ok(Bool::from_bool(ctx, true).into())
                     }
                 }
+                "is_empty" => {
+                    if args.len() != 1 {
+                        return Err(MumeiError::verification(
+                            "is_empty() requires exactly 1 argument: (string)",
+                        ));
+                    }
+                    let val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    let str_z3 = val.as_string().ok_or_else(|| {
+                        MumeiError::type_error("is_empty() expects a Str argument")
+                    })?;
+                    mark_string_constraints(vc);
+                    let ast = unsafe {
+                        z3_sys::Z3_mk_seq_length(raw_z3_context(ctx), str_z3.get_z3_ast())
+                    };
+                    let length = unsafe { Int::wrap(ctx, ast) };
+                    Ok(length._eq(&Int::from_i64(ctx, 0)).into())
+                }
+                "index_of" => {
+                    if args.len() != 2 {
+                        return Err(MumeiError::verification(
+                            "index_of() requires exactly 2 arguments: (string, pattern)",
+                        ));
+                    }
+                    let str_val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    let pattern_val = expr_to_z3(vc, &args[1], env, solver_opt)?;
+                    let str_z3 = str_val
+                        .as_string()
+                        .ok_or_else(|| MumeiError::type_error("index_of() expects a Str string"))?;
+                    let pattern_z3 = pattern_val.as_string().ok_or_else(|| {
+                        MumeiError::type_error("index_of() expects a Str pattern")
+                    })?;
+                    mark_string_constraints(vc);
+                    let offset = Int::from_i64(ctx, 0);
+                    let ast = unsafe {
+                        z3_sys::Z3_mk_seq_index(
+                            raw_z3_context(ctx),
+                            str_z3.get_z3_ast(),
+                            pattern_z3.get_z3_ast(),
+                            offset.get_z3_ast(),
+                        )
+                    };
+                    Ok(unsafe { Int::wrap(ctx, ast) }.into())
+                }
+                "substr" => {
+                    if args.len() != 3 {
+                        return Err(MumeiError::verification(
+                            "substr() requires exactly 3 arguments: (string, start, count)",
+                        ));
+                    }
+                    let str_val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    let start_val = expr_to_z3(vc, &args[1], env, solver_opt)?;
+                    let count_val = expr_to_z3(vc, &args[2], env, solver_opt)?;
+                    let str_z3 = str_val
+                        .as_string()
+                        .ok_or_else(|| MumeiError::type_error("substr() expects a Str string"))?;
+                    let start = start_val
+                        .as_int()
+                        .ok_or_else(|| MumeiError::type_error("substr() expects an Int start"))?;
+                    let count = count_val
+                        .as_int()
+                        .ok_or_else(|| MumeiError::type_error("substr() expects an Int count"))?;
+                    mark_string_constraints(vc);
+                    let ast = unsafe {
+                        z3_sys::Z3_mk_seq_extract(
+                            raw_z3_context(ctx),
+                            str_z3.get_z3_ast(),
+                            start.get_z3_ast(),
+                            count.get_z3_ast(),
+                        )
+                    };
+                    Ok(unsafe { Z3String::wrap(ctx, ast) }.into())
+                }
+                "char_at" => {
+                    if args.len() != 2 {
+                        return Err(MumeiError::verification(
+                            "char_at() requires exactly 2 arguments: (string, index)",
+                        ));
+                    }
+                    let str_val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    let index_val = expr_to_z3(vc, &args[1], env, solver_opt)?;
+                    let str_z3 = str_val
+                        .as_string()
+                        .ok_or_else(|| MumeiError::type_error("char_at() expects a Str string"))?;
+                    let index = index_val
+                        .as_int()
+                        .ok_or_else(|| MumeiError::type_error("char_at() expects an Int index"))?;
+                    mark_string_constraints(vc);
+                    let ast = unsafe {
+                        z3_sys::Z3_mk_seq_at(
+                            raw_z3_context(ctx),
+                            str_z3.get_z3_ast(),
+                            index.get_z3_ast(),
+                        )
+                    };
+                    Ok(unsafe { Z3String::wrap(ctx, ast) }.into())
+                }
                 _ => {
                     // `let f = |params| body; f(args)` — the callee name
                     // resolves to a `let`/`assign`-bound lambda: inline the

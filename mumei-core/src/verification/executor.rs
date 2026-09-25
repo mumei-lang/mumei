@@ -1307,9 +1307,18 @@ pub(crate) fn verify_inner(
         has_string_constraints_cell_pre.set(true);
     }
     fn text_has_string_constraint(expr: &str) -> bool {
-        ["starts_with(", "ends_with(", "contains(", "not_contains("]
-            .iter()
-            .any(|needle| expr.contains(needle))
+        [
+            "starts_with(",
+            "ends_with(",
+            "contains(",
+            "not_contains(",
+            "is_empty(",
+            "index_of(",
+            "substr(",
+            "char_at(",
+        ]
+        .iter()
+        .any(|needle| expr.contains(needle))
     }
     if !has_string_constraints_cell_pre.get()
         && (text_has_string_constraint(&atom.requires) || text_has_string_constraint(&atom.ensures))

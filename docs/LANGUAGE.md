@@ -173,6 +173,16 @@ First-class string type. String literals are `Str` values. Supported operations:
 | Concatenation | `a + b` | `Str` |
 | Equality | `a == b` | `i64` (0 or 1) |
 | Inequality | `a != b` | `i64` (0 or 1) |
+| Length | `len(s)` | `i64` |
+| Empty check | `is_empty(s)` | `bool` |
+| Prefix/suffix/substring checks | `starts_with(s, p)`, `ends_with(s, p)`, `contains(s, p)`, `not_contains(s, p)` | `bool` |
+| Search | `index_of(s, p)` | `i64` |
+| Extract | `substr(s, i, n)` | `Str` |
+| Character access | `char_at(s, i)` | `Str` |
+
+These string builtins are verification-side operations backed by Z3's string
+theory. They are available in contracts and verified standard-library helpers;
+native code generation (`mumei build`) does not lower them yet.
 
 ```mumei
 atom is_same(a: Str, b: Str)
