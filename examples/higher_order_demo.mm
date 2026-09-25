@@ -30,7 +30,7 @@ atom add(a: i64, b: i64)
 atom apply(x: i64, f: atom_ref(i64) -> i64)
     requires: x >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
     body: call(f, x);
 
 // --- 高階関数: 関数を2回適用する ---
@@ -47,7 +47,7 @@ atom apply_twice(x: i64, f: atom_ref(i64) -> i64)
 atom fold_two(a: i64, b: i64, f: atom_ref(i64, i64) -> i64)
     requires: a >= 0 && b >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0 && y >= 0, ensures: result >= 0;
     body: call(f, a, b);
 
 // --- 使用例を示す atom ---
