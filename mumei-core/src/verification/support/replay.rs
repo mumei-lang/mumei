@@ -274,6 +274,31 @@ impl<'a> PerformCollector<'a> {
         }
     }
 
+    /// Analyse a body that may run zero times, later, or concurrently (lambda,
+    /// async block, task): assignments inside it that drop a witness must be
+    /// honoured, but bindings it establishes may never have happened, so the
+    /// state afterwards is the meet of before and after. `shadowed` names are
+    /// local to the body and keep their outer provenance.
+    fn deferred_body(&mut self, shadowed: &[&'a str], body: &'a Stmt) {
+        let outer = self.derived.clone();
+        for name in shadowed {
+            self.derived.remove(name);
+        }
+        self.stmt(body);
+        let mut after = std::mem::take(&mut self.derived);
+        for name in shadowed {
+            match outer.get(name) {
+                Some(carried) => {
+                    after.insert(name, carried.clone());
+                }
+                None => {
+                    after.remove(name);
+                }
+            }
+        }
+        self.derived = meet(outer, after);
+    }
+
     fn match_arm(&mut self, scrutinee: BTreeSet<&'a str>, arm: &'a crate::parser::MatchArm) {
         let mut bound = Vec::new();
         pattern_vars(&arm.pattern, &mut bound);
@@ -333,17 +358,10 @@ impl<'a> PerformCollector<'a> {
             }
             Expr::ArrayAccess(_, idx) => self.expr(idx),
             Expr::FieldAccess(e, _) | Expr::Await { expr: e } => self.expr(e),
-            Expr::Async { body } => self.stmt(body),
+            Expr::Async { body } => self.deferred_body(&[], body),
             Expr::Lambda { params, body, .. } => {
-                // The lambda body is its own scope: its parameters shadow the
-                // witness, and bindings made inside it (which only happen if
-                // the lambda is ever called) do not flow to the enclosing body.
-                let outer = self.derived.clone();
-                for p in params {
-                    self.derived.remove(p.name.as_str());
-                }
-                self.stmt(body);
-                self.derived = outer;
+                let shadowed: Vec<&'a str> = params.iter().map(|p| p.name.as_str()).collect();
+                self.deferred_body(&shadowed, body);
             }
             Expr::Match { target, arms } => {
                 self.expr(target);
@@ -384,12 +402,27 @@ impl<'a> PerformCollector<'a> {
                 self.expr(value);
                 self.bind(var, value);
             }
-            Stmt::ArrayStore { index, value, .. } => {
+            Stmt::ArrayStore {
+                array,
+                index,
+                value,
+                ..
+            } => {
                 self.expr(index);
                 self.expr(value);
+                // An element is overwritten: the array carries only witnesses
+                // common to its previous contents and the stored value.
+                let stored = self.carried_by(value);
+                let carried: BTreeSet<&'a str> = self
+                    .derived
+                    .get(array.as_str())
+                    .map(|prev| prev.intersection(&stored).copied().collect())
+                    .unwrap_or_default();
+                self.bind_set(array, carried);
             }
             Stmt::While { cond, body, .. } => self.loop_body(cond, body),
-            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => self.stmt(body),
+            Stmt::Acquire { body, .. } => self.stmt(body),
+            Stmt::Task { body, .. } => self.deferred_body(&[], body),
             Stmt::TaskGroup { children, .. } => {
                 for child in children {
                     self.stmt(child);

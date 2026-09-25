@@ -746,8 +746,11 @@ those sources so that agent / distributed logic is replayable:
    witness-carrying operand taints the result, but a value chosen by `if`/`match`
    is derived only from witnesses common to every branch (the condition /
    scrutinee contributes nothing), state after a branch or loop is the meet of
-   all paths (loops iterate to a fixpoint), and a lambda body is its own scope
-   (its parameters shadow the witness; its bindings never leak outward). The
+   all paths (loops iterate to a fixpoint), and a body that may run zero times,
+   later or concurrently (lambda, async, task) is joined with the state before
+   it: assignments inside it can drop a witness but never establish one
+   (lambda parameters shadow the witness). An element store `a[i] = v` keeps
+   only the witnesses common to the array and `v`. The
    walk covers nested expression forms (array/struct literals, indexing, field
    access, lambdas, match, async).
    The resolved roots and witness names are part of the proof-cache hash, so
