@@ -35,6 +35,14 @@ fn callback_contract_requires_violation_is_hard_error() {
 }
 
 #[test]
+fn callback_contract_requires_only_call_violation_is_hard_error() {
+    let (ok, output) =
+        verify_fixture("tests/negative/test_callback_contract_requires_only_call_violation.mm");
+    assert!(!ok, "{output}");
+    assert!(output.contains("precondition") && output.contains("may not hold at call site"));
+}
+
+#[test]
 fn callback_contract_subsumption_accepts_valid_callback() {
     let (ok, output) = verify_fixture("tests/positive/test_callback_contract_ok.mm");
     assert!(ok, "{output}");
@@ -43,6 +51,13 @@ fn callback_contract_subsumption_accepts_valid_callback() {
 #[test]
 fn callback_contract_subsumption_accepts_requires() {
     let (ok, output) = verify_fixture("tests/positive/test_callback_contract_requires_ok.mm");
+    assert!(ok, "{output}");
+}
+
+#[test]
+fn callback_contract_requires_only_call_accepts_valid_argument() {
+    let (ok, output) =
+        verify_fixture("tests/positive/test_callback_contract_requires_only_call_ok.mm");
     assert!(ok, "{output}");
 }
 

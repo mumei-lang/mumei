@@ -2909,8 +2909,10 @@ pub(crate) fn expr_to_z3<'a>(
                         .iter()
                         .find(|p| p.name == *callee_var_name)
                     {
-                        // contract(f): ensures: <expr> が宣言されている場合
-                        if let Some(ref fn_ensures) = param.fn_contract_ensures {
+                        // Check either clause when a callback contract is declared.
+                        if param.fn_contract_ensures.is_some()
+                            || param.fn_contract_requires.is_some()
+                        {
                             let mut contract_env = env.clone();
 
                             // atom_ref のパラメータ型情報から引数名を生成
@@ -2945,8 +2947,9 @@ pub(crate) fn expr_to_z3<'a>(
                                         if let Some(solver) = solver_opt {
                                             solver.push();
                                             solver.assert(&req_bool.not());
-                                            if solver.check() == SatResult::Sat {
-                                                solver.pop(1);
+                                            let sat_result = solver.check();
+                                            solver.pop(1);
+                                            if sat_result == SatResult::Sat {
                                                 return Err(MumeiError::verification(format!(
                                                     "call_with_contract({}): precondition '{}' may not hold at call site",
                                                     callee_var_name, fn_requires
@@ -2955,31 +2958,38 @@ pub(crate) fn expr_to_z3<'a>(
                                                     "関数パラメータの事前条件を満たしていません。引数の制約を確認してください",
                                                 ));
                                             }
-                                            solver.pop(1);
+                                            if sat_result == SatResult::Unknown {
+                                                return Err(MumeiError::verification(format!(
+                                                    "call_with_contract({}): precondition '{}' could not be decided (Z3 unknown)",
+                                                    callee_var_name, fn_requires
+                                                )));
+                                            }
                                         }
                                     }
                                 }
                             }
 
                             // ensures を事実として solver に追加
-                            if fn_ensures.trim() != "true" {
-                                let ens_ast = parse_expression(fn_ensures);
-                                let ens_z3 = expr_to_z3(vc, &ens_ast, &mut contract_env, None)
+                            if let Some(fn_ensures) = param.fn_contract_ensures.as_deref() {
+                                if fn_ensures.trim() != "true" {
+                                    let ens_ast = parse_expression(fn_ensures);
+                                    let ens_z3 = expr_to_z3(vc, &ens_ast, &mut contract_env, None)
                                     .map_err(|e| MumeiError::verification(format!(
                                         "call_with_contract({}): failed to evaluate ensures '{}': {}",
                                         callee_var_name, fn_ensures, e
                                     )))?;
-                                if let Some(ens_bool) = ens_z3.as_bool() {
-                                    if let Some(solver) = solver_opt {
-                                        solver.assert(&ens_bool);
-                                        profile_solver_assertion(
-                                            vc,
-                                            &format!(
-                                                "call_with_contract_{}_ensures",
-                                                callee_var_name
-                                            ),
-                                            None,
-                                        );
+                                    if let Some(ens_bool) = ens_z3.as_bool() {
+                                        if let Some(solver) = solver_opt {
+                                            solver.assert(&ens_bool);
+                                            profile_solver_assertion(
+                                                vc,
+                                                &format!(
+                                                    "call_with_contract_{}_ensures",
+                                                    callee_var_name
+                                                ),
+                                                None,
+                                            );
+                                        }
                                     }
                                 }
                             }
