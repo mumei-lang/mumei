@@ -69,13 +69,24 @@ fn user_atoms_shadow_string_builtin_names() {
 
 #[test]
 fn str_builtins_verify_in_bitvec_mode() {
-    let (ok, out) = mumei_verify_uncached_with_args(
-        "tests/test_str_builtins_bitvec_decidable.mm",
-        &["--bitvec-i64"],
-    );
+    let (ok, out) =
+        mumei_verify_uncached_with_args("tests/test_str_builtins_bitvec.mm", &["--bitvec-i64"]);
     assert!(
         ok,
         "Str builtin fixture must verify in bit-vector mode:\n{out}"
+    );
+}
+
+#[test]
+fn str_substr_len_fails_closed_in_bitvec_mode() {
+    let (ok, out) = mumei_verify_uncached_with_args(
+        "tests/negative/test_str_builtins_bitvec_unknown.mm",
+        &["--bitvec-i64"],
+    );
+    assert!(!ok, "mixed Str/bit-vector goal must fail closed:\n{out}");
+    assert!(
+        out.contains("unknown") || out.contains("Lean"),
+        "expected an unknown or Lean-escalation diagnostic:\n{out}"
     );
 }
 
@@ -104,7 +115,7 @@ fn string_counterexample_replays_lengths_and_builtins() {
         .expect("string length should be serialized as an integer");
     assert_eq!(len_s, string.chars().count() as i64);
     assert_eq!(
-        payload["semantic_feedback"]["reconstruction_loss"]["validation_status"],
+        payload["semantic_feedback"]["counterexample_validation_status"],
         serde_json::json!("validated")
     );
 }

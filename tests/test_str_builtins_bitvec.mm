@@ -17,8 +17,3 @@ atom string_contains(s: Str, p: Str) -> bool
     requires: true;
     ensures: result == contains(s, p);
     body: contains(s, p);
-
-atom string_substr_len(s: Str, i: i64, n: i64) -> Str
-    requires: i >= 0 && n >= 0 && i + n <= len(s);
-    ensures: len(result) == n;
-    body: substr(s, i, n);

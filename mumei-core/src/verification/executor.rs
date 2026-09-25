@@ -1634,14 +1634,7 @@ pub(crate) fn verify_inner(
     // 2c. 全パラメータに対して配列長シンボルを事前生成
     #[allow(clippy::map_entry)]
     for param in &atom.params {
-        let is_string = env
-            .get(&param.name)
-            .is_some_and(|value| value.as_string().is_some());
-        if is_string {
-            let string = env
-                .get(&param.name)
-                .and_then(|value| value.as_string())
-                .expect("string parameter disappeared from verification environment");
+        if let Some(string) = env.get(&param.name).and_then(|value| value.as_string()) {
             let ast =
                 unsafe { z3_sys::Z3_mk_seq_length(raw_z3_context(&ctx), string.get_z3_ast()) };
             env.insert(
@@ -2115,13 +2108,12 @@ pub(crate) fn verify_inner(
                             FAILURE_POSTCONDITION_VIOLATED,
                             None,
                         );
-                        if let (Some(feedback), Some(loss)) =
-                            (&mut semantic_fb, reconstruction_loss)
-                        {
-                            feedback["reconstruction_loss"] = json!(loss);
+                        if let Some(feedback) = &mut semantic_fb {
+                            if let Some(loss) = reconstruction_loss {
+                                feedback["reconstruction_loss"] = json!(loss);
+                            }
                             if let Some(status) = validation_status {
-                                feedback["reconstruction_loss"]["validation_status"] =
-                                    json!(status);
+                                feedback["counterexample_validation_status"] = json!(status);
                             }
                         }
                         let loss_vector = if reconstruction_loss_output_enabled() {
