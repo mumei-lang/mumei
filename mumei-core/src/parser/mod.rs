@@ -1725,6 +1725,18 @@ extern "Rust" {
     }
 
     #[test]
+    fn test_parse_for_range_rejects_loop_variable_assignment() {
+        let failures = parse_body_expr_checked("for i in 0..n { i = i + 1 }")
+            .expect_err("assigning the loop variable must be rejected");
+        assert!(
+            failures.iter().any(|failure| {
+                failure.contains("for loop body must not assign to loop variable `i`")
+            }),
+            "expected loop variable assignment diagnostic, got {failures:?}"
+        );
+    }
+
+    #[test]
     fn test_parse_pipeline() {
         assert!(matches!(
             parse_expression("x |> f |> g"),

@@ -256,7 +256,11 @@ is equivalent to:
 Without clauses, the automatic invariant is `lo <= i && (i <= hi || i == lo)`
 and the default variant is `hi - i`. A user `invariant:` is conjoined with the
 automatic invariant; a user `decreases:` replaces the default. The loop uses
-the existing termination proof.
+the existing termination proof. The bounds `lo` and `hi` are expressions
+re-evaluated by the desugared `while` and invariant on each iteration, so the
+body must not reassign variables they mention or the loop variable; doing so
+breaks the automatic invariant/variant and the loop fails to verify. The loop
+variable is scoped to the enclosing block introduced by the desugaring.
 ---
 ## Module System
 ### Import Syntax
@@ -287,6 +291,8 @@ body: {
 The pipeline operator passes its left operand to the right-hand function:
 `x |> f |> g` is `g(f(x))`, and `x |> add(1)` is `add(1, x)`.
 `|>` has the lowest precedence, so parenthesize `(x |> f) == 3` when needed.
+It is not parsed inside a match guard or a bare (non-block) match-arm body;
+use parentheses or a block in those positions.
 ---
 ## Quantifiers in Contracts
 Use bounded ranges or finite collections when possible. For Z3-stable quantifier restrictions, see [Quantifiers](SPEC_GUIDE.md#quantifiers).

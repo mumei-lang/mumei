@@ -65,4 +65,8 @@ fn bad_for_invariant_is_rejected_non_vacuously() {
 fn missing_for_range_separator_is_rejected() {
     let (ok, out) = mumei_verify_uncached("tests/negative/test_for_range_missing_bounds.mm");
     assert!(!ok, "missing `..` must fail:\n{out}");
+    assert!(
+        out.contains("for loop requires '..'"),
+        "missing `..` must be rejected by the parser:\n{out}"
+    );
 }

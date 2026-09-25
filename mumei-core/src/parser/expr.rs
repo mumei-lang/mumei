@@ -939,6 +939,26 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                 None
             };
             let user_body = parse_block_or_stmt(ctx);
+            let assigns_loop_var = match &user_body {
+                Stmt::Block(stmts, _) => stmts.iter().any(|stmt| {
+                    matches!(
+                        stmt,
+                        Stmt::Assign {
+                            var: assigned_var,
+                            ..
+                        } if assigned_var == &var
+                    )
+                }),
+                Stmt::Assign {
+                    var: assigned_var, ..
+                } => assigned_var == &var,
+                _ => false,
+            };
+            if assigns_loop_var {
+                ctx.syntax_failure(format!(
+                    "for loop body must not assign to loop variable `{var}`"
+                ));
+            }
             let increment = Stmt::Assign {
                 var: var.clone(),
                 value: Box::new(Expr::BinaryOp(
