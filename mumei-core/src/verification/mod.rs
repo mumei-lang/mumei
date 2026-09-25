@@ -50,6 +50,7 @@ pub use support::{
     verify_impl_with_options, AllowedEffect, DataFlowTrace, ExecutionStep, SecurityPolicy,
     VariableMutation, VariableState, ViolationInfo,
 };
+pub(crate) use support::{declared_nondeterministic_effects, witness_params};
 pub use types::*;
 pub use vacuity::{
     check_spec_vacuity, check_spec_vacuity_for_hir, VacuityCheckResult, VacuityError,

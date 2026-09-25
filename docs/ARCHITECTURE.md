@@ -706,6 +706,49 @@ Sort solving is significantly slower than Int Sort.
 **Constraint Budget**: Each Z3 String constraint creation is tracked against the
 per-atom constraint budget (default: 1000) to prevent solver explosion.
 
+### Non-deterministic Effects and Replayability
+
+`Random`, `Clock` and `ExternalInput` (`std/effects.mm`) mark atoms whose behaviour
+depends on a source outside the program. `verification/support/replay.rs` isolates
+those sources so that agent / distributed logic is replayable:
+
+1. **Phase 1f-1 (replayability, after effect containment)** — for each declared
+   non-deterministic leaf effect (composites and `parent:` children are resolved
+   through `ModuleEnv::is_subeffect`), the atom must have a *witness* parameter
+   (`seed` / `timestamp` / `input`, or `<witness>_suffix`) and every
+   `perform <Effect>.<op>(args)` must receive the witness or a local
+   transitively derived from it (`let s2 = seed + 1`, or the result of an earlier
+   witnessed `perform`) in `args` (`support/replay.rs::verify_replayability`).
+   Derivation is a *must* analysis: through operators, calls and aggregates any
+   witness-carrying operand taints the result, but a value chosen by `if`/`match`
+   is derived only from witnesses common to every branch (the condition /
+   scrutinee contributes nothing), state after a branch or loop is the meet of
+   all paths (loops iterate to a fixpoint), and a lambda body is its own scope
+   (its parameters shadow the witness; its bindings never leak outward). The
+   walk covers nested expression forms (array/struct literals, indexing, field
+   access, lambdas, match, async).
+   The resolved roots and witness names are part of the proof-cache hash, so
+   cached proofs from before this rule are invalidated for affected atoms. Violations produce a `Replayability violation`
+   diagnostic and a `report.json` with `violation_type: "replayability"` and
+   `failure_type: effect_not_allowed`.
+2. **Z3 modelling** — `translator/expr.rs::nondeterministic_perform_result` encodes
+   the perform result as an uninterpreted function `__nd___perform_<Effect>_<op>`
+   of *all* its arguments (any Z3 sort; range `Int` or `BV(64)` under
+   `bitvec_i64`), instead of a fresh constant; a zero-argument perform is a
+   zero-arity function. The witness parameter is therefore universally quantified in
+   `ensures` verification while equal arguments denote equal results, so the
+   generation path is statically deterministic.
+3. **Property-based testing** — `property_based.rs::bind_nondeterministic_sources`
+   walks the translated body for every `__nd___perform_<Effect>_<op>(args)`
+   application and pins each one to `replay_source_value(effect, op, args)`, a
+   `DeterministicRng` value derived only from the effect/operation name and the
+   model's concrete argument tuple (so two performs with different arguments are
+   pinned independently). With a fixed `PropertyBasedTestConfig::seed`, generated inputs,
+   source values and shrunk counterexamples are bit-for-bit reproducible.
+
+Pure atoms never reach phase 1f-1: performing a non-deterministic source without
+declaring it is rejected by effect containment (`__effect_allowed_*`).
+
 ### Stateful Effects (Temporal Effect Verification)
 
 Mumei supports **stateful effects** — effects with defined states and transitions that

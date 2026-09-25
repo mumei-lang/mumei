@@ -15,6 +15,12 @@
 //       };
 //
 // Pure atoms (no effects: field) cannot perform any effects.
+//
+// Non-deterministic sources (Random / Clock / ExternalInput) are isolated at
+// the type level: an atom declaring one must receive the source through an
+// explicit witness parameter (`seed`, `timestamp`, `input`) and pass it to
+// every `perform`, so the same inputs always replay the same output.
+// See docs/LANGUAGE.md "Non-deterministic effects and replayability".
 
 // --- Basic Effects (non-parameterized) ---
 effect FileRead;
@@ -22,6 +28,19 @@ effect FileWrite;
 effect Network;
 effect Log;
 effect Console;
+
+// --- Non-deterministic Source Effects (Replayability) ---
+// Witness parameter required:  Random -> seed,  Clock -> timestamp,
+// ExternalInput -> input.
+//
+//   atom roll(seed: i64) -> i64
+//       effects: [Random];
+//       ensures: result >= 0;
+//       body: { let r = perform Random.next(seed); if r >= 0 { r } else { 0 - r } }
+//
+effect Random;
+effect Clock;
+effect ExternalInput;
 
 // --- Parameterized Network Effects ---
 // HTTP method effects with URL parameter for security policy enforcement.

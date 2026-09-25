@@ -1,4 +1,5 @@
 use super::module_env::ModuleEnv;
+use super::support::nondeterministic_root;
 use super::translator::{
     apply_refinement_constraint, expr_to_z3, param_z3_value, stmt_to_z3, VCtx,
     DEFAULT_CONSTRAINT_BUDGET, I64_BITS,
@@ -10,6 +11,7 @@ use super::{
 use crate::parser::{Expr, Op, Param, RefinedType, Stmt};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use z3::ast::Ast;
 
 const DEFAULT_INTEGER_BOUND: i64 = 100;
 const MAX_ARRAY_LEN: usize = 8;
@@ -841,7 +843,154 @@ fn evaluate_body(
     if !matches!(solver.check(), SatResult::Sat) {
         return None;
     }
+    bind_nondeterministic_sources(&solver, module_env, &value, &env)?;
+    if !matches!(solver.check(), SatResult::Sat) {
+        return None;
+    }
     dynamic_to_generated(&value, &solver)
+}
+
+/// Deterministic stand-in for a non-deterministic source during property-based
+/// testing: the value `perform <effect>.<operation>(args)` yields for the
+/// concrete `args` (the witness parameter and anything else passed to the
+/// perform).
+///
+/// It is derived from the effect, operation and arguments alone (through
+/// `DeterministicRng`), so a generated input replays the same trace on every
+/// run, and equal arguments produce equal source values.
+pub fn replay_source_value(effect: &str, operation: &str, arg_values: &[i64]) -> i64 {
+    let mut seed: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in effect
+        .bytes()
+        .chain(b".".iter().copied())
+        .chain(operation.bytes())
+    {
+        seed ^= u64::from(byte);
+        seed = seed.wrapping_mul(0x0100_0000_01b3);
+    }
+    for value in arg_values {
+        seed ^= *value as u64;
+        seed = seed.wrapping_mul(0x0100_0000_01b3);
+    }
+    DeterministicRng::new(seed).gen_range(-DEFAULT_INTEGER_BOUND, DEFAULT_INTEGER_BOUND)
+}
+
+const ND_APP_PREFIX: &str = "__nd___perform_";
+
+/// Pin every application `__nd___perform_<effect>_<op>(args)` reachable from
+/// the body value or a local to `replay_source_value` of its model-evaluated
+/// arguments. Applications are visited children-first and the model is
+/// refreshed after each pin, so a perform whose argument is itself the result
+/// of an earlier perform (`Random.next(Random.next(seed))`) sees the pinned
+/// inner value. The solver must be satisfiable on entry; returns `None` if a
+/// model is unavailable.
+fn bind_nondeterministic_sources<'a>(
+    solver: &Solver<'a>,
+    module_env: &ModuleEnv,
+    value: &Dynamic<'a>,
+    env: &Env<'a>,
+) -> Option<()> {
+    let ctx = solver.get_context();
+    let mut model = solver.get_model()?;
+    let mut seen = std::collections::HashSet::new();
+    let mut apps = Vec::new();
+    let mut roots: Vec<&Dynamic<'a>> = vec![value];
+    let mut keys: Vec<&String> = env.keys().collect();
+    keys.sort();
+    roots.extend(keys.into_iter().map(|k| &env[k]));
+    for root in roots {
+        collect_nd_apps(root, &mut seen, &mut apps);
+    }
+    for app in apps {
+        let name = app.decl().name();
+        let Some(rest) = name.strip_prefix(ND_APP_PREFIX) else {
+            continue;
+        };
+        let Some((effect, operation)) = split_effect_operation(rest, module_env) else {
+            continue;
+        };
+        if nondeterministic_root(module_env, effect).is_none() {
+            continue;
+        }
+        let arg_values: Vec<i64> = app
+            .children()
+            .iter()
+            .map(|arg| concrete_arg_value(&model, arg))
+            .collect();
+        let replay = replay_source_value(effect, operation, &arg_values);
+        if let Some(int_value) = app.as_int() {
+            solver.assert(&int_value._eq(&Int::from_i64(ctx, replay)));
+        } else if let Some(bv_value) = app.as_bv() {
+            solver.assert(&bv_value._eq(&z3::ast::BV::from_i64(ctx, replay, I64_BITS)));
+        } else {
+            continue;
+        }
+        if !matches!(solver.check(), SatResult::Sat) {
+            return None;
+        }
+        model = solver.get_model()?;
+    }
+    Some(())
+}
+
+fn collect_nd_apps<'a>(
+    node: &Dynamic<'a>,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<Dynamic<'a>>,
+) {
+    if !node.is_app() || !seen.insert(node.to_string()) {
+        return;
+    }
+    for child in node.children() {
+        collect_nd_apps(&child, seen, out);
+    }
+    if node.decl().name().starts_with(ND_APP_PREFIX) {
+        out.push(node.clone());
+    }
+}
+
+/// Integer fingerprint of a model value: Int/BV as the signed integer, Bool as
+/// 0/1, anything else (strings, arrays, ...) as a hash of its printed form.
+fn concrete_arg_value(model: &z3::Model<'_>, arg: &Dynamic<'_>) -> i64 {
+    let evaluated = model.eval(arg, true).unwrap_or_else(|| arg.clone());
+    if let Some(v) = evaluated.as_int().and_then(|i| i.as_i64()) {
+        return v;
+    }
+    if let Some(v) = evaluated.as_bv().and_then(|b| b.as_u64()) {
+        return v as i64;
+    }
+    if let Some(v) = evaluated.as_bool().and_then(|b| b.as_bool()) {
+        return i64::from(v);
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in evaluated.to_string().bytes() {
+        h ^= u64::from(byte);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h as i64
+}
+
+/// Split `<effect>_<operation>` on the longest known effect name, so effect
+/// names containing `_` are recovered correctly.
+fn split_effect_operation<'k>(rest: &'k str, module_env: &ModuleEnv) -> Option<(&'k str, &'k str)> {
+    let known = module_env
+        .effect_defs
+        .keys()
+        .chain(module_env.effects.keys())
+        .map(String::as_str)
+        .chain(["Random", "Clock", "ExternalInput"]);
+    let mut best: Option<(&str, &str)> = None;
+    for name in known {
+        if let Some(op) = rest
+            .strip_prefix(name)
+            .and_then(|tail| tail.strip_prefix('_'))
+        {
+            if best.is_none_or(|(e, _)| name.len() > e.len()) {
+                best = Some((&rest[..name.len()], op));
+            }
+        }
+    }
+    best.or_else(|| rest.split_once('_'))
 }
 
 fn dynamic_to_generated(value: &Dynamic<'_>, solver: &Solver<'_>) -> Option<GeneratedValue> {
@@ -962,6 +1111,12 @@ fn seed_concrete_env<'a>(
     let mut env: Env<'a> = HashMap::new();
     env.insert("true".to_string(), Bool::from_bool(ctx, true).into());
     env.insert("false".to_string(), Bool::from_bool(ctx, false).into());
+    for effect_name in module_env.resolve_effect_set_from_effects(&atom.effects) {
+        env.insert(
+            format!("__effect_allowed_{}", effect_name),
+            Bool::from_bool(ctx, true).into(),
+        );
+    }
     for param in &atom.params {
         let value = assignment
             .get(&param.name)
@@ -1090,4 +1245,70 @@ fn array_element_type(type_name: &str) -> &str {
         .and_then(|value| value.strip_suffix(']'))
         .map(str::trim)
         .unwrap_or("i64")
+}
+
+#[cfg(test)]
+mod replay_binding_tests {
+    use super::*;
+    use crate::parser::{parse_module, Item};
+
+    fn seeded_atom(body: &str) -> (Atom, ModuleEnv) {
+        let source = format!(
+            "effect Random;\natom roll(seed: i64) -> i64\neffects: [Random];\nensures: true;\nbody: {{ {body} }};\n"
+        );
+        let mut module_env = ModuleEnv::new();
+        let mut atom = None;
+        for item in parse_module(&source) {
+            match item {
+                Item::EffectDef(def) => {
+                    module_env.effect_defs.insert(def.name.clone(), def);
+                }
+                Item::Atom(a) => atom = Some(a),
+                _ => {}
+            }
+        }
+        (atom.expect("atom"), module_env)
+    }
+
+    fn eval(body: &str, seed: i64) -> GeneratedValue {
+        let (atom, module_env) = seeded_atom(body);
+        let mut assignment = HashMap::new();
+        assignment.insert("seed".to_string(), GeneratedValue::Int(seed));
+        evaluate_body(&atom, &module_env, &assignment, false).expect("decodable body")
+    }
+
+    #[test]
+    fn single_perform_is_pinned_to_replay_value_of_its_arguments() {
+        let expected = replay_source_value("Random", "next", &[7]);
+        assert_eq!(
+            eval("perform Random.next(seed)", 7),
+            GeneratedValue::Int(expected)
+        );
+    }
+
+    #[test]
+    fn chained_perform_is_pinned_to_the_pinned_inner_value() {
+        let inner = replay_source_value("Random", "next", &[7]);
+        let expected = replay_source_value("Random", "next", &[inner]);
+        assert_eq!(
+            eval(
+                "let a = perform Random.next(seed); perform Random.next(a)",
+                7
+            ),
+            GeneratedValue::Int(expected)
+        );
+    }
+
+    #[test]
+    fn performs_with_different_arguments_are_pinned_independently() {
+        let a = replay_source_value("Random", "next", &[7]);
+        let b = replay_source_value("Random", "next", &[8]);
+        assert_eq!(
+            eval(
+                "let a = perform Random.next(seed); let b = perform Random.next(seed + 1); a - b",
+                7
+            ),
+            GeneratedValue::Int(a - b)
+        );
+    }
 }

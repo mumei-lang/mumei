@@ -5,6 +5,33 @@ use super::*;
 use crate::lowering::{lower, LoweredType};
 use crate::verification::translator::may_write::CalleeRef;
 use serde_json::json;
+use z3::{FuncDecl, Sort};
+
+/// Z3 value of `perform <NonDeterministic>.<op>(args)`.
+///
+/// The source is modelled as an uninterpreted function of all its arguments: the
+/// witness parameter (seed/timestamp/input) is universally quantified like any
+/// other input, and two performs with equal arguments denote the same value.
+/// That is exactly the replay guarantee — the result may be anything, but it
+/// is a deterministic function of the explicit inputs. An argument-free
+/// perform becomes a zero-arity function (a single unknown constant).
+pub(crate) fn nondeterministic_perform_result<'a>(
+    ctx: &'a Context,
+    result_name: &str,
+    args: &[Dynamic<'a>],
+    bitvec_i64: bool,
+) -> Dynamic<'a> {
+    let domain_args: Vec<&dyn Ast<'a>> = args.iter().map(|arg| arg as &dyn Ast<'a>).collect();
+    let range = if bitvec_i64 {
+        Sort::bitvector(ctx, I64_BITS)
+    } else {
+        Sort::int(ctx)
+    };
+    let domain: Vec<Sort<'a>> = domain_args.iter().map(|arg| arg.get_sort()).collect();
+    let domain_refs: Vec<&Sort<'a>> = domain.iter().collect();
+    let decl = FuncDecl::new(ctx, format!("__nd_{}", result_name), &domain_refs, &range);
+    decl.apply(&domain_args)
+}
 
 fn decimal_mul(lhs: &str, rhs: &str) -> String {
     if lhs == "0" || rhs == "0" {
@@ -2444,6 +2471,16 @@ pub(crate) fn expr_to_z3<'a>(
             // (e.g., `let x = perform HttpGet.request(url); x + 1`) would get
             // a Z3 Sort mismatch error.
             let result_name = format!("__perform_{}_{}", effect, operation);
+            if nondeterministic_root(vc.module_env, effect).is_some() {
+                let result = nondeterministic_perform_result(
+                    ctx,
+                    &result_name,
+                    &arg_z3_values,
+                    vc.bitvec_i64,
+                );
+                env.insert(result_name, result.clone());
+                return Ok(result);
+            }
             let has_str_params = vc
                 .module_env
                 .effect_defs
