@@ -61,7 +61,12 @@ fn seeded_nondeterministic_atoms_verify() {
         out.contains("'replay_twice': verified"),
         "two performs with the same witness must denote the same value:\n{out}"
     );
-    for atom in ["roll_derived", "roll_branch"] {
+    for atom in [
+        "roll_derived",
+        "roll_branch",
+        "roll_rederived",
+        "roll_match",
+    ] {
         assert!(
             out.contains(&format!("'{atom}': verified")),
             "derived witness must be accepted for {atom}:\n{out}"
@@ -139,6 +144,25 @@ fn binding_inside_uncalled_lambda_does_not_leak_witness() {
         out.contains("without threading its witness parameter"),
         "expected threading diagnostic:\n{out}"
     );
+}
+
+#[test]
+fn witness_lost_on_some_path_is_rejected() {
+    for fixture in [
+        "tests/negative/test_replay_branch_drop.mm",
+        "tests/negative/test_replay_mixed_branch_value.mm",
+        "tests/negative/test_replay_loop_drop.mm",
+    ] {
+        let (ok, out) = mumei_verify(fixture);
+        assert!(
+            !ok,
+            "{fixture}: witness is not carried on every path:\n{out}"
+        );
+        assert!(
+            out.contains("without threading its witness parameter"),
+            "{fixture}: expected threading diagnostic:\n{out}"
+        );
+    }
 }
 
 #[test]

@@ -719,8 +719,14 @@ those sources so that agent / distributed logic is replayable:
    `perform <Effect>.<op>(args)` must receive the witness or a local
    transitively derived from it (`let s2 = seed + 1`, or the result of an earlier
    witnessed `perform`) in `args` (`support/replay.rs::verify_replayability`).
-   The walk covers nested expression forms (array/struct literals, indexing,
-   field access, lambdas, match, async); lambda parameters shadow the witness.
+   Derivation is a *must* analysis: through operators, calls and aggregates any
+   witness-carrying operand taints the result, but a value chosen by `if`/`match`
+   is derived only from witnesses common to every branch (the condition /
+   scrutinee contributes nothing), state after a branch or loop is the meet of
+   all paths (loops iterate to a fixpoint), and a lambda body is its own scope
+   (its parameters shadow the witness; its bindings never leak outward). The
+   walk covers nested expression forms (array/struct literals, indexing, field
+   access, lambdas, match, async).
    The resolved roots and witness names are part of the proof-cache hash, so
    cached proofs from before this rule are invalidated for affected atoms. Violations produce a `Replayability violation`
    diagnostic and a `report.json` with `violation_type: "replayability"` and

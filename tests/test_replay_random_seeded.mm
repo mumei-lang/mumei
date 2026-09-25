@@ -61,3 +61,24 @@ body: {
     let r = perform Random.next(s);
     if r >= 0 { r } else { 0 - r }
 };
+
+// Re-deriving the witness on every path keeps the perform replayable.
+atom roll_rederived(seed: i64, flag: i64) -> i64
+effects: [Random];
+ensures: result >= 0;
+body: {
+    let s = 0;
+    if flag > 0 { s = seed; 0 } else { s = seed + 1; 0 };
+    let r = perform Random.next(s);
+    if r >= 0 { r } else { 0 - r }
+};
+
+// A match arm binding of the witness carries its provenance.
+atom roll_match(seed: i64) -> i64
+effects: [Random];
+ensures: result >= 0;
+body: {
+    let s = match seed { 0 => seed, v => v };
+    let r = perform Random.next(s);
+    if r >= 0 { r } else { 0 - r }
+};

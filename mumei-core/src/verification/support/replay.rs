@@ -124,24 +124,166 @@ impl<'a> PerformCollector<'a> {
         }
     }
 
+    /// Witness parameters that `expr`'s value is guaranteed to be derived from.
+    /// Data-flow through operators, calls, aggregates and performs is a union
+    /// (any witness-carrying operand taints the result); a value chosen by an
+    /// `if`/`match` is derived only from witnesses common to *every* branch,
+    /// and the condition / scrutinee contributes nothing.
     fn carried_by(&self, expr: &'a Expr) -> BTreeSet<&'a str> {
-        let mut names = Vec::new();
-        collect_vars(expr, &mut names);
-        names
-            .into_iter()
-            .filter_map(|name| self.derived.get(name))
-            .flatten()
-            .copied()
-            .collect()
+        match expr {
+            Expr::Variable(name) => self.derived.get(name.as_str()).cloned().unwrap_or_default(),
+            Expr::ArrayAccess(name, idx) => {
+                let mut out = self.derived.get(name.as_str()).cloned().unwrap_or_default();
+                out.extend(self.carried_by(idx));
+                out
+            }
+            Expr::BinaryOp(l, _, r) => {
+                let mut out = self.carried_by(l);
+                out.extend(self.carried_by(r));
+                out
+            }
+            Expr::FieldAccess(e, _) | Expr::Await { expr: e } | Expr::ChanRecv { channel: e } => {
+                self.carried_by(e)
+            }
+            Expr::Call(_, args) | Expr::Perform { args, .. } | Expr::ArrayLit(args) => {
+                args.iter().flat_map(|a| self.carried_by(a)).collect()
+            }
+            Expr::CallRef { callee, args } => {
+                let mut out = self.carried_by(callee);
+                for a in args {
+                    out.extend(self.carried_by(a));
+                }
+                out
+            }
+            Expr::StructInit { fields, .. } => fields
+                .iter()
+                .flat_map(|(_, v)| self.carried_by(v))
+                .collect(),
+            Expr::ChanSend { channel, value } => {
+                let mut out = self.carried_by(channel);
+                out.extend(self.carried_by(value));
+                out
+            }
+            Expr::IfThenElse {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let then = self.value_of_block(then_branch);
+                let els = self.value_of_block(else_branch);
+                then.intersection(&els).copied().collect()
+            }
+            Expr::Match { target, arms } => {
+                let scrutinee = self.carried_by(target);
+                let mut acc: Option<BTreeSet<&'a str>> = None;
+                for arm in arms {
+                    let mut scratch = self.scratch();
+                    let mut bound = Vec::new();
+                    pattern_vars(&arm.pattern, &mut bound);
+                    for name in bound {
+                        scratch.bind_set(name, scrutinee.clone());
+                    }
+                    let value = scratch.value_of_block(&arm.body);
+                    acc = Some(match acc {
+                        None => value,
+                        Some(acc) => acc.intersection(&value).copied().collect(),
+                    });
+                }
+                acc.unwrap_or_default()
+            }
+            Expr::Number(_)
+            | Expr::Float(_)
+            | Expr::StringLit(_)
+            | Expr::AtomRef { .. }
+            | Expr::Async { .. }
+            | Expr::Lambda { .. } => BTreeSet::new(),
+        }
+    }
+
+    fn scratch(&self) -> Self {
+        Self {
+            derived: self.derived.clone(),
+            sites: Vec::new(),
+        }
+    }
+
+    /// Provenance of the value a block yields (its trailing expression), after
+    /// applying the block's own bindings on a scratch copy of the state.
+    fn value_of_block(&self, block: &'a Stmt) -> BTreeSet<&'a str> {
+        match block {
+            Stmt::Block(stmts, _) => {
+                let Some((last, init)) = stmts.split_last() else {
+                    return BTreeSet::new();
+                };
+                let mut scratch = self.scratch();
+                for s in init {
+                    scratch.stmt(s);
+                }
+                scratch.value_of_block(last)
+            }
+            Stmt::Expr(e, _) => self.carried_by(e),
+            _ => BTreeSet::new(),
+        }
     }
 
     fn bind(&mut self, var: &'a str, value: &'a Expr) {
         let carried = self.carried_by(value);
+        self.bind_set(var, carried);
+    }
+
+    fn bind_set(&mut self, var: &'a str, carried: BTreeSet<&'a str>) {
         if carried.is_empty() {
             self.derived.remove(var);
         } else {
             self.derived.insert(var, carried);
         }
+    }
+
+    /// Run `f` on each alternative path starting from the current state and
+    /// continue with the meet of the resulting states: a local is a witness
+    /// carrier after the join only if it is one on every path.
+    fn alternatives(&mut self, paths: &[&'a Stmt], mut f: impl FnMut(&mut Self, &'a Stmt)) {
+        let entry = self.derived.clone();
+        let mut joined: Option<HashMap<&'a str, BTreeSet<&'a str>>> = None;
+        for path in paths {
+            self.derived = entry.clone();
+            f(self, path);
+            joined = Some(match joined {
+                None => std::mem::take(&mut self.derived),
+                Some(acc) => meet(acc, std::mem::take(&mut self.derived)),
+            });
+        }
+        self.derived = joined.unwrap_or(entry);
+    }
+
+    /// A loop body may run zero or more times: iterate to a fixpoint so that a
+    /// binding lost on any iteration is not counted as a witness on the next.
+    fn loop_body(&mut self, cond: &'a Expr, body: &'a Stmt) {
+        loop {
+            let entry = self.derived.clone();
+            let sites_len = self.sites.len();
+            self.expr(cond);
+            self.stmt(body);
+            let next = meet(entry.clone(), std::mem::take(&mut self.derived));
+            if next == entry {
+                self.derived = next;
+                return;
+            }
+            self.sites.truncate(sites_len);
+            self.derived = next;
+        }
+    }
+
+    fn match_arm(&mut self, scrutinee: BTreeSet<&'a str>, arm: &'a crate::parser::MatchArm) {
+        let mut bound = Vec::new();
+        pattern_vars(&arm.pattern, &mut bound);
+        for name in bound {
+            self.bind_set(name, scrutinee.clone());
+        }
+        if let Some(guard) = &arm.guard {
+            self.expr(guard);
+        }
+        self.stmt(&arm.body);
     }
 
     fn expr(&mut self, expr: &'a Expr) {
@@ -183,8 +325,7 @@ impl<'a> PerformCollector<'a> {
                 else_branch,
             } => {
                 self.expr(cond);
-                self.stmt(then_branch);
-                self.stmt(else_branch);
+                self.alternatives(&[then_branch, else_branch], |c, branch| c.stmt(branch));
             }
             Expr::BinaryOp(l, _, r) => {
                 self.expr(l);
@@ -206,12 +347,18 @@ impl<'a> PerformCollector<'a> {
             }
             Expr::Match { target, arms } => {
                 self.expr(target);
+                let scrutinee = self.carried_by(target);
+                let entry = self.derived.clone();
+                let mut joined: Option<HashMap<&'a str, BTreeSet<&'a str>>> = None;
                 for arm in arms {
-                    if let Some(guard) = &arm.guard {
-                        self.expr(guard);
-                    }
-                    self.stmt(&arm.body);
+                    self.derived = entry.clone();
+                    self.match_arm(scrutinee.clone(), arm);
+                    joined = Some(match joined {
+                        None => std::mem::take(&mut self.derived),
+                        Some(acc) => meet(acc, std::mem::take(&mut self.derived)),
+                    });
                 }
+                self.derived = joined.unwrap_or(entry);
             }
             Expr::ChanSend { channel, value } => {
                 self.expr(channel);
@@ -241,10 +388,7 @@ impl<'a> PerformCollector<'a> {
                 self.expr(index);
                 self.expr(value);
             }
-            Stmt::While { cond, body, .. } => {
-                self.expr(cond);
-                self.stmt(body);
-            }
+            Stmt::While { cond, body, .. } => self.loop_body(cond, body),
             Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => self.stmt(body),
             Stmt::TaskGroup { children, .. } => {
                 for child in children {
@@ -257,91 +401,30 @@ impl<'a> PerformCollector<'a> {
     }
 }
 
-/// Variable names an expression reads (same shape as `call_graph::expr_mentions_var`).
-fn collect_vars<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
-    match expr {
-        Expr::Variable(name) => out.push(name),
-        Expr::ArrayAccess(name, idx) => {
-            out.push(name);
-            collect_vars(idx, out);
+/// Pointwise intersection of two provenance maps.
+fn meet<'a>(
+    mut a: HashMap<&'a str, BTreeSet<&'a str>>,
+    b: HashMap<&'a str, BTreeSet<&'a str>>,
+) -> HashMap<&'a str, BTreeSet<&'a str>> {
+    a.retain(|name, carried| match b.get(name) {
+        Some(other) => {
+            carried.retain(|w| other.contains(w));
+            !carried.is_empty()
         }
-        Expr::BinaryOp(l, _, r) => {
-            collect_vars(l, out);
-            collect_vars(r, out);
-        }
-        Expr::FieldAccess(e, _) | Expr::Await { expr: e } => collect_vars(e, out),
-        Expr::Call(_, args) | Expr::Perform { args, .. } | Expr::ArrayLit(args) => {
-            for arg in args {
-                collect_vars(arg, out);
-            }
-        }
-        Expr::CallRef { callee, args } => {
-            collect_vars(callee, out);
-            for arg in args {
-                collect_vars(arg, out);
-            }
-        }
-        Expr::StructInit { fields, .. } => {
-            for (_, value) in fields {
-                collect_vars(value, out);
-            }
-        }
-        // The value of an `if`/`match` comes from its branches; the condition
-        // or scrutinee only selects among them and carries no provenance.
-        Expr::IfThenElse {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            collect_vars_stmt(then_branch, out);
-            collect_vars_stmt(else_branch, out);
-        }
-        Expr::Match { arms, .. } => {
-            for arm in arms {
-                collect_vars_stmt(&arm.body, out);
-            }
-        }
-        Expr::ChanSend { channel, value } => {
-            collect_vars(channel, out);
-            collect_vars(value, out);
-        }
-        Expr::ChanRecv { channel } => collect_vars(channel, out),
-        Expr::Number(_)
-        | Expr::Float(_)
-        | Expr::StringLit(_)
-        | Expr::AtomRef { .. }
-        | Expr::Async { .. }
-        | Expr::Lambda { .. } => {}
-    }
+        None => false,
+    });
+    a
 }
 
-/// Variables that can flow into the value of a block used as an expression
-/// (the branches of an `if`/`match`), so `let x = if c { seed } else { 0 }`
-/// makes `x` a carrier of `seed`, while `if seed > 0 { x } else { x }` does not.
-fn collect_vars_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<&'a str>) {
-    match stmt {
-        Stmt::Block(stmts, _) => {
-            for s in stmts {
-                collect_vars_stmt(s, out);
+fn pattern_vars<'a>(pattern: &'a crate::parser::Pattern, out: &mut Vec<&'a str>) {
+    match pattern {
+        crate::parser::Pattern::Variable(name) => out.push(name),
+        crate::parser::Pattern::Variant { fields, .. } => {
+            for field in fields {
+                pattern_vars(field, out);
             }
         }
-        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => collect_vars(value, out),
-        Stmt::ArrayStore { index, value, .. } => {
-            collect_vars(index, out);
-            collect_vars(value, out);
-        }
-        Stmt::While { cond, body, .. } => {
-            collect_vars(cond, out);
-            collect_vars_stmt(body, out);
-        }
-        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => collect_vars_stmt(body, out),
-        Stmt::TaskGroup { children, .. } => {
-            for child in children {
-                collect_vars_stmt(child, out);
-            }
-        }
-        Stmt::Expr(e, _) => collect_vars(e, out),
-        Stmt::Cancel { .. } => {}
+        crate::parser::Pattern::Wildcard | crate::parser::Pattern::Literal(_) => {}
     }
 }
 
