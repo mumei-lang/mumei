@@ -2150,6 +2150,43 @@ fn test_subsumption_check_contract_requires_matches_concrete() {
 }
 
 #[test]
+fn test_subsumption_check_outer_callee_parameter_is_unconstrained() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let concrete = test_atom(
+        "positive",
+        vec![test_param("x", Some("i64"))],
+        "x >= 0",
+        "result >= 0",
+        "x",
+        Some("i64"),
+    );
+    let error = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result >= 0",
+        Some("x >= lo"),
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    )
+    .expect_err("an unbound outer callee parameter must produce a counterexample");
+    let message = error.to_string();
+    assert!(
+        message.contains("does not imply concrete requires"),
+        "expected a SAT requires-subsumption failure, got: {message}"
+    );
+    assert!(
+        !message.contains("could not lower"),
+        "unbound outer callee parameter should be unconstrained, not a lowering error: {message}"
+    );
+}
+
+#[test]
 fn test_subsumption_check_stronger_contract_requires_holds() {
     let cfg = Config::new();
     let ctx = Context::new(&cfg);

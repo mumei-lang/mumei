@@ -84,6 +84,10 @@ pub(crate) fn apply_refinement_constraint<'a>(
 /// Check that `concrete_atom.requires ∧ concrete_atom.ensures` implies
 /// `contract_ensures`.
 ///
+/// Contract clauses are lowered only over positional callback aliases
+/// (`arg{i}`, `x`, `y`, `len_*`, and `result`). References to other callee
+/// parameters remain unconstrained and therefore fail closed.
+///
 /// Uses a Z3 solver scope (push/pop) to avoid polluting the caller's context.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_contract_subsumption<'a>(
