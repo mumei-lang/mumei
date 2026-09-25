@@ -99,6 +99,7 @@ pub enum Token {
     Bar,        // |
     Assign,     // =
     Dot,        // .
+    DotDot,     // ..
     Comma,      // ,
     Colon,      // :
     ColonColon, // ::
@@ -246,6 +247,7 @@ impl std::fmt::Display for Token {
             Token::Bar => write!(f, "|"),
             Token::Assign => write!(f, "="),
             Token::Dot => write!(f, "."),
+            Token::DotDot => write!(f, ".."),
             Token::Comma => write!(f, ","),
             Token::Colon => write!(f, ":"),
             Token::ColonColon => write!(f, "::"),

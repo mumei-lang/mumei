@@ -8,27 +8,32 @@ use super::ParseContext;
 use crate::ast::TypeRef;
 use crate::parser::{Expr, JoinSemantics, LambdaParam, MatchArm, Op, Span, Stmt};
 
+// This must exceed FatArrow's left binding power so guards and arm bodies
+// stop before `=>`.
+const ABOVE_FAT_ARROW_BP: u8 = 5;
+
 /// Pratt parser binding power for binary operators.
 /// Returns (left_bp, right_bp). Left-associative: left < right.
 /// Right-associative: left > right.
 fn binding_power(tok: &Token) -> Option<(u8, u8)> {
     match tok {
-        Token::FatArrow => Some((1, 2)), // left-assoc => (matches old parser's while-loop behavior)
-        Token::Or => Some((3, 4)),
-        Token::And => Some((5, 6)),
-        Token::Eq | Token::Neq | Token::Gt | Token::Lt | Token::Ge | Token::Le => Some((7, 8)),
+        Token::Pipe => Some((1, 2)),
+        Token::FatArrow => Some((3, 4)), // left-assoc => (matches old parser's while-loop behavior)
+        Token::Or => Some((5, 6)),
+        Token::And => Some((7, 8)),
+        Token::Eq | Token::Neq | Token::Gt | Token::Lt | Token::Ge | Token::Le => Some((9, 10)),
         // Bitwise operators bind tighter than comparison and looser than
         // arithmetic, following the C/Rust ordering `| < ^ < & < shift`.
         // `Token::Bar` is only a bitwise OR in infix position; in prefix
         // position it still opens a lambda parameter list (`|x| x + 1`).
-        Token::Bar => Some((9, 10)),
-        Token::Caret => Some((11, 12)),
-        Token::Amp => Some((13, 14)),
-        Token::Shl | Token::Shr => Some((15, 16)),
-        Token::Plus | Token::Minus => Some((17, 18)),
-        Token::Star | Token::Slash => Some((19, 20)),
-        Token::StarStar => Some((21, 20)),
-        Token::Dot | Token::ColonColon => Some((23, 24)),
+        Token::Bar => Some((11, 12)),
+        Token::Caret => Some((13, 14)),
+        Token::Amp => Some((15, 16)),
+        Token::Shl | Token::Shr => Some((17, 18)),
+        Token::Plus | Token::Minus => Some((19, 20)),
+        Token::Star | Token::Slash => Some((21, 22)),
+        Token::StarStar => Some((23, 22)),
+        Token::Dot | Token::ColonColon => Some((25, 26)),
         _ => None,
     }
 }
@@ -228,6 +233,40 @@ pub fn parse_expr(ctx: &mut ParseContext, min_bp: u8) -> Expr {
             if l_bp < min_bp {
                 break;
             }
+            if tok == Token::Pipe {
+                ctx.advance();
+                let rhs_starts_bare_lambda = ctx.peek() == &Token::Bar;
+                let rhs = parse_expr(ctx, r_bp);
+                if rhs_starts_bare_lambda {
+                    ctx.syntax_failure(
+                        "pipeline lambda must be parenthesized: x |> (|y| ...)".to_string(),
+                    );
+                    continue;
+                }
+                lhs = match rhs {
+                    Expr::Variable(name) => Expr::Call(name, vec![lhs]),
+                    Expr::Call(name, mut args) => {
+                        args.push(lhs);
+                        Expr::Call(name, args)
+                    }
+                    Expr::CallRef { callee, mut args } => {
+                        args.push(lhs);
+                        Expr::CallRef { callee, args }
+                    }
+                    Expr::Lambda { .. } => Expr::CallRef {
+                        callee: Box::new(rhs),
+                        args: vec![lhs],
+                    },
+                    _ => {
+                        ctx.syntax_failure(
+                            "pipeline right-hand side must be a function name, call, or lambda"
+                                .to_string(),
+                        );
+                        lhs
+                    }
+                };
+                continue;
+            }
             let op = match token_to_op(&tok) {
                 Some(op) => op,
                 None => break,
@@ -419,8 +458,7 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
                 // Optional guard: if cond
                 let guard = if ctx.peek() == &Token::If {
                     ctx.advance();
-                    // Parse guard at binding power above => (l_bp=1, so min_bp=3 excludes it)
-                    Some(Box::new(parse_expr(ctx, 3)))
+                    Some(Box::new(parse_expr(ctx, ABOVE_FAT_ARROW_BP)))
                 } else {
                     None
                 };
@@ -745,7 +783,8 @@ fn parse_explicit_type_args(ctx: &mut ParseContext) -> Option<Vec<TypeRef>> {
 }
 
 /// Parse match arm body.
-/// Uses parse_expr with binding power above => to avoid consuming => as implies.
+/// Uses parse_expr with binding power above FatArrow to avoid consuming `=>`
+/// as implies.
 fn parse_match_arm_body(ctx: &mut ParseContext) -> Stmt {
     if ctx.peek() == &Token::LBrace {
         parse_block_or_stmt(ctx)
@@ -754,8 +793,7 @@ fn parse_match_arm_body(ctx: &mut ParseContext) -> Stmt {
         if ctx.peek() == &Token::Match || ctx.peek() == &Token::If {
             Stmt::Expr(parse_expr(ctx, 0), arm_span)
         } else {
-            // Parse at binding power 3, above => (l_bp=1) so => is not consumed
-            Stmt::Expr(parse_expr(ctx, 3), arm_span)
+            Stmt::Expr(parse_expr(ctx, ABOVE_FAT_ARROW_BP), arm_span)
         }
     }
 }
@@ -778,6 +816,87 @@ pub fn parse_block_or_stmt(ctx: &mut ParseContext) -> Stmt {
         Stmt::Block(stmts, span)
     } else {
         parse_statement(ctx)
+    }
+}
+
+fn stmt_assigns_var(stmt: &Stmt, var: &str) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } => expr_assigns_var(value, var),
+        Stmt::Assign {
+            var: assigned_var,
+            value,
+            ..
+        } => assigned_var == var || expr_assigns_var(value, var),
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_assigns_var(index, var) || expr_assigns_var(value, var)
+        }
+        Stmt::Block(stmts, _) => stmts.iter().any(|stmt| stmt_assigns_var(stmt, var)),
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            expr_assigns_var(cond, var)
+                || expr_assigns_var(invariant, var)
+                || decreases
+                    .as_deref()
+                    .is_some_and(|expr| expr_assigns_var(expr, var))
+                || stmt_assigns_var(body, var)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_assigns_var(body, var),
+        Stmt::TaskGroup { children, .. } => children.iter().any(|stmt| stmt_assigns_var(stmt, var)),
+        Stmt::Cancel { .. } => false,
+        Stmt::Expr(expr, _) => expr_assigns_var(expr, var),
+    }
+}
+
+fn expr_assigns_var(expr: &Expr, var: &str) -> bool {
+    match expr {
+        Expr::ArrayLit(items) => items.iter().any(|expr| expr_assigns_var(expr, var)),
+        Expr::ArrayAccess(_, index) => expr_assigns_var(index, var),
+        Expr::BinaryOp(left, _, right) => {
+            expr_assigns_var(left, var) || expr_assigns_var(right, var)
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_assigns_var(cond, var)
+                || stmt_assigns_var(then_branch, var)
+                || stmt_assigns_var(else_branch, var)
+        }
+        Expr::Call(_, args) => args.iter().any(|expr| expr_assigns_var(expr, var)),
+        Expr::StructInit { fields, .. } => {
+            fields.iter().any(|(_, expr)| expr_assigns_var(expr, var))
+        }
+        Expr::FieldAccess(base, _) => expr_assigns_var(base, var),
+        Expr::Match { target, arms } => {
+            expr_assigns_var(target, var)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_deref()
+                        .is_some_and(|expr| expr_assigns_var(expr, var))
+                        || stmt_assigns_var(&arm.body, var)
+                })
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_assigns_var(body, var),
+        Expr::Await { expr } => expr_assigns_var(expr, var),
+        Expr::CallRef { callee, args } => {
+            expr_assigns_var(callee, var) || args.iter().any(|expr| expr_assigns_var(expr, var))
+        }
+        Expr::Perform { args, .. } => args.iter().any(|expr| expr_assigns_var(expr, var)),
+        Expr::ChanSend { channel, value } => {
+            expr_assigns_var(channel, var) || expr_assigns_var(value, var)
+        }
+        Expr::ChanRecv { channel } => expr_assigns_var(channel, var),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
     }
 }
 
@@ -855,6 +974,152 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                     span: stmt_span,
                 }
             }
+        }
+
+        Token::For => {
+            ctx.advance();
+            let var = ctx.expect_ident();
+            match ctx.peek().clone() {
+                Token::Ident(name) if name == "in" => {
+                    ctx.advance();
+                }
+                found => {
+                    let (line, col) = ctx
+                        .tokens_ref()
+                        .get(ctx.pos())
+                        .map(|tok| (tok.line, tok.col))
+                        .unwrap_or((0, 0));
+                    ctx.syntax_failure(format!(
+                        "for loop requires 'in' after loop variable, found {found} at {line}:{col}"
+                    ));
+                }
+            }
+            let lo = parse_expr(ctx, 0);
+            if ctx.peek() != &Token::DotDot {
+                let (line, col) = ctx
+                    .tokens_ref()
+                    .get(ctx.pos())
+                    .map(|tok| (tok.line, tok.col))
+                    .unwrap_or((0, 0));
+                ctx.syntax_failure(format!(
+                    "for loop requires '..' between bounds, found {} at {line}:{col}",
+                    ctx.peek()
+                ));
+            }
+            let hi = if ctx.peek() == &Token::DotDot {
+                ctx.advance();
+                parse_expr(ctx, 0)
+            } else {
+                Expr::Variable("__mumei_missing_range_bound".to_string())
+            };
+            let lo_var = format!("__for_lo_{var}");
+            let hi_var = format!("__for_hi_{var}");
+            let lo_ref = Expr::Variable(lo_var.clone());
+            let hi_ref = Expr::Variable(hi_var.clone());
+            let user_invariant = if ctx.peek() == &Token::Invariant {
+                ctx.advance();
+                if ctx.peek() == &Token::Colon {
+                    ctx.advance();
+                }
+                Some(parse_expr(ctx, 0))
+            } else {
+                None
+            };
+            let user_decreases = if ctx.peek() == &Token::Decreases {
+                ctx.advance();
+                if ctx.peek() == &Token::Colon {
+                    ctx.advance();
+                }
+                Some(parse_expr(ctx, 0))
+            } else {
+                None
+            };
+            let user_body = parse_block_or_stmt(ctx);
+            if stmt_assigns_var(&user_body, &var) {
+                ctx.syntax_failure(format!(
+                    "for loop body must not assign to loop variable `{var}`"
+                ));
+            }
+            let increment = Stmt::Assign {
+                var: var.clone(),
+                value: Box::new(Expr::BinaryOp(
+                    Box::new(Expr::Variable(var.clone())),
+                    Op::Add,
+                    Box::new(Expr::Number(1)),
+                )),
+                span: stmt_span.clone(),
+            };
+            let loop_body = match user_body {
+                Stmt::Block(mut stmts, _) => {
+                    stmts.push(increment);
+                    Stmt::Block(stmts, stmt_span.clone())
+                }
+                stmt => Stmt::Block(vec![stmt, increment], stmt_span.clone()),
+            };
+            let auto_invariant = Expr::BinaryOp(
+                Box::new(Expr::BinaryOp(
+                    Box::new(lo_ref.clone()),
+                    Op::Le,
+                    Box::new(Expr::Variable(var.clone())),
+                )),
+                Op::And,
+                Box::new(Expr::BinaryOp(
+                    Box::new(Expr::BinaryOp(
+                        Box::new(Expr::Variable(var.clone())),
+                        Op::Le,
+                        Box::new(hi_ref.clone()),
+                    )),
+                    Op::Or,
+                    Box::new(Expr::BinaryOp(
+                        Box::new(Expr::Variable(var.clone())),
+                        Op::Eq,
+                        Box::new(lo_ref.clone()),
+                    )),
+                )),
+            );
+            let invariant = if let Some(user_invariant) = user_invariant {
+                Expr::BinaryOp(Box::new(auto_invariant), Op::And, Box::new(user_invariant))
+            } else {
+                auto_invariant
+            };
+            let decreases = user_decreases.unwrap_or_else(|| {
+                Expr::BinaryOp(
+                    Box::new(hi_ref.clone()),
+                    Op::Sub,
+                    Box::new(Expr::Variable(var.clone())),
+                )
+            });
+            Stmt::Block(
+                vec![
+                    Stmt::Let {
+                        var: lo_var,
+                        value: Box::new(lo),
+                        span: stmt_span.clone(),
+                    },
+                    Stmt::Let {
+                        var: hi_var,
+                        value: Box::new(hi),
+                        span: stmt_span.clone(),
+                    },
+                    Stmt::Let {
+                        var: var.clone(),
+                        value: Box::new(lo_ref),
+                        span: stmt_span.clone(),
+                    },
+                    Stmt::While {
+                        cond: Box::new(Expr::BinaryOp(
+                            Box::new(Expr::Variable(var)),
+                            Op::Lt,
+                            Box::new(hi_ref),
+                        )),
+                        invariant: Box::new(invariant),
+                        decreases: Some(Box::new(decreases)),
+                        body: Box::new(loop_body),
+                        span: stmt_span.clone(),
+                    },
+                ],
+                stmt_span,
+            )
         }
 
         Token::Acquire => {

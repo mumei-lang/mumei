@@ -227,6 +227,42 @@ decreases: n - i
     i = i + 1;
 };
 ```
+
+### Bounded `for` loops (sugar)
+
+Bounded `for` loops desugar to a `let` plus the existing terminating `while`:
+
+```mumei
+for i in lo..hi invariant: user_inv decreases: user_dec {
+    body
+}
+```
+
+is equivalent to:
+
+```mumei
+{
+    let __for_lo_i = lo;
+    let __for_hi_i = hi;
+    let i = __for_lo_i;
+    while i < __for_hi_i
+    invariant: __for_lo_i <= i && (i <= __for_hi_i || i == __for_lo_i) && user_inv
+    decreases: __for_hi_i - i
+    {
+        body;
+        i = i + 1;
+    }
+}
+```
+
+Without clauses, the automatic invariant is `lo <= i && (i <= hi || i == lo)`
+and the default variant is `hi - i`. A user `invariant:` is conjoined with the
+automatic invariant; a user `decreases:` replaces the default. The loop uses
+the existing termination proof. The bounds `lo` and `hi` are evaluated once
+before the loop and stored in generated temporaries. The loop variable binds
+in the enclosing block like an ordinary `let`; shadowing an outer binding with
+the same name is not restored. Assigning the loop variable in the body is
+rejected.
 ---
 ## Module System
 ### Import Syntax
@@ -251,6 +287,17 @@ body: {
     increment(x)
 };
 ```
+
+### Pipeline operator `|>`
+
+The pipeline operator passes its left operand to the right-hand function:
+`x |> f |> g` is `g(f(x))`, and `x |> add(1)` is `add(1, x)`.
+`|>` has the lowest precedence, so parenthesize `(x |> f) == 3` when needed.
+Pipeline lambda right-hand sides must be parenthesized, as in
+`x |> (|y| y + 1)`. Function-valued parameters can be applied with
+`x |> call(f)`.
+It is not parsed inside a match guard or a bare (non-block) match-arm body;
+use parentheses or a block in those positions.
 ---
 ## Quantifiers in Contracts
 Use bounded ranges or finite collections when possible. For Z3-stable quantifier restrictions, see [Quantifiers](SPEC_GUIDE.md#quantifiers).

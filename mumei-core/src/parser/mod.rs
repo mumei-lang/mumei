@@ -1385,6 +1385,31 @@ atom transfer(x: i64)
     }
 
     #[test]
+    fn test_parse_match_guards() {
+        let expr = parse_expression("match amount { a if a <= 10 => 0, _ => 3 }");
+        match expr {
+            Expr::Match { arms, .. } => {
+                assert_eq!(arms.len(), 2);
+                assert!(matches!(
+                    arms[0].guard.as_deref(),
+                    Some(Expr::BinaryOp(left, Op::Le, right))
+                        if matches!(left.as_ref(), Expr::Variable(name) if name == "a")
+                            && matches!(right.as_ref(), Expr::Number(10))
+                ));
+                assert!(matches!(
+                    arms[0].body.as_ref(),
+                    Stmt::Expr(Expr::Number(0), _)
+                ));
+                assert!(matches!(
+                    arms[1].body.as_ref(),
+                    Stmt::Expr(Expr::Number(3), _)
+                ));
+            }
+            _ => panic!("Expected guarded Match"),
+        }
+    }
+
+    #[test]
     fn test_parse_body_while() {
         let stmt = parse_body_expr("{ while x > 0 invariant: x >= 0 { x = x - 1 } }");
         match stmt {
@@ -1556,8 +1581,252 @@ extern "Rust" {
     }
 
     #[test]
+    fn test_lexer_range_and_field_tokens() {
+        let mut lexer = lexer::Lexer::new("0..10 a.b");
+        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        assert_eq!(tokens[0], token::Token::IntLit(0));
+        assert_eq!(tokens[1], token::Token::DotDot);
+        assert_eq!(tokens[2], token::Token::IntLit(10));
+        assert_eq!(tokens[3], token::Token::Ident("a".to_string()));
+        assert_eq!(tokens[4], token::Token::Dot);
+        assert_eq!(tokens[5], token::Token::Ident("b".to_string()));
+    }
+
+    #[test]
+    fn test_parse_for_range_desugars_to_while() {
+        let stmt = parse_body_expr("for i in 0..n { acc = acc + i }");
+        match stmt {
+            Stmt::Block(stmts, _) => {
+                assert_eq!(stmts.len(), 4);
+                assert!(matches!(
+                    &stmts[0],
+                    Stmt::Let { var, value, .. }
+                        if var == "__for_lo_i" && matches!(value.as_ref(), Expr::Number(0))
+                ));
+                assert!(matches!(
+                    &stmts[1],
+                    Stmt::Let { var, value, .. }
+                        if var == "__for_hi_i"
+                            && matches!(value.as_ref(), Expr::Variable(name) if name == "n")
+                ));
+                assert!(matches!(
+                    &stmts[2],
+                    Stmt::Let { var, value, .. }
+                        if var == "i"
+                            && matches!(value.as_ref(), Expr::Variable(name) if name == "__for_lo_i")
+                ));
+                match &stmts[3] {
+                    Stmt::While {
+                        cond,
+                        invariant,
+                        decreases: Some(decreases),
+                        body,
+                        ..
+                    } => {
+                        assert!(matches!(
+                            cond.as_ref(),
+                            Expr::BinaryOp(left, Op::Lt, right)
+                                if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
+                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "__for_hi_i")
+                        ));
+                        assert!(matches!(
+                            invariant.as_ref(),
+                            Expr::BinaryOp(auto, Op::And, rest)
+                                if matches!(
+                                    auto.as_ref(),
+                                Expr::BinaryOp(left, Op::Le, right)
+                                        if matches!(left.as_ref(), Expr::Variable(name) if name == "__for_lo_i")
+                                            && matches!(right.as_ref(), Expr::Variable(name) if name == "i")
+                                ) && matches!(
+                                    rest.as_ref(),
+                                    Expr::BinaryOp(bounds, Op::Or, start)
+                                        if matches!(
+                                            bounds.as_ref(),
+                                            Expr::BinaryOp(left, Op::Le, right)
+                                                if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
+                                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "__for_hi_i")
+                                        ) && matches!(
+                                            start.as_ref(),
+                                            Expr::BinaryOp(left, Op::Eq, right)
+                                                if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
+                                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "__for_lo_i")
+                                        )
+                                )
+                        ));
+                        assert!(matches!(
+                            decreases.as_ref(),
+                            Expr::BinaryOp(left, Op::Sub, right)
+                                if matches!(left.as_ref(), Expr::Variable(name) if name == "__for_hi_i")
+                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "i")
+                        ));
+                        match body.as_ref() {
+                            Stmt::Block(body_stmts, _) => {
+                                assert_eq!(body_stmts.len(), 2);
+                                assert!(
+                                    matches!(body_stmts[0], Stmt::Assign { ref var, .. } if var == "acc")
+                                );
+                                assert!(matches!(
+                                    &body_stmts[1],
+                                    Stmt::Assign { ref var, value, .. }
+                                        if var == "i"
+                                            && matches!(
+                                                value.as_ref(),
+                                                Expr::BinaryOp(left, Op::Add, right)
+                                                    if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
+                                                        && matches!(right.as_ref(), Expr::Number(1))
+                                            )
+                                ));
+                            }
+                            other => panic!("expected loop body block, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected desugared while, got {other:?}"),
+                }
+            }
+            other => panic!("expected desugared outer block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_for_range_custom_invariant_and_decreases() {
+        let stmt = parse_body_expr(
+            "for i in lo..hi invariant: acc >= 0 decreases: hi - i { acc = acc + 1 }",
+        );
+        let Stmt::Block(stmts, _) = stmt else {
+            panic!("expected desugared outer block");
+        };
+        let Stmt::While {
+            invariant,
+            decreases: Some(decreases),
+            ..
+        } = &stmts[3]
+        else {
+            panic!("expected desugared while");
+        };
+        assert!(matches!(
+            invariant.as_ref(),
+            Expr::BinaryOp(auto, Op::And, user)
+                    if matches!(user.as_ref(), Expr::BinaryOp(_, Op::Ge, _))
+                    && matches!(auto.as_ref(), Expr::BinaryOp(_, Op::And, _))
+        ));
+        assert!(matches!(
+            decreases.as_ref(),
+            Expr::BinaryOp(left, Op::Sub, right)
+                if matches!(left.as_ref(), Expr::Variable(name) if name == "hi")
+                    && matches!(right.as_ref(), Expr::Variable(name) if name == "i")
+        ));
+    }
+
+    #[test]
+    fn test_parse_for_range_missing_syntax_is_recorded() {
+        let missing_in = parse_body_expr_checked("for i 0..n { i = i + 1 }")
+            .expect_err("missing `in` must be recorded instead of panicking");
+        assert!(
+            missing_in.iter().any(|failure| failure.contains("'in'")),
+            "expected missing `in` diagnostic, got {missing_in:?}"
+        );
+
+        let missing_separator = parse_body_expr_checked("for i in 0 { i = i + 1 }")
+            .expect_err("missing `..` must be recorded instead of panicking");
+        assert!(
+            missing_separator
+                .iter()
+                .any(|failure| failure.contains("'..'")),
+            "expected missing range separator diagnostic, got {missing_separator:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_for_range_rejects_loop_variable_assignment() {
+        let failures = parse_body_expr_checked("for i in 0..n { i = i + 1 }")
+            .expect_err("assigning the loop variable must be rejected");
+        assert!(
+            failures.iter().any(|failure| {
+                failure.contains("for loop body must not assign to loop variable `i`")
+            }),
+            "expected loop variable assignment diagnostic, got {failures:?}"
+        );
+
+        let nested_failures = parse_body_expr_checked("for i in 0..n { if i >= 0 { i = i } }")
+            .expect_err("nested loop-variable assignment must be rejected");
+        assert!(
+            nested_failures.iter().any(|failure| {
+                failure.contains("for loop body must not assign to loop variable `i`")
+            }),
+            "expected nested loop variable assignment diagnostic, got {nested_failures:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_pipeline() {
+        assert!(matches!(
+            parse_expression("x |> f |> g"),
+            Expr::Call(name, args)
+                if name == "g"
+                    && args.len() == 1
+                    && matches!(
+                        &args[0],
+                        Expr::Call(inner_name, inner_args)
+                            if inner_name == "f"
+                                && matches!(&inner_args[..], [Expr::Variable(x)] if x == "x")
+                    )
+        ));
+        assert!(matches!(
+            parse_expression("x |> add(1)"),
+            Expr::Call(name, args)
+                if name == "add"
+                    && matches!(&args[..], [Expr::Number(1), Expr::Variable(x)] if x == "x")
+        ));
+        assert!(matches!(
+            parse_expression("a + 1 |> f"),
+            Expr::Call(name, args)
+                if name == "f"
+                    && matches!(
+                        &args[..],
+                        [Expr::BinaryOp(left, Op::Add, right)]
+                            if matches!(left.as_ref(), Expr::Variable(x) if x == "a")
+                                && matches!(right.as_ref(), Expr::Number(1))
+                )
+        ));
+    }
+
+    #[test]
+    fn test_parse_pipeline_lambda_and_rejects_unsupported_rhs() {
+        let failures = parse_body_expr_checked("x |> |y| y + 1 |> g")
+            .expect_err("bare pipeline lambda must be rejected");
+        assert!(
+            failures.iter().any(|failure| {
+                failure.contains("pipeline lambda must be parenthesized: x |> (|y| ...)")
+            }),
+            "expected bare pipeline lambda diagnostic, got {failures:?}"
+        );
+
+        assert!(matches!(
+            parse_expression("x |> (|y| y + 1)"),
+            Expr::CallRef { callee, args }
+                if matches!(callee.as_ref(), Expr::Lambda { .. })
+                    && matches!(&args[..], [Expr::Variable(name)] if name == "x")
+        ));
+
+        assert!(matches!(
+            parse_expression("x |> call(f)"),
+            Expr::CallRef { callee, args }
+                if matches!(callee.as_ref(), Expr::Variable(name) if name == "f")
+                    && matches!(&args[..], [Expr::Variable(name)] if name == "x")
+        ));
+
+        let failures = parse_body_expr_checked("x |> 42")
+            .expect_err("unsupported pipeline RHS must be recorded as a syntax failure");
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("pipeline right-hand side")),
+            "expected unsupported pipeline RHS diagnostic, got {failures:?}"
+        );
+    }
+
+    #[test]
     fn test_parse_pipeline_ready() {
-        // The lexer can tokenize |> even though the parser doesn't use it yet
         let mut lexer = lexer::Lexer::new("x |> f |> g");
         let tokens = lexer.tokenize();
         let pipes: Vec<_> = tokens
