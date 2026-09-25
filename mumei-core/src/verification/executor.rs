@@ -1634,7 +1634,23 @@ pub(crate) fn verify_inner(
     // 2c. 全パラメータに対して配列長シンボルを事前生成
     #[allow(clippy::map_entry)]
     for param in &atom.params {
-        array_len_value(&ctx, &mut env, &param.name, bitvec_i64, Some(&solver));
+        let is_string = env
+            .get(&param.name)
+            .is_some_and(|value| value.as_string().is_some());
+        if is_string {
+            let string = env
+                .get(&param.name)
+                .and_then(|value| value.as_string())
+                .expect("string parameter disappeared from verification environment");
+            let ast =
+                unsafe { z3_sys::Z3_mk_seq_length(raw_z3_context(&ctx), string.get_z3_ast()) };
+            env.insert(
+                format!("len_{}", param.name),
+                unsafe { Int::wrap(&ctx, ast) }.into(),
+            );
+        } else {
+            array_len_value(&ctx, &mut env, &param.name, bitvec_i64, Some(&solver));
+        }
     }
 
     // 2d. 線形性チェック: consumed_params + ref パラメータの Z3 シンボリック Bool 連携
@@ -1988,81 +2004,86 @@ pub(crate) fn verify_inner(
                     let ensures_check = solver.check();
                     if ensures_check == SatResult::Sat {
                         // Extract counterexample from Z3 model
-                        let (ce_a, ce_b, ce_value, data_flow_trace, reconstruction_loss) =
-                            if let Some(model) = solver.get_model() {
-                                let mut ce_json = serde_json::Map::new();
-                                let mut model_map = HashMap::new();
-                                for param in &atom.params {
-                                    if let Some(var_z3) = env.get(&param.name) {
-                                        if let Some(val) = model.eval(var_z3, true) {
-                                            let val_str = format!("{}", val);
-                                            ce_json.insert(param.name.clone(), json!(val_str));
-                                        }
-                                    }
-                                }
-                                let mut reconstruction_variables = HashMap::new();
-                                let mut model_values: HashMap<String, CexValue> = HashMap::new();
-                                for (name, var_z3) in &env {
-                                    reconstruction_variables.insert(name.clone(), var_z3.clone());
+                        let (
+                            ce_a,
+                            ce_b,
+                            ce_value,
+                            data_flow_trace,
+                            reconstruction_loss,
+                            validation_status,
+                        ) = if let Some(model) = solver.get_model() {
+                            let mut ce_json = serde_json::Map::new();
+                            let mut model_map = HashMap::new();
+                            for param in &atom.params {
+                                if let Some(var_z3) = env.get(&param.name) {
                                     if let Some(val) = model.eval(var_z3, true) {
-                                        if let Some(int_value) = z3_dynamic_to_i64(&val) {
-                                            model_map.insert(name.clone(), int_value);
-                                        }
-                                        if let Some(cex_value) = z3_dynamic_to_cex_value(&val) {
-                                            model_values.insert(name.clone(), cex_value);
-                                        }
+                                        let val_str = format!("{}", val);
+                                        ce_json.insert(param.name.clone(), json!(val_str));
                                     }
                                 }
-                                let a_str = ce_json
-                                    .get(atom.params.first().map(|p| p.name.as_str()).unwrap_or(""))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("N/A")
-                                    .to_string();
-                                let b_str = ce_json
-                                    .get(atom.params.get(1).map(|p| p.name.as_str()).unwrap_or(""))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("N/A")
-                                    .to_string();
-                                let ce_val = if ce_json.is_empty() {
-                                    None
-                                } else {
-                                    Some(serde_json::Value::Object(ce_json))
-                                };
-                                let data_flow_trace =
-                                    build_data_flow_trace(atom, &model_map, module_env, hir_atom);
-                                let reconstruction_loss = Some(ReconstructionLoss::from_z3_model(
-                                    atom.ensures.clone(),
-                                    &model,
-                                    &reconstruction_variables,
-                                ));
-                                if enable_spurious_detection {
-                                    let validation =
-                                        validate_counterexample(atom, &model_values, module_env);
-                                    if validation.validation_status == "spurious_candidate" {
-                                        solver.pop(1);
-                                        let symbols = validation
-                                            .symbol_provenance
-                                            .iter()
-                                            .map(|symbol| {
-                                                format!(
-                                                    "{} ({})",
-                                                    symbol.symbol_name, symbol.source
-                                                )
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join(", ");
-                                        let help = if symbols.is_empty() {
-                                            format!(
+                            }
+                            let mut reconstruction_variables = HashMap::new();
+                            let mut model_values: HashMap<String, CexValue> = HashMap::new();
+                            for (name, var_z3) in &env {
+                                reconstruction_variables.insert(name.clone(), var_z3.clone());
+                                if let Some(val) = model.eval(var_z3, true) {
+                                    if let Some(int_value) = z3_dynamic_to_i64(&val) {
+                                        model_map.insert(name.clone(), int_value);
+                                    }
+                                    if let Some(cex_value) = z3_dynamic_to_cex_value(&val) {
+                                        model_values.insert(name.clone(), cex_value);
+                                    }
+                                }
+                            }
+                            let a_str = ce_json
+                                .get(atom.params.first().map(|p| p.name.as_str()).unwrap_or(""))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("N/A")
+                                .to_string();
+                            let b_str = ce_json
+                                .get(atom.params.get(1).map(|p| p.name.as_str()).unwrap_or(""))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("N/A")
+                                .to_string();
+                            let ce_val = if ce_json.is_empty() {
+                                None
+                            } else {
+                                Some(serde_json::Value::Object(ce_json))
+                            };
+                            let data_flow_trace =
+                                build_data_flow_trace(atom, &model_map, module_env, hir_atom);
+                            let reconstruction_loss = Some(ReconstructionLoss::from_z3_model(
+                                atom.ensures.clone(),
+                                &model,
+                                &reconstruction_variables,
+                            ));
+                            let mut validation_status = None;
+                            if enable_spurious_detection {
+                                let validation =
+                                    validate_counterexample(atom, &model_values, module_env);
+                                validation_status = Some(validation.validation_status.clone());
+                                if validation.validation_status == "spurious_candidate" {
+                                    solver.pop(1);
+                                    let symbols = validation
+                                        .symbol_provenance
+                                        .iter()
+                                        .map(|symbol| {
+                                            format!("{} ({})", symbol.symbol_name, symbol.source)
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    let help = if symbols.is_empty() {
+                                        format!(
                                         "Counterexample replay mismatch: {}. Consider escalating to Lean or checking the Z3 translation.",
                                         validation.failed_constraints.join("; ")
                                     )
-                                        } else {
-                                            format!(
+                                    } else {
+                                        format!(
                                         "Counterexample depends on uninterpreted symbols: {}. Consider escalating to Lean or expanding the symbol.",
                                         symbols
                                     )
-                                        };
-                                        return Err(MumeiError::verification_at(
+                                    };
+                                    return Err(MumeiError::verification_at(
                                     format!(
                                         "Spurious counterexample detected for atom '{}'. Spurious counterexample candidate for atom '{}'",
                                         atom.name, atom.name
@@ -2071,12 +2092,19 @@ pub(crate) fn verify_inner(
                                 )
                                 .with_help(help)
                                 .with_counterexample(ce_val.clone()));
-                                    }
                                 }
-                                (a_str, b_str, ce_val, data_flow_trace, reconstruction_loss)
-                            } else {
-                                ("N/A".to_string(), "N/A".to_string(), None, None, None)
-                            };
+                            }
+                            (
+                                a_str,
+                                b_str,
+                                ce_val,
+                                data_flow_trace,
+                                reconstruction_loss,
+                                validation_status,
+                            )
+                        } else {
+                            ("N/A".to_string(), "N/A".to_string(), None, None, None, None)
+                        };
                         solver.pop(1);
                         let constraint_mappings =
                             build_constraint_mappings_for_atom(atom, module_env);
@@ -2091,6 +2119,10 @@ pub(crate) fn verify_inner(
                             (&mut semantic_fb, reconstruction_loss)
                         {
                             feedback["reconstruction_loss"] = json!(loss);
+                            if let Some(status) = validation_status {
+                                feedback["reconstruction_loss"]["validation_status"] =
+                                    json!(status);
+                            }
                         }
                         let loss_vector = if reconstruction_loss_output_enabled() {
                             let candidate = build_loss_vector(
@@ -2630,10 +2662,14 @@ fn z3_dynamic_to_i64(value: &Dynamic) -> Option<i64> {
         .or_else(|| format!("{}", value).parse::<i64>().ok())
 }
 
-/// Extract a concrete counterexample value from a Z3 model term, covering the
+/// Extract a concrete counterexample value from a Z3 model term, including
+/// native `Str` values so replay can validate string builtin bodies.
 /// `f64` encodings used by verification: `Int`, `Bool`, exact-rational `Real`
 /// (default `f64`), and IEEE 754 `Float` (under `--ieee754-f64`).
 fn z3_dynamic_to_cex_value(value: &Dynamic) -> Option<CexValue> {
+    if let Some(string_value) = value.as_string().and_then(|s| s.as_string()) {
+        return Some(CexValue::Str(string_value));
+    }
     if let Some(int_value) = value.as_int().and_then(|v| v.as_i64()) {
         return Some(CexValue::Int(int_value));
     }

@@ -62,19 +62,21 @@ impl PartialEq for EvalValue {
 /// counterexamples (encoded as Z3 `Real` rationals or IEEE 754 `Float`s) can be
 /// replayed under Mumei semantics. `Bool` keeps `result`-style boolean models
 /// exact instead of round-tripping through `0`/`1`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CexValue {
     Int(i64),
     Float(f64),
     Bool(bool),
+    Str(String),
 }
 
 impl CexValue {
-    fn to_eval(self) -> EvalValue {
+    fn to_eval(&self) -> EvalValue {
         match self {
-            CexValue::Int(value) => EvalValue::Int(value),
-            CexValue::Float(value) => EvalValue::Float(value),
-            CexValue::Bool(value) => EvalValue::Bool(value),
+            CexValue::Int(value) => EvalValue::Int(*value),
+            CexValue::Float(value) => EvalValue::Float(*value),
+            CexValue::Bool(value) => EvalValue::Bool(*value),
+            CexValue::Str(value) => EvalValue::String(value.clone()),
         }
     }
 }
@@ -136,7 +138,12 @@ pub fn validate_counterexample(
 
     let body_stmt = parse_body_expr(&atom.body_expr);
     match eval_stmt(&body_stmt, &mut eval_env, module_env, 0) {
-        Ok(result @ (EvalValue::Int(_) | EvalValue::Float(_) | EvalValue::Bool(_))) => {
+        Ok(
+            result @ (EvalValue::Int(_)
+            | EvalValue::Float(_)
+            | EvalValue::Bool(_)
+            | EvalValue::String(_)),
+        ) => {
             if let Some(model_result) = model.get("result") {
                 if !cex_matches_eval(model_result, &result) {
                     return invalid_counterexample_result(
@@ -153,20 +160,12 @@ pub fn validate_counterexample(
             }
             eval_env.insert("result".to_string(), result);
         }
-        Ok(EvalValue::String(_)) => {
-            return invalid_counterexample_result(
-                atom,
-                symbol_provenance,
-                false,
-                "string result is not replayable in Z3 integer model".to_string(),
-            );
-        }
         Ok(EvalValue::Lambda { .. }) => {
             return invalid_counterexample_result(
                 atom,
                 symbol_provenance,
                 false,
-                "lambda result is not replayable in Z3 integer model".to_string(),
+                "lambda result is not replayable in a counterexample model".to_string(),
             );
         }
         Err(err) => {
@@ -571,6 +570,14 @@ fn eval_expr(
             };
             match lambda {
                 Some(lambda) => eval_lambda_call(name, &lambda, args, env, module_env, depth + 1),
+                None if !user_defines_callee(module_env, name, env) => {
+                    if let Some(result) =
+                        eval_string_builtin(name, args, env, module_env, depth + 1)
+                    {
+                        return result;
+                    }
+                    eval_atom_call(name, args, env, module_env, depth + 1)
+                }
                 None => eval_atom_call(name, args, env, module_env, depth + 1),
             }
         }
@@ -683,11 +690,9 @@ fn eval_lambda_call(
             scalar @ (EvalValue::Int(_)
             | EvalValue::Float(_)
             | EvalValue::Bool(_)
+            | EvalValue::String(_)
             | EvalValue::Lambda { .. }) => {
                 call_env.insert(param.clone(), scalar);
-            }
-            EvalValue::String(_) => {
-                return Err(format!("non-scalar argument for lambda '{name}'"));
             }
         }
     }
@@ -717,10 +722,10 @@ fn eval_atom_call(
             value @ (EvalValue::Int(_)
             | EvalValue::Float(_)
             | EvalValue::Bool(_)
+            | EvalValue::String(_)
             | EvalValue::Lambda { .. }) => {
                 call_env.insert(param.name.clone(), value);
             }
-            EvalValue::String(_) => return Err(format!("non-scalar argument for atom '{}'", name)),
         }
     }
 
@@ -730,15 +735,112 @@ fn eval_atom_call(
     let body = parse_body_expr(&callee.body_expr);
     let result = eval_stmt(&body, &mut call_env, module_env, depth)?;
     match &result {
-        EvalValue::Int(_) | EvalValue::Float(_) | EvalValue::Bool(_) | EvalValue::Lambda { .. } => {
+        EvalValue::Int(_)
+        | EvalValue::Float(_)
+        | EvalValue::Bool(_)
+        | EvalValue::String(_)
+        | EvalValue::Lambda { .. } => {
             call_env.insert("result".to_string(), result.clone());
         }
-        EvalValue::String(_) => {}
     }
     if !eval_bool_clause(&callee.ensures, &mut call_env, module_env)? {
         return Err(format!("callee '{}' ensures clause is false", name));
     }
     Ok(result)
+}
+
+fn user_defines_callee(module_env: &ModuleEnv, name: &str, env: &EvalEnv) -> bool {
+    matches!(env.get(name), Some(EvalValue::Lambda { .. }))
+        || lookup_call_atom(module_env, name).is_some()
+}
+
+fn eval_string_builtin(
+    name: &str,
+    args: &[Expr],
+    env: &mut EvalEnv,
+    module_env: &ModuleEnv,
+    depth: usize,
+) -> Option<Result<EvalValue, String>> {
+    let arity = match name {
+        "len" | "is_empty" => 1,
+        "starts_with" | "ends_with" | "contains" | "not_contains" | "index_of" => 2,
+        "substr" => 3,
+        "char_at" => 2,
+        _ => return None,
+    };
+    if args.len() != arity {
+        return Some(Err(format!("{name}() expects {arity} arguments")));
+    }
+    let values = match args
+        .iter()
+        .map(|arg| eval_expr(arg, env, module_env, depth))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(values) => values,
+        Err(err) => return Some(Err(err)),
+    };
+    let string = |value: &EvalValue| match value {
+        EvalValue::String(value) => Ok(value.clone()),
+        _ => Err(format!("{name}() expects Str arguments")),
+    };
+    let result = match name {
+        "len" => string(&values[0]).map(|value| EvalValue::Int(value.chars().count() as i64)),
+        "is_empty" => string(&values[0]).map(|value| EvalValue::Bool(value.is_empty())),
+        "starts_with" => string(&values[0]).and_then(|value| {
+            string(&values[1]).map(|pat| EvalValue::Bool(value.starts_with(&pat)))
+        }),
+        "ends_with" => string(&values[0])
+            .and_then(|value| string(&values[1]).map(|pat| EvalValue::Bool(value.ends_with(&pat)))),
+        "contains" => string(&values[0])
+            .and_then(|value| string(&values[1]).map(|pat| EvalValue::Bool(value.contains(&pat)))),
+        "not_contains" => string(&values[0])
+            .and_then(|value| string(&values[1]).map(|pat| EvalValue::Bool(!value.contains(&pat)))),
+        "index_of" => string(&values[0]).and_then(|value| {
+            string(&values[1]).map(|pat| {
+                let index = value
+                    .find(&pat)
+                    .map(|byte_index| value[..byte_index].chars().count() as i64)
+                    .unwrap_or(-1);
+                EvalValue::Int(index)
+            })
+        }),
+        "substr" => {
+            let value = string(&values[0]);
+            let start = match &values[1] {
+                EvalValue::Int(value) => *value,
+                _ => return Some(Err("substr() expects integer start/count".to_string())),
+            };
+            let count = match &values[2] {
+                EvalValue::Int(value) => *value,
+                _ => return Some(Err("substr() expects integer start/count".to_string())),
+            };
+            value.map(|value| {
+                let chars: Vec<char> = value.chars().collect();
+                let start = usize::try_from(start)
+                    .unwrap_or(chars.len())
+                    .min(chars.len());
+                let count = usize::try_from(count).unwrap_or(0);
+                EvalValue::String(chars.into_iter().skip(start).take(count).collect())
+            })
+        }
+        "char_at" => {
+            let value = string(&values[0]);
+            let index = match &values[1] {
+                EvalValue::Int(value) => *value,
+                _ => return Some(Err("char_at() expects an integer index".to_string())),
+            };
+            value.map(|value| {
+                let character = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| value.chars().nth(index))
+                    .map(|character| character.to_string())
+                    .unwrap_or_default();
+                EvalValue::String(character)
+            })
+        }
+        _ => unreachable!(),
+    };
+    Some(result)
 }
 
 fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, String> {
@@ -873,6 +975,7 @@ fn cex_matches_eval(model: &CexValue, body: &EvalValue) -> bool {
         (CexValue::Bool(m), EvalValue::Bool(b)) => m == b,
         (CexValue::Int(m), EvalValue::Bool(b)) => *m == i64::from(*b),
         (CexValue::Bool(m), EvalValue::Int(b)) => i64::from(*m) == *b,
+        (CexValue::Str(m), EvalValue::String(b)) => m == b,
         _ => match (cex_as_f64(model), value_as_f64(body)) {
             (Some(m), Some(b)) => floats_close(m, b),
             _ => false,
@@ -900,7 +1003,7 @@ fn cex_as_f64(value: &CexValue) -> Option<f64> {
     match value {
         CexValue::Int(value) => Some(*value as f64),
         CexValue::Float(value) => Some(*value),
-        CexValue::Bool(_) => None,
+        CexValue::Bool(_) | CexValue::Str(_) => None,
     }
 }
 
@@ -909,6 +1012,7 @@ fn format_cex_value(value: &CexValue) -> String {
         CexValue::Int(value) => value.to_string(),
         CexValue::Float(value) => value.to_string(),
         CexValue::Bool(value) => value.to_string(),
+        CexValue::Str(value) => value.clone(),
     }
 }
 

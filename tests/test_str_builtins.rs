@@ -69,11 +69,43 @@ fn user_atoms_shadow_string_builtin_names() {
 
 #[test]
 fn str_builtins_verify_in_bitvec_mode() {
-    let (ok, out) =
-        mumei_verify_uncached_with_args("tests/test_str_builtins_bitvec.mm", &["--bitvec-i64"]);
+    let (ok, out) = mumei_verify_uncached_with_args(
+        "tests/test_str_builtins_bitvec_decidable.mm",
+        &["--bitvec-i64"],
+    );
     assert!(
         ok,
         "Str builtin fixture must verify in bit-vector mode:\n{out}"
+    );
+}
+
+#[test]
+fn string_counterexample_replays_lengths_and_builtins() {
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--json")
+        .arg("--enable-spurious-detection")
+        .arg("tests/negative/test_str_len_cex.mm")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run string counterexample fixture");
+    assert!(!output.status.success(), "fixture must fail verification");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("verify --json emits one JSON payload");
+    let counterexample = payload["semantic_feedback"]["reconstruction_loss"]["counter_example"]
+        .as_object()
+        .expect("loss-vector JSON should contain reconstruction counterexample");
+    let string = counterexample["s"]
+        .as_str()
+        .expect("string parameter should be serialized as a string");
+    let len_s = counterexample["len_s"]
+        .as_i64()
+        .expect("string length should be serialized as an integer");
+    assert_eq!(len_s, string.chars().count() as i64);
+    assert_eq!(
+        payload["semantic_feedback"]["reconstruction_loss"]["validation_status"],
+        serde_json::json!("validated")
     );
 }
 

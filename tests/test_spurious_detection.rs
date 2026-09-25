@@ -45,6 +45,61 @@ fn param(name: &str, type_name: &str) -> Param {
 }
 
 #[test]
+fn test_string_counterexample_replay() {
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("false_empty");
+    atom.params = vec![param("s", "Str")];
+    atom.ensures = "result == true".to_string();
+    atom.body_expr = "is_empty(s)".to_string();
+    let model = HashMap::from([
+        ("s".to_string(), CexValue::Str("A".to_string())),
+        ("result".to_string(), CexValue::Bool(false)),
+    ]);
+    let validation = validate_counterexample(&atom, &model, &module_env);
+    assert!(validation.is_valid);
+    assert_eq!(validation.validation_status, "validated");
+}
+
+#[test]
+fn test_string_counterexample_result_mismatch() {
+    let module_env = ModuleEnv::new();
+    let mut atom = base_atom("false_empty_mismatch");
+    atom.params = vec![param("s", "Str")];
+    atom.ensures = "result == true".to_string();
+    atom.body_expr = "is_empty(s)".to_string();
+    let model = HashMap::from([
+        ("s".to_string(), CexValue::Str("A".to_string())),
+        ("result".to_string(), CexValue::Bool(true)),
+    ]);
+    let validation = validate_counterexample(&atom, &model, &module_env);
+    assert!(!validation.is_valid);
+    assert_eq!(validation.validation_status, "spurious_candidate");
+}
+
+#[test]
+fn test_string_builtin_substr_and_index_of_replay() {
+    let module_env = ModuleEnv::new();
+
+    let mut substr = base_atom("substr_replay");
+    substr.params = vec![param("s", "Str")];
+    substr.ensures = "result == \"x\"".to_string();
+    substr.body_expr = "substr(s, 1, 2)".to_string();
+    let substr_model = HashMap::from([
+        ("s".to_string(), CexValue::Str("abc".to_string())),
+        ("result".to_string(), CexValue::Str("bc".to_string())),
+    ]);
+    let substr_validation = validate_counterexample(&substr, &substr_model, &module_env);
+    assert!(substr_validation.is_valid);
+
+    let mut index_of = base_atom("index_of_replay");
+    index_of.ensures = "result == 0".to_string();
+    index_of.body_expr = "index_of(\"abc\", \"z\")".to_string();
+    let index_model = HashMap::from([("result".to_string(), CexValue::Int(-1))]);
+    let index_validation = validate_counterexample(&index_of, &index_model, &module_env);
+    assert!(index_validation.is_valid);
+}
+
+#[test]
 fn test_validated_counterexample() {
     let module_env = ModuleEnv::new();
     let mut atom = base_atom("validated_counterexample");
