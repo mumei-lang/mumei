@@ -108,14 +108,27 @@ pub(crate) fn check_contract_subsumption<'a>(
     // Only the concrete atom's own parameter names are bound — no hardcoded
     // aliases — so there is no risk of accidental name collisions.
     let mut sub_env: Env<'_> = HashMap::new();
-    for (i, param) in concrete_atom.params.iter().enumerate() {
-        let z3_var: Dynamic =
-            Int::new_const(ctx, format!("__sub_p{}_{}", i, param.name).as_str()).into();
+    for param in &concrete_atom.params {
+        let z3_var = param_z3_value(
+            ctx,
+            &format!("__sub_{}", param.name),
+            param.type_name.as_deref(),
+            vc.module_env,
+            vc.ieee754_f64,
+            vc.bitvec_i64,
+        );
         sub_env.insert(param.name.clone(), z3_var);
     }
 
     // Create a fresh symbolic result that both ensures clauses reference.
-    let result_var: Dynamic = Int::new_const(ctx, "__sub_result").into();
+    let result_var = param_z3_value(
+        ctx,
+        "__sub_result",
+        concrete_atom.return_type.as_deref(),
+        vc.module_env,
+        vc.ieee754_f64,
+        vc.bitvec_i64,
+    );
     sub_env.insert("result".to_string(), result_var);
 
     // The parser represents `true` / `false` as Expr::Variable("true"|"false").
