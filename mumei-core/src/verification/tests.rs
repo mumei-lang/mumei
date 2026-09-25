@@ -64,6 +64,32 @@ fn test_param(name: &str, type_name: Option<&str>) -> Param {
     }
 }
 
+fn test_subsumption_vc<'a>(ctx: &'a Context, module_env: &'a ModuleEnv) -> VCtx<'a> {
+    VCtx {
+        ctx,
+        module_env,
+        current_atom: None,
+        linearity_ctx: None,
+        effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        profiler: None,
+        ieee754_f64: false,
+        bitvec_i64: false,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        bitvec_i64_global: false,
+    }
+}
+
 #[test]
 fn test_contract_hash_computation_is_deterministic() {
     let mut atom = test_atom(
@@ -2051,7 +2077,7 @@ fn test_subsumption_check_holds_with_requires() {
         &vc,
         &concrete,
         "result >= 0",
-        None,
+        Some("x >= 0"),
         "apply",
         "f",
         &solver,
@@ -2060,6 +2086,165 @@ fn test_subsumption_check_holds_with_requires() {
     assert!(
         result.is_ok(),
         "subsumption should hold: x >= 0 ∧ result == x + 1 ⇒ result >= 0"
+    );
+}
+
+#[test]
+fn test_subsumption_check_contract_requires_missing_is_rejected() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let concrete = test_atom(
+        "positive",
+        vec![test_param("x", Some("i64"))],
+        "x >= 0",
+        "result >= 0",
+        "x",
+        Some("i64"),
+    );
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result >= 0",
+        None,
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    );
+    let error = result.expect_err("missing contract requires must fail subsumption");
+    assert!(error.to_string().contains("contract requires"));
+}
+
+#[test]
+fn test_subsumption_check_contract_requires_matches_concrete() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let concrete = test_atom(
+        "positive",
+        vec![test_param("x", Some("i64"))],
+        "x >= 0",
+        "result >= 0",
+        "x",
+        Some("i64"),
+    );
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result >= 0",
+        Some("x >= 0"),
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_ok(),
+        "matching callback requires should hold: {result:?}"
+    );
+}
+
+#[test]
+fn test_subsumption_check_outer_callee_parameter_is_unconstrained() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let concrete = test_atom(
+        "positive",
+        vec![test_param("x", Some("i64"))],
+        "x >= 0",
+        "result >= 0",
+        "x",
+        Some("i64"),
+    );
+    let error = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result >= 0",
+        Some("x >= lo"),
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    )
+    .expect_err("an unbound outer callee parameter must produce a counterexample");
+    let message = error.to_string();
+    assert!(
+        message.contains("does not imply concrete requires"),
+        "expected a SAT requires-subsumption failure, got: {message}"
+    );
+    assert!(
+        !message.contains("could not lower"),
+        "unbound outer callee parameter should be unconstrained, not a lowering error: {message}"
+    );
+}
+
+#[test]
+fn test_subsumption_check_stronger_contract_requires_holds() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let concrete = test_atom(
+        "positive",
+        vec![test_param("x", Some("i64"))],
+        "x >= 0",
+        "result >= 0",
+        "x",
+        Some("i64"),
+    );
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result >= 0",
+        Some("x >= 1"),
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_ok(),
+        "stronger callback contract requires should hold: {result:?}"
+    );
+}
+
+#[test]
+fn test_subsumption_check_crossed_contract_requires_names_fail() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let concrete = test_atom(
+        "second",
+        vec![test_param("y", Some("i64")), test_param("x", Some("i64"))],
+        "x >= 0",
+        "result >= 0",
+        "0",
+        Some("i64"),
+    );
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result >= 0",
+        Some("x >= 0"),
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_err(),
+        "contract x must refer to the first callback argument in the requires obligation"
     );
 }
 
