@@ -238,10 +238,17 @@ pub fn parse_expr(ctx: &mut ParseContext, min_bp: u8) -> Expr {
                         args.push(lhs);
                         Expr::Call(name, args)
                     }
-                    rhs => Expr::CallRef {
+                    Expr::Lambda { .. } => Expr::CallRef {
                         callee: Box::new(rhs),
                         args: vec![lhs],
                     },
+                    _ => {
+                        ctx.syntax_failure(
+                            "pipeline right-hand side must be a function name, call, or lambda"
+                                .to_string(),
+                        );
+                        lhs
+                    }
                 };
                 continue;
             }
@@ -887,9 +894,9 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                         .get(ctx.pos())
                         .map(|tok| (tok.line, tok.col))
                         .unwrap_or((0, 0));
-                    panic!(
+                    ctx.syntax_failure(format!(
                         "for loop requires 'in' after loop variable, found {found} at {line}:{col}"
-                    );
+                    ));
                 }
             }
             let lo = parse_expr(ctx, 0);
@@ -899,13 +906,17 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                     .get(ctx.pos())
                     .map(|tok| (tok.line, tok.col))
                     .unwrap_or((0, 0));
-                panic!(
+                ctx.syntax_failure(format!(
                     "for loop requires '..' between bounds, found {} at {line}:{col}",
                     ctx.peek()
-                );
+                ));
             }
-            ctx.advance();
-            let hi = parse_expr(ctx, 0);
+            let hi = if ctx.peek() == &Token::DotDot {
+                ctx.advance();
+                parse_expr(ctx, 0)
+            } else {
+                Expr::Variable("__mumei_missing_range_bound".to_string())
+            };
             let user_invariant = if ctx.peek() == &Token::Invariant {
                 ctx.advance();
                 if ctx.peek() == &Token::Colon {

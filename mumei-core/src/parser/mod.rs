@@ -1681,6 +1681,25 @@ extern "Rust" {
     }
 
     #[test]
+    fn test_parse_for_range_missing_syntax_is_recorded() {
+        let missing_in = parse_body_expr_checked("for i 0..n { i = i + 1 }")
+            .expect_err("missing `in` must be recorded instead of panicking");
+        assert!(
+            missing_in.iter().any(|failure| failure.contains("'in'")),
+            "expected missing `in` diagnostic, got {missing_in:?}"
+        );
+
+        let missing_separator = parse_body_expr_checked("for i in 0 { i = i + 1 }")
+            .expect_err("missing `..` must be recorded instead of panicking");
+        assert!(
+            missing_separator
+                .iter()
+                .any(|failure| failure.contains("'..'")),
+            "expected missing range separator diagnostic, got {missing_separator:?}"
+        );
+    }
+
+    #[test]
     fn test_parse_pipeline() {
         assert!(matches!(
             parse_expression("x |> f |> g"),
@@ -1709,8 +1728,27 @@ extern "Rust" {
                         [Expr::BinaryOp(left, Op::Add, right)]
                             if matches!(left.as_ref(), Expr::Variable(x) if x == "a")
                                 && matches!(right.as_ref(), Expr::Number(1))
-                    )
+                )
         ));
+    }
+
+    #[test]
+    fn test_parse_pipeline_lambda_and_rejects_unsupported_rhs() {
+        assert!(matches!(
+            parse_expression("x |> |y| y + 1"),
+            Expr::CallRef { callee, args }
+                if matches!(callee.as_ref(), Expr::Lambda { .. })
+                    && matches!(&args[..], [Expr::Variable(name)] if name == "x")
+        ));
+
+        let failures = parse_body_expr_checked("x |> 42")
+            .expect_err("unsupported pipeline RHS must be recorded as a syntax failure");
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("pipeline right-hand side")),
+            "expected unsupported pipeline RHS diagnostic, got {failures:?}"
+        );
     }
 
     #[test]
