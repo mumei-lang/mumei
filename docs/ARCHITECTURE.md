@@ -716,20 +716,28 @@ those sources so that agent / distributed logic is replayable:
    non-deterministic leaf effect (composites and `parent:` children are resolved
    through `ModuleEnv::is_subeffect`), the atom must have a *witness* parameter
    (`seed` / `timestamp` / `input`, or `<witness>_suffix`) and every
-   `perform <Effect>.<op>(args)` must mention that witness in `args`
-   (`check_replayability`). Violations produce a `Replayability violation`
+   `perform <Effect>.<op>(args)` must receive the witness or a local
+   transitively derived from it (`let s2 = seed + 1`, or the result of an earlier
+   witnessed `perform`) in `args` (`support/replay.rs::verify_replayability`).
+   The walk covers nested expression forms (array/struct literals, indexing,
+   field access, lambdas, match, async); lambda parameters shadow the witness.
+   The resolved roots and witness names are part of the proof-cache hash, so
+   cached proofs from before this rule are invalidated for affected atoms. Violations produce a `Replayability violation`
    diagnostic and a `report.json` with `violation_type: "replayability"` and
    `failure_type: effect_not_allowed`.
 2. **Z3 modelling** — `translator/expr.rs::nondeterministic_perform_result` encodes
    the perform result as an uninterpreted function `__nd___perform_<Effect>_<op>`
-   of its numeric arguments (`Int` or `BV(64)` under `bitvec_i64`), instead of a
-   fresh constant. The witness parameter is therefore universally quantified in
+   of *all* its arguments (any Z3 sort; range `Int` or `BV(64)` under
+   `bitvec_i64`), instead of a fresh constant; a zero-argument perform is a
+   zero-arity function. The witness parameter is therefore universally quantified in
    `ensures` verification while equal arguments denote equal results, so the
    generation path is statically deterministic.
 3. **Property-based testing** — `property_based.rs::bind_nondeterministic_sources`
-   pins each non-deterministic perform to `replay_source_value(effect, op, witnesses)`,
-   a `DeterministicRng` value derived only from the effect name and the concrete
-   witness values. With a fixed `PropertyBasedTestConfig::seed`, generated inputs,
+   walks the translated body for every `__nd___perform_<Effect>_<op>(args)`
+   application and pins each one to `replay_source_value(effect, op, args)`, a
+   `DeterministicRng` value derived only from the effect/operation name and the
+   model's concrete argument tuple (so two performs with different arguments are
+   pinned independently). With a fixed `PropertyBasedTestConfig::seed`, generated inputs,
    source values and shrunk counterexamples are bit-for-bit reproducible.
 
 Pure atoms never reach phase 1f-1: performing a non-deterministic source without

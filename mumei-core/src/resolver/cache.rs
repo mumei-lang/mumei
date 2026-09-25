@@ -245,6 +245,18 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(p.value.as_bytes());
         }
     }
+    // Replayability inputs: which non-deterministic roots the declared effects
+    // resolve to (through the effect hierarchy) and which parameters act as
+    // their witnesses. Atoms without such effects contribute nothing, so their
+    // hashes are unchanged.
+    for root in crate::verification::declared_nondeterministic_effects(atom, module_env) {
+        hasher.update(b"|replay:");
+        hasher.update(root.as_bytes());
+        for witness in crate::verification::witness_params(atom, root) {
+            hasher.update(b",witness:");
+            hasher.update(witness.as_bytes());
+        }
+    }
     if atom.is_async {
         hasher.update(b"|async");
     }
@@ -721,5 +733,42 @@ body: { p.a };\n";
             "struct Pair {{ a: i64, b: i64 }}\n{getx_bitvec}{MAIN}"
         ));
         assert_ne!(before, after);
+    }
+}
+
+#[cfg(test)]
+mod replayability_hash_tests {
+    use super::*;
+    use crate::parser::{parse_module, Item};
+
+    fn hash(source: &str) -> String {
+        let items = parse_module(source);
+        let mut module_env = ModuleEnv::default();
+        let mut atom = None;
+        for item in items {
+            match item {
+                Item::EffectDef(def) => {
+                    module_env.effect_defs.insert(def.name.clone(), def);
+                }
+                Item::Atom(a) => atom = Some(a),
+                _ => {}
+            }
+        }
+        compute_proof_hash(&atom.expect("atom"), &module_env)
+    }
+
+    #[test]
+    fn nondeterministic_effect_resolution_participates_in_the_proof_hash() {
+        let body = "body: { perform Dice.next(seed) };";
+        let plain = hash(&format!(
+            "effect Dice;\natom roll(seed: i64) -> i64\neffects: [Dice];\nensures: true;\n{body}"
+        ));
+        let child = hash(&format!(
+            "effect Random;\neffect Dice parent: Random;\natom roll(seed: i64) -> i64\neffects: [Dice];\nensures: true;\n{body}"
+        ));
+        assert_ne!(
+            plain, child,
+            "resolving Dice to the Random root must change the hash"
+        );
     }
 }

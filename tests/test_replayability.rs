@@ -87,6 +87,29 @@ fn witness_not_threaded_into_perform_is_rejected() {
 }
 
 #[test]
+fn perform_nested_in_array_literal_is_still_checked() {
+    let (ok, out) = mumei_verify("tests/negative/test_replay_nested_perform.mm");
+    assert!(!ok, "nested perform Random.next(42) must fail:\n{out}");
+    assert!(
+        out.contains("without threading its witness parameter"),
+        "expected threading diagnostic:\n{out}"
+    );
+}
+
+#[test]
+fn lambda_parameter_shadowing_witness_is_rejected() {
+    let (ok, out) = mumei_verify("tests/negative/test_replay_lambda_shadow.mm");
+    assert!(
+        !ok,
+        "lambda-local seed must not count as the witness:\n{out}"
+    );
+    assert!(
+        out.contains("without threading its witness parameter"),
+        "expected threading diagnostic:\n{out}"
+    );
+}
+
+#[test]
 fn pure_atom_performing_nondeterministic_source_is_rejected_by_containment() {
     let (ok, out) = mumei_verify("tests/negative/test_replay_pure_atom.mm");
     assert!(!ok, "pure atom performing Random must fail:\n{out}");
@@ -98,9 +121,16 @@ fn pure_atom_performing_nondeterministic_source_is_rejected_by_containment() {
 }
 
 fn seeded_source(ensures: &str) -> String {
+    seeded_source_with_body(
+        ensures,
+        "let r = perform Random.next(seed);\n    if r >= 0 { r } else { 0 - r }",
+    )
+}
+
+fn seeded_source_with_body(ensures: &str, body: &str) -> String {
     format!(
         "effect Random;\natom roll(seed: i64) -> i64\neffects: [Random];\nensures: {ensures};\n\
-         body: {{\n    let r = perform Random.next(seed);\n    if r >= 0 {{ r }} else {{ 0 - r }}\n}};\n"
+         body: {{\n    {body}\n}};\n"
     )
 }
 
@@ -145,6 +175,30 @@ fn property_based_counterexample_for_nondeterministic_atom_is_reproducible() {
     let second = property_result(&source, 0x5EED);
     assert_eq!(first.status, "failed", "{first:?}");
     assert!(first.shrunk_counterexample.is_some(), "{first:?}");
+    assert_eq!(
+        first, second,
+        "fixed seed must replay the same counterexample"
+    );
+}
+
+/// Two performs with different arguments are both pinned: `a - a2` with equal
+/// arguments is always 0, while `a - b` with different arguments is not.
+#[test]
+fn property_based_pins_every_perform_by_its_arguments() {
+    let same = seeded_source_with_body(
+        "result == 0",
+        "let a = perform Random.next(seed);\n    let a2 = perform Random.next(seed);\n    a - a2",
+    );
+    let same_result = property_result(&same, 0x5EED);
+    assert_eq!(same_result.status, "passed", "{same_result:?}");
+
+    let different = seeded_source_with_body(
+        "result == 0",
+        "let a = perform Random.next(seed);\n    let b = perform Random.next(seed + 1);\n    a - b",
+    );
+    let first = property_result(&different, 0x5EED);
+    let second = property_result(&different, 0x5EED);
+    assert_eq!(first.status, "failed", "{first:?}");
     assert_eq!(
         first, second,
         "fixed seed must replay the same counterexample"

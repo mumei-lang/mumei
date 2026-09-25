@@ -1,5 +1,5 @@
 use super::module_env::ModuleEnv;
-use super::support::{declared_nondeterministic_effects, nondeterministic_root, witness_params};
+use super::support::nondeterministic_root;
 use super::translator::{
     apply_refinement_constraint, expr_to_z3, param_z3_value, stmt_to_z3, VCtx,
     DEFAULT_CONSTRAINT_BUDGET, I64_BITS,
@@ -840,7 +840,10 @@ fn evaluate_body(
     let mut env = seed_concrete_env(&ctx, atom, module_env, assignment, None, bitvec_i64);
     let body = parse_body_expr(&atom.body_expr);
     let value = stmt_to_z3(&vc, &body, &mut env, Some(&solver)).ok()?;
-    bind_nondeterministic_sources(&solver, atom, module_env, assignment, &env);
+    if !matches!(solver.check(), SatResult::Sat) {
+        return None;
+    }
+    bind_nondeterministic_sources(&solver, module_env, &value, &env)?;
     if !matches!(solver.check(), SatResult::Sat) {
         return None;
     }
@@ -848,13 +851,14 @@ fn evaluate_body(
 }
 
 /// Deterministic stand-in for a non-deterministic source during property-based
-/// testing: the value `perform <effect>.<operation>(...)` yields when the atom's
-/// witness parameters take `witness_values`.
+/// testing: the value `perform <effect>.<operation>(args)` yields for the
+/// concrete `args` (the witness parameter and anything else passed to the
+/// perform).
 ///
-/// It is derived from the witnesses alone (through `DeterministicRng`), so a
-/// generated input replays the same trace on every run, and the same witness
-/// values produce the same source value across atoms and runs.
-pub fn replay_source_value(effect: &str, operation: &str, witness_values: &[i64]) -> i64 {
+/// It is derived from the effect, operation and arguments alone (through
+/// `DeterministicRng`), so a generated input replays the same trace on every
+/// run, and equal arguments produce equal source values.
+pub fn replay_source_value(effect: &str, operation: &str, arg_values: &[i64]) -> i64 {
     let mut seed: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in effect
         .bytes()
@@ -864,59 +868,102 @@ pub fn replay_source_value(effect: &str, operation: &str, witness_values: &[i64]
         seed ^= u64::from(byte);
         seed = seed.wrapping_mul(0x0100_0000_01b3);
     }
-    for value in witness_values {
+    for value in arg_values {
         seed ^= *value as u64;
         seed = seed.wrapping_mul(0x0100_0000_01b3);
     }
     DeterministicRng::new(seed).gen_range(-DEFAULT_INTEGER_BOUND, DEFAULT_INTEGER_BOUND)
 }
 
-/// Pin every `__perform_<effect>_<op>` value of a non-deterministic effect to
-/// `replay_source_value` of the atom's concrete witness parameters.
+const ND_APP_PREFIX: &str = "__nd___perform_";
+
+/// Pin every application `__nd___perform_<effect>_<op>(args)` reachable from
+/// the body value or a local to `replay_source_value` of its model-evaluated
+/// arguments. The solver must be satisfiable on entry (the model supplies the
+/// concrete argument values); returns `None` if a model is unavailable.
 fn bind_nondeterministic_sources<'a>(
     solver: &Solver<'a>,
-    atom: &Atom,
     module_env: &ModuleEnv,
-    assignment: &HashMap<String, GeneratedValue>,
+    value: &Dynamic<'a>,
     env: &Env<'a>,
-) {
+) -> Option<()> {
     let ctx = solver.get_context();
-    for root in declared_nondeterministic_effects(atom, module_env) {
-        let witness_values: Vec<i64> = witness_params(atom, root)
-            .into_iter()
-            .filter_map(|name| match assignment.get(name) {
-                Some(GeneratedValue::Int(value)) => Some(*value),
-                Some(GeneratedValue::Bool(value)) => Some(i64::from(*value)),
-                _ => None,
-            })
-            .collect();
-        let mut keys: Vec<&String> = env
-            .keys()
-            .filter(|key| key.starts_with("__perform_"))
-            .collect();
-        keys.sort();
-        for key in keys {
-            let Some((effect, operation)) = split_perform_key(key, module_env) else {
-                continue;
-            };
-            if nondeterministic_root(module_env, effect) != Some(root) {
-                continue;
-            }
-            let replay = replay_source_value(effect, operation, &witness_values);
-            let source = &env[key];
-            if let Some(int_value) = source.as_int() {
-                solver.assert(&int_value._eq(&Int::from_i64(ctx, replay)));
-            } else if let Some(bv_value) = source.as_bv() {
-                solver.assert(&bv_value._eq(&z3::ast::BV::from_i64(ctx, replay, I64_BITS)));
-            }
+    let model = solver.get_model()?;
+    let mut seen = std::collections::HashSet::new();
+    let mut apps = Vec::new();
+    let mut roots: Vec<&Dynamic<'a>> = vec![value];
+    let mut keys: Vec<&String> = env.keys().collect();
+    keys.sort();
+    roots.extend(keys.into_iter().map(|k| &env[k]));
+    for root in roots {
+        collect_nd_apps(root, &mut seen, &mut apps);
+    }
+    for app in apps {
+        let name = app.decl().name();
+        let Some(rest) = name.strip_prefix(ND_APP_PREFIX) else {
+            continue;
+        };
+        let Some((effect, operation)) = split_effect_operation(rest, module_env) else {
+            continue;
+        };
+        if nondeterministic_root(module_env, effect).is_none() {
+            continue;
         }
+        let arg_values: Vec<i64> = app
+            .children()
+            .iter()
+            .map(|arg| concrete_arg_value(&model, arg))
+            .collect();
+        let replay = replay_source_value(effect, operation, &arg_values);
+        if let Some(int_value) = app.as_int() {
+            solver.assert(&int_value._eq(&Int::from_i64(ctx, replay)));
+        } else if let Some(bv_value) = app.as_bv() {
+            solver.assert(&bv_value._eq(&z3::ast::BV::from_i64(ctx, replay, I64_BITS)));
+        }
+    }
+    Some(())
+}
+
+fn collect_nd_apps<'a>(
+    node: &Dynamic<'a>,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<Dynamic<'a>>,
+) {
+    if !node.is_app() || !seen.insert(node.to_string()) {
+        return;
+    }
+    if node.decl().name().starts_with(ND_APP_PREFIX) {
+        out.push(node.clone());
+    }
+    for child in node.children() {
+        collect_nd_apps(&child, seen, out);
     }
 }
 
-/// Split `__perform_<effect>_<operation>` on the longest known effect name, so
-/// effect names containing `_` are recovered correctly.
-fn split_perform_key<'k>(key: &'k str, module_env: &ModuleEnv) -> Option<(&'k str, &'k str)> {
-    let rest = key.strip_prefix("__perform_")?;
+/// Integer fingerprint of a model value: Int/BV as the signed integer, Bool as
+/// 0/1, anything else (strings, arrays, ...) as a hash of its printed form.
+fn concrete_arg_value(model: &z3::Model<'_>, arg: &Dynamic<'_>) -> i64 {
+    let evaluated = model.eval(arg, true).unwrap_or_else(|| arg.clone());
+    if let Some(v) = evaluated.as_int().and_then(|i| i.as_i64()) {
+        return v;
+    }
+    if let Some(v) = evaluated.as_bv().and_then(|b| b.as_u64()) {
+        return v as i64;
+    }
+    if let Some(v) = evaluated.as_bool().and_then(|b| b.as_bool()) {
+        return i64::from(v);
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in evaluated.to_string().bytes() {
+        h ^= u64::from(byte);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h as i64
+}
+
+/// Split `<effect>_<operation>` on the longest known effect name, so effect
+/// names containing `_` are recovered correctly.
+fn split_effect_operation<'k>(rest: &'k str, module_env: &ModuleEnv) -> Option<(&'k str, &'k str)> {
     let known = module_env
         .effect_defs
         .keys()

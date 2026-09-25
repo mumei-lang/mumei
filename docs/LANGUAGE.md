@@ -446,6 +446,14 @@ value, but nothing else is assumed about it. Under `--property-based-test` the
 source value is derived deterministically from the generated witness, so a fixed
 `--property-based-test-seed` replays the same inputs and the same counterexample.
 
+**Runtime obligation.** At runtime a `perform Random.next(seed)` lowers to a call
+of the handler symbol `__effect_Random_next(seed)`. The compile-time guarantee
+transfers to the executable only if the linked handler is a pure function of its
+arguments (e.g. a PRNG step keyed by `seed`, a clock *reading* passed in as
+`timestamp`). A handler that ignores its arguments and reads `/dev/urandom` or
+the wall clock breaks replay — the type system isolates the source, it cannot
+inspect foreign code.
+
 ---
 ## Stateful Effects (Temporal Ordering)
 
