@@ -271,49 +271,88 @@ fn check_while_invariant<'a>(
 ) -> MumeiResult<bool> {
     let ctx = vc.ctx;
     let path_cond = vc.path_cond_conj();
-    let inv = expr_to_z3(vc, invariant, env, None)?
-        .as_bool()
-        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
-    solver.push();
-    solver.assert(&Bool::and(ctx, &[&path_cond, &inv.not()]));
-    let base = solver.check();
-    solver.pop(1);
-    if base != SatResult::Unsat {
-        return Ok(false);
-    }
-
     let env_snapshot = env.clone();
+    let linearity_snapshot = vc.linearity_ctx.map(|cell| cell.borrow().clone());
+    let effect_snapshot = vc.effect_ctx.map(|cell| cell.borrow().clone());
+    let constraint_count_snapshot = vc.constraint_count.map(|cell| cell.get());
+    let string_constraints_snapshot = vc.has_string_constraints.map(|cell| cell.get());
+    let path_cond_snapshot = vc.path_cond_stack.borrow().clone();
+    let inferred_len_snapshot = vc.inferred_invariants.map(|cell| cell.borrow().len());
+    let bv_shift_snapshot = vc.bv_shift_obligations.borrow().clone();
+    let bv_div_snapshot = vc.bv_div_obligations.borrow().clone();
+    let clause_context_snapshot = vc.clause_context.borrow().clone();
+    let enum_sorts_snapshot = vc.enum_sorts.borrow().clone();
     let types_snapshot = vc.local_enum_types.borrow().clone();
+    let array_elem_types_snapshot = vc.local_array_elem_types.borrow().clone();
     let lambdas_snapshot = vc.local_lambdas.borrow().clone();
-    let mut step_env = env.clone();
-    let modified_set: std::collections::HashSet<String> = modified.iter().cloned().collect();
-    havoc_vars(vc, &mut step_env, &modified_set);
-    let step = (|| -> MumeiResult<SatResult> {
-        let inv_h = expr_to_z3(vc, invariant, &mut step_env, None)?
+    let call_result_lens_snapshot = vc.call_result_lens.borrow().clone();
+    let restore = || {
+        if let (Some(cell), Some(snapshot)) = (vc.linearity_ctx, linearity_snapshot.as_ref()) {
+            *cell.borrow_mut() = snapshot.clone();
+        }
+        if let (Some(cell), Some(snapshot)) = (vc.effect_ctx, effect_snapshot.as_ref()) {
+            *cell.borrow_mut() = snapshot.clone();
+        }
+        if let Some(cell) = vc.constraint_count {
+            cell.set(constraint_count_snapshot.unwrap_or_default());
+        }
+        if let Some(cell) = vc.has_string_constraints {
+            cell.set(string_constraints_snapshot.unwrap_or(false));
+        }
+        *vc.path_cond_stack.borrow_mut() = path_cond_snapshot.clone();
+        if let (Some(cell), Some(length)) = (vc.inferred_invariants, inferred_len_snapshot) {
+            cell.borrow_mut().truncate(length);
+        }
+        *vc.bv_shift_obligations.borrow_mut() = bv_shift_snapshot.clone();
+        *vc.bv_div_obligations.borrow_mut() = bv_div_snapshot.clone();
+        *vc.clause_context.borrow_mut() = clause_context_snapshot.clone();
+        *vc.enum_sorts.borrow_mut() = enum_sorts_snapshot.clone();
+        *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
+        *vc.local_array_elem_types.borrow_mut() = array_elem_types_snapshot.clone();
+        *vc.local_lambdas.borrow_mut() = lambdas_snapshot.clone();
+        *vc.call_result_lens.borrow_mut() = call_result_lens_snapshot.clone();
+    };
+    let result = (|| -> MumeiResult<bool> {
+        let inv = expr_to_z3(vc, invariant, env, None)?
             .as_bool()
             .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
-        let c_h = expr_to_z3(vc, cond, &mut step_env, None)?
-            .as_bool()
-            .ok_or(MumeiError::type_error("While condition must be boolean"))?;
         solver.push();
-        let result = (|| -> MumeiResult<SatResult> {
-            solver.assert(&inv_h);
-            solver.assert(&c_h);
-            stmt_to_z3(vc, body, &mut step_env, Some(solver))?;
-            let inv_after = expr_to_z3(vc, invariant, &mut step_env, None)?
+        solver.assert(&Bool::and(ctx, &[&path_cond, &inv.not()]));
+        let base = solver.check();
+        solver.pop(1);
+        if base != SatResult::Unsat {
+            return Ok(false);
+        }
+
+        let mut step_env = env.clone();
+        let modified_set: std::collections::HashSet<String> = modified.iter().cloned().collect();
+        havoc_vars(vc, &mut step_env, &modified_set);
+        let step = (|| -> MumeiResult<SatResult> {
+            let inv_h = expr_to_z3(vc, invariant, &mut step_env, None)?
                 .as_bool()
                 .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
-            solver.assert(&inv_after.not());
-            Ok(solver.check())
-        })();
-        solver.pop(1);
-        result
+            let c_h = expr_to_z3(vc, cond, &mut step_env, None)?
+                .as_bool()
+                .ok_or(MumeiError::type_error("While condition must be boolean"))?;
+            solver.push();
+            let result = (|| -> MumeiResult<SatResult> {
+                solver.assert(&inv_h);
+                solver.assert(&c_h);
+                stmt_to_z3(vc, body, &mut step_env, Some(solver))?;
+                let inv_after = expr_to_z3(vc, invariant, &mut step_env, None)?
+                    .as_bool()
+                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+                solver.assert(&inv_after.not());
+                Ok(solver.check())
+            })();
+            solver.pop(1);
+            result
+        })()?;
+        Ok(step == SatResult::Unsat)
     })();
+    restore();
     *env = env_snapshot;
-    *vc.local_enum_types.borrow_mut() = types_snapshot;
-    *vc.local_lambdas.borrow_mut() = lambdas_snapshot;
-    let step = step?;
-    Ok(step == SatResult::Unsat)
+    result
 }
 
 /// Record (or clear, when the value has no inferable enum type) the
@@ -619,16 +658,22 @@ pub(crate) fn stmt_to_z3<'a>(
                 let mut effective_invariant = invariant.as_ref().clone();
                 let mut inferred_adopted = Vec::new();
                 if inferred {
+                    let loop_id = {
+                        let mut counter = vc.loop_counter.borrow_mut();
+                        let id = *counter;
+                        *counter += 1;
+                        id
+                    };
+                    let init_prefix = format!("__loop{loop_id}_init_");
                     for name in &modified_btree {
                         let base = name.strip_prefix("__z3_arr_").unwrap_or(name);
                         if let Some(value) =
                             env.get(name).cloned().or_else(|| env.get(base).cloned())
                         {
-                            env.insert(format!("__loop_init_{base}"), value);
+                            env.insert(format!("{init_prefix}{base}"), value);
                         }
                     }
-                    let candidates =
-                        generate_candidates(cond, body, &modified_btree, "__loop_init_");
+                    let candidates = generate_candidates(cond, body, &modified_btree, &init_prefix);
                     for candidate in &candidates {
                         let combined = if inferred_adopted.is_empty() {
                             candidate.clone()

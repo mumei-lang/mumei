@@ -2675,9 +2675,9 @@ benchmark 105 atom の proof certificate（`benchmarks/evaluation_suite.py` B-7 
 
 ---
 
-## P32: Loop Invariant 自動推論（template-based infer-verify）— Implemented (M1)
+## P32: Loop Invariant 自動推論（template-based infer-verify）— Implemented (M1–M3)
 
-**ステータス: Implemented (M1)**。`while` は opt-in 構文 `invariant: infer` で bounded counter、monotonic progress、accumulator bound、unchanged prefix の 4 テンプレートから候補を生成する。候補は既存の base/inductive VC に投入し、Z3 の `unsat` のみを採用する（`sat` / `unknown` は棄却）。推論結果は CLI の人間向け出力と JSON に報告される。CLI フラグは parser が config より先に実行されるため Deferred。裸の `while` は引き続き fail-closed。
+**ステータス: Implemented (M1–M3)**。`while` は opt-in 構文 `invariant: infer` で bounded counter、monotonic progress、accumulator bound、unchanged prefix の 4 テンプレートから候補を生成する。候補は既存の base/inductive VC に投入し、Z3 の `unsat` のみを採用する（`sat` / `unknown` は棄却）。推論結果は CLI の人間向け出力と JSON に報告される。CLI フラグは parser が config より先に実行されるため Deferred。裸の `while` は引き続き fail-closed。
 
 **基本原則**: 推論された不変量は一切信用しない。全候補は既存の `Stmt::While` 検証条件機械（`translator/stmt.rs` の havoc → 前提 assert → body 走査 → `¬inv` check、base case + inductive step）にそのまま投入し、Z3 が `unsat` を返した候補のみを採用する。`sat` / `unknown` を返した候補は棄却 — 検証を通らなかった推論不変量で loop を通す経路は設けない（推論はあくまで「書けたはずの不変量を代筆する」位置付けであり、検証強度は手書き不変量と同一）。
 
@@ -2699,9 +2699,9 @@ benchmark 105 atom の proof certificate（`benchmarks/evaluation_suite.py` B-7 
 **マイルストーン**:
 
 - **M0**: 本メモ。テンプレ集合と候補発生条件の確定。
-- **M1**: `loop_detector` の `LoopInfo` を拡張して候補生成に必要な情報（更新式・境界・書き込み index）を抽出。
-- **M2**: 候補生成 + 逐次 infer-verify（bounded counter / monotonic / accumulator の 3 テンプレ）。
-- **M3**: unchanged-prefix テンプレ + `forall` 翻訳のコスト制御、opt-in 構文 / フラグ。
+- **M1**: ✅ `loop_detector` の `LoopInfo` を拡張して候補生成に必要な情報（更新式・境界・書き込み index）を抽出。
+- **M2**: ✅ 候補生成 + 逐次 infer-verify（bounded counter / monotonic / accumulator の 3 テンプレ）。
+- **M3**: ✅ unchanged-prefix テンプレ + `forall` 翻訳のコスト制御、opt-in 構文。CLI フラグは parser が config より先に実行されるため Deferred。
 - **スコープ外**: CEGIS による不変量の反例駆動 *修正*（反例からの式修补は B-4/mumei-agent 側の管轄）、`decreases` の自動推論、ネスト loop の交互不変量、非線形・浮動小数点不変量。
 
 ---

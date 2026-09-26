@@ -36,6 +36,18 @@ fn bound_inference_verifies() {
 }
 
 #[test]
+fn nested_inference_verifies() {
+    let output = run("tests/positive/infer_invariant_nested.mm", false);
+    assert!(output.status.success(), "{:?}", output);
+}
+
+#[test]
+fn nested_inference_bad_postcondition_fails() {
+    let output = run("tests/negative/infer_invariant_nested.mm", false);
+    assert!(!output.status.success(), "{:?}", output);
+}
+
+#[test]
 fn counter_inference_is_present_in_json() {
     let output = run("tests/positive/infer_invariant_counter.mm", true);
     assert!(output.status.success(), "{:?}", output);

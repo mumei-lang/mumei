@@ -723,6 +723,19 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
             if promote_outside_fragment {
                 *ctx.escalated += 1;
             }
+            if !cached_entry.inferred_invariants.is_empty() {
+                ctx.inferred_invariants
+                    .insert(name.to_string(), cached_entry.inferred_invariants.clone());
+                if !ctx.quiet_output {
+                    for item in &cached_entry.inferred_invariants {
+                        println!(
+                            "   💡 inferred loop invariant (line {}): {}",
+                            item.line,
+                            item.adopted.join(" && ")
+                        );
+                    }
+                }
+            }
             if ctx.emit_structured_feedback {
                 ctx.structured_feedbacks
                     .push(structured_feedback_for_passed_atom(atom));
@@ -777,7 +790,8 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                         );
                     }
                 }
-                ctx.inferred_invariants.insert(name.to_string(), inferred);
+                ctx.inferred_invariants
+                    .insert(name.to_string(), inferred.clone());
             }
             if !ctx.quiet_output {
                 println!("  ⚖️  '{}': verified ✅", name);
@@ -818,6 +832,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                             .as_secs()
                     ),
                     skipped_clauses,
+                    inferred_invariants: inferred,
                 },
             );
             *ctx.verified += 1;

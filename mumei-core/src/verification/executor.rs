@@ -1393,6 +1393,7 @@ pub(crate) fn verify_inner(
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: Some(&has_string_constraints_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: Some(&profiler_cell),
         ieee754_f64,
         bitvec_i64,
