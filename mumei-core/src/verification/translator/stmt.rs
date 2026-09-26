@@ -667,10 +667,16 @@ pub(crate) fn stmt_to_z3<'a>(
                     let init_prefix = format!("__loop{loop_id}_init_");
                     for name in &modified_btree {
                         let base = name.strip_prefix("__z3_arr_").unwrap_or(name);
+                        let snapshot_key = format!("{init_prefix}{base}");
+                        if env.contains_key(&snapshot_key) {
+                            return Err(MumeiError::verification(format!(
+                                "identifier '{snapshot_key}' is reserved for loop invariant inference"
+                            )));
+                        }
                         if let Some(value) =
                             env.get(name).cloned().or_else(|| env.get(base).cloned())
                         {
-                            env.insert(format!("{init_prefix}{base}"), value);
+                            env.insert(snapshot_key, value);
                         }
                     }
                     let candidates = generate_candidates(cond, body, &modified_btree, &init_prefix);
@@ -718,11 +724,19 @@ pub(crate) fn stmt_to_z3<'a>(
                         })
                         .expect("inference adopted at least one candidate");
                     if let Some(report) = vc.inferred_invariants {
-                        report.borrow_mut().push(InferredInvariant {
+                        let entry = InferredInvariant {
                             line: span.line,
                             candidates_tried: candidates.len(),
                             adopted: inferred_adopted.iter().map(expr_to_string).collect(),
-                        });
+                        };
+                        let mut reports = report.borrow_mut();
+                        if let Some(existing) =
+                            reports.iter_mut().find(|item| item.line == entry.line)
+                        {
+                            *existing = entry;
+                        } else {
+                            reports.push(entry);
+                        }
                     }
                 }
 
