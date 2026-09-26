@@ -572,10 +572,12 @@ What a reference type must satisfy in Mumei's atom/effect model:
    param is an observable mutation channel — writes through it must stay inside
    the declared effect/param surface exactly as today's `ref mut` does.
 3. **Erasable lowering**: whatever is adopted must lower to existing codegen
-   shapes — `ref` params already lower to pass-by-address / fat-pointer
-   `(len, data)` pairs; a stored `&T` would need a runtime representation with
-   no aliasing guarantee gaps (no interior pointers into aggregates that
-   ownership analysis cannot see).
+   shapes — today `ref` / `ref mut` are verification-only markers (params are
+   bound as plain locals; codegen has no `is_ref` distinction, and arrays are
+   already fat-pointer `(len, data)` values), so a stored `&T` would be the
+   first construct needing a genuine pointer representation with no aliasing
+   guarantee gaps (no interior pointers into aggregates that ownership
+   analysis cannot see).
 
 Options:
 
@@ -583,7 +585,7 @@ Options:
 |---|---|---|---|
 | A. Full `&T`/`&mut T` | References storable in locals/structs, returnable from atoms; lifetime params in signatures | Requires true region inference + lifetime polymorphism; largest verifier surface | Full expressiveness (iterator views, shared sub-structure) |
 | B. Stack-only shared `&T` | First-class `&T` as read-only references; never returned, never stored into aggregates; scope = declaring block | No region inference needed — lexical liveness suffices | Cheap alias-free reads of large aggregates without `consume` |
-| C. Checker-first (recommended) | Keep `ref` / `ref mut` / `consume` call-site modifiers as the only borrow surface; build the MIR borrow-check architecture (below) anyway | No language change; the checker validates existing `Ref`/`RefMut` rvalues | De-risks whichever `&T` option is later chosen; turns today's hypotheses into hard rules |
+| C. Checker-first (recommended) | Keep `ref` / `ref mut` / `consume` parameter-declaration modifiers as the only borrow surface; build the MIR borrow-check architecture (below) anyway | No language change; the checker validates `Ref`/`RefMut` loans on MIR | De-risks whichever `&T` option is later chosen; turns today's hypotheses into hard rules |
 
 Recommended: **Option C now, Option B if `&T` lands**. `LinearityCtx` + MIR
 move analysis already keep `std/` and the demos green, and `ref` params cover
@@ -622,7 +624,8 @@ All pieces exist on MIR today; the borrow checker is a dataflow pass alongside
   practice.
 - **`LinearityCtx` → borrow checker**: today's `borrow()` / `release_borrow()` /
   `consume()` / `check_alive()` and the `__alive_` / `__borrowed_` /
-  `__exclusive_` Z3 Bools become hard MIR rules evaluated per program point:
+  `__exclusive_` Z3 Bools (keyed on the declared param modes) become hard MIR
+  rules evaluated per program point:
   (1) consume/move of `p` while a live loan covers a prefix of `p` → error;
   (2) write through `ref mut` or assignment to `p` while any live `Shared` loan
   conflicts `p` → error; (3) `RefMut(p)` while any live loan conflicts `p` →
@@ -642,9 +645,12 @@ All pieces exist on MIR today; the borrow checker is a dataflow pass alongside
 #### (c) Milestones and out-of-scope
 
 - **M0 — decision record**: this memo; trigger checklist in (a).
-- **M1 — loan-set dataflow**: `mir_analysis/borrow_check.rs` computing loan
-  sets over existing `Ref`/`RefMut` rvalues (already emitted for `ref`/`ref mut`
-  params); rules (1)–(4) as `MoveViolation`-style hard errors.
+- **M1 — loan-set dataflow**: `lower_hir_to_mir` gains `Rvalue::Ref`/`RefMut`
+  emission for `ref`/`ref mut`-marked params (the enum variants exist but are
+  not constructed today — `ref` params are bound as plain locals after the
+  keyword is stripped from the param name), then
+  `mir_analysis/borrow_check.rs` computes loan sets over them; rules (1)–(4)
+  as `MoveViolation`-style hard errors.
 - **M2 — diagnostics + regression**: conflict messages with place paths;
   `tests/test_concurrency.rs`-style fixture pairs (legal shared read /
   illegal alias-write).
@@ -1899,14 +1905,18 @@ body: {
 }
 ```
 
-`mode: shared` の read 側は `acquire` 内で不変量を前提として使い、書き込みを行わない
-（書き込みを含む shared acquire は従来どおり Phase 1h-2 の `ConcurrentDataRace` 系で
-弾く設計を維持する）。
+`mode: shared` の read 側は `acquire` 内で不変量を前提として使い、共有フィールドへの
+書き込みは行わない。現行の `ResourceMode` は exclusive の同一 atom 内重複取得と
+priority 階層のみを検査するため、**shared mode の `acquire` 内での書き込みを hard error
+とする規則は本設計で新たに導入する**（書き込みは `mode: exclusive` の `acquire` 経路に
+限定）。sibling task 間の capture 書き込み競合は既存の `ConcurrentDataRace`
+（Phase 1h-2、`verification/support/task_ownership.rs`）が別レイヤで担い、本設計とは
+直交する。
 
 **どこに置くか**: mumei-lean ではなく mumei-core 側の verifier に置く。義務は quantifier-free
-（不変量を havoc 済み post-body 環境で再評価する形）で、`task_ownership.rs` と同じ
-AST-level pass の隣に新しい解析（Phase 1h-3 相当、`support/shared_invariants.rs` 候補）と
-して追加する。`Stmt::Acquire` は既に translator で `__resource_held_<name>` Bool を
+（不変量を havoc 済み post-body 環境で再評価する形）で、Phase 1h-2 を担う
+`verification/support/task_ownership.rs` と同じ AST-level pass の隣に新しい解析
+（Phase 1h-3 相当、`support/shared_invariants.rs` 候補）として追加する。`Stmt::Acquire` は既に translator で `__resource_held_<name>` Bool を
 assert している（`translator/stmt.rs`）ため、義務はその延長線上に載る:
 
 - **エントリ**: `acquire res { body }` に入る時点で宣言不変量 `inv` を環境に assume
