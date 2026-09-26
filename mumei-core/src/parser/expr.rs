@@ -926,7 +926,14 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                 if ctx.peek() == &Token::Colon {
                     ctx.advance();
                 }
-                let inv = parse_expr(ctx, 0);
+                let inv = if matches!(ctx.peek(), Token::Ident(name) if name == "infer")
+                    && matches!(ctx.peek_at(1), Some(Token::LBrace) | Some(Token::Decreases))
+                {
+                    ctx.advance();
+                    Expr::Variable("__mumei_infer_invariant".to_string())
+                } else {
+                    parse_expr(ctx, 0)
+                };
                 let decreases = if ctx.peek() == &Token::Decreases {
                     ctx.advance();
                     if ctx.peek() == &Token::Colon {

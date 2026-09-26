@@ -3,6 +3,9 @@ use super::super::support::*;
 use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
+use crate::verification::invariant_inference::{
+    expr_to_string, generate_candidates, InferredInvariant,
+};
 use crate::verification::translator::may_write::{callee_may_write_args, CalleeRef};
 use crate::verification::translator::z3_types::array_root_ast;
 use serde_json::json;
@@ -255,6 +258,56 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
             }
         }
     }
+}
+
+fn check_while_invariant<'a>(
+    vc: &VCtx<'a>,
+    invariant: &Expr,
+    cond: &Expr,
+    body: &Stmt,
+    env: &mut Env<'a>,
+    solver: &Solver<'a>,
+    modified: &std::collections::BTreeSet<String>,
+) -> MumeiResult<bool> {
+    let ctx = vc.ctx;
+    let path_cond = vc.path_cond_conj();
+    let inv = expr_to_z3(vc, invariant, env, None)?
+        .as_bool()
+        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+    solver.push();
+    solver.assert(&Bool::and(ctx, &[&path_cond, &inv.not()]));
+    let base = solver.check();
+    solver.pop(1);
+    if base != SatResult::Unsat {
+        return Ok(false);
+    }
+
+    let env_snapshot = env.clone();
+    let types_snapshot = vc.local_enum_types.borrow().clone();
+    let lambdas_snapshot = vc.local_lambdas.borrow().clone();
+    let mut step_env = env.clone();
+    let modified_set: std::collections::HashSet<String> = modified.iter().cloned().collect();
+    havoc_vars(vc, &mut step_env, &modified_set);
+    let inv_h = expr_to_z3(vc, invariant, &mut step_env, None)?
+        .as_bool()
+        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+    let c_h = expr_to_z3(vc, cond, &mut step_env, None)?
+        .as_bool()
+        .ok_or(MumeiError::type_error("While condition must be boolean"))?;
+    solver.push();
+    solver.assert(&inv_h);
+    solver.assert(&c_h);
+    stmt_to_z3(vc, body, &mut step_env, Some(solver))?;
+    let inv_after = expr_to_z3(vc, invariant, &mut step_env, None)?
+        .as_bool()
+        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+    solver.assert(&inv_after.not());
+    let step = solver.check();
+    solver.pop(1);
+    *env = env_snapshot;
+    *vc.local_enum_types.borrow_mut() = types_snapshot;
+    *vc.local_lambdas.borrow_mut() = lambdas_snapshot;
+    Ok(step == SatResult::Unsat)
 }
 
 /// Record (or clear, when the value has no inferable enum type) the
@@ -524,7 +577,7 @@ pub(crate) fn stmt_to_z3<'a>(
             invariant,
             decreases,
             body,
-            ..
+            span,
         } => {
             // Loop Invariant 検証ロジック
             if let Some(solver) = solver_opt {
@@ -551,37 +604,94 @@ pub(crate) fn stmt_to_z3<'a>(
                     }
                 }
                 modified.retain(|name| env.contains_key(name));
-
-                let marks = obligation_marks(vc);
-                let inv = expr_to_z3(vc, invariant, env, None)?
-                    .as_bool()
-                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
-                rebind_deferred_obligations(vc, marks, &inv);
-
-                // Base case — conjoin path conditions from any enclosing
-                // `if/else` branches so that loop bodies inside e.g. the
-                // `else` of `if n <= 1 { … } else { let i = 1; while … }`
-                // can rely on the corresponding guard (here `n > 1`).
-                let path_cond = vc.path_cond_conj();
-                solver.push();
-                solver.assert(&Bool::and(ctx, &[&path_cond, &inv.not()]));
-                if solver.check() == SatResult::Sat {
+                let modified_btree: std::collections::BTreeSet<String> =
+                    modified.iter().cloned().collect();
+                let inferred = matches!(
+                    invariant.as_ref(),
+                    Expr::Variable(name) if name == "__mumei_infer_invariant"
+                );
+                let mut effective_invariant = invariant.as_ref().clone();
+                let mut inferred_adopted = Vec::new();
+                if inferred {
+                    for name in &modified_btree {
+                        let base = name.strip_prefix("__z3_arr_").unwrap_or(name);
+                        if let Some(value) =
+                            env.get(name).cloned().or_else(|| env.get(base).cloned())
+                        {
+                            env.insert(format!("__loop_init_{base}"), value);
+                        }
+                    }
+                    let candidates =
+                        generate_candidates(cond, body, &modified_btree, "__loop_init_");
+                    for candidate in &candidates {
+                        let combined = if inferred_adopted.is_empty() {
+                            candidate.clone()
+                        } else {
+                            inferred_adopted.iter().cloned().fold(
+                                candidate.clone(),
+                                |acc, adopted| {
+                                    Expr::BinaryOp(
+                                        Box::new(adopted),
+                                        crate::parser::Op::And,
+                                        Box::new(acc),
+                                    )
+                                },
+                            )
+                        };
+                        if check_while_invariant(
+                            vc,
+                            &combined,
+                            cond,
+                            body,
+                            env,
+                            solver,
+                            &modified_btree,
+                        )? {
+                            inferred_adopted.push(candidate.clone());
+                        }
+                    }
+                    if inferred_adopted.is_empty() {
+                        return Err(MumeiError::verification(format!(
+                            "while loop requires an 'invariant' clause: inference tried {} candidates, none verified",
+                            candidates.len()
+                        )));
+                    }
+                    effective_invariant = inferred_adopted
+                        .iter()
+                        .cloned()
+                        .reduce(|left, right| {
+                            Expr::BinaryOp(Box::new(left), crate::parser::Op::And, Box::new(right))
+                        })
+                        .expect("inference adopted at least one candidate");
+                    if let Some(report) = vc.inferred_invariants {
+                        report.borrow_mut().push(InferredInvariant {
+                            line: span.line,
+                            candidates_tried: candidates.len(),
+                            adopted: inferred_adopted.iter().map(expr_to_string).collect(),
+                        });
+                    }
+                } else {
+                    let marks = obligation_marks(vc);
+                    let inv = expr_to_z3(vc, &effective_invariant, env, None)?
+                        .as_bool()
+                        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+                    rebind_deferred_obligations(vc, marks, &inv);
+                    let path_cond = vc.path_cond_conj();
+                    solver.push();
+                    solver.assert(&Bool::and(ctx, &[&path_cond, &inv.not()]));
+                    if solver.check() == SatResult::Sat {
+                        solver.pop(1);
+                        return Err(MumeiError::verification("Invariant fails initially"));
+                    }
                     solver.pop(1);
-                    return Err(MumeiError::verification("Invariant fails initially"));
-                }
-                solver.pop(1);
 
-                // Inductive step — on a havoced env: the invariant must be
-                // preserved from ANY state satisfying it, not just the
-                // concrete loop-entry bindings.
-                {
                     let env_snapshot = env.clone();
                     let types_snapshot = vc.local_enum_types.borrow().clone();
                     let lambdas_snapshot = vc.local_lambdas.borrow().clone();
                     let mut step_env = env.clone();
                     havoc_vars(vc, &mut step_env, &modified);
                     let marks = obligation_marks(vc);
-                    let inv_h = expr_to_z3(vc, invariant, &mut step_env, None)?
+                    let inv_h = expr_to_z3(vc, &effective_invariant, &mut step_env, None)?
                         .as_bool()
                         .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
                     rebind_deferred_obligations(vc, marks, &inv_h);
@@ -594,11 +704,9 @@ pub(crate) fn stmt_to_z3<'a>(
                     solver.assert(&inv_h);
                     solver.assert(&c_h);
                     stmt_to_z3(vc, body, &mut step_env, Some(solver))?;
-
-                    let inv_after = expr_to_z3(vc, invariant, &mut step_env, None)?
+                    let inv_after = expr_to_z3(vc, &effective_invariant, &mut step_env, None)?
                         .as_bool()
                         .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
-
                     solver.assert(&inv_after.not());
                     if solver.check() == SatResult::Sat {
                         solver.pop(1);
@@ -606,9 +714,10 @@ pub(crate) fn stmt_to_z3<'a>(
                     }
                     solver.pop(1);
                     *env = env_snapshot;
-                    *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
-                    *vc.local_lambdas.borrow_mut() = lambdas_snapshot.clone();
+                    *vc.local_enum_types.borrow_mut() = types_snapshot;
+                    *vc.local_lambdas.borrow_mut() = lambdas_snapshot;
                 }
+                let invariant = &effective_invariant;
 
                 // Termination Check — again under havoced pre-state.
                 if let Some(dec_expr) = decreases {

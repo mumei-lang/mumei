@@ -238,6 +238,14 @@ decreases: n - i
 };
 ```
 
+候補テンプレートから不変量を推論する場合は、明示的に `infer` を指定します。
+
+```mumei
+while i < n invariant: infer decreases: n - i {
+    i = i + 1;
+};
+```
+
 ### Bounded `for` loops (sugar)
 
 Bounded `for` loops desugar to a `let` plus the existing terminating `while`:

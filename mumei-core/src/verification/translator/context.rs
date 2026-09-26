@@ -54,6 +54,9 @@ pub(crate) struct VCtx<'a> {
     /// Wrapped in RefCell so that recursive expr_to_z3/stmt_to_z3 calls can
     /// mutate it without changing every call-site signature.
     pub(crate) linearity_ctx: Option<&'a std::cell::RefCell<LinearityCtx>>,
+    pub(crate) inferred_invariants: Option<
+        &'a std::cell::RefCell<Vec<crate::verification::invariant_inference::InferredInvariant>>,
+    >,
     /// EffectCtx for tracking allowed vs used effects during body evaluation.
     pub(crate) effect_ctx: Option<&'a std::cell::RefCell<EffectCtx>>,
     /// Per-atom constraint budget: tracks the number of solver.assert() calls.

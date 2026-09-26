@@ -7,6 +7,7 @@ use super::types::*;
 use super::*;
 use crate::reconstruction_loss::ReconstructionLoss;
 use crate::structured_feedback::StructuredFeedback;
+use crate::verification::invariant_inference::InferredInvariant;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,7 +21,7 @@ pub fn verify_with_config(
     module_env: &ModuleEnv,
     timeout_ms: u64,
     global_max_unroll: usize,
-) -> MumeiResult<()> {
+) -> MumeiResult<Vec<InferredInvariant>> {
     verify_inner(
         hir_atom,
         output_dir,
@@ -44,7 +45,7 @@ pub fn verify_with_verification_config(
     output_dir: &Path,
     module_env: &ModuleEnv,
     config: &VerificationConfig,
-) -> MumeiResult<()> {
+) -> MumeiResult<Vec<InferredInvariant>> {
     verify_inner(
         hir_atom,
         output_dir,
@@ -102,6 +103,7 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
             generation_id: orchestration_generation_id_from_env(),
         },
     )
+    .map(|_| ())
 }
 
 pub(crate) struct VerifyInnerOptions<'a> {
@@ -440,7 +442,7 @@ pub(crate) fn verify_inner(
     output_dir: &Path,
     module_env: &ModuleEnv,
     options: VerifyInnerOptions<'_>,
-) -> MumeiResult<()> {
+) -> MumeiResult<Vec<InferredInvariant>> {
     let VerifyInnerOptions {
         timeout_ms,
         global_max_unroll,
@@ -482,7 +484,7 @@ pub(crate) fn verify_inner(
     // ジェネリック atom は単相化後に検証される
     // 例: pipe<E: Effect> は検証スキップ、pipe<FileWrite> が検証対象
     if !atom.type_params.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     // Nested arrays (`[[T]]` params / return types) have no encoding: an
@@ -585,7 +587,7 @@ pub(crate) fn verify_inner(
                 None,
                 Some(&diagnostics),
             );
-            return Ok(());
+            return Ok(Vec::new());
         }
         TrustLevel::Unverified => {
             // unverified atom: 警告を出すが、検証は続行する。
@@ -613,7 +615,7 @@ pub(crate) fn verify_inner(
                     None,
                     Some(&diagnostics),
                 );
-                return Ok(());
+                return Ok(Vec::new());
             }
         }
         TrustLevel::Verified => {
@@ -1370,6 +1372,7 @@ pub(crate) fn verify_inner(
     // linearity_ctx is wrapped in RefCell so expr_to_z3/stmt_to_z3 can mutate it
     // without requiring signature changes to every recursive call site.
     let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
+    let inferred_invariants_cell = std::cell::RefCell::new(Vec::<InferredInvariant>::new());
     // Build EffectCtx from the atom's declared effects (transitively resolved)
     let allowed_effects_set = module_env.resolve_effect_set_from_effects(&atom.effects);
     let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(allowed_effects_set));
@@ -1384,6 +1387,7 @@ pub(crate) fn verify_inner(
         module_env,
         current_atom: Some(atom),
         linearity_ctx: Some(&linearity_ctx_cell),
+        inferred_invariants: Some(&inferred_invariants_cell),
         effect_ctx: Some(&effect_ctx_cell),
         constraint_count: Some(&constraint_count_cell),
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
@@ -2432,7 +2436,9 @@ pub(crate) fn verify_inner(
         None,
         Some(&diagnostics),
     );
-    Ok(())
+    let inferred_invariants = inferred_invariants_cell.borrow().clone();
+    drop(vc);
+    Ok(inferred_invariants)
 }
 
 /// Collect variable names referenced in a clause expression that are bound

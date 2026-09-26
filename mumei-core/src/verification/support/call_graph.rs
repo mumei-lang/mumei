@@ -48,6 +48,7 @@ pub(crate) fn verify_atom_invariant(
         module_env,
         current_atom: Some(atom),
         linearity_ctx: None,
+        inferred_invariants: None,
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,

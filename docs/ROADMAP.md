@@ -2675,9 +2675,9 @@ benchmark 105 atom の proof certificate（`benchmarks/evaluation_suite.py` B-7 
 
 ---
 
-## P32: Loop Invariant 自動推論（template-based infer-verify）— 設計起票済み（design filed）
+## P32: Loop Invariant 自動推論（template-based infer-verify）— Implemented (M1)
 
-**ステータス: 設計起票済み（実装は Deferred）**。バックログ: `docs/CROSS_PROJECT_ROADMAP.md` Priority 26 群 3 R-19。現状: `while` は `invariant:` 節を必須とし、欠落すると fail-closed で parser error（`__mumei_missing_invariant` poison）となる。`for i in lo..hi` のみ組み込み不変量 `lo <= i && (i <= hi || i == lo)` を自動合成する。`verification/loop_detector.rs`（`detect_loops_needing_invariants` / `LoopContext` / `should_require_invariant`）と `verify --suggest-cegis` の advisory 出力は既存 — 本設計はこれを「候補を生成して Z3 で検証し、反例が出れば棄却する」infer-verify ループへ昇格させるもの。
+**ステータス: Implemented (M1)**。`while` は opt-in 構文 `invariant: infer` で bounded counter、monotonic progress、accumulator bound、unchanged prefix の 4 テンプレートから候補を生成する。候補は既存の base/inductive VC に投入し、Z3 の `unsat` のみを採用する（`sat` / `unknown` は棄却）。推論結果は CLI の人間向け出力と JSON に報告される。CLI フラグは parser が config より先に実行されるため Deferred。裸の `while` は引き続き fail-closed。
 
 **基本原則**: 推論された不変量は一切信用しない。全候補は既存の `Stmt::While` 検証条件機械（`translator/stmt.rs` の havoc → 前提 assert → body 走査 → `¬inv` check、base case + inductive step）にそのまま投入し、Z3 が `unsat` を返した候補のみを採用する。`sat` / `unknown` を返した候補は棄却 — 検証を通らなかった推論不変量で loop を通す経路は設けない（推論はあくまで「書けたはずの不変量を代筆する」位置付けであり、検証強度は手書き不変量と同一）。
 
