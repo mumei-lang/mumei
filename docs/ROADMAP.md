@@ -2647,6 +2647,37 @@ benchmark 105 atom の proof certificate（`benchmarks/evaluation_suite.py` B-7 
 
 ---
 
+## P32: Loop Invariant 自動推論（template-based infer-verify）— 設計起票済み（design filed）
+
+**ステータス: 設計起票済み（実装は Deferred）**。バックログ: `docs/CROSS_PROJECT_ROADMAP.md` Priority 26 群 3 R-19。現状: `while` は `invariant:` 節を必須とし、欠落すると fail-closed で parser error（`__mumei_missing_invariant` poison）となる。`for i in lo..hi` のみ組み込み不変量 `lo <= i && (i <= hi || i == lo)` を自動合成する。`verification/loop_detector.rs`（`detect_loops_needing_invariants` / `LoopContext` / `should_require_invariant`）と `verify --suggest-cegis` の advisory 出力は既存 — 本設計はこれを「候補を生成して Z3 で検証し、反例が出れば棄却する」infer-verify ループへ昇格させるもの。
+
+**基本原則**: 推論された不変量は一切信用しない。全候補は既存の `Stmt::While` 検証条件機械（`translator/stmt.rs` の havoc → 前提 assert → body 走査 → `¬inv` check、base case + inductive step）にそのまま投入し、Z3 が `unsat` を返した候補のみを採用する。`sat` / `unknown` を返した候補は棄却 — 検証を通らなかった推論不変量で loop を通す経路は設けない（推論はあくまで「書けたはずの不変量を代筆する」位置付けであり、検証強度は手書き不変量と同一）。
+
+**候補生成（candidate source）**: `loop_detector` が集める `LoopInfo`（loop-modified vars、index 更新、境界式）から以下のテンプレを emit する:
+
+| テンプレ | 形状 | 発生条件（ヒューリスティック） |
+|---|---|---|
+| bounded counter | `lo <= i && i <= hi`（厳密: `i <= hi`、step が正なら更に `i >= lo`） | `i = i + c` 形式の更新 + 条件 `i < hi` / `i <= hi` |
+| accumulator bound | `acc >= lo'` / `acc <= hi'`、または `requires` の範囲制約から写像した合計・件数 bound | `acc = acc + e` の更新 + `requires` / 配列長から取れる bound |
+| monotonic progress | `i <= n` で `decreases: n - i` と整合する進行度 | `while` 条件が変数の単調増減で終了する形 |
+| unchanged prefix | `forall(j, 0, i, arr[j] == arr0[j])` 相当の prefix 不変（配列書き込みが index `i` 以降に限定される場合） | `arr[i] = …` のみを行う loop（i がループ index） |
+
+`for i in lo..hi` では既存の自動不変量が先に立つため、推論は `while` と、ユーザー不変量が未記述の `for` 追加分（accumulator 等）に限定する。候補は各テンプレ独立に生成し、採用されたもの同士を conjunction で結合して最終不変量とする。
+
+**検証順序（verification order）**: 候補は安い順にソートして逐次 Z3 投入する — (1) bounded counter → (2) monotonic progress → (3) accumulator bound → (4) unchanged prefix（`forall` を含むため最も高コスト）。各候補は単体で base/step 両方の `¬inv` check を受け、採用済み候補集合は後続候補の検証環境に assume として加える（候補間の相互依存を許す順次強化）。タイムアウトは既存の `check_spec_satisfiability_with_timeout` 系の予算に従う。`forall` 候補が `unknown` になる場合は棄却して次候補へ — 推論段階では Lean escalation しない（Lean escalation only for Z3 `unknown` on the *final* user-visible proof obligation, not per-candidate; 推論候補の `unknown` は単に不採用を意味し、`lean_verified` 判定へは一切載らない）。
+
+**失敗時の振る舞い（failure behavior）**: 全候補が棄却された場合、あるいは採用候補の conjunction が ensures/post-loop 義務（`inv ∧ ¬cond` → 後続）を支えきれない場合は、現行と同じ fail-closed 経路に戻る — 不変量の記述を要求する diagnostic を出す。ユーザーが `invariant:` を書いた場合は推論を走らせず手書き不変量のみを使う（推論は補完であり上書きしない）。推論の起動は opt-in とする: 構文案は `invariant: infer`（明示的委譲）、または `verify --infer-invariants` フラグ経由。黙って parser 必須要件を緩める変更は行わない（`__mumei_missing_invariant` fail-closed 経路は維持）。推論成功時は採用不変量を diagnostic / `--suggest-cegis` 系 JSON で報告し、証明書 schema・contract vocabulary には新規フィールドを導入しない。
+
+**マイルストーン**:
+
+- **M0**: 本メモ。テンプレ集合と候補発生条件の確定。
+- **M1**: `loop_detector` の `LoopInfo` を拡張して候補生成に必要な情報（更新式・境界・書き込み index）を抽出。
+- **M2**: 候補生成 + 逐次 infer-verify（bounded counter / monotonic / accumulator の 3 テンプレ）。
+- **M3**: unchanged-prefix テンプレ + `forall` 翻訳のコスト制御、opt-in 構文 / フラグ。
+- **スコープ外**: CEGIS による不変量の反例駆動 *修正*（反例からの式修补は B-4/mumei-agent 側の管轄）、`decreases` の自動推論、ネスト loop の交互不変量、非線形・浮動小数点不変量。
+
+---
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
