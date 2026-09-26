@@ -54,6 +54,9 @@ pub(crate) struct VCtx<'a> {
     /// Wrapped in RefCell so that recursive expr_to_z3/stmt_to_z3 calls can
     /// mutate it without changing every call-site signature.
     pub(crate) linearity_ctx: Option<&'a std::cell::RefCell<LinearityCtx>>,
+    pub(crate) inferred_invariants: Option<
+        &'a std::cell::RefCell<Vec<crate::verification::invariant_inference::InferredInvariant>>,
+    >,
     /// EffectCtx for tracking allowed vs used effects during body evaluation.
     pub(crate) effect_ctx: Option<&'a std::cell::RefCell<EffectCtx>>,
     /// Per-atom constraint budget: tracks the number of solver.assert() calls.
@@ -76,6 +79,9 @@ pub(crate) struct VCtx<'a> {
     pub(crate) path_cond_stack: std::cell::RefCell<Vec<Bool<'a>>>,
     pub(crate) held_resources: std::cell::RefCell<std::collections::HashMap<String, usize>>,
     pub(crate) acquire_counter: std::cell::RefCell<usize>,
+    /// Monotonic per-context ID used to namespace loop snapshots during
+    /// nested invariant inference probes.
+    pub(crate) loop_counter: std::cell::RefCell<usize>,
     pub(crate) profiler: Option<&'a std::cell::RefCell<IncrementalProfiler<'a>>>,
     /// Opt-in IEEE 754 `f64` verification (`--ieee754-f64`). When `true`,
     /// `f64` parameters/literals are encoded as Z3 IEEE 754 binary64 `Float`

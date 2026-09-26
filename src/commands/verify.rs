@@ -545,6 +545,10 @@ struct VerifyContext<'a> {
     loss_vectors: &'a mut Vec<serde_json::Value>,
     structured_feedbacks: &'a mut Vec<StructuredFeedback>,
     reconstruction_losses: &'a mut std::collections::HashMap<String, ReconstructionLoss>,
+    inferred_invariants: &'a mut std::collections::HashMap<
+        String,
+        Vec<verification::invariant_inference::InferredInvariant>,
+    >,
     cert_results: &'a mut std::collections::HashMap<String, (String, String)>,
     verified: &'a mut usize,
     failed: &'a mut usize,
@@ -719,6 +723,19 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
             if promote_outside_fragment {
                 *ctx.escalated += 1;
             }
+            if !cached_entry.inferred_invariants.is_empty() {
+                ctx.inferred_invariants
+                    .insert(name.to_string(), cached_entry.inferred_invariants.clone());
+                if !ctx.quiet_output {
+                    for item in &cached_entry.inferred_invariants {
+                        println!(
+                            "   💡 inferred loop invariant (line {}): {}",
+                            item.line,
+                            item.adopted.join(" && ")
+                        );
+                    }
+                }
+            }
             if ctx.emit_structured_feedback {
                 ctx.structured_feedbacks
                     .push(structured_feedback_for_passed_atom(atom));
@@ -762,7 +779,20 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
         ctx.module_env,
         atom_verification_config,
     ) {
-        Ok(_) => {
+        Ok(inferred) => {
+            if !inferred.is_empty() {
+                if !ctx.quiet_output {
+                    for item in &inferred {
+                        println!(
+                            "   💡 inferred loop invariant (line {}): {}",
+                            item.line,
+                            item.adopted.join(" && ")
+                        );
+                    }
+                }
+                ctx.inferred_invariants
+                    .insert(name.to_string(), inferred.clone());
+            }
             if !ctx.quiet_output {
                 println!("  ⚖️  '{}': verified ✅", name);
             }
@@ -802,6 +832,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                             .as_secs()
                     ),
                     skipped_clauses,
+                    inferred_invariants: inferred,
                 },
             );
             *ctx.verified += 1;
@@ -1316,6 +1347,10 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
     let mut loop_suggestions: Vec<serde_json::Value> = Vec::new();
     let mut reconstruction_losses: std::collections::HashMap<String, ReconstructionLoss> =
         std::collections::HashMap::new();
+    let mut inferred_invariants: std::collections::HashMap<
+        String,
+        Vec<verification::invariant_inference::InferredInvariant>,
+    > = std::collections::HashMap::new();
     let mut loss_vectors: Vec<serde_json::Value> = Vec::new();
     let mut structured_feedbacks: Vec<StructuredFeedback> = Vec::new();
     let mut diagnostics: Vec<verification::Diagnostic> = Vec::new();
@@ -1480,6 +1515,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                     loss_vectors: &mut loss_vectors,
                     structured_feedbacks: &mut structured_feedbacks,
                     reconstruction_losses: &mut reconstruction_losses,
+                    inferred_invariants: &mut inferred_invariants,
                     cert_results: &mut cert_results,
                     verified: &mut verified,
                     failed: &mut failed,
@@ -1515,6 +1551,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                         loss_vectors: &mut loss_vectors,
                         structured_feedbacks: &mut structured_feedbacks,
                         reconstruction_losses: &mut reconstruction_losses,
+                        inferred_invariants: &mut inferred_invariants,
                         cert_results: &mut cert_results,
                         verified: &mut verified,
                         failed: &mut failed,
@@ -1964,6 +2001,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                 "exit_code": outcome.exit_code(),
                 "diagnostics": &merged_diagnostics,
                 "warnings": &diagnostics,
+                "inferred_invariants": &inferred_invariants,
             });
             if skipped_clauses > 0 {
                 payload["partial"] = serde_json::json!(true);
@@ -1993,6 +2031,11 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                         );
                         payload["skipped_clauses"] = serde_json::json!(skipped_clauses);
                         payload["exit_code"] = serde_json::json!(outcome.exit_code());
+                        let atom_name = payload["atom"].as_str().unwrap_or_default();
+                        payload["inferred_invariants"] = serde_json::json!(inferred_invariants
+                            .get(atom_name)
+                            .cloned()
+                            .unwrap_or_default());
                         if skipped_clauses > 0 {
                             payload["partial"] = serde_json::json!(true);
                         }
