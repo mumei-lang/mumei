@@ -751,11 +751,17 @@ pub(crate) fn stmt_to_z3<'a>(
             };
             if let Some(resource_def) = vc.module_env.get_resource(resource) {
                 if outermost {
+                    let acquire_id = {
+                        let mut counter = vc.acquire_counter.borrow_mut();
+                        let id = *counter;
+                        *counter += 1;
+                        id
+                    };
                     for field in &resource_def.state {
                         let key = format!("{resource}.{}", field.name);
                         let value = param_z3_value(
                             ctx,
-                            &key,
+                            &format!("{key}#acq{acquire_id}"),
                             Some(&field.ty),
                             vc.module_env,
                             vc.ieee754_f64,

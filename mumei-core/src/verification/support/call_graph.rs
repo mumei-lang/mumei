@@ -54,6 +54,7 @@ pub(crate) fn verify_atom_invariant(
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64,
         bitvec_i64,

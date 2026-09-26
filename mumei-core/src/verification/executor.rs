@@ -1391,6 +1391,7 @@ pub(crate) fn verify_inner(
         has_string_constraints: Some(&has_string_constraints_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
         held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
         profiler: Some(&profiler_cell),
         ieee754_f64,
         bitvec_i64,

@@ -80,6 +80,12 @@ fn initial_state_type_and_shadowing_checks_are_hard_errors() {
 }
 
 #[test]
+fn separate_acquires_do_not_reuse_state_cells() {
+    let output = run_verify("tests/negative/shared_state_reacquire.mm");
+    assert!(!output.status.success());
+}
+
+#[test]
 fn resource_codegen_emits_typed_state_globals() {
     let output_base =
         std::env::temp_dir().join(format!("mumei-shared-invariant-{}", std::process::id()));
