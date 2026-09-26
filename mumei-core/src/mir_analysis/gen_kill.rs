@@ -16,7 +16,7 @@ pub struct GenKill {
 /// Collect all Local references from an Operand into the given set.
 pub(crate) fn collect_operand_locals(op: &Operand, set: &mut HashSet<Local>) {
     match op {
-        Operand::Place(place) => collect_place_locals(place, set),
+        Operand::Place(place) | Operand::Move(place) => collect_place_locals(place, set),
         Operand::Constant(_) => {}
     }
 }

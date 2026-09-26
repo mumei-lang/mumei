@@ -16,6 +16,7 @@
 // hard errors. LinearityCtx is retained only for Z3-level borrow tracking.
 // =============================================================================
 
+pub mod borrow_check;
 mod gen_kill;
 mod liveness;
 mod move_analysis;
@@ -26,6 +27,10 @@ use crate::mir::{Local, MirBody, MirStatement, Movability, Operand, Place, Rvalu
 #[cfg(test)]
 use std::collections::HashMap;
 
+pub use borrow_check::{
+    check_borrows, check_borrows_with_callees, find_dynamic_borrowing_atom_ref, BorrowViolation,
+    BorrowViolationKind,
+};
 pub use gen_kill::{compute_gen_kill, GenKill};
 pub use liveness::{compute_liveness, insert_drops, LivenessResult};
 pub use move_analysis::{
@@ -362,6 +367,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -450,6 +456,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(0)))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -513,6 +520,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(2)))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -596,6 +604,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -678,6 +687,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -761,6 +771,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -820,6 +831,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(0)))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -883,6 +895,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(2)))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -931,6 +944,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(0)))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -1217,6 +1231,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -1258,6 +1273,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -1316,6 +1332,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -1407,6 +1424,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -1511,6 +1529,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -1602,6 +1621,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -1698,6 +1718,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -1749,6 +1770,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -1854,6 +1876,7 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 
@@ -1915,6 +1938,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
@@ -1963,6 +1987,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
@@ -2012,6 +2037,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
@@ -2183,6 +2209,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
@@ -2237,6 +2264,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
@@ -2290,6 +2318,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
@@ -2361,6 +2390,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
@@ -2417,6 +2447,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
@@ -2464,6 +2495,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
@@ -2499,6 +2531,7 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();

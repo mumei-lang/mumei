@@ -854,6 +854,51 @@ pub(crate) fn verify_inner(
         let liveness = crate::mir_analysis::compute_liveness(&mir_body);
         crate::mir_analysis::insert_drops(&mut mir_body, &liveness);
         let move_result = crate::mir_analysis::analyze_moves(&mir_body);
+        let callee_modes = module_env
+            .atoms
+            .iter()
+            .map(|(name, callee)| {
+                let modes = callee
+                    .params
+                    .iter()
+                    .map(|param| {
+                        if param.is_ref_mut {
+                            crate::mir::MirParamMode::Mut
+                        } else if param.is_ref {
+                            crate::mir::MirParamMode::Shared
+                        } else if callee
+                            .consumed_params
+                            .iter()
+                            .any(|consumed| consumed == &param.name)
+                        {
+                            crate::mir::MirParamMode::Consume
+                        } else {
+                            crate::mir::MirParamMode::Owned
+                        }
+                    })
+                    .collect();
+                (name.clone(), modes)
+            })
+            .collect();
+        if let Some(violation) =
+            crate::mir_analysis::check_borrows_with_callees(&mir_body, &move_result, &callee_modes)
+                .first()
+        {
+            return Err(MumeiError::verification(format!(
+                "borrow check failed in '{}': {}",
+                atom.name, violation.message
+            )));
+        }
+        if let Some(name) =
+            crate::mir_analysis::find_dynamic_borrowing_atom_ref(&hir_atom.body_stmt, module_env)
+        {
+            return Err(MumeiError::verification(format!(
+                "borrow check failed in '{}': cannot take 'atom_ref({name})' as a value: \
+                 '{name}' has borrowing/consuming parameters (ref/ref mut/consume) and can \
+                 only be invoked directly via call(atom_ref({name}), ...)",
+                atom.name
+            )));
+        }
         if let Some(v) = move_result.violations.first() {
             // Look up the local's name for better error messages
             let local_name = mir_body
