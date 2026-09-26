@@ -59,8 +59,10 @@ fn detect_loops_in_stmt(stmt: &Stmt, loops: &mut Vec<LoopInfo>, atom: &Atom) {
                 }
             }
             variables.sort();
-            let has_invariant =
-                !matches!(invariant.as_ref(), Expr::Variable(value) if value == "true");
+            let has_invariant = !matches!(
+                invariant.as_ref(),
+                Expr::Variable(value) if value == "true" || value == "__mumei_missing_invariant"
+            );
             loops.push(LoopInfo {
                 line: span.line,
                 loop_type: LoopType::While,

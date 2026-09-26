@@ -1077,11 +1077,13 @@ fn validation_ctx<'a>(
         module_env,
         current_atom: Some(atom),
         linearity_ctx: None,
+        inferred_invariants: None,
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64: false,
         bitvec_i64: bitvec_i64

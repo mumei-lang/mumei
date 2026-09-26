@@ -19,6 +19,7 @@ use z3::{Config, Context, SatResult, Solver};
 
 pub mod executor;
 pub mod fragment;
+pub mod invariant_inference;
 pub mod loop_detector;
 pub mod module_env;
 pub mod mutation;
