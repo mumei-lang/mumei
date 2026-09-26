@@ -1869,8 +1869,69 @@ E2E テストで判明した検証パスの穴を解消した:
 - `verify --json` の `code: "escalation_candidate"` 診断（`escalation_reason` / `z3_unknown`
   タグ付き）を回帰テストで固定。
 
-**残課題**: 明示的な同期プリミティブで保護された共有可変状態の干渉推論。
+**残課題**: 明示的な同期プリミティブで保護された共有可変状態の干渉推論 — **設計起票済み**（下記「P17 残課題（R-13）設計メモ」参照。実装は Deferred、着手トリガは CROSS_PROJECT_ROADMAP.md Priority 26 群 3 R-13 行に記載）。
 task body 内の配列要素キャプチャは P25 で解消済み。
+
+#### P17 残課題（R-13）設計メモ: Mutex/RwLock 下の共有可変状態 — 設計起票済み（design filed）
+
+**ステータス: 設計起票済み（実装は Deferred）**。バックログ: `docs/CROSS_PROJECT_ROADMAP.md` Priority 26 群 3 R-13。
+
+**スコープ**: `Mutex` / `RwLock` で保護された共有可変状態のみを対象とする
+rely-guarantee-lite。lock 取得でシリアライズされる critical section 内の書き込みが、
+unlock 時点で宣言済みの共有不変量を再確立することを検証する。
+
+**表面構文（案）**: 共有状態は `resource` 宣言に `invariant:` 節を載せる形で宣言する
+（既存の `resource NAME priority: N mode: exclusive|shared;` を拡張し、排他 resource の
+mutex 的な意味に不変量を付ける）。
+
+```mumei
+resource counter priority: 1 mode: exclusive
+invariant: counter.value >= 0;
+
+async atom bump(n: i64)
+requires: n >= 0;
+ensures: result >= 0;
+body: {
+    acquire counter {
+        counter.value = counter.value + n;   // invariant は一時的に崩れてよい
+        // unlock 点（acquire ブロック終端）で invariant が再確立されることを検査
+    }
+}
+```
+
+`mode: shared` の read 側は `acquire` 内で不変量を前提として使い、書き込みを行わない
+（書き込みを含む shared acquire は従来どおり Phase 1h-2 の `ConcurrentDataRace` 系で
+弾く設計を維持する）。
+
+**どこに置くか**: mumei-lean ではなく mumei-core 側の verifier に置く。義務は quantifier-free
+（不変量を havoc 済み post-body 環境で再評価する形）で、`task_ownership.rs` と同じ
+AST-level pass の隣に新しい解析（Phase 1h-3 相当、`support/shared_invariants.rs` 候補）と
+して追加する。`Stmt::Acquire` は既に translator で `__resource_held_<name>` Bool を
+assert している（`translator/stmt.rs`）ため、義務はその延長線上に載る:
+
+- **エントリ**: `acquire res { body }` に入る時点で宣言不変量 `inv` を環境に assume
+  （guard された共有フィールドへの read が不変量の下で評価される）。
+- **unlock 点（acquire ブロック終端）**: body を実行した post-env で `¬inv` が
+  `sat` になれば hard error（critical section が不変量を再確立していない）。
+  `Stmt::While` の inductive step と同じ機械部（havoc → 前提 assert → body 走査 →
+  事後の否定を check）を再利用する。
+- **途中離脱**: `task_group:any` の cancel 経路・`acquire` 内の early return をまたぐ
+  場合も unlock 点として同一義務を課す（cancel しても不変量を壊したまま解放しない
+  こと）。cancel 可能点をまたぐ acquire は resource hierarchy の既存規則
+  （`await` inside `acquire` → error）で既に制限されている。
+
+これらの義務は構文的に決定されるため常に hard error であり、Z3 `unknown` を経由しない
+（Lean escalation only for Z3 `unknown`）— `lean_verified` へ誤昇格しない。
+不変量自体が帰納的（例: 長さ・集計不変量）で Z3 が `unknown` を返す場合のみ、従来どおり
+escalation 候補となる。
+
+**明示的な除外**:
+
+- lock-free / atomic メモリオーダリング（release-acquire 等の weak memory 推論は対象外）
+- deadlock freedom（resource priority hierarchy が別レイヤで既に担保; 本設計は不変量のみ）
+- priority inversion・fairness・スケジューラの liveness
+- 真の interleaving モデル化 — critical section の逐次合成だけを見る "lite" 版であり、
+  lock 間の相互作用の完全な rely-guarantee は対象外
 
 ---
 
