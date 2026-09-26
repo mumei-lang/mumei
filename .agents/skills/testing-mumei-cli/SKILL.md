@@ -1059,3 +1059,18 @@ file, then diff the two `<file> exit=<code>` tables. On 0.6.16 twelve files fail
 identically on both sides — including `examples/libc_demo.mm` with exit **101**
 (a panic, not a verification failure) — so "some files fail" is expected; only a
 *difference* between the tables is a regression.
+
+### Borrow checker (R-14, `mir_analysis/borrow_check.rs`)
+
+Hard errors surface as `Verification Error: borrow check failed in '<atom>': <msg>`
+and exit 1; grep for `borrow check failed`. Writing ad-hoc `.mm` probes is the
+fastest way to exercise the rules; mark callees `trusted atom` so Z3 does not add
+noise, and `while` loops need an `invariant` clause or you get a syntax error
+instead of a borrow error. Clear `.mumei`, `.mumei_build_cache` in the probe dir
+between unrelated runs, or use the cache deliberately: verify twice (second run
+prints `skipped (unchanged, cached)`), then flip a callee param `ref` -> `ref mut`
+and confirm the caller re-verifies (dependency/`VERIFIER_POLICY_VERSION` hashing).
+Field borrows are conservative (same root local): `f(ref mut s.a, ref s.b)` is
+rejected. Block expressions as call arguments (`g(x, { x = 5; x })`) are not
+lowered as blocks — use `if true { ... } else { ... }` in probes instead.
+For Rust-level coverage run `cargo test --test test_borrow_check`.
