@@ -2647,6 +2647,28 @@ pub(crate) fn compile_hir_expr<'a>(
 
         HirExpr::FieldAccess(inner_expr, field_name) => {
             if let HirExpr::Variable(var_name) = inner_expr.as_ref() {
+                let resource_name = var_name
+                    .strip_prefix("__mumei_resource_")
+                    .unwrap_or(var_name);
+                if let Some(resource_field) = module_env.resource_field(resource_name, field_name) {
+                    let global_name =
+                        format!("__mumei_res_{}_{}", resource_name, resource_field.name);
+                    let global = module.get_global(&global_name).ok_or_else(|| {
+                        MumeiError::codegen(format!(
+                            "missing resource state global '{global_name}'"
+                        ))
+                    })?;
+                    let value_ty: inkwell::types::BasicTypeEnum = match resource_field.ty.as_str() {
+                        "bool" => context.bool_type().into(),
+                        "f64" => context.f64_type().into(),
+                        _ => context.i64_type().into(),
+                    };
+                    return Ok(llvm!(builder.build_load(
+                        value_ty,
+                        global.as_pointer_value(),
+                        &format!("{}.{}", resource_name, field_name)
+                    )));
+                }
                 let candidates = [
                     format!("__struct_{}_{}", var_name, field_name),
                     format!("{}_{}", var_name, field_name),

@@ -1203,6 +1203,25 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
         // Check for assignment: ident = expr (or array store: ident[idx] = expr)
         Token::Ident(ref name) => {
             let name_clone = name.clone();
+            if ctx.peek_at(1) == Some(&Token::Dot)
+                && matches!(ctx.peek_at(2), Some(Token::Ident(_)))
+                && ctx.peek_at(3) == Some(&Token::Assign)
+            {
+                let field = match ctx.peek_at(2).cloned() {
+                    Some(Token::Ident(field)) => field,
+                    _ => unreachable!(),
+                };
+                ctx.advance(); // consume resource name
+                ctx.advance(); // consume dot
+                ctx.advance(); // consume field name
+                ctx.advance(); // consume =
+                let value = parse_expr(ctx, 0);
+                Stmt::Assign {
+                    var: format!("{name_clone}.{field}"),
+                    value: Box::new(value),
+                    span: stmt_span,
+                }
+            } else
             // Peek ahead for direct variable assignment
             if ctx.peek_at(1).is_some_and(|t| *t == Token::Assign)
                 && ctx

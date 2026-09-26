@@ -267,6 +267,18 @@ pub(crate) fn compile_hir_stmt<'a>(
             Ok(val)
         }
         HirStmt::Assign { var, value } => {
+            if let Some((resource, field)) = module_env.is_resource_state_var(var) {
+                let val = compile_hir_expr(
+                    context, builder, module, function, value, variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                let global_name = format!("__mumei_res_{}_{}", resource.name, field.name);
+                let global = module.get_global(&global_name).ok_or_else(|| {
+                    MumeiError::codegen(format!("missing resource state global '{global_name}'"))
+                })?;
+                llvm!(builder.build_store(global.as_pointer_value(), val));
+                return Ok(val);
+            }
             // `h = if c { f } else { g }` / `m = match …` — same selector
             // binding as `let`.
             if matches!(

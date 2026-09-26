@@ -3003,6 +3003,16 @@ pub(crate) fn expr_to_z3<'a>(
 
         Expr::FieldAccess(inner_expr, field_name) => {
             if let Expr::Variable(name) = inner_expr.as_ref() {
+                if vc.module_env.resource_field(name, field_name).is_some() {
+                    let key = format!("{name}.{field_name}");
+                    return env.get(&key).cloned().ok_or_else(|| {
+                        MumeiError::verification(format!(
+                            "shared state '{key}' accessed outside 'acquire {name}'"
+                        ))
+                    });
+                }
+            }
+            if let Expr::Variable(name) = inner_expr.as_ref() {
                 if name == "result" && env.contains_key(&tuple_result_arity_key(name)) {
                     let Some(index) = field_name
                         .strip_prefix('_')

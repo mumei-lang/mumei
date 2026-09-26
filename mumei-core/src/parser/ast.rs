@@ -79,8 +79,17 @@ pub enum Op {
 #[derive(Debug, Clone)]
 pub struct ResourceDef {
     pub name: String,
+    pub state: Vec<ResourceField>,
     pub priority: i64,
     pub mode: ResourceMode,
+    pub invariant: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceField {
+    pub name: String,
+    pub ty: String,
     pub span: Span,
 }
 

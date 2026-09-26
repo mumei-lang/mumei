@@ -74,6 +74,7 @@ pub(crate) struct VCtx<'a> {
     /// implied by being in the `else` of `if n <= 1`) participate in the
     /// satisfiability query without leaking into sibling branches.
     pub(crate) path_cond_stack: std::cell::RefCell<Vec<Bool<'a>>>,
+    pub(crate) held_resources: std::cell::RefCell<std::collections::HashMap<String, usize>>,
     pub(crate) profiler: Option<&'a std::cell::RefCell<IncrementalProfiler<'a>>>,
     /// Opt-in IEEE 754 `f64` verification (`--ieee754-f64`). When `true`,
     /// `f64` parameters/literals are encoded as Z3 IEEE 754 binary64 `Float`

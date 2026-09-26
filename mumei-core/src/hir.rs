@@ -380,10 +380,18 @@ pub fn lower_expr_with_env(
                 .map(|(name, expr)| (name.clone(), lower_expr_with_env(expr, module_env)))
                 .collect(),
         },
-        Expr::FieldAccess(expr, field) => HirExpr::FieldAccess(
-            Box::new(lower_expr_with_env(expr, module_env)),
-            field.clone(),
-        ),
+        Expr::FieldAccess(expr, field) => {
+            let base = if let (Expr::Variable(resource), Some(env)) = (expr.as_ref(), module_env) {
+                if env.resource_field(resource, field).is_some() {
+                    HirExpr::Variable(format!("__mumei_resource_{resource}"))
+                } else {
+                    lower_expr_with_env(expr, module_env)
+                }
+            } else {
+                lower_expr_with_env(expr, module_env)
+            };
+            HirExpr::FieldAccess(Box::new(base), field.clone())
+        }
         Expr::Match { target, arms } => HirExpr::Match {
             target: Box::new(lower_expr_with_env(target, module_env)),
             arms: arms
@@ -735,7 +743,9 @@ pub fn collect_free_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
             // an outer binding that must be captured).
         }
         HirStmt::Assign { var, value } => {
-            vars.insert(var.clone());
+            if !var.contains('.') {
+                vars.insert(var.clone());
+            }
             vars.extend(collect_free_variables_expr(value));
         }
         HirStmt::ArrayStore {
@@ -798,7 +808,7 @@ pub fn collect_free_variables_expr(expr: &HirExpr) -> HashSet<String> {
     match expr {
         HirExpr::Variable(name) => {
             // Exclude boolean literals
-            if name != "true" && name != "false" {
+            if name != "true" && name != "false" && !name.starts_with("__mumei_resource_") {
                 vars.insert(name.clone());
             }
         }

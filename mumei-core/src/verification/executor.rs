@@ -1389,6 +1389,7 @@ pub(crate) fn verify_inner(
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: Some(&has_string_constraints_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
         profiler: Some(&profiler_cell),
         ieee754_f64,
         bitvec_i64,
