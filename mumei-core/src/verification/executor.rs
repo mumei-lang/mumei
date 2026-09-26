@@ -851,7 +851,35 @@ pub(crate) fn verify_inner(
         let liveness = crate::mir_analysis::compute_liveness(&mir_body);
         crate::mir_analysis::insert_drops(&mut mir_body, &liveness);
         let move_result = crate::mir_analysis::analyze_moves(&mir_body);
-        if let Some(violation) = crate::mir_analysis::check_borrows(&mir_body, &move_result).first()
+        let callee_modes = module_env
+            .atoms
+            .iter()
+            .map(|(name, callee)| {
+                let modes = callee
+                    .params
+                    .iter()
+                    .map(|param| {
+                        if param.is_ref_mut {
+                            crate::mir::MirParamMode::Mut
+                        } else if param.is_ref {
+                            crate::mir::MirParamMode::Shared
+                        } else if callee
+                            .consumed_params
+                            .iter()
+                            .any(|consumed| consumed == &param.name)
+                        {
+                            crate::mir::MirParamMode::Consume
+                        } else {
+                            crate::mir::MirParamMode::Owned
+                        }
+                    })
+                    .collect();
+                (name.clone(), modes)
+            })
+            .collect();
+        if let Some(violation) =
+            crate::mir_analysis::check_borrows_with_callees(&mir_body, &move_result, &callee_modes)
+                .first()
         {
             return Err(MumeiError::verification(format!(
                 "borrow check failed in '{}': {}",

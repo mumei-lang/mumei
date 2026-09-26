@@ -50,10 +50,13 @@ fn param_move_mode(
     place: &Place,
     param_modes: &HashMap<Local, MirParamMode>,
 ) -> Option<MirParamMode> {
-    let root = root_local(place);
-    (lookup_movability(root, &body.locals) != Movability::Copy)
-        .then(|| param_modes.get(root).copied())
+    let Place::Local(local) = place else {
+        return None;
+    };
+    (lookup_movability(local, &body.locals) != Movability::Copy)
+        .then(|| param_modes.get(local).copied())
         .flatten()
+        .filter(|mode| matches!(mode, MirParamMode::Shared | MirParamMode::Mut))
 }
 
 fn moved_at_entry(
@@ -218,6 +221,7 @@ fn check_block(
     entry_loans: &[Loan],
     moved: &mut HashSet<Local>,
     param_modes: &HashMap<Local, MirParamMode>,
+    callee_modes: &HashMap<String, Vec<MirParamMode>>,
     violations: &mut Vec<BorrowViolation>,
 ) -> Vec<Loan> {
     let mut loans = entry_loans.to_vec();
@@ -293,6 +297,7 @@ fn check_block(
                     &loans,
                     moved,
                     param_modes,
+                    callee_modes,
                     block.id,
                     statement_index,
                     violations,
@@ -326,6 +331,14 @@ fn check_block(
 
 /// Check MIR loans and callee-side parameter access rules.
 pub fn check_borrows(body: &MirBody, move_analysis: &MoveAnalysisResult) -> Vec<BorrowViolation> {
+    check_borrows_with_callees(body, move_analysis, &HashMap::new())
+}
+
+pub fn check_borrows_with_callees(
+    body: &MirBody,
+    move_analysis: &MoveAnalysisResult,
+    callee_modes: &HashMap<String, Vec<MirParamMode>>,
+) -> Vec<BorrowViolation> {
     let mut param_modes = HashMap::new();
     for (local, mode) in &body.param_modes {
         param_modes.insert(local.clone(), *mode);
@@ -363,6 +376,7 @@ pub fn check_borrows(body: &MirBody, move_analysis: &MoveAnalysisResult) -> Vec<
                 &incoming,
                 &mut moved,
                 &param_modes,
+                callee_modes,
                 &mut ignored,
             );
             if exit != exit_loans[&block.id] {
@@ -384,6 +398,7 @@ pub fn check_borrows(body: &MirBody, move_analysis: &MoveAnalysisResult) -> Vec<
             &entry_loans[&block.id],
             &mut moved,
             &param_modes,
+            callee_modes,
             &mut violations,
         );
     }
@@ -397,94 +412,80 @@ fn check_rvalue(
     loans: &[Loan],
     moved: &mut HashSet<Local>,
     param_modes: &HashMap<Local, MirParamMode>,
+    callee_modes: &HashMap<String, Vec<MirParamMode>>,
     block: BasicBlockId,
     statement: usize,
     violations: &mut Vec<BorrowViolation>,
 ) {
-    let operands = match rvalue {
-        Rvalue::Call { args, .. } => args.as_slice(),
-        Rvalue::Use(op) => std::slice::from_ref(op),
-        _ => &[],
-    };
-    for op in operands {
-        let Some(place) = operand_place(op) else {
-            continue;
-        };
-        let ordinary_param_move =
-            matches!(op, Operand::Place(_)) && param_move_mode(body, place, param_modes).is_some();
-        if matches!(op, Operand::Move(_)) || ordinary_param_move {
-            let local = root_local(place);
-            match param_modes.get(local) {
-                Some(MirParamMode::Shared) => {
-                    let name = place_name(body, place);
-                    violations.push(violation(
-                        BorrowViolationKind::WriteThroughShared,
-                        body,
-                        place,
-                        "caller",
-                        block,
-                        statement,
-                        if ordinary_param_move {
-                            format!("cannot move out of shared parameter '{name}'")
-                        } else {
-                            format!("cannot write through shared parameter '{name}'")
-                        },
-                    ));
-                }
-                Some(MirParamMode::Mut) => {
-                    let name = place_name(body, place);
-                    violations.push(violation(
-                        BorrowViolationKind::MoveWhileBorrowed,
-                        body,
-                        place,
-                        "caller",
-                        block,
-                        statement,
-                        format!("cannot move '{name}' while it is borrowed by 'caller'"),
-                    ));
-                }
-                _ => {}
-            }
-            check_move(body, place, loans, block, statement, violations);
-            if ordinary_param_move || matches!(op, Operand::Move(_)) {
-                moved.insert(root_local(place).clone());
-            }
-        }
-    }
-    // A call's arguments form one region. Check all move/loan pairs together
-    // so argument order cannot hide `ref`/`consume` conflicts.
-    if let Rvalue::Call { args, .. } = rvalue {
-        let call_loans: Vec<&Loan> = args
-            .iter()
-            .filter_map(|arg| match arg {
-                Operand::Place(Place::Local(holder)) => {
-                    loans.iter().find(|loan| loan.holder == *holder)
-                }
-                _ => None,
-            })
-            .collect();
-        for arg in args {
-            if matches!(arg, Operand::Move(_))
-                || matches!(arg, Operand::Place(place) if param_move_mode(body, place, param_modes).is_some())
-            {
-                let place = operand_place(arg).expect("move operand has a place");
-                for loan in &call_loans {
-                    if overlaps(place, &loan.place) {
+    let mut check_operand =
+        |op: &Operand, ordinary_param_move: bool, allow_implicit_local_move: bool| {
+            let Some(place) = operand_place(op) else {
+                return;
+            };
+            let whole_local_move = allow_implicit_local_move
+                && matches!(op, Operand::Place(Place::Local(local))
+                if lookup_movability(local, &body.locals) != Movability::Copy);
+            let explicit_move = matches!(op, Operand::Move(_));
+            if ordinary_param_move || whole_local_move || explicit_move {
+                let local = root_local(place);
+                match param_modes.get(local) {
+                    Some(MirParamMode::Shared) => {
                         let name = place_name(body, place);
-                        let borrower = place_name(body, &Place::Local(loan.holder.clone()));
+                        violations.push(violation(
+                            BorrowViolationKind::WriteThroughShared,
+                            body,
+                            place,
+                            "caller",
+                            block,
+                            statement,
+                            if ordinary_param_move {
+                                format!("cannot move out of shared parameter '{name}'")
+                            } else {
+                                format!("cannot write through shared parameter '{name}'")
+                            },
+                        ));
+                    }
+                    Some(MirParamMode::Mut) => {
+                        let name = place_name(body, place);
                         violations.push(violation(
                             BorrowViolationKind::MoveWhileBorrowed,
                             body,
                             place,
-                            borrower.clone(),
+                            "caller",
                             block,
                             statement,
-                            format!("cannot move '{name}' while it is borrowed by '{borrower}'"),
+                            format!("cannot move '{name}' while it is borrowed by 'caller'"),
                         ));
                     }
+                    _ => {}
                 }
+                check_move(body, place, loans, block, statement, violations);
+                moved.insert(root_local(place).clone());
+            }
+        };
+    match rvalue {
+        Rvalue::Use(op) => {
+            check_operand(
+                op,
+                operand_place(op)
+                    .is_some_and(|place| param_move_mode(body, place, param_modes).is_some()),
+                true,
+            );
+        }
+        Rvalue::Call { func, args } => {
+            for (index, op) in args.iter().enumerate() {
+                let ordinary_param_move = matches!(op, Operand::Place(Place::Local(_)))
+                    && matches!(
+                        callee_modes.get(func).and_then(|modes| modes.get(index)),
+                        Some(MirParamMode::Owned)
+                    )
+                    && operand_place(op)
+                        .is_some_and(|place| param_move_mode(body, place, param_modes).is_some());
+                check_operand(op, ordinary_param_move, false);
             }
         }
+        Rvalue::BinaryOp(_, _, _) => {}
+        _ => {}
     }
 }
 

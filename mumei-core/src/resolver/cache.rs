@@ -391,6 +391,21 @@ pub fn compute_proof_hash_with_flags(
             for p in &callee_atom.params {
                 hasher.update(b",param_type:");
                 hasher.update(p.type_name.as_deref().unwrap_or("").as_bytes());
+                hasher.update(b",param_mode:");
+                let mode = if p.is_ref_mut {
+                    "ref mut"
+                } else if p.is_ref {
+                    "ref"
+                } else if callee_atom
+                    .consumed_params
+                    .iter()
+                    .any(|consumed| consumed == &p.name)
+                {
+                    "consume"
+                } else {
+                    "owned"
+                };
+                hasher.update(mode.as_bytes());
             }
             hasher.update(b",return_type:");
             hasher.update(callee_atom.return_type.as_deref().unwrap_or("").as_bytes());
@@ -697,6 +712,31 @@ body: { getx(Pair { a: 1, b: 2 }) };
         let after = env_and_hash(&format!(
             "{structs}\ntrusted atom getx(p: Point) -> i64\nrequires: true;\nensures: true;\nbody: {{ p.x }};\n{MAIN}"
         ));
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn callee_param_mode_change_invalidates_the_proof_hash() {
+        let before = env_and_hash(
+            "trusted atom getx(ref p: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: p;\n\
+             trusted atom main(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: getx(ref x);\n",
+        );
+        let after = env_and_hash(
+            "trusted atom getx(ref mut p: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: p;\n\
+             trusted atom main(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: getx(ref mut x);\n",
+        );
         assert_ne!(before, after);
     }
 

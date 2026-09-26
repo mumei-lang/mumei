@@ -27,7 +27,9 @@ use crate::mir::{Local, MirBody, MirStatement, Movability, Operand, Place, Rvalu
 #[cfg(test)]
 use std::collections::HashMap;
 
-pub use borrow_check::{check_borrows, BorrowViolation, BorrowViolationKind};
+pub use borrow_check::{
+    check_borrows, check_borrows_with_callees, BorrowViolation, BorrowViolationKind,
+};
 pub use gen_kill::{compute_gen_kill, GenKill};
 pub use liveness::{compute_liveness, insert_drops, LivenessResult};
 pub use move_analysis::{

@@ -44,6 +44,14 @@ fn borrow_negative_fixtures_report_mir_rules() {
             "tests/negative/borrow_branch_loan_alias.mm",
             "cannot borrow 'x' mutably while another borrow is live",
         ),
+        (
+            "tests/negative/borrow_local_move_while_borrowed.mm",
+            "cannot move 'x' while it is borrowed",
+        ),
+        (
+            "tests/negative/borrow_field_alias.mm",
+            "mutably while another borrow is live",
+        ),
     ];
     for (file, message) in cases {
         let output = verify(file);
@@ -64,6 +72,16 @@ fn borrow_positive_fixture_verifies() {
     let output = verify("tests/positive/borrow_ok.mm");
     let text = combined(&output);
     assert!(output.status.success(), "borrow_ok should verify:\n{text}");
+}
+
+#[test]
+fn borrow_ref_param_reads_verify() {
+    let output = verify("tests/positive/borrow_ref_param_reads.mm");
+    let text = combined(&output);
+    assert!(
+        output.status.success(),
+        "borrow_ref_param_reads should verify:\n{text}"
+    );
 }
 
 #[test]

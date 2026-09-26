@@ -378,6 +378,10 @@ parameter 'x'`.
 Indirect calls through `atom_ref`/`CallRef` are not borrow-checked at the
 call site in this milestone; callee-side parameter rules still apply.
 
+The MIR borrow checker follows the same analysis-budget policy as move
+analysis: atoms over the budget skip MIR-level diagnostics, while the
+Z3-level linearity checks still run.
+
 First-class `&T`/`&mut T` types, reborrowing, lifetime parameters, closure or
 dynamic borrow capture, and region-polymorphic contracts are not part of this
 checker-first milestone.

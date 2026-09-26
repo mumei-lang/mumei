@@ -943,6 +943,17 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
 }
 
 /// Lower a HirExpr to an Operand, emitting MIR statements as needed.
+fn lower_place(ctx: &mut LowerCtx, expr: &HirExpr) -> Option<Place> {
+    match expr {
+        HirExpr::Variable(name) => Some(ctx.lookup_var(name)),
+        HirExpr::FieldAccess(base, field) => Some(Place::Field(
+            Box::new(lower_place(ctx, base)?),
+            field.clone(),
+        )),
+        _ => None,
+    }
+}
+
 fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
     match expr {
         HirExpr::Number(n) => Operand::Constant(MirConstant::Int(*n)),
@@ -1038,8 +1049,15 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
                             return op;
                         }
                     }
-                    let arg = lower_expr(ctx, a);
-                    match ctx.call_arg_mode(name, i) {
+                    let mode = ctx.call_arg_mode(name, i);
+                    let arg = if matches!(mode, MirParamMode::Shared | MirParamMode::Mut) {
+                        lower_place(ctx, a)
+                            .map(Operand::Place)
+                            .unwrap_or_else(|| lower_expr(ctx, a))
+                    } else {
+                        lower_expr(ctx, a)
+                    };
+                    match mode {
                         MirParamMode::Shared | MirParamMode::Mut => {
                             let place = match arg {
                                 Operand::Place(place) | Operand::Move(place) => place,
@@ -1049,7 +1067,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
                             };
                             let holder = ctx.alloc_temp();
                             ctx.emit(MirStatement::StorageLive(holder.clone()));
-                            let rvalue = if ctx.call_arg_mode(name, i) == MirParamMode::Mut {
+                            let rvalue = if mode == MirParamMode::Mut {
                                 Rvalue::RefMut(place)
                             } else {
                                 Rvalue::Ref(place)
