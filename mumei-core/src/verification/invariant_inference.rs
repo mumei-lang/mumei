@@ -25,8 +25,18 @@ pub(crate) fn generate_candidates(
     // Bounded counters are deliberately emitted first: they are generally
     // the cheapest formulas for Z3 to discharge.
     for (var, op, bound, swapped) in condition_comparisons(cond) {
-        if !modified_names.contains(&var) || mentions_any(&bound, &modified_names) {
+        let stable_length_bound = is_stable_array_length_bound(&bound, body);
+        if !modified_names.contains(&var)
+            || (mentions_any(&bound, &modified_names) && !stable_length_bound)
+        {
             continue;
+        }
+        if stable_length_bound {
+            candidates.push(comparison(
+                Expr::Variable(var.clone()),
+                Op::Ge,
+                Expr::Number(0),
+            ));
         }
         let (candidate_op, rhs) = match (op, swapped) {
             (Op::Lt, false) => (Op::Le, bound),
@@ -291,6 +301,37 @@ fn mentions_any(expr: &Expr, names: &BTreeSet<String>) -> bool {
     let mut vars = BTreeSet::new();
     collect_variables(expr, &mut vars);
     vars.iter().any(|name| names.contains(name))
+}
+
+fn is_stable_array_length_bound(expr: &Expr, body: &Stmt) -> bool {
+    let Expr::Call(name, args) = expr else {
+        return false;
+    };
+    let [Expr::Variable(array)] = args.as_slice() else {
+        return false;
+    };
+    if name != "len"
+        || !array_writes(body)
+            .iter()
+            .any(|(written, _)| written == array)
+    {
+        return false;
+    }
+    !assigns_variable(body, array)
+}
+
+fn assigns_variable(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
+        Stmt::Assign { var, .. } => var == name,
+        Stmt::Block(stmts, _) => stmts.iter().any(|stmt| assigns_variable(stmt, name)),
+        Stmt::While { body, .. } | Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            assigns_variable(body, name)
+        }
+        Stmt::TaskGroup { children, .. } => {
+            children.iter().any(|child| assigns_variable(child, name))
+        }
+        _ => false,
+    }
 }
 
 fn collect_variables(expr: &Expr, out: &mut BTreeSet<String>) {

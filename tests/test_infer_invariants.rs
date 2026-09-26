@@ -36,6 +36,26 @@ fn bound_inference_verifies() {
 }
 
 #[test]
+fn unchanged_prefix_inference_verifies_and_adopts_forall() {
+    let output = run("tests/positive/infer_invariant_unchanged_prefix.mm", true);
+    assert!(output.status.success(), "{:?}", output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_start = stdout
+        .find("{\n  \"atom\"")
+        .expect("JSON object in verify output");
+    let payload: Value =
+        serde_json::from_str(&stdout[json_start..]).expect("verify --json payload");
+    let adopted = payload["inferred_invariants"][0]["adopted"]
+        .as_array()
+        .expect("adopted invariant candidates");
+    assert!(adopted.iter().any(|candidate| {
+        candidate
+            .as_str()
+            .is_some_and(|text| text.contains("forall"))
+    }));
+}
+
+#[test]
 fn nested_inference_verifies() {
     let output = run("tests/positive/infer_invariant_nested.mm", false);
     assert!(output.status.success(), "{:?}", output);

@@ -678,9 +678,9 @@ pub(crate) fn stmt_to_z3<'a>(
                         }
                         let array_key = format!("__z3_arr_{base}");
                         if let Some(value) = env
-                            .get(base)
+                            .get(&array_key)
                             .cloned()
-                            .or_else(|| env.get(&array_key).cloned())
+                            .or_else(|| env.get(base).cloned())
                         {
                             env.insert(snapshot_key, value);
                         }
