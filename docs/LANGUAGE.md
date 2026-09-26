@@ -363,6 +363,22 @@ body: {
 | `ref mut` | Exclusive mutable | `__exclusive_` Bool |
 | `consume` | Ownership transfer | `__alive_` set to false |
 ---
+
+Borrow modifiers are checked on MIR at call sites. A `ref` argument creates a
+shared loan for the duration of that call; a `ref mut` argument creates an
+exclusive loan. Multiple shared loans are allowed, but mutable aliasing,
+moving a value while borrowed, writing through a shared borrow, and borrowing
+after a move are rejected. A `ref` parameter is read-only, while a `ref mut`
+parameter may be written but may not be moved. The checker reports errors such
+as `cannot move 'x' while it is borrowed by 't'`, `cannot write 'x' while it is
+shared-borrowed`, `cannot borrow 'x' mutably while another borrow is live`,
+`cannot borrow 'x' after it was moved`, and `cannot write through shared
+parameter 'x'`.
+
+First-class `&T`/`&mut T` types, reborrowing, lifetime parameters, closure or
+dynamic borrow capture, and region-polymorphic contracts are not part of this
+checker-first milestone.
+
 ## Async/Await and Resource Hierarchy
 ```mumei
 resource db_conn priority: 1 mode: exclusive;

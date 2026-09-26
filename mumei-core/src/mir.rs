@@ -72,7 +72,18 @@ pub enum Rvalue {
 #[allow(dead_code)]
 pub enum Operand {
     Place(Place),
+    /// An explicit ownership-consuming use of a place.
+    Move(Place),
     Constant(MirConstant),
+}
+
+/// Parameter mode recorded on a MIR body for callee-side borrow checking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MirParamMode {
+    Owned,
+    Shared,
+    Mut,
+    Consume,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -139,6 +150,9 @@ pub struct MirBody {
     /// mis-parsed keywords, not free variables.
     #[serde(default)]
     pub unbound_names: Vec<String>,
+    /// Borrow mode for each atom parameter local.
+    #[serde(default)]
+    pub param_modes: HashMap<Local, MirParamMode>,
 }
 
 impl MirBody {
@@ -278,6 +292,8 @@ struct LowerCtx {
     /// atom name inside `atom_ref(name)` / generic-call sugar — is a type or
     /// item reference, not an unbound variable.
     env_names: std::collections::BTreeSet<String>,
+    /// Callee parameter modes used to materialize call-site loans.
+    callee_modes: std::collections::HashMap<String, Vec<MirParamMode>>,
     /// Variable names that had no binding when they were referenced —
     /// surfaced to the caller as `MirBody::unbound_names` (fail-closed).
     unbound_names: std::collections::BTreeSet<String>,
@@ -313,6 +329,31 @@ impl LowerCtx {
                     .collect()
             })
             .unwrap_or_default();
+        let callee_modes = module_env
+            .map(|env| {
+                env.atoms
+                    .iter()
+                    .map(|(name, atom)| {
+                        let modes = atom
+                            .params
+                            .iter()
+                            .map(|param| {
+                                if param.is_ref_mut {
+                                    MirParamMode::Mut
+                                } else if param.is_ref {
+                                    MirParamMode::Shared
+                                } else if atom.consumed_params.iter().any(|p| p == &param.name) {
+                                    MirParamMode::Consume
+                                } else {
+                                    MirParamMode::Owned
+                                }
+                            })
+                            .collect();
+                        (name.clone(), modes)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             locals: Vec::new(),
             blocks: Vec::new(),
@@ -321,6 +362,7 @@ impl LowerCtx {
             alias_bases,
             enum_defs,
             env_names,
+            callee_modes,
             unbound_names: std::collections::BTreeSet::new(),
             next_local: 0,
             next_block: 0,
@@ -363,6 +405,14 @@ impl LowerCtx {
     /// Allocate a new unnamed temporary.
     fn alloc_temp(&mut self) -> Local {
         self.alloc_local(None, None)
+    }
+
+    fn call_arg_mode(&self, func: &str, index: usize) -> MirParamMode {
+        self.callee_modes
+            .get(func)
+            .or_else(|| self.callee_modes.get(&func.replace('.', "::")))
+            .and_then(|modes| modes.get(index).copied())
+            .unwrap_or(MirParamMode::Owned)
     }
 
     /// Finish the current basic block with the given terminator and return its id.
@@ -628,6 +678,7 @@ pub fn lower_hir_to_mir_with_env(
     module_env: Option<&crate::verification::ModuleEnv>,
 ) -> MirBody {
     let mut ctx = LowerCtx::with_env(module_env);
+    let mut param_modes = HashMap::new();
 
     // Allocate locals for atom parameters.
     for param in &hir_atom.atom.params {
@@ -640,6 +691,21 @@ pub fn lower_hir_to_mir_with_env(
             param.type_name.clone(),
             capability,
         );
+        let mode = if param.is_ref_mut {
+            MirParamMode::Mut
+        } else if param.is_ref {
+            MirParamMode::Shared
+        } else if hir_atom
+            .atom
+            .consumed_params
+            .iter()
+            .any(|name| name == &param.name)
+        {
+            MirParamMode::Consume
+        } else {
+            MirParamMode::Owned
+        };
+        param_modes.insert(local.clone(), mode);
         ctx.emit(MirStatement::StorageLive(local));
     }
 
@@ -657,6 +723,7 @@ pub fn lower_hir_to_mir_with_env(
         blocks: ctx.blocks,
         entry_block: 0,
         unbound_names: ctx.unbound_names.into_iter().collect(),
+        param_modes,
     }
 }
 
@@ -943,6 +1010,8 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
                     }
                 }
             }
+            let call_name = name.replace('.', "::");
+            let mut loan_holders = Vec::new();
             let arg_ops: Vec<Operand> = args
                 .iter()
                 .enumerate()
@@ -969,7 +1038,32 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
                             return op;
                         }
                     }
-                    lower_expr(ctx, a)
+                    let arg = lower_expr(ctx, a);
+                    match ctx.call_arg_mode(name, i) {
+                        MirParamMode::Shared | MirParamMode::Mut => {
+                            let place = match arg {
+                                Operand::Place(place) | Operand::Move(place) => place,
+                                Operand::Constant(_) => {
+                                    return arg;
+                                }
+                            };
+                            let holder = ctx.alloc_temp();
+                            ctx.emit(MirStatement::StorageLive(holder.clone()));
+                            let rvalue = if ctx.call_arg_mode(name, i) == MirParamMode::Mut {
+                                Rvalue::RefMut(place)
+                            } else {
+                                Rvalue::Ref(place)
+                            };
+                            ctx.emit(MirStatement::Assign(Place::Local(holder.clone()), rvalue));
+                            loan_holders.push(holder.clone());
+                            Operand::Place(Place::Local(holder))
+                        }
+                        MirParamMode::Consume => match arg {
+                            Operand::Place(place) => Operand::Move(place),
+                            other => other,
+                        },
+                        MirParamMode::Owned => arg,
+                    }
                 })
                 .collect();
             let tmp = ctx.alloc_temp();
@@ -977,10 +1071,13 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             ctx.emit(MirStatement::Assign(
                 Place::Local(tmp.clone()),
                 Rvalue::Call {
-                    func: name.clone(),
+                    func: call_name,
                     args: arg_ops,
                 },
             ));
+            for holder in loan_holders {
+                ctx.emit(MirStatement::StorageDead(holder));
+            }
             Operand::Place(Place::Local(tmp))
         }
         HirExpr::IfThenElse {
@@ -1658,6 +1755,7 @@ mod tests {
             locals,
             blocks,
             entry_block: 0,
+            param_modes: HashMap::new(),
             unbound_names: Vec::new(),
         };
 

@@ -148,7 +148,7 @@ impl std::fmt::Display for MoveViolationKind {
 fn collect_operand_read_locals(op: &Operand) -> Vec<Local> {
     let mut locals = Vec::new();
     match op {
-        Operand::Place(place) => {
+        Operand::Place(place) | Operand::Move(place) => {
             let mut set = HashSet::new();
             collect_place_locals(place, &mut set);
             locals.extend(set);
@@ -183,7 +183,8 @@ fn process_statement_for_moves(
             match rvalue {
                 Rvalue::Use(op) => {
                     // Rvalue::Use(Operand::Place(...)) is a potential move
-                    if let Operand::Place(Place::Local(src)) = op {
+                    if let Operand::Move(Place::Local(src)) | Operand::Place(Place::Local(src)) = op
+                    {
                         // Copy types are never consumed — only check alive
                         if lookup_movability(src, locals) == Movability::Copy {
                             if state.check_alive(src).is_err() {
@@ -236,6 +237,17 @@ fn process_statement_for_moves(
                 }
                 Rvalue::Call { args, .. } => {
                     for op in args {
+                        if let Operand::Move(Place::Local(src)) = op {
+                            match state.consume(src) {
+                                Ok(()) => {}
+                                Err(_) => violations.push(MoveViolation {
+                                    block_id,
+                                    local: src.clone(),
+                                    kind: MoveViolationKind::DoubleMove,
+                                }),
+                            }
+                            continue;
+                        }
                         for l in collect_operand_read_locals(op) {
                             if state.check_alive(&l).is_err() {
                                 violations.push(MoveViolation {
@@ -261,17 +273,10 @@ fn process_statement_for_moves(
                     }
                 }
                 Rvalue::Ref(place) | Rvalue::RefMut(place) => {
-                    let mut set = HashSet::new();
-                    collect_place_locals(place, &mut set);
-                    for l in set {
-                        if state.check_alive(&l).is_err() {
-                            violations.push(MoveViolation {
-                                block_id,
-                                local: l,
-                                kind: MoveViolationKind::UseAfterMove,
-                            });
-                        }
-                    }
+                    // Borrow-after-move is diagnosed by the MIR borrow checker,
+                    // which can report the source place and loan kind precisely.
+                    // Keep move analysis focused on ownership-consuming uses.
+                    let _ = place;
                 }
                 Rvalue::StructInit { fields, .. } => {
                     for (_, op) in fields {

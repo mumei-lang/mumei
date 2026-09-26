@@ -545,13 +545,15 @@ Extensions to the effect subtyping system:
 
 - **Phase 2 (Basic Effects)**: ✅ Complete — parameterized effects (`FileRead(path: Str)`, `HttpGet(url: Str)`) implemented with security policy enforcement. Standard library effects defined in `std/effects.mm`, `std/http.mm`, `std/file.mm`. Z3 verifies parameter constraints (e.g., `starts_with(path, "/tmp/")`) at compile time.
 - **Phase 3 (Effect Polymorphism)**: ✅ Complete — Effect polymorphism via `<E: Effect>` bounds and `with E` syntax. Resolved through monomorphization (same as type polymorphism).
-- **Phase 4 (MIR)**: Phase 4a–4c are done (liveness, move analysis, Copy/Move distinction, drop insertion in `mir_analysis/`). The borrow checking / lifetime analysis layer on top of MIR is **設計起票済み (design filed)** — see the R-14 design memo below; implementation remains deferred until the `&T` language-design decision is made.
+- **Phase 4 (MIR)**: Phase 4a–4c are done (liveness, move analysis, Copy/Move distinction, drop insertion in `mir_analysis/`). The checker-first borrow checking / lifetime analysis layer is implemented for existing `ref`, `ref mut`, and `consume` call semantics; first-class `&T` remains out of scope.
 - **Phase 5 (HIR Effect Type Information)**: ✅ Complete — `HirEffectSet` attached to `HirAtom`, `HirExpr::Call`, `HirExpr::Perform`. `lower_atom_to_hir_with_env()` populates effect info from `ModuleEnv`. Codegen reads effects from `hir_atom.effect_set`.
 - **Phase 6 (Capability Security)**: ✅ Complete — Evaluation documented in `docs/CAPABILITY_SECURITY.md`. Recommendation: Continue with parameterized effects + Z3 (Option A). `EffectCtx`, `SecurityPolicy`, `verify_effect_params`, `verify_effect_consistency`, `build_effect_feedback` all wired into the verification pipeline.
 
-### R-14 設計メモ: Borrow Checking / Lifetime Analysis — 設計起票済み (design filed)
+### R-14 設計メモ: Borrow Checking / Lifetime Analysis — Implemented (M1/M2, checker-first)
 
-**Status: 設計起票済み（実装は Deferred）**。Backlog entry: `docs/CROSS_PROJECT_ROADMAP.md` Priority 26 群 3 R-14.
+**Status: Implemented (M1/M2, checker-first)**. The MIR checker validates
+call-site loans for the existing `ref`, `ref mut`, and `consume` parameter
+modifiers without adding `&T` surface syntax.
 
 #### (a) The `&T` decision framework
 
@@ -598,15 +600,15 @@ code repeatedly unable to express shared sub-structure without `consume`+copy;
 (iii) codegen measurements showing reference-shaped copies dominating. Until
 one fires, `&T` stays out of the language.
 
-#### (b) Borrow-check architecture on MIR (if/when references land)
+#### (b) Borrow-check architecture on MIR
 
 All pieces exist on MIR today; the borrow checker is a dataflow pass alongside
 `analyze_moves`:
 
 - **Places/paths**: reuse `Place { Local, Field(Box<Place>, String),
-  Index(Box<Place>, Local) }`. Two places *conflict* iff one is a prefix of the
-  other; distinct `Field` projections of the same base are disjoint, `Index`
-  projections conservatively may-alias.
+  Index(Box<Place>, Local) }`. The current checker conservatively treats any
+  two places rooted at the same local as overlapping, including distinct
+  field/index projections.
 - **Loan set**: per-program-point dataflow state
   `Loan { place: Place, kind: Shared | Mut, holder: Local }`. `Assign(dst,
   Rvalue::Ref(p))` / `RefMut(p)` generates a loan on `p` held by `dst`; a loan
@@ -642,20 +644,25 @@ All pieces exist on MIR today; the borrow checker is a dataflow pass alongside
   capability/effect-typed params keep `param_leaves ⊆ allowed_leaves`
   accounting — a borrow never widens the permitted leaf set.
 
+Call-site loans have the call as their region: temporary `Ref`/`RefMut`
+holders are live from immediately before the call through the call and are
+dead immediately afterward. Shared parameters are read-only; `ref mut`
+parameters may be written but may not be moved. Moves, writes, mutable
+aliasing, and borrow-after-move are hard MIR diagnostics.
+
 #### (c) Milestones and out-of-scope
 
 - **M0 — decision record**: this memo; trigger checklist in (a).
-- **M1 — loan-set dataflow**: `lower_hir_to_mir` gains `Rvalue::Ref`/`RefMut`
-  emission for `ref`/`ref mut`-marked params (the enum variants exist but are
-  not constructed today — `ref` params are bound as plain locals after the
-  keyword is stripped from the param name), then
-  `mir_analysis/borrow_check.rs` computes loan sets over them; rules (1)–(4)
-  as `MoveViolation`-style hard errors.
-- **M2 — diagnostics + regression**: conflict messages with place paths;
+- **M1 — loan-set dataflow (implemented)**: `lower_hir_to_mir` gains
+  `Rvalue::Ref`/`RefMut` emission for `ref`/`ref mut`-marked call arguments,
+  explicit `Operand::Move` for `consume`, and
+  `mir_analysis/borrow_check.rs` computes call-scoped loan sets over them;
+  rules (1)–(4) are `MoveViolation`-style hard errors.
+- **M2 — diagnostics + regression (implemented)**: conflict messages with place paths;
   `tests/test_concurrency.rs`-style fixture pairs (legal shared read /
   illegal alias-write).
-- **M3 — (only if `&T` lands)** surface syntax + signature regions; gated on
-  the (a) triggers.
+- **M3 — (only if `&T` lands, deferred)** surface syntax + signature regions;
+  gated on the (a) triggers.
 
 Explicitly out of scope: lifetime elision, reborrowing (`&mut *p`), closure /
 `dyn` captures of borrows, lifetime parameters on types or atoms,

@@ -881,6 +881,13 @@ pub(crate) fn verify_inner(
                 }
             }
         }
+        if let Some(violation) = crate::mir_analysis::check_borrows(&mir_body, &move_result).first()
+        {
+            return Err(MumeiError::verification(format!(
+                "borrow check failed in '{}': {}",
+                atom.name, violation.message
+            )));
+        }
     }
     metrics.record_phase("Phase 1h: MIR move analysis", phase_start.elapsed());
 
