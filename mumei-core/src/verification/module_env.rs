@@ -479,6 +479,31 @@ impl ModuleEnv {
         self.resources.get(name)
     }
 
+    pub fn resource_field(
+        &self,
+        resource: &str,
+        field: &str,
+    ) -> Option<&crate::parser::ResourceField> {
+        self.resources
+            .get(resource)?
+            .state
+            .iter()
+            .find(|candidate| candidate.name == field)
+    }
+
+    pub fn is_resource_state_var(
+        &self,
+        dotted: &str,
+    ) -> Option<(&ResourceDef, &crate::parser::ResourceField)> {
+        let (resource, field) = dotted.split_once('.')?;
+        let resource_def = self.resources.get(resource)?;
+        let field_def = resource_def
+            .state
+            .iter()
+            .find(|candidate| candidate.name == field)?;
+        Some((resource_def, field_def))
+    }
+
     /// エフェクト定義を登録する（effects + effect_defs 両方に登録）
     pub fn register_effect(&mut self, effect_def: &EffectDef) {
         self.effects

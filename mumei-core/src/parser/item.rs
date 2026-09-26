@@ -6,10 +6,11 @@ use crate::ast::TypeRef;
 use crate::parser::{
     Atom, CapabilityDef, Effect, EffectDef, EffectDefParam, EffectParam, EnumDef, EnumVariant,
     ExternBlock, ExternFn, ImplBlock, ImplDef, ImportDecl, Item, Param, Quantifier, QuantifierType,
-    RefinedType, ResourceDef, ResourceMode, Span, StructDef, StructField, TraitDef, TraitMethod,
-    TrustLevel, TypeParamBound,
+    RefinedType, ResourceDef, ResourceField, ResourceMode, Span, StructDef, StructField, TraitDef,
+    TraitMethod, TrustLevel, TypeParamBound,
 };
 
+use super::expr::parse_expr;
 use super::token::{SpannedToken, Token};
 use super::ParseContext;
 
@@ -1163,6 +1164,35 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
             Token::Resource => {
                 let start_tok = ctx.advance().clone();
                 let name = ctx.expect_ident();
+                let mut state = Vec::new();
+                if ctx.peek() == &Token::LBrace {
+                    ctx.advance();
+                    while ctx.peek() != &Token::RBrace && ctx.peek() != &Token::Eof {
+                        let field_span = ctx.current_span();
+                        let field_name = ctx.expect_ident();
+                        ctx.expect(Token::Colon);
+                        let ty = ctx.expect_ident();
+                        if !matches!(ty.as_str(), "i64" | "bool" | "f64") {
+                            ctx.syntax_failure(format!(
+                                "resource state field '{field_name}' has unsupported type '{ty}'"
+                            ));
+                        }
+                        state.push(ResourceField {
+                            name: field_name,
+                            ty,
+                            span: field_span,
+                        });
+                        if ctx.peek() == &Token::Comma {
+                            ctx.advance();
+                        } else if ctx.peek() != &Token::RBrace {
+                            ctx.syntax_failure(
+                                "expected ',' or '}' in resource state block".to_string(),
+                            );
+                            break;
+                        }
+                    }
+                    ctx.expect(Token::RBrace);
+                }
                 ctx.expect(Token::Priority);
                 ctx.expect(Token::Colon);
                 let priority = parse_integer_literal(ctx);
@@ -1186,11 +1216,25 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                         }
                     }
                 };
+                let invariant = if ctx.peek() == &Token::Invariant {
+                    if state.is_empty() {
+                        ctx.syntax_failure("resource invariant requires a state block".to_string());
+                    }
+                    ctx.advance();
+                    if ctx.peek() == &Token::Colon {
+                        ctx.advance();
+                    }
+                    Some(parse_expr(ctx, 0))
+                } else {
+                    None
+                };
                 ctx.expect(Token::Semicolon);
                 items.push(Item::ResourceDef(ResourceDef {
                     name,
+                    state,
                     priority,
                     mode,
+                    invariant,
                     span: span_from_token(&start_tok),
                 }));
             }

@@ -204,7 +204,14 @@ impl<'a> UsageCollector<'a> {
                     self.expr(value);
                 }
             }
-            Expr::FieldAccess(base, _) => self.expr(base),
+            Expr::FieldAccess(base, field) => {
+                if let Expr::Variable(resource) = base.as_ref() {
+                    if self.module_env.resource_field(resource, field).is_some() {
+                        return;
+                    }
+                }
+                self.expr(base);
+            }
             Expr::Match { target, arms } => {
                 self.expr(target);
                 for arm in arms {
@@ -254,7 +261,9 @@ impl<'a> UsageCollector<'a> {
             }
             Stmt::Assign { var, value, .. } => {
                 self.expr(value);
-                self.record_write(var);
+                if !var.contains('.') {
+                    self.record_write(var);
+                }
             }
             Stmt::ArrayStore {
                 array,

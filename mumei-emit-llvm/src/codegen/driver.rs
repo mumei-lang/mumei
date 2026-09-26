@@ -2,11 +2,12 @@ use crate::codegen::expr_emit::{chan_payload_key, emit_array_literal};
 use crate::codegen::lowering::{declare_extern_functions, resolve_param_type, resolve_return_type};
 use crate::codegen::stmt_emit::compile_hir_stmt;
 use inkwell::context::Context;
+use inkwell::module::Linkage;
 use inkwell::module::Module;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
-use inkwell::types::BasicType;
+use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::OptimizationLevel;
 use mumei_core::hir::HirAtom;
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
@@ -22,6 +23,23 @@ pub fn compile_atom_into_module<'ctx>(
 ) -> MumeiResult<()> {
     let atom = &hir_atom.atom;
     let builder = context.create_builder();
+
+    for resource in module_env.resources.values() {
+        for field in &resource.state {
+            let name = format!("__mumei_res_{}_{}", resource.name, field.name);
+            if module.get_global(&name).is_some() {
+                continue;
+            }
+            let ty: BasicTypeEnum = match field.ty.as_str() {
+                "bool" => context.bool_type().into(),
+                "f64" => context.f64_type().into(),
+                _ => context.i64_type().into(),
+            };
+            let global = module.add_global(ty, None, &name);
+            global.set_linkage(Linkage::Internal);
+            global.set_initializer(&ty.const_zero());
+        }
+    }
 
     // Declare all extern functions before compiling the atom body
     declare_extern_functions(context, module, extern_blocks, module_env);

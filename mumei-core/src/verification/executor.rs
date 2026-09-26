@@ -456,6 +456,7 @@ pub(crate) fn verify_inner(
     } = options;
     let timeout_ms = orchestration_timeout_ms_from_env().unwrap_or(timeout_ms);
     let atom = &hir_atom.atom;
+    reject_resource_state_shadowing(atom, &hir_atom.body_stmt, module_env)?;
     if let Some(value) = unsupported_semantics_value(atom) {
         return Err(MumeiError::verification_at(
             format!(
@@ -1393,6 +1394,8 @@ pub(crate) fn verify_inner(
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: Some(&has_string_constraints_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
         loop_counter: std::cell::RefCell::new(0),
         profiler: Some(&profiler_cell),
         ieee754_f64,
@@ -1830,6 +1833,7 @@ pub(crate) fn verify_inner(
 
     // 4. ボディの検証
     let phase_start = std::time::Instant::now();
+    check_resource_initial_state(&vc, &mut env, &solver)?;
     let body_result = match stmt_to_z3(&vc, &hir_atom.body_stmt, &mut env, Some(&solver)) {
         Ok(val) => val,
         Err(e) => {
@@ -2439,6 +2443,103 @@ pub(crate) fn verify_inner(
     );
     let inferred_invariants = inferred_invariants_cell.borrow().clone();
     Ok(inferred_invariants)
+}
+
+fn reject_resource_state_shadowing(
+    atom: &Atom,
+    body: &Stmt,
+    module_env: &ModuleEnv,
+) -> MumeiResult<()> {
+    let resources: std::collections::HashSet<&str> = module_env
+        .resources
+        .values()
+        .filter(|resource| !resource.state.is_empty())
+        .map(|resource| resource.name.as_str())
+        .collect();
+    let check = |name: &str| {
+        if resources.contains(name) {
+            Err(MumeiError::verification(format!(
+                "identifier '{name}' shadows resource '{name}' with shared state"
+            )))
+        } else {
+            Ok(())
+        }
+    };
+    for param in &atom.params {
+        check(&param.name)?;
+    }
+    fn walk(stmt: &Stmt, check: &impl Fn(&str) -> MumeiResult<()>) -> MumeiResult<()> {
+        match stmt {
+            Stmt::Let { var, .. } => check(var)?,
+            Stmt::Block(items, ..)
+            | Stmt::TaskGroup {
+                children: items, ..
+            } => {
+                for item in items {
+                    walk(item, check)?;
+                }
+            }
+            Stmt::While { body, .. } | Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+                walk(body, check)?
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    walk(body, &check)
+}
+
+fn check_resource_initial_state<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    solver: &Solver<'a>,
+) -> MumeiResult<()> {
+    for (resource_name, resource) in &vc.module_env.resources {
+        let Some(invariant) = resource.invariant.as_ref() else {
+            continue;
+        };
+        let keys: Vec<String> = resource
+            .state
+            .iter()
+            .map(|field| format!("{resource_name}.{}", field.name))
+            .collect();
+        for field in &resource.state {
+            let value: Dynamic = match field.ty.as_str() {
+                "bool" => Bool::from_bool(vc.ctx, false).into(),
+                "i64" if vc.bitvec_i64 => BV::from_i64(vc.ctx, 0, 64).into(),
+                "i64" => Int::from_i64(vc.ctx, 0).into(),
+                "f64" if vc.ieee754_f64 => Float::from_f64(vc.ctx, 0.0).into(),
+                "f64" => Real::from_real(vc.ctx, 0, 1).into(),
+                _ => continue,
+            };
+            env.insert(format!("{resource_name}.{}", field.name), value);
+        }
+        let check = (|| {
+            let inv = expr_to_z3(vc, invariant, env, Some(solver))?
+                .as_bool()
+                .ok_or_else(|| MumeiError::type_error("resource invariant must be boolean"))?;
+            solver.push();
+            solver.assert(&inv.not());
+            let result = match solver.check() {
+                SatResult::Unsat => Ok(()),
+                SatResult::Sat => Err(MumeiError::verification(format!(
+                    "resource '{resource_name}' invariant does not hold for the initial state (all fields zero): {}",
+                    crate::verification::support::expr_to_source_string(invariant)
+                ))),
+                SatResult::Unknown => Err(MumeiError::verification(format!(
+                    "resource '{resource_name}' invariant does not hold for the initial state (all fields zero): {}",
+                    crate::verification::support::expr_to_source_string(invariant)
+                ))),
+            };
+            solver.pop(1);
+            result
+        })();
+        for key in keys {
+            env.remove(&key);
+        }
+        check?;
+    }
+    Ok(())
 }
 
 /// Collect variable names referenced in a clause expression that are bound
