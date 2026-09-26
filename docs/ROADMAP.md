@@ -1905,13 +1905,31 @@ body: {
 }
 ```
 
+**ストレージモデル（案）**: 現行の `ResourceDef` は `name` / `priority` / `mode` のみを持ち、
+`acquire` は名前付き mutex の取得にすぎず `counter.value` のような状態スロットは存在しない。
+本設計は `resource` 宣言を型付き state map で拡張する（`resource counter { value: i64 }
+priority: 1 mode: exclusive invariant: counter.value >= 0;`）。`acquire` ブロック内の
+`counter.<field>` アクセスはその resource が所有する state cell への load/store に lowering
+され、lowering 上の表現は resource 毎の heap cell（または module-scoped slot）とする。
+state map の無い resource は従来どおり純粋な lock として扱う。
+
 `mode: shared` の read 側は `acquire` 内で不変量を前提として使い、共有フィールドへの
 書き込みは行わない。現行の `ResourceMode` は exclusive の同一 atom 内重複取得と
 priority 階層のみを検査するため、**shared mode の `acquire` 内での書き込みを hard error
 とする規則は本設計で新たに導入する**（書き込みは `mode: exclusive` の `acquire` 経路に
 限定）。sibling task 間の capture 書き込み競合は既存の `ConcurrentDataRace`
-（Phase 1h-2、`verification/support/task_ownership.rs`）が別レイヤで担い、本設計とは
-直交する。
+（Phase 1h-2、`verification/support/task_ownership.rs`）が別レイヤで担う。
+
+**Phase 1h-2 との統合（lock-aware ownership）**: 現行の ownership pass は
+`Stmt::Acquire { body }` を `Task` / `While` と同じく body へ再帰するだけで、
+acquire による serialize は race 判定に寄与しない — `task` 内で `acquire res` に包まれた
+共有状態への書き込みも unsynchronized write として `ConcurrentDataRace` になる。
+本設計では同 pass を lock-aware にする: ある resource の `state` フィールドへのアクセスが
+同一 resource の `acquire` に支配されている場合は race 判定の対象から外し、上記の unlock
+点不変量義務へ振り替える。逆に、guard される state への acquire なしのアクセス、
+および state map を持つ resource の critical section 外アクセスは引き続き hard error
+（missing-acquire 診断）とする。これにより「lock 無しの共有書き込みは従来どおり弾き、
+lock 有りは不変量義務へ昇格」という役割分担になる。
 
 **どこに置くか**: mumei-lean ではなく mumei-core 側の verifier に置く。義務は quantifier-free
 （不変量を havoc 済み post-body 環境で再評価する形）で、Phase 1h-2 を担う
@@ -2676,7 +2694,7 @@ benchmark 105 atom の proof certificate（`benchmarks/evaluation_suite.py` B-7 
 
 **検証順序（verification order）**: 候補は安い順にソートして逐次 Z3 投入する — (1) bounded counter → (2) monotonic progress → (3) accumulator bound → (4) unchanged prefix（`forall` を含むため最も高コスト）。各候補は単体で base/step 両方の `¬inv` check を受け、採用済み候補集合は後続候補の検証環境に assume として加える（候補間の相互依存を許す順次強化）。タイムアウトは既存の `check_spec_satisfiability_with_timeout` 系の予算に従う。`forall` 候補が `unknown` になる場合は棄却して次候補へ — 推論段階では Lean escalation しない（Lean escalation only for Z3 `unknown` on the *final* user-visible proof obligation, not per-candidate; 推論候補の `unknown` は単に不採用を意味し、`lean_verified` 判定へは一切載らない）。
 
-**失敗時の振る舞い（failure behavior）**: 全候補が棄却された場合、あるいは採用候補の conjunction が ensures/post-loop 義務（`inv ∧ ¬cond` → 後続）を支えきれない場合は、現行と同じ fail-closed 経路に戻る — 不変量の記述を要求する diagnostic を出す。ユーザーが `invariant:` を書いた場合は推論を走らせず手書き不変量のみを使う（推論は補完であり上書きしない）。推論の起動は opt-in とする: 構文案は `invariant: infer`（明示的委譲）、または `verify --infer-invariants` フラグ経由。黙って parser 必須要件を緩める変更は行わない（`__mumei_missing_invariant` fail-closed 経路は維持）。推論成功時は採用不変量を diagnostic / `--suggest-cegis` 系 JSON で報告し、証明書 schema・contract vocabulary には新規フィールドを導入しない。
+**失敗時の振る舞い（failure behavior）**: 全候補が棄却された場合、あるいは採用候補の conjunction が ensures/post-loop 義務（`inv ∧ ¬cond` → 後続）を支えきれない場合は、現行と同じ fail-closed 経路に戻る — 不変量の記述を要求する diagnostic を出す。ユーザーが `invariant:` を書いた場合は推論を走らせず手書き不変量のみを使う（推論は補完であり上書きしない）。推論の起動は opt-in とする: 構文案は `invariant: infer`（明示的委譲）、または `verify --infer-invariants` フラグ経由。黙って parser 必須要件を緩める変更は行わない — ただし現行は `invariant:` 欠落を **parse 時点**で `syntax_failure` + `__mumei_missing_invariant` poison とするため、`LoopInfo` が利用可能になる前に loop が死ぬ。`invariant: infer` は marker としてそのまま parse を通せるが、フラグ経路（裸の `while` に推論を効かせる）には deferred-parse が要る: `--infer-invariants` 時は poison ではなく「infer-eligible marker」（例: `Expr::Variable("__mumei_infer_invariant")`）を emit して loop を verify 段まで到達させ、全候補棄却時に verify 側で従来どおりの missing-invariant diagnostic を出す（fail-closed は緩めず、発火点を parse から verify へ遅らせるだけ）。推論成功時は採用不変量を diagnostic / `--suggest-cegis` 系 JSON で報告し、証明書 schema・contract vocabulary には新規フィールドを導入しない。
 
 **マイルストーン**:
 
