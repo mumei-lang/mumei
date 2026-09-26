@@ -73,6 +73,7 @@ pub fn find_dynamic_borrowing_atom_ref(stmt: &Stmt, module_env: &ModuleEnv) -> O
             } => walk_expr(cond, module_env)
                 .or_else(|| walk_stmt(then_branch, module_env))
                 .or_else(|| walk_stmt(else_branch, module_env)),
+            Expr::Block(stmt) => walk_stmt(stmt, module_env),
             Expr::Call(_, args) | Expr::Perform { args, .. } => {
                 args.iter().find_map(|arg| walk_expr(arg, module_env))
             }

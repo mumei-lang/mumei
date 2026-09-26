@@ -348,6 +348,14 @@ pub fn lower_expr_with_env(
             then_branch: Box::new(lower_stmt_with_env(then_branch, module_env)),
             else_branch: Box::new(lower_stmt_with_env(else_branch, module_env)),
         },
+        Expr::Block(stmt) => {
+            let block = lower_stmt_with_env(stmt, module_env);
+            HirExpr::IfThenElse {
+                cond: Box::new(HirExpr::Variable("true".to_string())),
+                then_branch: Box::new(block.clone()),
+                else_branch: Box::new(block),
+            }
+        }
         Expr::Call(name, args) => {
             let callee_effects = module_env.and_then(|env| {
                 env.get_atom(name).map(|callee_atom| HirEffectSet {

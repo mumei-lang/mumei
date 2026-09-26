@@ -318,6 +318,7 @@ fn expr_resolves_to_lambda(expr: &Expr, out: &HashSet<String>) -> bool {
             stmt_tail_resolves_to_lambda(then_branch, out)
                 && stmt_tail_resolves_to_lambda(else_branch, out)
         }
+        Expr::Block(stmt) => stmt_tail_resolves_to_lambda(stmt, out),
         Expr::Match { arms, .. } => {
             !arms.is_empty()
                 && arms.iter().all(|arm| {
@@ -356,6 +357,7 @@ fn collect_lambda_binding_names_expr(expr: &Expr, out: &mut HashSet<String>) {
             collect_lambda_binding_names_stmt(then_branch, out);
             collect_lambda_binding_names_stmt(else_branch, out);
         }
+        Expr::Block(stmt) => collect_lambda_binding_names_stmt(stmt, out),
         Expr::Match { target, arms } => {
             collect_lambda_binding_names_expr(target, out);
             for arm in arms {
@@ -560,6 +562,7 @@ fn eval_expr(
                 Err("if condition is not boolean".to_string())
             }
         },
+        Expr::Block(stmt) => eval_stmt(stmt, env, module_env, depth),
         Expr::Call(name, args) => {
             // These names are always handled as string builtins by the Z3
             // translator, even when a user atom or lambda has the same name.
@@ -1135,6 +1138,7 @@ fn collect_expr_symbols(
             collect_stmt_symbols(then_branch, module_env, symbols, seen, lambda_names);
             collect_stmt_symbols(else_branch, module_env, symbols, seen, lambda_names);
         }
+        Expr::Block(stmt) => collect_stmt_symbols(stmt, module_env, symbols, seen, lambda_names),
         Expr::ArrayAccess(_, index) => {
             collect_expr_symbols(index, module_env, symbols, seen, lambda_names)
         }

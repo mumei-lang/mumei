@@ -651,6 +651,7 @@ pub(crate) fn infer_expr_enum_name(vc: &VCtx, expr: &Expr) -> Option<String> {
                 None
             }
         }
+        Expr::Block(stmt) => infer_stmt_enum_name(vc, stmt),
         Expr::Match { arms, .. } => {
             let mut names = arms
                 .iter()

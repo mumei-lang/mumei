@@ -115,6 +115,7 @@ fn detect_loops_in_expr(expr: &Expr, loops: &mut Vec<LoopInfo>, atom: &Atom) {
             detect_loops_in_stmt(then_branch, loops, atom);
             detect_loops_in_stmt(else_branch, loops, atom);
         }
+        Expr::Block(stmt) => detect_loops_in_stmt(stmt, loops, atom),
         Expr::BinaryOp(left, _, right) => {
             detect_loops_in_expr(left, loops, atom);
             detect_loops_in_expr(right, loops, atom);
@@ -275,6 +276,7 @@ fn collect_expr_variables(expr: &Expr, variables: &mut HashSet<String>) {
             collect_stmt_variables(then_branch, variables);
             collect_stmt_variables(else_branch, variables);
         }
+        Expr::Block(stmt) => collect_stmt_variables(stmt, variables),
         Expr::Call(_, args) => {
             for arg in args {
                 collect_expr_variables(arg, variables);
@@ -412,6 +414,7 @@ fn expr_to_source(expr: &Expr) -> String {
         Expr::FieldAccess(inner, field) => format!("{}.{}", expr_to_source(inner), field),
         Expr::AtomRef { name } => format!("atom_ref({name})"),
         Expr::IfThenElse { .. }
+        | Expr::Block(_)
         | Expr::StructInit { .. }
         | Expr::Match { .. }
         | Expr::Async { .. }

@@ -1426,6 +1426,15 @@ atom transfer(x: i64)
     }
 
     #[test]
+    fn test_parse_block_expression_is_expr_block() {
+        let expr = parse_expression("{ let t = 1; t }");
+        assert!(
+            matches!(expr, Expr::Block(_)),
+            "expected Expr::Block: {expr:?}"
+        );
+    }
+
+    #[test]
     fn test_parse_body_if() {
         let stmt = parse_body_expr("if x > 0 { x } else { 0 }");
         match stmt {

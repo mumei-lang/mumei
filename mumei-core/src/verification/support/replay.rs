@@ -173,6 +173,7 @@ impl<'a> PerformCollector<'a> {
                 let els = self.value_of_block(else_branch);
                 then.intersection(&els).copied().collect()
             }
+            Expr::Block(stmt) => self.value_of_block(stmt),
             Expr::Match { target, arms } => {
                 let scrutinee = self.carried_by(target);
                 let mut acc: Option<BTreeSet<&'a str>> = None;
@@ -352,6 +353,7 @@ impl<'a> PerformCollector<'a> {
                 self.expr(cond);
                 self.alternatives(&[then_branch, else_branch], |c, branch| c.stmt(branch));
             }
+            Expr::Block(stmt) => self.stmt(stmt),
             Expr::BinaryOp(l, _, r) => {
                 self.expr(l);
                 self.expr(r);

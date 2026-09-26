@@ -105,6 +105,7 @@ impl<'a> NominalChecker<'a> {
                 else_branch,
                 ..
             } => self.join_struct_types([then_branch.as_ref(), else_branch.as_ref()]),
+            Expr::Block(stmt) => self.join_struct_types([stmt.as_ref()]),
             Expr::Match { arms, .. } => {
                 self.join_struct_types(arms.iter().map(|arm| arm.body.as_ref()))
             }
@@ -178,6 +179,7 @@ impl<'a> NominalChecker<'a> {
                 self.expr(cond, span)?;
                 self.branches_agree("if", [then_branch.as_ref(), else_branch.as_ref()], span)
             }
+            Expr::Block(stmt) => self.branches_agree("block", [stmt.as_ref()], span),
             Expr::Call(name, args) => {
                 for arg in args {
                     self.expr(arg, span)?;
