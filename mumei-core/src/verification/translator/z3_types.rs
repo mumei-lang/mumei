@@ -689,13 +689,7 @@ pub(crate) fn wire_array_slots<'a>(
                 None => array_len_symbol(vc.ctx, &format!("len_{name}#if"), vc.bitvec_i64),
             }
         }
-        Some(Expr::Block(stmt)) => match stmt_tail_expr(stmt) {
-            Some(Expr::ArrayLit(elements)) => {
-                concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64)
-            }
-            Some(Expr::Variable(src)) => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
-            _ => array_len_symbol(vc.ctx, &format!("len_{name}#block"), vc.bitvec_i64),
-        },
+        Some(Expr::Block(stmt)) => branch_tail_len(vc, env, name, "block", stmt, &arr_dyn, 0),
         Some(Expr::Match { arms, .. }) => {
             // The Match eval folds arms in reverse, producing the chain
             // `ite(c_1, v_1, ite(c_2, v_2, …, v_n))` — the last arm's value

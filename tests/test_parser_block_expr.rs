@@ -90,6 +90,13 @@ fn block_expression_reuse_fixture_verifies() {
 }
 
 #[test]
+fn block_expression_array_len_tail_fixture_verifies() {
+    let output = verify("tests/positive/block_expr_array_len_tail.mm");
+    let text = combined(&output);
+    assert!(output.status.success(), "{text}");
+}
+
+#[test]
 fn unexpected_expression_token_fails_closed() {
     let output = verify("tests/negative/unexpected_token_expr.mm");
     let text = combined(&output);
