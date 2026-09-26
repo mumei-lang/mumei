@@ -545,9 +545,116 @@ Extensions to the effect subtyping system:
 
 - **Phase 2 (Basic Effects)**: ✅ Complete — parameterized effects (`FileRead(path: Str)`, `HttpGet(url: Str)`) implemented with security policy enforcement. Standard library effects defined in `std/effects.mm`, `std/http.mm`, `std/file.mm`. Z3 verifies parameter constraints (e.g., `starts_with(path, "/tmp/")`) at compile time.
 - **Phase 3 (Effect Polymorphism)**: ✅ Complete — Effect polymorphism via `<E: Effect>` bounds and `with E` syntax. Resolved through monomorphization (same as type polymorphism).
-- **Phase 4 (MIR)**: A CFG-based intermediate representation is needed for borrow checking and lifetime analysis, but the borrow checking design itself is not yet started. Will be introduced after the design is finalized.
+- **Phase 4 (MIR)**: Phase 4a–4c are done (liveness, move analysis, Copy/Move distinction, drop insertion in `mir_analysis/`). The borrow checking / lifetime analysis layer on top of MIR is **設計起票済み (design filed)** — see the R-14 design memo below; implementation remains deferred until the `&T` language-design decision is made.
 - **Phase 5 (HIR Effect Type Information)**: ✅ Complete — `HirEffectSet` attached to `HirAtom`, `HirExpr::Call`, `HirExpr::Perform`. `lower_atom_to_hir_with_env()` populates effect info from `ModuleEnv`. Codegen reads effects from `hir_atom.effect_set`.
 - **Phase 6 (Capability Security)**: ✅ Complete — Evaluation documented in `docs/CAPABILITY_SECURITY.md`. Recommendation: Continue with parameterized effects + Z3 (Option A). `EffectCtx`, `SecurityPolicy`, `verify_effect_params`, `verify_effect_consistency`, `build_effect_feedback` all wired into the verification pipeline.
+
+### R-14 設計メモ: Borrow Checking / Lifetime Analysis — 設計起票済み (design filed)
+
+**Status: 設計起票済み（実装は Deferred）**。Backlog entry: `docs/CROSS_PROJECT_ROADMAP.md` Priority 26 群 3 R-14.
+
+#### (a) The `&T` decision framework
+
+The prerequisite decision is whether Mumei introduces a first-class reference
+type `&T` / `&mut T`. The frame for that decision:
+
+What a reference type must satisfy in Mumei's atom/effect model:
+
+1. **Contract-boundary hygiene**: an atom is verified modularly — the caller
+   proves `requires`, assumes `ensures`, and the callee body is not re-verified
+   (`docs/LANGUAGE.md` §Inter-atom Function Calls). A `&T` that can be returned
+   or stored lets a callee hand the caller a path into a frame whose state the
+   caller's contract never described. Any `&T` must therefore be restricted so
+   that a reference cannot outlive the atom activation that produced it, or
+   contracts must grow a lifetime/region vocabulary (a much larger change).
+2. **Effect accounting**: effects are enforced by `param_leaves ⊆
+   allowed_leaves` containment (`verification/support/effects.rs`). A `&mut T`
+   param is an observable mutation channel — writes through it must stay inside
+   the declared effect/param surface exactly as today's `ref mut` does.
+3. **Erasable lowering**: whatever is adopted must lower to existing codegen
+   shapes — `ref` params already lower to pass-by-address / fat-pointer
+   `(len, data)` pairs; a stored `&T` would need a runtime representation with
+   no aliasing guarantee gaps (no interior pointers into aggregates that
+   ownership analysis cannot see).
+
+Options:
+
+| Option | Shape | Cost | Payoff |
+|---|---|---|---|
+| A. Full `&T`/`&mut T` | References storable in locals/structs, returnable from atoms; lifetime params in signatures | Requires true region inference + lifetime polymorphism; largest verifier surface | Full expressiveness (iterator views, shared sub-structure) |
+| B. Stack-only shared `&T` | First-class `&T` as read-only references; never returned, never stored into aggregates; scope = declaring block | No region inference needed — lexical liveness suffices | Cheap alias-free reads of large aggregates without `consume` |
+| C. Checker-first (recommended) | Keep `ref` / `ref mut` / `consume` call-site modifiers as the only borrow surface; build the MIR borrow-check architecture (below) anyway | No language change; the checker validates existing `Ref`/`RefMut` rvalues | De-risks whichever `&T` option is later chosen; turns today's hypotheses into hard rules |
+
+Recommended: **Option C now, Option B if `&T` lands**. `LinearityCtx` + MIR
+move analysis already keep `std/` and the demos green, and `ref` params cover
+the dominant "lend a large value read-only" case. Full `&mut T` (Option A) is
+the last resort — its cost is a real lifetime system.
+
+What triggers the decision: (i) a `std/` atom or benchmark that must return or
+store a reference (array slice views, iterator-style APIs); (ii) agent-generated
+code repeatedly unable to express shared sub-structure without `consume`+copy;
+(iii) codegen measurements showing reference-shaped copies dominating. Until
+one fires, `&T` stays out of the language.
+
+#### (b) Borrow-check architecture on MIR (if/when references land)
+
+All pieces exist on MIR today; the borrow checker is a dataflow pass alongside
+`analyze_moves`:
+
+- **Places/paths**: reuse `Place { Local, Field(Box<Place>, String),
+  Index(Box<Place>, Local) }`. Two places *conflict* iff one is a prefix of the
+  other; distinct `Field` projections of the same base are disjoint, `Index`
+  projections conservatively may-alias.
+- **Loan set**: per-program-point dataflow state
+  `Loan { place: Place, kind: Shared | Mut, holder: Local }`. `Assign(dst,
+  Rvalue::Ref(p))` / `RefMut(p)` generates a loan on `p` held by `dst`; a loan
+  dies when `holder` dies (`StorageDead`/`Drop`) or is overwritten — i.e. its
+  region is the holder's liveness range, computed by the existing
+  `compute_liveness`/`GenKill` machinery. Same worklist+merge skeleton as
+  `analyze_moves` (join = set union; conflicts reported at merge like
+  `ConflictingMerge`).
+- **Region inference — NLL-lite, or lexical fallback**: because `&T` would not
+  appear in signatures (Option B keeps borrows intraprocedural), there are no
+  lifetime parameters to solve. A loan's region = the set of CFG points where
+  its holder is live — that is exactly non-lexical lifetime semantics, obtained
+  free from liveness. The lexical fallback (loan lives to end of enclosing
+  block) is the degenerate form if holder liveness proves too coarse in
+  practice.
+- **`LinearityCtx` → borrow checker**: today's `borrow()` / `release_borrow()` /
+  `consume()` / `check_alive()` and the `__alive_` / `__borrowed_` /
+  `__exclusive_` Z3 Bools become hard MIR rules evaluated per program point:
+  (1) consume/move of `p` while a live loan covers a prefix of `p` → error;
+  (2) write through `ref mut` or assignment to `p` while any live `Shared` loan
+  conflicts `p` → error; (3) `RefMut(p)` while any live loan conflicts `p` →
+  error (the xor-mutable/aliased rule); (4) use of a holder outside its
+  loan's region → error. These are `MoveViolation`-class hard errors —
+  decided syntactically, never Z3 `unknown` (Lean escalation only for Z3
+  `unknown`), so they cannot promote to `lean_verified`. `LinearityCtx`
+  remains as the Z3-level encoding of `ref`/`ref mut` call-site facts until
+  the MIR rules subsume it (its current role per `docs/ARCHITECTURE.md`
+  §LinearityCtx).
+- **Effects/contracts interaction**: a `ref`/`ref mut` argument must satisfy the
+  callee's `requires` on entry and the caller may assume the callee's `ensures`
+  over the mutated referent on return (post-state read-back). Borrowed
+  capability/effect-typed params keep `param_leaves ⊆ allowed_leaves`
+  accounting — a borrow never widens the permitted leaf set.
+
+#### (c) Milestones and out-of-scope
+
+- **M0 — decision record**: this memo; trigger checklist in (a).
+- **M1 — loan-set dataflow**: `mir_analysis/borrow_check.rs` computing loan
+  sets over existing `Ref`/`RefMut` rvalues (already emitted for `ref`/`ref mut`
+  params); rules (1)–(4) as `MoveViolation`-style hard errors.
+- **M2 — diagnostics + regression**: conflict messages with place paths;
+  `tests/test_concurrency.rs`-style fixture pairs (legal shared read /
+  illegal alias-write).
+- **M3 — (only if `&T` lands)** surface syntax + signature regions; gated on
+  the (a) triggers.
+
+Explicitly out of scope: lifetime elision, reborrowing (`&mut *p`), closure /
+`dyn` captures of borrows, lifetime parameters on types or atoms,
+region-polymorphic contracts, and any change to contract vocabulary or proof
+certificate schema.
 
 ---
 
