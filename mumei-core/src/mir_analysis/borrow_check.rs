@@ -162,7 +162,7 @@ fn check_borrow(
 }
 
 /// Check MIR loans and callee-side parameter access rules.
-pub fn check_borrows(body: &MirBody, _move_analysis: &MoveAnalysisResult) -> Vec<BorrowViolation> {
+pub fn check_borrows(body: &MirBody, move_analysis: &MoveAnalysisResult) -> Vec<BorrowViolation> {
     let mut violations = Vec::new();
     let mut param_modes = HashMap::new();
     for (local, mode) in &body.param_modes {
@@ -171,7 +171,17 @@ pub fn check_borrows(body: &MirBody, _move_analysis: &MoveAnalysisResult) -> Vec
 
     for block in &body.blocks {
         let mut loans = Vec::<Loan>::new();
-        let mut moved = HashSet::<Local>::new();
+        let mut moved: HashSet<Local> = move_analysis
+            .entry_states
+            .get(&block.id)
+            .into_iter()
+            .flat_map(|state| {
+                state
+                    .status
+                    .iter()
+                    .filter_map(|(local, alive)| (!*alive).then_some(local.clone()))
+            })
+            .collect();
         for (statement_index, statement) in block.statements.iter().enumerate() {
             match statement {
                 MirStatement::StorageDead(local) | MirStatement::Drop(local) => {

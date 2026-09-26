@@ -57,3 +57,9 @@ fn borrow_positive_fixture_verifies() {
     let text = combined(&output);
     assert!(output.status.success(), "borrow_ok should verify:\n{text}");
 }
+
+#[test]
+fn borrow_after_branch_move_is_rejected() {
+    let output = verify("tests/negative/borrow_after_move_branch.mm");
+    assert!(!output.status.success());
+}

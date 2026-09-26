@@ -273,10 +273,17 @@ fn process_statement_for_moves(
                     }
                 }
                 Rvalue::Ref(place) | Rvalue::RefMut(place) => {
-                    // Borrow-after-move is diagnosed by the MIR borrow checker,
-                    // which can report the source place and loan kind precisely.
-                    // Keep move analysis focused on ownership-consuming uses.
-                    let _ = place;
+                    let mut set = HashSet::new();
+                    collect_place_locals(place, &mut set);
+                    for l in set {
+                        if state.check_alive(&l).is_err() {
+                            violations.push(MoveViolation {
+                                block_id,
+                                local: l,
+                                kind: MoveViolationKind::UseAfterMove,
+                            });
+                        }
+                    }
                 }
                 Rvalue::StructInit { fields, .. } => {
                     for (_, op) in fields {

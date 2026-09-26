@@ -851,6 +851,13 @@ pub(crate) fn verify_inner(
         let liveness = crate::mir_analysis::compute_liveness(&mir_body);
         crate::mir_analysis::insert_drops(&mut mir_body, &liveness);
         let move_result = crate::mir_analysis::analyze_moves(&mir_body);
+        if let Some(violation) = crate::mir_analysis::check_borrows(&mir_body, &move_result).first()
+        {
+            return Err(MumeiError::verification(format!(
+                "borrow check failed in '{}': {}",
+                atom.name, violation.message
+            )));
+        }
         if let Some(v) = move_result.violations.first() {
             // Look up the local's name for better error messages
             let local_name = mir_body
@@ -880,13 +887,6 @@ pub(crate) fn verify_inner(
                     )));
                 }
             }
-        }
-        if let Some(violation) = crate::mir_analysis::check_borrows(&mir_body, &move_result).first()
-        {
-            return Err(MumeiError::verification(format!(
-                "borrow check failed in '{}': {}",
-                atom.name, violation.message
-            )));
         }
     }
     metrics.record_phase("Phase 1h: MIR move analysis", phase_start.elapsed());
