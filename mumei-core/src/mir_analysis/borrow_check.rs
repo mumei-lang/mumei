@@ -3,6 +3,8 @@ use crate::mir::{
     BasicBlockId, Local, LocalDecl, MirBody, MirParamMode, MirStatement, Movability, Operand,
     Place, Rvalue,
 };
+use crate::parser::{Expr, Stmt};
+use crate::verification::ModuleEnv;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +24,107 @@ pub struct BorrowViolation {
     pub block: BasicBlockId,
     pub statement: usize,
     pub message: String,
+}
+
+fn atom_has_borrowing_params(atom: &crate::parser::Atom) -> bool {
+    atom.params
+        .iter()
+        .any(|param| param.is_ref || param.is_ref_mut)
+        || atom
+            .consumed_params
+            .iter()
+            .any(|name| atom.params.iter().any(|param| &param.name == name))
+}
+
+fn known_atom<'a>(module_env: &'a ModuleEnv, name: &str) -> Option<&'a crate::parser::Atom> {
+    module_env
+        .get_atom(name)
+        .or_else(|| module_env.get_atom(&name.replace('.', "::")))
+}
+
+/// Find a first-class `atom_ref` value whose target has borrowing or consuming
+/// parameters. Direct `CallRef` callees are intentionally exempt because they
+/// are lowered into the same MIR call representation as direct calls.
+pub fn find_dynamic_borrowing_atom_ref(stmt: &Stmt, module_env: &ModuleEnv) -> Option<String> {
+    fn walk_expr(node: &Expr, module_env: &ModuleEnv) -> Option<String> {
+        match node {
+            Expr::AtomRef { name } => known_atom(module_env, name)
+                .filter(|atom| atom_has_borrowing_params(atom))
+                .map(|_| name.clone()),
+            Expr::CallRef { callee, args } => {
+                let found = if matches!(callee.as_ref(), Expr::AtomRef { .. }) {
+                    None
+                } else {
+                    walk_expr(callee, module_env)
+                };
+                found.or_else(|| args.iter().find_map(|arg| walk_expr(arg, module_env)))
+            }
+            Expr::ArrayLit(elements) => elements
+                .iter()
+                .find_map(|element| walk_expr(element, module_env)),
+            Expr::ArrayAccess(_, index) => walk_expr(index, module_env),
+            Expr::BinaryOp(lhs, _, rhs) => {
+                walk_expr(lhs, module_env).or_else(|| walk_expr(rhs, module_env))
+            }
+            Expr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => walk_expr(cond, module_env)
+                .or_else(|| walk_stmt(then_branch, module_env))
+                .or_else(|| walk_stmt(else_branch, module_env)),
+            Expr::Call(_, args) | Expr::Perform { args, .. } => {
+                args.iter().find_map(|arg| walk_expr(arg, module_env))
+            }
+            Expr::StructInit { fields, .. } => fields
+                .iter()
+                .find_map(|(_, value)| walk_expr(value, module_env)),
+            Expr::FieldAccess(base, _) => walk_expr(base, module_env),
+            Expr::Match { target, arms } => walk_expr(target, module_env).or_else(|| {
+                arms.iter().find_map(|arm| {
+                    arm.guard
+                        .as_deref()
+                        .and_then(|guard| walk_expr(guard, module_env))
+                        .or_else(|| walk_stmt(&arm.body, module_env))
+                })
+            }),
+            Expr::Async { body } | Expr::Lambda { body, .. } => walk_stmt(body, module_env),
+            Expr::Await { expr: inner } => walk_expr(inner, module_env),
+            Expr::ChanSend { channel, value } => {
+                walk_expr(channel, module_env).or_else(|| walk_expr(value, module_env))
+            }
+            Expr::ChanRecv { channel } => walk_expr(channel, module_env),
+            Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Variable(_) => None,
+        }
+    }
+
+    fn walk_stmt(node: &Stmt, module_env: &ModuleEnv) -> Option<String> {
+        match node {
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => walk_expr(value, module_env),
+            Stmt::ArrayStore { index, value, .. } => {
+                walk_expr(index, module_env).or_else(|| walk_expr(value, module_env))
+            }
+            Stmt::Block(stmts, _)
+            | Stmt::TaskGroup {
+                children: stmts, ..
+            } => stmts.iter().find_map(|child| walk_stmt(child, module_env)),
+            Stmt::While {
+                cond,
+                invariant,
+                decreases,
+                body,
+                ..
+            } => walk_expr(cond, module_env)
+                .or_else(|| walk_expr(invariant, module_env))
+                .or_else(|| decreases.as_deref().and_then(|d| walk_expr(d, module_env)))
+                .or_else(|| walk_stmt(body, module_env)),
+            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => walk_stmt(body, module_env),
+            Stmt::Expr(expr, _) => walk_expr(expr, module_env),
+            Stmt::Cancel { .. } => None,
+        }
+    }
+
+    walk_stmt(stmt, module_env)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -415,6 +415,11 @@ impl LowerCtx {
             .unwrap_or(MirParamMode::Owned)
     }
 
+    fn has_known_callee(&self, func: &str) -> bool {
+        self.callee_modes.contains_key(func)
+            || self.callee_modes.contains_key(&func.replace('.', "::"))
+    }
+
     /// Finish the current basic block with the given terminator and return its id.
     fn finish_block(&mut self, terminator: Terminator) -> BasicBlockId {
         let id = self.next_block;
@@ -954,6 +959,97 @@ fn lower_place(ctx: &mut LowerCtx, expr: &HirExpr) -> Option<Place> {
     }
 }
 
+fn lower_call_args(ctx: &mut LowerCtx, name: &str, args: &[HirExpr]) -> (Vec<Operand>, Vec<Local>) {
+    let binder = if matches!(
+        name,
+        "forall" | "exists" | "sum" | "all" | "any" | "prod" | "count"
+    ) && args.len() >= 3
+    {
+        match &args[0] {
+            HirExpr::Variable(v) => Some(v.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let saved_prior = binder.as_ref().and_then(|b| ctx.var_map.get(b).cloned());
+    let binder_local = binder
+        .as_ref()
+        .map(|b| ctx.alloc_local(Some(b.clone()), Some("i64".to_string())));
+    if let Some(b) = &binder {
+        match &saved_prior {
+            Some(l) => {
+                ctx.var_map.insert(b.clone(), l.clone());
+            }
+            None => {
+                ctx.var_map.remove(b);
+            }
+        }
+    }
+
+    let mut loan_holders = Vec::new();
+    let arg_ops = args
+        .iter()
+        .enumerate()
+        .map(|(i, arg_expr)| {
+            if i == 0 {
+                if let Some(local) = &binder_local {
+                    return Operand::Place(Place::Local(local.clone()));
+                }
+            }
+            if i == args.len() - 1 {
+                if let (Some(b), Some(local)) = (&binder, &binder_local) {
+                    let saved = ctx.var_map.insert(b.clone(), local.clone());
+                    let op = lower_expr(ctx, arg_expr);
+                    match saved {
+                        Some(l) => {
+                            ctx.var_map.insert(b.clone(), l);
+                        }
+                        None => {
+                            ctx.var_map.remove(b);
+                        }
+                    }
+                    return op;
+                }
+            }
+
+            let mode = ctx.call_arg_mode(name, i);
+            let arg = if matches!(mode, MirParamMode::Shared | MirParamMode::Mut) {
+                lower_place(ctx, arg_expr)
+                    .map(Operand::Place)
+                    .unwrap_or_else(|| lower_expr(ctx, arg_expr))
+            } else {
+                lower_expr(ctx, arg_expr)
+            };
+            match mode {
+                MirParamMode::Shared | MirParamMode::Mut => {
+                    let place = match arg {
+                        Operand::Place(place) | Operand::Move(place) => place,
+                        Operand::Constant(_) => return arg,
+                    };
+                    let holder = ctx.alloc_temp();
+                    ctx.emit(MirStatement::StorageLive(holder.clone()));
+                    let rvalue = if mode == MirParamMode::Mut {
+                        Rvalue::RefMut(place)
+                    } else {
+                        Rvalue::Ref(place)
+                    };
+                    ctx.emit(MirStatement::Assign(Place::Local(holder.clone()), rvalue));
+                    loan_holders.push(holder.clone());
+                    Operand::Place(Place::Local(holder))
+                }
+                MirParamMode::Consume => match arg {
+                    Operand::Place(place) => Operand::Move(place),
+                    other => other,
+                },
+                MirParamMode::Owned => arg,
+            }
+        })
+        .collect();
+
+    (arg_ops, loan_holders)
+}
+
 fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
     match expr {
         HirExpr::Number(n) => Operand::Constant(MirConstant::Int(*n)),
@@ -985,105 +1081,8 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             Operand::Place(Place::Local(tmp))
         }
         HirExpr::Call { name, args, .. } => {
-            // Quantifier-style calls (`forall(v, lo, hi, body)`, `exists`,
-            // `sum`, `all`, `any`, `prod`, `count`) bind `v` over the
-            // trailing body argument — register the binder in `var_map` for
-            // the duration of that argument's lowering so it is not
-            // reported as unbound. The binder is a dedicated i64 local:
-            // the verifier (Phase 5) treats these calls specially, so MIR
-            // only needs the name to resolve.
-            let binder = if matches!(
-                name.as_str(),
-                "forall" | "exists" | "sum" | "all" | "any" | "prod" | "count"
-            ) && args.len() >= 3
-            {
-                match &args[0] {
-                    HirExpr::Variable(v) => Some(v.clone()),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            let saved_prior = binder.as_ref().and_then(|b| ctx.var_map.get(b).cloned());
-            let binder_local = binder
-                .as_ref()
-                .map(|b| ctx.alloc_local(Some(b.clone()), Some("i64".to_string())));
-            // `alloc_local` auto-registers named locals in `var_map` — the
-            // binder must only be visible while lowering the quantifier body
-            // (the trailing argument), not in the bounds or after the call.
-            if let Some(b) = &binder {
-                match &saved_prior {
-                    Some(l) => {
-                        ctx.var_map.insert(b.clone(), l.clone());
-                    }
-                    None => {
-                        ctx.var_map.remove(b);
-                    }
-                }
-            }
             let call_name = name.replace('.', "::");
-            let mut loan_holders = Vec::new();
-            let arg_ops: Vec<Operand> = args
-                .iter()
-                .enumerate()
-                .map(|(i, a)| {
-                    // arg[0] is the binder name itself — lower it to the
-                    // dedicated binder local, not a var_map lookup.
-                    if i == 0 {
-                        if let Some(local) = &binder_local {
-                            return Operand::Place(Place::Local(local.clone()));
-                        }
-                    }
-                    if i == args.len() - 1 {
-                        if let (Some(b), Some(local)) = (&binder, &binder_local) {
-                            let saved = ctx.var_map.insert(b.clone(), local.clone());
-                            let op = lower_expr(ctx, a);
-                            match saved {
-                                Some(l) => {
-                                    ctx.var_map.insert(b.clone(), l);
-                                }
-                                None => {
-                                    ctx.var_map.remove(b);
-                                }
-                            }
-                            return op;
-                        }
-                    }
-                    let mode = ctx.call_arg_mode(name, i);
-                    let arg = if matches!(mode, MirParamMode::Shared | MirParamMode::Mut) {
-                        lower_place(ctx, a)
-                            .map(Operand::Place)
-                            .unwrap_or_else(|| lower_expr(ctx, a))
-                    } else {
-                        lower_expr(ctx, a)
-                    };
-                    match mode {
-                        MirParamMode::Shared | MirParamMode::Mut => {
-                            let place = match arg {
-                                Operand::Place(place) | Operand::Move(place) => place,
-                                Operand::Constant(_) => {
-                                    return arg;
-                                }
-                            };
-                            let holder = ctx.alloc_temp();
-                            ctx.emit(MirStatement::StorageLive(holder.clone()));
-                            let rvalue = if mode == MirParamMode::Mut {
-                                Rvalue::RefMut(place)
-                            } else {
-                                Rvalue::Ref(place)
-                            };
-                            ctx.emit(MirStatement::Assign(Place::Local(holder.clone()), rvalue));
-                            loan_holders.push(holder.clone());
-                            Operand::Place(Place::Local(holder))
-                        }
-                        MirParamMode::Consume => match arg {
-                            Operand::Place(place) => Operand::Move(place),
-                            other => other,
-                        },
-                        MirParamMode::Owned => arg,
-                    }
-                })
-                .collect();
+            let (arg_ops, loan_holders) = lower_call_args(ctx, name, args);
             let tmp = ctx.alloc_temp();
             ctx.emit(MirStatement::StorageLive(tmp.clone()));
             ctx.emit(MirStatement::Assign(
@@ -1332,14 +1331,28 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
         HirExpr::CallRef { callee, args } => {
             // Indirect call through a callee expression.
             let callee_op = lower_expr(ctx, callee);
-            let arg_ops: Vec<Operand> = args.iter().map(|a| lower_expr(ctx, a)).collect();
             let tmp = ctx.alloc_temp();
             ctx.emit(MirStatement::StorageLive(tmp.clone()));
 
             // If callee is a FuncRef constant, extract the name for a direct call.
-            let func_name = match &callee_op {
-                Operand::Constant(MirConstant::FuncRef(name)) => name.clone(),
-                _ => "__indirect_call".to_string(),
+            let (func_name, arg_ops, loan_holders) = match &callee_op {
+                Operand::Constant(MirConstant::FuncRef(name)) => {
+                    if ctx.has_known_callee(name) {
+                        let (arg_ops, loan_holders) = lower_call_args(ctx, name, args);
+                        (name.replace('.', "::"), arg_ops, loan_holders)
+                    } else {
+                        (
+                            name.replace('.', "::"),
+                            args.iter().map(|arg| lower_expr(ctx, arg)).collect(),
+                            Vec::new(),
+                        )
+                    }
+                }
+                _ => (
+                    "__indirect_call".to_string(),
+                    args.iter().map(|arg| lower_expr(ctx, arg)).collect(),
+                    Vec::new(),
+                ),
             };
             ctx.emit(MirStatement::Assign(
                 Place::Local(tmp.clone()),
@@ -1348,6 +1361,9 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
                     args: arg_ops,
                 },
             ));
+            for holder in loan_holders {
+                ctx.emit(MirStatement::StorageDead(holder));
+            }
             Operand::Place(Place::Local(tmp))
         }
 

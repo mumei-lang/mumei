@@ -28,7 +28,8 @@ use crate::mir::{Local, MirBody, MirStatement, Movability, Operand, Place, Rvalu
 use std::collections::HashMap;
 
 pub use borrow_check::{
-    check_borrows, check_borrows_with_callees, BorrowViolation, BorrowViolationKind,
+    check_borrows, check_borrows_with_callees, find_dynamic_borrowing_atom_ref, BorrowViolation,
+    BorrowViolationKind,
 };
 pub use gen_kill::{compute_gen_kill, GenKill};
 pub use liveness::{compute_liveness, insert_drops, LivenessResult};

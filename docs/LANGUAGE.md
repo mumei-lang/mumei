@@ -383,8 +383,12 @@ shared-borrowed`, `cannot borrow 'x' mutably while another borrow is live`,
 `cannot borrow 'x' after it was moved`, and `cannot write through shared
 parameter 'x'`.
 
-Indirect calls through `atom_ref`/`CallRef` are not borrow-checked at the
-call site in this milestone; callee-side parameter rules still apply.
+Static `atom_ref`/`CallRef` targets are borrow-checked like direct calls:
+`ref`, `ref mut`, and `consume` arguments create the same call-scoped loans
+and ownership transfers. A first-class use of an `atom_ref` whose target has
+borrowing or consuming parameters is rejected; such a target can only be
+used directly as the callee of `call(atom_ref(f), ...)`. All-owned atom
+references may still be passed as ordinary first-class values.
 
 The MIR borrow checker follows the same analysis-budget policy as move
 analysis: atoms over the budget skip MIR-level diagnostics, while the
