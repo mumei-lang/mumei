@@ -275,6 +275,7 @@ pub(crate) fn expr_to_source_string(expr: &Expr) -> String {
             stmt_to_source_string(then_branch),
             stmt_to_source_string(else_branch)
         ),
+        Expr::Block(stmt) => stmt_to_source_string(stmt),
         Expr::StructInit { type_name, fields } => {
             let fields_str: Vec<String> = fields
                 .iter()
@@ -371,6 +372,7 @@ pub(crate) fn collect_callees_with_args_expr(expr: &Expr) -> Vec<(String, Vec<Ex
             callees.extend(collect_callees_with_args_stmt(then_branch));
             callees.extend(collect_callees_with_args_stmt(else_branch));
         }
+        Expr::Block(stmt) => callees.extend(collect_callees_with_args_stmt(stmt)),
         Expr::BinaryOp(l, _, r) => {
             callees.extend(collect_callees_with_args_expr(l));
             callees.extend(collect_callees_with_args_expr(r));
@@ -504,6 +506,7 @@ pub(crate) fn collect_array_accesses_inner(expr: &Expr, out: &mut Vec<(String, E
             collect_array_accesses_in_stmt(then_branch, out);
             collect_array_accesses_in_stmt(else_branch, out);
         }
+        Expr::Block(stmt) => collect_array_accesses_in_stmt(stmt, out),
         _ => {}
     }
 }
@@ -556,6 +559,7 @@ pub(crate) fn collect_callees_expr(expr: &Expr) -> Vec<String> {
             callees.extend(collect_callees_stmt(then_branch));
             callees.extend(collect_callees_stmt(else_branch));
         }
+        Expr::Block(stmt) => callees.extend(collect_callees_stmt(stmt)),
         Expr::BinaryOp(l, _, r) => {
             callees.extend(collect_callees_expr(l));
             callees.extend(collect_callees_expr(r));

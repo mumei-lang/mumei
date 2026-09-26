@@ -496,6 +496,7 @@ fn collect_expr_local_lets(expr: &Expr, local: &mut std::collections::HashSet<St
             collect_arm_local_lets(then_branch, local);
             collect_arm_local_lets(else_branch, local);
         }
+        Expr::Block(stmt) => collect_arm_local_lets(stmt, local),
         Expr::Match { target, arms } => {
             // Inner match arms have their own local set via the inner
             // merge — their `let`s never reach this arm's env, and
@@ -2039,6 +2040,7 @@ pub(crate) fn expr_to_z3<'a>(
             merge_branch_envs(env, then_env, else_env, &c);
             Ok(c.ite(&t, &e))
         }
+        Expr::Block(stmt) => stmt_to_z3(vc, stmt, env, solver_opt),
 
         Expr::StructInit { type_name, fields } => {
             // 構造体の各フィールドを検証し、env に登録

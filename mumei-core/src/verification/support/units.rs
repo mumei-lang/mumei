@@ -206,6 +206,7 @@ impl<'a> UnitCtx<'a> {
                 let e = self.check_stmt(else_branch)?;
                 self.join_branches("conditional branches", t, e, || expr_to_source_string(expr))
             }
+            Expr::Block(stmt) => self.check_stmt(stmt),
             Expr::Call(name, args) => {
                 let arg_units = args
                     .iter()

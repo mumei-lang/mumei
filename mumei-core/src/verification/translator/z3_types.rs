@@ -689,6 +689,7 @@ pub(crate) fn wire_array_slots<'a>(
                 None => array_len_symbol(vc.ctx, &format!("len_{name}#if"), vc.bitvec_i64),
             }
         }
+        Some(Expr::Block(stmt)) => branch_tail_len(vc, env, name, "block", stmt, &arr_dyn, 0),
         Some(Expr::Match { arms, .. }) => {
             // The Match eval folds arms in reverse, producing the chain
             // `ite(c_1, v_1, ite(c_2, v_2, …, v_n))` — the last arm's value
@@ -882,6 +883,10 @@ pub(crate) fn tail_len_expr<'a>(
             );
             cond.ite(&len_t, &len_e)
         }
+        Expr::Block(stmt) => match stmt_tail_expr(stmt) {
+            Some(tail) => tail_len_expr(vc, env, name, side, Some(stmt), tail, val_node, depth + 1),
+            None => fresh(),
+        },
         Expr::Match { arms, .. } => match_arm_lens(
             vc,
             env,
@@ -1129,6 +1134,7 @@ fn expr_stores_to_array(
                 || stmt_stores_to_array(module_env, then_branch, name, visited, depth)
                 || stmt_stores_to_array(module_env, else_branch, name, visited, depth)
         }
+        Expr::Block(stmt) => stmt_stores_to_array(module_env, stmt, name, visited, depth),
         Expr::Match { target, arms } => {
             expr_stores_to_array(module_env, target, name, visited, depth)
                 || arms.iter().any(|arm| {

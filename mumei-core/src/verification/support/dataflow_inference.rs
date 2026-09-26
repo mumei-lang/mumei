@@ -215,6 +215,7 @@ fn trace_eval_expr(
                 trace_stmt(else_branch, env, module_env, &mut Vec::new(), depth)
             }
         }
+        Expr::Block(stmt) => trace_stmt(stmt, env, module_env, &mut Vec::new(), depth),
         Expr::Call(name, args) => trace_eval_atom_call(name, args, env, module_env, depth + 1),
         Expr::ArrayAccess(_, _)
         | Expr::StructInit { .. }
@@ -538,6 +539,7 @@ pub(crate) fn collect_divisors_expr(expr: &Expr) -> Vec<String> {
             divisors.extend(collect_divisors_stmt(then_branch));
             divisors.extend(collect_divisors_stmt(else_branch));
         }
+        Expr::Block(stmt) => divisors.extend(collect_divisors_stmt(stmt)),
         Expr::Match { target, arms } => {
             divisors.extend(collect_divisors_expr(target));
             for arm in arms {

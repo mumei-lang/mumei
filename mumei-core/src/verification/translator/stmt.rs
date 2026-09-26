@@ -109,6 +109,7 @@ fn collect_expr_assigned_vars(
             collect_assigned_vars(env, vc, then_branch, out);
             collect_assigned_vars(env, vc, else_branch, out);
         }
+        Expr::Block(stmt) => collect_assigned_vars(env, vc, stmt, out),
         Expr::Match { target, arms } => {
             collect_expr_assigned_vars(env, vc, target, out, in_stmt_ctx);
             for arm in arms {
@@ -403,6 +404,7 @@ fn resolve_lambda_expr<'a>(
     solver_opt: Option<&Solver<'a>>,
 ) -> Option<std::rc::Rc<LocalLambda<'a>>> {
     match expr {
+        Expr::Block(stmt) => resolve_lambda_stmt(vc, stmt, env, solver_opt),
         Expr::Lambda { .. } => Some(std::rc::Rc::new(LocalLambda::Closure {
             expr: expr.clone(),
             captured: vc.local_lambdas.borrow().clone(),

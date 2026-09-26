@@ -141,6 +141,7 @@ fn normalize_expr(expr: Expr) -> Expr {
             then_branch,
             else_branch,
         },
+        Expr::Block(stmt) => Expr::Block(stmt),
         Expr::CallRef { callee, args } => Expr::CallRef {
             callee: Box::new(normalize_expr(*callee)),
             args: args.into_iter().map(normalize_expr).collect(),
@@ -450,11 +451,7 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
 
         Token::LBrace => {
             let block = parse_block_or_stmt(ctx);
-            Expr::IfThenElse {
-                cond: Box::new(Expr::Variable("true".to_string())),
-                then_branch: Box::new(block.clone()),
-                else_branch: Box::new(block),
-            }
+            Expr::Block(Box::new(block))
         }
 
         Token::Match => {
@@ -886,6 +883,7 @@ fn expr_assigns_var(expr: &Expr, var: &str) -> bool {
                 || stmt_assigns_var(then_branch, var)
                 || stmt_assigns_var(else_branch, var)
         }
+        Expr::Block(stmt) => stmt_assigns_var(stmt, var),
         Expr::Call(_, args) => args.iter().any(|expr| expr_assigns_var(expr, var)),
         Expr::StructInit { fields, .. } => {
             fields.iter().any(|(_, expr)| expr_assigns_var(expr, var))

@@ -201,6 +201,7 @@ pub(crate) fn collect_acquire_resources_expr(expr: &Expr) -> Vec<String> {
             resources.extend(collect_acquire_resources_stmt(then_branch));
             resources.extend(collect_acquire_resources_stmt(else_branch));
         }
+        Expr::Block(stmt) => resources.extend(collect_acquire_resources_stmt(stmt)),
         Expr::Async { body } => {
             resources.extend(collect_acquire_resources_stmt(body));
         }
@@ -310,6 +311,7 @@ pub(crate) fn verify_bmc_resource_safety(
                 else_branch,
                 ..
             } => has_acquire_in_while_stmt(then_branch) || has_acquire_in_while_stmt(else_branch),
+            Expr::Block(stmt) => has_acquire_in_while_stmt(stmt),
             Expr::Async { body } => has_acquire_in_while_stmt(body),
             // Plan 8: Channel operations — traverse sub-expressions
             Expr::ChanSend { channel, value } => {
@@ -394,6 +396,7 @@ pub(crate) fn verify_async_recursion_depth(
                     + count_self_calls_stmt(then_branch, atom_name)
                     + count_self_calls_stmt(else_branch, atom_name)
             }
+            Expr::Block(stmt) => count_self_calls_stmt(stmt, atom_name),
             Expr::Async { body } => count_self_calls_stmt(body, atom_name),
             Expr::Await { expr } => count_self_calls_expr(expr, atom_name),
             Expr::BinaryOp(l, _, r) => {

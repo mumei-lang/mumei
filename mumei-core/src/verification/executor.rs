@@ -1312,6 +1312,7 @@ pub(crate) fn verify_inner(
                     || body_has_symbolic_perform_args(then_branch, module_env)
                     || body_has_symbolic_perform_args(else_branch, module_env)
             }
+            Expr::Block(stmt) => body_has_symbolic_perform_args(stmt, module_env),
             Expr::BinaryOp(l, _, r) => {
                 expr_has_symbolic_perform_args(l, module_env)
                     || expr_has_symbolic_perform_args(r, module_env)
@@ -2685,6 +2686,7 @@ fn collect_clause_free(
             collect_clause_free_stmt(then_branch, &bound.clone(), allowed, out);
             collect_clause_free_stmt(else_branch, &bound.clone(), allowed, out);
         }
+        Expr::Block(stmt) => collect_clause_free_stmt(stmt, bound, allowed, out),
         Expr::StructInit { fields, .. } => {
             for (_, v) in fields {
                 collect_clause_free(v, bound, allowed, out);
