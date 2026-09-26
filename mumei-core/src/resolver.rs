@@ -480,6 +480,7 @@ atom caller(n: i64) -> i64
                 type_deps: vec!["Nat".to_string()],
                 timestamp: "1234567890s".to_string(),
                 skipped_clauses: 2,
+                inferred_invariants: Vec::new(),
             },
         );
 
@@ -522,6 +523,7 @@ atom caller(n: i64) -> i64
                     type_deps: vec![],
                     timestamp: "0s".to_string(),
                     skipped_clauses: 0,
+                    inferred_invariants: Vec::new(),
                 },
             );
         }

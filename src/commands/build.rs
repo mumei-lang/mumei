@@ -497,6 +497,7 @@ pub(crate) fn cmd_build(
                                                     .as_secs()
                                             ),
                                             skipped_clauses: 0,
+                                            inferred_invariants: Vec::new(),
                                         },
                                     );
                                 }
@@ -688,6 +689,7 @@ pub(crate) fn cmd_build(
                                                 .as_secs()
                                         ),
                                         skipped_clauses: 0,
+                                        inferred_invariants: Vec::new(),
                                     },
                                 );
                             }
