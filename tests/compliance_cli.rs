@@ -34,9 +34,7 @@ fn compliance_missing_pep_variant_fails_exhaustiveness() {
     let combined = format!("{stdout}\n{stderr}");
     assert!(
         combined.contains("Match is not exhaustive")
-            && (combined.contains("CustomerType::PEP")
-                || combined.contains("tag=3")
-                || combined.contains("value = PEP")),
+            && (combined.contains("CustomerType::PEP") || combined.contains("tag=3")),
         "expected PEP/tag=3 exhaustiveness counterexample, got:\n{combined}"
     );
 }
