@@ -83,6 +83,7 @@ fn initial_state_type_and_shadowing_checks_are_hard_errors() {
 fn separate_acquires_do_not_reuse_state_cells() {
     let output = run_verify("tests/negative/shared_state_reacquire.mm");
     assert!(!output.status.success());
+    assert!(combined(&output).contains("Postcondition (ensures) is not satisfied."));
 }
 
 #[test]
