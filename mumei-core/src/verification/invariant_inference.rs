@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferredInvariant {
     pub line: usize,
+    pub column: usize,
     pub candidates_tried: usize,
     pub adopted: Vec<String>,
 }

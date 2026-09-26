@@ -54,14 +54,19 @@ fn nested_inference_reports_each_loop_once() {
     let reports = payload["inferred_invariants"]
         .as_array()
         .expect("inferred invariant reports");
-    assert_eq!(reports.len(), 1);
-    let mut lines = reports
+    assert_eq!(reports.len(), 2);
+    let mut locations = reports
         .iter()
-        .map(|report| report["line"].as_u64().expect("report line"))
+        .map(|report| {
+            (
+                report["line"].as_u64().expect("report line"),
+                report["column"].as_u64().expect("report column"),
+            )
+        })
         .collect::<Vec<_>>();
-    lines.sort_unstable();
-    lines.dedup();
-    assert_eq!(lines.len(), 1);
+    locations.sort_unstable();
+    locations.dedup();
+    assert_eq!(locations.len(), reports.len());
 }
 
 #[test]
@@ -95,6 +100,19 @@ fn unprovable_inference_still_fails_closed() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!combined.contains("__mumei_infer_invariant"));
+}
+
+#[test]
+fn array_reassignment_and_element_store_do_not_report_snapshot_collision() {
+    let output = run("tests/negative/infer_invariant_array_store.mm", false);
+    assert!(!output.status.success(), "{:?}", output);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(combined.contains("none verified"));
+    assert!(!combined.contains("reserved for loop invariant inference"));
 }
 
 #[test]

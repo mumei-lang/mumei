@@ -651,6 +651,10 @@ pub(crate) fn stmt_to_z3<'a>(
                 modified.retain(|name| env.contains_key(name));
                 let modified_btree: std::collections::BTreeSet<String> =
                     modified.iter().cloned().collect();
+                let modified_bases: std::collections::BTreeSet<String> = modified_btree
+                    .iter()
+                    .map(|name| name.strip_prefix("__z3_arr_").unwrap_or(name).to_string())
+                    .collect();
                 let inferred = matches!(
                     invariant.as_ref(),
                     Expr::Variable(name) if name == "__mumei_infer_invariant"
@@ -665,16 +669,18 @@ pub(crate) fn stmt_to_z3<'a>(
                         id
                     };
                     let init_prefix = format!("__loop{loop_id}_init_");
-                    for name in &modified_btree {
-                        let base = name.strip_prefix("__z3_arr_").unwrap_or(name);
+                    for base in &modified_bases {
                         let snapshot_key = format!("{init_prefix}{base}");
                         if env.contains_key(&snapshot_key) {
                             return Err(MumeiError::verification(format!(
                                 "identifier '{snapshot_key}' is reserved for loop invariant inference"
                             )));
                         }
-                        if let Some(value) =
-                            env.get(name).cloned().or_else(|| env.get(base).cloned())
+                        let array_key = format!("__z3_arr_{base}");
+                        if let Some(value) = env
+                            .get(base)
+                            .cloned()
+                            .or_else(|| env.get(&array_key).cloned())
                         {
                             env.insert(snapshot_key, value);
                         }
@@ -726,12 +732,14 @@ pub(crate) fn stmt_to_z3<'a>(
                     if let Some(report) = vc.inferred_invariants {
                         let entry = InferredInvariant {
                             line: span.line,
+                            column: span.col,
                             candidates_tried: candidates.len(),
                             adopted: inferred_adopted.iter().map(expr_to_string).collect(),
                         };
                         let mut reports = report.borrow_mut();
-                        if let Some(existing) =
-                            reports.iter_mut().find(|item| item.line == entry.line)
+                        if let Some(existing) = reports
+                            .iter_mut()
+                            .find(|item| item.line == entry.line && item.column == entry.column)
                         {
                             *existing = entry;
                         } else {
