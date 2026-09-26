@@ -557,6 +557,43 @@ pub(crate) fn stmt_to_z3<'a>(
             Ok(val)
         }
         Stmt::Assign { var, value, .. } => {
+            if var.contains('.') {
+                let Some((resource, _field)) = vc.module_env.is_resource_state_var(var) else {
+                    return Err(MumeiError::verification(format!(
+                        "unknown resource state '{var}'"
+                    )));
+                };
+                if resource.mode == crate::parser::ResourceMode::Shared {
+                    return Err(MumeiError::verification(format!(
+                        "cannot write shared state '{var}' under mode: shared (read-only)"
+                    )));
+                }
+                if !env.contains_key(var) {
+                    return Err(MumeiError::verification(format!(
+                        "shared state '{var}' written outside 'acquire {}'",
+                        resource.name
+                    )));
+                }
+                let val = expr_to_z3(vc, value, env, solver_opt)?;
+                let expected: Dynamic = match _field.ty.as_str() {
+                    "bool" => Bool::from_bool(vc.ctx, false).into(),
+                    "i64" if vc.bitvec_i64 => BV::from_i64(vc.ctx, 0, 64).into(),
+                    "i64" => Int::from_i64(vc.ctx, 0).into(),
+                    "f64" if vc.ieee754_f64 => Float::from_f64(vc.ctx, 0.0).into(),
+                    "f64" => Real::from_real(vc.ctx, 0, 1).into(),
+                    _ => unreachable!("resource field types are parser-validated"),
+                };
+                if val.get_sort() != expected.get_sort() {
+                    return Err(MumeiError::type_error(format!(
+                        "shared state '{var}' has type {} but value has type {}",
+                        _field.ty,
+                        val.get_sort()
+                    )));
+                }
+                env.insert(var.clone(), val.clone());
+                profile_solver_assertion(vc, &format!("assign_{}", var), None);
+                return Ok(val);
+            }
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             record_binding_enum_type(vc, var, value);
             record_binding_lambda(vc, var, value, env, solver_opt);
@@ -895,11 +932,92 @@ pub(crate) fn stmt_to_z3<'a>(
         Stmt::Acquire { resource, body, .. } => {
             let held_name = format!("__resource_held_{}", resource);
             let held_bool = Bool::new_const(ctx, held_name.as_str());
+            let outermost = {
+                let mut held = vc.held_resources.borrow_mut();
+                let depth = held.entry(resource.clone()).or_insert(0);
+                let outermost = *depth == 0;
+                *depth += 1;
+                outermost
+            };
+            if let Some(resource_def) = vc.module_env.get_resource(resource) {
+                if outermost {
+                    let acquire_id = {
+                        let mut counter = vc.acquire_counter.borrow_mut();
+                        let id = *counter;
+                        *counter += 1;
+                        id
+                    };
+                    for field in &resource_def.state {
+                        let key = format!("{resource}.{}", field.name);
+                        let value = param_z3_value(
+                            ctx,
+                            &format!("{key}#acq{acquire_id}"),
+                            Some(&field.ty),
+                            vc.module_env,
+                            vc.ieee754_f64,
+                            vc.bitvec_i64,
+                        );
+                        env.insert(key, value);
+                    }
+                    if let (Some(invariant), Some(solver)) =
+                        (resource_def.invariant.as_ref(), solver_opt)
+                    {
+                        let inv = expr_to_z3(vc, invariant, env, Some(solver))?
+                            .as_bool()
+                            .ok_or(MumeiError::type_error("resource invariant must be boolean"))?;
+                        solver.assert(&inv);
+                    }
+                }
+            }
             if let Some(solver) = solver_opt {
                 solver.assert(&held_bool);
             }
             env.insert(held_name.clone(), held_bool.into());
             let body_result = stmt_to_z3(vc, body, env, solver_opt)?;
+            if outermost {
+                if let (Some(resource_def), Some(solver)) =
+                    (vc.module_env.get_resource(resource), solver_opt)
+                {
+                    if let Some(invariant) = resource_def.invariant.as_ref() {
+                        let inv_after = expr_to_z3(vc, invariant, env, Some(solver))?
+                            .as_bool()
+                            .ok_or(MumeiError::type_error("resource invariant must be boolean"))?;
+                        solver.push();
+                        solver.assert(&inv_after.not());
+                        let result = solver.check();
+                        solver.pop(1);
+                        match result {
+                            z3::SatResult::Sat => {
+                                return Err(MumeiError::verification(format!(
+                                    "shared invariant of resource '{}' not re-established at unlock: {}",
+                                    resource,
+                                    crate::verification::support::expr_to_source_string(invariant)
+                                )));
+                            }
+                            z3::SatResult::Unknown => {
+                                return Err(MumeiError::verification(format!(
+                                    "shared invariant of resource '{}' not re-established at unlock: {} (solver returned unknown)",
+                                    resource,
+                                    crate::verification::support::expr_to_source_string(invariant)
+                                )));
+                            }
+                            z3::SatResult::Unsat => {}
+                        }
+                    }
+                }
+                if let Some(resource_def) = vc.module_env.get_resource(resource) {
+                    for field in &resource_def.state {
+                        env.remove(&format!("{resource}.{}", field.name));
+                    }
+                }
+            }
+            let mut held = vc.held_resources.borrow_mut();
+            if let Some(depth) = held.get_mut(resource) {
+                *depth -= 1;
+                if *depth == 0 {
+                    held.remove(resource);
+                }
+            }
             let released = Bool::from_bool(ctx, false);
             env.insert(held_name, released.into());
             Ok(body_result)

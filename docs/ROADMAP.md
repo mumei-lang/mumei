@@ -1885,24 +1885,23 @@ E2E テストで判明した検証パスの穴を解消した:
 - `verify --json` の `code: "escalation_candidate"` 診断（`escalation_reason` / `z3_unknown`
   タグ付き）を回帰テストで固定。
 
-**残課題**: 明示的な同期プリミティブで保護された共有可変状態の干渉推論 — **設計起票済み**（下記「P17 残課題（R-13）設計メモ」参照。実装は Deferred、着手トリガは CROSS_PROJECT_ROADMAP.md Priority 26 群 3 R-13 行に記載）。
+**残課題**: lock-free/atomics、deadlock/priority-inversion の完全分析、task_group:any のクリティカルセクション中キャンセルモデル — **設計起票済み**（下記 P17 R-13 のスコープ外）。
 task body 内の配列要素キャプチャは P25 で解消済み。
 
-#### P17 残課題（R-13）設計メモ: Mutex/RwLock 下の共有可変状態 — 設計起票済み（design filed）
+#### P17 R-13: Mutex/RwLock 下の共有可変状態 — Implemented (M1)
 
-**ステータス: 設計起票済み（実装は Deferred）**。バックログ: `docs/CROSS_PROJECT_ROADMAP.md` Priority 26 群 3 R-13。
+**ステータス: Implemented (M1)**。Typed resource state, acquire-only access, and unlock invariant obligations are implemented.
 
 **スコープ**: `Mutex` / `RwLock` で保護された共有可変状態のみを対象とする
 rely-guarantee-lite。lock 取得でシリアライズされる critical section 内の書き込みが、
 unlock 時点で宣言済みの共有不変量を再確立することを検証する。
 
-**表面構文（案）**: 共有状態は `resource` 宣言に `invariant:` 節を載せる形で宣言する
+**表面構文**: 共有状態は `resource` 宣言に typed state と `invariant:` 節を載せる形で宣言する
 （既存の `resource NAME priority: N mode: exclusive|shared;` を拡張し、排他 resource の
 mutex 的な意味に不変量を付ける）。
 
 ```mumei
-resource counter priority: 1 mode: exclusive
-invariant: counter.value >= 0;
+resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;
 
 async atom bump(n: i64)
 requires: n >= 0;
@@ -1915,8 +1914,9 @@ body: {
 }
 ```
 
-**ストレージモデル（案）**: 現行の `ResourceDef` は `name` / `priority` / `mode` のみを持ち、
-`acquire` は名前付き mutex の取得にすぎず `counter.value` のような状態スロットは存在しない。
+**ストレージモデル**: Resource state fields support `i64`, `bool`, and `f64`. State cells
+exist only while their resource is held by `acquire`, and are lowered to module-scoped cells
+for code generation. A resource without a state map remains a pure lock.
 本設計は `resource` 宣言を型付き state map で拡張する（`resource counter { value: i64 }
 priority: 1 mode: exclusive invariant: counter.value >= 0;`）。`acquire` ブロック内の
 `counter.<field>` アクセスはその resource が所有する state cell への load/store に lowering
@@ -1930,7 +1930,7 @@ priority 階層のみを検査するため、**shared mode の `acquire` 内で�
 限定）。sibling task 間の capture 書き込み競合は既存の `ConcurrentDataRace`
 （Phase 1h-2、`verification/support/task_ownership.rs`）が別レイヤで担う。
 
-**Phase 1h-2 との統合（lock-aware ownership）**: 現行の ownership pass は
+**Phase 1h-2 との統合（lock-aware ownership）**: Ownership analysis treats
 `Stmt::Acquire { body }` を `Task` / `While` と同じく body へ再帰するだけで、
 acquire による serialize は race 判定に寄与しない — `task` 内で `acquire res` に包まれた
 共有状態への書き込みも unsynchronized write として `ConcurrentDataRace` になる。
@@ -1941,7 +1941,7 @@ acquire による serialize は race 判定に寄与しない — `task` 内で 
 （missing-acquire 診断）とする。これにより「lock 無しの共有書き込みは従来どおり弾き、
 lock 有りは不変量義務へ昇格」という役割分担になる。
 
-**どこに置くか**: mumei-lean ではなく mumei-core 側の verifier に置く。義務は quantifier-free
+**実装位置**: mumei-lean ではなく mumei-core 側の verifier に置く。義務は quantifier-free
 （不変量を havoc 済み post-body 環境で再評価する形）で、Phase 1h-2 を担う
 `verification/support/task_ownership.rs` と同じ AST-level pass の隣に新しい解析
 （Phase 1h-3 相当、`support/shared_invariants.rs` 候補）として追加する。`Stmt::Acquire` は既に translator で `__resource_held_<name>` Bool を
@@ -1958,16 +1958,16 @@ assert している（`translator/stmt.rs`）ため、義務はその延長線�
   こと）。cancel 可能点をまたぐ acquire は resource hierarchy の既存規則
   （`await` inside `acquire` → error）で既に制限されている。
 
-これらの義務は構文的に決定されるため常に hard error であり、Z3 `unknown` を経由しない
-（Lean escalation only for Z3 `unknown`）— `lean_verified` へ誤昇格しない。
-不変量自体が帰納的（例: 長さ・集計不変量）で Z3 が `unknown` を返す場合のみ、従来どおり
-escalation 候補となる。
+これらの義務は常に hard error であり、Z3 `unknown` も失敗として扱われ、Lean escalation を経由しない
+（Lean escalation only for unrelated verification obligations）— `lean_verified` へ誤昇格しない。
 
 **明示的な除外**:
 
 - lock-free / atomic メモリオーダリング（release-acquire 等の weak memory 推論は対象外）
 - deadlock freedom（resource priority hierarchy が別レイヤで既に担保; 本設計は不変量のみ）
 - priority inversion・fairness・スケジューラの liveness
+- `task_group:any` の子が critical section の途中で cancellation される実行はモデル化しない。
+  acquire body は cancellation に対して atomic として扱い、これは follow-up である。
 - 真の interleaving モデル化 — critical section の逐次合成だけを見る "lite" 版であり、
   lock 間の相互作用の完全な rely-guarantee は対象外
 

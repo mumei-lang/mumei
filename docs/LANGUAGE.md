@@ -410,6 +410,20 @@ body: {
     acquire db_conn { acquire cache { amount } }
 };
 ```
+
+Resources may declare typed shared state and an invariant:
+
+```mumei
+resource counter { value: i64, ready: bool }
+    priority: 1 mode: exclusive invariant: counter.value >= 0;
+```
+
+State fields are visible only inside `acquire counter { ... }`. Reads and writes use
+`counter.value` syntax. An `exclusive` resource permits writes; a `shared` resource
+permits reads but rejects writes. At unlock, the declared invariant must be re-established;
+both a satisfiable negation and a solver `unknown` are hard verification errors.
+State cells start at their zero value (`0`, `false`, or `0.0` according to the
+declared type), so every invariant must admit that initial state.
 ---
 ## Higher-Order Functions (Phase A)
 

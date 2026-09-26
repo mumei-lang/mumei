@@ -243,6 +243,24 @@ pub fn compute_proof_hash_with_flags(
     for r in &atom.resources {
         hasher.update(b"|resource:");
         hasher.update(r.as_bytes());
+        if let Some(resource) = module_env.get_resource(r) {
+            hasher.update(b"|priority:");
+            hasher.update(resource.priority.to_string().as_bytes());
+            hasher.update(b"|mode:");
+            hasher.update(format!("{:?}", resource.mode).as_bytes());
+            for field in &resource.state {
+                hasher.update(b"|state:");
+                hasher.update(field.name.as_bytes());
+                hasher.update(b":");
+                hasher.update(field.ty.as_bytes());
+            }
+            if let Some(invariant) = &resource.invariant {
+                hasher.update(b"|resource_invariant:");
+                hasher.update(
+                    crate::verification::support::expr_to_source_string(invariant).as_bytes(),
+                );
+            }
+        }
     }
     for e in &atom.effects {
         hasher.update(b"|effect:");
@@ -687,6 +705,9 @@ mod nominal_hash_tests {
                 Item::StructDef(s) => {
                     module_env.structs.insert(s.name.clone(), s.clone());
                 }
+                Item::ResourceDef(resource) => {
+                    module_env.register_resource(resource);
+                }
                 _ => {}
             }
         }
@@ -780,6 +801,19 @@ body: { p.a };\n";
         let after = env_and_hash(&format!(
             "struct Pair {{ a: i64, b: i64 }}\n{getx_bitvec}{MAIN}"
         ));
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn resource_invariant_change_invalidates_the_proof_hash() {
+        let before = env_and_hash(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
+             atom main() -> i64\nresources: [counter];\nrequires: true;\nensures: true;\nbody: { 0 }",
+        );
+        let after = env_and_hash(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 1;\n\
+             atom main() -> i64\nresources: [counter];\nrequires: true;\nensures: true;\nbody: { 0 }",
+        );
         assert_ne!(before, after);
     }
 }

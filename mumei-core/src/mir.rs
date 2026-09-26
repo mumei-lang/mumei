@@ -250,7 +250,7 @@ pub fn movability_from_type(ty: &Option<String>) -> Movability {
             // `let f = |params| …` — a lambda binding is an immutable
             // closure reference, not an owned resource: reads copy, never
             // move, so `if c {f} else {g}` doesn't consume f/g.
-            | "__lambda",
+            | "__lambda" | "resource",
         ) => Movability::Copy,
         _ => Movability::Move,
     }
@@ -465,6 +465,13 @@ impl LowerCtx {
             self.var_map.insert(name.to_string(), local.clone());
             Place::Local(local)
         }
+    }
+
+    fn lookup_resource(&mut self, name: &str) -> Place {
+        if let Some(local) = self.var_map.get(name) {
+            return Place::Local(local.clone());
+        }
+        Place::Local(self.alloc_local(Some(name.to_string()), Some("resource".to_string())))
     }
 
     /// A bare name that resolves to a nullary variant of a declared enum
@@ -868,7 +875,11 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
         }
         HirStmt::Assign { var, value } => {
             let val_op = lower_expr(ctx, value);
-            let place = ctx.lookup_var(var);
+            let place = if let Some((resource, field)) = var.split_once('.') {
+                Place::Field(Box::new(ctx.lookup_resource(resource)), field.to_string())
+            } else {
+                ctx.lookup_var(var)
+            };
             ctx.emit(MirStatement::Assign(place, Rvalue::Use(val_op)));
             None
         }
@@ -1166,7 +1177,15 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             Operand::Place(Place::Local(tmp))
         }
         HirExpr::FieldAccess(base, field) => {
-            let base_op = lower_expr(ctx, base);
+            let base_op = if let HirExpr::Variable(name) = base.as_ref() {
+                if let Some(resource) = name.strip_prefix("__mumei_resource_") {
+                    Operand::Place(ctx.lookup_resource(resource))
+                } else {
+                    lower_expr(ctx, base)
+                }
+            } else {
+                lower_expr(ctx, base)
+            };
             let tmp = ctx.alloc_temp();
             ctx.emit(MirStatement::StorageLive(tmp.clone()));
             ctx.emit(MirStatement::Assign(

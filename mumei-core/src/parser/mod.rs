@@ -810,8 +810,67 @@ atom max_val<T: Comparable>(a: T, b: T)
             .collect();
         assert_eq!(resources.len(), 1);
         assert_eq!(resources[0].name, "mutex_a");
+        assert!(resources[0].state.is_empty());
+        assert!(resources[0].invariant.is_none());
         assert_eq!(resources[0].priority, 1);
         assert_eq!(resources[0].mode, ResourceMode::Exclusive);
+    }
+
+    #[test]
+    fn test_parse_typed_resource_state_and_invariant() {
+        let items = parse_module(
+            "resource counter { value: i64, ready: bool, ratio: f64 } \
+             priority: 1 mode: exclusive invariant: counter.value >= 0;",
+        );
+        let resource = items
+            .iter()
+            .find_map(|item| match item {
+                Item::ResourceDef(resource) => Some(resource),
+                _ => None,
+            })
+            .expect("resource should parse");
+        assert_eq!(
+            resource
+                .state
+                .iter()
+                .map(|field| (field.name.as_str(), field.ty.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("value", "i64"), ("ready", "bool"), ("ratio", "f64")]
+        );
+        assert!(resource.invariant.is_some());
+    }
+
+    #[test]
+    fn test_parse_resource_rejects_unsupported_state_type() {
+        let failures =
+            parse_module_checked("resource counter { value: String } priority: 1 mode: exclusive;")
+                .expect_err("unsupported resource state type should fail");
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("unsupported type 'String'")));
+    }
+
+    #[test]
+    fn test_parse_resource_invariant_requires_state() {
+        let failures =
+            parse_module_checked("resource counter priority: 1 mode: exclusive invariant: true;")
+                .expect_err("resource invariant without state should fail");
+        assert!(failures
+            .iter()
+            .any(|failure| failure == "resource invariant requires a state block"));
+    }
+
+    #[test]
+    fn test_parse_dotted_resource_assignment() {
+        let stmt = parse_body_expr_checked("{ counter.value = counter.value + 1; }")
+            .expect("dotted assignment should parse");
+        let Stmt::Block(stmts, _) = stmt else {
+            panic!("expected block");
+        };
+        let Stmt::Assign { var, .. } = &stmts[0] else {
+            panic!("expected assignment");
+        };
+        assert_eq!(var, "counter.value");
     }
 
     #[test]
