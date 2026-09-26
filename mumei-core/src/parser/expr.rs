@@ -448,6 +448,15 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             }
         }
 
+        Token::LBrace => {
+            let block = parse_block_or_stmt(ctx);
+            Expr::IfThenElse {
+                cond: Box::new(Expr::Variable("true".to_string())),
+                then_branch: Box::new(block.clone()),
+                else_branch: Box::new(block),
+            }
+        }
+
         Token::Match => {
             ctx.advance();
             let target = parse_expr(ctx, 0);
