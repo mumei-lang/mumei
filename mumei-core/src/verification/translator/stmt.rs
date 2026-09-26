@@ -505,9 +505,33 @@ fn resolve_lambda_stmt<'a>(
 ) -> Option<std::rc::Rc<LocalLambda<'a>>> {
     match stmt {
         Stmt::Expr(e, _) => resolve_lambda_expr(vc, e, env, solver_opt),
-        Stmt::Block(stmts, _) => stmts
-            .last()
-            .and_then(|s| resolve_lambda_stmt(vc, s, env, solver_opt)),
+        Stmt::Block(stmts, _) => {
+            let saved_lambdas = vc.local_lambdas.borrow().clone();
+            for stmt in stmts.iter().take(stmts.len().saturating_sub(1)) {
+                let binding = match stmt {
+                    Stmt::Let { var, value, .. } | Stmt::Assign { var, value, .. } => {
+                        Some((var, value))
+                    }
+                    _ => None,
+                };
+                if let Some((var, value)) = binding {
+                    let mut value_env = env.clone();
+                    match resolve_lambda_expr(vc, value, &mut value_env, solver_opt) {
+                        Some(lambda) => {
+                            vc.local_lambdas.borrow_mut().insert(var.clone(), lambda);
+                        }
+                        None => {
+                            vc.local_lambdas.borrow_mut().remove(var);
+                        }
+                    }
+                }
+            }
+            let result = stmts
+                .last()
+                .and_then(|s| resolve_lambda_stmt(vc, s, env, solver_opt));
+            *vc.local_lambdas.borrow_mut() = saved_lambdas;
+            result
+        }
         _ => None,
     }
 }
