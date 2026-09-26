@@ -54,7 +54,7 @@ fn borrow_negative_fixtures_report_mir_rules() {
         ),
         (
             "tests/negative/borrow_callref_consume_use_after_move.mm",
-            "x",
+            "use of moved value `x`",
         ),
         (
             "tests/negative/borrow_callref_alias.mm",
