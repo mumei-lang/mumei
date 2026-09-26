@@ -20,7 +20,10 @@ use inkwell::values::{
 };
 use inkwell::AddressSpace;
 use inkwell::{FloatPredicate, IntPredicate};
-use mumei_core::hir::{HirExpr, HirStmt};
+use mumei_core::hir::{
+    collect_assigned_outer_variables_match_arm, collect_assigned_outer_variables_stmt, HirExpr,
+    HirStmt,
+};
 use mumei_core::parser::{JoinSemantics, Op};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
@@ -1863,6 +1866,8 @@ pub(crate) fn compile_hir_expr<'a>(
             let else_block = context.append_basic_block(*function, "else");
             let merge_block = context.append_basic_block(*function, "merge");
             let pre_vars = variables.clone();
+            let then_assigned = collect_assigned_outer_variables_stmt(then_branch);
+            let else_assigned = collect_assigned_outer_variables_stmt(else_branch);
 
             // Lambda bindings are branch-scoped like the verifier's
             // `local_lambdas`: restore the pre-branch markers before the
@@ -1914,8 +1919,21 @@ pub(crate) fn compile_hir_expr<'a>(
             phi.add_incoming(&[(&then_val, then_end_block), (&else_val, else_end_block)]);
             *variables = pre_vars.clone();
             for (name, pre_val) in &pre_vars {
-                let then_val = then_vars.get(name).cloned().unwrap_or(*pre_val);
-                let else_val = else_vars.get(name).cloned().unwrap_or(*pre_val);
+                let then_changed = then_assigned.contains(name);
+                let else_changed = else_assigned.contains(name);
+                if !then_changed && !else_changed {
+                    continue;
+                }
+                let then_val = if then_changed {
+                    then_vars.get(name).cloned().unwrap_or(*pre_val)
+                } else {
+                    *pre_val
+                };
+                let else_val = if else_changed {
+                    else_vars.get(name).cloned().unwrap_or(*pre_val)
+                } else {
+                    *pre_val
+                };
                 if then_val.get_type() != else_val.get_type() {
                     return Err(MumeiError::codegen(format!(
                         "incompatible branch types for variable '{name}'"
@@ -2027,6 +2045,7 @@ pub(crate) fn compile_hir_expr<'a>(
             let mut arm_states: Vec<(
                 HashMap<String, BasicValueEnum<'a>>,
                 inkwell::basic_block::BasicBlock<'a>,
+                std::collections::HashSet<String>,
             )> = Vec::new();
 
             let arm_count = arms.len();
@@ -2123,7 +2142,8 @@ pub(crate) fn compile_hir_expr<'a>(
                 let body_end = builder.get_insert_block().unwrap();
                 llvm!(builder.build_unconditional_branch(merge_block));
                 incoming.push((body_val, body_end));
-                arm_states.push((arm_vars, body_end));
+                let assigned = collect_assigned_outer_variables_match_arm(arm);
+                arm_states.push((arm_vars, body_end, assigned));
             }
 
             // Plan 18: Infer phi type from the first arm's body value type
@@ -2149,7 +2169,11 @@ pub(crate) fn compile_hir_expr<'a>(
             };
             llvm!(builder.build_unconditional_branch(merge_block));
             incoming.push((unreachable_val, unreachable_block));
-            arm_states.push((pre_vars.clone(), unreachable_block));
+            arm_states.push((
+                pre_vars.clone(),
+                unreachable_block,
+                std::collections::HashSet::new(),
+            ));
 
             builder.position_at_end(merge_block);
             let phi = llvm!(builder.build_phi(phi_type, "match_result"));
@@ -2159,8 +2183,18 @@ pub(crate) fn compile_hir_expr<'a>(
             *variables = pre_vars.clone();
             for (name, pre_val) in &pre_vars {
                 let mut merged_incoming = Vec::with_capacity(arm_states.len());
-                for (arm_vars, arm_end) in &arm_states {
-                    let value = arm_vars.get(name).cloned().unwrap_or(*pre_val);
+                let assigned_any = arm_states
+                    .iter()
+                    .any(|(_, _, assigned)| assigned.contains(name));
+                if !assigned_any {
+                    continue;
+                }
+                for (arm_vars, arm_end, assigned) in &arm_states {
+                    let value = if assigned.contains(name) {
+                        arm_vars.get(name).cloned().unwrap_or(*pre_val)
+                    } else {
+                        *pre_val
+                    };
                     if value.get_type() != pre_val.get_type() {
                         return Err(MumeiError::codegen(format!(
                             "incompatible match-arm type for variable '{name}'"

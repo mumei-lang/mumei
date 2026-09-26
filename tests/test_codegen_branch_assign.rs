@@ -32,3 +32,27 @@ fn match_arm_assignment_merges_before_following_expression() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn if_shadow_does_not_merge_branch_local_binding() {
+    let output = run_fixture("tests/positive/codegen_if_shadow.mm");
+    assert_eq!(
+        output.status.code(),
+        Some(8),
+        "if shadow must not replace the outer binding\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn match_shadow_does_not_merge_pattern_binding() {
+    let output = run_fixture("tests/positive/codegen_match_shadow.mm");
+    assert_eq!(
+        output.status.code(),
+        Some(8),
+        "match pattern binding must not replace the outer binding\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
