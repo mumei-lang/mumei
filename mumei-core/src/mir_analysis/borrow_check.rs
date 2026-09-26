@@ -1,6 +1,7 @@
 use super::MoveAnalysisResult;
 use crate::mir::{
-    BasicBlockId, Local, MirBody, MirParamMode, MirStatement, Operand, Place, Rvalue,
+    BasicBlockId, Local, LocalDecl, MirBody, MirParamMode, MirStatement, Movability, Operand,
+    Place, Rvalue,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -29,11 +30,60 @@ enum LoanKind {
     Mut,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct Loan {
     holder: Local,
     place: Place,
     kind: LoanKind,
+}
+
+fn lookup_movability(local: &Local, locals: &[LocalDecl]) -> Movability {
+    locals
+        .iter()
+        .find(|decl| decl.local == *local)
+        .map(|decl| decl.movability)
+        .unwrap_or(Movability::Move)
+}
+
+fn param_move_mode(
+    body: &MirBody,
+    place: &Place,
+    param_modes: &HashMap<Local, MirParamMode>,
+) -> Option<MirParamMode> {
+    let root = root_local(place);
+    (lookup_movability(root, &body.locals) != Movability::Copy)
+        .then(|| param_modes.get(root).copied())
+        .flatten()
+}
+
+fn moved_at_entry(
+    body: &MirBody,
+    move_analysis: &MoveAnalysisResult,
+    block: BasicBlockId,
+) -> HashSet<Local> {
+    move_analysis
+        .entry_states
+        .get(&block)
+        .into_iter()
+        .flat_map(|state| {
+            state
+                .status
+                .iter()
+                .filter_map(|(local, alive)| (!*alive).then_some(local.clone()))
+        })
+        .filter(|local| {
+            body.locals
+                .iter()
+                .find(|decl| decl.local == *local)
+                .is_some()
+        })
+        .collect()
+}
+
+fn add_loan(loans: &mut Vec<Loan>, loan: Loan) {
+    if !loans.iter().any(|existing| existing == &loan) {
+        loans.push(loan);
+    }
 }
 
 fn root_local(place: &Place) -> &Local {
@@ -162,117 +212,180 @@ fn check_borrow(
 }
 
 /// Check MIR loans and callee-side parameter access rules.
+fn check_block(
+    body: &MirBody,
+    block: &crate::mir::BasicBlock,
+    entry_loans: &[Loan],
+    moved: &mut HashSet<Local>,
+    param_modes: &HashMap<Local, MirParamMode>,
+    violations: &mut Vec<BorrowViolation>,
+) -> Vec<Loan> {
+    let mut loans = entry_loans.to_vec();
+    for (statement_index, statement) in block.statements.iter().enumerate() {
+        match statement {
+            MirStatement::StorageDead(local) | MirStatement::Drop(local) => {
+                loans.retain(|loan| loan.holder != *local);
+            }
+            MirStatement::Assign(place, Rvalue::Ref(borrowed))
+            | MirStatement::Assign(place, Rvalue::RefMut(borrowed)) => {
+                let kind = if matches!(statement, MirStatement::Assign(_, Rvalue::RefMut(_))) {
+                    LoanKind::Mut
+                } else {
+                    LoanKind::Shared
+                };
+                if kind == LoanKind::Mut
+                    && matches!(
+                        param_modes.get(root_local(borrowed)),
+                        Some(MirParamMode::Shared)
+                    )
+                {
+                    let name = place_name(body, borrowed);
+                    violations.push(violation(
+                        BorrowViolationKind::WriteThroughShared,
+                        body,
+                        borrowed,
+                        "caller",
+                        block.id,
+                        statement_index,
+                        format!("cannot write through shared parameter '{name}'"),
+                    ));
+                }
+                check_borrow(
+                    body,
+                    borrowed,
+                    kind,
+                    &loans,
+                    moved,
+                    block.id,
+                    statement_index,
+                    violations,
+                );
+                let Place::Local(holder) = place else {
+                    continue;
+                };
+                loans.retain(|loan| loan.holder != *holder);
+                add_loan(
+                    &mut loans,
+                    Loan {
+                        holder: holder.clone(),
+                        place: borrowed.clone(),
+                        kind,
+                    },
+                );
+            }
+            MirStatement::Assign(place, rvalue) => {
+                let local = root_local(place);
+                if matches!(param_modes.get(local), Some(MirParamMode::Shared)) {
+                    let name = place_name(body, place);
+                    violations.push(violation(
+                        BorrowViolationKind::WriteThroughShared,
+                        body,
+                        place,
+                        "caller",
+                        block.id,
+                        statement_index,
+                        format!("cannot write through shared parameter '{name}'"),
+                    ));
+                }
+                check_rvalue(
+                    body,
+                    rvalue,
+                    &loans,
+                    moved,
+                    param_modes,
+                    block.id,
+                    statement_index,
+                    violations,
+                );
+                if loans
+                    .iter()
+                    .any(|loan| loan.kind == LoanKind::Shared && overlaps(place, &loan.place))
+                {
+                    let name = place_name(body, place);
+                    violations.push(violation(
+                        BorrowViolationKind::WriteWhileShared,
+                        body,
+                        place,
+                        "caller",
+                        block.id,
+                        statement_index,
+                        format!("cannot write '{name}' while it is shared-borrowed"),
+                    ));
+                }
+                if let Place::Local(local) = place {
+                    if !matches!(rvalue, Rvalue::Ref(_) | Rvalue::RefMut(_)) {
+                        moved.remove(local);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    loans
+}
+
+/// Check MIR loans and callee-side parameter access rules.
 pub fn check_borrows(body: &MirBody, move_analysis: &MoveAnalysisResult) -> Vec<BorrowViolation> {
-    let mut violations = Vec::new();
     let mut param_modes = HashMap::new();
     for (local, mode) in &body.param_modes {
         param_modes.insert(local.clone(), *mode);
     }
 
-    for block in &body.blocks {
-        let mut loans = Vec::<Loan>::new();
-        let mut moved: HashSet<Local> = move_analysis
-            .entry_states
-            .get(&block.id)
-            .into_iter()
-            .flat_map(|state| {
-                state
-                    .status
-                    .iter()
-                    .filter_map(|(local, alive)| (!*alive).then_some(local.clone()))
-            })
-            .collect();
-        for (statement_index, statement) in block.statements.iter().enumerate() {
-            match statement {
-                MirStatement::StorageDead(local) | MirStatement::Drop(local) => {
-                    loans.retain(|loan| loan.holder != *local);
-                }
-                MirStatement::Assign(place, Rvalue::Ref(borrowed))
-                | MirStatement::Assign(place, Rvalue::RefMut(borrowed)) => {
-                    let kind = if matches!(statement, MirStatement::Assign(_, Rvalue::RefMut(_))) {
-                        LoanKind::Mut
-                    } else {
-                        LoanKind::Shared
-                    };
-                    if kind == LoanKind::Mut
-                        && matches!(
-                            param_modes.get(root_local(borrowed)),
-                            Some(MirParamMode::Shared)
-                        )
-                    {
-                        let name = place_name(body, borrowed);
-                        violations.push(violation(
-                            BorrowViolationKind::WriteThroughShared,
-                            body,
-                            borrowed,
-                            "caller",
-                            block.id,
-                            statement_index,
-                            format!("cannot write through shared parameter '{name}'"),
-                        ));
-                    }
-                    check_borrow(
-                        body,
-                        borrowed,
-                        kind,
-                        &loans,
-                        &moved,
-                        block.id,
-                        statement_index,
-                        &mut violations,
-                    );
-                    loans.push(Loan {
-                        holder: match place {
-                            Place::Local(local) => local.clone(),
-                            _ => continue,
-                        },
-                        place: borrowed.clone(),
-                        kind,
-                    });
-                }
-                MirStatement::Assign(place, rvalue) => {
-                    let local = root_local(place);
-                    if matches!(param_modes.get(local), Some(MirParamMode::Shared)) {
-                        let name = place_name(body, place);
-                        violations.push(violation(
-                            BorrowViolationKind::WriteThroughShared,
-                            body,
-                            place,
-                            "caller",
-                            block.id,
-                            statement_index,
-                            format!("cannot write through shared parameter '{name}'"),
-                        ));
-                    }
-                    check_rvalue(
-                        body,
-                        rvalue,
-                        &loans,
-                        &mut moved,
-                        &param_modes,
-                        block.id,
-                        statement_index,
-                        &mut violations,
-                    );
-                    if loans
-                        .iter()
-                        .any(|loan| loan.kind == LoanKind::Shared && overlaps(place, &loan.place))
-                    {
-                        let name = place_name(body, place);
-                        violations.push(violation(
-                            BorrowViolationKind::WriteWhileShared,
-                            body,
-                            place,
-                            "caller",
-                            block.id,
-                            statement_index,
-                            format!("cannot write '{name}' while it is shared-borrowed"),
-                        ));
+    let mut entry_loans: HashMap<BasicBlockId, Vec<Loan>> = body
+        .blocks
+        .iter()
+        .map(|block| (block.id, Vec::new()))
+        .collect();
+    let mut exit_loans = entry_loans.clone();
+    let predecessors = body.predecessors();
+    loop {
+        let mut changed = false;
+        for block in &body.blocks {
+            let mut incoming = Vec::new();
+            if let Some(preds) = predecessors.get(&block.id) {
+                for pred in preds {
+                    for loan in exit_loans.get(pred).into_iter().flatten() {
+                        add_loan(&mut incoming, loan.clone());
                     }
                 }
-                _ => {}
+            }
+            if incoming != entry_loans[&block.id] {
+                entry_loans.insert(block.id, incoming.clone());
+                changed = true;
+            } else {
+                incoming = entry_loans[&block.id].clone();
+            }
+            let mut ignored = Vec::new();
+            let mut moved = moved_at_entry(body, move_analysis, block.id);
+            let exit = check_block(
+                body,
+                block,
+                &incoming,
+                &mut moved,
+                &param_modes,
+                &mut ignored,
+            );
+            if exit != exit_loans[&block.id] {
+                exit_loans.insert(block.id, exit);
+                changed = true;
             }
         }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut violations = Vec::new();
+    for block in &body.blocks {
+        let mut moved = moved_at_entry(body, move_analysis, block.id);
+        check_block(
+            body,
+            block,
+            &entry_loans[&block.id],
+            &mut moved,
+            &param_modes,
+            &mut violations,
+        );
     }
     violations
 }
@@ -297,7 +410,9 @@ fn check_rvalue(
         let Some(place) = operand_place(op) else {
             continue;
         };
-        if matches!(op, Operand::Move(_)) {
+        let ordinary_param_move =
+            matches!(op, Operand::Place(_)) && param_move_mode(body, place, param_modes).is_some();
+        if matches!(op, Operand::Move(_)) || ordinary_param_move {
             let local = root_local(place);
             match param_modes.get(local) {
                 Some(MirParamMode::Shared) => {
@@ -309,7 +424,11 @@ fn check_rvalue(
                         "caller",
                         block,
                         statement,
-                        format!("cannot write through shared parameter '{name}'"),
+                        if ordinary_param_move {
+                            format!("cannot move out of shared parameter '{name}'")
+                        } else {
+                            format!("cannot write through shared parameter '{name}'")
+                        },
                     ));
                 }
                 Some(MirParamMode::Mut) => {
@@ -327,7 +446,9 @@ fn check_rvalue(
                 _ => {}
             }
             check_move(body, place, loans, block, statement, violations);
-            moved.insert(root_local(place).clone());
+            if ordinary_param_move || matches!(op, Operand::Move(_)) {
+                moved.insert(root_local(place).clone());
+            }
         }
     }
     // A call's arguments form one region. Check all move/loan pairs together
@@ -343,7 +464,10 @@ fn check_rvalue(
             })
             .collect();
         for arg in args {
-            if let Operand::Move(place) = arg {
+            if matches!(arg, Operand::Move(_))
+                || matches!(arg, Operand::Place(place) if param_move_mode(body, place, param_modes).is_some())
+            {
+                let place = operand_place(arg).expect("move operand has a place");
                 for loan in &call_loans {
                     if overlaps(place, &loan.place) {
                         let name = place_name(body, place);

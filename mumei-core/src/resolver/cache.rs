@@ -7,7 +7,8 @@ use std::fs;
 use std::path::Path;
 
 /// Bump when verifier semantics change so cached proofs are re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 2;
+/// Version 3 enables checker-first MIR borrow checking.
+pub const VERIFIER_POLICY_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {

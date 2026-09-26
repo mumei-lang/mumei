@@ -666,8 +666,9 @@ aliasing, and borrow-after-move are hard MIR diagnostics.
 
 Explicitly out of scope: lifetime elision, reborrowing (`&mut *p`), closure /
 `dyn` captures of borrows, lifetime parameters on types or atoms,
-region-polymorphic contracts, and any change to contract vocabulary or proof
-certificate schema.
+region-polymorphic contracts, indirect calls through `atom_ref`/`CallRef` at
+the call site (callee-side rules still apply), and any change to contract
+vocabulary or proof certificate schema.
 
 ---
 

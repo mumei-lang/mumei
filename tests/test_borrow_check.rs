@@ -36,6 +36,14 @@ fn borrow_negative_fixtures_report_mir_rules() {
             "tests/negative/borrow_write_through_shared.mm",
             "cannot write through shared parameter 'x'",
         ),
+        (
+            "tests/negative/borrow_move_out_of_ref_param.mm",
+            "cannot move out of shared parameter 'x'",
+        ),
+        (
+            "tests/negative/borrow_branch_loan_alias.mm",
+            "cannot borrow 'x' mutably while another borrow is live",
+        ),
     ];
     for (file, message) in cases {
         let output = verify(file);
@@ -61,5 +69,19 @@ fn borrow_positive_fixture_verifies() {
 #[test]
 fn borrow_after_branch_move_is_rejected() {
     let output = verify("tests/negative/borrow_after_move_branch.mm");
-    assert!(!output.status.success());
+    let text = combined(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("x"), "{text}");
+    assert!(
+        text.contains("cannot borrow 'x' after it was moved")
+            || text.contains("used after being moved"),
+        "{text}"
+    );
+}
+
+#[test]
+fn borrow_reinit_after_move_verifies() {
+    let output = verify("tests/positive/borrow_reinit_after_move.mm");
+    let text = combined(&output);
+    assert!(output.status.success(), "{text}");
 }

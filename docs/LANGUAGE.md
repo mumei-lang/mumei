@@ -375,6 +375,9 @@ shared-borrowed`, `cannot borrow 'x' mutably while another borrow is live`,
 `cannot borrow 'x' after it was moved`, and `cannot write through shared
 parameter 'x'`.
 
+Indirect calls through `atom_ref`/`CallRef` are not borrow-checked at the
+call site in this milestone; callee-side parameter rules still apply.
+
 First-class `&T`/`&mut T` types, reborrowing, lifetime parameters, closure or
 dynamic borrow capture, and region-polymorphic contracts are not part of this
 checker-first milestone.
