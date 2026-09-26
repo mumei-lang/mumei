@@ -1875,7 +1875,7 @@ E2E テストで判明した検証パスの穴を解消した:
 - `verify --json` の `code: "escalation_candidate"` 診断（`escalation_reason` / `z3_unknown`
   タグ付き）を回帰テストで固定。
 
-**残課題**: 明示的な同期プリミティブで保護された共有可変状態の干渉推論 — **設計起票済み**（下記「P17 残課題（R-13）設計メモ」参照。実装は Deferred、着手トリガは CROSS_PROJECT_ROADMAP.md Priority 26 群 3 R-13 行に記載）。
+**残課題**: lock-free/atomics、deadlock/priority-inversion の完全分析、task_group:any のクリティカルセクション中キャンセルモデル — **設計起票済み**（下記 P17 R-13 のスコープ外）。
 task body 内の配列要素キャプチャは P25 で解消済み。
 
 #### P17 R-13: Mutex/RwLock 下の共有可変状態 — Implemented (M1)

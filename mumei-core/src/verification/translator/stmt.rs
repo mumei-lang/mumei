@@ -477,6 +477,21 @@ pub(crate) fn stmt_to_z3<'a>(
                     )));
                 }
                 let val = expr_to_z3(vc, value, env, solver_opt)?;
+                let expected: Dynamic = match _field.ty.as_str() {
+                    "bool" => Bool::from_bool(vc.ctx, false).into(),
+                    "i64" if vc.bitvec_i64 => BV::from_i64(vc.ctx, 0, 64).into(),
+                    "i64" => Int::from_i64(vc.ctx, 0).into(),
+                    "f64" if vc.ieee754_f64 => Float::from_f64(vc.ctx, 0.0).into(),
+                    "f64" => Real::from_real(vc.ctx, 0, 1).into(),
+                    _ => unreachable!("resource field types are parser-validated"),
+                };
+                if val.get_sort() != expected.get_sort() {
+                    return Err(MumeiError::type_error(format!(
+                        "shared state '{var}' has type {} but value has type {}",
+                        _field.ty,
+                        val.get_sort()
+                    )));
+                }
                 env.insert(var.clone(), val.clone());
                 profile_solver_assertion(vc, &format!("assign_{}", var), None);
                 return Ok(val);

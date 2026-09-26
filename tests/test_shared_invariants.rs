@@ -62,6 +62,24 @@ fn unlocked_and_shared_mode_writes_are_rejected() {
 }
 
 #[test]
+fn initial_state_type_and_shadowing_checks_are_hard_errors() {
+    let initial = run_verify("tests/negative/shared_invariant_initial.mm");
+    assert!(!initial.status.success());
+    assert!(combined(&initial).contains(
+        "resource 'counter' invariant does not hold for the initial state (all fields zero)"
+    ));
+
+    let mismatch = run_verify("tests/negative/shared_state_type_mismatch.mm");
+    assert!(!mismatch.status.success());
+    assert!(combined(&mismatch).contains("shared state 'counter.ready' has type bool"));
+
+    let shadowed = run_verify("tests/negative/shared_state_shadowing.mm");
+    assert!(!shadowed.status.success());
+    assert!(combined(&shadowed)
+        .contains("identifier 'counter' shadows resource 'counter' with shared state"));
+}
+
+#[test]
 fn resource_codegen_emits_typed_state_globals() {
     let output_base =
         std::env::temp_dir().join(format!("mumei-shared-invariant-{}", std::process::id()));
