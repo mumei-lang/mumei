@@ -65,6 +65,10 @@ fn borrow_negative_fixtures_report_mir_rules() {
             "cannot write 'x' while it is shared-borrowed",
         ),
         (
+            "tests/negative/borrow_write_while_shared_block.mm",
+            "cannot write 'x' while it is shared-borrowed",
+        ),
+        (
             "tests/negative/borrow_atom_ref_value_escape.mm",
             "cannot take 'atom_ref(reader)' as a value",
         ),

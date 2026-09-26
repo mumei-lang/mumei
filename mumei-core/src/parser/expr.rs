@@ -448,6 +448,15 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             }
         }
 
+        Token::LBrace => {
+            let block = parse_block_or_stmt(ctx);
+            Expr::IfThenElse {
+                cond: Box::new(Expr::Variable("true".to_string())),
+                then_branch: Box::new(block.clone()),
+                else_branch: Box::new(block),
+            }
+        }
+
         Token::Match => {
             ctx.advance();
             let target = parse_expr(ctx, 0);
@@ -665,8 +674,17 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
                 ctx.advance();
                 parse_ident_continuation(ctx, name)
             } else {
+                let found = format!("{tok}");
+                let (line, col) = ctx
+                    .tokens_ref()
+                    .get(ctx.pos())
+                    .map(|t| (t.line, t.col))
+                    .unwrap_or((0, 0));
+                ctx.syntax_failure(format!(
+                    "unexpected token {found} in expression at {line}:{col}"
+                ));
                 ctx.advance();
-                Expr::Number(0)
+                Expr::Variable("__mumei_unexpected_token".to_string())
             }
         }
     }

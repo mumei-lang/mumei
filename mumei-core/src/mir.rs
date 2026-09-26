@@ -573,6 +573,14 @@ impl LowerCtx {
     /// `Movability` (i.e. the Copy primitives) are recognised; anything
     /// unknown returns `None` and the local stays conservatively Move.
     fn infer_hir_ty(&self, expr: &HirExpr) -> Option<String> {
+        self.infer_hir_ty_in(expr, &std::collections::HashMap::new())
+    }
+
+    fn infer_hir_ty_in(
+        &self,
+        expr: &HirExpr,
+        locals: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
         match expr {
             HirExpr::Number(_) => Some("i64".to_string()),
             HirExpr::Float(_) => Some("f64".to_string()),
@@ -587,7 +595,10 @@ impl LowerCtx {
                 if name == "true" || name == "false" {
                     Some("bool".to_string())
                 } else {
-                    self.lookup_var_ty(name)
+                    locals
+                        .get(name)
+                        .cloned()
+                        .or_else(|| self.lookup_var_ty(name))
                 }
             }
             HirExpr::BinaryOp(lhs, op, rhs) => match op {
@@ -601,25 +612,29 @@ impl LowerCtx {
                 | crate::parser::Op::Or
                 | crate::parser::Op::Implies => Some("bool".to_string()),
                 crate::parser::Op::Pow => {
-                    if self.infer_hir_ty(lhs).as_deref() == Some("f64")
-                        || self.infer_hir_ty(rhs).as_deref() == Some("f64")
+                    if self.infer_hir_ty_in(lhs, locals).as_deref() == Some("f64")
+                        || self.infer_hir_ty_in(rhs, locals).as_deref() == Some("f64")
                     {
                         Some("f64".to_string())
                     } else {
                         Some("i64".to_string())
                     }
                 }
-                _ => self.infer_hir_ty(lhs).or_else(|| self.infer_hir_ty(rhs)),
+                _ => self
+                    .infer_hir_ty_in(lhs, locals)
+                    .or_else(|| self.infer_hir_ty_in(rhs, locals)),
             },
             // `[e0, …]` — element type from the first element; the binding is
             // an array (Move) so later `a[i]` reads and `let b = a` moves are
             // tracked correctly. Empty literals can't reach HIR (parse error).
             HirExpr::ArrayLit(elements) => elements
                 .first()
-                .and_then(|e| self.infer_hir_ty(e))
+                .and_then(|e| self.infer_hir_ty_in(e, locals))
                 .map(|elem| format!("[{elem}]")),
-            HirExpr::ArrayAccess(name, _) => self
-                .lookup_var_ty(name)
+            HirExpr::ArrayAccess(name, _) => locals
+                .get(name)
+                .cloned()
+                .or_else(|| self.lookup_var_ty(name))
                 .and_then(|ty| {
                     if ty.starts_with('[') && ty.ends_with(']') {
                         Some(ty[1..ty.len() - 1].to_string())
@@ -632,34 +647,68 @@ impl LowerCtx {
                 then_branch,
                 else_branch,
                 ..
-            } => hir_stmt_tail_expr(then_branch)
-                .and_then(|e| self.infer_hir_ty(e))
-                .or_else(|| hir_stmt_tail_expr(else_branch).and_then(|e| self.infer_hir_ty(e))),
+            } => self
+                .infer_hir_branch_ty_in(then_branch, locals)
+                .or_else(|| self.infer_hir_branch_ty_in(else_branch, locals)),
             HirExpr::Match { target, arms } => {
-                // Infer the result type from the arm bodies so `let r = match …`
-                // bindings to scalar results are Copy, not Move. A tail that
-                // is a pattern-bound variable resolves to the variant field's
-                // declared type — `var_map` has no entry yet because inference
-                // runs before the arm bodies are lowered. Falls back to None
-                // (conservative Move) when no arm's tail type resolves.
-                let scrutinee_ty = self.infer_hir_ty(target);
+                let scrutinee_ty = self.infer_hir_ty_in(target, locals);
                 arms.iter().find_map(|arm| {
-                    hir_stmt_tail_expr(&arm.body).and_then(|e| match e {
-                        HirExpr::Variable(name) => self
-                            .pattern_binding_ty(scrutinee_ty.as_deref(), &arm.pattern, name)
-                            .or_else(|| self.infer_hir_ty(e)),
-                        _ => self.infer_hir_ty(e),
-                    })
+                    hir_stmt_tail_expr(&arm.body)
+                        .and_then(|e| match e {
+                            HirExpr::Variable(name) => {
+                                self.pattern_binding_ty(scrutinee_ty.as_deref(), &arm.pattern, name)
+                            }
+                            _ => None,
+                        })
+                        .or_else(|| self.infer_hir_branch_ty_in(&arm.body, locals))
                 })
             }
             // P25: `recv(ch)` yields the channel's declared payload type.
             HirExpr::ChanRecv { channel } => match channel.as_ref() {
-                HirExpr::Variable(name) => self
-                    .lookup_var_ty(name)
+                HirExpr::Variable(name) => locals
+                    .get(name)
+                    .cloned()
+                    .or_else(|| self.lookup_var_ty(name))
                     .and_then(|ty| crate::lowering::chan_payload_type(&ty)),
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    fn infer_hir_branch_ty(&self, stmt: &HirStmt) -> Option<String> {
+        self.infer_hir_branch_ty_in(stmt, &std::collections::HashMap::new())
+    }
+
+    fn infer_hir_branch_ty_in(
+        &self,
+        stmt: &HirStmt,
+        outer_locals: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        match stmt {
+            HirStmt::Block { stmts, tail_expr } => {
+                let mut locals = outer_locals.clone();
+                for stmt in stmts {
+                    if let HirStmt::Let { var, ty, value } = stmt {
+                        // HIR `ty` can be inferred before parameter types are
+                        // available, so prefer the param-aware expression
+                        // inference and retain it only as a fallback.
+                        let inferred = self.infer_hir_ty_in(value, &locals).or_else(|| ty.clone());
+                        match inferred {
+                            Some(ty) => {
+                                locals.insert(var.clone(), ty);
+                            }
+                            None => {
+                                locals.remove(var);
+                            }
+                        }
+                    }
+                }
+                tail_expr
+                    .as_deref()
+                    .and_then(|expr| self.infer_hir_ty_in(expr, &locals))
+            }
+            _ => hir_stmt_tail_expr(stmt).and_then(|expr| self.infer_hir_ty_in(expr, outer_locals)),
         }
     }
 }
@@ -749,18 +798,7 @@ pub fn infer_atom_return_type(atom: &crate::parser::Atom) -> Option<String> {
     }
     match &hir.body {
         crate::hir::HirStmt::Expr(expr) => ctx.infer_hir_ty(expr),
-        crate::hir::HirStmt::Block { stmts, tail_expr } => {
-            // Register let-bound locals so the tail expression can resolve
-            // their types. Infer each binding with the param-aware context
-            // rather than the HIR-recorded `ty`, which is param-blind.
-            for stmt in stmts {
-                if let crate::hir::HirStmt::Let { var, value, .. } = stmt {
-                    let ty = ctx.infer_hir_ty(value);
-                    ctx.alloc_local(Some(var.clone()), ty);
-                }
-            }
-            tail_expr.as_ref().and_then(|expr| ctx.infer_hir_ty(expr))
-        }
+        crate::hir::HirStmt::Block { .. } => ctx.infer_hir_branch_ty(&hir.body),
         _ => None,
     }
 }

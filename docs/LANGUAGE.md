@@ -306,6 +306,10 @@ body: {
 };
 ```
 
+Block expressions `{ stmts; expr }` are allowed anywhere an expression is
+accepted and evaluate to their trailing expression. Unexpected tokens in
+expression position are hard syntax errors.
+
 ### Pipeline operator `|>`
 
 The pipeline operator passes its left operand to the right-hand function:
