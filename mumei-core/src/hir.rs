@@ -802,6 +802,101 @@ pub fn collect_free_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
     vars
 }
 
+/// Collect outer variable names assigned by a HirStmt.
+///
+/// Local `let` bindings are excluded so code generation can merge only
+/// assignments that update a value from before a branch.
+pub fn collect_assigned_outer_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
+    let mut assigned = HashSet::new();
+    match stmt {
+        HirStmt::Let { value, .. } => {
+            assigned.extend(collect_assigned_outer_variables_expr(value));
+        }
+        HirStmt::Assign { var, value } => {
+            if !var.contains('.') {
+                assigned.insert(var.clone());
+            }
+            assigned.extend(collect_assigned_outer_variables_expr(value));
+        }
+        HirStmt::ArrayStore { index, value, .. } => {
+            assigned.extend(collect_assigned_outer_variables_expr(index));
+            assigned.extend(collect_assigned_outer_variables_expr(value));
+        }
+        HirStmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+        } => {
+            assigned.extend(collect_assigned_outer_variables_expr(cond));
+            assigned.extend(collect_assigned_outer_variables_expr(invariant));
+            if let Some(decrease) = decreases {
+                assigned.extend(collect_assigned_outer_variables_expr(decrease));
+            }
+            assigned.extend(collect_assigned_outer_variables_stmt(body));
+        }
+        HirStmt::Block { stmts, tail_expr } => {
+            let mut bound = HashSet::new();
+            for stmt in stmts {
+                let stmt_assigned = collect_assigned_outer_variables_stmt(stmt);
+                for name in stmt_assigned {
+                    if !bound.contains(&name) {
+                        assigned.insert(name);
+                    }
+                }
+                if let HirStmt::Let { var, .. } = stmt {
+                    bound.insert(var.clone());
+                }
+            }
+            if let Some(tail) = tail_expr {
+                for name in collect_assigned_outer_variables_expr(tail) {
+                    if !bound.contains(&name) {
+                        assigned.insert(name);
+                    }
+                }
+            }
+        }
+        HirStmt::Acquire { body, .. } => {
+            assigned.extend(collect_assigned_outer_variables_stmt(body));
+        }
+        HirStmt::Expr(expr) => {
+            assigned.extend(collect_assigned_outer_variables_expr(expr));
+        }
+    }
+    assigned
+}
+
+/// Collect outer variable names assigned by nested control-flow expressions.
+pub fn collect_assigned_outer_variables_expr(expr: &HirExpr) -> HashSet<String> {
+    let mut assigned = HashSet::new();
+    match expr {
+        HirExpr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            assigned.extend(collect_assigned_outer_variables_stmt(then_branch));
+            assigned.extend(collect_assigned_outer_variables_stmt(else_branch));
+        }
+        HirExpr::Match { arms, .. } => {
+            for arm in arms {
+                assigned.extend(collect_assigned_outer_variables_match_arm(arm));
+            }
+        }
+        _ => {}
+    }
+    assigned
+}
+
+/// Collect assignments from a match arm while excluding its pattern bindings.
+pub fn collect_assigned_outer_variables_match_arm(arm: &HirMatchArm) -> HashSet<String> {
+    let mut assigned = collect_assigned_outer_variables_stmt(&arm.body);
+    let mut pattern_bound = HashSet::new();
+    collect_pattern_bindings(&arm.pattern, &mut pattern_bound);
+    assigned.retain(|name| !pattern_bound.contains(name));
+    assigned
+}
+
 /// Collect free variables from a HirExpr (recursive traversal).
 pub fn collect_free_variables_expr(expr: &HirExpr) -> HashSet<String> {
     let mut vars = HashSet::new();
@@ -945,4 +1040,82 @@ pub fn lower_expr_from_str(input: &str) -> HirExpr {
 pub fn lower_stmt_from_str(input: &str) -> HirStmt {
     let stmt = parse_body_expr(input);
     lower_stmt(&stmt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    fn assigned_outer_variables_excludes_shadowing_let() {
+        let stmt = HirStmt::Block {
+            stmts: vec![
+                HirStmt::Let {
+                    var: "acc".to_string(),
+                    ty: None,
+                    value: Box::new(HirExpr::Number(1)),
+                },
+                HirStmt::Assign {
+                    var: "acc".to_string(),
+                    value: Box::new(HirExpr::Number(2)),
+                },
+            ],
+            tail_expr: None,
+        };
+        assert_eq!(collect_assigned_outer_variables_stmt(&stmt), HashSet::new());
+    }
+
+    #[test]
+    fn assigned_outer_variables_includes_plain_assignment() {
+        let stmt = HirStmt::Assign {
+            var: "acc".to_string(),
+            value: Box::new(HirExpr::Number(2)),
+        };
+        assert_eq!(
+            collect_assigned_outer_variables_stmt(&stmt),
+            names(&["acc"])
+        );
+    }
+
+    #[test]
+    fn assigned_outer_variables_excludes_pattern_bindings() {
+        let expr = HirExpr::Match {
+            target: Box::new(HirExpr::Variable("value".to_string())),
+            arms: vec![HirMatchArm {
+                pattern: Pattern::Variant {
+                    variant_name: "Cons".to_string(),
+                    fields: vec![Pattern::Variable("x".to_string())],
+                },
+                guard: None,
+                body: Box::new(HirStmt::Assign {
+                    var: "x".to_string(),
+                    value: Box::new(HirExpr::Number(1)),
+                }),
+            }],
+        };
+        assert_eq!(collect_assigned_outer_variables_expr(&expr), HashSet::new());
+    }
+
+    #[test]
+    fn assigned_outer_variables_finds_nested_if_inside_block() {
+        let stmt = HirStmt::Block {
+            stmts: vec![HirStmt::Expr(HirExpr::IfThenElse {
+                cond: Box::new(HirExpr::Variable("condition".to_string())),
+                then_branch: Box::new(HirStmt::Assign {
+                    var: "acc".to_string(),
+                    value: Box::new(HirExpr::Number(1)),
+                }),
+                else_branch: Box::new(HirStmt::Expr(HirExpr::Number(0))),
+            })],
+            tail_expr: None,
+        };
+        assert_eq!(
+            collect_assigned_outer_variables_stmt(&stmt),
+            names(&["acc"])
+        );
+    }
 }
