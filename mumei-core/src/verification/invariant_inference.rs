@@ -159,6 +159,8 @@ pub(crate) fn generate_candidates(
         ));
     }
 
+    let mut seen = BTreeSet::new();
+    candidates.retain(|candidate| seen.insert(expr_to_string(candidate)));
     candidates
 }
 
@@ -408,5 +410,12 @@ mod tests {
         assert!(candidates.iter().any(|candidate| {
             expr_to_string(candidate) == "((sum - __loop_init_sum) == (1 * (i - __loop_init_i)))"
         }));
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|candidate| expr_to_string(candidate) == "(sum >= __loop_init_sum)")
+                .count(),
+            1
+        );
     }
 }

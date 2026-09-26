@@ -2437,7 +2437,6 @@ pub(crate) fn verify_inner(
         Some(&diagnostics),
     );
     let inferred_invariants = inferred_invariants_cell.borrow().clone();
-    drop(vc);
     Ok(inferred_invariants)
 }
 

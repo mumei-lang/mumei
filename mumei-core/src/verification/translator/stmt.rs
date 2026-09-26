@@ -288,25 +288,31 @@ fn check_while_invariant<'a>(
     let mut step_env = env.clone();
     let modified_set: std::collections::HashSet<String> = modified.iter().cloned().collect();
     havoc_vars(vc, &mut step_env, &modified_set);
-    let inv_h = expr_to_z3(vc, invariant, &mut step_env, None)?
-        .as_bool()
-        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
-    let c_h = expr_to_z3(vc, cond, &mut step_env, None)?
-        .as_bool()
-        .ok_or(MumeiError::type_error("While condition must be boolean"))?;
-    solver.push();
-    solver.assert(&inv_h);
-    solver.assert(&c_h);
-    stmt_to_z3(vc, body, &mut step_env, Some(solver))?;
-    let inv_after = expr_to_z3(vc, invariant, &mut step_env, None)?
-        .as_bool()
-        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
-    solver.assert(&inv_after.not());
-    let step = solver.check();
-    solver.pop(1);
+    let step = (|| -> MumeiResult<SatResult> {
+        let inv_h = expr_to_z3(vc, invariant, &mut step_env, None)?
+            .as_bool()
+            .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+        let c_h = expr_to_z3(vc, cond, &mut step_env, None)?
+            .as_bool()
+            .ok_or(MumeiError::type_error("While condition must be boolean"))?;
+        solver.push();
+        let result = (|| -> MumeiResult<SatResult> {
+            solver.assert(&inv_h);
+            solver.assert(&c_h);
+            stmt_to_z3(vc, body, &mut step_env, Some(solver))?;
+            let inv_after = expr_to_z3(vc, invariant, &mut step_env, None)?
+                .as_bool()
+                .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+            solver.assert(&inv_after.not());
+            Ok(solver.check())
+        })();
+        solver.pop(1);
+        result
+    })();
     *env = env_snapshot;
     *vc.local_enum_types.borrow_mut() = types_snapshot;
     *vc.local_lambdas.borrow_mut() = lambdas_snapshot;
+    let step = step?;
     Ok(step == SatResult::Unsat)
 }
 
@@ -638,15 +644,18 @@ pub(crate) fn stmt_to_z3<'a>(
                                 },
                             )
                         };
-                        if check_while_invariant(
-                            vc,
-                            &combined,
-                            cond,
-                            body,
-                            env,
-                            solver,
-                            &modified_btree,
-                        )? {
+                        if matches!(
+                            check_while_invariant(
+                                vc,
+                                &combined,
+                                cond,
+                                body,
+                                env,
+                                solver,
+                                &modified_btree,
+                            ),
+                            Ok(true)
+                        ) {
                             inferred_adopted.push(candidate.clone());
                         }
                     }
@@ -670,21 +679,26 @@ pub(crate) fn stmt_to_z3<'a>(
                             adopted: inferred_adopted.iter().map(expr_to_string).collect(),
                         });
                     }
-                } else {
-                    let marks = obligation_marks(vc);
-                    let inv = expr_to_z3(vc, &effective_invariant, env, None)?
-                        .as_bool()
-                        .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
-                    rebind_deferred_obligations(vc, marks, &inv);
-                    let path_cond = vc.path_cond_conj();
-                    solver.push();
-                    solver.assert(&Bool::and(ctx, &[&path_cond, &inv.not()]));
-                    if solver.check() == SatResult::Sat {
-                        solver.pop(1);
-                        return Err(MumeiError::verification("Invariant fails initially"));
-                    }
-                    solver.pop(1);
+                }
 
+                let marks = obligation_marks(vc);
+                let inv = expr_to_z3(vc, &effective_invariant, env, None)?
+                    .as_bool()
+                    .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
+                rebind_deferred_obligations(vc, marks, &inv);
+                let path_cond = vc.path_cond_conj();
+                solver.push();
+                solver.assert(&Bool::and(ctx, &[&path_cond, &inv.not()]));
+                if solver.check() == SatResult::Sat {
+                    solver.pop(1);
+                    return Err(MumeiError::verification("Invariant fails initially"));
+                }
+                solver.pop(1);
+
+                // Inductive step — on a havoced env: the invariant must be
+                // preserved from ANY state satisfying it, not just the concrete
+                // loop-entry bindings.
+                {
                     let env_snapshot = env.clone();
                     let types_snapshot = vc.local_enum_types.borrow().clone();
                     let lambdas_snapshot = vc.local_lambdas.borrow().clone();
