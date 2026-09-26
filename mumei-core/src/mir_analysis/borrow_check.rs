@@ -219,7 +219,7 @@ fn place_name(body: &MirBody, place: &Place) -> String {
                 .iter()
                 .find(|decl| decl.local == *index)
                 .and_then(|decl| decl.name.clone())
-                .unwrap_or_else(|| format!("_{}", index.0))
+                .unwrap_or_else(|| "..".to_string())
         ),
     }
 }
@@ -262,6 +262,17 @@ fn check_move(
         if overlaps(place, &loan.place) {
             let borrowed = place_name(body, place);
             let borrower = place_name(body, &Place::Local(loan.holder.clone()));
+            let message = if body
+                .locals
+                .iter()
+                .find(|decl| decl.local == loan.holder)
+                .and_then(|decl| decl.name.as_ref())
+                .is_some()
+            {
+                format!("cannot move '{borrowed}' while it is borrowed by '{borrower}'")
+            } else {
+                format!("cannot move '{borrowed}' while it is borrowed")
+            };
             violations.push(violation(
                 BorrowViolationKind::MoveWhileBorrowed,
                 body,
@@ -269,7 +280,7 @@ fn check_move(
                 borrower.clone(),
                 block,
                 statement,
-                format!("cannot move '{borrowed}' while it is borrowed by '{borrower}'"),
+                message,
             ));
             break;
         }
@@ -300,11 +311,17 @@ fn check_borrow(
         ));
         return;
     }
-    let conflicts = loans.iter().any(|loan| {
+    let conflict = loans.iter().find(|loan| {
         overlaps(place, &loan.place) && (kind == LoanKind::Mut || loan.kind == LoanKind::Mut)
     });
-    if conflicts {
+    if let Some(conflict) = conflict {
         let name = place_name(body, place);
+        let message = if kind == LoanKind::Mut {
+            format!("cannot borrow '{name}' mutably while another borrow is live")
+        } else {
+            let other = place_name(body, &conflict.place);
+            format!("cannot borrow '{name}' while it is mutably borrowed by '{other}'")
+        };
         violations.push(violation(
             BorrowViolationKind::MutableAliasing,
             body,
@@ -312,7 +329,7 @@ fn check_borrow(
             "caller",
             block,
             statement,
-            format!("cannot borrow '{name}' mutably while another borrow is live"),
+            message,
         ));
     }
 }
@@ -541,11 +558,7 @@ fn check_rvalue(
                             "caller",
                             block,
                             statement,
-                            if ordinary_param_move {
-                                format!("cannot move out of shared parameter '{name}'")
-                            } else {
-                                format!("cannot write through shared parameter '{name}'")
-                            },
+                            format!("cannot move out of shared parameter '{name}'"),
                         ));
                     }
                     Some(MirParamMode::Mut) => {

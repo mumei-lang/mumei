@@ -378,10 +378,13 @@ exclusive loan. Multiple shared loans are allowed, but mutable aliasing,
 moving a value while borrowed, writing through a shared borrow, and borrowing
 after a move are rejected. A `ref` parameter is read-only, while a `ref mut`
 parameter may be written but may not be moved. The checker reports errors such
-as `cannot move 'x' while it is borrowed by 't'`, `cannot write 'x' while it is
-shared-borrowed`, `cannot borrow 'x' mutably while another borrow is live`,
-`cannot borrow 'x' after it was moved`, and `cannot write through shared
-parameter 'x'`.
+as `cannot move 'x' while it is borrowed by 't'`, `cannot move out of shared
+parameter 'x'`, `cannot write 'x' while it is shared-borrowed`, `cannot borrow
+'x' mutably while another borrow is live`, `cannot borrow 'x' while it is
+mutably borrowed by 'y'`, `cannot borrow 'x' after it was moved`, and `cannot
+write through shared parameter 'x'`.
+When the live loan is held by an unnamed temporary, the move diagnostic omits
+the temporary name and reports `cannot move 'x' while it is borrowed`.
 
 Static `atom_ref`/`CallRef` targets are borrow-checked like direct calls:
 `ref`, `ref mut`, and `consume` arguments create the same call-scoped loans

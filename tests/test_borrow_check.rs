@@ -22,7 +22,7 @@ fn borrow_negative_fixtures_report_mir_rules() {
     let cases = [
         (
             "tests/negative/borrow_mut_shared_alias.mm",
-            "cannot borrow 'x' mutably while another borrow is live",
+            "cannot borrow 'x' while it is mutably borrowed by 'x'",
         ),
         (
             "tests/negative/borrow_move_while_borrowed.mm",
@@ -42,7 +42,7 @@ fn borrow_negative_fixtures_report_mir_rules() {
         ),
         (
             "tests/negative/borrow_branch_loan_alias.mm",
-            "cannot borrow 'x' mutably while another borrow is live",
+            "cannot borrow 'x' while it is mutably borrowed by 'x'",
         ),
         (
             "tests/negative/borrow_local_move_while_borrowed.mm",
@@ -50,7 +50,7 @@ fn borrow_negative_fixtures_report_mir_rules() {
         ),
         (
             "tests/negative/borrow_field_alias.mm",
-            "mutably while another borrow is live",
+            "cannot borrow 's' while it is mutably borrowed by 's.a'",
         ),
         (
             "tests/negative/borrow_callref_consume_use_after_move.mm",
@@ -58,7 +58,11 @@ fn borrow_negative_fixtures_report_mir_rules() {
         ),
         (
             "tests/negative/borrow_callref_alias.mm",
-            "cannot borrow 'x' mutably while another borrow is live",
+            "cannot borrow 'x' while it is mutably borrowed by 'x'",
+        ),
+        (
+            "tests/negative/borrow_write_while_shared.mm",
+            "cannot write 'x' while it is shared-borrowed",
         ),
         (
             "tests/negative/borrow_atom_ref_value_escape.mm",
