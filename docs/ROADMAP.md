@@ -545,9 +545,122 @@ Extensions to the effect subtyping system:
 
 - **Phase 2 (Basic Effects)**: ✅ Complete — parameterized effects (`FileRead(path: Str)`, `HttpGet(url: Str)`) implemented with security policy enforcement. Standard library effects defined in `std/effects.mm`, `std/http.mm`, `std/file.mm`. Z3 verifies parameter constraints (e.g., `starts_with(path, "/tmp/")`) at compile time.
 - **Phase 3 (Effect Polymorphism)**: ✅ Complete — Effect polymorphism via `<E: Effect>` bounds and `with E` syntax. Resolved through monomorphization (same as type polymorphism).
-- **Phase 4 (MIR)**: A CFG-based intermediate representation is needed for borrow checking and lifetime analysis, but the borrow checking design itself is not yet started. Will be introduced after the design is finalized.
+- **Phase 4 (MIR)**: Phase 4a–4c are done (liveness, move analysis, Copy/Move distinction, drop insertion in `mir_analysis/`). The borrow checking / lifetime analysis layer on top of MIR is **設計起票済み (design filed)** — see the R-14 design memo below; implementation remains deferred until the `&T` language-design decision is made.
 - **Phase 5 (HIR Effect Type Information)**: ✅ Complete — `HirEffectSet` attached to `HirAtom`, `HirExpr::Call`, `HirExpr::Perform`. `lower_atom_to_hir_with_env()` populates effect info from `ModuleEnv`. Codegen reads effects from `hir_atom.effect_set`.
 - **Phase 6 (Capability Security)**: ✅ Complete — Evaluation documented in `docs/CAPABILITY_SECURITY.md`. Recommendation: Continue with parameterized effects + Z3 (Option A). `EffectCtx`, `SecurityPolicy`, `verify_effect_params`, `verify_effect_consistency`, `build_effect_feedback` all wired into the verification pipeline.
+
+### R-14 設計メモ: Borrow Checking / Lifetime Analysis — 設計起票済み (design filed)
+
+**Status: 設計起票済み（実装は Deferred）**。Backlog entry: `docs/CROSS_PROJECT_ROADMAP.md` Priority 26 群 3 R-14.
+
+#### (a) The `&T` decision framework
+
+The prerequisite decision is whether Mumei introduces a first-class reference
+type `&T` / `&mut T`. The frame for that decision:
+
+What a reference type must satisfy in Mumei's atom/effect model:
+
+1. **Contract-boundary hygiene**: an atom is verified modularly — the caller
+   proves `requires`, assumes `ensures`, and the callee body is not re-verified
+   (`docs/LANGUAGE.md` §Inter-atom Function Calls). A `&T` that can be returned
+   or stored lets a callee hand the caller a path into a frame whose state the
+   caller's contract never described. Any `&T` must therefore be restricted so
+   that a reference cannot outlive the atom activation that produced it, or
+   contracts must grow a lifetime/region vocabulary (a much larger change).
+2. **Effect accounting**: effects are enforced by `param_leaves ⊆
+   allowed_leaves` containment (`verification/support/effects.rs`). A `&mut T`
+   param is an observable mutation channel — writes through it must stay inside
+   the declared effect/param surface exactly as today's `ref mut` does.
+3. **Erasable lowering**: whatever is adopted must lower to existing codegen
+   shapes — today `ref` / `ref mut` are verification-only markers (params are
+   bound as plain locals; codegen has no `is_ref` distinction, and arrays are
+   already fat-pointer `(len, data)` values), so a stored `&T` would be the
+   first construct needing a genuine pointer representation with no aliasing
+   guarantee gaps (no interior pointers into aggregates that ownership
+   analysis cannot see).
+
+Options:
+
+| Option | Shape | Cost | Payoff |
+|---|---|---|---|
+| A. Full `&T`/`&mut T` | References storable in locals/structs, returnable from atoms; lifetime params in signatures | Requires true region inference + lifetime polymorphism; largest verifier surface | Full expressiveness (iterator views, shared sub-structure) |
+| B. Stack-only shared `&T` | First-class `&T` as read-only references; never returned, never stored into aggregates; scope = declaring block | No region inference needed — lexical liveness suffices | Cheap alias-free reads of large aggregates without `consume` |
+| C. Checker-first (recommended) | Keep `ref` / `ref mut` / `consume` parameter-declaration modifiers as the only borrow surface; build the MIR borrow-check architecture (below) anyway | No language change; the checker validates `Ref`/`RefMut` loans on MIR | De-risks whichever `&T` option is later chosen; turns today's hypotheses into hard rules |
+
+Recommended: **Option C now, Option B if `&T` lands**. `LinearityCtx` + MIR
+move analysis already keep `std/` and the demos green, and `ref` params cover
+the dominant "lend a large value read-only" case. Full `&mut T` (Option A) is
+the last resort — its cost is a real lifetime system.
+
+What triggers the decision: (i) a `std/` atom or benchmark that must return or
+store a reference (array slice views, iterator-style APIs); (ii) agent-generated
+code repeatedly unable to express shared sub-structure without `consume`+copy;
+(iii) codegen measurements showing reference-shaped copies dominating. Until
+one fires, `&T` stays out of the language.
+
+#### (b) Borrow-check architecture on MIR (if/when references land)
+
+All pieces exist on MIR today; the borrow checker is a dataflow pass alongside
+`analyze_moves`:
+
+- **Places/paths**: reuse `Place { Local, Field(Box<Place>, String),
+  Index(Box<Place>, Local) }`. Two places *conflict* iff one is a prefix of the
+  other; distinct `Field` projections of the same base are disjoint, `Index`
+  projections conservatively may-alias.
+- **Loan set**: per-program-point dataflow state
+  `Loan { place: Place, kind: Shared | Mut, holder: Local }`. `Assign(dst,
+  Rvalue::Ref(p))` / `RefMut(p)` generates a loan on `p` held by `dst`; a loan
+  dies when `holder` dies (`StorageDead`/`Drop`) or is overwritten — i.e. its
+  region is the holder's liveness range, computed by the existing
+  `compute_liveness`/`GenKill` machinery. Same worklist+merge skeleton as
+  `analyze_moves` (join = set union; conflicts reported at merge like
+  `ConflictingMerge`).
+- **Region inference — NLL-lite, or lexical fallback**: because `&T` would not
+  appear in signatures (Option B keeps borrows intraprocedural), there are no
+  lifetime parameters to solve. A loan's region = the set of CFG points where
+  its holder is live — that is exactly non-lexical lifetime semantics, obtained
+  free from liveness. The lexical fallback (loan lives to end of enclosing
+  block) is the degenerate form if holder liveness proves too coarse in
+  practice.
+- **`LinearityCtx` → borrow checker**: today's `borrow()` / `release_borrow()` /
+  `consume()` / `check_alive()` and the `__alive_` / `__borrowed_` /
+  `__exclusive_` Z3 Bools (keyed on the declared param modes) become hard MIR
+  rules evaluated per program point:
+  (1) consume/move of `p` while a live loan covers a prefix of `p` → error;
+  (2) write through `ref mut` or assignment to `p` while any live `Shared` loan
+  conflicts `p` → error; (3) `RefMut(p)` while any live loan conflicts `p` →
+  error (the xor-mutable/aliased rule); (4) use of a holder outside its
+  loan's region → error. These are `MoveViolation`-class hard errors —
+  decided syntactically, never Z3 `unknown` (Lean escalation only for Z3
+  `unknown`), so they cannot promote to `lean_verified`. `LinearityCtx`
+  remains as the Z3-level encoding of `ref`/`ref mut` call-site facts until
+  the MIR rules subsume it (its current role per `docs/ARCHITECTURE.md`
+  §LinearityCtx).
+- **Effects/contracts interaction**: a `ref`/`ref mut` argument must satisfy the
+  callee's `requires` on entry and the caller may assume the callee's `ensures`
+  over the mutated referent on return (post-state read-back). Borrowed
+  capability/effect-typed params keep `param_leaves ⊆ allowed_leaves`
+  accounting — a borrow never widens the permitted leaf set.
+
+#### (c) Milestones and out-of-scope
+
+- **M0 — decision record**: this memo; trigger checklist in (a).
+- **M1 — loan-set dataflow**: `lower_hir_to_mir` gains `Rvalue::Ref`/`RefMut`
+  emission for `ref`/`ref mut`-marked params (the enum variants exist but are
+  not constructed today — `ref` params are bound as plain locals after the
+  keyword is stripped from the param name), then
+  `mir_analysis/borrow_check.rs` computes loan sets over them; rules (1)–(4)
+  as `MoveViolation`-style hard errors.
+- **M2 — diagnostics + regression**: conflict messages with place paths;
+  `tests/test_concurrency.rs`-style fixture pairs (legal shared read /
+  illegal alias-write).
+- **M3 — (only if `&T` lands)** surface syntax + signature regions; gated on
+  the (a) triggers.
+
+Explicitly out of scope: lifetime elision, reborrowing (`&mut *p`), closure /
+`dyn` captures of borrows, lifetime parameters on types or atoms,
+region-polymorphic contracts, and any change to contract vocabulary or proof
+certificate schema.
 
 ---
 
@@ -1762,8 +1875,91 @@ E2E テストで判明した検証パスの穴を解消した:
 - `verify --json` の `code: "escalation_candidate"` 診断（`escalation_reason` / `z3_unknown`
   タグ付き）を回帰テストで固定。
 
-**残課題**: 明示的な同期プリミティブで保護された共有可変状態の干渉推論。
+**残課題**: 明示的な同期プリミティブで保護された共有可変状態の干渉推論 — **設計起票済み**（下記「P17 残課題（R-13）設計メモ」参照。実装は Deferred、着手トリガは CROSS_PROJECT_ROADMAP.md Priority 26 群 3 R-13 行に記載）。
 task body 内の配列要素キャプチャは P25 で解消済み。
+
+#### P17 残課題（R-13）設計メモ: Mutex/RwLock 下の共有可変状態 — 設計起票済み（design filed）
+
+**ステータス: 設計起票済み（実装は Deferred）**。バックログ: `docs/CROSS_PROJECT_ROADMAP.md` Priority 26 群 3 R-13。
+
+**スコープ**: `Mutex` / `RwLock` で保護された共有可変状態のみを対象とする
+rely-guarantee-lite。lock 取得でシリアライズされる critical section 内の書き込みが、
+unlock 時点で宣言済みの共有不変量を再確立することを検証する。
+
+**表面構文（案）**: 共有状態は `resource` 宣言に `invariant:` 節を載せる形で宣言する
+（既存の `resource NAME priority: N mode: exclusive|shared;` を拡張し、排他 resource の
+mutex 的な意味に不変量を付ける）。
+
+```mumei
+resource counter priority: 1 mode: exclusive
+invariant: counter.value >= 0;
+
+async atom bump(n: i64)
+requires: n >= 0;
+ensures: result >= 0;
+body: {
+    acquire counter {
+        counter.value = counter.value + n;   // invariant は一時的に崩れてよい
+        // unlock 点（acquire ブロック終端）で invariant が再確立されることを検査
+    }
+}
+```
+
+**ストレージモデル（案）**: 現行の `ResourceDef` は `name` / `priority` / `mode` のみを持ち、
+`acquire` は名前付き mutex の取得にすぎず `counter.value` のような状態スロットは存在しない。
+本設計は `resource` 宣言を型付き state map で拡張する（`resource counter { value: i64 }
+priority: 1 mode: exclusive invariant: counter.value >= 0;`）。`acquire` ブロック内の
+`counter.<field>` アクセスはその resource が所有する state cell への load/store に lowering
+され、lowering 上の表現は resource 毎の heap cell（または module-scoped slot）とする。
+state map の無い resource は従来どおり純粋な lock として扱う。
+
+`mode: shared` の read 側は `acquire` 内で不変量を前提として使い、共有フィールドへの
+書き込みは行わない。現行の `ResourceMode` は exclusive の同一 atom 内重複取得と
+priority 階層のみを検査するため、**shared mode の `acquire` 内での書き込みを hard error
+とする規則は本設計で新たに導入する**（書き込みは `mode: exclusive` の `acquire` 経路に
+限定）。sibling task 間の capture 書き込み競合は既存の `ConcurrentDataRace`
+（Phase 1h-2、`verification/support/task_ownership.rs`）が別レイヤで担う。
+
+**Phase 1h-2 との統合（lock-aware ownership）**: 現行の ownership pass は
+`Stmt::Acquire { body }` を `Task` / `While` と同じく body へ再帰するだけで、
+acquire による serialize は race 判定に寄与しない — `task` 内で `acquire res` に包まれた
+共有状態への書き込みも unsynchronized write として `ConcurrentDataRace` になる。
+本設計では同 pass を lock-aware にする: ある resource の `state` フィールドへのアクセスが
+同一 resource の `acquire` に支配されている場合は race 判定の対象から外し、上記の unlock
+点不変量義務へ振り替える。逆に、guard される state への acquire なしのアクセス、
+および state map を持つ resource の critical section 外アクセスは引き続き hard error
+（missing-acquire 診断）とする。これにより「lock 無しの共有書き込みは従来どおり弾き、
+lock 有りは不変量義務へ昇格」という役割分担になる。
+
+**どこに置くか**: mumei-lean ではなく mumei-core 側の verifier に置く。義務は quantifier-free
+（不変量を havoc 済み post-body 環境で再評価する形）で、Phase 1h-2 を担う
+`verification/support/task_ownership.rs` と同じ AST-level pass の隣に新しい解析
+（Phase 1h-3 相当、`support/shared_invariants.rs` 候補）として追加する。`Stmt::Acquire` は既に translator で `__resource_held_<name>` Bool を
+assert している（`translator/stmt.rs`）ため、義務はその延長線上に載る:
+
+- **エントリ**: `acquire res { body }` に入る時点で宣言不変量 `inv` を環境に assume
+  （guard された共有フィールドへの read が不変量の下で評価される）。
+- **unlock 点（acquire ブロック終端）**: body を実行した post-env で `¬inv` が
+  `sat` になれば hard error（critical section が不変量を再確立していない）。
+  `Stmt::While` の inductive step と同じ機械部（havoc → 前提 assert → body 走査 →
+  事後の否定を check）を再利用する。
+- **途中離脱**: `task_group:any` の cancel 経路・`acquire` 内の early return をまたぐ
+  場合も unlock 点として同一義務を課す（cancel しても不変量を壊したまま解放しない
+  こと）。cancel 可能点をまたぐ acquire は resource hierarchy の既存規則
+  （`await` inside `acquire` → error）で既に制限されている。
+
+これらの義務は構文的に決定されるため常に hard error であり、Z3 `unknown` を経由しない
+（Lean escalation only for Z3 `unknown`）— `lean_verified` へ誤昇格しない。
+不変量自体が帰納的（例: 長さ・集計不変量）で Z3 が `unknown` を返す場合のみ、従来どおり
+escalation 候補となる。
+
+**明示的な除外**:
+
+- lock-free / atomic メモリオーダリング（release-acquire 等の weak memory 推論は対象外）
+- deadlock freedom（resource priority hierarchy が別レイヤで既に担保; 本設計は不変量のみ）
+- priority inversion・fairness・スケジューラの liveness
+- 真の interleaving モデル化 — critical section の逐次合成だけを見る "lite" 版であり、
+  lock 間の相互作用の完全な rely-guarantee は対象外
 
 ---
 
@@ -2476,6 +2672,37 @@ benchmark 105 atom の proof certificate（`benchmarks/evaluation_suite.py` B-7 
 - **契約定数への影響**: 新 obligation class（例: `concurrency_obligation`）と bridge lemma を `docs/LEAN_TRANSLATOR_SPEC.md` §10 catalog に追加するため、`bridge_lemma_hash` の lockstep 更新（pinned doc 4 本 + mumei-lean `scripts/export_cert.py` + mumei-agent `_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH`）が必須。`translator_version` を動かすかは IR schema 変更の有無で判断する。契約語彙（`harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` / `lean_verified` / 8 固定 audit キー / `verification_status` / `contradiction_type` / `ai_proof_used` / `ai_proof_attempts` / `lean_fallback_strategy`）に新規 alias は導入しない。
 - **前提**: B-1 群 1（`perform` / let 列の前処理）が先に入ること。`task` 内部の `let acc = n; acc = acc + 1; acc` などは群 1 の lowering を再利用する。
 - **回帰ゲート**: 既存 8 obligation class の bridge lemma 集合と ladder prefix 不変、`tests/test_contract_vocabulary.py`（3 リポジトリ）green、`scripts/check_proof_bundle_drift.py` pass。
+
+---
+
+## P32: Loop Invariant 自動推論（template-based infer-verify）— 設計起票済み（design filed）
+
+**ステータス: 設計起票済み（実装は Deferred）**。バックログ: `docs/CROSS_PROJECT_ROADMAP.md` Priority 26 群 3 R-19。現状: `while` は `invariant:` 節を必須とし、欠落すると fail-closed で parser error（`__mumei_missing_invariant` poison）となる。`for i in lo..hi` のみ組み込み不変量 `lo <= i && (i <= hi || i == lo)` を自動合成する。`verification/loop_detector.rs`（`detect_loops_needing_invariants` / `LoopContext` / `should_require_invariant`）と `verify --suggest-cegis` の advisory 出力は既存 — 本設計はこれを「候補を生成して Z3 で検証し、反例が出れば棄却する」infer-verify ループへ昇格させるもの。
+
+**基本原則**: 推論された不変量は一切信用しない。全候補は既存の `Stmt::While` 検証条件機械（`translator/stmt.rs` の havoc → 前提 assert → body 走査 → `¬inv` check、base case + inductive step）にそのまま投入し、Z3 が `unsat` を返した候補のみを採用する。`sat` / `unknown` を返した候補は棄却 — 検証を通らなかった推論不変量で loop を通す経路は設けない（推論はあくまで「書けたはずの不変量を代筆する」位置付けであり、検証強度は手書き不変量と同一）。
+
+**候補生成（candidate source）**: `loop_detector` が集める `LoopInfo`（loop-modified vars、index 更新、境界式）から以下のテンプレを emit する:
+
+| テンプレ | 形状 | 発生条件（ヒューリスティック） |
+|---|---|---|
+| bounded counter | `lo <= i && i <= hi`（厳密: `i <= hi`、step が正なら更に `i >= lo`） | `i = i + c` 形式の更新 + 条件 `i < hi` / `i <= hi` |
+| accumulator bound | `acc >= lo'` / `acc <= hi'`、または `requires` の範囲制約から写像した合計・件数 bound | `acc = acc + e` の更新 + `requires` / 配列長から取れる bound |
+| monotonic progress | `i <= n` で `decreases: n - i` と整合する進行度 | `while` 条件が変数の単調増減で終了する形 |
+| unchanged prefix | `forall(j, 0, i, arr[j] == arr0[j])` 相当の prefix 不変（配列書き込みが index `i` 以降に限定される場合） | `arr[i] = …` のみを行う loop（i がループ index） |
+
+`for i in lo..hi` では既存の自動不変量が先に立つため、推論は `while` と、ユーザー不変量が未記述の `for` 追加分（accumulator 等）に限定する。候補は各テンプレ独立に生成し、採用されたもの同士を conjunction で結合して最終不変量とする。
+
+**検証順序（verification order）**: 候補は安い順にソートして逐次 Z3 投入する — (1) bounded counter → (2) monotonic progress → (3) accumulator bound → (4) unchanged prefix（`forall` を含むため最も高コスト）。各候補は単体で base/step 両方の `¬inv` check を受け、採用済み候補集合は後続候補の検証環境に assume として加える（候補間の相互依存を許す順次強化）。タイムアウトは既存の `check_spec_satisfiability_with_timeout` 系の予算に従う。`forall` 候補が `unknown` になる場合は棄却して次候補へ — 推論段階では Lean escalation しない（Lean escalation only for Z3 `unknown` on the *final* user-visible proof obligation, not per-candidate; 推論候補の `unknown` は単に不採用を意味し、`lean_verified` 判定へは一切載らない）。
+
+**失敗時の振る舞い（failure behavior）**: 全候補が棄却された場合、あるいは採用候補の conjunction が ensures/post-loop 義務（`inv ∧ ¬cond` → 後続）を支えきれない場合は、現行と同じ fail-closed 経路に戻る — 不変量の記述を要求する diagnostic を出す。ユーザーが `invariant:` を書いた場合は推論を走らせず手書き不変量のみを使う（推論は補完であり上書きしない）。推論の起動は opt-in とする: 構文案は `invariant: infer`（明示的委譲）、または `verify --infer-invariants` フラグ経由。黙って parser 必須要件を緩める変更は行わない — ただし現行は `invariant:` 欠落を **parse 時点**で `syntax_failure` + `__mumei_missing_invariant` poison とするため、`LoopInfo` が利用可能になる前に loop が死ぬ。`invariant: infer` は marker としてそのまま parse を通せるが、フラグ経路（裸の `while` に推論を効かせる）には deferred-parse が要る: `--infer-invariants` 時は poison ではなく「infer-eligible marker」（例: `Expr::Variable("__mumei_infer_invariant")`）を emit して loop を verify 段まで到達させ、全候補棄却時に verify 側で従来どおりの missing-invariant diagnostic を出す（fail-closed は緩めず、発火点を parse から verify へ遅らせるだけ）。推論成功時は採用不変量を diagnostic / `--suggest-cegis` 系 JSON で報告し、証明書 schema・contract vocabulary には新規フィールドを導入しない。
+
+**マイルストーン**:
+
+- **M0**: 本メモ。テンプレ集合と候補発生条件の確定。
+- **M1**: `loop_detector` の `LoopInfo` を拡張して候補生成に必要な情報（更新式・境界・書き込み index）を抽出。
+- **M2**: 候補生成 + 逐次 infer-verify（bounded counter / monotonic / accumulator の 3 テンプレ）。
+- **M3**: unchanged-prefix テンプレ + `forall` 翻訳のコスト制御、opt-in 構文 / フラグ。
+- **スコープ外**: CEGIS による不変量の反例駆動 *修正*（反例からの式修补は B-4/mumei-agent 側の管轄）、`decreases` の自動推論、ネスト loop の交互不変量、非線形・浮動小数点不変量。
 
 ---
 
