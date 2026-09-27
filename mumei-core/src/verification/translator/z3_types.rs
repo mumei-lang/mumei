@@ -730,28 +730,68 @@ fn stmt_tail_expr(stmt: &Stmt) -> Option<&Expr> {
     }
 }
 
-/// The most recent `let <name> = <rhs>` before `stmt`'s tail — match-arm
-/// `let`s stay arm-local and never reach the merged env, so resolving the
-/// arm tail's variable here recovers e.g. `A => { let t = [1,2]; t }`.
-/// Any reassignment of `name` between that `let` and the tail invalidates
-/// the initializer as a length source, so the caller falls back to the
-/// env slot (or a fresh symbol).
-fn stmt_let_rhs<'e>(stmt: &'e Stmt, name: &str) -> Option<&'e Expr> {
-    match stmt {
-        Stmt::Let { var, value, .. } if var == name => Some(value.as_ref()),
-        Stmt::Block(stmts, _) => {
-            for s in stmts.iter().rev() {
-                if let Some(rhs) = stmt_let_rhs(s, name) {
-                    return Some(rhs);
-                }
-                if stmt_assigns_var(s, name) {
-                    return None;
-                }
-            }
-            None
-        }
-        _ => None,
+/// `let` scope for tail-length resolution. `stmts` are the statements a
+/// variable may be resolved in (everything before the `let` currently
+/// being followed); `root` is the whole block, used to tell whether a
+/// variable that falls back to its env slot was reassigned after the
+/// point it was read at (the env only reflects end-of-block state).
+#[derive(Clone, Copy)]
+pub(crate) struct LetScope<'e> {
+    stmts: &'e [Stmt],
+    root: &'e [Stmt],
+}
+
+impl<'e> LetScope<'e> {
+    fn of(stmt: &'e Stmt) -> Self {
+        let stmts = match stmt {
+            Stmt::Block(stmts, _) => stmts.as_slice(),
+            other => std::slice::from_ref(other),
+        };
+        LetScope { stmts, root: stmts }
     }
+
+    fn before(self, stmts: &'e [Stmt]) -> Self {
+        LetScope {
+            stmts,
+            root: self.root,
+        }
+    }
+
+    /// Scope for a block nested somewhere inside this one.
+    fn nested(self, stmt: &'e Stmt) -> Self {
+        LetScope {
+            stmts: LetScope::of(stmt).stmts,
+            root: self.root,
+        }
+    }
+
+    /// Whether `var`'s env slot is trustworthy for a read inside this
+    /// scope: reads at the outermost block's tail see the final state,
+    /// earlier reads only if nothing in that block reassigns `var`.
+    fn env_is_current(self, var: &str) -> bool {
+        std::ptr::eq(self.stmts, self.root) || !self.root.iter().any(|s| stmt_assigns_var(s, var))
+    }
+}
+
+/// The most recent `let <name> = <rhs>` in `scope` — match-arm `let`s stay
+/// arm-local and never reach the merged env, so resolving the arm tail's
+/// variable here recovers e.g. `A => { let t = [1,2]; t }`. Returns the
+/// rhs together with the statements preceding that `let`, which is the
+/// only scope its own variables may be resolved in. Any reassignment of
+/// `name` after the `let` invalidates the initializer as a length source,
+/// so the caller falls back to the env slot (or a fresh symbol).
+fn let_rhs_in<'e>(scope: &'e [Stmt], name: &str) -> Option<(&'e Expr, &'e [Stmt])> {
+    for (i, s) in scope.iter().enumerate().rev() {
+        if let Stmt::Let { var, value, .. } = s {
+            if var == name {
+                return Some((value.as_ref(), &scope[..i]));
+            }
+        }
+        if stmt_assigns_var(s, name) {
+            return None;
+        }
+    }
+    None
 }
 
 /// Recursion bound for tail-length computation — deep let-chains or
@@ -832,7 +872,16 @@ fn branch_tail_len<'a>(
     depth: u32,
 ) -> Dynamic<'a> {
     match stmt_tail_expr(scope) {
-        Some(tail) => tail_len_expr(vc, env, name, side, Some(scope), tail, val_node, depth),
+        Some(tail) => tail_len_expr(
+            vc,
+            env,
+            name,
+            side,
+            Some(LetScope::of(scope)),
+            tail,
+            val_node,
+            depth,
+        ),
         None => array_len_symbol(vc.ctx, &format!("len_{name}#{side}"), vc.bitvec_i64),
     }
 }
@@ -850,7 +899,7 @@ pub(crate) fn tail_len_expr<'a>(
     env: &mut Env<'a>,
     name: &str,
     side: &str,
-    scope: Option<&Stmt>,
+    scope: Option<LetScope<'_>>,
     tail: &Expr,
     val_node: &Dynamic<'a>,
     depth: u32,
@@ -861,8 +910,23 @@ pub(crate) fn tail_len_expr<'a>(
     }
     match tail {
         Expr::ArrayLit(elements) => concrete_len_value(vc.ctx, elements.len(), vc.bitvec_i64),
-        Expr::Variable(src) => match scope.and_then(|s| stmt_let_rhs(s, src)) {
-            Some(rhs) => tail_len_expr(vc, env, name, side, scope, rhs, val_node, depth + 1),
+        Expr::Variable(src) => match scope {
+            Some(sc) => match let_rhs_in(sc.stmts, src) {
+                Some((rhs, before)) => tail_len_expr(
+                    vc,
+                    env,
+                    name,
+                    side,
+                    Some(sc.before(before)),
+                    rhs,
+                    val_node,
+                    depth + 1,
+                ),
+                None if sc.env_is_current(src) => {
+                    array_len_value(vc.ctx, env, src, vc.bitvec_i64, None)
+                }
+                None => fresh(),
+            },
             None => array_len_value(vc.ctx, env, src, vc.bitvec_i64, None),
         },
         Expr::IfThenElse {
@@ -898,7 +962,16 @@ pub(crate) fn tail_len_expr<'a>(
             cond.ite(&len_t, &len_e)
         }
         Expr::Block(stmt) => match stmt_tail_expr(stmt) {
-            Some(tail) => tail_len_expr(vc, env, name, side, Some(stmt), tail, val_node, depth + 1),
+            Some(tail) => tail_len_expr(
+                vc,
+                env,
+                name,
+                side,
+                Some(scope.map_or_else(|| LetScope::of(stmt), |sc| sc.nested(stmt))),
+                tail,
+                val_node,
+                depth + 1,
+            ),
             None => fresh(),
         },
         Expr::Match { arms, .. } => match_arm_lens(

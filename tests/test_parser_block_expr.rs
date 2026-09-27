@@ -103,7 +103,7 @@ fn reassigned_block_array_does_not_inherit_initializer_length() {
     assert!(!output.status.success(), "{text}");
     assert_eq!(
         text.matches("Potential Out-of-Bounds on 'xs'").count(),
-        2,
+        5,
         "{text}"
     );
 }

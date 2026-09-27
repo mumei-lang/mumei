@@ -19,6 +19,23 @@ body: {
     ys[1]
 };
 
+atom block_alias_tail() -> i64
+requires: true;
+ensures: true;
+body: {
+    let s = [4, 5, 6];
+    let xs = { let alias = s; alias };
+    xs[2]
+};
+
+atom block_alias_then_source_reassign_tail() -> i64
+requires: true;
+ensures: true;
+body: {
+    let xs = { let source = [4, 5, 6]; let alias = source; source = [1]; alias };
+    xs[2]
+};
+
 atom block_reassign_tail() -> i64
 requires: true;
 ensures: true;
