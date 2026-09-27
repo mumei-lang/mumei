@@ -40,6 +40,7 @@ fn array_reassignment_fixtures_run() {
     assert_run("tests/positive/array_alias_branch.mm", 22);
     assert_run("tests/positive/array_branch_local_scope.mm", 12);
     assert_run("tests/positive/array_branch_store.mm", 50);
+    assert_run("tests/positive/array_loop_shadow.mm", 7);
 }
 
 #[test]
@@ -67,6 +68,7 @@ fn array_reassignment_fixtures_verify_before_codegen() {
         "tests/positive/array_alias_branch.mm",
         "tests/positive/array_branch_local_scope.mm",
         "tests/positive/array_branch_store.mm",
+        "tests/positive/array_loop_shadow.mm",
         "tests/negative/array_reassign_in_loop_codegen.mm",
         "tests/negative/array_reassign_from_call_codegen.mm",
     ] {

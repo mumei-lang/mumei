@@ -1,6 +1,6 @@
 use crate::codegen::expr_emit::{
     chan_payload_key, chan_payload_type_name, compile_hir_expr, emit_array_literal,
-    infer_struct_type_name, resolve_named_type,
+    infer_struct_type_name, resolve_named_type, LAMBDA_MARK,
 };
 use crate::codegen::lowering::ArrayPtr;
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
@@ -10,7 +10,7 @@ use inkwell::module::Module;
 use inkwell::values::{AsValueRef, BasicValueEnum, FunctionValue, PhiValue};
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
-use mumei_core::hir::{HirExpr, HirStmt};
+use mumei_core::hir::{collect_assigned_outer_variables_stmt, HirExpr, HirStmt};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
 
@@ -219,6 +219,12 @@ pub(crate) fn compile_hir_stmt<'a>(
                 )?;
                 array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
                 variables.insert(var.clone(), len_val);
+                if var_types
+                    .get(var.as_str())
+                    .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
+                {
+                    var_types.remove(var.as_str());
+                }
                 return Ok(len_val);
             }
             // `let a = arr` — the binding aliases the tracked fat pointer so
@@ -227,6 +233,12 @@ pub(crate) fn compile_hir_stmt<'a>(
                 if let Some(&(len_val, elem_ty, data_ptr)) = array_ptrs.get(src.as_str()) {
                     array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
                     variables.insert(var.clone(), len_val);
+                    if var_types
+                        .get(var.as_str())
+                        .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
+                    {
+                        var_types.remove(var.as_str());
+                    }
                     return Ok(len_val);
                 }
                 // `let g = f` on a lambda binding: alias the same lifted fn
@@ -332,12 +344,24 @@ pub(crate) fn compile_hir_stmt<'a>(
                 )?;
                 array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
                 variables.insert(var.clone(), len_val);
+                if var_types
+                    .get(var.as_str())
+                    .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
+                {
+                    var_types.remove(var.as_str());
+                }
                 return Ok(len_val);
             }
             if let HirExpr::Variable(src) = value.as_ref() {
                 if let Some(&(len_val, elem_ty, data_ptr)) = array_ptrs.get(src.as_str()) {
                     array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
                     variables.insert(var.clone(), len_val);
+                    if var_types
+                        .get(var.as_str())
+                        .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
+                    {
+                        var_types.remove(var.as_str());
+                    }
                     return Ok(len_val);
                 }
             }
@@ -492,22 +516,21 @@ pub(crate) fn compile_hir_stmt<'a>(
                 module_env,
             )?;
             let body_end_block = builder.get_insert_block().unwrap();
+            let body_assigned = collect_assigned_outer_variables_stmt(body);
             for (name, pre_array) in &pre_loop_arrays {
-                if let Some(body_array) = array_ptrs.get(name) {
-                    if body_array.0.as_value_ref() != pre_array.0.as_value_ref()
+                let changed = array_ptrs.get(name).is_none_or(|body_array| {
+                    body_array.0.as_value_ref() != pre_array.0.as_value_ref()
                         || body_array.1 != pre_array.1
                         || body_array.2.as_value_ref() != pre_array.2.as_value_ref()
-                    {
-                        return Err(MumeiError::codegen(format!(
-                            "array '{name}' is reassigned inside a loop, which native codegen does not support yet"
-                        )));
-                    }
-                } else {
+                });
+                if body_assigned.contains(name) && changed {
                     return Err(MumeiError::codegen(format!(
                         "array '{name}' is reassigned inside a loop, which native codegen does not support yet"
                     )));
                 }
+                array_ptrs.insert(name.clone(), *pre_array);
             }
+            array_ptrs.retain(|name, _| pre_loop_arrays.contains_key(name));
 
             for (name, phi) in &phi_nodes {
                 if let Some(body_val) = variables.get(name) {
