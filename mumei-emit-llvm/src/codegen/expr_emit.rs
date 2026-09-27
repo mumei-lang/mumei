@@ -28,6 +28,7 @@ use mumei_core::hir::{
 use mumei_core::parser::{JoinSemantics, Op};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 type ArrayMergeState<'a> = (
     HashMap<String, BasicValueEnum<'a>>,
@@ -408,10 +409,139 @@ fn push_lambda_captures<'a>(
 /// One conjunct of a lambda-selector leaf's taken-condition: an `if`
 /// condition evaluated as truthy (`!= 0`), or a match arm's
 /// `target == literal` equality. A leaf's conds are ANDed.
+pub(crate) type SelScope<'a> = Rc<(HashMap<String, BasicValueEnum<'a>>, HashMap<String, String>)>;
+
 #[derive(Clone)]
-pub(crate) enum SelCond<'e> {
-    Truthy(&'e HirExpr),
-    MatchEq(&'e HirExpr, i64),
+pub(crate) enum SelCond<'e, 'a> {
+    Truthy(&'e HirExpr, Option<SelScope<'a>>),
+    MatchEq(&'e HirExpr, i64, Option<SelScope<'a>>),
+}
+
+type SelBranch<'e, 'a> = (Vec<SelCond<'e, 'a>>, String, Option<SelScope<'a>>);
+
+/// Lambda-only block prefix: every non-tail stmt must be `let v = |…| …`
+/// or `let v = <lambda-bound var>`; anything else makes the selector
+/// fall back to the generic expression path.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn block_lambda_scope<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+    caller_fn: &FunctionValue<'a>,
+    stmts: &[HirStmt],
+    variables: &HashMap<String, BasicValueEnum<'a>>,
+    var_types: &HashMap<String, String>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<Option<(HashMap<String, BasicValueEnum<'a>>, HashMap<String, String>)>> {
+    let mut local_variables = variables.clone();
+    let mut local_var_types = var_types.clone();
+    for stmt in stmts {
+        match stmt {
+            HirStmt::Let { var, value, .. } => match value.as_ref() {
+                HirExpr::Lambda {
+                    params,
+                    return_type,
+                    captures,
+                    body,
+                } => {
+                    let (fn_name, all_caps) = emit_lambda_function(
+                        context,
+                        module,
+                        caller_fn,
+                        var,
+                        params,
+                        return_type.as_ref(),
+                        captures,
+                        body,
+                        &local_variables,
+                        &local_var_types,
+                        array_ptrs,
+                        module_env,
+                    )?;
+                    let lam_fn = module.get_function(&fn_name).unwrap();
+                    let ptr: BasicValueEnum = lam_fn.as_global_value().as_pointer_value().into();
+                    local_variables.insert(var.clone(), ptr);
+                    local_var_types.insert(var.clone(), lambda_marker(&fn_name, &all_caps));
+                }
+                HirExpr::Variable(src)
+                    if local_var_types
+                        .get(src.as_str())
+                        .is_some_and(|mark| mark.starts_with(LAMBDA_MARK)) =>
+                {
+                    let mark = local_var_types.get(src.as_str()).cloned().unwrap();
+                    let ptr = local_variables
+                        .get(src.as_str())
+                        .copied()
+                        .unwrap_or_else(|| context.i64_type().const_int(0, false).into());
+                    local_variables.insert(var.clone(), ptr);
+                    local_var_types.insert(var.clone(), mark);
+                }
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some((local_variables, local_var_types)))
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn collect_lambda_branch_body<'e, 'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+    caller_fn: &FunctionValue<'a>,
+    stmt: &'e HirStmt,
+    conds: Vec<SelCond<'e, 'a>>,
+    variables: &HashMap<String, BasicValueEnum<'a>>,
+    var_types: &HashMap<String, String>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+    require_simple_tail: bool,
+    scope: Option<SelScope<'a>>,
+) -> MumeiResult<Option<Vec<SelBranch<'e, 'a>>>> {
+    match stmt {
+        HirStmt::Block {
+            stmts,
+            tail_expr: Some(tail),
+        } if !stmts.is_empty() => {
+            if require_simple_tail
+                && !matches!(tail.as_ref(), HirExpr::Variable(_) | HirExpr::Lambda { .. })
+            {
+                return Ok(None);
+            }
+            let Some((local_variables, local_var_types)) = block_lambda_scope(
+                context, module, caller_fn, stmts, variables, var_types, array_ptrs, module_env,
+            )?
+            else {
+                return Ok(None);
+            };
+            let scope = Some(Rc::new((local_variables.clone(), local_var_types.clone())));
+            collect_lambda_branches(
+                context,
+                module,
+                caller_fn,
+                tail,
+                conds,
+                &local_variables,
+                &local_var_types,
+                array_ptrs,
+                module_env,
+                scope,
+            )
+        }
+        _ => {
+            let Some(tail) = hir_stmt_tail_expr(stmt) else {
+                return Ok(None);
+            };
+            if require_simple_tail && !matches!(tail, HirExpr::Variable(_) | HirExpr::Lambda { .. })
+            {
+                return Ok(None);
+            }
+            collect_lambda_branches(
+                context, module, caller_fn, tail, conds, variables, var_types, array_ptrs,
+                module_env, scope,
+            )
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -420,19 +550,20 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
     module: &Module<'a>,
     caller_fn: &FunctionValue<'a>,
     expr: &'e HirExpr,
-    conds: Vec<SelCond<'e>>,
+    conds: Vec<SelCond<'e, 'a>>,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
     array_ptrs: &HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
-) -> MumeiResult<Option<Vec<(Vec<SelCond<'e>>, String)>>> {
+    scope: Option<SelScope<'a>>,
+) -> MumeiResult<Option<Vec<SelBranch<'e, 'a>>>> {
     // No depth cap: the verifier's `resolve_lambda_stmt` recurses without a
     // limit, so a cap here would make codegen reject programs verify accepts.
     match expr {
         HirExpr::Variable(name) => Ok(var_types
             .get(name.as_str())
             .filter(|m| m.starts_with(LAMBDA_MARK))
-            .map(|mark| vec![(conds, mark.clone())])),
+            .map(|mark| vec![(conds, mark.clone(), scope.clone())])),
         HirExpr::Lambda {
             params,
             return_type,
@@ -455,31 +586,47 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
                 array_ptrs,
                 module_env,
             )?;
-            Ok(Some(vec![(conds, lambda_marker(&fn_name, &all_caps))]))
+            Ok(Some(vec![(
+                conds,
+                lambda_marker(&fn_name, &all_caps),
+                scope,
+            )]))
         }
         HirExpr::IfThenElse {
             cond,
             then_branch,
             else_branch,
         } => {
-            let Some(then_tail) = hir_stmt_tail_expr(then_branch) else {
-                return Ok(None);
-            };
-            let Some(else_tail) = hir_stmt_tail_expr(else_branch) else {
-                return Ok(None);
-            };
             let mut then_conds = conds.clone();
-            then_conds.push(SelCond::Truthy(cond));
-            let Some(mut then_branches) = collect_lambda_branches(
-                context, module, caller_fn, then_tail, then_conds, variables, var_types,
-                array_ptrs, module_env,
+            then_conds.push(SelCond::Truthy(cond, scope.clone()));
+            let Some(mut then_branches) = collect_lambda_branch_body(
+                context,
+                module,
+                caller_fn,
+                then_branch,
+                then_conds,
+                variables,
+                var_types,
+                array_ptrs,
+                module_env,
+                false,
+                scope.clone(),
             )?
             else {
                 return Ok(None);
             };
-            let Some(mut else_branches) = collect_lambda_branches(
-                context, module, caller_fn, else_tail, conds, variables, var_types, array_ptrs,
+            let Some(mut else_branches) = collect_lambda_branch_body(
+                context,
+                module,
+                caller_fn,
+                else_branch,
+                conds,
+                variables,
+                var_types,
+                array_ptrs,
                 module_env,
+                false,
+                scope,
             )?
             else {
                 return Ok(None);
@@ -495,15 +642,9 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
             if arms.is_empty() {
                 return Ok(None);
             }
-            let mut out: Vec<(Vec<SelCond<'e>>, String)> = Vec::new();
+            let mut out: Vec<SelBranch<'e, 'a>> = Vec::new();
             for arm in arms {
                 if arm.guard.is_some() {
-                    return Ok(None);
-                }
-                let Some(tail) = hir_stmt_tail_expr(&arm.body) else {
-                    return Ok(None);
-                };
-                if !matches!(tail, HirExpr::Variable(_) | HirExpr::Lambda { .. }) {
                     return Ok(None);
                 }
                 let mut leaf_conds = conds.clone();
@@ -511,13 +652,22 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
                     mumei_core::parser::Pattern::Wildcard
                     | mumei_core::parser::Pattern::Variable(_) => {}
                     mumei_core::parser::Pattern::Literal(n) => {
-                        leaf_conds.push(SelCond::MatchEq(target.as_ref(), *n));
+                        leaf_conds.push(SelCond::MatchEq(target.as_ref(), *n, scope.clone()));
                     }
                     _ => return Ok(None),
                 }
-                let Some(mut leaves) = collect_lambda_branches(
-                    context, module, caller_fn, tail, leaf_conds, variables, var_types, array_ptrs,
+                let Some(mut leaves) = collect_lambda_branch_body(
+                    context,
+                    module,
+                    caller_fn,
+                    &arm.body,
+                    leaf_conds,
+                    variables,
+                    var_types,
+                    array_ptrs,
                     module_env,
+                    true,
+                    scope.clone(),
                 )?
                 else {
                     return Ok(None);
@@ -552,7 +702,7 @@ pub(crate) fn emit_lambda_selector<'a>(
     module: &Module<'a>,
     caller_fn: &FunctionValue<'a>,
     var_name: &str,
-    branches: &[String],
+    branches: &[(String, Option<SelScope<'a>>)],
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
     array_ptrs: &HashMap<String, ArrayPtr<'a>>,
@@ -561,7 +711,8 @@ pub(crate) fn emit_lambda_selector<'a>(
     // Resolve each branch's lifted fn and marker captures.
     let mut branch_fns: Vec<FunctionValue<'a>> = Vec::with_capacity(branches.len());
     let mut branch_caps: Vec<Vec<String>> = Vec::with_capacity(branches.len());
-    for mark in branches {
+    let mut branch_scopes: Vec<Option<SelScope<'a>>> = Vec::with_capacity(branches.len());
+    for (mark, scope) in branches {
         let Some((fn_name, caps)) = parse_lambda_marker(mark) else {
             return Ok(None);
         };
@@ -570,6 +721,7 @@ pub(crate) fn emit_lambda_selector<'a>(
         };
         branch_fns.push(lam_fn);
         branch_caps.push(caps);
+        branch_scopes.push(scope.clone());
     }
 
     // Arity + argument types + return type must agree across branches —
@@ -607,12 +759,45 @@ pub(crate) fn emit_lambda_selector<'a>(
         return Ok(None);
     };
 
-    // Ordered union of all branch captures.
+    // Ordered union of all outer branch captures. Lambda captures that only
+    // exist in a branch's block scope are supplied directly in that branch's
+    // dispatch path instead of becoming dispatcher parameters.
     let mut union_caps: Vec<String> = Vec::new();
-    for caps in &branch_caps {
+    let mut scope_lambda_caps: Vec<Vec<(String, BasicValueEnum<'a>)>> =
+        vec![Vec::new(); branches.len()];
+    for (i, caps) in branch_caps.iter().enumerate() {
         for c in caps {
-            if !union_caps.contains(c) {
-                union_caps.push(c.clone());
+            if array_ptrs.contains_key(c.as_str()) || variables.contains_key(c.as_str()) {
+                if !union_caps.contains(c) {
+                    union_caps.push(c.clone());
+                }
+                continue;
+            }
+            let Some(scope) = branch_scopes[i].as_ref() else {
+                return Ok(None);
+            };
+            let Some(mark) = scope
+                .1
+                .get(c.as_str())
+                .filter(|mark| mark.starts_with(LAMBDA_MARK))
+            else {
+                return Ok(None);
+            };
+            let Some(ptr) = scope.0.get(c.as_str()).copied() else {
+                return Ok(None);
+            };
+            if !scope_lambda_caps[i].iter().any(|(name, _)| name == c) {
+                scope_lambda_caps[i].push((c.clone(), ptr));
+            }
+            if let Some((_, transitive_caps)) = parse_lambda_marker(mark) {
+                for transitive_cap in transitive_caps {
+                    if (array_ptrs.contains_key(transitive_cap.as_str())
+                        || variables.contains_key(transitive_cap.as_str()))
+                        && !union_caps.contains(&transitive_cap)
+                    {
+                        union_caps.push(transitive_cap);
+                    }
+                }
             }
         }
     }
@@ -712,11 +897,15 @@ pub(crate) fn emit_lambda_selector<'a>(
                 .build_conditional_branch(cond_i, call_block, next_block)
                 .map_err(|e| MumeiError::codegen(format!("sel branch failed: {e:?}")))?;
             lam_builder.position_at_end(call_block);
+            let mut branch_scope_vars = scope_vars.clone();
+            for (name, ptr) in &scope_lambda_caps[i] {
+                branch_scope_vars.insert(name.clone(), *ptr);
+            }
             let mut vals = push_lambda_captures(
                 context,
                 &lam_builder,
                 &branch_caps[i],
-                &scope_vars,
+                &branch_scope_vars,
                 &array_ptrs_local,
             )?;
             vals.extend(
@@ -738,11 +927,15 @@ pub(crate) fn emit_lambda_selector<'a>(
         } else {
             // The trailing else leaf is unconditional: emit its call inline
             // at the current position.
+            let mut branch_scope_vars = scope_vars.clone();
+            for (name, ptr) in &scope_lambda_caps[i] {
+                branch_scope_vars.insert(name.clone(), *ptr);
+            }
             let mut vals = push_lambda_captures(
                 context,
                 &lam_builder,
                 &branch_caps[i],
-                &scope_vars,
+                &branch_scope_vars,
                 &array_ptrs_local,
             )?;
             vals.extend(

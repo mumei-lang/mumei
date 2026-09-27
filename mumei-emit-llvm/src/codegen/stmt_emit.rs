@@ -59,11 +59,15 @@ fn bind_lambda_selector<'a>(
         var_types,
         array_ptrs,
         module_env,
+        None,
     )?
     else {
         return Ok(None);
     };
-    let marks: Vec<String> = branches.iter().map(|(_, m)| m.clone()).collect();
+    let selector_branches: Vec<(String, Option<super::expr_emit::SelScope<'a>>)> = branches
+        .iter()
+        .map(|(_, mark, scope)| (mark.clone(), scope.clone()))
+        .collect();
     // The selector index is frozen at the binding site: fold the branch
     // conditions back-to-front into a nested `select` so a later rebind of a
     // cond variable cannot re-pick the branch.
@@ -73,11 +77,27 @@ fn bind_lambda_selector<'a>(
         let mut taken = context.bool_type().const_int(1, false);
         for cond in &branches[i].0 {
             let c_bool = match cond {
-                super::expr_emit::SelCond::Truthy(e) => {
-                    let c = compile_hir_expr(
-                        context, builder, module, function, e, variables, var_types, array_ptrs,
-                        module_env,
-                    )?;
+                super::expr_emit::SelCond::Truthy(e, scope) => {
+                    let c = if let Some(scope) = scope {
+                        let mut scope_variables = scope.0.clone();
+                        let mut scope_var_types = scope.1.clone();
+                        compile_hir_expr(
+                            context,
+                            builder,
+                            module,
+                            function,
+                            e,
+                            &mut scope_variables,
+                            &mut scope_var_types,
+                            array_ptrs,
+                            module_env,
+                        )?
+                    } else {
+                        compile_hir_expr(
+                            context, builder, module, function, e, variables, var_types,
+                            array_ptrs, module_env,
+                        )?
+                    };
                     builder
                         .build_int_compare(
                             IntPredicate::NE,
@@ -89,11 +109,27 @@ fn bind_lambda_selector<'a>(
                             MumeiError::codegen(format!("lambda sel cond failed: {e:?}"))
                         })?
                 }
-                super::expr_emit::SelCond::MatchEq(t, lit) => {
-                    let tv = compile_hir_expr(
-                        context, builder, module, function, t, variables, var_types, array_ptrs,
-                        module_env,
-                    )?;
+                super::expr_emit::SelCond::MatchEq(t, lit, scope) => {
+                    let tv = if let Some(scope) = scope {
+                        let mut scope_variables = scope.0.clone();
+                        let mut scope_var_types = scope.1.clone();
+                        compile_hir_expr(
+                            context,
+                            builder,
+                            module,
+                            function,
+                            t,
+                            &mut scope_variables,
+                            &mut scope_var_types,
+                            array_ptrs,
+                            module_env,
+                        )?
+                    } else {
+                        compile_hir_expr(
+                            context, builder, module, function, t, variables, var_types,
+                            array_ptrs, module_env,
+                        )?
+                    };
                     // Literal patterns only compare integer targets — a
                     // non-i64 scrutinee (f64, Str) can't form this selector,
                     // so fall back to the generic path instead of panicking.
@@ -126,7 +162,15 @@ fn bind_lambda_selector<'a>(
             .map_err(|e| MumeiError::codegen(format!("lambda sel select failed: {e:?}")))?;
     }
     let Some((fn_name, all_caps)) = super::expr_emit::emit_lambda_selector(
-        context, module, function, var, &marks, variables, var_types, array_ptrs, module_env,
+        context,
+        module,
+        function,
+        var,
+        &selector_branches,
+        variables,
+        var_types,
+        array_ptrs,
+        module_env,
     )?
     else {
         return Ok(None);
