@@ -7,7 +7,7 @@ use crate::codegen::task_runtime::declare_task_group_should_cancel_current_exter
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::values::{BasicValueEnum, FunctionValue, PhiValue};
+use inkwell::values::{AsValueRef, BasicValueEnum, FunctionValue, PhiValue};
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
 use mumei_core::hir::{HirExpr, HirStmt};
@@ -325,6 +325,27 @@ pub(crate) fn compile_hir_stmt<'a>(
                 );
                 return Ok(ptr);
             }
+            if let HirExpr::ArrayLit(elements) = value.as_ref() {
+                let (len_val, elem_ty, data_ptr) = emit_array_literal(
+                    context, builder, module, function, elements, variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                variables.insert(var.clone(), len_val);
+                return Ok(len_val);
+            }
+            if let HirExpr::Variable(src) = value.as_ref() {
+                if let Some(&(len_val, elem_ty, data_ptr)) = array_ptrs.get(src.as_str()) {
+                    array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                    variables.insert(var.clone(), len_val);
+                    return Ok(len_val);
+                }
+            }
+            if array_ptrs.contains_key(var.as_str()) {
+                return Err(MumeiError::codegen(format!(
+                    "array '{var}' can only be reassigned from an array literal or another array binding"
+                )));
+            }
             let val = compile_hir_expr(
                 context, builder, module, function, value, variables, var_types, array_ptrs,
                 module_env,
@@ -423,6 +444,7 @@ pub(crate) fn compile_hir_stmt<'a>(
             let after_block = context.append_basic_block(*function, "loop.after");
 
             let pre_loop_vars = variables.clone();
+            let pre_loop_arrays = array_ptrs.clone();
             let entry_end_block = builder.get_insert_block().unwrap();
 
             llvm!(builder.build_unconditional_branch(header_block));
@@ -470,6 +492,22 @@ pub(crate) fn compile_hir_stmt<'a>(
                 module_env,
             )?;
             let body_end_block = builder.get_insert_block().unwrap();
+            for (name, pre_array) in &pre_loop_arrays {
+                if let Some(body_array) = array_ptrs.get(name) {
+                    if body_array.0.as_value_ref() != pre_array.0.as_value_ref()
+                        || body_array.1 != pre_array.1
+                        || body_array.2.as_value_ref() != pre_array.2.as_value_ref()
+                    {
+                        return Err(MumeiError::codegen(format!(
+                            "array '{name}' is reassigned inside a loop, which native codegen does not support yet"
+                        )));
+                    }
+                } else {
+                    return Err(MumeiError::codegen(format!(
+                        "array '{name}' is reassigned inside a loop, which native codegen does not support yet"
+                    )));
+                }
+            }
 
             for (name, phi) in &phi_nodes {
                 if let Some(body_val) = variables.get(name) {
