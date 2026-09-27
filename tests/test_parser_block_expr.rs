@@ -10,6 +10,15 @@ fn verify(file: &str) -> std::process::Output {
         .unwrap_or_else(|err| panic!("failed to run mumei verify {file}: {err}"))
 }
 
+fn run(file: &str) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("run")
+        .arg(file)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei run {file}: {err}"))
+}
+
 fn combined(output: &std::process::Output) -> String {
     format!(
         "{}\n{}",
@@ -124,4 +133,19 @@ fn block_expression_does_not_double_constraint_translation() {
         block_constraints.abs_diff(inline_constraints) <= 2,
         "block constraints {block_constraints} differ from inline {inline_constraints}"
     );
+}
+
+#[test]
+fn block_local_lambda_codegen_runs() {
+    let output = run("tests/positive/block_expr_lambda_run.mm");
+    let text = combined(&output);
+    assert_eq!(output.status.code(), Some(39), "{text}");
+}
+
+#[test]
+fn block_lambda_with_side_effect_stays_fail_closed() {
+    let output = run("tests/negative/block_expr_lambda_side_effect_codegen.mm");
+    let text = combined(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("Unknown function g"), "{text}");
 }
