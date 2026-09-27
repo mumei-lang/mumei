@@ -3,6 +3,7 @@ use super::super::support::*;
 use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
+use crate::parser::expr::stmt_assigns_var;
 use crate::parser::parse_type_ref;
 use z3::ast::Ast as _;
 
@@ -732,10 +733,23 @@ fn stmt_tail_expr(stmt: &Stmt) -> Option<&Expr> {
 /// The most recent `let <name> = <rhs>` before `stmt`'s tail — match-arm
 /// `let`s stay arm-local and never reach the merged env, so resolving the
 /// arm tail's variable here recovers e.g. `A => { let t = [1,2]; t }`.
+/// Any reassignment of `name` between that `let` and the tail invalidates
+/// the initializer as a length source, so the caller falls back to the
+/// env slot (or a fresh symbol).
 fn stmt_let_rhs<'e>(stmt: &'e Stmt, name: &str) -> Option<&'e Expr> {
     match stmt {
         Stmt::Let { var, value, .. } if var == name => Some(value.as_ref()),
-        Stmt::Block(stmts, _) => stmts.iter().rev().find_map(|s| stmt_let_rhs(s, name)),
+        Stmt::Block(stmts, _) => {
+            for s in stmts.iter().rev() {
+                if let Some(rhs) = stmt_let_rhs(s, name) {
+                    return Some(rhs);
+                }
+                if stmt_assigns_var(s, name) {
+                    return None;
+                }
+            }
+            None
+        }
         _ => None,
     }
 }

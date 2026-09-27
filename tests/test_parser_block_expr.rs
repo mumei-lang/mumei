@@ -97,6 +97,18 @@ fn block_expression_array_len_tail_fixture_verifies() {
 }
 
 #[test]
+fn reassigned_block_array_does_not_inherit_initializer_length() {
+    let output = verify("tests/negative/block_expr_array_reassign_oob.mm");
+    let text = combined(&output);
+    assert!(!output.status.success(), "{text}");
+    assert_eq!(
+        text.matches("Potential Out-of-Bounds on 'xs'").count(),
+        2,
+        "{text}"
+    );
+}
+
+#[test]
 fn unexpected_expression_token_fails_closed() {
     let output = verify("tests/negative/unexpected_token_expr.mm");
     let text = combined(&output);

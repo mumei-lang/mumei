@@ -18,3 +18,11 @@ body: {
     let ys = { let m = n; mk(m) };
     ys[1]
 };
+
+atom block_reassign_tail() -> i64
+requires: true;
+ensures: true;
+body: {
+    let xs = { let t = [1]; t = [4, 5, 6]; t };
+    xs[2]
+};

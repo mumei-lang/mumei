@@ -834,7 +834,7 @@ pub fn parse_block_or_stmt(ctx: &mut ParseContext) -> Stmt {
     }
 }
 
-fn stmt_assigns_var(stmt: &Stmt, var: &str) -> bool {
+pub(crate) fn stmt_assigns_var(stmt: &Stmt, var: &str) -> bool {
     match stmt {
         Stmt::Let { value, .. } => expr_assigns_var(value, var),
         Stmt::Assign {
