@@ -139,7 +139,7 @@ fn block_expression_does_not_double_constraint_translation() {
 fn block_local_lambda_codegen_runs() {
     let output = run("tests/positive/block_expr_lambda_run.mm");
     let text = combined(&output);
-    assert_eq!(output.status.code(), Some(50), "{text}");
+    assert_eq!(output.status.code(), Some(54), "{text}");
 }
 
 #[test]

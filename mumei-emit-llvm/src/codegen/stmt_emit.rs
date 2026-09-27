@@ -64,7 +64,10 @@ fn bind_lambda_selector<'a>(
     else {
         return Ok(None);
     };
-    let marks: Vec<String> = branches.iter().map(|(_, m)| m.clone()).collect();
+    let selector_branches: Vec<(String, Option<super::expr_emit::SelScope<'a>>)> = branches
+        .iter()
+        .map(|(_, mark, scope)| (mark.clone(), scope.clone()))
+        .collect();
     // The selector index is frozen at the binding site: fold the branch
     // conditions back-to-front into a nested `select` so a later rebind of a
     // cond variable cannot re-pick the branch.
@@ -159,7 +162,15 @@ fn bind_lambda_selector<'a>(
             .map_err(|e| MumeiError::codegen(format!("lambda sel select failed: {e:?}")))?;
     }
     let Some((fn_name, all_caps)) = super::expr_emit::emit_lambda_selector(
-        context, module, function, var, &marks, variables, var_types, array_ptrs, module_env,
+        context,
+        module,
+        function,
+        var,
+        &selector_branches,
+        variables,
+        var_types,
+        array_ptrs,
+        module_env,
     )?
     else {
         return Ok(None);

@@ -409,6 +409,8 @@ pub(crate) enum SelCond<'e, 'a> {
     MatchEq(&'e HirExpr, i64, Option<SelScope<'a>>),
 }
 
+type SelBranch<'e, 'a> = (Vec<SelCond<'e, 'a>>, String, Option<SelScope<'a>>);
+
 /// Lambda-only block prefix: every non-tail stmt must be `let v = |…| …`
 /// or `let v = <lambda-bound var>`; anything else makes the selector
 /// fall back to the generic expression path.
@@ -487,7 +489,7 @@ fn collect_lambda_branch_body<'e, 'a>(
     module_env: &ModuleEnv,
     require_simple_tail: bool,
     scope: Option<SelScope<'a>>,
-) -> MumeiResult<Option<Vec<(Vec<SelCond<'e, 'a>>, String)>>> {
+) -> MumeiResult<Option<Vec<SelBranch<'e, 'a>>>> {
     match stmt {
         HirStmt::Block {
             stmts,
@@ -546,14 +548,14 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
     array_ptrs: &HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
     scope: Option<SelScope<'a>>,
-) -> MumeiResult<Option<Vec<(Vec<SelCond<'e, 'a>>, String)>>> {
+) -> MumeiResult<Option<Vec<SelBranch<'e, 'a>>>> {
     // No depth cap: the verifier's `resolve_lambda_stmt` recurses without a
     // limit, so a cap here would make codegen reject programs verify accepts.
     match expr {
         HirExpr::Variable(name) => Ok(var_types
             .get(name.as_str())
             .filter(|m| m.starts_with(LAMBDA_MARK))
-            .map(|mark| vec![(conds, mark.clone())])),
+            .map(|mark| vec![(conds, mark.clone(), scope.clone())])),
         HirExpr::Lambda {
             params,
             return_type,
@@ -576,7 +578,11 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
                 array_ptrs,
                 module_env,
             )?;
-            Ok(Some(vec![(conds, lambda_marker(&fn_name, &all_caps))]))
+            Ok(Some(vec![(
+                conds,
+                lambda_marker(&fn_name, &all_caps),
+                scope,
+            )]))
         }
         HirExpr::IfThenElse {
             cond,
@@ -628,7 +634,7 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
             if arms.is_empty() {
                 return Ok(None);
             }
-            let mut out: Vec<(Vec<SelCond<'e, 'a>>, String)> = Vec::new();
+            let mut out: Vec<SelBranch<'e, 'a>> = Vec::new();
             for arm in arms {
                 if arm.guard.is_some() {
                     return Ok(None);
@@ -688,7 +694,7 @@ pub(crate) fn emit_lambda_selector<'a>(
     module: &Module<'a>,
     caller_fn: &FunctionValue<'a>,
     var_name: &str,
-    branches: &[String],
+    branches: &[(String, Option<SelScope<'a>>)],
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
     array_ptrs: &HashMap<String, ArrayPtr<'a>>,
@@ -697,7 +703,8 @@ pub(crate) fn emit_lambda_selector<'a>(
     // Resolve each branch's lifted fn and marker captures.
     let mut branch_fns: Vec<FunctionValue<'a>> = Vec::with_capacity(branches.len());
     let mut branch_caps: Vec<Vec<String>> = Vec::with_capacity(branches.len());
-    for mark in branches {
+    let mut branch_scopes: Vec<Option<SelScope<'a>>> = Vec::with_capacity(branches.len());
+    for (mark, scope) in branches {
         let Some((fn_name, caps)) = parse_lambda_marker(mark) else {
             return Ok(None);
         };
@@ -706,6 +713,7 @@ pub(crate) fn emit_lambda_selector<'a>(
         };
         branch_fns.push(lam_fn);
         branch_caps.push(caps);
+        branch_scopes.push(scope.clone());
     }
 
     // Arity + argument types + return type must agree across branches —
@@ -743,12 +751,45 @@ pub(crate) fn emit_lambda_selector<'a>(
         return Ok(None);
     };
 
-    // Ordered union of all branch captures.
+    // Ordered union of all outer branch captures. Lambda captures that only
+    // exist in a branch's block scope are supplied directly in that branch's
+    // dispatch path instead of becoming dispatcher parameters.
     let mut union_caps: Vec<String> = Vec::new();
-    for caps in &branch_caps {
+    let mut scope_lambda_caps: Vec<Vec<(String, BasicValueEnum<'a>, String)>> =
+        vec![Vec::new(); branches.len()];
+    for (i, caps) in branch_caps.iter().enumerate() {
         for c in caps {
-            if !union_caps.contains(c) {
-                union_caps.push(c.clone());
+            if array_ptrs.contains_key(c.as_str()) || variables.contains_key(c.as_str()) {
+                if !union_caps.contains(c) {
+                    union_caps.push(c.clone());
+                }
+                continue;
+            }
+            let Some(scope) = branch_scopes[i].as_ref() else {
+                return Ok(None);
+            };
+            let Some(mark) = scope
+                .1
+                .get(c.as_str())
+                .filter(|mark| mark.starts_with(LAMBDA_MARK))
+            else {
+                return Ok(None);
+            };
+            let Some(ptr) = scope.0.get(c.as_str()).copied() else {
+                return Ok(None);
+            };
+            if !scope_lambda_caps[i].iter().any(|(name, _, _)| name == c) {
+                scope_lambda_caps[i].push((c.clone(), ptr, mark.clone()));
+            }
+            if let Some((_, transitive_caps)) = parse_lambda_marker(mark) {
+                for transitive_cap in transitive_caps {
+                    if (array_ptrs.contains_key(transitive_cap.as_str())
+                        || variables.contains_key(transitive_cap.as_str()))
+                        && !union_caps.contains(&transitive_cap)
+                    {
+                        union_caps.push(transitive_cap);
+                    }
+                }
             }
         }
     }
@@ -848,11 +889,17 @@ pub(crate) fn emit_lambda_selector<'a>(
                 .build_conditional_branch(cond_i, call_block, next_block)
                 .map_err(|e| MumeiError::codegen(format!("sel branch failed: {e:?}")))?;
             lam_builder.position_at_end(call_block);
+            let mut branch_scope_vars = scope_vars.clone();
+            let mut _branch_scope_var_types = scope_var_types.clone();
+            for (name, ptr, mark) in &scope_lambda_caps[i] {
+                branch_scope_vars.insert(name.clone(), *ptr);
+                _branch_scope_var_types.insert(name.clone(), mark.clone());
+            }
             let mut vals = push_lambda_captures(
                 context,
                 &lam_builder,
                 &branch_caps[i],
-                &scope_vars,
+                &branch_scope_vars,
                 &array_ptrs_local,
             )?;
             vals.extend(
@@ -874,11 +921,17 @@ pub(crate) fn emit_lambda_selector<'a>(
         } else {
             // The trailing else leaf is unconditional: emit its call inline
             // at the current position.
+            let mut branch_scope_vars = scope_vars.clone();
+            let mut _branch_scope_var_types = scope_var_types.clone();
+            for (name, ptr, mark) in &scope_lambda_caps[i] {
+                branch_scope_vars.insert(name.clone(), *ptr);
+                _branch_scope_var_types.insert(name.clone(), mark.clone());
+            }
             let mut vals = push_lambda_captures(
                 context,
                 &lam_builder,
                 &branch_caps[i],
-                &scope_vars,
+                &branch_scope_vars,
                 &array_ptrs_local,
             )?;
             vals.extend(
