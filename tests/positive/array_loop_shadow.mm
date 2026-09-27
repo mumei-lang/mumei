@@ -1,4 +1,4 @@
-trusted atom f() -> i64
+atom f() -> i64
 requires: true;
 ensures: result == 7;
 body: {
@@ -6,7 +6,7 @@ body: {
     let i = 0;
     let acc = 0;
     while i < 2
-    invariant: i >= 0
+    invariant: i >= 0 && i <= 2 && acc == 2 * i
     decreases: 2 - i
     {
         let xs = [9, 9];
