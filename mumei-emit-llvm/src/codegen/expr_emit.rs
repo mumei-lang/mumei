@@ -755,7 +755,7 @@ pub(crate) fn emit_lambda_selector<'a>(
     // exist in a branch's block scope are supplied directly in that branch's
     // dispatch path instead of becoming dispatcher parameters.
     let mut union_caps: Vec<String> = Vec::new();
-    let mut scope_lambda_caps: Vec<Vec<(String, BasicValueEnum<'a>, String)>> =
+    let mut scope_lambda_caps: Vec<Vec<(String, BasicValueEnum<'a>)>> =
         vec![Vec::new(); branches.len()];
     for (i, caps) in branch_caps.iter().enumerate() {
         for c in caps {
@@ -778,8 +778,8 @@ pub(crate) fn emit_lambda_selector<'a>(
             let Some(ptr) = scope.0.get(c.as_str()).copied() else {
                 return Ok(None);
             };
-            if !scope_lambda_caps[i].iter().any(|(name, _, _)| name == c) {
-                scope_lambda_caps[i].push((c.clone(), ptr, mark.clone()));
+            if !scope_lambda_caps[i].iter().any(|(name, _)| name == c) {
+                scope_lambda_caps[i].push((c.clone(), ptr));
             }
             if let Some((_, transitive_caps)) = parse_lambda_marker(mark) {
                 for transitive_cap in transitive_caps {
@@ -890,10 +890,8 @@ pub(crate) fn emit_lambda_selector<'a>(
                 .map_err(|e| MumeiError::codegen(format!("sel branch failed: {e:?}")))?;
             lam_builder.position_at_end(call_block);
             let mut branch_scope_vars = scope_vars.clone();
-            let mut _branch_scope_var_types = scope_var_types.clone();
-            for (name, ptr, mark) in &scope_lambda_caps[i] {
+            for (name, ptr) in &scope_lambda_caps[i] {
                 branch_scope_vars.insert(name.clone(), *ptr);
-                _branch_scope_var_types.insert(name.clone(), mark.clone());
             }
             let mut vals = push_lambda_captures(
                 context,
@@ -922,10 +920,8 @@ pub(crate) fn emit_lambda_selector<'a>(
             // The trailing else leaf is unconditional: emit its call inline
             // at the current position.
             let mut branch_scope_vars = scope_vars.clone();
-            let mut _branch_scope_var_types = scope_var_types.clone();
-            for (name, ptr, mark) in &scope_lambda_caps[i] {
+            for (name, ptr) in &scope_lambda_caps[i] {
                 branch_scope_vars.insert(name.clone(), *ptr);
-                _branch_scope_var_types.insert(name.clone(), mark.clone());
             }
             let mut vals = push_lambda_captures(
                 context,
