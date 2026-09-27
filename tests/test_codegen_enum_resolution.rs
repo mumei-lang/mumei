@@ -450,24 +450,11 @@ atom mk() -> i64
     std::fs::remove_dir_all(&dir).expect("remove fixture dir");
 }
 
-// `len(x)` on a value that is not a tracked array parameter used to emit
-// `const 0` — silently wrong. It now fails with a clean codegen error.
-#[test]
-fn len_on_non_array_errors_cleanly() {
+// `len(x)` on a non-array value fails closed in both layers: verified atoms
+// reject it during type checking, while trusted atoms reject it in codegen.
+fn assert_len_on_non_array_fails(name: &str, source: &str, expected: &str) {
     let bin = env!("CARGO_BIN_EXE_mumei");
-    let fixture = write_fixture(
-        "len_enum",
-        r#"
-enum Mine { Cons(i64), Nil }
-
-atom bad_len(m: Mine) -> i64
-    requires: true;
-    ensures: true;
-    body: {
-        len(m)
-    }
-"#,
-    );
+    let fixture = write_fixture(name, source);
     let dir = fixture.parent().unwrap().to_path_buf();
     let output = Command::new(bin)
         .arg("build")
@@ -483,8 +470,44 @@ atom bad_len(m: Mine) -> i64
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        !output.status.success() && combined.contains("is not an array"),
-        "len() on an enum value must be a clean codegen error:\n{combined}"
+        !output.status.success() && combined.contains(expected),
+        "len() on an enum value must fail with {expected:?}:\n{combined}"
     );
     std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+}
+
+#[test]
+fn len_on_non_array_is_a_type_error() {
+    assert_len_on_non_array_fails(
+        "len_enum_type_error",
+        r#"
+enum Mine { Cons(i64), Nil }
+
+atom bad_len(m: Mine) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        len(m)
+    }
+"#,
+        "expects an array or string argument",
+    );
+}
+
+#[test]
+fn len_on_non_array_in_trusted_atom_is_a_clean_codegen_error() {
+    assert_len_on_non_array_fails(
+        "len_enum_codegen_error",
+        r#"
+enum Mine { Cons(i64), Nil }
+
+trusted atom bad_len(m: Mine) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        len(m)
+    }
+"#,
+        "is only supported on arrays and Str",
+    );
 }
