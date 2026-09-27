@@ -1,3 +1,14 @@
+### 2026-09-27: v0.6.20 release version bump
+
+- **Workspace and member crate versions**: bumped versions from `0.6.19` to
+  `0.6.20` so `mumei --version`, `mumei inspect`, and proof-certificate
+  `mumei_version` match the release tag before tagging.
+- **Install references**: synced the README and README_JA pinned install
+  examples on `v0.6.20`, along with the Homebrew formula template and
+  `install.sh` help examples.
+
+---
+
 ### 2026-09-21: Lean bridge contract catalog sync
 
 - Added the generated `schema/bridge_lemma_catalog.json` mirror and wired
