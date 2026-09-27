@@ -27,6 +27,7 @@ use mumei_core::hir::{
 use mumei_core::parser::{JoinSemantics, Op};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// P25 — key under which a `chan<T>` binding records its declared payload
 /// type inside `var_types`. `<` can never appear in a Mumei identifier, so
@@ -400,10 +401,12 @@ fn push_lambda_captures<'a>(
 /// One conjunct of a lambda-selector leaf's taken-condition: an `if`
 /// condition evaluated as truthy (`!= 0`), or a match arm's
 /// `target == literal` equality. A leaf's conds are ANDed.
+pub(crate) type SelScope<'a> = Rc<(HashMap<String, BasicValueEnum<'a>>, HashMap<String, String>)>;
+
 #[derive(Clone)]
-pub(crate) enum SelCond<'e> {
-    Truthy(&'e HirExpr),
-    MatchEq(&'e HirExpr, i64),
+pub(crate) enum SelCond<'e, 'a> {
+    Truthy(&'e HirExpr, Option<SelScope<'a>>),
+    MatchEq(&'e HirExpr, i64, Option<SelScope<'a>>),
 }
 
 /// Lambda-only block prefix: every non-tail stmt must be `let v = |…| …`
@@ -477,13 +480,14 @@ fn collect_lambda_branch_body<'e, 'a>(
     module: &Module<'a>,
     caller_fn: &FunctionValue<'a>,
     stmt: &'e HirStmt,
-    conds: Vec<SelCond<'e>>,
+    conds: Vec<SelCond<'e, 'a>>,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
     array_ptrs: &HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
     require_simple_tail: bool,
-) -> MumeiResult<Option<Vec<(Vec<SelCond<'e>>, String)>>> {
+    scope: Option<SelScope<'a>>,
+) -> MumeiResult<Option<Vec<(Vec<SelCond<'e, 'a>>, String)>>> {
     match stmt {
         HirStmt::Block {
             stmts,
@@ -500,6 +504,7 @@ fn collect_lambda_branch_body<'e, 'a>(
             else {
                 return Ok(None);
             };
+            let scope = Some(Rc::new((local_variables.clone(), local_var_types.clone())));
             collect_lambda_branches(
                 context,
                 module,
@@ -510,6 +515,7 @@ fn collect_lambda_branch_body<'e, 'a>(
                 &local_var_types,
                 array_ptrs,
                 module_env,
+                scope,
             )
         }
         _ => {
@@ -522,7 +528,7 @@ fn collect_lambda_branch_body<'e, 'a>(
             }
             collect_lambda_branches(
                 context, module, caller_fn, tail, conds, variables, var_types, array_ptrs,
-                module_env,
+                module_env, scope,
             )
         }
     }
@@ -534,12 +540,13 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
     module: &Module<'a>,
     caller_fn: &FunctionValue<'a>,
     expr: &'e HirExpr,
-    conds: Vec<SelCond<'e>>,
+    conds: Vec<SelCond<'e, 'a>>,
     variables: &HashMap<String, BasicValueEnum<'a>>,
     var_types: &HashMap<String, String>,
     array_ptrs: &HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
-) -> MumeiResult<Option<Vec<(Vec<SelCond<'e>>, String)>>> {
+    scope: Option<SelScope<'a>>,
+) -> MumeiResult<Option<Vec<(Vec<SelCond<'e, 'a>>, String)>>> {
     // No depth cap: the verifier's `resolve_lambda_stmt` recurses without a
     // limit, so a cap here would make codegen reject programs verify accepts.
     match expr {
@@ -577,7 +584,7 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
             else_branch,
         } => {
             let mut then_conds = conds.clone();
-            then_conds.push(SelCond::Truthy(cond));
+            then_conds.push(SelCond::Truthy(cond, scope.clone()));
             let Some(mut then_branches) = collect_lambda_branch_body(
                 context,
                 module,
@@ -589,6 +596,7 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
                 array_ptrs,
                 module_env,
                 false,
+                scope.clone(),
             )?
             else {
                 return Ok(None);
@@ -604,6 +612,7 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
                 array_ptrs,
                 module_env,
                 false,
+                scope,
             )?
             else {
                 return Ok(None);
@@ -619,7 +628,7 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
             if arms.is_empty() {
                 return Ok(None);
             }
-            let mut out: Vec<(Vec<SelCond<'e>>, String)> = Vec::new();
+            let mut out: Vec<(Vec<SelCond<'e, 'a>>, String)> = Vec::new();
             for arm in arms {
                 if arm.guard.is_some() {
                     return Ok(None);
@@ -629,13 +638,22 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
                     mumei_core::parser::Pattern::Wildcard
                     | mumei_core::parser::Pattern::Variable(_) => {}
                     mumei_core::parser::Pattern::Literal(n) => {
-                        leaf_conds.push(SelCond::MatchEq(target.as_ref(), *n));
+                        leaf_conds.push(SelCond::MatchEq(target.as_ref(), *n, scope.clone()));
                     }
                     _ => return Ok(None),
                 }
                 let Some(mut leaves) = collect_lambda_branch_body(
-                    context, module, caller_fn, &arm.body, leaf_conds, variables, var_types,
-                    array_ptrs, module_env, true,
+                    context,
+                    module,
+                    caller_fn,
+                    &arm.body,
+                    leaf_conds,
+                    variables,
+                    var_types,
+                    array_ptrs,
+                    module_env,
+                    true,
+                    scope.clone(),
                 )?
                 else {
                     return Ok(None);
