@@ -57,6 +57,11 @@ fn array_reassignment_failures_stay_fail_closed() {
         text.contains("can only be reassigned from an array literal"),
         "{text}"
     );
+
+    let output = run("tests/negative/array_reassign_in_loop_nested_codegen.mm");
+    let text = combined(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("reassigned inside a loop"), "{text}");
 }
 
 #[test]
@@ -70,6 +75,7 @@ fn array_reassignment_fixtures_verify_before_codegen() {
         "tests/positive/array_branch_store.mm",
         "tests/positive/array_loop_shadow.mm",
         "tests/negative/array_reassign_in_loop_codegen.mm",
+        "tests/negative/array_reassign_in_loop_nested_codegen.mm",
         "tests/negative/array_reassign_from_call_codegen.mm",
     ] {
         let output = verify(file);
