@@ -47,7 +47,7 @@ Every PR in this area should review this file together with the local roadmap it
 
 ## 現状サマリ
 
-**mumei (コンパイラ)**: 戦略ロードマップ P1〜P31 すべて実装済み（P31 は 2026-09-22 に seq 中段 `task_group` lowering で完結、対象 atom は反例につき live 化対象外）。エフェクトシステム、MIR、temporal verification、modular verification、LSP、concurrency codegen、proof certificate / proof graph、capability Stage 1、nlsat 先行経路まで到達（v0.6.20 リリース済み）。
+**mumei (コンパイラ)**: 戦略ロードマップ P1〜P31 すべて実装済み（P31 は 2026-09-22 に seq 中段 `task_group` lowering で完結、対象 atom は反例につき live 化対象外）。エフェクトシステム、MIR、temporal verification、modular verification、LSP、concurrency codegen、proof certificate / proof graph、capability Stage 1、nlsat 先行経路まで到達（v0.6.19 リリース済み）。
 
 **mumei-agent**: V1-A〜V1-E（spec health / 監査 / 双方向整合 / 人向け UX）全項目実装済み。Track A データフロー層（A-1〜A-6）、Lean AI 証明生成（B-4〜B-6、`--external-proofs` 経路）、`language_patterns` レジストリ（tree-sitter scope-aware、confidence フィールド付き）まで到達。Forge Mode は Infrastructure Complete / Expansion In Progress（cron 稼働中）。
 
