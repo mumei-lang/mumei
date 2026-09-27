@@ -878,20 +878,93 @@ pub fn collect_assigned_outer_variables_stmt(stmt: &HirStmt) -> HashSet<String> 
 pub fn collect_assigned_outer_variables_expr(expr: &HirExpr) -> HashSet<String> {
     let mut assigned = HashSet::new();
     match expr {
+        HirExpr::Number(_)
+        | HirExpr::Float(_)
+        | HirExpr::StringLit(_)
+        | HirExpr::AtomRef { .. } => {}
+        HirExpr::Variable(_) => {}
+        HirExpr::ArrayLit(elements) => {
+            for element in elements {
+                assigned.extend(collect_assigned_outer_variables_expr(element));
+            }
+        }
+        HirExpr::ArrayAccess(_, index) => {
+            assigned.extend(collect_assigned_outer_variables_expr(index));
+        }
+        HirExpr::BinaryOp(left, _, right) => {
+            assigned.extend(collect_assigned_outer_variables_expr(left));
+            assigned.extend(collect_assigned_outer_variables_expr(right));
+        }
         HirExpr::IfThenElse {
+            cond,
             then_branch,
             else_branch,
-            ..
         } => {
+            assigned.extend(collect_assigned_outer_variables_expr(cond));
             assigned.extend(collect_assigned_outer_variables_stmt(then_branch));
             assigned.extend(collect_assigned_outer_variables_stmt(else_branch));
         }
-        HirExpr::Match { arms, .. } => {
-            for arm in arms {
-                assigned.extend(collect_assigned_outer_variables_match_arm(arm));
+        HirExpr::Call { args, .. } => {
+            for arg in args {
+                assigned.extend(collect_assigned_outer_variables_expr(arg));
             }
         }
-        _ => {}
+        HirExpr::StructInit { fields, .. } => {
+            for (_, field) in fields {
+                assigned.extend(collect_assigned_outer_variables_expr(field));
+            }
+        }
+        HirExpr::FieldAccess(expr, _) => {
+            assigned.extend(collect_assigned_outer_variables_expr(expr));
+        }
+        HirExpr::Match { target, arms } => {
+            assigned.extend(collect_assigned_outer_variables_expr(target));
+            for arm in arms {
+                assigned.extend(collect_assigned_outer_variables_match_arm(arm));
+                if let Some(guard) = &arm.guard {
+                    let mut guard_assigned = collect_assigned_outer_variables_expr(guard);
+                    let mut pattern_bound = HashSet::new();
+                    collect_pattern_bindings(&arm.pattern, &mut pattern_bound);
+                    guard_assigned.retain(|name| !pattern_bound.contains(name));
+                    assigned.extend(guard_assigned);
+                }
+            }
+        }
+        HirExpr::CallRef { callee, args } => {
+            assigned.extend(collect_assigned_outer_variables_expr(callee));
+            for arg in args {
+                assigned.extend(collect_assigned_outer_variables_expr(arg));
+            }
+        }
+        HirExpr::Async { body } | HirExpr::Task { body, .. } => {
+            assigned.extend(collect_assigned_outer_variables_stmt(body));
+        }
+        HirExpr::Await { expr } => {
+            assigned.extend(collect_assigned_outer_variables_expr(expr));
+        }
+        HirExpr::Perform { args, .. } => {
+            for arg in args {
+                assigned.extend(collect_assigned_outer_variables_expr(arg));
+            }
+        }
+        HirExpr::TaskGroup { children, .. } => {
+            for child in children {
+                assigned.extend(collect_assigned_outer_variables_stmt(child));
+            }
+        }
+        HirExpr::Lambda { .. } => {}
+        HirExpr::ChanSend { channel, value } => {
+            assigned.extend(collect_assigned_outer_variables_expr(channel));
+            assigned.extend(collect_assigned_outer_variables_expr(value));
+        }
+        HirExpr::ChanRecv { channel } => {
+            assigned.extend(collect_assigned_outer_variables_expr(channel));
+        }
+        HirExpr::VariantInit { fields, .. } => {
+            for field in fields {
+                assigned.extend(collect_assigned_outer_variables_expr(field));
+            }
+        }
     }
     assigned
 }
@@ -1124,6 +1197,42 @@ mod tests {
         assert_eq!(
             collect_assigned_outer_variables_stmt(&stmt),
             names(&["acc"])
+        );
+    }
+
+    #[test]
+    fn assigned_outer_variables_finds_if_nested_in_assignment_expression() {
+        let stmt = HirStmt::Assign {
+            var: "acc".to_string(),
+            value: Box::new(HirExpr::BinaryOp(
+                Box::new(HirExpr::Variable("acc".to_string())),
+                Op::Add,
+                Box::new(HirExpr::IfThenElse {
+                    cond: Box::new(HirExpr::BinaryOp(
+                        Box::new(HirExpr::Variable("i".to_string())),
+                        Op::Eq,
+                        Box::new(HirExpr::Number(0)),
+                    )),
+                    then_branch: Box::new(HirStmt::Block {
+                        stmts: vec![HirStmt::Assign {
+                            var: "xs".to_string(),
+                            value: Box::new(HirExpr::ArrayLit(vec![
+                                HirExpr::Number(9),
+                                HirExpr::Number(9),
+                            ])),
+                        }],
+                        tail_expr: Some(Box::new(HirExpr::Number(1))),
+                    }),
+                    else_branch: Box::new(HirStmt::Block {
+                        stmts: Vec::new(),
+                        tail_expr: Some(Box::new(HirExpr::Number(0))),
+                    }),
+                }),
+            )),
+        };
+        assert_eq!(
+            collect_assigned_outer_variables_stmt(&stmt),
+            names(&["acc", "xs"])
         );
     }
 }

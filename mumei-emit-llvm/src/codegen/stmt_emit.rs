@@ -1,16 +1,16 @@
 use crate::codegen::expr_emit::{
     chan_payload_key, chan_payload_type_name, compile_hir_expr, emit_array_literal,
-    infer_struct_type_name, resolve_named_type,
+    infer_struct_type_name, resolve_named_type, LAMBDA_MARK,
 };
 use crate::codegen::lowering::ArrayPtr;
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::values::{BasicValueEnum, FunctionValue, PhiValue};
+use inkwell::values::{AsValueRef, BasicValueEnum, FunctionValue, PhiValue};
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
-use mumei_core::hir::{HirExpr, HirStmt};
+use mumei_core::hir::{collect_assigned_outer_variables_stmt, HirExpr, HirStmt};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
 
@@ -263,6 +263,12 @@ pub(crate) fn compile_hir_stmt<'a>(
                 )?;
                 array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
                 variables.insert(var.clone(), len_val);
+                if var_types
+                    .get(var.as_str())
+                    .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
+                {
+                    var_types.remove(var.as_str());
+                }
                 return Ok(len_val);
             }
             // `let a = arr` — the binding aliases the tracked fat pointer so
@@ -271,6 +277,12 @@ pub(crate) fn compile_hir_stmt<'a>(
                 if let Some(&(len_val, elem_ty, data_ptr)) = array_ptrs.get(src.as_str()) {
                     array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
                     variables.insert(var.clone(), len_val);
+                    if var_types
+                        .get(var.as_str())
+                        .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
+                    {
+                        var_types.remove(var.as_str());
+                    }
                     return Ok(len_val);
                 }
                 // `let g = f` on a lambda binding: alias the same lifted fn
@@ -368,6 +380,39 @@ pub(crate) fn compile_hir_stmt<'a>(
                     super::expr_emit::lambda_marker(&fn_name, &all_caps),
                 );
                 return Ok(ptr);
+            }
+            if let HirExpr::ArrayLit(elements) = value.as_ref() {
+                let (len_val, elem_ty, data_ptr) = emit_array_literal(
+                    context, builder, module, function, elements, variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                variables.insert(var.clone(), len_val);
+                if var_types
+                    .get(var.as_str())
+                    .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
+                {
+                    var_types.remove(var.as_str());
+                }
+                return Ok(len_val);
+            }
+            if let HirExpr::Variable(src) = value.as_ref() {
+                if let Some(&(len_val, elem_ty, data_ptr)) = array_ptrs.get(src.as_str()) {
+                    array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                    variables.insert(var.clone(), len_val);
+                    if var_types
+                        .get(var.as_str())
+                        .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
+                    {
+                        var_types.remove(var.as_str());
+                    }
+                    return Ok(len_val);
+                }
+            }
+            if array_ptrs.contains_key(var.as_str()) {
+                return Err(MumeiError::codegen(format!(
+                    "array '{var}' can only be reassigned from an array literal or another array binding"
+                )));
             }
             let val = compile_hir_expr(
                 context, builder, module, function, value, variables, var_types, array_ptrs,
@@ -467,6 +512,7 @@ pub(crate) fn compile_hir_stmt<'a>(
             let after_block = context.append_basic_block(*function, "loop.after");
 
             let pre_loop_vars = variables.clone();
+            let pre_loop_arrays = array_ptrs.clone();
             let entry_end_block = builder.get_insert_block().unwrap();
 
             llvm!(builder.build_unconditional_branch(header_block));
@@ -514,6 +560,21 @@ pub(crate) fn compile_hir_stmt<'a>(
                 module_env,
             )?;
             let body_end_block = builder.get_insert_block().unwrap();
+            let body_assigned = collect_assigned_outer_variables_stmt(body);
+            for (name, pre_array) in &pre_loop_arrays {
+                let changed = array_ptrs.get(name).is_none_or(|body_array| {
+                    body_array.0.as_value_ref() != pre_array.0.as_value_ref()
+                        || body_array.1 != pre_array.1
+                        || body_array.2.as_value_ref() != pre_array.2.as_value_ref()
+                });
+                if body_assigned.contains(name) && changed {
+                    return Err(MumeiError::codegen(format!(
+                        "array '{name}' is reassigned inside a loop, which native codegen does not support yet"
+                    )));
+                }
+                array_ptrs.insert(name.clone(), *pre_array);
+            }
+            array_ptrs.retain(|name, _| pre_loop_arrays.contains_key(name));
 
             for (name, phi) in &phi_nodes {
                 if let Some(body_val) = variables.get(name) {

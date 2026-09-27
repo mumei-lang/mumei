@@ -11,6 +11,7 @@ use crate::codegen::task_runtime::{
     compile_task_spawn, declare_task_group_any_externs, emit_task_join_only, emit_task_join_raw,
     emit_task_spawn_only, static_next_task_group_id, PendingTask, TaskGroupAnyContext,
 };
+use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -26,8 +27,15 @@ use mumei_core::hir::{
 };
 use mumei_core::parser::{JoinSemantics, Op};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+
+type ArrayMergeState<'a> = (
+    HashMap<String, BasicValueEnum<'a>>,
+    HashMap<String, ArrayPtr<'a>>,
+    BasicBlock<'a>,
+    HashSet<String>,
+);
 
 /// P25 — key under which a `chan<T>` binding records its declared payload
 /// type inside `var_types`. `<` can never appear in a Mumei identifier, so
@@ -1264,6 +1272,92 @@ pub(crate) fn emit_array_literal<'a>(
     Ok((len_val, elem_ty, data_ptr.into()))
 }
 
+/// Phi-merge array bindings that branches reassigned, mirroring the scalar
+/// variable merge while keeping the fat-pointer slots in sync.
+#[allow(clippy::type_complexity)]
+fn merge_array_ptrs<'a>(
+    builder: &Builder<'a>,
+    pre: &HashMap<String, ArrayPtr<'a>>,
+    states: &[(
+        HashMap<String, ArrayPtr<'a>>,
+        BasicBlock<'a>,
+        HashSet<String>,
+    )],
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+) -> MumeiResult<()> {
+    *array_ptrs = pre.clone();
+    for (name, pre_array) in pre {
+        if !states
+            .iter()
+            .any(|(_, _, assigned)| assigned.contains(name))
+        {
+            continue;
+        }
+        let values: Vec<ArrayPtr<'a>> = states
+            .iter()
+            .map(|(state, _, assigned)| {
+                if assigned.contains(name) {
+                    state.get(name).copied().ok_or_else(|| {
+                        MumeiError::codegen(format!(
+                            "array '{name}' reassigned to a non-array value in a branch"
+                        ))
+                    })
+                } else {
+                    Ok(*pre_array)
+                }
+            })
+            .collect::<MumeiResult<_>>()?;
+        let first = values
+            .first()
+            .copied()
+            .ok_or_else(|| MumeiError::codegen(format!("array '{name}' has no branch state")))?;
+        if values.iter().any(|(_, elem_ty, data_ptr)| {
+            *elem_ty != first.1 || data_ptr.get_type() != first.2.get_type()
+        }) {
+            return Err(MumeiError::codegen(format!(
+                "incompatible branch array type for '{name}'"
+            )));
+        }
+        if values
+            .iter()
+            .any(|(len, _, _)| len.get_type() != first.0.get_type())
+        {
+            return Err(MumeiError::codegen(format!(
+                "incompatible branch array length type for '{name}'"
+            )));
+        }
+        if values.iter().all(|(len, _, data_ptr)| {
+            len.as_value_ref() == first.0.as_value_ref()
+                && data_ptr.as_value_ref() == first.2.as_value_ref()
+        }) {
+            array_ptrs.insert(name.clone(), first);
+            variables.insert(name.clone(), first.0);
+            continue;
+        }
+        let len_phi = llvm!(builder.build_phi(first.0.get_type(), &format!("phi_{name}_len")));
+        let len_incoming: Vec<(&dyn BasicValue<'a>, BasicBlock<'a>)> = values
+            .iter()
+            .zip(states.iter())
+            .map(|((len, _, _), (_, block, _))| (len as &dyn BasicValue<'a>, *block))
+            .collect();
+        len_phi.add_incoming(&len_incoming);
+
+        let data_phi = llvm!(builder.build_phi(first.2.get_type(), &format!("phi_{name}_data")));
+        let data_incoming: Vec<(&dyn BasicValue<'a>, BasicBlock<'a>)> = values
+            .iter()
+            .zip(states.iter())
+            .map(|((_, _, data_ptr), (_, block, _))| (data_ptr as &dyn BasicValue<'a>, *block))
+            .collect();
+        data_phi.add_incoming(&data_incoming);
+
+        let len = len_phi.as_basic_value();
+        array_ptrs.insert(name.clone(), (len, first.1, data_phi.as_basic_value()));
+        variables.insert(name.clone(), len);
+    }
+    Ok(())
+}
+
 /// Emit `E::V(..)` / `E::V` as a tagged-union struct value. Fail-closed on a
 /// recursive enum (the eager `enum_llvm_type` layout cannot represent it) and
 /// on arity/unknown-variant mismatches — verification rejects those first, so
@@ -2059,6 +2153,7 @@ pub(crate) fn compile_hir_expr<'a>(
             let else_block = context.append_basic_block(*function, "else");
             let merge_block = context.append_basic_block(*function, "merge");
             let pre_vars = variables.clone();
+            let pre_arrays = array_ptrs.clone();
             let then_assigned = collect_assigned_outer_variables_stmt(then_branch);
             let else_assigned = collect_assigned_outer_variables_stmt(else_branch);
 
@@ -2082,6 +2177,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 module_env,
             )?;
             let then_vars = variables.clone();
+            let then_arrays = array_ptrs.clone();
             let then_marks = lambda_marks(var_types);
             var_types.retain(|_, v| !v.starts_with(LAMBDA_MARK));
             var_types.extend(pre_marks.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -2090,6 +2186,7 @@ pub(crate) fn compile_hir_expr<'a>(
 
             builder.position_at_end(else_block);
             *variables = pre_vars.clone();
+            *array_ptrs = pre_arrays.clone();
             let else_val = compile_hir_stmt(
                 context,
                 builder,
@@ -2102,6 +2199,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 module_env,
             )?;
             let else_vars = variables.clone();
+            let else_arrays = array_ptrs.clone();
             let else_marks = lambda_marks(var_types);
             merge_lambda_marks(var_types, &then_marks, &else_marks);
             let else_end_block = builder.get_insert_block().unwrap();
@@ -2142,6 +2240,16 @@ pub(crate) fn compile_hir_expr<'a>(
                     variables.insert(name.clone(), merged.as_basic_value());
                 }
             }
+            merge_array_ptrs(
+                builder,
+                &pre_arrays,
+                &[
+                    (then_arrays, then_end_block, then_assigned),
+                    (else_arrays, else_end_block, else_assigned),
+                ],
+                array_ptrs,
+                variables,
+            )?;
             Ok(phi.as_basic_value())
         }
 
@@ -2209,6 +2317,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 module_env,
             )?;
             let pre_vars = variables.clone();
+            let pre_arrays = array_ptrs.clone();
 
             // Declared enum type of the scrutinee — resolves which enum owns
             // a colliding variant name deterministically (prelude `List` vs
@@ -2235,11 +2344,7 @@ pub(crate) fn compile_hir_expr<'a>(
 
             let mut incoming: Vec<(BasicValueEnum<'a>, inkwell::basic_block::BasicBlock<'a>)> =
                 Vec::new();
-            let mut arm_states: Vec<(
-                HashMap<String, BasicValueEnum<'a>>,
-                inkwell::basic_block::BasicBlock<'a>,
-                std::collections::HashSet<String>,
-            )> = Vec::new();
+            let mut arm_states: Vec<ArrayMergeState<'a>> = Vec::new();
 
             let arm_count = arms.len();
             let mut try_blocks: Vec<inkwell::basic_block::BasicBlock<'a>> = Vec::new();
@@ -2272,6 +2377,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 let full_cond = if let Some(guard) = &arm.guard {
                     let mut guard_vars = pre_vars.clone();
                     let mut guard_var_types = var_types.clone();
+                    *array_ptrs = pre_arrays.clone();
                     bind_pattern_variables(
                         context,
                         builder,
@@ -2311,6 +2417,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 builder.position_at_end(body_block);
                 let mut arm_vars = pre_vars.clone();
                 let mut arm_var_types = var_types.clone();
+                *array_ptrs = pre_arrays.clone();
                 bind_pattern_variables(
                     context,
                     builder,
@@ -2333,10 +2440,11 @@ pub(crate) fn compile_hir_expr<'a>(
                     module_env,
                 )?;
                 let body_end = builder.get_insert_block().unwrap();
+                let arm_arrays = array_ptrs.clone();
                 llvm!(builder.build_unconditional_branch(merge_block));
                 incoming.push((body_val, body_end));
                 let assigned = collect_assigned_outer_variables_match_arm(arm);
-                arm_states.push((arm_vars, body_end, assigned));
+                arm_states.push((arm_vars, arm_arrays, body_end, assigned));
             }
 
             // Plan 18: Infer phi type from the first arm's body value type
@@ -2364,6 +2472,7 @@ pub(crate) fn compile_hir_expr<'a>(
             incoming.push((unreachable_val, unreachable_block));
             arm_states.push((
                 pre_vars.clone(),
+                pre_arrays.clone(),
                 unreachable_block,
                 std::collections::HashSet::new(),
             ));
@@ -2378,11 +2487,11 @@ pub(crate) fn compile_hir_expr<'a>(
                 let mut merged_incoming = Vec::with_capacity(arm_states.len());
                 let assigned_any = arm_states
                     .iter()
-                    .any(|(_, _, assigned)| assigned.contains(name));
+                    .any(|(_, _, _, assigned)| assigned.contains(name));
                 if !assigned_any {
                     continue;
                 }
-                for (arm_vars, arm_end, assigned) in &arm_states {
+                for (arm_vars, _, arm_end, assigned) in &arm_states {
                     let value = if assigned.contains(name) {
                         arm_vars.get(name).cloned().unwrap_or(*pre_val)
                     } else {
@@ -2414,6 +2523,15 @@ pub(crate) fn compile_hir_expr<'a>(
                     variables.insert(name.clone(), merged.as_basic_value());
                 }
             }
+            let array_states: Vec<(
+                HashMap<String, ArrayPtr<'a>>,
+                inkwell::basic_block::BasicBlock<'a>,
+                std::collections::HashSet<String>,
+            )> = arm_states
+                .iter()
+                .map(|(_, arrays, block, assigned)| (arrays.clone(), *block, assigned.clone()))
+                .collect();
+            merge_array_ptrs(builder, &pre_arrays, &array_states, array_ptrs, variables)?;
 
             Ok(phi.as_basic_value())
         }
