@@ -186,6 +186,7 @@ impl<'a> UsageCollector<'a> {
                 self.stmt(then_branch);
                 self.stmt(else_branch);
             }
+            Expr::Block(stmt) => self.stmt(stmt),
             Expr::Call(name, args) => {
                 let consumed = consumed_positions(name, self.module_env);
                 for (i, arg) in args.iter().enumerate() {
@@ -542,6 +543,7 @@ fn check_expr(
             check_stmt(then_branch, module_env, &mut types.clone(), violations);
             check_stmt(else_branch, module_env, &mut types.clone(), violations);
         }
+        Expr::Block(stmt) => check_stmt(stmt, module_env, &mut types.clone(), violations),
         Expr::Async { body } | Expr::Lambda { body, .. } => {
             check_stmt(body, module_env, &mut types.clone(), violations)
         }

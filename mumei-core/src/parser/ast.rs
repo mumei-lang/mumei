@@ -196,6 +196,7 @@ pub enum Expr {
     ArrayLit(Vec<Expr>),
     ArrayAccess(String, Box<Expr>),
     BinaryOp(Box<Expr>, Op, Box<Expr>),
+    Block(Box<Stmt>),
     IfThenElse {
         cond: Box<Expr>,
         then_branch: Box<Stmt>,

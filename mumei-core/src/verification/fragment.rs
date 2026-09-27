@@ -558,6 +558,7 @@ fn collect_nonlinear_terms_expr(expr: &Expr, terms: &mut Vec<PolyShape>) -> bool
                 && collect_nonlinear_terms_stmt(then_branch, terms)
                 && collect_nonlinear_terms_stmt(else_branch, terms)
         }
+        Expr::Block(stmt) => collect_nonlinear_terms_stmt(stmt, terms),
         Expr::Call(_, args) => args
             .iter()
             .all(|arg| collect_nonlinear_terms_expr(arg, terms)),
@@ -765,6 +766,7 @@ fn collect_array_access_names_in_expr(expr: &Expr, names: &mut Vec<String>) {
             collect_array_access_names_in_stmt(then_branch, names);
             collect_array_access_names_in_stmt(else_branch, names);
         }
+        Expr::Block(stmt) => collect_array_access_names_in_stmt(stmt, names),
         Expr::Call(_, args) | Expr::Perform { args, .. } => {
             for arg in args {
                 collect_array_access_names_in_expr(arg, names);
@@ -958,6 +960,7 @@ fn expr_has_bitwise_op(expr: &Expr) -> bool {
                 || stmt_has_bitwise_op(then_branch)
                 || stmt_has_bitwise_op(else_branch)
         }
+        Expr::Block(stmt) => stmt_has_bitwise_op(stmt),
         Expr::Match { target, arms } => {
             expr_has_bitwise_op(target) || arms.iter().any(|arm| stmt_has_bitwise_op(&arm.body))
         }
@@ -1367,6 +1370,7 @@ pub(crate) fn collect_array_index_names_from_expr(expr: &Expr, indexes: &mut Vec
             collect_array_index_names_from_stmt(then_branch, indexes);
             collect_array_index_names_from_stmt(else_branch, indexes);
         }
+        Expr::Block(stmt) => collect_array_index_names_from_stmt(stmt, indexes),
         Expr::Call(_, args) => {
             for arg in args {
                 collect_array_index_names_from_expr(arg, indexes);
@@ -1473,6 +1477,7 @@ pub(crate) fn expr_has_array_access(expr: &Expr) -> bool {
                 || stmt_has_array_access(then_branch)
                 || stmt_has_array_access(else_branch)
         }
+        Expr::Block(stmt) => stmt_has_array_access(stmt),
         Expr::Call(_, args) => args.iter().any(expr_has_array_access),
         Expr::StructInit { fields, .. } => fields
             .iter()
@@ -1549,6 +1554,7 @@ pub(crate) fn expr_has_linear_arithmetic(expr: &Expr) -> bool {
                 || stmt_has_linear_arithmetic(then_branch)
                 || stmt_has_linear_arithmetic(else_branch)
         }
+        Expr::Block(stmt) => stmt_has_linear_arithmetic(stmt),
         Expr::Call(_, args) => args.iter().any(expr_has_linear_arithmetic),
         Expr::StructInit { fields, .. } => fields
             .iter()
@@ -1627,6 +1633,7 @@ pub(crate) fn expr_has_nonlinear_arithmetic(expr: &Expr) -> bool {
                 || stmt_has_nonlinear_arithmetic(then_branch)
                 || stmt_has_nonlinear_arithmetic(else_branch)
         }
+        Expr::Block(stmt) => stmt_has_nonlinear_arithmetic(stmt),
         Expr::Call(_, args) => args.iter().any(expr_has_nonlinear_arithmetic),
         Expr::StructInit { fields, .. } => fields
             .iter()
@@ -1714,6 +1721,7 @@ pub(crate) fn expr_has_regex_semantics(expr: &Expr) -> bool {
                 || stmt_has_regex_semantics(then_branch)
                 || stmt_has_regex_semantics(else_branch)
         }
+        Expr::Block(stmt) => stmt_has_regex_semantics(stmt),
         Expr::StructInit { fields, .. } => fields
             .iter()
             .any(|(_, field_expr)| expr_has_regex_semantics(field_expr)),
@@ -1811,6 +1819,7 @@ fn expr_enum_name(
                 None
             }
         }
+        Expr::Block(stmt) => stmt_enum_name(stmt, names, module_env),
         Expr::Match { arms, .. } => {
             let mut results = arms
                 .iter()
@@ -1898,6 +1907,10 @@ pub(crate) fn expr_has_inductive_shape(
             expr_has_inductive_shape(cond, module_env, names)
                 || stmt_has_inductive_shape(then_branch, module_env, &mut then_names)
                 || stmt_has_inductive_shape(else_branch, module_env, &mut else_names)
+        }
+        Expr::Block(stmt) => {
+            let mut block_names = names.clone();
+            stmt_has_inductive_shape(stmt, module_env, &mut block_names)
         }
         Expr::Call(_, args) => args
             .iter()
@@ -2017,6 +2030,7 @@ pub(crate) fn expr_contains_while(expr: &Expr) -> bool {
             else_branch,
             ..
         } => stmt_has_while(then_branch) || stmt_has_while(else_branch),
+        Expr::Block(stmt) => stmt_has_while(stmt),
         Expr::Match { arms, .. } => arms.iter().any(|arm| stmt_has_while(&arm.body)),
         Expr::Async { body } | Expr::Lambda { body, .. } => stmt_has_while(body),
         Expr::BinaryOp(left, _, right) => expr_contains_while(left) || expr_contains_while(right),

@@ -327,6 +327,14 @@ fn mutate_binary_expr(expr: &mut Expr, original_op: &Op, conditions_only: bool) 
                 | mutate_stmt(then_branch, &mutation)
                 | mutate_stmt(else_branch, &mutation)
         }
+        Expr::Block(stmt) => {
+            let mutation = if conditions_only {
+                MutationOperator::ConditionFlip(original_op.clone())
+            } else {
+                MutationOperator::BinaryOpFlip(original_op.clone())
+            };
+            mutate_stmt(stmt, &mutation)
+        }
         Expr::Call(_, args) | Expr::CallRef { args, .. } | Expr::Perform { args, .. } => args
             .iter_mut()
             .any(|arg| mutate_binary_expr(arg, original_op, conditions_only)),
@@ -411,6 +419,7 @@ fn mutate_array_access_expr(expr: &mut Expr, offset: i64) -> bool {
                 | mutate_stmt(then_branch, &MutationOperator::ArrayIndexOffset(offset))
                 | mutate_stmt(else_branch, &MutationOperator::ArrayIndexOffset(offset))
         }
+        Expr::Block(stmt) => mutate_stmt(stmt, &MutationOperator::ArrayIndexOffset(offset)),
         Expr::Call(_, args) | Expr::CallRef { args, .. } | Expr::Perform { args, .. } => args
             .iter_mut()
             .any(|arg| mutate_array_access_expr(arg, offset)),
@@ -471,6 +480,10 @@ fn mutate_constant_expr(expr: &mut Expr, value: i64) -> bool {
             mutate_constant_expr(cond, value)
                 | mutate_stmt(then_branch, &mutation)
                 | mutate_stmt(else_branch, &mutation)
+        }
+        Expr::Block(stmt) => {
+            let mutation = constant_mutation(value);
+            mutate_stmt(stmt, &mutation)
         }
         Expr::Call(_, args) | Expr::CallRef { args, .. } | Expr::Perform { args, .. } => {
             args.iter_mut().any(|arg| mutate_constant_expr(arg, value))

@@ -629,6 +629,7 @@ fn infer_bounds_from_expr(expr: &Expr, variable_name: &str, bounds: &mut Bounds)
             infer_bounds_from_stmt(then_branch, variable_name, bounds);
             infer_bounds_from_stmt(else_branch, variable_name, bounds);
         }
+        Expr::Block(stmt) => infer_bounds_from_stmt(stmt, variable_name, bounds),
         _ => {}
     }
 }

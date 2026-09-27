@@ -423,6 +423,7 @@ impl Monomorphizer {
                 self.collect_from_stmt(then_branch);
                 self.collect_from_stmt(else_branch);
             }
+            Expr::Block(stmt) => self.collect_from_stmt(stmt),
             Expr::Match { target, arms } => {
                 self.collect_from_expr(target);
                 for arm in arms {
