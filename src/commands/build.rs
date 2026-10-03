@@ -52,7 +52,7 @@ fn build_proof_flags(
     module_env: &verification::ModuleEnv,
     config: &verification::VerificationConfig,
 ) -> Vec<&'static str> {
-    let mut flags = vec!["ensures_outcome_classification"];
+    let mut flags = Vec::new();
     if config.enable_vacuity_check {
         flags.push("enable_vacuity_check");
     }

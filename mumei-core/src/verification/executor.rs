@@ -2203,26 +2203,6 @@ pub(crate) fn verify_inner(
                         ensures_outcome_summary(context_reachability, &ensures_outcomes);
                     if ensures_check == SatResult::Sat {
                         if let Some(help) = spurious_candidate_help {
-                            save_visualizer_report(
-                                output_dir,
-                                "failed",
-                                &atom.name,
-                                &ce_a,
-                                &ce_b,
-                                &format!(
-                                    "Spurious counterexample candidate for atom '{}'.",
-                                    atom.name
-                                ),
-                                ce_value.as_ref(),
-                                FAILURE_POSTCONDITION_VIOLATED,
-                                None,
-                                Some(&atom.span),
-                                None,
-                                data_flow_trace.as_ref(),
-                                None,
-                                Some(&diagnostics),
-                                Some(&outcome_summary),
-                            );
                             return Err(MumeiError::verification_at(
                                 format!(
                                     "Spurious counterexample detected for atom '{}'. Spurious counterexample candidate for atom '{}'",
@@ -2565,26 +2545,6 @@ pub(crate) fn verify_inner(
         } else {
             "Z3 returned unknown during the final consistency check.".to_string()
         };
-        save_visualizer_report(
-            output_dir,
-            "failed",
-            &atom.name,
-            "N/A",
-            "N/A",
-            &message,
-            None,
-            "",
-            None,
-            Some(&atom.span),
-            None,
-            None,
-            None,
-            Some(&diagnostics),
-            Some(&ensures_outcome_summary(
-                context_reachability,
-                &ensures_outcomes,
-            )),
-        );
         let mut err = MumeiError::verification_at(message, atom.span.clone());
         if let Some(help) = property_based_help {
             err = err.with_help(help);

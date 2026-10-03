@@ -134,6 +134,8 @@ reported as unreachable. An unreachable context remains a contradiction error
 under the existing final consistency check. The report attaches
 `context_reachability: "unreachable"`, `"vacuous"` outcomes, and a diagnostic
 explaining that every ensures clause would hold vacuously.
+These keys are absent from cached (unchanged) results because verification was
+not recomputed for that run.
 
 ## semantic_feedback.structured_unsat_core
 

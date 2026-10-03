@@ -602,8 +602,6 @@ fn write_cached_success_report(output_dir: &Path, atom: &parser::Atom, skipped_c
         "suggestion": structured.feedback_instruction,
         "diagnostics": [],
         "skipped_clauses": skipped_clauses,
-        "context_reachability": "unknown",
-        "ensures_outcomes": [],
     });
     if skipped_clauses > 0 {
         report["partial"] = serde_json::json!(true);
@@ -689,7 +687,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
 
     // Proof flags that alter the verification outcome must participate in the
     // incremental-cache key, otherwise switching modes reuses a stale result.
-    let mut proof_flags: Vec<&str> = vec!["ensures_outcome_classification"];
+    let mut proof_flags: Vec<&str> = Vec::new();
     if atom_verification_config.enable_vacuity_check {
         proof_flags.push("enable_vacuity_check");
     }
@@ -705,7 +703,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
     let proof_hash = resolver::compute_proof_hash_with_flags(atom, ctx.module_env, &proof_flags);
 
     if let Some(cached_entry) = ctx.verification_cache.get(name) {
-        if cached_entry.proof_hash == proof_hash && atom.ensures.trim() == "true" {
+        if cached_entry.proof_hash == proof_hash {
             let skipped_clauses = cached_entry.skipped_clauses;
             if !ctx.quiet_output {
                 println!("  ⚖️  '{}': skipped (unchanged, cached) ⏩", name);
