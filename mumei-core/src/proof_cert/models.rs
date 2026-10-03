@@ -348,6 +348,12 @@ pub struct LeanResultMetadata {
     /// (mumei-lean `docs/LEAN_TRANSLATOR_SPEC.md` §12).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tactic_search: Option<TacticSearchMetadata>,
+    /// Kernel axioms reported by the Lean bridge audit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_axioms: Option<Vec<String>>,
+    /// Result of the Lean kernel-axiom audit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axiom_audit: Option<String>,
 }
 
 /// Automatic tactic search provenance emitted by the mumei-lean bridge.

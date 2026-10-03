@@ -336,6 +336,55 @@ fn lean_verified_without_current_lean_metadata_is_reported_as_stale_not_verified
 }
 
 #[test]
+fn lsp_reports_rejected_lean_kernel_axiom_audit() {
+    let dir = unique_temp_dir("mumei-lsp-lean-axiom-rejected");
+    let source =
+        "atom clamp_low(x: i64) -> i64\n  requires: x >= 0;\n  ensures: result >= 0;\n  body: x;\n";
+    let source_path = dir.join("rejected.mm");
+    let cert_path = dir.join("rejected.proof.json");
+    std::fs::write(&source_path, source).expect("write source");
+
+    let generated = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--proof-cert")
+        .arg("--output")
+        .arg(&cert_path)
+        .arg(&source_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run mumei verify --proof-cert");
+    assert!(generated.status.success());
+
+    let raw = std::fs::read_to_string(&cert_path).expect("read certificate");
+    let mut cert: Value = serde_json::from_str(&raw).expect("parse certificate");
+    mark_lean_verified(&mut cert["atoms"][0], "clamp_low_spec");
+    cert["atoms"][0]["lean_result_metadata"]["kernel_axioms"] = serde_json::json!(["sorryAx"]);
+    cert["atoms"][0]["lean_result_metadata"]["axiom_audit"] = Value::String("passed".to_string());
+    std::fs::write(&cert_path, cert.to_string()).expect("write patched certificate");
+
+    let diagnostics = did_open_diagnostics(&source_path, source);
+    let lean: Vec<&Value> = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.get("source").and_then(Value::as_str) == Some("mumei-lean"))
+        .collect();
+    assert_eq!(lean.len(), 1, "{diagnostics:#?}");
+    let escalation = lean_escalation(lean[0]).expect("lean_escalation payload");
+    assert_eq!(
+        escalation.get("status").and_then(Value::as_str),
+        Some("axiom_rejected"),
+        "{escalation}"
+    );
+    assert!(
+        lean[0]
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("sorryAx")),
+        "{lean:#?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn lsp_reports_every_pending_escalation_recorded_in_the_sibling_certificate() {
     let dir = unique_temp_dir("mumei-lsp-lean-pending-all");
     // Two undecided atoms: in-process verification stops at the first one, so

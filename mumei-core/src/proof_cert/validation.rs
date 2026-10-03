@@ -1,9 +1,58 @@
 use super::generation::compute_atom_content_hash_for_version;
-use super::models::{AtomCertificate, ProofCertificate};
+use super::models::{AtomCertificate, LeanResultMetadata, ProofCertificate};
 use super::status;
 use crate::verification;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+
+pub const LEAN_STANDARD_KERNEL_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeanAxiomAudit {
+    Passed { axioms: Vec<String> },
+    Rejected { disallowed: Vec<String> },
+    Error,
+    Unaudited,
+}
+
+pub fn lean_axiom_audit(atom: &AtomCertificate) -> LeanAxiomAudit {
+    let Some(metadata) = lean_result_metadata(atom) else {
+        return LeanAxiomAudit::Unaudited;
+    };
+    let disallowed = metadata
+        .kernel_axioms
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|axiom| !LEAN_STANDARD_KERNEL_AXIOMS.contains(&axiom.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !disallowed.is_empty() {
+        return LeanAxiomAudit::Rejected { disallowed };
+    }
+
+    match metadata.axiom_audit.as_deref() {
+        Some("rejected") => LeanAxiomAudit::Rejected { disallowed },
+        Some("error") => LeanAxiomAudit::Error,
+        Some("passed") => metadata
+            .kernel_axioms
+            .clone()
+            .map(|axioms| LeanAxiomAudit::Passed { axioms })
+            .unwrap_or(LeanAxiomAudit::Error),
+        Some(_) => LeanAxiomAudit::Error,
+        None => metadata
+            .kernel_axioms
+            .clone()
+            .map(|axioms| LeanAxiomAudit::Passed { axioms })
+            .unwrap_or(LeanAxiomAudit::Unaudited),
+    }
+}
+
+fn lean_result_metadata(atom: &AtomCertificate) -> Option<&LeanResultMetadata> {
+    atom.lean_result_metadata
+        .as_ref()
+        .or(atom.lean_metadata.as_ref())
+}
 
 pub(crate) fn compute_certificate_hash(cert: &ProofCertificate) -> String {
     // Serialize with empty certificate_hash for deterministic hashing.
@@ -132,10 +181,15 @@ pub fn verify_certificate(
                 } else if ac.z3_check_result == status::Z3_UNSAT {
                     "proven".to_string()
                 } else if allow_lean_verified && ac.z3_check_result == status::Z3_LEAN_VERIFIED {
-                    if lean_certificate_metadata_is_current(ac) {
-                        "proven".to_string()
-                    } else {
+                    if !lean_translator_metadata_is_current(ac) {
                         "stale_translator".to_string()
+                    } else if matches!(
+                        lean_axiom_audit(ac),
+                        LeanAxiomAudit::Rejected { .. } | LeanAxiomAudit::Error
+                    ) {
+                        "axiom_rejected".to_string()
+                    } else {
+                        "proven".to_string()
                     }
                 } else {
                     "unproven".to_string()
@@ -176,16 +230,20 @@ pub(crate) fn manual_lemma_reason_for_atom(
 /// result record with a theorem name and the same identifiers. This is the
 /// predicate behind `verify_certificate`'s `proven` vs `stale_translator`.
 pub fn lean_certificate_metadata_is_current(atom: &AtomCertificate) -> bool {
+    lean_translator_metadata_is_current(atom)
+        && matches!(
+            lean_axiom_audit(atom),
+            LeanAxiomAudit::Passed { .. } | LeanAxiomAudit::Unaudited
+        )
+}
+
+fn lean_translator_metadata_is_current(atom: &AtomCertificate) -> bool {
     if atom.translator_version != verification::LEAN_TRANSLATOR_VERSION
         || atom.bridge_lemma_hash != verification::LEAN_BRIDGE_LEMMA_HASH
     {
         return false;
     }
-    let Some(metadata) = atom
-        .lean_result_metadata
-        .as_ref()
-        .or(atom.lean_metadata.as_ref())
-    else {
+    let Some(metadata) = lean_result_metadata(atom) else {
         return false;
     };
     metadata.status == status::LEAN_STATUS_VERIFIED

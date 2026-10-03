@@ -1495,6 +1495,53 @@ fn append_certificate_lean_escalation_diagnostics(
             }));
             continue;
         }
+        // Kernel-axiom audit failures are distinct from stale translator
+        // metadata, so check the audit before the translator gate.
+        match proof_cert::lean_axiom_audit(atom_cert) {
+            proof_cert::LeanAxiomAudit::Rejected { disallowed } => {
+                diagnostics.push(serde_json::json!({
+                    "range": atom_name_range(source, atom),
+                    "severity": 2,
+                    "source": "mumei-lean",
+                    "message": format!(
+                        "Lean escalation: axiom_rejected (disallowed kernel axioms: {:?}; certificate {})",
+                        disallowed,
+                        cert_path.display()
+                    ),
+                    "data": {
+                        "lean_escalation": {
+                            "status": "axiom_rejected",
+                            "atom": atom_cert.name,
+                            "z3_result_class": atom_cert.z3_result_class,
+                            "certificate": cert_path.to_string_lossy(),
+                            "disallowed": disallowed,
+                        }
+                    }
+                }));
+                continue;
+            }
+            proof_cert::LeanAxiomAudit::Error => {
+                diagnostics.push(serde_json::json!({
+                    "range": atom_name_range(source, atom),
+                    "severity": 2,
+                    "source": "mumei-lean",
+                    "message": format!(
+                        "Lean escalation: axiom_rejected (kernel axiom audit errored; certificate {})",
+                        cert_path.display()
+                    ),
+                    "data": {
+                        "lean_escalation": {
+                            "status": "axiom_rejected",
+                            "atom": atom_cert.name,
+                            "z3_result_class": atom_cert.z3_result_class,
+                            "certificate": cert_path.to_string_lossy(),
+                        }
+                    }
+                }));
+                continue;
+            }
+            proof_cert::LeanAxiomAudit::Passed { .. } | proof_cert::LeanAxiomAudit::Unaudited => {}
+        }
         // Same acceptance rule as `verify_certificate`: a `lean_verified`
         // entry counts only when its Lean result metadata is current;
         // otherwise it is `stale_translator` and must not read as proven.
