@@ -164,6 +164,29 @@ body: { x + 1 };
     );
 }
 
+#[test]
+fn concrete_counterexample_reports_exact_or_approximate_fidelity() {
+    let source = r#"
+atom identity(x: i64) -> i64
+requires: true;
+ensures: result > x;
+body: x;
+"#;
+    let (exact_dir, exact_output, exact_report) = verify_json("exact_fidelity", source, &[]);
+    let (approximate_dir, approximate_output, approximate_report) = verify_json(
+        "approximate_fidelity",
+        source,
+        &["--disable-spurious-detection"],
+    );
+    std::fs::remove_dir_all(exact_dir).expect("remove exact fixture directory");
+    std::fs::remove_dir_all(approximate_dir).expect("remove approximate fixture directory");
+
+    assert!(!exact_output.status.success());
+    assert!(!approximate_output.status.success());
+    assert_eq!(exact_report["counterexample_fidelity"], "exact");
+    assert_eq!(approximate_report["counterexample_fidelity"], "approximate");
+}
+
 const VACUOUS_CONTEXT_SOURCE: &str = r#"
 trusted atom conditional(x: i64) -> i64
 requires: true;

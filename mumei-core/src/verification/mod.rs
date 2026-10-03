@@ -24,6 +24,7 @@ pub mod loop_detector;
 pub mod module_env;
 pub mod mutation;
 pub mod nlae_reporter;
+pub mod phase_contract;
 pub mod profiler;
 pub mod property_based;
 pub mod spec_validation;
@@ -43,6 +44,10 @@ pub use loop_detector::*;
 pub use module_env::*;
 pub use mutation::{apply_mutation, generate_mutations, MutationOperator, MutationResult};
 pub use nlae_reporter::*;
+pub use phase_contract::{
+    check_phase_order, counterexample_fidelity, phase_contract, CounterexampleFidelity,
+    PhaseContract, PhaseFact, PhaseOrderError, ENSURES_PHASE, PHASE_CONTRACTS,
+};
 pub use profiler::{ConstraintProfile, IncrementalProfiler, SolverHeatmap};
 pub use property_based::*;
 pub use spec_validation::*;
