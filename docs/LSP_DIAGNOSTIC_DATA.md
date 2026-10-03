@@ -67,6 +67,23 @@ Each Lean-verified atom produces a severity `3` diagnostic with:
 The diagnostic is emitted per atom whose certificate has
 `z3_check_result == "lean_verified"`.
 
+A kernel-axiom audit rejection produces a severity `2` diagnostic:
+
+```json
+{
+  "lean_escalation": {
+    "status": "axiom_rejected",
+    "atom": "...",
+    "z3_result_class": "...",
+    "certificate": "...",
+    "disallowed": ["sorryAx"]
+  }
+}
+```
+
+`disallowed` lists the non-standard kernel axioms reported by the rejected
+`axiom_audit`. An audit error also uses `axiom_rejected` but omits `disallowed`.
+
 ## `mumei-intent` data
 
 Intent-drift diagnostics have severity `2` and are emitted when drift is
