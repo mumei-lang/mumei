@@ -464,7 +464,7 @@ pub(crate) fn cmd_build(
                                 &module_env,
                                 &verification_config,
                             ) {
-                                Ok(_) => {
+                                Ok((_, cover_results)) => {
                                     println!(
                                         "  ⚖️  [2/3] Verification: Passed. Logic verified with Z3."
                                     );
@@ -498,6 +498,7 @@ pub(crate) fn cmd_build(
                                             ),
                                             skipped_clauses: 0,
                                             inferred_invariants: Vec::new(),
+                                            cover_results,
                                         },
                                     );
                                 }
@@ -657,7 +658,7 @@ pub(crate) fn cmd_build(
                             &module_env,
                             &verification_config,
                         ) {
-                            Ok(_) => {
+                            Ok((_, cover_results)) => {
                                 println!(
                                     "  ⚖️  [2/3] Verification: Passed. Logic verified with Z3."
                                 );
@@ -690,6 +691,7 @@ pub(crate) fn cmd_build(
                                         ),
                                         skipped_clauses: 0,
                                         inferred_invariants: Vec::new(),
+                                        cover_results,
                                     },
                                 );
                             }

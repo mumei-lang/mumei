@@ -42,6 +42,25 @@ fn verify_source(name: &str, source: &str) -> (PathBuf, Output, serde_json::Valu
     (dir, output, report, text)
 }
 
+fn is_odd_witness(value: &serde_json::Value) -> bool {
+    let Some(value) = value.as_str() else {
+        return false;
+    };
+    let parsed = if let Some(hex) = value.strip_prefix("#x") {
+        u128::from_str_radix(hex, 16).ok()
+    } else if let Some(binary) = value.strip_prefix("#b") {
+        u128::from_str_radix(binary, 2).ok()
+    } else if let Some(bitvector) = value.strip_prefix("(_ bv") {
+        bitvector
+            .split_whitespace()
+            .next()
+            .and_then(|number| number.parse::<u128>().ok())
+    } else {
+        value.parse::<i128>().ok().map(|integer| integer as u128)
+    };
+    parsed.is_some_and(|integer| integer & 1 == 1)
+}
+
 #[test]
 fn cover_witness_is_reported_and_keeps_ensures_summary() {
     let (dir, output, report, text) = verify_source(
@@ -64,6 +83,191 @@ body: if x < 0 { 0 - x } else { x };
     assert_eq!(report["cover_results"][0]["status"], "covered");
     assert_eq!(report["cover_results"][0]["witness"]["x"], "0");
     assert_eq!(report["cover_results"][0]["witness"]["result"], "0");
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn bitwise_cover_selects_bitvector_semantics() {
+    let (dir, output, report, text) = verify_source(
+        "bitwise_cover",
+        r#"
+atom bw(x: i64) -> i64
+requires: x >= 0 && x < 100;
+ensures: result >= 0;
+cover "odd": (x & 1) == 1;
+body: x;
+"#,
+    );
+
+    assert!(output.status.success(), "{text}");
+    assert_eq!(report["cover_results"][0]["status"], "covered");
+    assert!(is_odd_witness(&report["cover_results"][0]["witness"]["x"]));
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn callee_preconditions_constrain_cover_witnesses() {
+    let (dir, output, report, text) = verify_source(
+        "cover_call",
+        r#"
+atom pos(y: i64) -> i64
+requires: y > 0;
+ensures: result == y;
+body: y;
+
+atom caller(x: i64) -> i64
+requires: x > -10 && x < 10;
+ensures: result == x;
+cover "pos call": pos(x) == 1;
+body: x;
+"#,
+    );
+
+    assert!(output.status.success(), "{text}");
+    assert_eq!(report["cover_results"][0]["status"], "covered");
+    assert_eq!(report["cover_results"][0]["witness"]["x"], "1");
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn callee_preconditions_can_make_a_cover_unreachable() {
+    let (dir, output, report, text) = verify_source(
+        "cover_call_unreachable",
+        r#"
+atom pos(y: i64) -> i64
+requires: y > 0;
+ensures: result == y;
+body: y;
+
+atom caller(x: i64) -> i64
+requires: x < 0;
+cover "pos call": pos(x) == 1;
+body: x;
+"#,
+    );
+
+    assert!(!output.status.success(), "{text}");
+    assert_eq!(report["failure_type"], "cover_unreachable");
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn guarded_callee_calls_remain_coverable() {
+    let (dir, output, report, text) = verify_source(
+        "guarded_cover_call",
+        r#"
+atom pos(y: i64) -> i64
+requires: y > 0;
+ensures: result == y;
+body: y;
+
+atom caller(x: i64) -> i64
+requires: x > -10 && x < 10;
+ensures: result == x;
+cover "pos call": x > 0 && pos(x) == x;
+body: x;
+"#,
+    );
+
+    assert!(output.status.success(), "{text}");
+    assert_eq!(report["cover_results"][0]["status"], "covered");
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn tuple_result_cover_is_reported_unknown() {
+    let (dir, output, report, text) = verify_source(
+        "tuple_cover_result",
+        r#"
+atom T(x: u64, y: u64) -> (u64, bool)
+requires: x + y <= 100;
+cover "impossible": result._0 == 999;
+body: x + y;
+"#,
+    );
+
+    assert!(output.status.success(), "{text}");
+    assert_eq!(report["cover_results"][0]["status"], "unknown");
+    assert!(report["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .any(|diagnostic| diagnostic.as_str().is_some_and(|text| {
+            text == "warning: reachability of cover clause \"impossible\" is unknown because tuple result components are not linked to the body"
+        })));
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn cover_witness_reports_pre_body_parameter_values() {
+    let (dir, output, report, text) = verify_source(
+        "mutated_cover_input",
+        r#"
+atom m(x: i64) -> i64
+requires: x >= 0 && x < 100;
+ensures: result >= 1;
+cover "one": result == 1;
+body: { x = x + 1; x };
+"#,
+    );
+
+    assert!(output.status.success(), "{text}");
+    assert_eq!(report["cover_results"][0]["status"], "covered");
+    assert_eq!(report["cover_results"][0]["witness"]["x"], "0");
+    assert_eq!(report["cover_results"][0]["witness"]["result"], "1");
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn cover_results_survive_verification_cache_hits() {
+    let (dir, first_output, first_report, first_text) = verify_source(
+        "cached_cover",
+        r#"
+atom even_cover(x: i64) -> i64
+requires: x >= 0 && x < 100;
+cover "zero": x == 0;
+body: x;
+"#,
+    );
+    assert!(first_output.status.success(), "{first_text}");
+    assert_eq!(first_report["cover_results"][0]["status"], "covered");
+
+    let fixture = dir.join("cached_cover.mm");
+    let report_dir = dir.join("reports");
+    let second_output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--report-dir")
+        .arg(&report_dir)
+        .arg("--disable-spurious-detection")
+        .arg(&fixture)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run cached mumei verify");
+    let second_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&second_output.stdout),
+        String::from_utf8_lossy(&second_output.stderr)
+    );
+    assert!(second_output.status.success(), "{second_text}");
+    assert!(
+        second_text.contains("skipped (unchanged, cached)"),
+        "{second_text}"
+    );
+
+    let cached_report: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(report_dir.join("report.json")).expect("read cached report.json"),
+    )
+    .expect("parse cached report.json");
+    assert_eq!(cached_report["cover_results"][0]["status"], "covered");
+    assert_eq!(cached_report["cover_results"][0]["label"], "zero");
+    assert_eq!(cached_report["cover_results"][0]["witness"]["x"], "0");
 
     std::fs::remove_dir_all(dir).expect("remove fixture directory");
 }
@@ -131,6 +335,23 @@ body: 0;
             }),
         "{report}"
     );
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn unverified_atoms_do_not_skip_cover_checks() {
+    let (dir, output, report, text) = verify_source(
+        "unverified_cover",
+        r#"
+unverified atom u(x: i64) -> i64
+cover "never": x != x;
+body: x;
+"#,
+    );
+
+    assert!(!output.status.success(), "{text}");
+    assert_eq!(report["failure_type"], "cover_unreachable");
 
     std::fs::remove_dir_all(dir).expect("remove fixture directory");
 }

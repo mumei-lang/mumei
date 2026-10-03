@@ -57,6 +57,7 @@ pub(crate) struct VCtx<'a> {
     pub(crate) inferred_invariants: Option<
         &'a std::cell::RefCell<Vec<crate::verification::invariant_inference::InferredInvariant>>,
     >,
+    pub(crate) cover_obligations: Option<std::cell::RefCell<Vec<Bool<'a>>>>,
     /// EffectCtx for tracking allowed vs used effects during body evaluation.
     pub(crate) effect_ctx: Option<&'a std::cell::RefCell<EffectCtx>>,
     /// Per-atom constraint budget: tracks the number of solver.assert() calls.

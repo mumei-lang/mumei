@@ -319,6 +319,12 @@ fn collect_expr_variables(expr: &Expr, variables: &mut HashSet<String>) {
     }
 }
 
+pub(crate) fn expression_ast_references_identifier(expr: &Expr, identifier: &str) -> bool {
+    let mut variables = HashSet::new();
+    collect_expr_variables(expr, &mut variables);
+    variables.contains(identifier)
+}
+
 fn collect_stmt_variables(stmt: &Stmt, variables: &mut HashSet<String>) {
     match stmt {
         Stmt::Let { var, value, .. } | Stmt::Assign { var, value, .. } => {

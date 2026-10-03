@@ -185,6 +185,8 @@ pub struct VerificationCacheEntry {
     pub skipped_clauses: usize,
     #[serde(default)]
     pub inferred_invariants: Vec<crate::verification::invariant_inference::InferredInvariant>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cover_results: Vec<serde_json::Value>,
 }
 
 /// Compute a proof hash that includes transitive dependency signatures and type predicates.
@@ -680,6 +682,7 @@ pub fn migrate_old_cache(base_dir: &Path) {
                         timestamp: timestamp.clone(),
                         skipped_clauses: 0,
                         inferred_invariants: Vec::new(),
+                        cover_results: Vec::new(),
                     },
                 );
             }

@@ -57,6 +57,7 @@ pub fn verify_with_config(
             generation_id: orchestration_generation_id_from_env(),
         },
     )
+    .map(|(inferred_invariants, _)| inferred_invariants)
 }
 
 pub fn verify_with_verification_config(
@@ -64,7 +65,7 @@ pub fn verify_with_verification_config(
     output_dir: &Path,
     module_env: &ModuleEnv,
     config: &VerificationConfig,
-) -> MumeiResult<Vec<InferredInvariant>> {
+) -> MumeiResult<(Vec<InferredInvariant>, Vec<serde_json::Value>)> {
     verify_inner(
         hir_atom,
         output_dir,
@@ -461,7 +462,7 @@ pub(crate) fn verify_inner(
     output_dir: &Path,
     module_env: &ModuleEnv,
     options: VerifyInnerOptions<'_>,
-) -> MumeiResult<Vec<InferredInvariant>> {
+) -> MumeiResult<(Vec<InferredInvariant>, Vec<serde_json::Value>)> {
     let VerifyInnerOptions {
         timeout_ms,
         global_max_unroll,
@@ -504,7 +505,7 @@ pub(crate) fn verify_inner(
     // ジェネリック atom は単相化後に検証される
     // 例: pipe<E: Effect> は検証スキップ、pipe<FileWrite> が検証対象
     if !atom.type_params.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
     // Nested arrays (`[[T]]` params / return types) have no encoding: an
@@ -615,7 +616,7 @@ pub(crate) fn verify_inner(
                 Some(&diagnostics),
                 None,
             );
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         TrustLevel::Unverified => {
             // unverified atom: 警告を出すが、検証は続行する。
@@ -625,7 +626,10 @@ pub(crate) fn verify_inner(
                        Verification results may be incomplete.",
                 atom.name
             );
-            if atom.ensures.trim() == "true" && atom.requires.trim() == "true" {
+            if atom.ensures.trim() == "true"
+                && atom.requires.trim() == "true"
+                && atom.covers.is_empty()
+            {
                 // 契約が trivial な場合、検証する意味がないのでスキップ
                 save_visualizer_report(
                     output_dir,
@@ -644,7 +648,7 @@ pub(crate) fn verify_inner(
                     Some(&diagnostics),
                     None,
                 );
-                return Ok(Vec::new());
+                return Ok((Vec::new(), Vec::new()));
             }
         }
         TrustLevel::Verified => {
@@ -1457,12 +1461,13 @@ pub(crate) fn verify_inner(
     // Set to true when Z3 String constraints are added during expr_to_z3.
     let has_string_constraints_cell = std::cell::Cell::new(has_string_constraints_cell_pre.get());
     let profiler_cell = std::cell::RefCell::new(IncrementalProfiler::new(&solver, &ctx));
-    let vc = VCtx {
+    let mut vc = VCtx {
         ctx: &ctx,
         module_env,
         current_atom: Some(atom),
         linearity_ctx: Some(&linearity_ctx_cell),
         inferred_invariants: Some(&inferred_invariants_cell),
+        cover_obligations: None,
         effect_ctx: Some(&effect_ctx_cell),
         constraint_count: Some(&constraint_count_cell),
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
@@ -1484,7 +1489,6 @@ pub(crate) fn verify_inner(
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
         bitvec_i64_global,
     };
-
     let mut env: Env = HashMap::new();
 
     // Plan 9: Pre-register parameters with correct Z3 Sort based on their base type.
@@ -1497,6 +1501,15 @@ pub(crate) fn verify_inner(
             datatype::param_z3_value_for_vc(&vc, param.name.as_str(), param.type_name.as_deref());
         env.insert(param.name.clone(), var);
     }
+    let cover_input_values: Env = atom
+        .params
+        .iter()
+        .filter_map(|param| {
+            env.get(&param.name)
+                .cloned()
+                .map(|value| (param.name.clone(), value))
+        })
+        .collect();
     seed_tuple_result_components(
         &ctx,
         &mut env,
@@ -2616,7 +2629,26 @@ pub(crate) fn verify_inner(
 
         for cover in &atom.covers {
             let cover_name = cover.label.as_deref().unwrap_or(&cover.clause);
-            let cover_bool = match lower_clause_with_skip(
+            if tuple_component_types(atom.return_type.as_deref()).is_some()
+                && super::loop_detector::expression_ast_references_identifier(
+                    &parse_expression(&cover.clause),
+                    "result",
+                )
+            {
+                diagnostics.push(format!(
+                    "warning: reachability of cover clause {cover_name:?} is unknown because tuple result components are not linked to the body"
+                ));
+                cover_results.push(json!({
+                    "clause": cover.clause,
+                    "label": cover.label,
+                    "status": "unknown",
+                    "witness": serde_json::Value::Null,
+                }));
+                continue;
+            }
+
+            vc.cover_obligations = Some(std::cell::RefCell::new(Vec::new()));
+            let lowered_cover = lower_clause_with_skip(
                 &vc,
                 &mut env,
                 hir_atom,
@@ -2624,7 +2656,13 @@ pub(crate) fn verify_inner(
                 "cover",
                 &mut diagnostics,
                 Some(&solver),
-            )? {
+            );
+            let cover_obligations = vc
+                .cover_obligations
+                .take()
+                .expect("cover obligation collection is active")
+                .into_inner();
+            let cover_bool = match lowered_cover? {
                 ClauseLoweringOutcome::Trivial => Bool::from_bool(&ctx, true),
                 ClauseLoweringOutcome::Skipped => {
                     diagnostics.push(format!(
@@ -2643,12 +2681,15 @@ pub(crate) fn verify_inner(
 
             solver.push();
             solver.assert(&cover_bool);
+            for obligation in &cover_obligations {
+                solver.assert(obligation);
+            }
             let cover_check = solver.check();
             let witness = if cover_check == SatResult::Sat {
                 solver.get_model().map(|model| {
                     let mut witness = serde_json::Map::new();
                     for param in &atom.params {
-                        if let Some(var_z3) = env.get(&param.name) {
+                        if let Some(var_z3) = cover_input_values.get(&param.name) {
                             if let Some(value) = model.eval(var_z3, true) {
                                 witness.insert(param.name.clone(), json!(format!("{}", value)));
                             }
@@ -2750,7 +2791,7 @@ pub(crate) fn verify_inner(
         Some(&success_extra_fields),
     );
     let inferred_invariants = inferred_invariants_cell.borrow().clone();
-    Ok(inferred_invariants)
+    Ok((inferred_invariants, cover_results))
 }
 
 fn reject_resource_state_shadowing(
