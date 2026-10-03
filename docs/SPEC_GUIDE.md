@@ -683,6 +683,15 @@ mumei verify --enable-vacuity-check spec.mm
 
 Use this check in AI-generated-code workflows to catch semantic evasion such as replacing meaningful `requires` or `ensures` clauses with `true`.
 
+### Unreachable verification contexts
+
+Postcondition verification also checks whether the `requires` and body
+constraints can hold together. An unreachable context remains an error under
+the existing contradiction check. The report classifies its ensures clauses
+as vacuous and includes a diagnostic explaining that they would hold
+vacuously. This reachability check is distinct from the mutation-based vacuity
+check above.
+
 ## Contract Isolation Sandbox
 
 Mumei enforces strict separation between specifications (contracts) and implementations to prevent specification gaming by AI agents.

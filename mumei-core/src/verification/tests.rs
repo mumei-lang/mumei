@@ -437,6 +437,8 @@ fn test_executor_marks_symbolic_exponent_ensures_unverifiable() {
     let report = std::fs::read_to_string(output_dir.join("report.json")).unwrap();
     let report_json: serde_json::Value = serde_json::from_str(&report).unwrap();
     assert_eq!(report_json["status"], "unverifiable");
+    assert_eq!(report_json["context_reachability"], "unknown");
+    assert_eq!(report_json["ensures_outcomes"][0]["outcome"], "skipped");
     let diagnostics = report_json["diagnostics"].as_array().unwrap();
     assert!(diagnostics.iter().any(|diag| {
         diag.as_str()

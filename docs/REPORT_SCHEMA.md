@@ -116,6 +116,8 @@ LSP diagnostics include `relatedInformation` for multi-location errors, enabling
 | `input_a` | `string` | No | First input description (legacy; prefer `counterexample`) |
 | `input_b` | `string` | No | Second input description (legacy; prefer `counterexample`) |
 | `reason` | `string` | Yes | Human-readable result description |
+| `context_reachability` | `"reachable" \| "unreachable" \| "unknown"` | Ensures reports | Satisfiability of the context used to verify postconditions |
+| `ensures_outcomes` | `array` | Ensures reports | Per-clause postcondition outcome (`proved`, `vacuous`, `always_false`, `fails_on_some_inputs`, `fails`, `unknown`, or `skipped`) |
 | `violation_type` | `string` | No | `"effect_mismatch"`, `"effect_propagation"`, etc. |
 | `effect_violation` | `object` | No | Effect violation details (see below) |
 | `semantic_feedback` | `object` | No | Rich diagnostics (see below) |
@@ -124,6 +126,18 @@ LSP diagnostics include `relatedInformation` for multi-location errors, enabling
 | `suggestion` | `string` | No | Fix suggestion text (counterexample や unsat core を踏まえた動的な修正提案が含まれる場合がある) |
 | `span` | `object` | No | Source location (`file`, `line`, `col`, `len`) |
 | `type_definition_locations` | `array` | No | Constraint source locations |
+
+Ensures reports include `context_reachability` and an `ensures_outcomes` entry
+for each non-trivial lowered or skipped clause. Each outcome entry contains the
+source `clause` text and its classified `outcome`. An unknown context is never
+reported as unreachable. Unless a satisfiable `ctx ∧ ¬Q` query has already
+established reachability, `context_reachability` comes from the existing Phase 6
+final consistency check. Reports produced before Phase 6 without that evidence
+use `"unknown"`. An unreachable context remains a contradiction error. The report attaches
+`context_reachability: "unreachable"`, `"vacuous"` outcomes, and a diagnostic
+explaining that every ensures clause would hold vacuously.
+These keys are absent from cached (unchanged) results because verification was
+not recomputed for that run.
 
 ## semantic_feedback.structured_unsat_core
 

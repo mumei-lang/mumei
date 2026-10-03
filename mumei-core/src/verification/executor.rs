@@ -557,6 +557,7 @@ pub(crate) fn verify_inner(
             None,
             None,
             Some(&[diagnostic]),
+            None,
         );
         return Err(
             MumeiError::verification_at(err.to_string(), err.span.clone()).with_help(format!(
@@ -587,6 +588,7 @@ pub(crate) fn verify_inner(
                 None,
                 None,
                 Some(&diagnostics),
+                None,
             );
             return Ok(Vec::new());
         }
@@ -615,6 +617,7 @@ pub(crate) fn verify_inner(
                     None,
                     None,
                     Some(&diagnostics),
+                    None,
                 );
                 return Ok(Vec::new());
             }
@@ -1944,6 +1947,7 @@ pub(crate) fn verify_inner(
                 None,
                 None,
                 Some(&diagnostics),
+                None,
             );
             return Err(e);
         }
@@ -2007,6 +2011,7 @@ pub(crate) fn verify_inner(
                 None,
                 None,
                 Some(&diagnostics),
+                None,
             );
             return Err(MumeiError::verification_at(err_str, atom.span.clone()).with_help(
                 format!(
@@ -2020,6 +2025,8 @@ pub(crate) fn verify_inner(
     // 5. 事後条件 (ensures)
     let phase_start = std::time::Instant::now();
     let mut skipped_ensures = false;
+    let mut context_reachability = ContextReachability::Unknown;
+    let mut ensures_outcomes = Vec::new();
     if atom.ensures.trim() != "true" {
         if tuple_component_types(atom.return_type.as_deref()).is_none() {
             // `[e0, …]` tail or `arr` tail: ensures clauses index `result[i]`
@@ -2046,21 +2053,23 @@ pub(crate) fn verify_inner(
                 ClauseLoweringOutcome::Trivial => {}
                 ClauseLoweringOutcome::Skipped => {
                     skipped_ensures = true;
+                    ensures_outcomes.push((ens_clause.trim().to_string(), ClauseOutcome::Skipped));
                 }
                 ClauseLoweringOutcome::Lowered(ens_bool) => {
                     solver.push();
                     solver.assert(&ens_bool.not());
                     let ensures_check = solver.check();
-                    if ensures_check == SatResult::Sat {
+                    let mut spurious_candidate_help = None;
+                    let (
+                        ce_a,
+                        ce_b,
+                        ce_value,
+                        data_flow_trace,
+                        reconstruction_loss,
+                        validation_status,
+                    ) = if ensures_check == SatResult::Sat {
                         // Extract counterexample from Z3 model
-                        let (
-                            ce_a,
-                            ce_b,
-                            ce_value,
-                            data_flow_trace,
-                            reconstruction_loss,
-                            validation_status,
-                        ) = if let Some(model) = solver.get_model() {
+                        if let Some(model) = solver.get_model() {
                             let mut ce_json = serde_json::Map::new();
                             let mut model_map = HashMap::new();
                             for param in &atom.params {
@@ -2112,7 +2121,6 @@ pub(crate) fn verify_inner(
                                     validate_counterexample(atom, &model_values, module_env);
                                 validation_status = Some(validation.validation_status.clone());
                                 if validation.validation_status == "spurious_candidate" {
-                                    solver.pop(1);
                                     let symbols = validation
                                         .symbol_provenance
                                         .iter()
@@ -2132,15 +2140,7 @@ pub(crate) fn verify_inner(
                                         symbols
                                     )
                                     };
-                                    return Err(MumeiError::verification_at(
-                                    format!(
-                                        "Spurious counterexample detected for atom '{}'. Spurious counterexample candidate for atom '{}'",
-                                        atom.name, atom.name
-                                    ),
-                                    atom.span.clone(),
-                                )
-                                .with_help(help)
-                                .with_counterexample(ce_val.clone()));
+                                    spurious_candidate_help = Some(help);
                                 }
                             }
                             (
@@ -2153,8 +2153,44 @@ pub(crate) fn verify_inner(
                             )
                         } else {
                             ("N/A".to_string(), "N/A".to_string(), None, None, None, None)
-                        };
+                        }
+                    } else {
+                        ("N/A".to_string(), "N/A".to_string(), None, None, None, None)
+                    };
+                    if ensures_check == SatResult::Sat {
+                        context_reachability = ContextReachability::Reachable;
+                    }
+                    let holds_check = if ensures_check == SatResult::Sat {
                         solver.pop(1);
+                        solver.push();
+                        solver.assert(&ens_bool);
+                        let holds_check = solver.check();
+                        solver.pop(1);
+                        Some(holds_check)
+                    } else {
+                        solver.pop(1);
+                        None
+                    };
+                    let mut clause_outcome =
+                        classify_vc_outcome(context_reachability, ensures_check, holds_check);
+                    if spurious_candidate_help.is_some() {
+                        clause_outcome = ClauseOutcome::Unknown;
+                    }
+                    ensures_outcomes.push((ens_clause.trim().to_string(), clause_outcome));
+                    let outcome_summary =
+                        ensures_outcome_summary(context_reachability, &ensures_outcomes);
+                    if ensures_check == SatResult::Sat {
+                        if let Some(help) = spurious_candidate_help {
+                            return Err(MumeiError::verification_at(
+                                format!(
+                                    "Spurious counterexample detected for atom '{}'. Spurious counterexample candidate for atom '{}'",
+                                    atom.name, atom.name
+                                ),
+                                atom.span.clone(),
+                            )
+                            .with_help(help)
+                            .with_counterexample(ce_value.clone()));
+                        }
                         let constraint_mappings =
                             build_constraint_mappings_for_atom(atom, module_env);
                         let mut semantic_fb = build_semantic_feedback(
@@ -2183,13 +2219,18 @@ pub(crate) fn verify_inner(
                         } else {
                             None
                         };
+                        let failure_reason = match clause_outcome {
+                            ClauseOutcome::AlwaysFalse => "Postcondition violated. The postcondition is false for every input that satisfies requires (the specification or the body is likely wrong).".to_string(),
+                            ClauseOutcome::FailsOnSomeInputs => "Postcondition violated. The postcondition holds for some inputs but not all.".to_string(),
+                            _ => "Postcondition violated.".to_string(),
+                        };
                         save_visualizer_report(
                             output_dir,
                             "failed",
                             &atom.name,
                             &ce_a,
                             &ce_b,
-                            "Postcondition violated.",
+                            &failure_reason,
                             ce_value.as_ref(),
                             FAILURE_POSTCONDITION_VIOLATED,
                             semantic_fb.as_ref(),
@@ -2198,6 +2239,7 @@ pub(crate) fn verify_inner(
                             data_flow_trace.as_ref(),
                             loss_vector.as_ref(),
                             Some(&diagnostics),
+                            Some(&outcome_summary),
                         );
                         metrics.record_phase(
                             "Phase 5: ensures verification (failed)",
@@ -2206,12 +2248,26 @@ pub(crate) fn verify_inner(
                         metrics.total_constraints = constraint_count_cell.get();
                         metrics.print_summary();
                         // Feature 3d: Add related spans for constraint definition locations
+                        let mut help =
+                            "ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください"
+                                .to_string();
+                        match clause_outcome {
+                            ClauseOutcome::AlwaysFalse => help.push_str(
+                                "\nThe postcondition is false for every input that satisfies requires (the specification or the body is likely wrong).",
+                            ),
+                            ClauseOutcome::FailsOnSomeInputs => {
+                                help.push_str(
+                                    "\nThe postcondition holds for some inputs but not all.",
+                                );
+                            }
+                            _ => {}
+                        }
                         let mut err = MumeiError::verification_at(
-                        "Postcondition (ensures) is not satisfied.",
-                        atom.span.clone(),
-                    )
-                    .with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください")
-                    .with_counterexample(ce_value.clone());
+                            "Postcondition (ensures) is not satisfied.",
+                            atom.span.clone(),
+                        )
+                        .with_help(help)
+                        .with_counterexample(ce_value.clone());
                         for mapping in &constraint_mappings {
                             if mapping.span.line > 0 {
                                 let related_src_span = span_to_source_span("", &mapping.span);
@@ -2234,7 +2290,6 @@ pub(crate) fn verify_inner(
                         return Err(err);
                     }
                     if ensures_check == SatResult::Unknown {
-                        solver.pop(1);
                         let property_based_help = property_based_config
                             .map(|config| {
                                 run_property_based_test_with_mode(
@@ -2262,7 +2317,6 @@ pub(crate) fn verify_inner(
                         }
                         return Err(err);
                     }
-                    solver.pop(1);
                 }
             }
         }
@@ -2288,6 +2342,10 @@ pub(crate) fn verify_inner(
                 None,
                 None,
                 Some(&diagnostics),
+                Some(&ensures_outcome_summary(
+                    context_reachability,
+                    &ensures_outcomes,
+                )),
             );
             return Err(
                 MumeiError::verification_at(UNVERIFIABLE_ERROR_PREFIX, atom.span.clone())
@@ -2337,6 +2395,7 @@ pub(crate) fn verify_inner(
                 None,
                 None,
                 Some(&diagnostics),
+                None,
             );
             return Err(MumeiError::verification_at(
                 format!(
@@ -2360,7 +2419,21 @@ pub(crate) fn verify_inner(
     let profiler_final_check_start = profiler_checkpoint(&vc);
     let final_check = solver.check();
     profile_solver_check(&vc, profiler_final_check_start);
+    context_reachability = match final_check {
+        SatResult::Sat => ContextReachability::Reachable,
+        SatResult::Unsat => ContextReachability::Unreachable,
+        SatResult::Unknown => ContextReachability::Unknown,
+    };
     if final_check == SatResult::Unsat {
+        for (_, outcome) in &mut ensures_outcomes {
+            if *outcome == ClauseOutcome::Proved {
+                *outcome = ClauseOutcome::Vacuous;
+            }
+        }
+        diagnostics.push(format!(
+            "vacuous verification context in atom `{}`: requires and body constraints are unsatisfiable together, so every ensures clause would hold vacuously",
+            atom.name
+        ));
         let unsat_core = solver.get_unsat_core();
         let core_labels: Vec<String> = unsat_core
             .iter()
@@ -2401,6 +2474,10 @@ pub(crate) fn verify_inner(
             None,
             None,
             Some(&diagnostics),
+            Some(&ensures_outcome_summary(
+                context_reachability,
+                &ensures_outcomes,
+            )),
         );
 
         let constraint_summary = if conflicting_constraints.is_empty() {
@@ -2419,10 +2496,13 @@ pub(crate) fn verify_inner(
             z3_check_start.elapsed(),
         );
         metrics.print_summary();
-        return Err(MumeiError::verification_at(
-            constraint_summary,
-            atom.span.clone(),
-        ));
+        let mut err = MumeiError::verification_at(constraint_summary, atom.span.clone());
+        if context_reachability == ContextReachability::Unreachable {
+            err = err.with_help(
+                "The verification context is vacuous: requires and body constraints are unsatisfiable together, so every ensures clause would hold vacuously.",
+            );
+        }
+        return Err(err);
     }
     if final_check == SatResult::Unknown {
         let heatmap = profiler_cell
@@ -2486,6 +2566,10 @@ pub(crate) fn verify_inner(
         None,
         None,
         Some(&diagnostics),
+        Some(&ensures_outcome_summary(
+            context_reachability,
+            &ensures_outcomes,
+        )),
     );
     let inferred_invariants = inferred_invariants_cell.borrow().clone();
     Ok(inferred_invariants)
@@ -2836,6 +2920,19 @@ fn z3_dynamic_to_cex_value(value: &Dynamic) -> Option<CexValue> {
     parse_z3_numeric_to_f64(&text).map(CexValue::Float)
 }
 
+fn ensures_outcome_summary(
+    context_reachability: ContextReachability,
+    outcomes: &[(String, ClauseOutcome)],
+) -> serde_json::Value {
+    json!({
+        "context_reachability": context_reachability,
+        "ensures_outcomes": outcomes.iter().map(|(clause, outcome)| json!({
+            "clause": clause,
+            "outcome": outcome,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn save_visualizer_report(
     output_dir: &Path,
@@ -2852,6 +2949,7 @@ pub(crate) fn save_visualizer_report(
     data_flow_trace: Option<&DataFlowTrace>,
     loss_vector: Option<&serde_json::Value>,
     diagnostics: Option<&[String]>,
+    outcome_summary: Option<&serde_json::Value>,
 ) {
     let mut report = json!({
         "status": status,
@@ -2860,6 +2958,13 @@ pub(crate) fn save_visualizer_report(
         "input_b": b,
         "reason": reason
     });
+    if let Some(outcome_summary) = outcome_summary.and_then(serde_json::Value::as_object) {
+        if let Some(report) = report.as_object_mut() {
+            for (key, value) in outcome_summary {
+                report.insert(key.clone(), value.clone());
+            }
+        }
+    }
     if !failure_type.is_empty() {
         report["failure_type"] = json!(failure_type);
     }
