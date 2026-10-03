@@ -125,6 +125,7 @@ LSP diagnostics include `relatedInformation` for multi-location errors, enabling
 | `failure_type` | `string` | No | Failure category code |
 | `failed_clause` | `string` | No | Failing ensures conjunct on a postcondition violation |
 | `failed_clause_label` | `string` | No | Optional label for the failing ensures conjunct; absent when unlabeled |
+| `counterexample_fidelity` | `"exact" \| "bounded" \| "approximate"` | No | Exact means replayed under Mumei semantics and the violation reproduced; approximate means not replayed or replay was inconclusive; bounded means a bounded-depth phase produced the counterexample |
 | `suggestion` | `string` | No | Fix suggestion text (counterexample や unsat core を踏まえた動的な修正提案が含まれる場合がある) |
 | `span` | `object` | No | Source location (`file`, `line`, `col`, `len`) |
 | `type_definition_locations` | `array` | No | Constraint source locations |

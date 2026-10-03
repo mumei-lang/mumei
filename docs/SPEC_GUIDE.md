@@ -26,6 +26,14 @@ ensures "bounded by dividend": result <= a && result >= 0 - a;
 body: a / b;
 ```
 
+## Phase contracts
+
+`mumei_core::verification::phase_contract::PHASE_CONTRACTS` documents executor
+order and facts that flow between verification phases. Facts are declared only
+where data actually flows; static checks are independent of those facts.
+Counterexample fidelity is diagnostic metadata and does not affect verification
+results.
+
 ## Decidable Fragment
 
 ### Linear arithmetic

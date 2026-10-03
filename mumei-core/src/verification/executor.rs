@@ -2223,7 +2223,7 @@ pub(crate) fn verify_inner(
                             if let Some(loss) = reconstruction_loss {
                                 feedback["reconstruction_loss"] = json!(loss);
                             }
-                            if let Some(status) = validation_status {
+                            if let Some(status) = validation_status.as_ref() {
                                 feedback["counterexample_validation_status"] = json!(status);
                             }
                         }
@@ -2253,6 +2253,14 @@ pub(crate) fn verify_inner(
                         extra_report_fields["failed_clause"] = json!(failed_clause);
                         if let Some(label) = failed_clause_label {
                             extra_report_fields["failed_clause_label"] = json!(label);
+                        }
+                        if ce_value.is_some() {
+                            extra_report_fields["counterexample_fidelity"] =
+                                json!(counterexample_fidelity(
+                                    phase_contract(ENSURES_PHASE)
+                                        .expect("ensures phase is declared"),
+                                    validation_status.as_deref(),
+                                ));
                         }
                         save_visualizer_report(
                             output_dir,
