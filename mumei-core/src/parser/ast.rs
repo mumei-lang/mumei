@@ -429,6 +429,20 @@ pub struct Param {
     pub fn_contract_ensures: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClauseKind {
+    Requires,
+    Ensures,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClauseLabel {
+    pub kind: ClauseKind,
+    pub clause: String,
+    pub label: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Atom {
     pub name: String,
@@ -440,6 +454,7 @@ pub struct Atom {
     pub trace_id: Option<String>,
     pub spec_metadata: HashMap<String, String>,
     pub requires: String,
+    pub clause_labels: Vec<ClauseLabel>,
     pub forall_constraints: Vec<Quantifier>,
     pub ensures: String,
     pub body_expr: String,

@@ -12,6 +12,25 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+fn clause_label_for<'a>(
+    atom: &'a crate::parser::Atom,
+    kind: crate::parser::ClauseKind,
+    conjunct: &str,
+) -> Option<&'a str> {
+    atom.clause_labels
+        .iter()
+        .find(|label| {
+            let conjunct = conjunct.trim();
+            label.kind == kind
+                && (crate::verification::spec_validation::strip_wrapping_parens(&label.clause)
+                    == conjunct
+                    || split_top_level_conjunctions(&label.clause)
+                        .iter()
+                        .any(|part| part.trim() == conjunct))
+        })
+        .map(|label| label.label.as_str())
+}
+
 /// mumei.toml の [proof]/[build] 設定を反映した verify
 /// timeout_ms: Z3 ソルバのタイムアウト（ミリ秒）
 /// global_max_unroll: BMC のグローバル展開深度
@@ -2224,6 +2243,17 @@ pub(crate) fn verify_inner(
                             ClauseOutcome::FailsOnSomeInputs => "Postcondition violated. The postcondition holds for some inputs but not all.".to_string(),
                             _ => "Postcondition violated.".to_string(),
                         };
+                        let failed_clause = ens_clause.trim();
+                        let failed_clause_label = clause_label_for(
+                            atom,
+                            crate::parser::ClauseKind::Ensures,
+                            failed_clause,
+                        );
+                        let mut extra_report_fields = outcome_summary.clone();
+                        extra_report_fields["failed_clause"] = json!(failed_clause);
+                        if let Some(label) = failed_clause_label {
+                            extra_report_fields["failed_clause_label"] = json!(label);
+                        }
                         save_visualizer_report(
                             output_dir,
                             "failed",
@@ -2239,7 +2269,7 @@ pub(crate) fn verify_inner(
                             data_flow_trace.as_ref(),
                             loss_vector.as_ref(),
                             Some(&diagnostics),
-                            Some(&outcome_summary),
+                            Some(&extra_report_fields),
                         );
                         metrics.record_phase(
                             "Phase 5: ensures verification (failed)",
@@ -2261,6 +2291,13 @@ pub(crate) fn verify_inner(
                                 );
                             }
                             _ => {}
+                        }
+                        if let Some(label) = failed_clause_label {
+                            help.push_str(&format!(
+                                "\nviolated ensures clause {}: {}",
+                                json!(label),
+                                failed_clause
+                            ));
                         }
                         let mut err = MumeiError::verification_at(
                             "Postcondition (ensures) is not satisfied.",
@@ -2949,7 +2986,7 @@ pub(crate) fn save_visualizer_report(
     data_flow_trace: Option<&DataFlowTrace>,
     loss_vector: Option<&serde_json::Value>,
     diagnostics: Option<&[String]>,
-    outcome_summary: Option<&serde_json::Value>,
+    extra_fields: Option<&serde_json::Value>,
 ) {
     let mut report = json!({
         "status": status,
@@ -2958,13 +2995,6 @@ pub(crate) fn save_visualizer_report(
         "input_b": b,
         "reason": reason
     });
-    if let Some(outcome_summary) = outcome_summary.and_then(serde_json::Value::as_object) {
-        if let Some(report) = report.as_object_mut() {
-            for (key, value) in outcome_summary {
-                report.insert(key.clone(), value.clone());
-            }
-        }
-    }
     if !failure_type.is_empty() {
         report["failure_type"] = json!(failure_type);
     }
@@ -2984,6 +3014,11 @@ pub(crate) fn save_visualizer_report(
     }
     if let Some(diagnostics) = diagnostics {
         report["diagnostics"] = json!(diagnostics);
+    }
+    if let Some(serde_json::Value::Object(fields)) = extra_fields {
+        for (key, value) in fields {
+            report[key.as_str()] = value.clone();
+        }
     }
     let skipped_clauses = diagnostics
         .map(|entries| {

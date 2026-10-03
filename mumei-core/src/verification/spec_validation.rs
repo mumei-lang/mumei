@@ -900,7 +900,7 @@ pub(crate) fn split_top_level_conjunctions(input: &str) -> Vec<String> {
     clauses
 }
 
-fn strip_wrapping_parens(input: &str) -> &str {
+pub(crate) fn strip_wrapping_parens(input: &str) -> &str {
     let trimmed = input.trim();
     if !(trimmed.starts_with('(') && trimmed.ends_with(')')) {
         return trimmed;

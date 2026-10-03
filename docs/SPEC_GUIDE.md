@@ -9,6 +9,23 @@ keywords: "mumei specification guide, Z3 decidable fragment, formal methods, pro
 
 This guide describes the P8-D decidable specification fragment that Mumei expects Z3 to verify reliably. Stay inside these patterns for first-pass verification; use Lean escalation for specifications that intentionally need stronger reasoning.
 
+## Optional clause labels
+
+`requires` and `ensures` clauses may have an optional quoted label before the
+colon. Labels are diagnostic metadata: they do not change verification,
+proof hashes, cache keys, or certificates. An ensures label on a conjunction
+is shown for whichever top-level conjunct fails.
+Labels on extern function contracts are accepted by the parser but are not
+currently shown in diagnostics; caller-side precondition failures report the
+callee's whole `requires` and do not carry labels.
+
+```mumei
+atom safe_div(a: i64, b: i64) -> i64
+requires "divisor must be non-zero": b != 0;
+ensures "bounded by dividend": result <= a && result >= 0 - a;
+body: a / b;
+```
+
 ## Decidable Fragment
 
 ### Linear arithmetic

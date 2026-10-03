@@ -42,6 +42,7 @@ mod tests {
             params: vec![],
             trace_id: None,
             spec_metadata: Default::default(),
+            clause_labels: Vec::new(),
             requires: "true".to_string(),
             forall_constraints: vec![],
             ensures: "true".to_string(),

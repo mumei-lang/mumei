@@ -778,6 +778,60 @@ atom add(a: i64, b: i64)
     }
 
     #[test]
+    fn test_parse_optional_clause_labels() {
+        let labeled = parse_atom(
+            r#"
+atom labeled(x: i64) -> i64
+    requires "positive input": x > 0;
+    requires "small input": x < 10;
+    ensures "bounded \"result\"": result >= 0 && result <= 10;
+    body: x;
+"#,
+        );
+        let unlabeled = parse_atom(
+            r#"
+atom labeled(x: i64) -> i64
+    requires: x > 0;
+    requires: x < 10;
+    ensures: result >= 0 && result <= 10;
+    body: x;
+"#,
+        );
+
+        assert_eq!(labeled.requires, unlabeled.requires);
+        assert_eq!(labeled.ensures, unlabeled.ensures);
+        assert_eq!(
+            labeled.clause_labels,
+            vec![
+                ClauseLabel {
+                    kind: ClauseKind::Requires,
+                    clause: "x > 0".to_string(),
+                    label: "positive input".to_string(),
+                },
+                ClauseLabel {
+                    kind: ClauseKind::Requires,
+                    clause: "x < 10".to_string(),
+                    label: "small input".to_string(),
+                },
+                ClauseLabel {
+                    kind: ClauseKind::Ensures,
+                    clause: "result >= 0 && result <= 10".to_string(),
+                    label: "bounded \"result\"".to_string(),
+                },
+            ]
+        );
+        assert!(unlabeled.clause_labels.is_empty());
+        assert_eq!(
+            crate::resolver::compute_proof_hash(&labeled, &crate::verification::ModuleEnv::new()),
+            crate::resolver::compute_proof_hash(&unlabeled, &crate::verification::ModuleEnv::new())
+        );
+        assert_eq!(
+            crate::proof_cert::compute_atom_content_hash_v2(&labeled),
+            crate::proof_cert::compute_atom_content_hash_v2(&unlabeled)
+        );
+    }
+
+    #[test]
     fn test_parse_atom_with_trait_bounds() {
         let source = r#"
 atom max_val<T: Comparable>(a: T, b: T)
@@ -1587,6 +1641,30 @@ extern "Rust" {
         assert_eq!(externs.len(), 1);
         assert_eq!(externs[0].language, "Rust");
         assert_eq!(externs[0].functions.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_extern_block_with_labeled_contracts() {
+        let source = r#"
+extern "Rust" {
+    fn abs(x: i64) -> i64
+        requires "nonnegative input": x >= 0;
+        ensures "nonnegative result": result >= 0;
+}
+"#;
+        let items = parse_module(source);
+        let extern_fn = items
+            .iter()
+            .find_map(|item| {
+                if let Item::ExternBlock(block) = item {
+                    block.functions.first()
+                } else {
+                    None
+                }
+            })
+            .expect("extern function");
+        assert_eq!(extern_fn.requires.as_deref(), Some("x >= 0"));
+        assert_eq!(extern_fn.ensures.as_deref(), Some("result >= 0"));
     }
 
     // --- New tests: Lexer and token-based parsing ---
