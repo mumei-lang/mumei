@@ -124,3 +124,21 @@ body: x + 1;
         );
     }
 }
+
+#[test]
+fn compound_label_followed_by_another_ensures_still_matches() {
+    let (output, report, text) = verify_source(
+        "compound_then_more",
+        r#"
+atom bounded(x: i64) -> i64
+requires: x >= 0;
+ensures "bounded result": result >= 0 && result <= 2;
+ensures: result >= x;
+body: x;
+"#,
+    );
+
+    assert!(!output.status.success(), "{text}");
+    assert_eq!(report["failed_clause"], "result >= 0 && result <= 2");
+    assert_eq!(report["failed_clause_label"], "bounded result");
+}

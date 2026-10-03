@@ -20,10 +20,13 @@ fn clause_label_for<'a>(
     atom.clause_labels
         .iter()
         .find(|label| {
+            let conjunct = conjunct.trim();
             label.kind == kind
-                && split_top_level_conjunctions(&label.clause)
-                    .iter()
-                    .any(|part| part.trim() == conjunct.trim())
+                && (crate::verification::spec_validation::strip_wrapping_parens(&label.clause)
+                    == conjunct
+                    || split_top_level_conjunctions(&label.clause)
+                        .iter()
+                        .any(|part| part.trim() == conjunct))
         })
         .map(|label| label.label.as_str())
 }
