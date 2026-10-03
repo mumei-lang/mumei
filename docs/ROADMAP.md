@@ -2716,6 +2716,36 @@ templates are:
 - **M3**: ✅ unchanged-prefix テンプレ + `forall` 翻訳のコスト制御、opt-in 構文。CLI フラグは parser が config より先に実行されるため Deferred。
 - **スコープ外**: CEGIS による不変量の反例駆動 *修正*（反例からの式修补は B-4/mumei-agent 側の管轄）、`decreases` の自動推論、ネスト loop の交互不変量、非線形・浮動小数点不変量。
 
+## P33: 検証診断と信頼境界の明示化（VC 結果分類・phase contract・bridge 公理監査）— 🚧 Wave 1 実装中
+
+**目的**: 「通った / 落ちた」の 2 値だった検証結果に *なぜ* を付け、検証器自身が置いている前提（フェーズ間の事実、反例の忠実度、Lean bridge の信頼境界）を宣言・監査可能にする。いずれも既存の fail-closed 方針を緩めない — 追加するのは診断と監査のみで、`unknown` を証明・到達不能として扱う経路は設けない。
+
+### Wave 1（優先度: 高）
+
+| 項目 | repo | 内容 | 判断ポイント |
+|---|---|---|---|
+| W1-A: ensures 結果の分類 | mumei | 文脈 `ctx`（requires ∧ body 制約）の SAT と、反例経路でのみ `ctx ∧ Q` を追加照会し、各 ensures 句を `proved` / `vacuous` / `always_false` / `fails_on_some_inputs` / `fails` / `unknown` / `skipped` に分類。verify レポートに `context_reachability` / `ensures_outcomes` を追加。 | `ctx` unsat は従来どおり Phase 6 の矛盾エラーのまま（緩めない）。追加クエリは文脈 1 回 + 失敗時 1 回のみ。 |
+| W1-B: clause label | mumei | `requires "理由": expr;` / `ensures "理由": expr;` で句に人間可読ラベルを付与し、失敗メッセージ・レポートに載せる。 | ラベルなしは完全互換。ラベルは意味論に影響しない。 |
+| W1-C: phase contract | mumei | atom 検証の各フェーズが前提とする事実・確立する事実・無効化する事実を宣言テーブル化し、順序整合をテストで検査。各フェーズの反例忠実度（exact / bounded / approximate）を宣言し、失敗レポートに付与。 | 宣言は実行順を変えない。テーブルと実装の乖離をテストで検出する。 |
+| W1-D: bridge 公理監査 | mumei-lean | 生成 Lean に atom ごとの名前付き bridge 公理と `<atom>_certified` 定理を出力し、`lake build` 後に依存公理を収集。標準公理と自身の bridge 公理以外（`sorryAx`、証明が持ち込んだ axiom 等）があれば昇格を拒否し、証明書メタデータに監査結果を記録。 | 既存の translator version / bridge hash ゲートは維持。 |
+| W1-E: label の消費・生成 | mumei-agent | verify レポートの clause label を heal / 監査レポートで利用し、移行提案で検出理由をラベルとして出力。 | 旧 mumei との互換のため出力はバージョン検出でゲート。 |
+
+### Wave 2（優先度: 中）
+
+- **句単位の信頼モード**: atom 単位の `trusted` を句単位へ細分化（「実装側では仮定のみ」「呼び出し側では検査のみ」等）。trust surface メトリクス（P20）と整合させる。
+- **`cover` 句**: assert の双対として「この条件を満たす実行が存在する」ことを要求。witness はテスト生成・監査の入力に使える。
+- **ensures の lemma エクスポート**: 検証済み量化事実をトリガ付きで他 atom の文脈へ供給。
+- **Z3 インクリメンタル再利用**: 句ごとの push/pop と unsat core の再利用でクエリ数増加分を相殺。
+- **`verify-cert` での公理監査表示**: W1-D の監査結果を mumei 側で表示し、拒否済み証明書を受理しない。
+
+### Wave 3（優先度: 低〜長期、記録のみ）
+
+- refinement 型の witness 必須化、量化束縛への refinement 注入規則。
+- 例外出口ごとの契約と網羅性検査、async の rely/guarantee。
+- 反例の source 復元を lowering の逆写像として体系化。
+- `--keep-phase-artifacts`（中間フェーズ dump）、SARIF 出力、終了コードの契約化。
+- HIR を中心にした emit 系の再編、検証器の宣言的仕様書。
+
 ---
 
 ## Related Documents
