@@ -42,6 +42,25 @@ fn verify_json(
     (dir, output, payload)
 }
 
+fn output_text(output: &Output) -> String {
+    format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn verify_text(name: &str, dir: &PathBuf) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg(dir.join(format!("{name}.mm")))
+        .arg("--report-dir")
+        .arg(dir)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run verify")
+}
+
 #[test]
 fn proved_ensures_report_reachable_context_and_outcome() {
     let (dir, output, report) = verify_json(
@@ -79,9 +98,12 @@ body: { x + 1 };
 "#,
         &[],
     );
+    let human_output = verify_text("always_false", &dir);
+    let cli_output = output_text(&human_output);
     std::fs::remove_dir_all(dir).expect("remove fixture directory");
 
     assert!(!output.status.success());
+    assert!(!human_output.status.success());
     assert_eq!(report["status"], "failed");
     assert_eq!(report["context_reachability"], "reachable");
     assert_eq!(report["ensures_outcomes"][0]["outcome"], "always_false");
@@ -89,6 +111,18 @@ body: { x + 1 };
         .as_str()
         .unwrap()
         .contains("false for every input that satisfies requires"));
+    assert!(
+        cli_output.contains(
+            "ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください"
+        ),
+        "{cli_output}"
+    );
+    assert!(
+        cli_output.contains(
+            "The postcondition is false for every input that satisfies requires (the specification or the body is likely wrong)."
+        ),
+        "{cli_output}"
+    );
 }
 
 #[test]
@@ -103,9 +137,12 @@ body: { x + 1 };
 "#,
         &[],
     );
+    let human_output = verify_text("some_inputs", &dir);
+    let cli_output = output_text(&human_output);
     std::fs::remove_dir_all(dir).expect("remove fixture directory");
 
     assert!(!output.status.success());
+    assert!(!human_output.status.success());
     assert_eq!(report["status"], "failed");
     assert_eq!(
         report["ensures_outcomes"][0]["outcome"],
@@ -115,6 +152,16 @@ body: { x + 1 };
         .as_str()
         .unwrap()
         .contains("holds for some inputs but not all"));
+    assert!(
+        cli_output.contains(
+            "ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください"
+        ),
+        "{cli_output}"
+    );
+    assert!(
+        cli_output.contains("The postcondition holds for some inputs but not all."),
+        "{cli_output}"
+    );
 }
 
 const VACUOUS_CONTEXT_SOURCE: &str = r#"
@@ -149,6 +196,12 @@ fn unreachable_context_remains_contradiction_and_classifies_ensures_as_vacuous()
 
     assert!(!output.status.success());
     assert!(stderr.contains("Verification Error: Contradiction found."));
+    assert!(
+        stderr.contains(
+            "The verification context is vacuous: requires and body constraints are unsatisfiable together, so every ensures clause would hold vacuously."
+        ),
+        "{stderr}"
+    );
     assert_eq!(visualizer_report["status"], "failed");
     assert_eq!(visualizer_report["reason"], "Logic contradiction.");
     assert_eq!(visualizer_report["failure_type"], "invariant_violated");

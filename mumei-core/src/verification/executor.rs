@@ -2248,27 +2248,26 @@ pub(crate) fn verify_inner(
                         metrics.total_constraints = constraint_count_cell.get();
                         metrics.print_summary();
                         // Feature 3d: Add related spans for constraint definition locations
-                        let mut err = MumeiError::verification_at(
-                            "Postcondition (ensures) is not satisfied.",
-                            atom.span.clone(),
-                        )
-                        .with_help(
-                            "ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください",
-                        )
-                        .with_counterexample(ce_value.clone());
+                        let mut help =
+                            "ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください"
+                                .to_string();
                         match clause_outcome {
-                            ClauseOutcome::AlwaysFalse => {
-                                err = err.with_help(
-                                    "The postcondition is false for every input that satisfies requires (the specification or the body is likely wrong).",
-                                );
-                            }
+                            ClauseOutcome::AlwaysFalse => help.push_str(
+                                "\nThe postcondition is false for every input that satisfies requires (the specification or the body is likely wrong).",
+                            ),
                             ClauseOutcome::FailsOnSomeInputs => {
-                                err = err.with_help(
-                                    "The postcondition holds for some inputs but not all.",
+                                help.push_str(
+                                    "\nThe postcondition holds for some inputs but not all.",
                                 );
                             }
                             _ => {}
                         }
+                        let mut err = MumeiError::verification_at(
+                            "Postcondition (ensures) is not satisfied.",
+                            atom.span.clone(),
+                        )
+                        .with_help(help)
+                        .with_counterexample(ce_value.clone());
                         for mapping in &constraint_mappings {
                             if mapping.span.line > 0 {
                                 let related_src_span = span_to_source_span("", &mapping.span);
