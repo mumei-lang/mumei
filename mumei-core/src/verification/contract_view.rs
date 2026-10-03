@@ -41,8 +41,7 @@ fn contract_view_with_dropped_conjuncts(atom: &Atom, view: ContractView) -> (Str
         .iter()
         .filter(|mode| mode.kind == kind && mode.mode == dropped_mode)
     {
-        for conjunct in split_top_level_conjunctions(&mode.clause) {
-            let conjunct = normalize_conjunct(&conjunct);
+        for conjunct in flatten_conjuncts(&mode.clause) {
             *excluded.entry(conjunct).or_default() += 1;
         }
     }
@@ -52,8 +51,7 @@ fn contract_view_with_dropped_conjuncts(atom: &Atom, view: ContractView) -> (Str
 
     let mut kept = Vec::new();
     let mut dropped = Vec::new();
-    for conjunct in split_top_level_conjunctions(source) {
-        let conjunct = normalize_conjunct(&conjunct);
+    for conjunct in flatten_conjuncts(source) {
         if let Some(count) = excluded.get_mut(&conjunct) {
             if *count > 0 {
                 *count -= 1;
@@ -73,13 +71,49 @@ fn contract_view_with_dropped_conjuncts(atom: &Atom, view: ContractView) -> (Str
     let contract = if kept.is_empty() {
         "true".to_string()
     } else {
-        kept.join(" && ")
+        kept.iter()
+            .map(|conjunct| format!("({conjunct})"))
+            .collect::<Vec<_>>()
+            .join(" && ")
     };
     (contract, dropped)
 }
 
+fn flatten_conjuncts(source: &str) -> Vec<String> {
+    let mut flattened = Vec::new();
+    for conjunct in split_top_level_conjunctions(source) {
+        let conjunct = normalize_conjunct(&conjunct);
+        if split_top_level_conjunctions(&conjunct).len() > 1 {
+            flattened.extend(flatten_conjuncts(&conjunct));
+        } else {
+            flattened.push(conjunct);
+        }
+    }
+    flattened
+}
+
 fn normalize_conjunct(conjunct: &str) -> String {
-    strip_wrapping_parens(conjunct.trim()).trim().to_string()
+    let normalized = strip_wrapping_parens(conjunct.trim());
+    let chars: Vec<char> = normalized.chars().collect();
+    let mut result = String::with_capacity(normalized.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let current = chars[index];
+        result.push(current);
+        index += 1;
+        if current == '-' && index < chars.len() && chars[index].is_whitespace() {
+            let previous = result[..result.len() - current.len_utf8()]
+                .chars()
+                .rev()
+                .find(|character| !character.is_whitespace());
+            if previous.is_none_or(|character| "<(=,+-*/!&|".contains(character)) {
+                while index < chars.len() && chars[index].is_whitespace() {
+                    index += 1;
+                }
+            }
+        }
+    }
+    result.trim().to_string()
 }
 
 #[cfg(test)]
@@ -101,7 +135,10 @@ mod tests {
             contract_view(&atom, ContractView::BodyRequires),
             "(x > 0) && (x > 0)"
         );
-        assert_eq!(contract_view(&atom, ContractView::CallerRequires), "x > 0");
+        assert_eq!(
+            contract_view(&atom, ContractView::CallerRequires),
+            "(x > 0)"
+        );
     }
 
     #[test]
@@ -115,7 +152,7 @@ mod tests {
 
         assert_eq!(
             contract_view(&atom, ContractView::BodyEnsures),
-            "result > 0"
+            "(result > 0)"
         );
         assert!(dropped_conjuncts(&atom, ContractView::BodyEnsures).is_empty());
     }
@@ -133,6 +170,101 @@ mod tests {
         assert_eq!(
             contract_view(&atom, ContractView::CallerEnsures),
             "result > 1 && result < 3"
+        );
+    }
+
+    #[test]
+    fn views_match_middle_moded_clauses_for_all_contract_sides() {
+        let body_requires = parse_atom_from_source(
+            "atom body_requires(x: i64) -> i64 \
+             requires: x > 0; \
+             requires check: x > 1; \
+             requires: x > 2; \
+             body: x;",
+        );
+        assert_eq!(
+            contract_view(&body_requires, ContractView::BodyRequires),
+            "(x > 0) && (x > 2)"
+        );
+
+        let caller_requires = parse_atom_from_source(
+            "atom caller_requires(x: i64) -> i64 \
+             requires: x > 0; \
+             requires assume: x > 1; \
+             requires: x > 2; \
+             body: x;",
+        );
+        assert_eq!(
+            contract_view(&caller_requires, ContractView::CallerRequires),
+            "(x > 0) && (x > 2)"
+        );
+
+        let body_ensures = parse_atom_from_source(
+            "atom body_ensures(x: i64) -> i64 \
+             ensures: result > 0; \
+             ensures assume: result > 1; \
+             ensures: result > 2; \
+             body: x;",
+        );
+        assert_eq!(
+            contract_view(&body_ensures, ContractView::BodyEnsures),
+            "(result > 0) && (result > 2)"
+        );
+
+        let caller_ensures = parse_atom_from_source(
+            "atom caller_ensures(x: i64) -> i64 \
+             ensures: result > 0; \
+             ensures check: result > 1; \
+             ensures: result > 2; \
+             body: x;",
+        );
+        assert_eq!(
+            contract_view(&caller_ensures, ContractView::CallerEnsures),
+            "(result > 0) && (result > 2)"
+        );
+    }
+
+    #[test]
+    fn views_flatten_compound_mode_clauses_next_to_other_clauses() {
+        let atom = parse_atom_from_source(
+            "atom compound(x: i64) -> i64 \
+             ensures: result > 0; \
+             ensures assume: result > 100 && result < 200; \
+             ensures: result < 300; \
+             body: x;",
+        );
+
+        assert_eq!(
+            contract_view(&atom, ContractView::BodyEnsures),
+            "(result > 0) && (result < 300)"
+        );
+
+        let checked_compound = parse_atom_from_source(
+            "atom checked_compound(x: i64) -> i64 \
+             ensures: result > 0; \
+             ensures check: result > 100 && result < 200; \
+             ensures: result < 300; \
+             body: x;",
+        );
+        assert_eq!(
+            contract_view(&checked_compound, ContractView::CallerEnsures),
+            "(result > 0) && (result < 300)"
+        );
+    }
+
+    #[test]
+    fn caller_requires_parenthesizes_retained_disjunctions() {
+        let atom = parse_atom_from_source(
+            "atom disjunction(x: i64) -> i64 \
+             requires: x > 10 || x < -10; \
+             requires assume: x != 99; \
+             requires: x < 50; \
+             body: x;",
+        );
+
+        assert_eq!(
+            contract_view(&atom, ContractView::CallerRequires),
+            "(x > 10 || x < -10) && (x < 50)"
         );
     }
 

@@ -891,6 +891,48 @@ atom bad_mode(x: i64) -> i64
     }
 
     #[test]
+    fn test_parse_rejects_quantified_moded_requires() {
+        for (mode, quantifier) in [("check", "forall"), ("assume", "exists")] {
+            let source = format!(
+                r#"
+atom quantified(arr: [i64], n: i64) -> i64
+    requires {mode}: {quantifier}(i, 0, n, arr[i] > 0);
+    ensures: result > 0;
+    body: arr[0];
+"#
+            );
+            let errors = item::parse_module_from_source_checked(&source)
+                .expect_err("quantified moded requires must be rejected");
+            assert!(
+                errors.iter().any(|error| error
+                    == "clause trust modes (assume/check) are not supported on requires clauses containing quantifiers (forall/exists)"),
+                "unexpected syntax errors: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_keeps_unmoded_quantified_requires() {
+        let items = item::parse_module_from_source_checked(
+            r#"
+atom quantified(arr: [i64], n: i64) -> i64
+    requires: n >= 1 && forall(i, 0, n, arr[i] > 0);
+    ensures: result > 0;
+    body: arr[0];
+"#,
+        )
+        .expect("ordinary quantified requires remain supported");
+        let atom = items
+            .iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) => Some(atom),
+                _ => None,
+            })
+            .expect("quantified atom");
+        assert_eq!(atom.forall_constraints.len(), 1);
+    }
+
+    #[test]
     fn test_parse_atom_with_trait_bounds() {
         let source = r#"
 atom max_val<T: Comparable>(a: T, b: T)

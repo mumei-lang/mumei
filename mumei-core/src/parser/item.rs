@@ -1847,6 +1847,12 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                     });
                 }
                 if let Some(mode) = mode {
+                    if !quantifier_spans(&clause).is_empty() {
+                        ctx.syntax_failure(
+                            "clause trust modes (assume/check) are not supported on requires clauses containing quantifiers (forall/exists)"
+                                .to_string(),
+                        );
+                    }
                     clause_modes.push(ClauseMode {
                         kind: ClauseKind::Requires,
                         clause: clause.clone(),

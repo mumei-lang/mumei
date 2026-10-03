@@ -183,7 +183,11 @@ pub(crate) fn check_contract_subsumption<'a>(
     // Without this, the check would ask "for ALL params, does ensures ⇒
     // contract?" which is too strong. We need "for params satisfying
     // requires, does ensures ⇒ contract?".
-    let concrete_req = concrete_atom.requires.trim();
+    let concrete_requires = crate::verification::contract_view(
+        concrete_atom,
+        crate::verification::ContractView::CallerRequires,
+    );
+    let concrete_req = concrete_requires.trim();
     let requires_bool_opt = if concrete_req != "true" && !concrete_req.is_empty() {
         let req_ast = parse_expression(concrete_req);
         let value = expr_to_z3(vc, &req_ast, &mut concrete_env, None).map_err(|error| {
@@ -195,7 +199,7 @@ pub(crate) fn check_contract_subsumption<'a>(
         Some(value.as_bool().ok_or_else(|| {
             MumeiError::verification(format!(
                 "Contract subsumption requires '{}' to be boolean",
-                concrete_atom.requires
+                concrete_requires
             ))
         })?)
     } else {
@@ -256,7 +260,11 @@ pub(crate) fn check_contract_subsumption<'a>(
     }
 
     // Parse and evaluate the concrete atom's ensures.
-    let concrete_ens_ast = parse_expression(&concrete_atom.ensures);
+    let concrete_ensures = crate::verification::contract_view(
+        concrete_atom,
+        crate::verification::ContractView::CallerEnsures,
+    );
+    let concrete_ens_ast = parse_expression(&concrete_ensures);
     let concrete_ens_z3 =
         expr_to_z3(vc, &concrete_ens_ast, &mut concrete_env, None).map_err(|error| {
             MumeiError::verification(format!(
@@ -282,7 +290,7 @@ pub(crate) fn check_contract_subsumption<'a>(
             _ => {
                 return Err(MumeiError::verification(format!(
                     "Contract subsumption ensures must be boolean: concrete '{}' and contract '{}'",
-                    concrete_atom.ensures, contract_ensures
+                    concrete_ensures, contract_ensures
                 )))
             }
         };
@@ -304,7 +312,7 @@ pub(crate) fn check_contract_subsumption<'a>(
     if sat_result == SatResult::Sat {
         return Err(MumeiError::verification(format!(
             "Contract subsumption failed: atom_ref({}) passed to {}.{} — concrete ensures '{}' does not imply contract ensures '{}'",
-            concrete_atom.name, callee_name, param_name, concrete_atom.ensures, contract_ensures
+            concrete_atom.name, callee_name, param_name, concrete_ensures, contract_ensures
         )));
     }
     if sat_result == SatResult::Unknown {

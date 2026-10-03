@@ -226,6 +226,97 @@ body: 0;
 }
 
 #[test]
+fn middle_assumed_ensures_clause_is_filtered_from_body_proofs() {
+    let (dir, output, report) = verify(
+        "middle_assumed_ensures",
+        r#"
+atom h(x: i64) -> i64
+requires: x > 0 && x < 1000;
+ensures: result > 0;
+ensures assume: result > 100;
+ensures: result < 1000;
+body: x;
+"#,
+    );
+    let text = output_text(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(report["ensures_outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|outcome| outcome["clause"] == "result > 100" && outcome["outcome"] == "assumed"));
+    remove_fixture(dir);
+}
+
+#[test]
+fn assumed_middle_requires_are_not_exposed_to_callers() {
+    let (dir, output, _) = verify(
+        "middle_assumed_requires",
+        r#"
+atom g(x: i64) -> i64
+requires: x > 10 || x < -10;
+requires assume: x != 99;
+requires: x < 50;
+ensures: result < 50;
+body: x;
+
+atom bad() -> i64
+requires: true;
+ensures: result < 50;
+body: g(60);
+"#,
+    );
+    let text = output_text(&output);
+    assert!(!output.status.success(), "{text}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse JSON verification output");
+    assert_eq!(report["verified"], 1);
+    assert_eq!(report["diagnostics"][0]["atom"], "bad");
+    assert!(report["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("precondition (requires) not satisfied at call site"));
+    remove_fixture(dir);
+}
+
+#[test]
+fn ordinary_quantified_requires_still_verify() {
+    let (dir, output, _) = verify(
+        "ordinary_quantified_requires",
+        r#"
+atom first_positive(arr: [i64], n: i64) -> i64
+requires: n >= 1 && len(arr) >= n && forall(i, 0, n, arr[i] > 0);
+ensures: result > 0;
+body: arr[0];
+"#,
+    );
+    let text = output_text(&output);
+    assert!(output.status.success(), "{text}");
+    remove_fixture(dir);
+}
+
+#[test]
+fn quantified_moded_requires_fail_to_parse_with_a_syntax_error() {
+    let (dir, output, _) = verify(
+        "moded_quantified_requires",
+        r#"
+atom first_positive(arr: [i64], n: i64) -> i64
+requires: n >= 1 && len(arr) >= n;
+requires check: forall(i, 0, n, arr[i] > 0);
+ensures: result > 0;
+body: arr[0];
+"#,
+    );
+    let text = output_text(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.contains("clause trust modes (assume/check) are not supported on requires clauses containing quantifiers (forall/exists)"),
+        "{text}"
+    );
+    remove_fixture(dir);
+}
+
+#[test]
 fn ordinary_ensures_duplicate_suppresses_assumed_outcome_and_warning() {
     let (dir, output, report) = verify(
         "ordinary_assumed_ensures_duplicate",
