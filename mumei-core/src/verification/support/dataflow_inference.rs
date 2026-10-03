@@ -250,7 +250,11 @@ fn trace_eval_atom_call(
         call_env.insert(param.name.clone(), trace_value_as_int(&value)?);
     }
 
-    if !trace_eval_bool_clause(&callee.requires, &mut call_env, module_env)? {
+    let caller_requires = crate::verification::contract_view(
+        callee,
+        crate::verification::ContractView::CallerRequires,
+    );
+    if !trace_eval_bool_clause(&caller_requires, &mut call_env, module_env)? {
         return None;
     }
     let body = parse_body_expr(&callee.body_expr);
@@ -264,7 +268,9 @@ fn trace_eval_atom_call(
         }
         TraceValue::String(_) => {}
     }
-    if !trace_eval_bool_clause(&callee.ensures, &mut call_env, module_env)? {
+    let body_ensures =
+        crate::verification::contract_view(callee, crate::verification::ContractView::BodyEnsures);
+    if !trace_eval_bool_clause(&body_ensures, &mut call_env, module_env)? {
         return None;
     }
     Some(result)
@@ -656,8 +662,12 @@ pub(crate) fn infer_requires(atom: &Atom, module_env: &ModuleEnv) -> Vec<String>
     let callees_with_args = collect_callees_with_args_stmt(&body_stmt);
     for (callee_name, call_args) in &callees_with_args {
         if let Some(callee_atom) = module_env.get_atom(callee_name) {
-            if callee_atom.requires != "true" && !callee_atom.requires.is_empty() {
-                let mut substituted_req = callee_atom.requires.clone();
+            let caller_requires = crate::verification::contract_view(
+                callee_atom,
+                crate::verification::ContractView::CallerRequires,
+            );
+            if caller_requires != "true" && !caller_requires.is_empty() {
+                let mut substituted_req = caller_requires;
                 // callee の仮引数名と呼び出し引数を zip して置換
                 // 同時置換: まずパラメータ名をユニークなプレースホルダに置換し、
                 // 次にプレースホルダを引数式に置換する。

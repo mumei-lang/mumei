@@ -103,6 +103,9 @@ pub struct AtomCertificate {
     /// Postcondition contract text (P5-A)
     #[serde(default)]
     pub ensures: String,
+    /// Contract clauses trusted through clause-level `assume` modes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumed_clauses: Vec<String>,
     /// Quantifier (`forall`/`exists`) constraints extracted from `requires`
     /// at parse time — `requires` renders each quantified conjunct as `true`,
     /// so the structured form is the only place the hypotheses survive.

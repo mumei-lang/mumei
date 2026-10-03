@@ -126,6 +126,15 @@ pub fn compute_atom_content_hash_v2(atom: &crate::parser::Atom) -> String {
         );
     }
     hash_section(&mut hasher, "ensures", &atom.ensures);
+    if !atom.clause_modes.is_empty() {
+        for mode in &atom.clause_modes {
+            hash_section(
+                &mut hasher,
+                "clause_mode",
+                &format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause),
+            );
+        }
+    }
     hash_section(
         &mut hasher,
         "invariant",
@@ -345,6 +354,18 @@ pub fn generate_certificate_with_reconstruction_losses(
                 effects,
                 requires: atom.requires.clone(),
                 ensures: atom.ensures.clone(),
+                assumed_clauses: atom
+                    .clause_modes
+                    .iter()
+                    .filter(|mode| mode.mode == crate::parser::ClauseTrustMode::Assume)
+                    .map(|mode| {
+                        let kind = match &mode.kind {
+                            crate::parser::ClauseKind::Requires => "requires",
+                            crate::parser::ClauseKind::Ensures => "ensures",
+                        };
+                        format!("{kind}: {}", mode.clause)
+                    })
+                    .collect(),
                 forall_constraints: atom
                     .forall_constraints
                     .iter()

@@ -58,6 +58,7 @@ fn lean_verified_atom(
         effects: Vec::new(),
         requires: "true".to_string(),
         ensures: "result >= 0".to_string(),
+        assumed_clauses: Vec::new(),
         forall_constraints: Vec::new(),
         body_expr: "0".to_string(),
         body_summary: "0".to_string(),

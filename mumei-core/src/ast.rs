@@ -756,6 +756,7 @@ impl Monomorphizer {
         // 例: param="E" が "Error" 内の "E" にマッチしないようにする
         let mut mono_requires = generic.requires.clone();
         let mut mono_ensures = generic.ensures.clone();
+        let mut mono_clause_modes = generic.clause_modes.clone();
         for bound in &generic.where_bounds {
             if bound.bounds.contains(&"Effect".to_string()) {
                 if let Some(concrete_type_ref) = type_map.get(&bound.param) {
@@ -766,6 +767,11 @@ impl Monomorphizer {
                             .replace_all(&mono_requires, concrete.as_str())
                             .to_string();
                         mono_ensures = re.replace_all(&mono_ensures, concrete.as_str()).to_string();
+                        for clause_mode in &mut mono_clause_modes {
+                            clause_mode.clause = re
+                                .replace_all(&clause_mode.clause, concrete.as_str())
+                                .to_string();
+                        }
                     }
                 }
             }
@@ -780,6 +786,7 @@ impl Monomorphizer {
             spec_metadata: std::collections::HashMap::new(),
             requires: mono_requires,
             clause_labels: generic.clause_labels.clone(),
+            clause_modes: mono_clause_modes,
             forall_constraints: generic.forall_constraints.clone(),
             ensures: mono_ensures,
             body_expr: mono_body,

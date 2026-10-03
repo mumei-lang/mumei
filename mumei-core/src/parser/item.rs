@@ -4,10 +4,10 @@
 
 use crate::ast::TypeRef;
 use crate::parser::{
-    Atom, CapabilityDef, ClauseKind, ClauseLabel, Effect, EffectDef, EffectDefParam, EffectParam,
-    EnumDef, EnumVariant, ExternBlock, ExternFn, ImplBlock, ImplDef, ImportDecl, Item, Param,
-    Quantifier, QuantifierType, RefinedType, ResourceDef, ResourceField, ResourceMode, Span,
-    StructDef, StructField, TraitDef, TraitMethod, TrustLevel, TypeParamBound,
+    Atom, CapabilityDef, ClauseKind, ClauseLabel, ClauseMode, ClauseTrustMode, Effect, EffectDef,
+    EffectDefParam, EffectParam, EnumDef, EnumVariant, ExternBlock, ExternFn, ImplBlock, ImplDef,
+    ImportDecl, Item, Param, Quantifier, QuantifierType, RefinedType, ResourceDef, ResourceField,
+    ResourceMode, Span, StructDef, StructField, TraitDef, TraitMethod, TrustLevel, TypeParamBound,
 };
 
 use super::expr::parse_expr;
@@ -1725,6 +1725,32 @@ fn take_clause_label(ctx: &mut ParseContext) -> Option<String> {
     }
 }
 
+fn take_clause_trust_mode(ctx: &mut ParseContext) -> Option<ClauseTrustMode> {
+    match ctx.peek().clone() {
+        Token::Ident(mode) if mode == "assume" => {
+            ctx.advance();
+            Some(ClauseTrustMode::Assume)
+        }
+        Token::Ident(mode) if mode == "check" => {
+            ctx.advance();
+            Some(ClauseTrustMode::Check)
+        }
+        Token::Ident(mode) => {
+            let (line, col) = ctx
+                .tokens_ref()
+                .get(ctx.pos())
+                .map(|token| (token.line, token.col))
+                .unwrap_or((0, 0));
+            ctx.syntax_failure(format!(
+                "unknown clause trust mode '{mode}' at {line}:{col} — expected assume or check"
+            ));
+            ctx.advance();
+            None
+        }
+        _ => None,
+    }
+}
+
 fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
     let name = ctx.expect_ident();
 
@@ -1790,6 +1816,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
     let mut requires_raw = "true".to_string();
     let mut ensures = "true".to_string();
     let mut clause_labels = Vec::new();
+    let mut clause_modes = Vec::new();
     let mut body_raw = String::new();
     let mut consumed_params: Vec<String> = Vec::new();
     let mut resources: Vec<String> = Vec::new();
@@ -1808,6 +1835,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         match ctx.peek().clone() {
             Token::Requires => {
                 ctx.advance();
+                let mode = take_clause_trust_mode(ctx);
                 let label = take_clause_label(ctx);
                 ctx.expect(Token::Colon);
                 let clause = collect_until_semicolon(ctx);
@@ -1818,11 +1846,19 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                         label,
                     });
                 }
+                if let Some(mode) = mode {
+                    clause_modes.push(ClauseMode {
+                        kind: ClauseKind::Requires,
+                        clause: clause.clone(),
+                        mode,
+                    });
+                }
                 requires_raw = conjoin_clause(&requires_raw, &clause);
                 ctx.expect(Token::Semicolon);
             }
             Token::Ensures => {
                 ctx.advance();
+                let mode = take_clause_trust_mode(ctx);
                 let label = take_clause_label(ctx);
                 ctx.expect(Token::Colon);
                 let clause = collect_until_semicolon(ctx);
@@ -1831,6 +1867,13 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                         kind: ClauseKind::Ensures,
                         clause: clause.clone(),
                         label,
+                    });
+                }
+                if let Some(mode) = mode {
+                    clause_modes.push(ClauseMode {
+                        kind: ClauseKind::Ensures,
+                        clause: clause.clone(),
+                        mode,
                     });
                 }
                 ensures = conjoin_clause(&ensures, &clause);
@@ -2006,6 +2049,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         spec_metadata,
         requires: requires_cleaned,
         clause_labels,
+        clause_modes,
         forall_constraints,
         ensures,
         body_expr: body_raw,

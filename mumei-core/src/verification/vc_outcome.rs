@@ -18,6 +18,7 @@ pub enum ClauseOutcome {
     Fails,
     Unknown,
     Skipped,
+    Assumed,
 }
 
 pub fn classify(
@@ -99,6 +100,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ClauseOutcome::Skipped).unwrap(),
             serde_json::json!("skipped")
+        );
+        assert_eq!(
+            serde_json::to_value(ClauseOutcome::Assumed).unwrap(),
+            serde_json::json!("assumed")
         );
     }
 }

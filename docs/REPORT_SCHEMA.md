@@ -117,7 +117,7 @@ LSP diagnostics include `relatedInformation` for multi-location errors, enabling
 | `input_b` | `string` | No | Second input description (legacy; prefer `counterexample`) |
 | `reason` | `string` | Yes | Human-readable result description |
 | `context_reachability` | `"reachable" \| "unreachable" \| "unknown"` | Ensures reports | Satisfiability of the context used to verify postconditions |
-| `ensures_outcomes` | `array` | Ensures reports | Per-clause postcondition outcome (`proved`, `vacuous`, `always_false`, `fails_on_some_inputs`, `fails`, `unknown`, or `skipped`) |
+| `ensures_outcomes` | `array` | Ensures reports | Per-clause postcondition outcome (`proved`, `vacuous`, `always_false`, `fails_on_some_inputs`, `fails`, `unknown`, `skipped`, or `assumed`) |
 | `violation_type` | `string` | No | `"effect_mismatch"`, `"effect_propagation"`, etc. |
 | `effect_violation` | `object` | No | Effect violation details (see below) |
 | `semantic_feedback` | `object` | No | Rich diagnostics (see below) |
@@ -131,9 +131,11 @@ LSP diagnostics include `relatedInformation` for multi-location errors, enabling
 | `type_definition_locations` | `array` | No | Constraint source locations |
 
 Ensures reports include `context_reachability` and an `ensures_outcomes` entry
-for each non-trivial lowered or skipped clause. Each outcome entry contains the
-source `clause` text and its classified `outcome`. An unknown context is never
-reported as unreachable. Unless a satisfiable `ctx ∧ ¬Q` query has already
+for each non-trivial lowered, skipped, or assumed clause. Each outcome entry
+contains the source `clause` text and its classified `outcome`; an assumed
+clause may also include its optional `label`. Assumed clauses are not sent to
+the solver, and their warning is included in `diagnostics`. An unknown context
+is never reported as unreachable. Unless a satisfiable `ctx ∧ ¬Q` query has already
 established reachability, `context_reachability` comes from the existing Phase 6
 final consistency check. Reports produced before Phase 6 without that evidence
 use `"unknown"`. An unreachable context remains a contradiction error. The report attaches

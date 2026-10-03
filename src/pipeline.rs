@@ -266,6 +266,7 @@ pub(crate) fn try_load_and_prepare_with_full_options(
                         trace_id: None,
                         spec_metadata: std::collections::HashMap::new(),
                         clause_labels: Vec::new(),
+                        clause_modes: Vec::new(),
                         requires: ext_fn
                             .requires
                             .clone()
