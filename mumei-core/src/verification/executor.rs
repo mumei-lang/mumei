@@ -12,6 +12,22 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+fn clause_label_for<'a>(
+    atom: &'a crate::parser::Atom,
+    kind: crate::parser::ClauseKind,
+    conjunct: &str,
+) -> Option<&'a str> {
+    atom.clause_labels
+        .iter()
+        .find(|label| {
+            label.kind == kind
+                && split_top_level_conjunctions(&label.clause)
+                    .iter()
+                    .any(|part| part.trim() == conjunct.trim())
+        })
+        .map(|label| label.label.as_str())
+}
+
 /// mumei.toml の [proof]/[build] 設定を反映した verify
 /// timeout_ms: Z3 ソルバのタイムアウト（ミリ秒）
 /// global_max_unroll: BMC のグローバル展開深度
@@ -2183,7 +2199,23 @@ pub(crate) fn verify_inner(
                         } else {
                             None
                         };
-                        save_visualizer_report(
+                        let failed_clause = ens_clause.trim();
+                        let failed_clause_label = clause_label_for(
+                            atom,
+                            crate::parser::ClauseKind::Ensures,
+                            failed_clause,
+                        );
+                        let extra_report_fields = if let Some(label) = failed_clause_label {
+                            json!({
+                                "failed_clause": failed_clause,
+                                "failed_clause_label": label
+                            })
+                        } else {
+                            json!({
+                                "failed_clause": failed_clause
+                            })
+                        };
+                        save_visualizer_report_with_extra(
                             output_dir,
                             "failed",
                             &atom.name,
@@ -2198,6 +2230,7 @@ pub(crate) fn verify_inner(
                             data_flow_trace.as_ref(),
                             loss_vector.as_ref(),
                             Some(&diagnostics),
+                            Some(&extra_report_fields),
                         );
                         metrics.record_phase(
                             "Phase 5: ensures verification (failed)",
@@ -2206,12 +2239,22 @@ pub(crate) fn verify_inner(
                         metrics.total_constraints = constraint_count_cell.get();
                         metrics.print_summary();
                         // Feature 3d: Add related spans for constraint definition locations
+                        let help = if let Some(label) = failed_clause_label {
+                            format!(
+                                "ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください\nviolated ensures clause {}: {}",
+                                json!(label),
+                                failed_clause
+                            )
+                        } else {
+                            "ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください"
+                                .to_string()
+                        };
                         let mut err = MumeiError::verification_at(
-                        "Postcondition (ensures) is not satisfied.",
-                        atom.span.clone(),
-                    )
-                    .with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください")
-                    .with_counterexample(ce_value.clone());
+                            "Postcondition (ensures) is not satisfied.",
+                            atom.span.clone(),
+                        )
+                        .with_help(help)
+                        .with_counterexample(ce_value.clone());
                         for mapping in &constraint_mappings {
                             if mapping.span.line > 0 {
                                 let related_src_span = span_to_source_span("", &mapping.span);
@@ -2853,6 +2896,43 @@ pub(crate) fn save_visualizer_report(
     loss_vector: Option<&serde_json::Value>,
     diagnostics: Option<&[String]>,
 ) {
+    save_visualizer_report_with_extra(
+        output_dir,
+        status,
+        name,
+        a,
+        b,
+        reason,
+        counterexample,
+        failure_type,
+        semantic_feedback,
+        span,
+        constraint_mappings,
+        data_flow_trace,
+        loss_vector,
+        diagnostics,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn save_visualizer_report_with_extra(
+    output_dir: &Path,
+    status: &str,
+    name: &str,
+    a: &str,
+    b: &str,
+    reason: &str,
+    counterexample: Option<&serde_json::Value>,
+    failure_type: &str,
+    semantic_feedback: Option<&serde_json::Value>,
+    span: Option<&Span>,
+    constraint_mappings: Option<&[ConstraintMapping]>,
+    data_flow_trace: Option<&DataFlowTrace>,
+    loss_vector: Option<&serde_json::Value>,
+    diagnostics: Option<&[String]>,
+    extra_fields: Option<&serde_json::Value>,
+) {
     let mut report = json!({
         "status": status,
         "atom": name,
@@ -2879,6 +2959,11 @@ pub(crate) fn save_visualizer_report(
     }
     if let Some(diagnostics) = diagnostics {
         report["diagnostics"] = json!(diagnostics);
+    }
+    if let Some(serde_json::Value::Object(fields)) = extra_fields {
+        for (key, value) in fields {
+            report[key.as_str()] = value.clone();
+        }
     }
     let skipped_clauses = diagnostics
         .map(|entries| {

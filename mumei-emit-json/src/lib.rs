@@ -127,6 +127,7 @@ mod tests {
                 ],
                 trace_id: None,
                 spec_metadata: std::collections::HashMap::new(),
+                clause_labels: Vec::new(),
                 requires: "b != 0".to_string(),
                 forall_constraints: vec![],
                 ensures: "result == a / b".to_string(),

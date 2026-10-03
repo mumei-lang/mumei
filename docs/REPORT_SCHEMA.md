@@ -121,6 +121,8 @@ LSP diagnostics include `relatedInformation` for multi-location errors, enabling
 | `semantic_feedback` | `object` | No | Rich diagnostics (see below) |
 | `counterexample` | `object` | No | Z3 counter-example values |
 | `failure_type` | `string` | No | Failure category code |
+| `failed_clause` | `string` | No | Failing ensures conjunct on a postcondition violation |
+| `failed_clause_label` | `string` | No | Optional label for the failing ensures conjunct; absent when unlabeled |
 | `suggestion` | `string` | No | Fix suggestion text (counterexample や unsat core を踏まえた動的な修正提案が含まれる場合がある) |
 | `span` | `object` | No | Source location (`file`, `line`, `col`, `len`) |
 | `type_definition_locations` | `array` | No | Constraint source locations |

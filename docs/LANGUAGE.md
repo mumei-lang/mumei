@@ -138,6 +138,11 @@ atom name(param: Type, ...)
     body: expression;
 ```
 
+An atom's `requires` and `ensures` clauses may include an optional quoted label
+before the colon. Labels are diagnostic metadata and do not affect verification.
+For example, `ensures "nonnegative result": result >= 0;` displays the label if
+that postcondition fails.
+
 ### Explicit Return Type (`-> Type`)
 
 By default, atoms return `i64`. Use `-> Type` to declare a different return type:

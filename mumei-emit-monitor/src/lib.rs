@@ -426,6 +426,7 @@ mod tests {
             }],
             trace_id: None,
             spec_metadata: HashMap::new(),
+            clause_labels: Vec::new(),
             requires: "x > 0".to_string(),
             forall_constraints: vec![],
             ensures: "result >= x".to_string(),

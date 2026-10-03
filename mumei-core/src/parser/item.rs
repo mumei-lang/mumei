@@ -4,10 +4,10 @@
 
 use crate::ast::TypeRef;
 use crate::parser::{
-    Atom, CapabilityDef, Effect, EffectDef, EffectDefParam, EffectParam, EnumDef, EnumVariant,
-    ExternBlock, ExternFn, ImplBlock, ImplDef, ImportDecl, Item, Param, Quantifier, QuantifierType,
-    RefinedType, ResourceDef, ResourceField, ResourceMode, Span, StructDef, StructField, TraitDef,
-    TraitMethod, TrustLevel, TypeParamBound,
+    Atom, CapabilityDef, ClauseKind, ClauseLabel, Effect, EffectDef, EffectDefParam, EffectParam,
+    EnumDef, EnumVariant, ExternBlock, ExternFn, ImplBlock, ImplDef, ImportDecl, Item, Param,
+    Quantifier, QuantifierType, RefinedType, ResourceDef, ResourceField, ResourceMode, Span,
+    StructDef, StructField, TraitDef, TraitMethod, TrustLevel, TypeParamBound,
 };
 
 use super::expr::parse_expr;
@@ -1435,12 +1435,14 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                             match ctx.peek() {
                                 Token::Requires => {
                                     ctx.advance();
+                                    let _ = take_clause_label(ctx);
                                     ctx.expect(Token::Colon);
                                     ext_requires = Some(collect_until_semicolon(ctx));
                                     ctx.expect(Token::Semicolon);
                                 }
                                 Token::Ensures => {
                                     ctx.advance();
+                                    let _ = take_clause_label(ctx);
                                     ctx.expect(Token::Colon);
                                     ext_ensures = Some(collect_until_semicolon(ctx));
                                     ctx.expect(Token::Semicolon);
@@ -1713,6 +1715,16 @@ fn string_literal_len(rest: &str) -> usize {
 // Atom body parsing
 // =============================================================================
 
+fn take_clause_label(ctx: &mut ParseContext) -> Option<String> {
+    match ctx.peek().clone() {
+        Token::StringLit(label) => {
+            ctx.advance();
+            Some(label)
+        }
+        _ => None,
+    }
+}
+
 fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
     let name = ctx.expect_ident();
 
@@ -1777,6 +1789,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
 
     let mut requires_raw = "true".to_string();
     let mut ensures = "true".to_string();
+    let mut clause_labels = Vec::new();
     let mut body_raw = String::new();
     let mut consumed_params: Vec<String> = Vec::new();
     let mut resources: Vec<String> = Vec::new();
@@ -1795,14 +1808,32 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         match ctx.peek().clone() {
             Token::Requires => {
                 ctx.advance();
+                let label = take_clause_label(ctx);
                 ctx.expect(Token::Colon);
-                requires_raw = conjoin_clause(&requires_raw, &collect_until_semicolon(ctx));
+                let clause = collect_until_semicolon(ctx);
+                if let Some(label) = label {
+                    clause_labels.push(ClauseLabel {
+                        kind: ClauseKind::Requires,
+                        clause: clause.clone(),
+                        label,
+                    });
+                }
+                requires_raw = conjoin_clause(&requires_raw, &clause);
                 ctx.expect(Token::Semicolon);
             }
             Token::Ensures => {
                 ctx.advance();
+                let label = take_clause_label(ctx);
                 ctx.expect(Token::Colon);
-                ensures = conjoin_clause(&ensures, &collect_until_semicolon(ctx));
+                let clause = collect_until_semicolon(ctx);
+                if let Some(label) = label {
+                    clause_labels.push(ClauseLabel {
+                        kind: ClauseKind::Ensures,
+                        clause: clause.clone(),
+                        label,
+                    });
+                }
+                ensures = conjoin_clause(&ensures, &clause);
                 ctx.expect(Token::Semicolon);
             }
             Token::Body => {
@@ -1974,6 +2005,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         trace_id: None,
         spec_metadata,
         requires: requires_cleaned,
+        clause_labels,
         forall_constraints,
         ensures,
         body_expr: body_raw,

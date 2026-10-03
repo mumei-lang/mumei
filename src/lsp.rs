@@ -1166,6 +1166,13 @@ fn build_hover(source: &str, line: usize) -> Option<String> {
                         a.requires.trim(),
                         a.ensures.trim()
                     );
+                    let clause_labels = format_clause_labels(a);
+                    if !clause_labels.is_empty() {
+                        md.push_str(&format!(
+                            "\n\n**labeled clauses**:\n```\n{}\n```",
+                            clause_labels
+                        ));
+                    }
                     // エフェクト情報を表示
                     if !a.effects.is_empty() {
                         let effects_str: Vec<String> =
@@ -1179,6 +1186,25 @@ fn build_hover(source: &str, line: usize) -> Option<String> {
     }
 
     None
+}
+
+fn format_clause_labels(atom: &parser::Atom) -> String {
+    atom.clause_labels
+        .iter()
+        .map(|clause_label| {
+            let kind = match &clause_label.kind {
+                parser::ClauseKind::Requires => "requires",
+                parser::ClauseKind::Ensures => "ensures",
+            };
+            format!(
+                "{} {}: {};",
+                kind,
+                serde_json::json!(clause_label.label.as_str()),
+                clause_label.clause
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // =============================================================================
@@ -1640,15 +1666,20 @@ fn build_completion_list(
         for item in doc_items {
             match item {
                 parser::Item::Atom(a) => {
+                    let mut detail = format!(
+                        "atom {}  requires: {}  ensures: {}",
+                        a.name,
+                        a.requires.trim(),
+                        a.ensures.trim()
+                    );
+                    let clause_labels = format_clause_labels(a);
+                    if !clause_labels.is_empty() {
+                        detail.push_str(&format!("  {}", clause_labels.replace('\n', " ")));
+                    }
                     items.push(serde_json::json!({
                         "label": a.name,
                         "kind": 3,
-                        "detail": format!(
-                            "atom {}  requires: {}  ensures: {}",
-                            a.name,
-                            a.requires.trim(),
-                            a.ensures.trim()
-                        )
+                        "detail": detail
                     }));
                 }
                 parser::Item::EffectDef(e) => {
@@ -1930,9 +1961,25 @@ atom inc(n: i64)
     }
 
     #[test]
+    fn test_hover_includes_clause_labels() {
+        let source = r#"atom safe(x: i64) -> i64
+requires "positive \"input\"": x > 0;
+ensures "nonzero result": result != 0;
+body: x;
+"#;
+        let hover = build_hover(source, 0).expect("hover for atom declaration");
+        assert!(hover.contains("requires \"positive \\\"input\\\"\": x > 0;"));
+        assert!(hover.contains("ensures \"nonzero result\": result != 0;"));
+    }
+
+    #[test]
     fn test_completion_includes_atoms_from_cache() {
         let mut parsed_items: HashMap<String, Vec<parser::Item>> = HashMap::new();
-        let source = "atom inc(n: i64) requires: n >= 0; ensures: result == n + 1; body: n + 1;";
+        let source = r#"atom inc(n: i64)
+requires "nonnegative input": n >= 0;
+ensures "increments input": result == n + 1;
+body: n + 1;
+"#;
         let items = parser::parse_module(source);
         assert!(!items.is_empty(), "should parse at least one item");
         parsed_items.insert("file:///test.mm".to_string(), items);
@@ -1950,6 +1997,12 @@ atom inc(n: i64)
             .find(|i| i.get("label").and_then(|l| l.as_str()) == Some("inc"))
             .unwrap();
         assert_eq!(inc_item.get("kind").and_then(|k| k.as_u64()), Some(3));
+        let detail = inc_item
+            .get("detail")
+            .and_then(|value| value.as_str())
+            .expect("atom completion detail");
+        assert!(detail.contains("requires \"nonnegative input\": n >= 0;"));
+        assert!(detail.contains("ensures \"increments input\": result == n + 1;"));
     }
 
     #[test]
