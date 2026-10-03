@@ -592,6 +592,12 @@ pub(crate) fn verify_inner(
         TrustLevel::Trusted => {
             // trusted atom: body の検証をスキップし、契約（requires/ensures）のみ信頼する。
             // 呼び出し元は契約に基づいて Compositional Verification を行う。
+            if !atom.covers.is_empty() {
+                diagnostics.push(format!(
+                    "warning: cover clauses in trusted atom `{}` were not checked because body verification is skipped",
+                    atom.name
+                ));
+            }
             save_visualizer_report(
                 output_dir,
                 "trusted",
@@ -2057,7 +2063,7 @@ pub(crate) fn verify_inner(
                 &body_result,
                 &mut env,
             );
-            env.insert("result".to_string(), body_result);
+            env.insert("result".to_string(), body_result.clone());
         }
         for ens_clause in split_top_level_conjunctions(&atom.ensures) {
             match lower_clause_with_skip(
@@ -2593,9 +2599,139 @@ pub(crate) fn verify_inner(
     metrics.total_constraints = constraint_count_cell.get();
     metrics.record_phase("Phase 6: final Z3 check", z3_check_start.elapsed());
 
+    let cover_phase_start = std::time::Instant::now();
+    let mut cover_results = Vec::with_capacity(atom.covers.len());
+    let mut cover_failure = None;
+    if !atom.covers.is_empty() {
+        if tuple_component_types(atom.return_type.as_deref()).is_none() {
+            wire_array_slots(
+                &vc,
+                "result",
+                tail_expr(&hir_atom.body_stmt),
+                &body_result,
+                &mut env,
+            );
+            env.insert("result".to_string(), body_result.clone());
+        }
+
+        for cover in &atom.covers {
+            let cover_name = cover.label.as_deref().unwrap_or(&cover.clause);
+            let cover_bool = match lower_clause_with_skip(
+                &vc,
+                &mut env,
+                hir_atom,
+                &cover.clause,
+                "cover",
+                &mut diagnostics,
+                Some(&solver),
+            )? {
+                ClauseLoweringOutcome::Trivial => Bool::from_bool(&ctx, true),
+                ClauseLoweringOutcome::Skipped => {
+                    diagnostics.push(format!(
+                        "warning: reachability of cover clause {cover_name:?} is unknown because it could not be lowered"
+                    ));
+                    cover_results.push(json!({
+                        "clause": cover.clause,
+                        "label": cover.label,
+                        "status": "unknown",
+                        "witness": serde_json::Value::Null,
+                    }));
+                    continue;
+                }
+                ClauseLoweringOutcome::Lowered(cover_bool) => cover_bool,
+            };
+
+            solver.push();
+            solver.assert(&cover_bool);
+            let cover_check = solver.check();
+            let witness = if cover_check == SatResult::Sat {
+                solver.get_model().map(|model| {
+                    let mut witness = serde_json::Map::new();
+                    for param in &atom.params {
+                        if let Some(var_z3) = env.get(&param.name) {
+                            if let Some(value) = model.eval(var_z3, true) {
+                                witness.insert(param.name.clone(), json!(format!("{}", value)));
+                            }
+                        }
+                    }
+                    if tuple_component_types(atom.return_type.as_deref()).is_none() {
+                        if let Some(result_z3) = env.get("result") {
+                            if let Some(value) = model.eval(result_z3, true) {
+                                witness.insert("result".to_string(), json!(format!("{}", value)));
+                            }
+                        }
+                    }
+                    serde_json::Value::Object(witness)
+                })
+            } else {
+                None
+            };
+            solver.pop(1);
+
+            match cover_check {
+                SatResult::Sat => cover_results.push(json!({
+                    "clause": cover.clause,
+                    "label": cover.label,
+                    "status": "covered",
+                    "witness": witness.unwrap_or(serde_json::Value::Null),
+                })),
+                SatResult::Unsat => {
+                    let reason = format!(
+                        "cover \"{cover_name}\" is unreachable: no execution satisfying requires reaches a state where {} holds",
+                        cover.clause
+                    );
+                    cover_failure = Some(reason);
+                    break;
+                }
+                SatResult::Unknown => {
+                    diagnostics.push(format!(
+                        "warning: Z3 returned unknown while checking cover clause {cover_name:?}"
+                    ));
+                    cover_results.push(json!({
+                        "clause": cover.clause,
+                        "label": cover.label,
+                        "status": "unknown",
+                        "witness": serde_json::Value::Null,
+                    }));
+                }
+            }
+        }
+    }
+    metrics.record_phase(COVER_PHASE, cover_phase_start.elapsed());
+    metrics.total_constraints = constraint_count_cell.get();
+
+    if let Some(reason) = cover_failure {
+        metrics.print_summary();
+        save_visualizer_report(
+            output_dir,
+            "failed",
+            &atom.name,
+            "N/A",
+            "N/A",
+            &reason,
+            None,
+            "cover_unreachable",
+            None,
+            Some(&atom.span),
+            None,
+            None,
+            None,
+            Some(&diagnostics),
+            Some(&ensures_outcome_summary(
+                context_reachability,
+                &ensures_outcomes,
+            )),
+        );
+        return Err(MumeiError::verification_at(reason, atom.span.clone()));
+    }
+
     // Print metrics summary (always for now; future: gate behind --verbose)
     metrics.print_summary();
 
+    let mut success_extra_fields = ensures_outcome_summary(context_reachability, &ensures_outcomes);
+    if !atom.covers.is_empty() {
+        success_extra_fields["cover_results"] = json!(cover_results);
+    }
     save_visualizer_report(
         output_dir,
         "success",
@@ -2611,10 +2747,7 @@ pub(crate) fn verify_inner(
         None,
         None,
         Some(&diagnostics),
-        Some(&ensures_outcome_summary(
-            context_reachability,
-            &ensures_outcomes,
-        )),
+        Some(&success_extra_fields),
     );
     let inferred_invariants = inferred_invariants_cell.borrow().clone();
     Ok(inferred_invariants)

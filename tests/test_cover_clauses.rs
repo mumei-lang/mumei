@@ -1,0 +1,181 @@
+use mumei_core::parser::{parse_module, CoverClause, Item};
+use mumei_core::proof_cert::compute_atom_content_hash_v2;
+use mumei_core::resolver::compute_proof_hash;
+use mumei_core::verification::ModuleEnv;
+use std::path::PathBuf;
+use std::process::{Command, Output};
+
+fn verify_source(name: &str, source: &str) -> (PathBuf, Output, serde_json::Value, String) {
+    let dir = std::env::temp_dir().join(format!(
+        "mumei_cover_clauses_{}_{}_{}",
+        std::process::id(),
+        name,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir).expect("create fixture directory");
+    let fixture = dir.join(format!("{name}.mm"));
+    let report_dir = dir.join("reports");
+    std::fs::create_dir_all(&report_dir).expect("create report directory");
+    std::fs::write(&fixture, source).expect("write fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--report-dir")
+        .arg(&report_dir)
+        .arg("--disable-spurious-detection")
+        .arg(&fixture)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run mumei verify");
+    let report: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(report_dir.join("report.json")).expect("read report.json"),
+    )
+    .expect("parse report.json");
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (dir, output, report, text)
+}
+
+#[test]
+fn cover_witness_is_reported_and_keeps_ensures_summary() {
+    let (dir, output, report, text) = verify_source(
+        "abs_val",
+        r#"
+atom abs_val(x: i64) -> i64
+requires: x > -1000 && x < 1000;
+ensures: result >= 0;
+body: if x < 0 { 0 - x } else { x };
+cover "zero": result == 0;
+"#,
+    );
+
+    assert!(output.status.success(), "{text}");
+    assert_eq!(report["status"], "success");
+    assert_eq!(report["context_reachability"], "reachable");
+    assert!(report.get("ensures_outcomes").is_some());
+    assert_eq!(report["cover_results"][0]["clause"], "result == 0");
+    assert_eq!(report["cover_results"][0]["label"], "zero");
+    assert_eq!(report["cover_results"][0]["status"], "covered");
+    assert_eq!(report["cover_results"][0]["witness"]["x"], "0");
+    assert_eq!(report["cover_results"][0]["witness"]["result"], "0");
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn unreachable_cover_fails_with_structured_failure_type() {
+    let (dir, output, report, text) = verify_source(
+        "unreachable",
+        r#"
+atom positive(x: i64) -> i64
+requires: x > 0;
+body: x;
+cover "neg": x < 0;
+"#,
+    );
+
+    assert!(!output.status.success(), "{text}");
+    assert_eq!(report["failure_type"], "cover_unreachable");
+    assert!(text.contains("neg"), "{text}");
+    assert!(text.contains("unreachable"), "{text}");
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn atoms_without_covers_keep_existing_report_shape() {
+    let (dir, output, report, text) = verify_source(
+        "no_cover",
+        r#"
+atom identity(x: i64) -> i64
+requires: true;
+ensures: result == x;
+body: x;
+"#,
+    );
+
+    assert!(output.status.success(), "{text}");
+    assert!(report.get("cover_results").is_none());
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn trusted_atoms_warn_when_covers_are_not_checked() {
+    let (dir, output, report, text) = verify_source(
+        "trusted",
+        r#"
+trusted atom fixed() -> i64
+requires: true;
+body: 0;
+cover "one": result == 1;
+"#,
+    );
+
+    assert!(output.status.success(), "{text}");
+    assert!(
+        report["diagnostics"]
+            .as_array()
+            .expect("diagnostics array")
+            .iter()
+            .any(|diagnostic| {
+                diagnostic
+                    .as_str()
+                    .is_some_and(|text| text.contains("cover clauses") && text.contains("warning"))
+            }),
+        "{report}"
+    );
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn covers_change_hashes_without_changing_no_cover_golden() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let source =
+        std::fs::read_to_string(manifest_dir.join("tests/fixtures/bitvec_backward_compat.mm"))
+            .expect("read hash compatibility fixture");
+    let items = parse_module(&source);
+    let atom = items
+        .iter()
+        .find_map(|item| match item {
+            Item::Atom(atom) if atom.name == "bc_add" => Some(atom),
+            _ => None,
+        })
+        .expect("find bc_add");
+
+    let golden: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(manifest_dir.join("tests/fixtures/bitvec_backward_compat.golden.json"))
+            .expect("read certificate golden"),
+    )
+    .expect("parse certificate golden");
+    let expected_content_hash = golden["atoms"]
+        .as_array()
+        .expect("golden atoms")
+        .iter()
+        .find(|entry| entry["name"] == "bc_add")
+        .and_then(|entry| entry["content_hash"].as_str())
+        .expect("bc_add content hash");
+    assert_eq!(compute_atom_content_hash_v2(atom), expected_content_hash);
+
+    let baseline_proof_hash = compute_proof_hash(atom, &ModuleEnv::new());
+    let mut covered = atom.clone();
+    covered.covers.push(CoverClause {
+        clause: "result >= 0".to_string(),
+        label: Some("nonnegative".to_string()),
+    });
+    assert_ne!(
+        compute_atom_content_hash_v2(atom),
+        compute_atom_content_hash_v2(&covered)
+    );
+    assert_ne!(
+        baseline_proof_hash,
+        compute_proof_hash(&covered, &ModuleEnv::new())
+    );
+}

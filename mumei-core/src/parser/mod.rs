@@ -832,6 +832,48 @@ atom labeled(x: i64) -> i64
     }
 
     #[test]
+    fn test_parse_cover_clauses_and_contextual_cover_identifier() {
+        let covered = parse_atom(
+            r#"
+atom covered(x: i64) -> i64
+    requires: x >= 0;
+    ensures: result >= 0;
+    cover "zero": result == 0;
+    cover: x > 0;
+    body: x;
+    cover "maximum": x == 100;
+"#,
+        );
+
+        assert_eq!(
+            covered.covers,
+            vec![
+                CoverClause {
+                    clause: "result == 0".to_string(),
+                    label: Some("zero".to_string()),
+                },
+                CoverClause {
+                    clause: "x > 0".to_string(),
+                    label: None,
+                },
+                CoverClause {
+                    clause: "x == 100".to_string(),
+                    label: Some("maximum".to_string()),
+                },
+            ]
+        );
+
+        let identifier = parse_atom(
+            r#"
+atom identity(cover: i64) -> i64
+    body: cover;
+"#,
+        );
+        assert_eq!(identifier.body_expr, "cover");
+        assert!(identifier.covers.is_empty());
+    }
+
+    #[test]
     fn test_parse_atom_with_trait_bounds() {
         let source = r#"
 atom max_val<T: Comparable>(a: T, b: T)

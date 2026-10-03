@@ -11,8 +11,10 @@ use std::fmt;
 pub enum PhaseFact {
     SolverContext,
     BodyResult,
+    BodyResultValue,
     EnsuresOutcomes,
     ContextReachability,
+    CoverResults,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -33,10 +35,15 @@ pub struct PhaseContract {
 }
 
 const NO_FACTS: &[PhaseFact] = &[];
-const SOLVER_AND_BODY: &[PhaseFact] = &[PhaseFact::SolverContext, PhaseFact::BodyResult];
+const SOLVER_AND_BODY: &[PhaseFact] = &[
+    PhaseFact::SolverContext,
+    PhaseFact::BodyResult,
+    PhaseFact::BodyResultValue,
+];
 const ENSURES_REQUIREMENTS: &[PhaseFact] = &[PhaseFact::SolverContext, PhaseFact::EnsuresOutcomes];
 
 pub const ENSURES_PHASE: &str = "Phase 5: ensures verification";
+pub const COVER_PHASE: &str = "Phase 7: cover witnesses";
 
 pub const PHASE_CONTRACTS: &[PhaseContract] = &[
     PhaseContract {
@@ -164,6 +171,13 @@ pub const PHASE_CONTRACTS: &[PhaseContract] = &[
         establishes: &[PhaseFact::ContextReachability],
         invalidates: NO_FACTS,
         counterexample_fidelity: None,
+    },
+    PhaseContract {
+        name: COVER_PHASE,
+        requires: &[PhaseFact::SolverContext, PhaseFact::BodyResultValue],
+        establishes: &[PhaseFact::CoverResults],
+        invalidates: NO_FACTS,
+        counterexample_fidelity: Some(CounterexampleFidelity::Exact),
     },
 ];
 

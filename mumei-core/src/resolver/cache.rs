@@ -43,7 +43,7 @@ pub(crate) fn compute_hash(source: &str) -> String {
 
 /// Atom の契約+body+メタデータのハッシュを計算する（Incremental Build 用）
 /// 以下のフィールドを結合してハッシュ化する:
-/// - name, requires, ensures, body_expr（基本契約）
+/// - name, requires, ensures, covers, body_expr（基本契約）
 /// - consumed_params, ref params（所有権制約）
 /// - resources, async flag（並行性制約）
 /// - invariant（帰納的不変量）
@@ -60,6 +60,14 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
     hasher.update(atom.requires.as_bytes());
     hasher.update(b"|");
     hasher.update(atom.ensures.as_bytes());
+    for cover in &atom.covers {
+        hasher.update(b"|cover:");
+        hasher.update(cover.clause.as_bytes());
+        if let Some(label) = &cover.label {
+            hasher.update(b"|label=");
+            hasher.update(label.as_bytes());
+        }
+    }
     hasher.update(b"|");
     hasher.update(atom.body_expr.as_bytes());
     // consumed_params も含める（所有権制約の変更を検出）
@@ -199,6 +207,14 @@ pub fn compute_proof_hash_with_flags(
     hasher.update(atom.requires.as_bytes());
     hasher.update(b"|");
     hasher.update(atom.ensures.as_bytes());
+    for cover in &atom.covers {
+        hasher.update(b"|cover:");
+        hasher.update(cover.clause.as_bytes());
+        if let Some(label) = &cover.label {
+            hasher.update(b"|label=");
+            hasher.update(label.as_bytes());
+        }
+    }
     hasher.update(b"|");
     hasher.update(atom.body_expr.as_bytes());
     for cp in &atom.consumed_params {
@@ -408,6 +424,14 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(callee_atom.requires.as_bytes());
             hasher.update(b":");
             hasher.update(callee_atom.ensures.as_bytes());
+            for cover in &callee_atom.covers {
+                hasher.update(b"|cover:");
+                hasher.update(cover.clause.as_bytes());
+                if let Some(label) = &cover.label {
+                    hasher.update(b"|label=");
+                    hasher.update(label.as_bytes());
+                }
+            }
             for p in &callee_atom.params {
                 hasher.update(b",param_type:");
                 hasher.update(p.type_name.as_deref().unwrap_or("").as_bytes());
@@ -472,6 +496,14 @@ pub fn compute_contract_hash(atom: &crate::parser::Atom) -> String {
         hash_field(&mut hasher, "quantifier.condition", &q.condition);
     }
     hash_field(&mut hasher, "ensures", &atom.ensures);
+    for cover in &atom.covers {
+        let mut section = cover.clause.clone();
+        if let Some(label) = &cover.label {
+            section.push_str("|label=");
+            section.push_str(label);
+        }
+        hash_field(&mut hasher, "cover", &section);
+    }
     if let Some(ref inv) = atom.invariant {
         hash_field(&mut hasher, "invariant", inv);
     }

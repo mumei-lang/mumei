@@ -662,6 +662,7 @@ mod tests {
             trace_id: None,
             spec_metadata,
             clause_labels: Vec::new(),
+            covers: Vec::new(),
             requires: "true".to_string(),
             forall_constraints: vec![],
             ensures: "true".to_string(),
