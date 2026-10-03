@@ -52,9 +52,12 @@ fn build_proof_flags(
     module_env: &verification::ModuleEnv,
     config: &verification::VerificationConfig,
 ) -> Vec<&'static str> {
-    let mut flags = Vec::new();
+    let mut flags = vec!["ensures_outcome_classification"];
     if config.enable_vacuity_check {
         flags.push("enable_vacuity_check");
+    }
+    if config.fail_on_vacuous {
+        flags.push("fail_on_vacuous");
     }
     if config.ieee754_f64 {
         flags.push("ieee754_f64");
@@ -210,6 +213,7 @@ pub(crate) fn cmd_build(
         enable_spurious_detection: true,
         enable_vacuity_check: std::env::var("MUMEI_ENABLE_VACUITY_CHECK").unwrap_or_default()
             == "1",
+        fail_on_vacuous: false,
         detect_loops: false,
         suggest_cegis: false,
         ieee754_f64: false,

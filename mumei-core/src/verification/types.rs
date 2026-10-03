@@ -680,6 +680,7 @@ pub struct VerificationConfig {
     pub collect_decidable_fragment_metrics: bool,
     pub enable_spurious_detection: bool,
     pub enable_vacuity_check: bool,
+    pub fail_on_vacuous: bool,
     pub detect_loops: bool,
     pub suggest_cegis: bool,
     /// Opt-in IEEE 754 binary64 encoding for `f64` verification
@@ -702,6 +703,7 @@ impl Default for VerificationConfig {
             collect_decidable_fragment_metrics: false,
             enable_spurious_detection: true,
             enable_vacuity_check: false,
+            fail_on_vacuous: false,
             detect_loops: false,
             suggest_cegis: false,
             ieee754_f64: false,
