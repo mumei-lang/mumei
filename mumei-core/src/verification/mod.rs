@@ -32,6 +32,7 @@ pub(crate) mod support;
 pub mod translator;
 pub mod types;
 pub mod vacuity;
+pub mod vc_outcome;
 
 #[cfg(test)]
 mod tests;
@@ -56,6 +57,7 @@ pub use types::*;
 pub use vacuity::{
     check_spec_vacuity, check_spec_vacuity_for_hir, VacuityCheckResult, VacuityError,
 };
+pub use vc_outcome::{classify as classify_vc_outcome, ClauseOutcome, ContextReachability};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractManifest {

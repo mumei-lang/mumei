@@ -329,6 +329,12 @@ atom identity_with_unsupported_requires(x: i64) -> i64
         first_payload["skipped_clauses"]
     );
     assert_eq!(second_payload["partial"], true);
+    let cached_report: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(report_dir.join("report.json")).expect("read cached visualizer report"),
+    )
+    .expect("parse cached visualizer report");
+    assert!(cached_report.get("context_reachability").is_none());
+    assert!(cached_report.get("ensures_outcomes").is_none());
 
     std::fs::remove_dir_all(report_dir).expect("remove cached partial fixture dir");
 }

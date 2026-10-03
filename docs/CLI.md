@@ -35,6 +35,12 @@ mumei verify src/            # every .mm file under the directory
 mumei verify src/main.mm --json --proof-cert
 ```
 
+Postcondition verification checks whether the requires and body constraints
+form a reachable context. An unreachable context remains a contradiction
+failure; the report classifies its ensures clauses as vacuous and includes a
+diagnostic. Ensures entries in `report.json` include the context reachability
+and an outcome for each non-trivial clause.
+
 ### Exit codes
 
 Only `0` and `1` are verdicts about the program. Every other code means the
