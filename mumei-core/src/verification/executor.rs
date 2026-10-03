@@ -2047,24 +2047,17 @@ pub(crate) fn verify_inner(
     let mut skipped_ensures = false;
     let mut context_reachability = ContextReachability::Unknown;
     let mut ensures_outcomes = Vec::new();
-    for mode in atom.clause_modes.iter().filter(|mode| {
-        mode.kind == crate::parser::ClauseKind::Ensures
-            && mode.mode == crate::parser::ClauseTrustMode::Assume
-    }) {
-        for clause in split_top_level_conjunctions(&mode.clause) {
-            let label = clause_label_for(atom, crate::parser::ClauseKind::Ensures, &clause)
-                .map(str::to_string);
-            let warning = match &label {
-                Some(label) => format!(
-                    "assumed ensures clause `{clause}` with label `{label}` is trusted and was not proved"
-                ),
-                None => format!(
-                    "assumed ensures clause `{clause}` is trusted and was not proved"
-                ),
-            };
-            diagnostics.push(format!("warning: {warning}"));
-            ensures_outcomes.push((clause, ClauseOutcome::Assumed, label));
-        }
+    for clause in dropped_conjuncts(atom, ContractView::BodyEnsures) {
+        let label =
+            clause_label_for(atom, crate::parser::ClauseKind::Ensures, &clause).map(str::to_string);
+        let warning = match &label {
+            Some(label) => format!(
+                "assumed ensures clause `{clause}` with label `{label}` is trusted and was not proved"
+            ),
+            None => format!("assumed ensures clause `{clause}` is trusted and was not proved"),
+        };
+        diagnostics.push(format!("warning: {warning}"));
+        ensures_outcomes.push((clause, ClauseOutcome::Assumed, label));
     }
     let body_ensures = contract_view(atom, ContractView::BodyEnsures);
     if body_ensures.trim() != "true" {

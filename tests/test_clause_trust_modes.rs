@@ -226,6 +226,38 @@ body: 0;
 }
 
 #[test]
+fn ordinary_ensures_duplicate_suppresses_assumed_outcome_and_warning() {
+    let (dir, output, report) = verify(
+        "ordinary_assumed_ensures_duplicate",
+        r#"
+atom ordinary_assumed_ensures_duplicate() -> i64
+requires: true;
+ensures: result > 0;
+ensures assume: result > 0;
+body: 1;
+"#,
+    );
+    let text = output_text(&output);
+    assert!(output.status.success(), "{text}");
+
+    let outcomes = report["ensures_outcomes"].as_array().unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0]["outcome"], "proved");
+    assert!(outcomes
+        .iter()
+        .all(|outcome| outcome["outcome"] != "assumed"));
+    assert!(report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|diagnostic| !diagnostic
+            .as_str()
+            .unwrap_or_default()
+            .contains("assumed ensures clause")));
+    remove_fixture(dir);
+}
+
+#[test]
 fn assumed_ensures_label_is_present_in_report_and_warning() {
     let (dir, output, report) = verify(
         "labeled_assumption",
