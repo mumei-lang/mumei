@@ -2026,7 +2026,6 @@ pub(crate) fn verify_inner(
     let phase_start = std::time::Instant::now();
     let mut skipped_ensures = false;
     let mut context_reachability = ContextReachability::Unknown;
-    let mut context_reachability_checked = false;
     let mut ensures_outcomes = Vec::new();
     if atom.ensures.trim() != "true" {
         if tuple_component_types(atom.return_type.as_deref()).is_none() {
@@ -2057,30 +2056,6 @@ pub(crate) fn verify_inner(
                     ensures_outcomes.push((ens_clause.trim().to_string(), ClauseOutcome::Skipped));
                 }
                 ClauseLoweringOutcome::Lowered(ens_bool) => {
-                    if !context_reachability_checked {
-                        let context_check_start = std::time::Instant::now();
-                        context_reachability = match solver.check() {
-                            SatResult::Sat => ContextReachability::Reachable,
-                            SatResult::Unsat => ContextReachability::Unreachable,
-                            SatResult::Unknown => ContextReachability::Unknown,
-                        };
-                        metrics.record_phase(
-                            "ensures_context_reachability",
-                            context_check_start.elapsed(),
-                        );
-                        context_reachability_checked = true;
-                        if context_reachability == ContextReachability::Unreachable {
-                            diagnostics.push(format!(
-                                "vacuous verification context in atom `{}`: requires and body constraints are unsatisfiable together, so every ensures clause would hold vacuously",
-                                atom.name
-                            ));
-                        }
-                    }
-                    if context_reachability == ContextReachability::Unreachable {
-                        ensures_outcomes
-                            .push((ens_clause.trim().to_string(), ClauseOutcome::Vacuous));
-                        continue;
-                    }
                     solver.push();
                     solver.assert(&ens_bool.not());
                     let ensures_check = solver.check();
@@ -2182,6 +2157,9 @@ pub(crate) fn verify_inner(
                     } else {
                         ("N/A".to_string(), "N/A".to_string(), None, None, None, None)
                     };
+                    if ensures_check == SatResult::Sat {
+                        context_reachability = ContextReachability::Reachable;
+                    }
                     let holds_check = if ensures_check == SatResult::Sat {
                         solver.pop(1);
                         solver.push();
@@ -2442,7 +2420,21 @@ pub(crate) fn verify_inner(
     let profiler_final_check_start = profiler_checkpoint(&vc);
     let final_check = solver.check();
     profile_solver_check(&vc, profiler_final_check_start);
+    context_reachability = match final_check {
+        SatResult::Sat => ContextReachability::Reachable,
+        SatResult::Unsat => ContextReachability::Unreachable,
+        SatResult::Unknown => ContextReachability::Unknown,
+    };
     if final_check == SatResult::Unsat {
+        for (_, outcome) in &mut ensures_outcomes {
+            if *outcome == ClauseOutcome::Proved {
+                *outcome = ClauseOutcome::Vacuous;
+            }
+        }
+        diagnostics.push(format!(
+            "vacuous verification context in atom `{}`: requires and body constraints are unsatisfiable together, so every ensures clause would hold vacuously",
+            atom.name
+        ));
         let unsat_core = solver.get_unsat_core();
         let core_labels: Vec<String> = unsat_core
             .iter()

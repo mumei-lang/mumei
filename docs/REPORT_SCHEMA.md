@@ -130,8 +130,10 @@ LSP diagnostics include `relatedInformation` for multi-location errors, enabling
 Ensures reports include `context_reachability` and an `ensures_outcomes` entry
 for each non-trivial lowered or skipped clause. Each outcome entry contains the
 source `clause` text and its classified `outcome`. An unknown context is never
-reported as unreachable. An unreachable context remains a contradiction error
-under the existing final consistency check. The report attaches
+reported as unreachable. Unless a satisfiable `ctx ∧ ¬Q` query has already
+established reachability, `context_reachability` comes from the existing Phase 6
+final consistency check. Reports produced before Phase 6 without that evidence
+use `"unknown"`. An unreachable context remains a contradiction error. The report attaches
 `context_reachability: "unreachable"`, `"vacuous"` outcomes, and a diagnostic
 explaining that every ensures clause would hold vacuously.
 These keys are absent from cached (unchanged) results because verification was
