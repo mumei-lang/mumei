@@ -102,9 +102,15 @@ body: { x + 1 };
         .flatten()
         .map(|name| phase_contract(name).expect("phase is declared").name)
         .collect::<Vec<_>>();
-    assert!(verified_phases.contains(&"Phase 4: body evaluation"));
-    assert!(verified_phases.contains(&"Phase 5: ensures verification"));
-    assert!(verified_phases.contains(&"Phase 6: final Z3 check"));
+    let expected_phases = PHASE_CONTRACTS
+        .iter()
+        .map(|contract| contract.name)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        verified_phases,
+        expected_phases,
+        "verified atom phases did not match the declared list:\nrecorded: {verified_phases:?}\ndeclared: {expected_phases:?}"
+    );
 
     let (failure_dir, failure) = verify(
         "failure",
