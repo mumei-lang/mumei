@@ -1849,9 +1849,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                 ctx.advance();
                 ctx.expect(Token::Colon);
                 body_raw = collect_body(ctx);
-                if ctx.peek() == &Token::Semicolon {
-                    ctx.advance();
-                }
+                break;
             }
             Token::Consume => {
                 ctx.advance();

@@ -50,8 +50,8 @@ fn cover_witness_is_reported_and_keeps_ensures_summary() {
 atom abs_val(x: i64) -> i64
 requires: x > -1000 && x < 1000;
 ensures: result >= 0;
-body: if x < 0 { 0 - x } else { x };
 cover "zero": result == 0;
+body: if x < 0 { 0 - x } else { x };
 "#,
     );
 
@@ -75,8 +75,8 @@ fn unreachable_cover_fails_with_structured_failure_type() {
         r#"
 atom positive(x: i64) -> i64
 requires: x > 0;
-body: x;
 cover "neg": x < 0;
+body: x;
 "#,
     );
 
@@ -113,8 +113,8 @@ fn trusted_atoms_warn_when_covers_are_not_checked() {
         r#"
 trusted atom fixed() -> i64
 requires: true;
-body: 0;
 cover "one": result == 1;
+body: 0;
 "#,
     );
 

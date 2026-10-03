@@ -424,14 +424,6 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(callee_atom.requires.as_bytes());
             hasher.update(b":");
             hasher.update(callee_atom.ensures.as_bytes());
-            for cover in &callee_atom.covers {
-                hasher.update(b"|cover:");
-                hasher.update(cover.clause.as_bytes());
-                if let Some(label) = &cover.label {
-                    hasher.update(b"|label=");
-                    hasher.update(label.as_bytes());
-                }
-            }
             for p in &callee_atom.params {
                 hasher.update(b",param_type:");
                 hasher.update(p.type_name.as_deref().unwrap_or("").as_bytes());

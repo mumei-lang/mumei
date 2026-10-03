@@ -840,8 +840,8 @@ atom covered(x: i64) -> i64
     ensures: result >= 0;
     cover "zero": result == 0;
     cover: x > 0;
-    body: x;
     cover "maximum": x == 100;
+    body: x;
 "#,
         );
 
