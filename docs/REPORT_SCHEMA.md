@@ -130,10 +130,10 @@ LSP diagnostics include `relatedInformation` for multi-location errors, enabling
 Ensures reports include `context_reachability` and an `ensures_outcomes` entry
 for each non-trivial lowered or skipped clause. Each outcome entry contains the
 source `clause` text and its classified `outcome`. An unknown context is never
-reported as unreachable. By default, an unreachable context is reported as
-`"unreachable"` with `"vacuous"` clause outcomes and a warning diagnostic;
-`mumei verify --fail-on-vacuous` changes that warning into a failure with
-`failure_type: "vacuous_context"`.
+reported as unreachable. An unreachable context remains a contradiction error
+under the existing final consistency check. The report attaches
+`context_reachability: "unreachable"`, `"vacuous"` outcomes, and a diagnostic
+explaining that every ensures clause would hold vacuously.
 
 ## semantic_feedback.structured_unsat_core
 

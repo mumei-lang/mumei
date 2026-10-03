@@ -154,9 +154,6 @@ pub(crate) enum Command {
         /// Enable spec vacuity checking via mutation testing
         #[arg(long)]
         enable_vacuity_check: bool,
-        /// Fail verification when an ensures context is unreachable
-        #[arg(long)]
-        fail_on_vacuous: bool,
         /// Detect loops that may need stronger invariants
         #[arg(long)]
         detect_loops: bool,

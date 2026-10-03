@@ -33,14 +33,13 @@ mumei run src/main.mm --emit llvm-ir -o dist/app
 mumei verify src/main.mm
 mumei verify src/            # every .mm file under the directory
 mumei verify src/main.mm --json --proof-cert
-mumei verify src/main.mm --fail-on-vacuous
 ```
 
 Postcondition verification checks whether the requires and body constraints
-form a reachable context. An unreachable context produces a warning by default;
-`--fail-on-vacuous` makes verification fail instead. Ensures entries in
-`report.json` include the context reachability and an outcome for each
-non-trivial clause.
+form a reachable context. An unreachable context remains a contradiction
+failure; the report classifies its ensures clauses as vacuous and includes a
+diagnostic. Ensures entries in `report.json` include the context reachability
+and an outcome for each non-trivial clause.
 
 ### Exit codes
 

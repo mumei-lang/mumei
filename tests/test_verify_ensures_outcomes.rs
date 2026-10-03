@@ -130,54 +130,39 @@ body: conditional(x);
 "#;
 
 #[test]
-fn unreachable_context_warns_and_classifies_ensures_as_vacuous() {
-    let (dir, output, report) = verify_json("vacuous_default", VACUOUS_CONTEXT_SOURCE, &[]);
-    std::fs::remove_dir_all(dir).expect("remove fixture directory");
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(report["status"], "success");
-    assert_eq!(report["context_reachability"], "unreachable");
-    assert_eq!(report["ensures_outcomes"][0]["outcome"], "vacuous");
-    assert!(report["diagnostics"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|diagnostic| diagnostic["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("vacuous verification context"))));
-    assert!(report["warnings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|warning| warning["code"] == "vacuous_context" && warning["atom"] == "caller"));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("warning: vacuous verification context")
-    );
-}
-
-#[test]
-fn fail_on_vacuous_rejects_unreachable_context() {
-    let (dir, output, report) = verify_json(
-        "vacuous_failure",
-        VACUOUS_CONTEXT_SOURCE,
-        &["--fail-on-vacuous"],
-    );
+fn unreachable_context_remains_contradiction_and_classifies_ensures_as_vacuous() {
+    let (dir, fixture) = write_fixture("vacuous_context", VACUOUS_CONTEXT_SOURCE);
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--report-dir")
+        .arg(&dir)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run verify");
     let visualizer_report: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.join("report.json")).expect("read visualizer report"),
     )
     .expect("parse visualizer report");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     std::fs::remove_dir_all(dir).expect("remove fixture directory");
 
     assert!(!output.status.success());
-    assert_eq!(report["status"], "failed");
-    assert_eq!(visualizer_report["failure_type"], "vacuous_context");
+    assert!(stderr.contains("Verification Error: Contradiction found."));
+    assert_eq!(visualizer_report["status"], "failed");
+    assert_eq!(visualizer_report["reason"], "Logic contradiction.");
+    assert_eq!(visualizer_report["failure_type"], "invariant_violated");
     assert_eq!(visualizer_report["context_reachability"], "unreachable");
     assert_eq!(
         visualizer_report["ensures_outcomes"][0]["outcome"],
         "vacuous"
     );
+    assert!(visualizer_report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|diagnostic| diagnostic.as_str().is_some_and(|message| {
+            message
+                == "vacuous verification context in atom `caller`: requires and body constraints are unsatisfiable together, so every ensures clause would hold vacuously"
+        })));
 }

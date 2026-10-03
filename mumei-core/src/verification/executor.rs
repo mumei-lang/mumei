@@ -31,7 +31,6 @@ pub fn verify_with_config(
             global_max_unroll,
             enable_spurious_detection: true,
             enable_vacuity_check: false,
-            fail_on_vacuous: false,
             ieee754_f64: false,
             bitvec_i64: false,
             property_based_config: None,
@@ -56,7 +55,6 @@ pub fn verify_with_verification_config(
             global_max_unroll: config.global_max_unroll,
             enable_spurious_detection: config.enable_spurious_detection,
             enable_vacuity_check: config.enable_vacuity_check,
-            fail_on_vacuous: config.fail_on_vacuous,
             ieee754_f64: config.ieee754_f64,
             bitvec_i64: config.bitvec_i64,
             property_based_config: config.property_based_test.as_ref(),
@@ -98,7 +96,6 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
             global_max_unroll: BMC_DEFAULT_UNROLL_DEPTH,
             enable_spurious_detection: true,
             enable_vacuity_check: false,
-            fail_on_vacuous: false,
             ieee754_f64: false,
             bitvec_i64: false,
             property_based_config: None,
@@ -114,7 +111,6 @@ pub(crate) struct VerifyInnerOptions<'a> {
     global_max_unroll: usize,
     enable_spurious_detection: bool,
     enable_vacuity_check: bool,
-    fail_on_vacuous: bool,
     ieee754_f64: bool,
     bitvec_i64: bool,
     property_based_config: Option<&'a PropertyBasedTestConfig>,
@@ -452,7 +448,6 @@ pub(crate) fn verify_inner(
         global_max_unroll,
         enable_spurious_detection,
         enable_vacuity_check,
-        fail_on_vacuous,
         ieee754_f64,
         bitvec_i64,
         property_based_config,
@@ -2075,12 +2070,10 @@ pub(crate) fn verify_inner(
                         );
                         context_reachability_checked = true;
                         if context_reachability == ContextReachability::Unreachable {
-                            let warning = format!(
-                                "warning: vacuous verification context in atom `{}`: requires and body constraints are unsatisfiable together, so every ensures clause holds vacuously",
+                            diagnostics.push(format!(
+                                "vacuous verification context in atom `{}`: requires and body constraints are unsatisfiable together, so every ensures clause would hold vacuously",
                                 atom.name
-                            );
-                            eprintln!("{warning}");
-                            diagnostics.push(warning);
+                            ));
                         }
                     }
                     if context_reachability == ContextReachability::Unreachable {
@@ -2370,36 +2363,6 @@ pub(crate) fn verify_inner(
                 }
             }
         }
-        if fail_on_vacuous && context_reachability == ContextReachability::Unreachable {
-            let outcome_summary = ensures_outcome_summary(context_reachability, &ensures_outcomes);
-            metrics.record_phase(
-                "Phase 5: ensures verification (vacuous context)",
-                phase_start.elapsed(),
-            );
-            metrics.total_constraints = constraint_count_cell.get();
-            metrics.print_summary();
-            save_visualizer_report(
-                output_dir,
-                "failed",
-                &atom.name,
-                "N/A",
-                "N/A",
-                "Verification context is unreachable.",
-                None,
-                "vacuous_context",
-                None,
-                Some(&atom.span),
-                None,
-                None,
-                None,
-                Some(&diagnostics),
-                Some(&outcome_summary),
-            );
-            return Err(MumeiError::verification_at(
-                format!("Vacuous verification context in atom '{}'.", atom.name),
-                atom.span.clone(),
-            ));
-        }
         if skipped_ensures {
             metrics.record_phase(
                 "Phase 5: ensures verification (unverifiable)",
@@ -2499,7 +2462,7 @@ pub(crate) fn verify_inner(
     let profiler_final_check_start = profiler_checkpoint(&vc);
     let final_check = solver.check();
     profile_solver_check(&vc, profiler_final_check_start);
-    if final_check == SatResult::Unsat && context_reachability != ContextReachability::Unreachable {
+    if final_check == SatResult::Unsat {
         let unsat_core = solver.get_unsat_core();
         let core_labels: Vec<String> = unsat_core
             .iter()
@@ -2540,7 +2503,10 @@ pub(crate) fn verify_inner(
             None,
             None,
             Some(&diagnostics),
-            None,
+            Some(&ensures_outcome_summary(
+                context_reachability,
+                &ensures_outcomes,
+            )),
         );
 
         let constraint_summary = if conflicting_constraints.is_empty() {
@@ -2559,13 +2525,15 @@ pub(crate) fn verify_inner(
             z3_check_start.elapsed(),
         );
         metrics.print_summary();
-        return Err(MumeiError::verification_at(
-            constraint_summary,
-            atom.span.clone(),
-        ));
+        let mut err = MumeiError::verification_at(constraint_summary, atom.span.clone());
+        if context_reachability == ContextReachability::Unreachable {
+            err = err.with_help(
+                "The verification context is vacuous: requires and body constraints are unsatisfiable together, so every ensures clause would hold vacuously.",
+            );
+        }
+        return Err(err);
     }
-    if final_check == SatResult::Unknown && context_reachability != ContextReachability::Unreachable
-    {
+    if final_check == SatResult::Unknown {
         let heatmap = profiler_cell
             .borrow()
             .build_heatmap(&atom.name, "z3_unknown");
@@ -2597,6 +2565,26 @@ pub(crate) fn verify_inner(
         } else {
             "Z3 returned unknown during the final consistency check.".to_string()
         };
+        save_visualizer_report(
+            output_dir,
+            "failed",
+            &atom.name,
+            "N/A",
+            "N/A",
+            &message,
+            None,
+            "",
+            None,
+            Some(&atom.span),
+            None,
+            None,
+            None,
+            Some(&diagnostics),
+            Some(&ensures_outcome_summary(
+                context_reachability,
+                &ensures_outcomes,
+            )),
+        );
         let mut err = MumeiError::verification_at(message, atom.span.clone());
         if let Some(help) = property_based_help {
             err = err.with_help(help);
