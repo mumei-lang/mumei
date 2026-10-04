@@ -342,7 +342,7 @@ def _translate_ensures_to_assertions(atom: TrustedAtom) -> list[str]:
         if m:
             if "result >= 100" in part and "result <= 599" in part:
                 assertions.append(
-                    '    prop_assert!(result == 0 || (result >= 100 && result <= 599), "ensures: result == 0 || (100 <= result <= 599), got {}", result);'
+                    '    prop_assert!(result == 0 || (100..=599).contains(&result), "ensures: result == 0 || (100 <= result <= 599), got {}", result);'
                 )
                 continue
             assertions.append(
