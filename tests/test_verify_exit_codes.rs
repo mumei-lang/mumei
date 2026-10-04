@@ -119,6 +119,24 @@ fn solver_unknown_without_counterexample_is_inconclusive() {
 }
 
 #[test]
+fn rejection_of_an_atom_named_like_a_solver_result_is_still_a_rejection() {
+    // The semantics check rejects the atom before Z3 runs; its error quotes the
+    // atom name, which must not be mistaken for a solver result.
+    for name in ["timeout", "spurious_candidate"] {
+        let dir = temp_dir(&format!("named_{name}"));
+        write(
+            &dir,
+            "named.mm",
+            &format!(
+                "atom {name}(x: i64) -> i64\nrequires: x >= 0;\nensures: result >= 0;\nsemantics: bogus;\nbody: {{ x }};\n"
+            ),
+        );
+        let output = verify(&dir, &["named.mm"]);
+        assert_exit(&output, EXIT_REJECTED);
+    }
+}
+
+#[test]
 fn unreadable_input_is_an_input_error() {
     let dir = temp_dir("missing");
     assert_exit(&verify(&dir, &["does_not_exist.mm"]), EXIT_INPUT_ERROR);

@@ -3861,6 +3861,31 @@ fn nlsat_first_unknown_message_maps_to_existing_z3_result_classes() {
 }
 
 #[test]
+fn z3_result_from_error_message_ignores_quoted_identifiers() {
+    for name in ["timeout", "spurious_candidate", "unknown", "resource_limit"] {
+        let message =
+            format!("Verification Error: atom '{name}' declares an unknown semantics mode 'bogus'");
+        assert_eq!(
+            z3_result_from_error_message(&message),
+            None,
+            "atom name {name:?} must not be read as a solver result"
+        );
+    }
+    assert_eq!(
+        z3_result_from_error_message(
+            "Spurious counterexample detected for atom 'f'. Spurious counterexample candidate for atom 'f'"
+        ),
+        Some("spurious_candidate")
+    );
+    assert_eq!(
+        z3_result_from_error_message(
+            "Constraint budget exceeded for atom 'timeout': 10 constraints (limit: 5)"
+        ),
+        Some("resource_limit")
+    );
+}
+
+#[test]
 fn nlsat_first_unknown_demotes_to_lean_with_nonlinear_reason() {
     // Bounded, degree ≤ 2, ≤ 3 variables → nlsat-first candidate; if Z3 answers
     // unknown the classification must fall back to the Lean escalation reason.

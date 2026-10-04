@@ -1266,19 +1266,24 @@ pub fn classify_z3_result(result: &str) -> &'static str {
     }
 }
 
+/// Recovers the Z3 result class from a verifier error message.
+///
+/// Only multi-word phrases the verifier itself writes are matched. Error
+/// messages quote user identifiers (atom, resource, law names), and a bare
+/// token such as `timeout` would turn an unrelated rejection of an atom named
+/// `timeout` into an inconclusive result.
 pub fn z3_result_from_error_message(message: &str) -> Option<&'static str> {
     let normalized = message.to_ascii_lowercase();
     if normalized.contains("z3 returned unknown") || normalized.contains("solver returned unknown")
     {
         Some("unknown")
-    } else if normalized.contains("timeout") {
+    } else if normalized.contains("z3 nlsat timeout") {
         Some("timeout")
     } else if normalized.contains("resource limit")
         || normalized.contains("constraint budget exceeded")
     {
         Some("resource_limit")
-    } else if normalized.contains("spurious_candidate")
-        || normalized.contains("spurious counterexample")
+    } else if normalized.contains("spurious counterexample")
         || normalized.contains("does not match mumei body result")
         || normalized.contains("does not violate ensures under mumei semantics")
     {
