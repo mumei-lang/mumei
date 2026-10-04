@@ -2177,6 +2177,22 @@ pub(crate) fn verify_inner(
                                     ));
                                 }
                             }
+                            let length_companions = atom
+                                .params
+                                .iter()
+                                .filter_map(|param| {
+                                    let type_name = param.type_name.as_deref()?;
+                                    let lowering =
+                                        length_companion_lowering(type_name, module_env)?;
+                                    let value = pre_body_env.get(&format!("len_{}", param.name))?;
+                                    Some(raise_length_companion(
+                                        &model,
+                                        &param.name,
+                                        value,
+                                        lowering,
+                                    ))
+                                })
+                                .collect::<Vec<_>>();
                             if tuple_component_types(atom.return_type.as_deref()).is_none() {
                                 if let Some(result) = env.get("result") {
                                     loss_bindings.push((
@@ -2232,6 +2248,18 @@ pub(crate) fn verify_inner(
                                 &loss_env,
                                 module_env,
                             );
+                            let length_companion_names = length_companions
+                                .iter()
+                                .map(|value| value.source_name.clone())
+                                .collect::<HashSet<_>>();
+                            let mut raised_loss = raised_loss;
+                            raised_loss.values.extend(length_companions);
+                            raised_loss
+                                .values
+                                .sort_by(|left, right| left.source_name.cmp(&right.source_name));
+                            raised_loss
+                                .omitted_solver_symbols
+                                .retain(|symbol| !length_companion_names.contains(symbol));
                             for value in &raised_loss.values {
                                 if !raised_counterexample
                                     .values
@@ -2244,6 +2272,9 @@ pub(crate) fn verify_inner(
                             raised_counterexample
                                 .omitted_solver_symbols
                                 .extend(raised_loss.omitted_solver_symbols.iter().cloned());
+                            raised_counterexample
+                                .omitted_solver_symbols
+                                .retain(|symbol| !length_companion_names.contains(symbol));
                             raised_counterexample
                                 .values
                                 .sort_by(|a, b| a.source_name.cmp(&b.source_name));

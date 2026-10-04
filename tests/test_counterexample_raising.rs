@@ -206,6 +206,64 @@ body: match s { Circle(n) => n, Sq(n) => n };
 }
 
 #[test]
+fn string_length_companion_is_raised_in_loss_and_provenance() {
+    let dir = std::env::temp_dir().join(format!(
+        "mumei_string_length_provenance_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir).expect("create report directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--json")
+        .arg("--enable-spurious-detection")
+        .arg("--report-dir")
+        .arg(&dir)
+        .arg("tests/negative/test_str_len_cex.mm")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run string length counterexample fixture");
+    assert!(
+        !output.status.success(),
+        "fixture must fail verification: {}",
+        output_text(&output)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: Value =
+        serde_json::from_str(stdout.trim()).expect("verify --json emits one JSON payload");
+    let provenance = &payload["counterexample_provenance"];
+    assert_eq!(provenance["values"]["len_s"]["status"], "raised");
+    assert_eq!(provenance["values"]["len_s"]["lowering"], "str_length");
+    assert!(
+        !provenance["omitted_solver_symbols"]
+            .as_array()
+            .expect("provenance contains omitted solver symbols")
+            .iter()
+            .any(|symbol| symbol == "len_s"),
+        "a raised length companion must not also be omitted"
+    );
+
+    let counterexample = &payload["counterexample"];
+    assert!(counterexample.is_object());
+    assert!(
+        counterexample.get("len_s").is_none(),
+        "length companions are reconstruction-loss values, not public counterexample fields"
+    );
+    let loss = &payload["semantic_feedback"]["reconstruction_loss"]["counter_example"];
+    let string = loss["s"]
+        .as_str()
+        .expect("string parameter is present in reconstruction loss");
+    let len_s = loss["len_s"]
+        .as_i64()
+        .expect("raised string length is an integer");
+    assert_eq!(len_s, string.chars().count() as i64);
+    cleanup(dir);
+}
+
+#[test]
 fn array_parameter_is_retained_even_when_it_cannot_be_raised() {
     // Previously array parameters could disappear into raw array and length symbols.
     let (dir, output, report) = verify_source(
@@ -228,6 +286,21 @@ body: n;
         provenance["status"] == "raised"
             || (provenance["status"] == "unraisable" && provenance["reason"].is_string()),
         "{provenance}"
+    );
+    let length_provenance = &report["counterexample_provenance"]["values"]["len_arr"];
+    assert_eq!(length_provenance["status"], "raised");
+    assert_eq!(length_provenance["lowering"], "array_length");
+    assert!(
+        !report["counterexample_provenance"]["omitted_solver_symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol == "len_arr")
+    );
+    assert!(
+        report["semantic_feedback"]["reconstruction_loss"]["counter_example"]["len_arr"]
+            .as_i64()
+            .is_some()
     );
     if provenance["status"] == "unraisable" {
         assert_eq!(report["counterexample_fidelity"], "approximate");

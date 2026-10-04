@@ -61,6 +61,9 @@ internal or otherwise unreported solver symbols.
 Primitive lowering labels include `int`, signed `bitvec_i64`/`bitvec_i32`,
 unsigned `bitvec_u64`/`bitvec_u32`, exact `real_f64`/`real_f32`, and
 `ieee754_f64`/`ieee754_f32` for matching IEEE floating-point sorts.
+`str_length` and `array_length` identify the solver-side length companions of
+`Str` and array parameters (`len(s)`); they are reported in reconstruction-loss
+values and provenance.
 
 In-process verification stops at the first failing atom.  When a sibling
 `<file>.proof.json` certificate exists, every other atom it records with an

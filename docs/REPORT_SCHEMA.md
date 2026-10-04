@@ -144,7 +144,9 @@ Primitive lowering labels include `int` for integer-sorted source integers,
 `bitvec_i64` and `bitvec_i32` for signed bit-vectors, `bitvec_u64` and
 `bitvec_u32` for unsigned bit-vectors, `real_f64` and `real_f32` for exactly
 representable real values, and `ieee754_f64` and `ieee754_f32` for matching
-IEEE floating-point sorts.
+IEEE floating-point sorts. `str_length` and `array_length` identify the
+solver-side length companions of `Str` and array parameters (`len(s)`); they
+are reported in reconstruction-loss values and provenance.
 
 Ensures reports include `context_reachability` and an `ensures_outcomes` entry
 for each non-trivial lowered, skipped, or assumed clause. Each outcome entry

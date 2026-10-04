@@ -38,7 +38,8 @@ pub fn loss_json_from_raised_rendering(rendering: &str, lowering: &str, is_raise
         return Value::String(rendering.to_string());
     }
     match lowering {
-        "int" | "bitvec_i64" | "bitvec_i32" | "bitvec_u64" | "bitvec_u32" => rendering
+        "int" | "bitvec_i64" | "bitvec_i32" | "bitvec_u64" | "bitvec_u32" | "str_length"
+        | "array_length" => rendering
             .parse::<i64>()
             .map(Number::from)
             .or_else(|_| rendering.parse::<u64>().map(Number::from))
@@ -50,6 +51,9 @@ pub fn loss_json_from_raised_rendering(rendering: &str, lowering: &str, is_raise
             .and_then(Number::from_f64)
             .map(Value::Number)
             .unwrap_or_else(|| Value::String(rendering.to_string())),
+        "string" => string_value_from_rendering(rendering)
+            .map(Value::String)
+            .unwrap_or_else(|| Value::String(rendering.to_string())),
         "bool" => match rendering {
             "true" => Value::Bool(true),
             "false" => Value::Bool(false),
@@ -57,6 +61,19 @@ pub fn loss_json_from_raised_rendering(rendering: &str, lowering: &str, is_raise
         },
         _ => Value::String(rendering.to_string()),
     }
+}
+
+fn string_value_from_rendering(rendering: &str) -> Option<String> {
+    let content = rendering.strip_prefix('"')?.strip_suffix('"')?;
+    let mut characters = content.chars();
+    let mut value = String::with_capacity(content.len());
+    while let Some(character) = characters.next() {
+        if character == '"' && characters.next() != Some('"') {
+            return None;
+        }
+        value.push(character);
+    }
+    Some(value)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -366,6 +383,49 @@ pub fn raise_named_model_value<'ctx>(
         rendering,
         lowering,
         source_type: type_hint.map(str::to_string),
+        status,
+    }
+}
+
+pub fn raise_length_companion<'ctx>(
+    model: &Model<'ctx>,
+    binding: &str,
+    value: &Dynamic<'ctx>,
+    lowering: &'static str,
+) -> RaisedValue {
+    let (rendering, status) = match model.eval(value, true) {
+        Some(evaluated) => {
+            let raw = evaluated.to_string();
+            match evaluated.as_int().and_then(|integer| integer.as_i64()) {
+                Some(length) => (length.to_string(), RaisedStatus::Raised),
+                None => {
+                    let reason = if evaluated.as_int().is_some() {
+                        "length companion is outside the supported i64 range"
+                    } else {
+                        "length companion did not evaluate to a Z3 Int"
+                    };
+                    (
+                        raw,
+                        RaisedStatus::Unraisable {
+                            reason: reason.to_string(),
+                        },
+                    )
+                }
+            }
+        }
+        None => (
+            value.to_string(),
+            RaisedStatus::Unraisable {
+                reason: "model did not evaluate the length companion".to_string(),
+            },
+        ),
+    };
+    RaisedValue {
+        source_name: format!("len_{binding}"),
+        solver_name: None,
+        rendering,
+        lowering,
+        source_type: None,
         status,
     }
 }
@@ -934,6 +994,14 @@ fn resolve_source_base_type(type_name: &str, module_env: &ModuleEnv) -> String {
     base
 }
 
+pub fn length_companion_lowering(type_name: &str, module_env: &ModuleEnv) -> Option<&'static str> {
+    match lower(&resolve_source_base_type(type_name, module_env)) {
+        LoweredType::Str => Some("str_length"),
+        LoweredType::Array(_) => Some("array_length"),
+        _ => None,
+    }
+}
+
 fn parse_solver_integer(raw: &str) -> Option<i128> {
     if let Some(inner) = raw
         .strip_prefix("(- ")
@@ -1140,7 +1208,8 @@ pub fn raise_atom_counterexample<'ctx>(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_ieee754_f64, raise_model_value, RaisedCounterexample, RaisedStatus, RaisedValue,
+        decode_ieee754_f64, length_companion_lowering, loss_json_from_raised_rendering,
+        raise_length_companion, raise_model_value, RaisedCounterexample, RaisedStatus, RaisedValue,
     };
     use crate::parser::{RefinedType, Span};
     use crate::verification::ModuleEnv;
@@ -1368,6 +1437,63 @@ mod tests {
             structured.to_loss_json(),
             Value::String("Shape::Circle(1)".to_string())
         );
+        assert_eq!(
+            loss_json_from_raised_rendering("\"A\"", "string", true),
+            Value::String("A".to_string())
+        );
+        assert_eq!(
+            loss_json_from_raised_rendering("\"a\"\"b\"", "string", true),
+            Value::String("a\"b".to_string())
+        );
+    }
+
+    #[test]
+    fn length_companions_fail_closed_for_non_integer_values() {
+        let config = Config::new();
+        let context = Context::new(&config);
+        let solver = Solver::new(&context);
+        solver.assert(&Bool::from_bool(&context, true));
+        assert_eq!(solver.check(), SatResult::Sat);
+        let model = solver.get_model().unwrap();
+        let value: Dynamic = Bool::from_bool(&context, true).into();
+
+        let raised = raise_length_companion(&model, "s", &value, "str_length");
+
+        assert_eq!(raised.source_name, "len_s");
+        assert_eq!(raised.lowering, "str_length");
+        assert_eq!(raised.source_type, None);
+        assert_eq!(raised.solver_name, None);
+        assert_eq!(raised.rendering, "true");
+        assert_eq!(
+            raised.status,
+            RaisedStatus::Unraisable {
+                reason: "length companion did not evaluate to a Z3 Int".to_string(),
+            }
+        );
+        assert_eq!(raised.to_loss_json(), Value::String("true".to_string()));
+    }
+
+    #[test]
+    fn length_companion_lowering_resolves_string_aliases_and_arrays() {
+        let mut module_env = ModuleEnv::new();
+        module_env.register_type(&RefinedType {
+            name: "Text".to_string(),
+            _base_type: "Str".to_string(),
+            operand: "v".to_string(),
+            predicate_raw: "true".to_string(),
+            unit: None,
+            span: Span::default(),
+        });
+
+        assert_eq!(
+            length_companion_lowering("Text", &module_env),
+            Some("str_length")
+        );
+        assert_eq!(
+            length_companion_lowering("[i64]", &module_env),
+            Some("array_length")
+        );
+        assert_eq!(length_companion_lowering("i64", &module_env), None);
     }
 
     #[test]
