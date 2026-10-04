@@ -430,12 +430,18 @@ fn resolve_ctor_variant<'a>(
     target_val: &Dynamic,
     variant_name: &str,
 ) -> Option<(&'a EnumDef, usize)> {
+    let target_sort = target_val.as_datatype()?.get_sort();
+    // モデル値のソートが正: enum_ctx は arms からの推測なので、同名 variant を
+    // 持つ別 enum を誤検出している可能性がある。ソートが一致するときだけ使う。
     if let Some(edef) = enum_ctx {
-        if let Some(idx) = edef.variants.iter().position(|v| v.name == variant_name) {
-            return Some((edef, idx));
+        if let Some(sort) = datatype::enum_datatype_sort(vc, edef) {
+            if sort.sort == target_sort {
+                if let Some(idx) = edef.variants.iter().position(|v| v.name == variant_name) {
+                    return Some((edef, idx));
+                }
+            }
         }
     }
-    let target_sort = target_val.as_datatype()?.get_sort();
     for edef in module_env.enums.values() {
         if let Some(sort) = datatype::enum_datatype_sort(vc, edef) {
             if sort.sort == target_sort {

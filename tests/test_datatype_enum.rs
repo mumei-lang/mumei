@@ -100,6 +100,22 @@ fn datatype_enum_missing_payload_arm_shows_fields_and_tag() {
 }
 
 #[test]
+fn shared_variant_names_resolve_to_the_target_enum() {
+    // Two enums share variant names; the uncovered arm must be reported on the
+    // target's own enum (A::X), not the other owner of the same-named variants.
+    let output = mumei_verify("tests/test_enum_shared_variant_negative.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("A::X (tag=0)") && !combined.contains("B::"),
+        "counterexample must name the target's enum, got:\n{combined}"
+    );
+}
+
+#[test]
 fn qualified_variant_arms_resolve_the_qualifier_enum() {
     let output = mumei_verify("tests/test_enum_qualified_pattern.mm");
     let combined = format!(
