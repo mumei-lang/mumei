@@ -61,4 +61,4 @@ jobs:
         run: cargo test --workspace --lib --bins
 
       - name: Integration tests
-        run: cargo test --tests --no-fail-fast
+        run: cargo test --test '*' --no-fail-fast
