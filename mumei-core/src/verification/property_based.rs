@@ -805,7 +805,10 @@ fn assignment_satisfies_preconditions(
     if assert_clause(&vc, &solver, &mut env, &atom.requires).is_err() {
         return false;
     }
-    matches!(solver.check(), SatResult::Sat)
+    matches!(
+        crate::verification::phase_artifacts::check(&solver),
+        SatResult::Sat
+    )
 }
 
 fn assignment_satisfies_ensures(
@@ -824,7 +827,10 @@ fn assignment_satisfies_ensures(
     if assert_clause(&vc, &solver, &mut env, &atom.ensures).is_err() {
         return true;
     }
-    matches!(solver.check(), SatResult::Sat)
+    matches!(
+        crate::verification::phase_artifacts::check(&solver),
+        SatResult::Sat
+    )
 }
 
 fn evaluate_body(
@@ -841,11 +847,17 @@ fn evaluate_body(
     let mut env = seed_concrete_env(&ctx, atom, module_env, assignment, None, bitvec_i64);
     let body = parse_body_expr(&atom.body_expr);
     let value = stmt_to_z3(&vc, &body, &mut env, Some(&solver)).ok()?;
-    if !matches!(solver.check(), SatResult::Sat) {
+    if !matches!(
+        crate::verification::phase_artifacts::check(&solver),
+        SatResult::Sat
+    ) {
         return None;
     }
     bind_nondeterministic_sources(&solver, module_env, &value, &env)?;
-    if !matches!(solver.check(), SatResult::Sat) {
+    if !matches!(
+        crate::verification::phase_artifacts::check(&solver),
+        SatResult::Sat
+    ) {
         return None;
     }
     dynamic_to_generated(&value, &solver)
@@ -926,7 +938,10 @@ fn bind_nondeterministic_sources<'a>(
         } else {
             continue;
         }
-        if !matches!(solver.check(), SatResult::Sat) {
+        if !matches!(
+            crate::verification::phase_artifacts::check(solver),
+            SatResult::Sat
+        ) {
             return None;
         }
         model = solver.get_model()?;
