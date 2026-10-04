@@ -902,14 +902,6 @@ struct LspVerifyFailure {
     inconclusive: bool,
 }
 
-/// Z3 results `mumei verify` reports as inconclusive rather than rejected.
-fn is_inconclusive_z3_result(z3_result: &str) -> bool {
-    matches!(
-        z3_result,
-        "unknown" | "timeout" | "resource_limit" | "spurious_candidate"
-    )
-}
-
 /// Outcome of the in-process verification pass over a buffer.
 struct LspLiveVerification {
     /// Atoms Z3 proved in this run whose classification does not route them
@@ -951,7 +943,8 @@ fn classify_lsp_failure(
         error,
         atom: Some(atom.name.clone()),
         escalation: classification.should_escalate.then_some(classification),
-        inconclusive: is_unverifiable || is_inconclusive_z3_result(&z3_result),
+        inconclusive: is_unverifiable
+            || crate::commands::verify::is_solver_inconclusive(&z3_result),
     }
 }
 
@@ -1551,11 +1544,12 @@ fn append_certificate_lean_escalation_diagnostics(
             let reason = reason.as_str();
             // `skipped`: the certifying run never got a Z3 verdict for the atom.
             let check = atom_cert.z3_check_result.as_str();
-            let severity = if is_inconclusive_z3_result(check) || check == "skipped" {
-                2
-            } else {
-                1
-            };
+            let severity =
+                if crate::commands::verify::is_solver_inconclusive(check) || check == "skipped" {
+                    2
+                } else {
+                    1
+                };
             diagnostics.push(serde_json::json!({
                 "range": atom_name_range(source, atom),
                 "severity": severity,
