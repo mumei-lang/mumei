@@ -74,8 +74,8 @@ The table below is the contract table. Paths in the last column are relative to
 | `Phase 1d: atom invariant` | — | — | — | — | `verification/support/call_graph.rs::verify_atom_invariant` |
 | `Phase 1e: call graph cycles` | — | — | — | — | `verification/support/call_graph.rs::verify_call_graph_cycles` |
 | `Phase 1g: effect params` | — | — | — | — | `verification/support/effects.rs::verify_effect_params` |
-| `Phase 1h: MIR move analysis` | — | — | — | — | `mir_analysis/move_analysis.rs::analyze_moves`, `mir_analysis/borrow_check.rs::check_borrows_with_callees` |
 | `Phase 1h-2: structured concurrency ownership` | — | — | — | — | `verification/support/task_ownership.rs::verify_task_ownership` |
+| `Phase 1h: MIR move analysis` | — | — | — | — | `mir_analysis/move_analysis.rs::analyze_moves`, `mir_analysis/borrow_check.rs::check_borrows_with_callees` |
 | `Phase 1i: vacuity checking` | — | — | — | — | `verification/vacuity.rs::check_spec_vacuity_for_hir` |
 | `Phase 1j: temporal effects` | — | — | — | — | `mir_analysis/temporal_effects.rs::analyze_temporal_effects_with_contracts` |
 | `Phase 4: body evaluation` | — | `solver_context`, `body_result`, `body_result_value` | — | `approximate` | `verification/executor.rs::verify_inner` |

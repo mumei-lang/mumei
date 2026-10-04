@@ -680,15 +680,19 @@ pub(crate) fn expr_to_z3<'a>(
                     )?;
 
                     // 束縛変数を一時的に env に追加して condition を評価
-                    let bound_var = Int::new_const(ctx, var_name.as_str());
+                    // Fresh const: a same-named outer variable must not be
+                    // captured by the quantifier binder.
+                    let bound_var = Int::fresh_const(ctx, var_name.as_str());
                     let old_val = env.insert(var_name.clone(), bound_var.clone().into());
 
                     let range_cond =
                         Bool::and(ctx, &[&bound_var.ge(&start_z3), &bound_var.lt(&end_z3)]);
 
-                    let condition_z3 = expr_to_z3(vc, &args[3], env, None)?.as_bool().ok_or(
-                        MumeiError::type_error(format!("{}(): condition must be boolean", name)),
-                    )?;
+                    vc.quantifier_binders
+                        .borrow_mut()
+                        .push((var_name.clone(), bound_var.clone().into()));
+                    let condition_res = expr_to_z3(vc, &args[3], env, None);
+                    vc.quantifier_binders.borrow_mut().pop();
 
                     // 束縛変数を env から復元
                     if let Some(old) = old_val {
@@ -696,6 +700,14 @@ pub(crate) fn expr_to_z3<'a>(
                     } else {
                         env.remove(&var_name);
                     }
+
+                    let condition_z3 =
+                        condition_res?
+                            .as_bool()
+                            .ok_or(MumeiError::type_error(format!(
+                                "{}(): condition must be boolean",
+                                name
+                            )))?;
 
                     let quantifier_expr = if name == "forall" {
                         // ∀ var ∈ [start, end). condition
@@ -821,6 +833,7 @@ pub(crate) fn expr_to_z3<'a>(
                     // ソートは f64 エンコーディング（デフォルト Real、
                     // `--ieee754-f64` で Float）に合わせる。
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    vc.reject_quantifier_dependent_call("sqrt", std::slice::from_ref(&_val))?;
                     // 呼び出しごとに一意な名前を使い、`sqrt(a) + sqrt(b)` の
                     // ような複数呼び出しが同一の Z3 変数に潰れないようにする。
                     static SQRT_COUNTER: std::sync::atomic::AtomicUsize =
@@ -848,6 +861,10 @@ pub(crate) fn expr_to_z3<'a>(
                 "cast_to_int" => {
                     // Z3 0.12 では Float->Int 直接変換がないため、シンボリック整数を返す
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    vc.reject_quantifier_dependent_call(
+                        "cast_to_int",
+                        std::slice::from_ref(&_val),
+                    )?;
                     Ok(Int::new_const(ctx, "cast_result").into())
                 }
                 // =============================================================
@@ -1064,6 +1081,9 @@ pub(crate) fn expr_to_z3<'a>(
                         for arg in args {
                             arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
                         }
+                        let recursive_instance = vc.is_instantiating_contract(&callee.name);
+                        // The unconstrained recursive result only weakens assumptions.
+                        vc.reject_quantifier_dependent_call(name, &arg_vals)?;
 
                         // 仮引数名と実引数値の対応を構築
                         let mut call_env = env.clone();
@@ -1121,11 +1141,10 @@ pub(crate) fn expr_to_z3<'a>(
                         }
 
                         // requires の検証: 呼び出し元のコンテキストで事前条件が満たされるか
-                        let caller_requires = crate::verification::contract_view(
-                            &callee,
-                            crate::verification::ContractView::CallerRequires,
-                        );
-                        if caller_requires.trim() != "true" {
+                        let caller_requires =
+                            crate::verification::caller_requires_obligation(&callee);
+                        if caller_requires.trim() != "true" && !recursive_instance {
+                            let _contract_guard = vc.enter_contract_instantiation(&callee.name);
                             if let Some(solver) = solver_opt {
                                 let req_ast = parse_expression(&caller_requires);
                                 let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
@@ -1300,60 +1319,63 @@ pub(crate) fn expr_to_z3<'a>(
                         // 呼び出し元のコンテキストで検証する。
                         // get_traits_for_method で全候補を取得し、find_impl で callee の型に
                         // 対して実際にトレイトが impl されている候補のみ適用する。
-                        if let Some(solver) = solver_opt {
-                            let callee_type = callee
-                                .params
-                                .first()
-                                .and_then(|p| p.type_name.as_deref())
-                                .unwrap_or("i64");
-                            let candidates = vc.module_env.get_traits_for_method(name);
-                            // find_impl で正しいトレイトを絞り込む
-                            let matched = candidates
-                                .iter()
-                                .find(|(tn, _)| vc.module_env.find_impl(tn, callee_type).is_some());
-                            if let Some((_trait_name, trait_method)) = matched {
-                                for (i, constraint_opt) in
-                                    trait_method.param_constraints.iter().enumerate()
-                                {
-                                    if let Some(constraint) = constraint_opt {
-                                        if let Some(arg_val) = arg_vals.get(i) {
-                                            let param_name = callee
-                                                .params
-                                                .get(i)
-                                                .map(|p| p.name.as_str())
-                                                .unwrap_or("v");
-                                            let concrete_constraint: String =
-                                                replace_constraint_placeholder(
-                                                    constraint, param_name,
+                        if !recursive_instance {
+                            if let Some(solver) = solver_opt {
+                                let callee_type = callee
+                                    .params
+                                    .first()
+                                    .and_then(|p| p.type_name.as_deref())
+                                    .unwrap_or("i64");
+                                let candidates = vc.module_env.get_traits_for_method(name);
+                                // find_impl で正しいトレイトを絞り込む
+                                let matched = candidates.iter().find(|(tn, _)| {
+                                    vc.module_env.find_impl(tn, callee_type).is_some()
+                                });
+                                if let Some((_trait_name, trait_method)) = matched {
+                                    for (i, constraint_opt) in
+                                        trait_method.param_constraints.iter().enumerate()
+                                    {
+                                        if let Some(constraint) = constraint_opt {
+                                            if let Some(arg_val) = arg_vals.get(i) {
+                                                let param_name = callee
+                                                    .params
+                                                    .get(i)
+                                                    .map(|p| p.name.as_str())
+                                                    .unwrap_or("v");
+                                                let concrete_constraint: String =
+                                                    replace_constraint_placeholder(
+                                                        constraint, param_name,
+                                                    );
+                                                let mut constraint_env: Env = env.clone();
+                                                constraint_env.insert(
+                                                    param_name.to_string(),
+                                                    arg_val.clone(),
                                                 );
-                                            let mut constraint_env: Env = env.clone();
-                                            constraint_env
-                                                .insert(param_name.to_string(), arg_val.clone());
-                                            let constraint_ast =
-                                                parse_expression(&concrete_constraint);
-                                            if let Ok(constraint_z3) = expr_to_z3(
-                                                vc,
-                                                &constraint_ast,
-                                                &mut constraint_env,
-                                                None,
-                                            ) {
-                                                if let Some(constraint_bool) =
-                                                    constraint_z3.as_bool()
-                                                {
-                                                    if vc.cover_obligations.is_some() {
-                                                        record_cover_obligation(
-                                                            vc,
-                                                            constraint_bool,
-                                                        );
-                                                    } else {
-                                                        solver.push();
-                                                        for cond in
-                                                            vc.path_cond_stack.borrow().iter()
-                                                        {
-                                                            solver.assert(cond);
-                                                        }
-                                                        solver.assert(&constraint_bool.not());
-                                                        if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
+                                                let constraint_ast =
+                                                    parse_expression(&concrete_constraint);
+                                                if let Ok(constraint_z3) = expr_to_z3(
+                                                    vc,
+                                                    &constraint_ast,
+                                                    &mut constraint_env,
+                                                    None,
+                                                ) {
+                                                    if let Some(constraint_bool) =
+                                                        constraint_z3.as_bool()
+                                                    {
+                                                        if vc.cover_obligations.is_some() {
+                                                            record_cover_obligation(
+                                                                vc,
+                                                                constraint_bool,
+                                                            );
+                                                        } else {
+                                                            solver.push();
+                                                            for cond in
+                                                                vc.path_cond_stack.borrow().iter()
+                                                            {
+                                                                solver.assert(cond);
+                                                            }
+                                                            solver.assert(&constraint_bool.not());
+                                                            if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                                                             solver.pop(1);
                                                             return Err(MumeiError::verification(
                                                                 format!(
@@ -1364,7 +1386,8 @@ pub(crate) fn expr_to_z3<'a>(
                                                                 "トレイトメソッドのパラメータ制約が満たされていません。引数の値を確認してください"
                                                             ));
                                                         }
-                                                        solver.pop(1);
+                                                            solver.pop(1);
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1445,9 +1468,11 @@ pub(crate) fn expr_to_z3<'a>(
                             );
                             bind_struct_fields(&mut call_env, &result_name, &result_fields);
                             bind_struct_fields(&mut call_env, "result", &result_fields);
-                            if let (Some(solver), true) =
-                                (solver_opt, callee_semantics_match_caller(vc, &callee))
-                            {
+                            if let (Some(solver), true) = (
+                                solver_opt,
+                                !recursive_instance && callee_semantics_match_caller(vc, &callee),
+                            ) {
+                                let _contract_guard = vc.enter_contract_instantiation(&callee.name);
                                 assume_struct_invariants(
                                     vc,
                                     solver,
@@ -1488,8 +1513,10 @@ pub(crate) fn expr_to_z3<'a>(
                             crate::verification::ContractView::CallerEnsures,
                         );
                         if caller_ensures.trim() != "true"
+                            && !recursive_instance
                             && callee_semantics_match_caller(vc, &callee)
                         {
+                            let _contract_guard = vc.enter_contract_instantiation(&callee.name);
                             call_env.insert("result".to_string(), result_z3.clone());
                             if let Some(len_sym) = &result_len {
                                 call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
@@ -2588,6 +2615,10 @@ pub(crate) fn expr_to_z3<'a>(
                 let val = expr_to_z3(vc, arg, env, solver_opt)?;
                 arg_z3_values.push(val);
             }
+            vc.reject_quantifier_dependent_call(
+                &format!("perform {effect}.{operation}"),
+                &arg_z3_values,
+            )?;
 
             // Z3 String Sort: verify symbolic parameter constraints
             // Look up the EffectDef to get constraint and param definitions
@@ -2953,6 +2984,8 @@ pub(crate) fn expr_to_z3<'a>(
                     for arg in args {
                         arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
                     }
+                    let recursive_instance = vc.is_instantiating_contract(&callee_atom.name);
+                    vc.reject_quantifier_dependent_call(callee_name, &arg_vals)?;
 
                     // 呼び出し先のパラメータ名に引数をマッピング
                     let mut call_env = env.clone();
@@ -2965,11 +2998,10 @@ pub(crate) fn expr_to_z3<'a>(
                     }
 
                     // requires を呼び出し元のコンテキストで検証
-                    let caller_requires = crate::verification::contract_view(
-                        &callee_atom,
-                        crate::verification::ContractView::CallerRequires,
-                    );
-                    if caller_requires.trim() != "true" {
+                    let caller_requires =
+                        crate::verification::caller_requires_obligation(&callee_atom);
+                    if caller_requires.trim() != "true" && !recursive_instance {
+                        let _contract_guard = vc.enter_contract_instantiation(&callee_atom.name);
                         let req_ast = parse_expression(&caller_requires);
                         let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
                         if let Some(req_bool) = req_z3.as_bool() {
@@ -3017,9 +3049,12 @@ pub(crate) fn expr_to_z3<'a>(
                         );
                         bind_struct_fields(&mut call_env, &result_name, &result_fields);
                         bind_struct_fields(&mut call_env, "result", &result_fields);
-                        if let (Some(solver), true) =
-                            (solver_opt, callee_semantics_match_caller(vc, &callee_atom))
-                        {
+                        if let (Some(solver), true) = (
+                            solver_opt,
+                            !recursive_instance && callee_semantics_match_caller(vc, &callee_atom),
+                        ) {
+                            let _contract_guard =
+                                vc.enter_contract_instantiation(&callee_atom.name);
                             assume_struct_invariants(
                                 vc,
                                 solver,
@@ -3036,7 +3071,8 @@ pub(crate) fn expr_to_z3<'a>(
                         &callee_atom,
                         crate::verification::ContractView::CallerEnsures,
                     );
-                    if caller_ensures.trim() != "true" {
+                    if caller_ensures.trim() != "true" && !recursive_instance {
+                        let _contract_guard = vc.enter_contract_instantiation(&callee_atom.name);
                         call_env.insert("result".to_string(), result_z3.clone());
                         let ens_ast = parse_expression(&caller_ensures);
                         let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
@@ -3084,6 +3120,7 @@ pub(crate) fn expr_to_z3<'a>(
             for arg in args {
                 arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
             }
+            vc.reject_quantifier_dependent_call("call", &arg_vals)?;
 
             // The callee didn't resolve to a known atom — a concrete
             // `atom_ref` target or contract callee may still store through

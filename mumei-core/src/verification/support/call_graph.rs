@@ -69,7 +69,10 @@ pub(crate) fn verify_atom_invariant(
         local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
+        contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
 
