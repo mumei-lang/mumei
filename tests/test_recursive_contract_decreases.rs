@@ -740,3 +740,56 @@ fn test_stale_cache_on_callee_effects_change() {
         String::from_utf8_lossy(&fresh.output.stdout)
     );
 }
+
+// Fix 2: recursive calls inside a lambda body are checked at bind time with
+// arbitrary param constants; the real invocation through `apply_local_lambda`
+// runs the full congruent path. Callees keep `requires: true` because on
+// develop a lambda body calling any atom with a non-trivial requires already
+// fails at bind time.
+const LAM_INVOKED: &str = r#"
+atom lt(n: i64) -> i64
+    requires: true;
+    ensures: result >= 0;
+    decreases: n;
+    body: if n <= 0 { 0 } else { let g = |x| lt(x); g(n - 1) };
+"#;
+
+const LAM_NON_DECREASING: &str = r#"
+atom lb(n: i64) -> i64
+    requires: true;
+    ensures: result >= 0;
+    decreases: n;
+    body: if n <= 0 { 0 } else { let g = |x| lb(x); g(n) };
+"#;
+
+const LAM_UNINVOKED: &str = r#"
+atom lu(n: i64) -> i64
+    requires: true;
+    ensures: result >= 0;
+    decreases: n;
+    body: if n <= 0 { 0 } else { let g = |x| lu(x); lu(n - 1) };
+"#;
+
+#[test]
+fn test_lambda_invoked_decreasing_call_verifies() {
+    let case = verify("lt", LAM_INVOKED, "lt");
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_lambda_invoked_stable_call_fails_termination() {
+    let case = verify("lb", LAM_NON_DECREASING, "lb");
+    assert_verdict(&case, "failed");
+    assert_eq!(
+        case.failure_type().as_deref(),
+        Some("termination_measure_violation"),
+        "lb should report termination_measure_violation; report:\n{:?}",
+        case.report
+    );
+}
+
+#[test]
+fn test_lambda_bound_but_never_invoked_verifies() {
+    let case = verify("lu", LAM_UNINVOKED, "lu");
+    assert_case(case, "verified");
+}

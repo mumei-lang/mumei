@@ -3735,8 +3735,18 @@ pub(crate) fn expr_to_z3<'a>(
                     map.insert(p.name.clone(), std::rc::Rc::new(LocalLambda::Opaque));
                 }
             }
-            // Verify the lambda body in the sub-environment
+            // Verify the lambda body in the sub-environment. This is a
+            // bind-time pass with arbitrary param constants, so recursive
+            // calls inside are not congruent: no `rec_fn#` application and
+            // no termination obligation (the real invocation through
+            // `apply_local_lambda` re-checks both with actual arguments).
+            vc.recursion
+                .lambda_bind_depth
+                .set(vc.recursion.lambda_bind_depth.get() + 1);
             let body_result = stmt_to_z3(vc, body, &mut lambda_env, solver_opt);
+            vc.recursion
+                .lambda_bind_depth
+                .set(vc.recursion.lambda_bind_depth.get() - 1);
             *vc.local_lambdas.borrow_mut() = saved_lambdas;
             let _body_val = body_result?;
 

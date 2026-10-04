@@ -66,6 +66,11 @@ pub(crate) struct RecursionCtx<'a> {
     /// `(implies(path_conds, obligation), callee_name)` and is drained by the
     /// executor once the preconditions hold.
     pub(crate) pending_termination: std::cell::RefCell<Vec<(Bool<'a>, String)>>,
+    /// Depth of lambda bodies being translated at bind time (arbitrary
+    /// param constants, not real arguments). Recursive calls there take the
+    /// ordinary non-congruent path; the real invocation via
+    /// `apply_local_lambda` keeps the full congruent treatment.
+    pub(crate) lambda_bind_depth: std::cell::Cell<u32>,
 }
 
 impl<'a> Default for RecursionCtx<'a> {
@@ -77,6 +82,7 @@ impl<'a> Default for RecursionCtx<'a> {
             current_measure: std::cell::RefCell::new(None),
             current_scc: std::cell::RefCell::new(None),
             pending_termination: std::cell::RefCell::new(Vec::new()),
+            lambda_bind_depth: std::cell::Cell::new(0),
         }
     }
 }
@@ -293,6 +299,7 @@ impl<'a> VCtx<'a> {
     /// atoms that could qualify.
     pub(crate) fn callee_congruent(&self, callee: &crate::parser::Atom) -> bool {
         self.recursion.enabled.get()
+            && self.recursion.lambda_bind_depth.get() == 0
             && callee.decreases.is_some()
             && self
                 .recursive_scc_of(&callee.name)
