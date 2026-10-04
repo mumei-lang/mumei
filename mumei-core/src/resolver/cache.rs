@@ -10,7 +10,12 @@ use std::path::Path;
 /// Version 3 enables checker-first MIR borrow checking.
 /// Version 4 stops lowering calls whose arguments depend on a quantifier-bound
 /// variable, so earlier "verified" results for such atoms must be re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 4;
+/// Version 6 checks a callee's quantified requires at call sites and keeps
+/// quantifiers nested under non-conjunctive operators in the requires text,
+/// and stops quantifier binders from capturing same-named outer variables.
+/// Version 7 enables recursive contracts: `decreases` termination obligations
+/// and congruent recursive calls.
+pub const VERIFIER_POLICY_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -76,6 +81,10 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
             hasher.update(b"|clause_mode:");
             hasher.update(format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause).as_bytes());
         }
+    }
+    if let Some(ref dec) = atom.decreases {
+        hasher.update(b"|decreases:");
+        hasher.update(dec.as_bytes());
     }
     hasher.update(atom.body_expr.as_bytes());
     // consumed_params も含める（所有権制約の変更を検出）
@@ -231,6 +240,10 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(b"|clause_mode:");
             hasher.update(format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause).as_bytes());
         }
+    }
+    if let Some(ref dec) = atom.decreases {
+        hasher.update(b"|decreases:");
+        hasher.update(dec.as_bytes());
     }
     hasher.update(atom.body_expr.as_bytes());
     for cp in &atom.consumed_params {
@@ -440,6 +453,57 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(callee_atom.requires.as_bytes());
             hasher.update(b":");
             hasher.update(callee_atom.ensures.as_bytes());
+            if let Some(ref dec) = callee_atom.decreases {
+                hasher.update(b"|decreases:");
+                hasher.update(dec.as_bytes());
+            }
+            for e in &callee_atom.effects {
+                hasher.update(b",effect:");
+                hasher.update(e.name.as_bytes());
+                if e.negated {
+                    hasher.update(b",negated");
+                }
+                for p in &e.params {
+                    hasher.update(b",param:");
+                    hasher.update(p.value.as_bytes());
+                }
+            }
+            if callee_atom.trust_level != crate::parser::TrustLevel::Verified {
+                hasher.update(b",trust:");
+                hasher.update(
+                    match callee_atom.trust_level {
+                        crate::parser::TrustLevel::Trusted => "trusted",
+                        crate::parser::TrustLevel::Unverified => "unverified",
+                        crate::parser::TrustLevel::Verified => "verified",
+                    }
+                    .as_bytes(),
+                );
+            }
+            if callee_atom.is_async {
+                hasher.update(b",async");
+            }
+            if !callee_atom.type_params.is_empty() {
+                hasher.update(b",type_params:");
+                hasher.update(callee_atom.type_params.join(",").as_bytes());
+            }
+            if !callee_atom.forall_constraints.is_empty() {
+                for q in &callee_atom.forall_constraints {
+                    let quantifier_type = match q.q_type {
+                        crate::parser::QuantifierType::ForAll => "forall",
+                        crate::parser::QuantifierType::Exists => "exists",
+                    };
+                    hasher.update(b",quantified_requires:");
+                    hasher.update(quantifier_type.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.var.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.start.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.end.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.condition.as_bytes());
+                }
+            }
             if !callee_atom.clause_modes.is_empty() {
                 for mode in &callee_atom.clause_modes {
                     hasher.update(b",clause_mode:");
@@ -512,6 +576,9 @@ pub fn compute_contract_hash(atom: &crate::parser::Atom) -> String {
         hash_field(&mut hasher, "quantifier.condition", &q.condition);
     }
     hash_field(&mut hasher, "ensures", &atom.ensures);
+    if let Some(ref dec) = atom.decreases {
+        hash_field(&mut hasher, "decreases", dec);
+    }
     if !atom.clause_modes.is_empty() {
         for mode in &atom.clause_modes {
             hash_field(
@@ -794,6 +861,31 @@ body: { getx(Pair { a: 1, b: 2 }) };
         let after = env_and_hash(&format!(
             "{structs}\ntrusted atom getx(p: Point) -> i64\nrequires: true;\nensures: true;\nbody: {{ p.x }};\n{MAIN}"
         ));
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn callee_quantified_requires_change_invalidates_the_proof_hash() {
+        let before = env_and_hash(
+            "trusted atom getx(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 0 && forall(i, 0, n, arr[i] > 0);\n\
+             ensures: result > 0;\n\
+             body: arr[0];\n\
+             trusted atom main(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 1 && forall(i, 0, n, arr[i] > 1);\n\
+             ensures: result > 0;\n\
+             body: getx(arr, n);\n",
+        );
+        let after = env_and_hash(
+            "trusted atom getx(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 0 && forall(i, 0, n, arr[i] > 1);\n\
+             ensures: result > 0;\n\
+             body: arr[0];\n\
+             trusted atom main(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 1 && forall(i, 0, n, arr[i] > 1);\n\
+             ensures: result > 0;\n\
+             body: getx(arr, n);\n",
+        );
         assert_ne!(before, after);
     }
 

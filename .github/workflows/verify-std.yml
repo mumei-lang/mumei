@@ -88,6 +88,15 @@ jobs:
           LIBCLANG_PATH: /usr/lib/llvm-17/lib
         run: cargo build --release
 
+      - name: Check Z3 runtime library
+        run: |
+          resolved=$(ldd target/release/mumei | grep libz3)
+          echo "$resolved"
+          case "$resolved" in
+            *"$RUNNER_TEMP/mumei-z3-4.14.1/"*) ;;
+            *) echo "::error::mumei linked against unexpected libz3: $resolved"; exit 1 ;;
+          esac
+
       - name: Verify std on PR head
         env:
           LLVM_SYS_170_PREFIX: /usr/lib/llvm-17

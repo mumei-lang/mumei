@@ -118,7 +118,7 @@ pub fn validate_counterexample(
 
     let body_requires =
         crate::verification::contract_view(atom, crate::verification::ContractView::BodyRequires);
-    match eval_bool_clause(&body_requires, &mut eval_env, module_env) {
+    match eval_bool_clause(&body_requires, &mut eval_env, module_env, 0) {
         Ok(true) => {}
         Ok(false) => {
             return CounterexampleValidationResult {
@@ -182,7 +182,7 @@ pub fn validate_counterexample(
 
     let body_ensures =
         crate::verification::contract_view(atom, crate::verification::ContractView::BodyEnsures);
-    match eval_bool_clause(&body_ensures, &mut eval_env, module_env) {
+    match eval_bool_clause(&body_ensures, &mut eval_env, module_env, 0) {
         Ok(false) => CounterexampleValidationResult {
             is_valid: true,
             validation_status: "validated".to_string(),
@@ -470,11 +470,12 @@ fn eval_bool_clause(
     clause: &str,
     env: &mut EvalEnv,
     module_env: &ModuleEnv,
+    depth: usize,
 ) -> Result<bool, String> {
     if clause.trim().is_empty() || clause.trim() == "true" {
         return Ok(true);
     }
-    match eval_expr(&parse_expression(clause), env, module_env, 0)? {
+    match eval_expr(&parse_expression(clause), env, module_env, depth)? {
         EvalValue::Bool(value) => Ok(value),
         EvalValue::Int(value) => Ok(value != 0),
         EvalValue::Float(value) => Ok(value != 0.0),
@@ -745,11 +746,13 @@ fn eval_atom_call(
         }
     }
 
+    // Keep the plain caller view: this evaluator has no forall/exists or
+    // array values, so a quantified obligation would abort every replay.
     let caller_requires = crate::verification::contract_view(
         callee,
         crate::verification::ContractView::CallerRequires,
     );
-    if !eval_bool_clause(&caller_requires, &mut call_env, module_env)? {
+    if !eval_bool_clause(&caller_requires, &mut call_env, module_env, depth)? {
         return Err(format!("callee '{}' requires clause is false", name));
     }
     let body = parse_body_expr(&callee.body_expr);
@@ -767,7 +770,7 @@ fn eval_atom_call(
         callee,
         crate::verification::ContractView::CallerEnsures,
     );
-    if !eval_bool_clause(&caller_ensures, &mut call_env, module_env)? {
+    if !eval_bool_clause(&caller_ensures, &mut call_env, module_env, depth)? {
         return Err(format!("callee '{}' ensures clause is false", name));
     }
     Ok(result)
