@@ -94,6 +94,8 @@ Session-protocol results also include `effect`, `protocol_state`,
 `protocol_path`, `callee_atom`, and `suggested_fix`.
 Covered cover clauses are represented as pass results (`kind: "pass"`,
 `level: "none"`). `ruleIndex` refers to the matching entry in the run's rules.
+A rule's `defaultConfiguration.level` is the most severe level among its
+results (`error` > `warning` > `note` > `none`); rule order follows first use.
 
 | Finding | SARIF rule ID | Level |
 |---|---|---|

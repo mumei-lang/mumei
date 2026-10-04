@@ -564,13 +564,18 @@ fn result_at_file(
 }
 
 fn collect_rules(results: &[Value]) -> Vec<Value> {
-    let mut rules = Vec::new();
-    let mut seen = HashMap::new();
+    let mut rules: Vec<Value> = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
     for result in results {
         let Some(id) = result["ruleId"].as_str() else {
             continue;
         };
-        if seen.contains_key(id) {
+        if let Some(index) = seen.get(id).copied() {
+            let current_level = rules[index]["defaultConfiguration"]["level"].as_str();
+            let result_level = result["level"].as_str();
+            if sarif_level_severity(result_level) > sarif_level_severity(current_level) {
+                rules[index]["defaultConfiguration"]["level"] = result["level"].clone();
+            }
             continue;
         }
         seen.insert(id.to_string(), rules.len());
@@ -581,6 +586,16 @@ fn collect_rules(results: &[Value]) -> Vec<Value> {
         }));
     }
     rules
+}
+
+fn sarif_level_severity(level: Option<&str>) -> u8 {
+    match level {
+        Some("error") => 3,
+        Some("warning") => 2,
+        Some("note") => 1,
+        Some("none") => 0,
+        _ => 0,
+    }
 }
 
 fn rule_description(rule_id: &str) -> &'static str {
@@ -1203,5 +1218,26 @@ body: { x + 1 };
             let index = result["ruleIndex"].as_u64().unwrap() as usize;
             assert_eq!(rules[index]["id"], result["ruleId"]);
         }
+    }
+
+    #[test]
+    fn rule_default_level_uses_the_most_severe_result_without_reordering() {
+        let mut collector = SarifCollector::new();
+        collector.results = vec![
+            json!({"ruleId":"shared","level":"warning"}),
+            json!({"ruleId":"other","level":"note"}),
+            json!({"ruleId":"shared","level":"error"}),
+        ];
+
+        let document = collector.document(VerifyOutcome::Verified);
+        let run = &document["runs"][0];
+        let rules = run["tool"]["driver"]["rules"].as_array().unwrap();
+        let results = run["results"].as_array().unwrap();
+        assert_eq!(rules[0]["id"], "shared");
+        assert_eq!(rules[0]["defaultConfiguration"]["level"], "error");
+        assert_eq!(rules[1]["id"], "other");
+        assert_eq!(results[0]["ruleIndex"], 0);
+        assert_eq!(results[1]["ruleIndex"], 1);
+        assert_eq!(results[2]["ruleIndex"], 0);
     }
 }
