@@ -852,6 +852,21 @@ fn verify_inner_impl(
     verify_effect_params(atom, module_env)?;
     metrics.record_phase("Phase 1g: effect params", phase_start.elapsed());
 
+    // Phase 1h-2: structured concurrency ownership analysis.
+    // MIR lowering flattens `task_group` children into a sequential chain, so
+    // it cannot see concurrent interleaving or `task_group:any` cancellation.
+    // This AST-level pass rejects concurrent double moves, moves that race with
+    // a sibling's use, unsynchronised shared writes, and parent uses of values
+    // a child consumed or of writes a cancelled child may never have performed.
+    // It runs before 1h so the task-group-specific diagnostic is not pre-empted
+    // by the generic MIR move error.
+    let phase_start = std::time::Instant::now();
+    verify_task_ownership(atom, &hir_atom.body_stmt, module_env)?;
+    metrics.record_phase(
+        "Phase 1h-2: structured concurrency ownership",
+        phase_start.elapsed(),
+    );
+
     // Phase 1h: MIR-based move analysis (Phase 4c integrated)
     // Lower HIR to MIR and run forward dataflow move analysis.
     // Copy types (Int, Nat, Bool, f64, etc.) are distinguished from Move types
@@ -1010,19 +1025,6 @@ fn verify_inner_impl(
         }
     }
     metrics.record_phase("Phase 1h: MIR move analysis", phase_start.elapsed());
-
-    // Phase 1h-2: structured concurrency ownership analysis.
-    // MIR lowering flattens `task_group` children into a sequential chain, so
-    // it cannot see concurrent interleaving or `task_group:any` cancellation.
-    // This AST-level pass rejects concurrent double moves, moves that race with
-    // a sibling's use, unsynchronised shared writes, and parent uses of values
-    // a child consumed or of writes a cancelled child may never have performed.
-    let phase_start = std::time::Instant::now();
-    verify_task_ownership(atom, &hir_atom.body_stmt, module_env)?;
-    metrics.record_phase(
-        "Phase 1h-2: structured concurrency ownership",
-        phase_start.elapsed(),
-    );
 
     // Phase 1i: Vacuity checking via mutation testing
     let phase_start = std::time::Instant::now();
