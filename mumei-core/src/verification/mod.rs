@@ -25,6 +25,7 @@ pub mod loop_detector;
 pub mod module_env;
 pub mod mutation;
 pub mod nlae_reporter;
+pub mod phase_artifacts;
 pub mod phase_contract;
 pub mod profiler;
 pub mod property_based;

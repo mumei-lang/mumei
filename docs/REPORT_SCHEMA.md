@@ -297,6 +297,11 @@ Example:
 }
 ```
 
+`mumei verify --emit sarif` also writes `report.sarif` beside the report
+artifacts. It contains a SARIF 2.1.0 run with atom-level and obligation-level
+findings; see [the CLI reference](CLI.md#sarif-output) for its rule mapping and
+properties.
+
 ## proof_graph.json Schema
 
 `mumei verify --emit proof-graph` writes `proof_graph.json` in the report

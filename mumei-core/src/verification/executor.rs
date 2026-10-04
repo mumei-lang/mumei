@@ -47,6 +47,14 @@ fn body_identifier_names(body: &str) -> Vec<String> {
     names
 }
 
+pub fn clause_label_for_atom<'a>(
+    atom: &'a crate::parser::Atom,
+    kind: crate::parser::ClauseKind,
+    conjunct: &str,
+) -> Option<&'a str> {
+    clause_label_for(atom, kind, conjunct)
+}
+
 /// mumei.toml の [proof]/[build] 設定を反映した verify
 /// timeout_ms: Z3 ソルバのタイムアウト（ミリ秒）
 /// global_max_unroll: BMC のグローバル展開深度
@@ -271,6 +279,7 @@ impl VerificationMetrics {
 
     pub(crate) fn record_phase(&mut self, name: &str, duration: std::time::Duration) {
         self.phase_times.push((name.to_string(), duration));
+        super::phase_artifacts::complete_phase(name);
     }
 
     /// Print metrics to stderr (for --verbose / debug output).
@@ -474,6 +483,18 @@ fn lower_clause_with_skip<'a>(
 }
 
 pub(crate) fn verify_inner(
+    hir_atom: &HirAtom,
+    output_dir: &Path,
+    module_env: &ModuleEnv,
+    options: VerifyInnerOptions<'_>,
+) -> MumeiResult<(Vec<InferredInvariant>, Vec<serde_json::Value>)> {
+    super::phase_artifacts::begin_atom(&hir_atom.atom.span.file, &hir_atom.atom.name);
+    let result = verify_inner_impl(hir_atom, output_dir, module_env, options);
+    super::phase_artifacts::finish_atom(&result);
+    result
+}
+
+fn verify_inner_impl(
     hir_atom: &HirAtom,
     output_dir: &Path,
     module_env: &ModuleEnv,
@@ -1144,7 +1165,7 @@ pub(crate) fn verify_inner(
                                     z3_solver
                                         .assert(&state_var.lt(&Int::from_i64(&z3_ctx, num_states)));
 
-                                    match z3_solver.check() {
+                                    match crate::verification::phase_artifacts::check(&z3_solver) {
                                         SatResult::Unsat => {
                                             // Irreconcilable: the two branches require
                                             // mutually exclusive states → hard error.
@@ -1904,7 +1925,9 @@ pub(crate) fn verify_inner(
                             // ref_mut_val == other_val が SAT ならエイリアシングの可能性あり
                             solver.push();
                             solver.assert(&rm_int._eq(&ot_int));
-                            if solver.check() == SatResult::Sat {
+                            if crate::verification::phase_artifacts::check(&solver)
+                                == SatResult::Sat
+                            {
                                 solver.pop(1);
                                 let other_kind = if other_p.is_ref_mut { "ref mut" } else { "ref" };
                                 return Err(MumeiError::verification_at(
@@ -2124,7 +2147,7 @@ pub(crate) fn verify_inner(
                 ClauseLoweringOutcome::Lowered(ens_bool) => {
                     solver.push();
                     solver.assert(&ens_bool.not());
-                    let ensures_check = solver.check();
+                    let ensures_check = crate::verification::phase_artifacts::check(&solver);
                     let mut spurious_candidate_help = None;
                     let mut counterexample_provenance = None;
                     let (
@@ -2360,7 +2383,7 @@ pub(crate) fn verify_inner(
                         solver.pop(1);
                         solver.push();
                         solver.assert(&ens_bool);
-                        let holds_check = solver.check();
+                        let holds_check = crate::verification::phase_artifacts::check(&solver);
                         solver.pop(1);
                         Some(holds_check)
                     } else {
@@ -2653,7 +2676,7 @@ pub(crate) fn verify_inner(
 
     let z3_check_start = std::time::Instant::now();
     let profiler_final_check_start = profiler_checkpoint(&vc);
-    let final_check = solver.check();
+    let final_check = crate::verification::phase_artifacts::check(&solver);
     profile_solver_check(&vc, profiler_final_check_start);
     context_reachability = match final_check {
         SatResult::Sat => ContextReachability::Reachable,
@@ -2914,7 +2937,7 @@ pub(crate) fn verify_inner(
             for obligation in &cover_obligations {
                 solver.assert(obligation);
             }
-            let cover_check = solver.check();
+            let cover_check = crate::verification::phase_artifacts::check(&solver);
             let raised_witness = if cover_check == SatResult::Sat {
                 solver.get_model().map(|model| {
                     let mut witness_env = pre_body_env.clone();
@@ -3113,7 +3136,7 @@ fn check_resource_initial_state<'a>(
                 .ok_or_else(|| MumeiError::type_error("resource invariant must be boolean"))?;
             solver.push();
             solver.assert(&inv.not());
-            let result = match solver.check() {
+            let result = match crate::verification::phase_artifacts::check(solver) {
                 SatResult::Unsat => Ok(()),
                 SatResult::Sat => Err(MumeiError::verification(format!(
                     "resource '{resource_name}' invariant does not hold for the initial state (all fields zero): {}",
