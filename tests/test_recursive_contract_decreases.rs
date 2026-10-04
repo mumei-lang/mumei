@@ -170,6 +170,41 @@ atom use_qr2()
     body: call(atom_ref(qr2), 5, 7);
 "#;
 
+// SCC-internal failing case: `qr3(n - 1, k + 1)` decreases `n` but widens the
+// quantifier range, so at `k = 5` the callee requires `i = 5 < 5`.
+const QR3_WIDENING: &str = r#"
+atom qr3(n: i64, k: i64) -> i64
+    requires: n >= 0 && k >= 0 && forall(i, 0, k, i < 5);
+    ensures: result >= 0;
+    decreases: n;
+    body: if n == 0 { 0 } else { qr3(n - 1, k + 1) };
+"#;
+
+// Passing twin: the recursive call shrinks only `n`, so the callee's
+// quantified requires is implied by the caller's.
+const QR3_OK: &str = r#"
+atom qr3_ok(n: i64, k: i64) -> i64
+    requires: n >= 0 && k >= 0 && forall(i, 0, k, i < 5);
+    ensures: result >= 0;
+    decreases: n;
+    body: if n == 0 { 0 } else { qr3_ok(n - 1, k) };
+"#;
+
+// Direct (non-atom_ref) call from outside the SCC into `qr2`: the scalar
+// conjuncts hold (`5 >= 0`, `7 >= 0`), only the quantified conjunct fails.
+const QR_DIRECT_CALLER: &str = r#"
+atom qr2(n: i64, k: i64)
+    requires: n >= 0 && forall(i, 0, k, i < 5);
+    ensures: result >= 0;
+    decreases: n;
+    body: if n == 0 { 0 } else { 1 + qr2(n - 1, k) };
+
+atom use_qr2_direct()
+    requires: true;
+    ensures: result >= 0;
+    body: qr2(5, 7);
+"#;
+
 // A recursive call whose argument depends on a quantifier-bound variable is
 // rejected before any `rec_fn#` application or termination obligation is
 // built: the enclosing clause is unverifiable (exit 3).
@@ -479,6 +514,43 @@ fn test_quantified_requires_conjunct_violated_fails() {
     assert!(
         message.contains("forall(i, 0, k, i < 5)"),
         "the diagnostic should name the violated quantified conjunct; report:\n{message}"
+    );
+}
+
+#[test]
+fn test_scc_internal_widened_quantifier_fails() {
+    let case = verify("qr3", QR3_WIDENING, "qr3");
+    assert!(case.did_not_crash());
+    assert_verdict(&case, "failed");
+    assert_eq!(
+        case.failure_type().as_deref(),
+        Some("precondition_violated"),
+        "qr3 should report precondition_violated; report:\n{:?}",
+        case.report
+    );
+    let message = format!("{:?}", case.report);
+    assert!(
+        message.contains("forall(i, 0, k, i < 5)"),
+        "the report should name the violated quantified conjunct; report:\n{message}"
+    );
+}
+
+#[test]
+fn test_scc_internal_stable_quantifier_verifies() {
+    let case = verify("qr3_ok", QR3_OK, "qr3_ok");
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_direct_call_quantified_requires_violated_fails() {
+    let case = verify("use_qr2_direct", QR_DIRECT_CALLER, "use_qr2_direct");
+    assert!(case.did_not_crash());
+    assert_verdict(&case, "failed");
+    assert_eq!(
+        case.failure_type().as_deref(),
+        Some("precondition_violated"),
+        "use_qr2_direct should report precondition_violated; report:\n{:?}",
+        case.report
     );
 }
 

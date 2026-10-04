@@ -1529,7 +1529,7 @@ pub(crate) fn expr_to_z3<'a>(
                                                 .map(RaisedCounterexample::provenance_json);
                                             solver.pop(1);
                                             return Err(MumeiError::verification(
-                                                format!("Call to '{}': precondition (requires) not satisfied at call site", name)
+                                                format!("Call to '{}': precondition '{}' may not hold at call site", name, caller_requires)
                                             ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください")
                                             .with_counterexample_provenance(ce_value, provenance));
                                         }
