@@ -209,7 +209,8 @@ fn resolve_edge_name(module_env: &ModuleEnv, name: &str) -> Option<String> {
     module_env.get_atom(&fqn).map(|a| a.name.clone())
 }
 
-/// Components of a `decreases` clause: the parts of an outer `(m1, ..., mk)` tuple, or the whole text for a single measure.
+/// Components of a `decreases` clause: the parts of an outer `(m1, ..., mk)`
+/// tuple, or the whole text for a single measure.
 pub(crate) fn measure_components(text: &str) -> Vec<String> {
     let text = text.trim();
     if text == "()" {
