@@ -1435,11 +1435,12 @@ impl Drop for ReportStaging {
                 let tmp = self
                     .publish_to
                     .join(format!(".{name}.{}.tmp", std::process::id()));
-                if std::fs::copy(&path, &tmp).is_ok() {
-                    let _ = std::fs::rename(&tmp, self.publish_to.join(&name));
-                } else {
-                    let _ = std::fs::remove_file(&tmp);
+                if std::fs::copy(&path, &tmp).is_ok()
+                    && std::fs::rename(&tmp, self.publish_to.join(&name)).is_ok()
+                {
+                    continue;
                 }
+                let _ = std::fs::remove_file(&tmp);
             }
         }
         // A run whose last atom wrote no report.json must not leave a stale
@@ -1449,6 +1450,38 @@ impl Drop for ReportStaging {
         }
         let _ = std::fs::remove_dir_all(&self.staging);
     }
+}
+
+/// Creates a fresh, process-private staging dir under temp_dir. The name is
+/// unpredictable enough for collisions to be rare, but creation is still
+/// exclusive (non-recursive `DirBuilder`, mode 0o700 on unix) so a pre-created
+/// directory is never used — a planted report.json would be read back and
+/// published as our own. Retries with a new name on AlreadyExists; returns
+/// None when no private dir can be created, in which case the caller falls
+/// back to writing reports directly into output_dir (pre-staging behavior).
+fn create_private_staging_dir() -> Option<PathBuf> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    for attempt in 0..16 {
+        let dir = std::env::temp_dir().join(format!(
+            "mumei-verify-{}-{nanos}-{attempt}",
+            std::process::id()
+        ));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&dir) {
+            Ok(()) => return Some(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
@@ -1569,19 +1602,10 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
     // temp dir so two concurrent `mumei verify` runs in the same cwd can't
     // overwrite each other's intermediate reports; the guard publishes the
     // finished reports back to output_dir (cwd) when cmd_verify returns.
-    let staging_dir = report_dir.is_none().then(|| {
-        std::env::temp_dir().join(format!(
-            "mumei-verify-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or_default()
-        ))
-    });
-    if let Some(dir) = &staging_dir {
-        let _ = std::fs::create_dir_all(dir);
-    }
+    let staging_dir = report_dir
+        .is_none()
+        .then(create_private_staging_dir)
+        .flatten();
     let _report_staging = staging_dir.as_ref().map(|dir| ReportStaging {
         staging: dir.clone(),
         publish_to: output_dir.to_path_buf(),
@@ -2878,5 +2902,19 @@ impl S {
         assert_eq!(cert.atoms[0].z3_check_result, "lean_verified");
         assert_eq!(stats.lean_verified, 1);
         assert!(stats.axiom_rejected_atoms.is_empty());
+    }
+
+    #[test]
+    fn private_staging_dir_is_new_and_owner_only() {
+        let dir = create_private_staging_dir().expect("staging dir");
+        assert!(dir.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(dir.metadata().unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        // A second attempt over the same name must fail, not reuse it.
+        assert!(std::fs::create_dir(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
