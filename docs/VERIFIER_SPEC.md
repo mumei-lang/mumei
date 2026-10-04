@@ -140,8 +140,9 @@ Rules:
 - **E4 (spurious counterexamples are not failures of `Q`).** When spurious
   detection is enabled and a Sat refutation's model does not reproduce the
   violation under Mumei semantics, the conjunct's outcome is `unknown`, not one
-  of the failing outcomes, and the atom is rejected with a "spurious
-  counterexample" error. `executor.rs::verify_inner`,
+  of the failing outcomes, and the atom fails with a "spurious
+  counterexample" error that counts as inconclusive (exit `3`, rule X4).
+  `executor.rs::verify_inner`,
   `verification/spurious_detection.rs::validate_counterexample`.
 - **E5 (unlowerable is not proved).** A conjunct the solver encoding does not
   support is `skipped`, and an atom with any skipped ensures conjunct fails with
@@ -337,7 +338,8 @@ Rules (all in `src/commands/verify.rs`):
   solver-inconclusive ⇒ `1`; any inconclusive failure, unverifiable atom, or
   open Lean escalation ⇒ `3`; otherwise `0`.
 - **X2 (what counts as inconclusive).** A failed atom is solver-inconclusive
-  exactly when its solver result is `unknown`, `timeout`, or `resource_limit`.
+  exactly when its solver result is `unknown`, `timeout`, `resource_limit`, or
+  `spurious_candidate`.
   `is_solver_inconclusive`, with the result recovered from the error by
   `mumei-core/src/verification/types.rs::z3_result_from_error_message`.
 - **X3 (outcome to code).** Under rule X1, for an atom that is not escalated to
@@ -346,13 +348,11 @@ Rules (all in `src/commands/verify.rs`):
   check that returns Unknown is inconclusive (`3`); a `skipped` conjunct makes
   the atom unverifiable (`3`). `proved` and `assumed` do not lower the result.
 - **X4 (spurious candidates).** The solver result of a spurious counterexample
-  is `spurious_candidate`, which is not in the inconclusive set, so such an
-  atom currently counts as rejected (`1`) even though the conjunct's outcome is
-  `unknown` (rule E4). The intended contract is inconclusive (`3`), because a
-  candidate that does not replay neither proves nor refutes the clause. Both
-  codes are non-zero, so the change stays fail-closed. It will land in a
-  separate PR that updates [`CLI.md`](CLI.md#exit-codes) and adds a
-  regression test. Until then this rule describes the current behaviour.
+  is `spurious_candidate`, which is in the inconclusive set (rule X2), so such
+  an atom exits `3`, matching the conjunct's `unknown` outcome (rule E4). A
+  candidate that does not replay neither proves nor refutes the clause. The
+  same holds under `--escalate-lean` when Lean does not discharge the
+  candidate.
 - **X5 (directories).** A directory run exits with the most severe per-file
   outcome, ordered `5 > 4 > 1 > 3 > 0`. `VerifyOutcome::combine`.
 
