@@ -73,6 +73,30 @@ trait Zeroer {
 impl Zeroer for i64 {}
 "#;
 
+const SPURIOUS_CANDIDATE_SOURCE: &str = r#"
+extern "Rust" {
+  fn ext_f(x: i64) -> i64;
+}
+atom g(x: i64) -> i64
+requires: x > 0;
+ensures: result > 0;
+body: { ext_f(x) };
+"#;
+
+const UNKNOWN_SOURCE: &str = r#"
+atom fermat3(x: i64, y: i64, z: i64) -> i64
+requires: x > 0 && y > 0 && z > 0;
+ensures: x * x * x + y * y * y != z * z * z;
+body: { 0 };
+"#;
+
+const REJECTED_COUNTEREXAMPLE_SOURCE: &str = r#"
+atom inc(x: Int) -> Int {
+  ensures: result == x + 2;
+  body: { x + 1 }
+}
+"#;
+
 fn temp_dir(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -103,6 +127,34 @@ fn run_verify(input: &Path, cwd: &Path, report_dir: &Path, extra_args: &[&str]) 
         .current_dir(cwd)
         .output()
         .expect("run mumei verify")
+}
+
+fn run_sarif_fixture(root: &Path, name: &str, atom: &str, source: &str) -> (Output, PathBuf) {
+    let fixture_dir = root.join(name);
+    let input_dir = fixture_dir.join("inputs");
+    let cwd = fixture_dir.join("cwd");
+    let report_dir = fixture_dir.join("reports");
+    std::fs::create_dir_all(&input_dir).expect("create fixture input directory");
+    std::fs::create_dir_all(&cwd).expect("create fixture working directory");
+    let fixture = input_dir.join(format!("{atom}.mm"));
+    std::fs::write(&fixture, source).expect("write SARIF fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--json")
+        .arg("--cache-scope")
+        .arg("global")
+        .arg("--solver-timeout")
+        .arg("50")
+        .arg("--report-dir")
+        .arg(&report_dir)
+        .arg("--emit")
+        .arg("sarif")
+        .current_dir(&cwd)
+        .output()
+        .expect("run mumei verify with SARIF");
+    (output, report_dir.join("report.sarif"))
 }
 
 fn run_session_protocol_verify(root: &Path, tag: &str, emit_sarif: bool) -> (Output, PathBuf) {
@@ -246,6 +298,61 @@ fn sarif_preserves_json_and_exit_code_and_maps_verification_findings() {
             .unwrap()
             .contains("trusted, not proved")
     );
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
+}
+
+#[test]
+fn sarif_reports_spurious_candidates_as_review_and_preserves_other_verdicts() {
+    let root = temp_dir("spurious_candidate");
+
+    let (spurious_output, spurious_path) =
+        run_sarif_fixture(&root, "spurious", "g", SPURIOUS_CANDIDATE_SOURCE);
+    assert_eq!(
+        spurious_output.status.code(),
+        Some(3),
+        "spurious candidate should be inconclusive\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&spurious_output.stdout),
+        String::from_utf8_lossy(&spurious_output.stderr)
+    );
+    let spurious_doc = read_sarif(&spurious_path);
+    let spurious_results = spurious_doc["runs"][0]["results"].as_array().unwrap();
+    let spurious = sarif_result(spurious_results, "g", "spurious_candidate");
+    assert_eq!(spurious["level"], "warning");
+    assert_eq!(spurious["kind"], "review");
+
+    let (unknown_output, unknown_path) =
+        run_sarif_fixture(&root, "unknown", "fermat3", UNKNOWN_SOURCE);
+    assert_eq!(
+        unknown_output.status.code(),
+        Some(3),
+        "unknown result should be inconclusive\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&unknown_output.stdout),
+        String::from_utf8_lossy(&unknown_output.stderr)
+    );
+    let unknown_doc = read_sarif(&unknown_path);
+    let unknown_results = unknown_doc["runs"][0]["results"].as_array().unwrap();
+    let unknown = sarif_result(unknown_results, "fermat3", "unknown");
+    assert_eq!(unknown["level"], "warning");
+    assert_eq!(unknown["kind"], "review");
+
+    let (rejected_output, rejected_path) =
+        run_sarif_fixture(&root, "rejected", "inc", REJECTED_COUNTEREXAMPLE_SOURCE);
+    assert_eq!(
+        rejected_output.status.code(),
+        Some(1),
+        "genuine counterexample should be rejected\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&rejected_output.stdout),
+        String::from_utf8_lossy(&rejected_output.stderr)
+    );
+    let rejected_doc = read_sarif(&rejected_path);
+    let rejected_results = rejected_doc["runs"][0]["results"].as_array().unwrap();
+    let rejected = rejected_results
+        .iter()
+        .find(|result| result["properties"]["atom"] == "inc")
+        .expect("missing rejected counterexample result");
+    assert_eq!(rejected["level"], "error");
+    assert_eq!(rejected["kind"], "fail");
+
     std::fs::remove_dir_all(root).expect("remove fixture directory");
 }
 

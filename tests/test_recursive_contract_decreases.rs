@@ -16,6 +16,78 @@ atom tri(n: i64)
     body: if n == 0 { 0 } else { n + tri(n - 1) };
 "#;
 
+const ACKERMANN: &str = r#"
+atom ack(m: i64, n: i64) -> i64
+    requires: m >= 0 && n >= 0;
+    ensures: result >= n + 1;
+    decreases: (m, n);
+    body: if m == 0 { n + 1 } else { if n == 0 { ack(m - 1, 1) } else { ack(m - 1, ack(m, n - 1)) } };
+"#;
+
+const LEXDOWN: &str = r#"
+atom lexdown(m: i64, n: i64) -> i64
+    requires: m >= 0 && n >= 0;
+    ensures: result == 0;
+    decreases: (m, n);
+    body: if m == 0 && n == 0 { 0 } else { if n == 0 { lexdown(m - 1, m) } else { lexdown(m, n - 1) } };
+"#;
+
+const MUTUAL_LEX: &str = r#"
+atom f(m: i64, n: i64) -> i64
+    requires: m >= 0 && n >= 0;
+    ensures: result >= 0;
+    decreases: (m, n);
+    body: if n == 0 { 0 } else { g(m, n - 1) };
+
+atom g(m: i64, n: i64) -> i64
+    requires: m >= 0 && n >= 0;
+    ensures: result >= 0;
+    decreases: (m, n);
+    body: if m == 0 { 0 } else { f(m - 1, n) };
+"#;
+
+const MIXED_ARITY: &str = r#"
+atom f(n: i64) -> i64
+    requires: n >= 0;
+    ensures: n == 0 || result == g(n - 1);
+    decreases: (n, 0);
+    body: if n == 0 { 0 } else { g(n - 1) };
+
+atom g(n: i64) -> i64
+    requires: n >= 0;
+    ensures: n == 0 || result == f(n - 1);
+    decreases: n;
+    body: if n == 0 { 0 } else { f(n - 1) };
+"#;
+
+const MIXED_ARITY_NODEC: &str = r#"
+atom f(n: i64) -> i64
+    requires: n >= 0;
+    ensures: n == 0 || result == g(n - 1);
+    body: if n == 0 { 0 } else { g(n - 1) };
+
+atom g(n: i64) -> i64
+    requires: n >= 0;
+    ensures: n == 0 || result == f(n - 1);
+    body: if n == 0 { 0 } else { f(n - 1) };
+"#;
+
+const TUPLE_CALL_MEASURE: &str = r#"
+atom f(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result >= 0 && (n == 0 || result == f(n - 1));
+    decreases: (f(n), n);
+    body: if n == 0 { 0 } else { f(n - 1) };
+"#;
+
+const NESTED_TUPLE_MEASURE: &str = r#"
+atom f(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result >= 0 && (n == 0 || result == f(n - 1));
+    decreases: (n, (n, 0));
+    body: if n == 0 { 0 } else { f(n - 1) };
+"#;
+
 const TRI_NODEC: &str = r#"
 atom tri(n: i64)
     requires: n >= 0;
@@ -281,6 +353,21 @@ impl CaseResult {
             .unwrap_or(false)
     }
 
+    fn diagnostic_message_contains(&self, code: &str, text: &str) -> bool {
+        self.payload
+            .as_ref()
+            .and_then(|payload| payload["diagnostics"].as_array())
+            .is_some_and(|diagnostics| {
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic["code"].as_str() == Some(code)
+                        && diagnostic["atom"].as_str() == Some(self.target)
+                        && diagnostic["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains(text))
+                })
+            })
+    }
+
     fn failure_type(&self) -> Option<String> {
         self.report
             .as_ref()
@@ -295,6 +382,15 @@ fn parse_json_output(output: &Output) -> Option<Value> {
 }
 
 fn verify(name: &'static str, source: &str, target: &'static str) -> CaseResult {
+    verify_with_args(name, source, target, &[])
+}
+
+fn verify_with_args(
+    name: &'static str,
+    source: &str,
+    target: &'static str,
+    extra_args: &[&str],
+) -> CaseResult {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -313,6 +409,7 @@ fn verify(name: &'static str, source: &str, target: &'static str) -> CaseResult 
         .arg("--json")
         .arg("--report-dir")
         .arg(&dir)
+        .args(extra_args)
         .current_dir(&dir)
         .output()
         .expect("run verify");
@@ -393,6 +490,142 @@ fn test_tri_with_decreases_verifies() {
 }
 
 #[test]
+fn test_parenthesized_single_measure_verifies() {
+    let source = TRI_DEC.replace("decreases: n;", "decreases: (n);");
+    let case = verify("tri_parenthesized", &source, "tri");
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_match_measures_verify() {
+    let single_match = TRI_DEC.replace("decreases: n;", "decreases: match n { 0 => 0, _ => n };");
+    assert_case(
+        verify("tri_match_measure", &single_match, "tri"),
+        "verified",
+    );
+
+    let tuple_match = LEXDOWN.replace(
+        "decreases: (m, n);",
+        "decreases: (match m { 0 => 0, _ => m }, n);",
+    );
+    assert_case(
+        verify("lexdown_match_component", &tuple_match, "lexdown"),
+        "verified",
+    );
+}
+
+#[test]
+fn test_ackermann_with_lexicographic_decreases_verifies() {
+    let case = verify("ackermann", ACKERMANN, "ack");
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_lexdown_with_lexicographic_decreases_verifies() {
+    let case = verify("lexdown", LEXDOWN, "lexdown");
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_lexdown_with_lexicographic_decreases_verifies_in_bitvec_mode() {
+    let case = verify_with_args("lexdown_bv", LEXDOWN, "lexdown", &["--bitvec-i64"]);
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_mutual_recursion_with_lexicographic_decreases_verifies() {
+    let case = verify("mutual_lex", MUTUAL_LEX, "g");
+    assert!(
+        case.did_not_crash(),
+        "mutual_lex crashed; stderr:\n{}",
+        String::from_utf8_lossy(&case.output.stderr)
+    );
+    assert_eq!(
+        case.payload
+            .as_ref()
+            .and_then(|payload| payload["status"].as_str()),
+        Some("success"),
+        "mutual lexicographic SCC should verify; stdout:\n{}",
+        String::from_utf8_lossy(&case.output.stdout)
+    );
+}
+
+#[test]
+fn test_mixed_arity_mutual_recursion_is_unsupported() {
+    let dec = verify("mixed_arity", MIXED_ARITY, "f");
+    let nodec = verify("mixed_arity_nodec", MIXED_ARITY_NODEC, "f");
+    assert!(dec.did_not_crash() && nodec.did_not_crash());
+    assert!(
+        dec.has_diagnostic_code("recursive_contract_unsupported"),
+        "expected recursive_contract_unsupported hint; stdout:\n{}",
+        String::from_utf8_lossy(&dec.output.stdout)
+    );
+    assert!(
+        dec.diagnostic_message_contains("recursive_contract_unsupported", "different arity"),
+        "expected a different-arity explanation; stdout:\n{}",
+        String::from_utf8_lossy(&dec.output.stdout)
+    );
+    assert_eq!(
+        dec.verdict(),
+        nodec.verdict(),
+        "mixed-arity decreases must follow the ineligible SCC path"
+    );
+}
+
+#[test]
+fn test_tuple_call_and_nested_tuple_measures_are_unsupported() {
+    let with_measure = |measure: &str| {
+        NESTED_TUPLE_MEASURE.replace("decreases: (n, (n, 0));", &format!("decreases: {measure};"))
+    };
+    let cases = [
+        (
+            "tuple_call_measure",
+            TUPLE_CALL_MEASURE.to_string(),
+            "must not contain calls",
+        ),
+        (
+            "nested_tuple_measure",
+            NESTED_TUPLE_MEASURE.to_string(),
+            "must not nest tuples",
+        ),
+        (
+            "nested_tuple_with_double_parentheses",
+            with_measure("(n, ((n, 0)))"),
+            "must not nest tuples",
+        ),
+        (
+            "nested_tuple_with_arithmetic",
+            with_measure("(n, (n, 0) + 1)"),
+            "must not nest tuples",
+        ),
+        (
+            "single_measure_with_tuple_arithmetic",
+            with_measure("(n, 0) + 1"),
+            "must not nest tuples",
+        ),
+        (
+            "tuple_call_with_comma",
+            with_measure("(f(n, n))"),
+            "must not contain calls",
+        ),
+    ];
+    for (name, source, expected_message) in cases {
+        let case = verify(name, &source, "f");
+        assert!(case.did_not_crash(), "{name} crashed");
+        assert!(
+            case.has_diagnostic_code("recursive_contract_unsupported"),
+            "expected unsupported hint; stdout:\n{}",
+            String::from_utf8_lossy(&case.output.stdout)
+        );
+        assert!(
+            case.diagnostic_message_contains("recursive_contract_unsupported", expected_message),
+            "expected {expected_message:?}; stdout:\n{}",
+            String::from_utf8_lossy(&case.output.stdout)
+        );
+    }
+}
+
+#[test]
 fn test_tri_without_decreases_fails_with_hint() {
     let case = verify("tri_nodec", TRI_NODEC, "tri");
     assert!(case.did_not_crash());
@@ -431,6 +664,45 @@ fn test_call_without_decreasing_argument_fails_termination() {
 #[test]
 fn test_growing_call_argument_fails_termination() {
     let case = verify("growing", GROWING_CALL, "f");
+    assert_termination(&case, "n");
+}
+
+#[test]
+fn test_lexicographic_call_that_increases_first_measure_fails_termination() {
+    let source = r#"
+atom f(m: i64, n: i64) -> i64
+    requires: m >= 0 && n >= 1;
+    ensures: result >= 0;
+    decreases: (m, n);
+    body: if m == 0 { 0 } else { f(m + 1, n - 1) };
+"#;
+    let case = verify("lex_growing_first", source, "f");
+    assert_termination(&case, "m");
+}
+
+#[test]
+fn test_lexicographic_equal_measures_fail_termination() {
+    let source = r#"
+atom f(m: i64, n: i64) -> i64
+    requires: m >= 0 && n >= 0;
+    ensures: result >= 0;
+    decreases: (m, n);
+    body: if m == 0 { 0 } else { f(m, n) };
+"#;
+    let case = verify("lex_equal", source, "f");
+    assert_termination(&case, "m");
+}
+
+#[test]
+fn test_negative_lexicographic_component_fails_termination() {
+    let source = r#"
+atom f(m: i64, n: i64) -> i64
+    requires: m >= 0;
+    ensures: result >= 0;
+    decreases: (m, n);
+    body: if n != 0 { f(m, n - 1) } else { 0 };
+"#;
+    let case = verify("lex_negative_component", source, "f");
     assert_termination(&case, "n");
 }
 

@@ -14,4 +14,3 @@ atom area(s: Shape) -> i64
             Point => 0
         }
     }
-}

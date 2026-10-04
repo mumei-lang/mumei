@@ -44,8 +44,8 @@ pub(crate) use call_graph::{
 pub(crate) use nominal_types::{tail_expr, verify_nominal_struct_types};
 
 pub(crate) use recursion::{
-    collect_call_edges_expr, collect_call_edges_stmt, recursive_scc, RecursiveScc,
-    RecursiveSccEligibility,
+    collect_call_edges_expr, collect_call_edges_stmt, measure_components, recursive_scc,
+    RecursiveScc, RecursiveSccEligibility,
 };
 
 pub(crate) use task_ownership::{

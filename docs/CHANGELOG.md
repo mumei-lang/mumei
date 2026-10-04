@@ -1,3 +1,20 @@
+### 2026-10-04: HIR carries signature, contract and metadata (emitter ABI 2)
+
+- `HirAtom` now carries signature, ordered contract clauses, quantified
+  preconditions, and atom metadata alongside the existing AST-backed fields.
+- Emitter plugins must use ABI 2; ABI-1 plugins fail loading with an ABI
+  mismatch and must be rebuilt.
+
+---
+
+### 2026-10-04: SARIF reports spurious candidates as review findings
+
+- `--emit sarif` now reports atoms whose only failure is an unconfirmed
+  (spurious) counterexample candidate as warnings for review, as it already
+  did for `unknown` results, instead of as failures.
+
+---
+
 ### 2026-10-04: atom-level decreases and recursive contracts
 
 - **`decreases:` atom clause**: an atom can declare a termination measure
@@ -18,8 +35,6 @@
   `recursive_contract_needs_decreases` / `recursive_contract_unsupported`
   hint diagnostic; the call semantics and verdict are unchanged.
 - **Verifier policy version**: bumped to 7 so cached proofs are re-derived.
-
-
 ### Unreleased: quantified `requires` checked at call sites
 
 - Quantified `requires` conjuncts (`forall`/`exists` at the top level of

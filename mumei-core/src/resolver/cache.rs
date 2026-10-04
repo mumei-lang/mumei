@@ -15,7 +15,8 @@ use std::path::Path;
 /// and stops quantifier binders from capturing same-named outer variables.
 /// Version 7 enables recursive contracts: `decreases` termination obligations
 /// and congruent recursive calls.
-pub const VERIFIER_POLICY_VERSION: u32 = 7;
+/// Version 8 accepts lexicographic `decreases: (m1, ..., mk);` measures.
+pub const VERIFIER_POLICY_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
