@@ -7,7 +7,13 @@ use z3::{SatResult, Solver};
 
 use super::{phase_contract, PHASE_CONTRACTS};
 
+#[cfg(not(test))]
 static SINK: Mutex<Option<State>> = Mutex::new(None);
+#[cfg(test)]
+thread_local! {
+    // Lib tests run concurrently; a per-thread sink keeps one test's captures out of another's trace.
+    static SINK: &'static Mutex<Option<State>> = Box::leak(Box::new(Mutex::new(None)));
+}
 
 struct State {
     directory: PathBuf,
@@ -455,8 +461,16 @@ fn first_line(message: &str) -> String {
         .to_string()
 }
 
+#[cfg(not(test))]
 fn lock_sink() -> std::sync::MutexGuard<'static, Option<State>> {
     SINK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
+fn lock_sink() -> std::sync::MutexGuard<'static, Option<State>> {
+    SINK.with(|sink| *sink)
+        .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 

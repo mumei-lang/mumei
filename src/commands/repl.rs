@@ -265,6 +265,7 @@ pub(crate) fn repl_register_extern_fn(
         invariant: None,
         effects: vec![],
         return_type: Some(ext_fn.return_type.clone()),
+        decreases: None,
         span: ext_fn.span.clone(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),

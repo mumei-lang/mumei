@@ -799,6 +799,7 @@ impl Monomorphizer {
             invariant: generic.invariant.clone(),
             effects: mono_effects,
             return_type: generic.return_type.clone(),
+            decreases: generic.decreases.clone(),
             span: generic.span.clone(),
             effect_pre: generic
                 .effect_pre
