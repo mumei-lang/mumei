@@ -167,6 +167,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_hir_atom(
         name: &str,
         params: Vec<Param>,

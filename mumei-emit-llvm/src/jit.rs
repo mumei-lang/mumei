@@ -558,17 +558,17 @@ mod tests {
         let engine = JitEngine::new(&context).unwrap();
         let module_env = ModuleEnv::new();
 
-        // Create atom with f64 return: body: 3.14
+        // Create atom with f64 return: body: 2.5
         let hir = make_hir_atom(
-            "pi_approx",
+            "float_const",
             vec![],
-            HirStmt::Expr(HirExpr::Float(3.14)),
+            HirStmt::Expr(HirExpr::Float(2.5)),
             Some("f64".to_string()),
         );
 
         engine.compile_atom(&hir, &module_env, &[]).unwrap();
-        let result = engine.execute_f64("pi_approx").unwrap();
-        assert!((result - 3.14).abs() < 1e-10);
+        let result = engine.execute_f64("float_const").unwrap();
+        assert!((result - 2.5).abs() < 1e-10);
     }
 
     #[test]
