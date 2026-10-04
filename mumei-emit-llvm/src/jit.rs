@@ -479,7 +479,7 @@ impl Drop for JitEngine<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mumei_core::hir::{HirEffectSet, HirExpr, HirStmt};
+    use mumei_core::hir::{lower_atom_metadata, HirEffectSet, HirExpr, HirStmt};
     use mumei_core::parser::ast::{Atom, Expr, Param, Span, Stmt, TrustLevel};
 
     /// Helper: build a minimal HirAtom for JIT testing.
@@ -490,38 +490,42 @@ mod tests {
         return_type: Option<String>,
     ) -> HirAtom {
         let span = Span::new("", 0, 0, 0);
+        let atom = Atom {
+            name: name.to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params,
+            trace_id: None,
+            spec_metadata: std::collections::HashMap::new(),
+            clause_labels: Vec::new(),
+            clause_modes: Vec::new(),
+            covers: Vec::new(),
+            requires: "true".to_string(),
+            forall_constraints: vec![],
+            ensures: "true".to_string(),
+            body_expr: "0".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type,
+            decreases: None,
+            span: span.clone(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let body_stmt = Stmt::Expr(Expr::Number(0), span);
+        let (signature, contract, meta) = lower_atom_metadata(&atom, &body, None);
         HirAtom {
             body,
-            requires_hir: HirExpr::Number(1),
-            ensures_hir: HirExpr::Number(1),
-            atom: Atom {
-                name: name.to_string(),
-                type_params: vec![],
-                where_bounds: vec![],
-                params,
-                trace_id: None,
-                spec_metadata: std::collections::HashMap::new(),
-                clause_labels: Vec::new(),
-                clause_modes: Vec::new(),
-                covers: Vec::new(),
-                requires: "true".to_string(),
-                forall_constraints: vec![],
-                ensures: "true".to_string(),
-                body_expr: "0".to_string(),
-                consumed_params: vec![],
-                resources: vec![],
-                is_async: false,
-                trust_level: TrustLevel::Verified,
-                max_unroll: None,
-                invariant: None,
-                effects: vec![],
-                return_type,
-                decreases: None,
-                span: span.clone(),
-                effect_pre: std::collections::HashMap::new(),
-                effect_post: std::collections::HashMap::new(),
-            },
-            body_stmt: Stmt::Expr(Expr::Number(0), span),
+            signature,
+            contract,
+            meta,
+            atom,
+            body_stmt,
             effect_set: HirEffectSet::default(),
         }
     }

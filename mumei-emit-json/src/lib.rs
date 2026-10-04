@@ -91,62 +91,66 @@ impl Emitter for VerifiedJsonEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mumei_core::hir::{HirEffectSet, HirExpr, HirStmt};
+    use mumei_core::hir::{lower_atom_metadata, HirEffectSet, HirExpr, HirStmt};
     use mumei_core::parser::ast::{Atom, Expr, Param, Span, Stmt, TrustLevel};
     use mumei_core::verification::ModuleEnv;
 
     #[test]
     fn test_verified_json_emitter_basic() {
+        let body = HirStmt::Expr(HirExpr::Number(0));
+        let atom = Atom {
+            name: "safe_divide".to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![
+                Param {
+                    name: "a".to_string(),
+                    type_name: Some("i64".to_string()),
+                    type_ref: None,
+                    is_ref: false,
+                    is_ref_mut: false,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
+                },
+                Param {
+                    name: "b".to_string(),
+                    type_name: Some("i64".to_string()),
+                    type_ref: None,
+                    is_ref: false,
+                    is_ref_mut: false,
+                    fn_contract_requires: None,
+                    fn_contract_ensures: None,
+                },
+            ],
+            trace_id: None,
+            spec_metadata: std::collections::HashMap::new(),
+            clause_labels: Vec::new(),
+            clause_modes: Vec::new(),
+            covers: Vec::new(),
+            requires: "b != 0".to_string(),
+            forall_constraints: vec![],
+            ensures: "result == a / b".to_string(),
+            body_expr: "a / b".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: Some("i64".to_string()),
+            decreases: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let (signature, contract, meta) = lower_atom_metadata(&atom, &body, None);
         let hir_atom = HirAtom {
-            body: HirStmt::Expr(HirExpr::Number(0)),
-            requires_hir: HirExpr::Number(1),
-            ensures_hir: HirExpr::Number(1),
-            atom: Atom {
-                name: "safe_divide".to_string(),
-                type_params: vec![],
-                where_bounds: vec![],
-                params: vec![
-                    Param {
-                        name: "a".to_string(),
-                        type_name: Some("i64".to_string()),
-                        type_ref: None,
-                        is_ref: false,
-                        is_ref_mut: false,
-                        fn_contract_requires: None,
-                        fn_contract_ensures: None,
-                    },
-                    Param {
-                        name: "b".to_string(),
-                        type_name: Some("i64".to_string()),
-                        type_ref: None,
-                        is_ref: false,
-                        is_ref_mut: false,
-                        fn_contract_requires: None,
-                        fn_contract_ensures: None,
-                    },
-                ],
-                trace_id: None,
-                spec_metadata: std::collections::HashMap::new(),
-                clause_labels: Vec::new(),
-                clause_modes: Vec::new(),
-                covers: Vec::new(),
-                requires: "b != 0".to_string(),
-                forall_constraints: vec![],
-                ensures: "result == a / b".to_string(),
-                body_expr: "a / b".to_string(),
-                consumed_params: vec![],
-                resources: vec![],
-                is_async: false,
-                trust_level: TrustLevel::Verified,
-                max_unroll: None,
-                invariant: None,
-                effects: vec![],
-                return_type: Some("i64".to_string()),
-                decreases: None,
-                span: Span::default(),
-                effect_pre: std::collections::HashMap::new(),
-                effect_post: std::collections::HashMap::new(),
-            },
+            body,
+            signature,
+            contract,
+            meta,
+            atom,
             body_stmt: Stmt::Expr(Expr::Number(0), Span::default()),
             effect_set: HirEffectSet::default(),
         };
