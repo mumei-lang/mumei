@@ -246,7 +246,7 @@ fn bitwise_in_invariant_selects_bitvector_encoding() {
 #[test]
 fn bitwise_in_forall_condition_selects_bitvector_encoding() {
     let dir = temp_dir("forall");
-    let source = "atom masked_elements(n: i64) -> i64\n\
+    let source = "atom masked_elements(arr: [i64], n: i64) -> i64\n\
         requires: n >= 0 && forall(i, 0, n, (arr[i] & 1) == 0);\n\
         ensures: result == n;\n\
         body: n;\n";
@@ -265,7 +265,7 @@ fn bitwise_in_forall_condition_selects_bitvector_encoding() {
 #[test]
 fn bitvec_mode_supports_array_indexing_with_i64_index() {
     let dir = temp_dir("array");
-    let source = "atom read_at(i: i64, n: i64) -> i64\n\
+    let source = "atom read_at(arr: [i64], i: i64, n: i64) -> i64\n\
         requires: n >= 0 && i >= 0 && i < n && len(arr) == n && arr[i] >= 0;\n\
         ensures: result >= 0;\n\
         body: arr[i];\n";
@@ -401,7 +401,7 @@ fn forall_over_a_bitvector_bound_is_not_vacuous() {
     let provable = write_fixture(
         &dir,
         "forall_bound.mm",
-        "atom first_is_zero(n: i64) -> i64\n\
+        "atom first_is_zero(arr: [i64], n: i64) -> i64\n\
          requires: n == 3 && len(arr) == n && forall(i, 0, n, arr[i] == 0);\n\
          ensures: arr[0] == 0;\n\
          body: 0;\n",
@@ -409,7 +409,7 @@ fn forall_over_a_bitvector_bound_is_not_vacuous() {
     let false_claim = write_fixture(
         &dir,
         "forall_bound_false.mm",
-        "atom first_is_one(n: i64) -> i64\n\
+        "atom first_is_one(arr: [i64], n: i64) -> i64\n\
          requires: n == 3 && len(arr) == n && forall(i, 0, n, arr[i] == 0);\n\
          ensures: arr[0] == 1;\n\
          body: 0;\n",
