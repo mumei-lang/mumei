@@ -150,8 +150,9 @@ Rules:
   `executor.rs::lower_clause_with_skip`,
   `mumei-core/src/verification/types.rs::UNVERIFIABLE_ERROR_PREFIX`.
 - **E6 (report shape).** The report lists `context_reachability` and one
-  `ensures_outcomes` entry (`clause`, `outcome`, optional `label`) per conjunct
-  in source order. `executor.rs::ensures_outcome_summary`; field reference in
+  `ensures_outcomes` entry (`clause`, `outcome`, optional `label`) per conjunct.
+  The `assumed` entries come first, in source order, followed by the checked
+  conjuncts in source order. `executor.rs::ensures_outcome_summary`; field reference in
   [`REPORT_SCHEMA.md`](REPORT_SCHEMA.md).
 
 ## 3. Clause trust modes
@@ -238,10 +239,13 @@ Rules:
   frames after Phase 6; they never add a hypothesis to the frames that decide
   ensures outcomes or the final check.
 - **C4 (fail closed to `unknown`).** A cover is `unknown`, never `covered` or
-  unreachable, when: a `requires check` clause cannot be lowered; the cover
-  itself cannot be lowered; it uses a bitwise operator under the default Int
-  encoding; or it refers to `result` of a tuple-returning atom.
-  `executor.rs::verify_inner` (Phase 7).
+  unreachable, when: a `requires check` clause cannot be lowered (whether it
+  is unsupported or its lowering errors); the cover itself uses a construct
+  the solver encoding does not support (it is `skipped` by
+  `lower_clause_with_skip`); it uses a bitwise operator under the default Int
+  encoding; or it refers to `result` of a tuple-returning atom. Any other
+  lowering error in the cover itself is a hard error that fails the atom, as
+  for ensures (rule E5). `executor.rs::verify_inner` (Phase 7).
 - **C5 (trusted atoms).** A trusted atom has no body verification, so its
   covers are not checked and a warning says so. `executor.rs::verify_inner`
   (`TrustLevel::Trusted` branch).
