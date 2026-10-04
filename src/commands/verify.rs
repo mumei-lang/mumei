@@ -373,6 +373,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     json,
                 );
             }
+            discard_stale_report(report_dir.as_deref());
             warn_phase_artifact_write_failures();
             std::process::exit(EXIT_INPUT_ERROR);
         }
@@ -1452,6 +1453,13 @@ impl Drop for ReportStaging {
     }
 }
 
+/// An early exit verified no atom, so a report.json from an earlier run must
+/// not survive as this run's result.
+fn discard_stale_report(report_dir: Option<&str>) {
+    let dir = report_dir.map_or(Path::new("."), Path::new);
+    let _ = std::fs::remove_file(dir.join("report.json"));
+}
+
 /// Creates a fresh, process-private staging dir under temp_dir. The name is
 /// unpredictable enough for collisions to be rare, but creation is still
 /// exclusive (non-recursive `DirBuilder`, mode 0o700 on unix) so a pre-created
@@ -1537,6 +1545,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
     let quiet_output = json_output || structured_feedback_stdout || loss_vector_stdout;
     if let Err(message) = z3_availability() {
         eprintln!("{message}");
+        discard_stale_report(report_dir);
         return early_outcome(VerifyOutcome::InternalError, &message, json_output);
     }
     let manifest_config = manifest::find_and_load();
@@ -1574,6 +1583,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
             Ok(result) => result,
             Err(e) => {
                 eprintln!("  ❌ {e}");
+                discard_stale_report(report_dir);
                 return early_outcome(VerifyOutcome::InputError, &e, json_output);
             }
         };
@@ -1587,6 +1597,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         !quiet_output,
     ) {
         eprintln!("  ❌ {e}");
+        discard_stale_report(report_dir);
         return early_outcome(VerifyOutcome::InputError, &e, json_output);
     }
 
