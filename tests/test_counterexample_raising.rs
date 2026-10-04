@@ -1,6 +1,7 @@
 use serde_json::Value;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 fn verify_source(name: &str, source: &str, extra_args: &[&str]) -> (PathBuf, Output, Value) {
     let dir = std::env::temp_dir().join(format!(
@@ -41,6 +42,109 @@ fn output_text(output: &Output) -> String {
 
 fn cleanup(dir: PathBuf) {
     std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+fn lsp_diagnostic_for_source(name: &str, source: &str) -> Value {
+    let dir = std::env::temp_dir().join(format!(
+        "mumei_counterexample_raising_lsp_{}_{}_{}",
+        std::process::id(),
+        name,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir).expect("create LSP fixture directory");
+    let source_path = dir.join(format!("{name}.mm"));
+    std::fs::write(&source_path, source).expect("write LSP fixture");
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": format!("file://{}", source_path.display()),
+                "languageId": "mumei",
+                "version": 1,
+                "text": source
+            }
+        }
+    });
+    let body = serde_json::to_string(&body).expect("serialize didOpen");
+    let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("lsp")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn LSP");
+    child
+        .stdin
+        .as_mut()
+        .expect("open LSP stdin")
+        .write_all(frame.as_bytes())
+        .expect("write didOpen");
+    drop(child.stdin.take());
+    let output = child.wait_with_output().expect("wait for LSP");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diagnostic = stdout
+        .split("Content-Length: ")
+        .skip(1)
+        .filter_map(|chunk| chunk.split_once("\r\n\r\n").map(|(_, body)| body))
+        .filter_map(|body| {
+            serde_json::Deserializer::from_str(body)
+                .into_iter::<Value>()
+                .next()
+        })
+        .filter_map(Result::ok)
+        .find_map(|message| {
+            (message.get("method").and_then(Value::as_str)
+                == Some("textDocument/publishDiagnostics"))
+            .then_some(message)
+        })
+        .and_then(|message| {
+            message
+                .pointer("/params/diagnostics")
+                .and_then(Value::as_array)
+                .and_then(|diagnostics| {
+                    diagnostics
+                        .iter()
+                        .find(|diagnostic| diagnostic.pointer("/data/counterexample").is_some())
+                })
+                .cloned()
+        })
+        .expect("call-site diagnostic includes counterexample data");
+    std::fs::remove_dir_all(&dir).expect("remove LSP fixture directory");
+    diagnostic
+}
+
+const CHECK_CALLEE: &str = r#"
+struct Pt { a: i64, b: i64 }
+
+atom check(p: Pt) -> i64
+requires: p.a > 0;
+ensures: true;
+body: p.a;
+"#;
+
+fn verify_callsite_source(name: &str, source: &str) -> (PathBuf, Value) {
+    let (dir, output, report) =
+        verify_source(name, source, &["--json", "--enable-spurious-detection"]);
+    let text = output_text(&output);
+    assert!(
+        !output.status.success(),
+        "call-site precondition must fail: {text}"
+    );
+    assert_eq!(report["status"], "failed");
+    assert!(
+        report["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("Call to 'check': precondition")),
+        "{report}"
+    );
+    let diagnostic = lsp_diagnostic_for_source(name, source);
+    (dir, diagnostic)
 }
 
 #[test]
@@ -116,6 +220,166 @@ body: p.a + p.b;
             "solver helper leaked as counterexample key {key}"
         );
     }
+    cleanup(dir);
+}
+
+#[test]
+fn callsite_struct_variable_argument_raises_fields() {
+    // Before this fix, LSP data had p="0", lowering struct, status unraisable, reason "struct values require their binding fields".
+    let source = format!(
+        "{CHECK_CALLEE}\n{}",
+        r#"
+atom caller(q: Pt) -> i64
+requires: true;
+ensures: true;
+body: check(q);
+"#
+    );
+    let (dir, diagnostic) = verify_callsite_source("callsite_struct_variable", &source);
+    let counterexample = diagnostic
+        .pointer("/data/counterexample")
+        .and_then(Value::as_object)
+        .expect("call-site counterexample");
+    let rendering = counterexample["p"].as_str().expect("struct argument value");
+    assert!(rendering.starts_with("Pt { a: "), "{rendering}");
+    assert!(rendering.contains(", b: "), "{rendering}");
+    assert!(rendering.ends_with(" }"), "{rendering}");
+    let a = rendering
+        .strip_prefix("Pt { a: ")
+        .and_then(|rest| rest.split_once(", b:").map(|(value, _)| value))
+        .and_then(|value| value.parse::<i64>().ok())
+        .expect("raised struct field a");
+    assert!(a <= 0, "{rendering}");
+    assert_eq!(
+        diagnostic.pointer("/data/counterexample_provenance/values/p/status"),
+        Some(&Value::String("raised".to_string()))
+    );
+    assert_eq!(
+        diagnostic.pointer("/data/counterexample_provenance/values/p/lowering"),
+        Some(&Value::String("struct".to_string()))
+    );
+    let value_keys = diagnostic
+        .pointer("/data/counterexample_provenance/values")
+        .and_then(Value::as_object)
+        .expect("provenance values");
+    for key in counterexample.keys().chain(value_keys.keys()) {
+        assert!(
+            !key.contains("__struct_") && !key.contains("__mumei_struct"),
+            "solver helper leaked as source key {key}"
+        );
+    }
+    cleanup(dir);
+}
+
+#[test]
+fn callsite_struct_literal_argument_raises_fields() {
+    let source = format!(
+        "{CHECK_CALLEE}\n{}",
+        r#"
+atom caller_lit(x: i64) -> i64
+requires: true;
+ensures: true;
+body: check(Pt { a: x, b: 1 });
+"#
+    );
+    let (dir, diagnostic) = verify_callsite_source("callsite_struct_literal", &source);
+    let rendering = diagnostic
+        .pointer("/data/counterexample/p")
+        .and_then(Value::as_str)
+        .expect("raised struct argument");
+    assert!(rendering.starts_with("Pt { a: "), "{rendering}");
+    assert!(rendering.contains(", b: 1"), "{rendering}");
+    let a = rendering
+        .strip_prefix("Pt { a: ")
+        .and_then(|rest| rest.split_once(", b:").map(|(value, _)| value))
+        .and_then(|value| value.parse::<i64>().ok())
+        .expect("raised struct field a");
+    assert!(a <= 0, "{rendering}");
+    assert_eq!(
+        diagnostic.pointer("/data/counterexample_provenance/values/p/status"),
+        Some(&Value::String("raised".to_string()))
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn callsite_struct_call_result_stays_unraisable() {
+    let source = format!(
+        "{CHECK_CALLEE}\n{}",
+        r#"
+atom mk(x: i64) -> Pt
+requires: true;
+ensures: true;
+body: Pt { a: x, b: 0 };
+
+atom caller_call(x: i64) -> i64
+requires: true;
+ensures: true;
+body: check(mk(x));
+"#
+    );
+    let (dir, diagnostic) = verify_callsite_source("callsite_struct_call_result", &source);
+    assert_eq!(
+        diagnostic.pointer("/data/counterexample_provenance/values/p/status"),
+        Some(&Value::String("unraisable".to_string()))
+    );
+    assert_eq!(
+        diagnostic.pointer("/data/counterexample_provenance/values/p/reason"),
+        Some(&Value::String(
+            "struct argument comes from an abstract callee result; its fields are not tied to source values"
+                .to_string()
+        ))
+    );
+    assert_eq!(
+        diagnostic.pointer("/data/counterexample/p"),
+        Some(&Value::String("0".to_string()))
+    );
+    assert_eq!(
+        diagnostic.pointer("/data/counterexample_provenance/complete"),
+        Some(&Value::Bool(false))
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn callsite_struct_let_alias_of_call_result_stays_unraisable() {
+    let source = format!(
+        "{CHECK_CALLEE}\n{}",
+        r#"
+atom mk(x: i64) -> Pt
+requires: true;
+ensures: true;
+body: Pt { a: x, b: 0 };
+
+atom caller_call_alias(x: i64) -> i64
+requires: true;
+ensures: true;
+body: {
+    let r = mk(x);
+    check(r)
+};
+"#
+    );
+    let (dir, diagnostic) = verify_callsite_source("callsite_struct_call_alias", &source);
+    assert_eq!(
+        diagnostic.pointer("/data/counterexample_provenance/values/p/status"),
+        Some(&Value::String("unraisable".to_string()))
+    );
+    assert_eq!(
+        diagnostic.pointer("/data/counterexample_provenance/values/p/reason"),
+        Some(&Value::String(
+            "struct argument comes from an abstract callee result; its fields are not tied to source values"
+                .to_string()
+        ))
+    );
+    assert_eq!(
+        diagnostic.pointer("/data/counterexample/p"),
+        Some(&Value::String("0".to_string()))
+    );
+    assert_eq!(
+        diagnostic.pointer("/data/counterexample_provenance/complete"),
+        Some(&Value::Bool(false))
+    );
     cleanup(dir);
 }
 
