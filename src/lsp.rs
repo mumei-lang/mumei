@@ -332,6 +332,13 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
                 }
                 _ => None,
             };
+            let counterexample_provenance = match &e {
+                verification::MumeiError::VerificationError {
+                    counterexample_provenance,
+                    ..
+                } => counterexample_provenance.clone(),
+                _ => None,
+            };
             let mut message = format!("{}", detail);
             // The editor previously reported the Z3 verdict without saying
             // whether the atom is routed to mumei-lean. Escalation state is
@@ -393,10 +400,16 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
             if !related_info.is_empty() {
                 diag["relatedInformation"] = serde_json::json!(related_info);
             }
-            if counterexample.is_some() || escalation_data.is_some() {
+            if counterexample.is_some()
+                || counterexample_provenance.is_some()
+                || escalation_data.is_some()
+            {
                 let mut data = serde_json::Map::new();
                 if let Some(ce) = counterexample {
                     data.insert("counterexample".to_string(), ce);
+                }
+                if let Some(provenance) = counterexample_provenance {
+                    data.insert("counterexample_provenance".to_string(), provenance);
                 }
                 if let Some(lean) = escalation_data {
                     data.insert("lean_escalation".to_string(), lean);

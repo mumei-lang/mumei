@@ -2256,7 +2256,8 @@ impl<'ctx> MinimalUnsatCoreProbe<'ctx> {
             .map(|label| Bool::new_const(self.context, normalize_tracking_label(label)))
             .collect();
 
-        self.solver.check_assumptions(&assumptions) == SatResult::Unsat
+        crate::verification::phase_artifacts::check_assumptions(&self.solver, &assumptions)
+            == SatResult::Unsat
     }
 }
 

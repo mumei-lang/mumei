@@ -24,8 +24,19 @@ Z3 diagnostics may carry:
 ```json
 {
   "counterexample": {
-    "a": 1,
-    "b": 2
+    "a": "1",
+    "b": "2"
+  },
+  "counterexample_provenance": {
+    "complete": true,
+    "values": {
+      "a": {
+        "status": "raised",
+        "lowering": "int",
+        "source_type": "i64"
+      }
+    },
+    "omitted_solver_symbols": []
   },
   "lean_escalation": {
     "status": "pending",
@@ -42,11 +53,23 @@ inconclusive in the same sense as `mumei verify` exit code `3`: Z3 returned
 `spurious_candidate`, or the atom is `unverifiable`.  A confirmed
 counterexample or contract violation stays an error (severity `1`).
 
-`counterexample` maps variable names to values.  It is also appended to the
+`counterexample` maps source names to rendered string values. It is also appended to the
 diagnostic message as `Counter-example: a = 1, b = 2`, unless the message
 already contains `Counter-example:`.  A pending escalation is also reflected
 in the message suffix:
 `Lean escalation: pending (z3 <class>, reason <reason>)`.
+`counterexample_provenance` is optional. Its `values` object records each
+reported value's `raised` or `unraisable` status, lowering, optional declared
+source type and solver symbol, and an unraisable reason. `complete` is false
+when any reported value could not be raised. `omitted_solver_symbols` lists
+internal or otherwise unreported solver symbols.
+
+Primitive lowering labels include `int`, signed `bitvec_i64`/`bitvec_i32`,
+unsigned `bitvec_u64`/`bitvec_u32`, exact `real_f64`/`real_f32`, and
+`ieee754_f64`/`ieee754_f32` for matching IEEE floating-point sorts.
+`str_length` and `array_length` identify the solver-side length companions of
+`Str` and array parameters (`len(s)`); they are reported in reconstruction-loss
+values and provenance.
 
 In-process verification stops at the first failing atom.  When a sibling
 `<file>.proof.json` certificate exists, every other atom it records with an

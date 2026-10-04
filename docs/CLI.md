@@ -52,9 +52,9 @@ keep working.
 | Code | Meaning | Typical cause |
 |---|---|---|
 | `0` | Verified | every obligation discharged (or delegated to an accepted certificate) |
-| `1` | Rejected | Z3 counterexample, contract / type / session-protocol violation, strict array-type violation |
+| `1` | Rejected | confirmed Z3 counterexample, contract / type / session-protocol violation, strict array-type violation |
 | `2` | Usage error | invalid command-line arguments (reported by the argument parser), including unsupported `--emit` / `--no-emit` targets |
-| `3` | Inconclusive | no counterexample, but an obligation ended `unknown` / `timeout` / `resource_limit`, was reported `unverifiable` (unsupported Z3 clause), or is a `--escalate-lean` candidate Z3 left `unknown` that the Lean bridge did not discharge |
+| `3` | Inconclusive | no confirmed counterexample, but an obligation ended `unknown` / `timeout` / `resource_limit`, Z3's model was classified a spurious candidate (`spurious_candidate`: the counterexample replay could not confirm it), the obligation was reported `unverifiable` (unsupported Z3 clause), or it is a `--escalate-lean` candidate Z3 left inconclusive that the Lean bridge did not discharge |
 | `4` | Input error | the input file, a `--cross-spec-files` entry, or the directory could not be read, parsed, or resolved (missing file, unresolved import, empty directory) |
 | `5` | Internal error | the verifier panicked, or an artifact / certificate / Lean-bridge step could not be completed |
 
@@ -79,3 +79,75 @@ JSON. `--emit loss-vector` / `--emit structured-feedback` print the emitted
 artifact to stdout as a second JSON document ahead of the summary. A directory
 run with `--json` prints one payload per file followed by the text summary;
 parse it line-oriented or verify files individually.
+
+### SARIF output
+
+`mumei verify <file-or-directory> --emit sarif` writes a SARIF 2.1.0 log to
+`<report-dir or .>/report.sarif`. A directory run contains the results from all
+files in one log. Each result refers to an existing failure type, verification
+outcome, or status; its `properties` always includes `atom` and `obligation`
+(`requires`, `ensures`, `cover`, `atom`, `lean_proof`, `trait_law`, or
+`session_protocol`), with `clause`,
+`label`, `outcome`, `failure_type`, `z3_result`, `context_reachability`,
+`counterexample`, `counterexample_fidelity`, and `witness` when available.
+Session-protocol results also include `effect`, `protocol_state`,
+`protocol_path`, `callee_atom`, and `suggested_fix`.
+Covered cover clauses are represented as pass results (`kind: "pass"`,
+`level: "none"`). `ruleIndex` refers to the matching entry in the run's rules.
+A rule's `defaultConfiguration.level` is the most severe level among its
+results (`error` > `warning` > `note` > `none`); rule order follows first use.
+
+| Finding | SARIF rule ID | Level |
+|---|---|---|
+| Failed atom or postcondition | report failure type (or `failed`) | `error` |
+| Vacuous, unknown, or skipped ensures clause | `vacuous`, `unknown`, or `skipped` | `warning` |
+| Unverifiable atom | `unverifiable` | `warning` |
+| Unknown cover result | `unknown` | `warning` |
+| Covered cover result | `covered` | `none` (pass result) |
+| Assumed clause | `assumed_clause` | `note` |
+| Axiom-audit rejection | `axiom_rejected` | `warning` |
+| Trait-law or impl error | `trait_law_violated` when a law has a counterexample; solver result when inconclusive; otherwise `failed` (e.g. a missing method or trait) | `error` (`warning` when inconclusive) |
+| Session protocol violation | violation kind (`duality_mismatch`, `unreachable_receive`, `deadlock_no_progress`) | `error` |
+
+The SARIF invocation records the combined process exit code (including all
+files in a directory run); `executionSuccessful` is true for exit codes 0, 1,
+and 3. Requesting SARIF does not change verification verdicts, the `--json`
+payload, or the exit-code contract above.
+
+### Preserving phase artifacts
+
+`mumei verify <file-or-directory> --keep-phase-artifacts <DIR>` preserves each
+atom's verification phases and the SMT-LIB queries issued during them:
+
+```text
+<DIR>/<source>-<hash8>/<atom>-<hash8>/phases.json
+<DIR>/<source>-<hash8>/<atom>-<hash8>/<NNNN>-<phase-slug>.smt2
+```
+
+`<source>` is the atom's source path with every character outside
+`[A-Za-z0-9._-]` replaced by `_`; `<atom>` uses the same sanitization (so
+`S::m` becomes `S__m`). Each component is suffixed with `-<hash8>`, the first
+eight lowercase hexadecimal characters of the SHA-256 hash of the original,
+unsanitized value. The hash keeps distinct paths or atom names from colliding
+when sanitization is lossy. An empty sanitized component becomes `_`. `NNNN`
+is a 1-based query number for that atom, and the phase slug is the lower-case
+phase name with non-alphanumeric runs replaced by `-`. Each `.smt2` file
+contains comments for the atom, phase, and source origin, followed by the
+solver text and its `(check-sat)` or `(check-sat-assuming (...))` command.
+
+`phases.json` has `version: 1`, `atom`, `source_file`, `outcome`, `error`,
+`partial`, and an ordered `phases` array. `partial` is `true` when a query
+could not be captured; otherwise it is `false`. Each phase entry has `phase`,
+`result`, and `queries`; each query has `index`, `file`, `origin`, and solver
+`result` (`sat`, `unsat`, or `unknown`). Completed phases are included even
+when they have no queries. Results may be `passed`, `failed`, `unknown`,
+`unverifiable`, `contradiction`, or `aborted`. For an unchanged cached atom,
+the file records `outcome: "cached"` and an empty `phases` array. An
+unrecognized phase is retained verbatim and marked `in_phase_contract: false`.
+
+Phase capture is diagnostic only: it does not change solver input, the
+incremental-cache key, verification verdicts, `report.json`, `--json` output,
+or exit codes. If artifact writes fail, one warning is printed to stderr after
+verification, including with `--json`:
+`warning: --keep-phase-artifacts: <n> artifact write(s) failed (first: <path>: <io error>); phase artifacts are incomplete`.
+The failure never changes the verdict, report, JSON output, or exit code.

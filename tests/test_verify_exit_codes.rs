@@ -36,6 +36,21 @@ ensures: x * x * x + y * y * y != z * z * z;
 body: { 0 };
 "#;
 
+/// Z3 finds a model, but the counterexample replay flags it as spurious: the
+/// body calls a `trusted` atom whose result Z3 treats as unconstrained, so the
+/// model is not a confirmed violation of the Mumei semantics.
+const SPURIOUS_SRC: &str = r#"
+trusted atom mystery(x: i64) -> i64
+requires: true;
+ensures: true;
+body: { 0 };
+
+atom uses_mystery(x: i64) -> i64
+requires: x >= 0;
+ensures: result >= 0;
+body: { mystery(x) };
+"#;
+
 fn temp_dir(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -137,6 +152,57 @@ fn rejection_of_an_atom_named_like_a_solver_result_is_still_a_rejection() {
 }
 
 #[test]
+fn spurious_counterexample_candidate_is_inconclusive() {
+    let dir = temp_dir("spurious");
+    write(&dir, "spurious.mm", SPURIOUS_SRC);
+    let output = verify(&dir, &["spurious.mm"]);
+    assert_exit(&output, EXIT_INCONCLUSIVE);
+    let combined = combined_output(&output);
+    assert!(
+        combined.contains("Spurious counterexample detected"),
+        "fixture must exercise the spurious-candidate path:\n{combined}"
+    );
+    assert!(
+        combined.contains("1 failed"),
+        "summary counts stay unchanged; only the exit code differs:\n{combined}"
+    );
+}
+
+#[test]
+fn spurious_candidate_json_payload_is_inconclusive() {
+    let dir = temp_dir("spurious_json");
+    write(&dir, "spurious.mm", SPURIOUS_SRC);
+    let output = verify(&dir, &["--json", "spurious.mm"]);
+    assert_exit(&output, EXIT_INCONCLUSIVE);
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json prints a JSON payload");
+    assert_eq!(payload["exit_code"], serde_json::json!(EXIT_INCONCLUSIVE));
+    assert_eq!(payload["status"], serde_json::json!("inconclusive"));
+    assert_eq!(payload["failed"], serde_json::json!(1));
+    let tags = payload["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .filter(|diag| diag["atom"] == "uses_mystery")
+        .flat_map(|diag| diag["tags"].as_array().cloned().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert!(
+        tags.contains(&serde_json::json!("z3_spurious_candidate")),
+        "the per-atom diagnostic keeps its spurious_candidate tag: {tags:?}"
+    );
+}
+
+#[test]
+fn counterexample_without_spurious_detection_is_still_a_rejection() {
+    // The same model is reported as a plain counterexample when the replay
+    // check is switched off, so the exit code follows the detector's verdict.
+    let dir = temp_dir("spurious_disabled");
+    write(&dir, "spurious.mm", SPURIOUS_SRC);
+    let output = verify(&dir, &["--disable-spurious-detection", "spurious.mm"]);
+    assert_exit(&output, EXIT_REJECTED);
+}
+
+#[test]
 fn unreadable_input_is_an_input_error() {
     let dir = temp_dir("missing");
     assert_exit(&verify(&dir, &["does_not_exist.mm"]), EXIT_INPUT_ERROR);
@@ -171,6 +237,18 @@ fn directory_run_reports_the_most_severe_outcome() {
     write(&rejected, "bad.mm", REJECTED_SRC);
     write(&rejected, "unknown.mm", UNKNOWN_SRC);
     assert_exit(&verify(&dir, &["rejected"]), EXIT_REJECTED);
+
+    let spurious = dir.join("spurious");
+    std::fs::create_dir_all(&spurious).expect("create dir");
+    write(&spurious, "ok.mm", VERIFIED_SRC);
+    write(&spurious, "spurious.mm", SPURIOUS_SRC);
+    assert_exit(&verify(&dir, &["spurious"]), EXIT_INCONCLUSIVE);
+
+    let spurious_and_rejected = dir.join("spurious_and_rejected");
+    std::fs::create_dir_all(&spurious_and_rejected).expect("create dir");
+    write(&spurious_and_rejected, "bad.mm", REJECTED_SRC);
+    write(&spurious_and_rejected, "spurious.mm", SPURIOUS_SRC);
+    assert_exit(&verify(&dir, &["spurious_and_rejected"]), EXIT_REJECTED);
 }
 
 #[test]
@@ -242,6 +320,34 @@ fn undischarged_lean_escalation_candidate_is_inconclusive() {
         .expect("run mumei verify --escalate-lean");
     assert_exit(&output, EXIT_INCONCLUSIVE);
     let combined = combined_output(&output);
+    assert!(
+        combined.contains("still open"),
+        "summary should say the Lean candidate is still open:\n{combined}"
+    );
+}
+
+#[test]
+fn undischarged_spurious_escalation_candidate_is_inconclusive() {
+    let dir = temp_dir("spurious_escalation");
+    let bridge_repo = write_noop_bridge(&dir);
+    write(&dir, "spurious.mm", SPURIOUS_SRC);
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--escalate-lean")
+        .arg("--proof-cert")
+        .arg("--output")
+        .arg("spurious.proof.json")
+        .arg("spurious.mm")
+        .env("MUMEI_LEAN_PATH", &bridge_repo)
+        .current_dir(&dir)
+        .output()
+        .expect("run mumei verify --escalate-lean");
+    assert_exit(&output, EXIT_INCONCLUSIVE);
+    let combined = combined_output(&output);
+    assert!(
+        combined.contains("spurious_candidate"),
+        "fixture must be escalated as a spurious candidate:\n{combined}"
+    );
     assert!(
         combined.contains("still open"),
         "summary should say the Lean candidate is still open:\n{combined}"
