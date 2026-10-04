@@ -10,6 +10,11 @@ use crate::verification::translator::may_write::CalleeRef;
 use serde_json::json;
 use z3::{FuncDecl, Sort};
 
+/// Generations of constant-argument contract instances unfolded below a congruent call (§8 D7).
+pub(crate) const CONSTANT_UNFOLD_DEPTH: usize = 32;
+/// Upper bound on the total number of unfolded instances per top-level call.
+pub(crate) const CONSTANT_UNFOLD_MAX_INSTANCES: usize = 256;
+
 /// Z3 value of `perform <NonDeterministic>.<op>(args)`.
 ///
 /// The source is modelled as an uninterpreted function of all its arguments: the
@@ -199,6 +204,158 @@ fn call_result_sort<'a>(vc: &VCtx<'a>, callee: &Atom) -> Sort<'a> {
         &format!("__recsort_result_{}", callee.name),
         result_type,
     )
+}
+
+fn constant_args<'a>(args: &[Dynamic<'a>]) -> Option<(Vec<Dynamic<'a>>, String)> {
+    let mut simplified_args = Vec::with_capacity(args.len());
+    let mut keys = Vec::with_capacity(args.len());
+    for arg in args {
+        let simplified = arg.simplify();
+        let key = if let Some(value) = simplified.as_int() {
+            format!("int:{}", value.as_i64()?)
+        } else if let Some(value) = simplified.as_bv() {
+            let numeral = value
+                .as_u64()
+                .map(|value| format!("u{value}"))
+                .or_else(|| value.as_i64().map(|value| format!("i{value}")))?;
+            format!("bv{}:{numeral}", value.get_size())
+        } else {
+            let value = simplified.as_bool()?;
+            format!("bool:{}", if value.as_bool()? { "true" } else { "false" })
+        };
+        simplified_args.push(simplified);
+        keys.push(key);
+    }
+    Some((simplified_args, keys.join(",")))
+}
+
+fn constant_call_key(name: &str, args_key: &str) -> String {
+    format!("{name}({args_key})")
+}
+
+fn caller_outside_scc(vc: &VCtx<'_>, callee: &Atom) -> bool {
+    vc.recursion
+        .current_scc
+        .borrow()
+        .as_ref()
+        .map(|scc| !scc.contains(&callee.name))
+        .unwrap_or(true)
+}
+
+struct UnfoldSinkGuard<'v, 'a> {
+    vc: &'v VCtx<'a>,
+}
+
+impl<'v, 'a> UnfoldSinkGuard<'v, 'a> {
+    fn new(vc: &'v VCtx<'a>) -> Self {
+        *vc.recursion.unfold_sink.borrow_mut() = Some(Vec::new());
+        Self { vc }
+    }
+
+    fn take_frontier(&self) -> Vec<(String, Vec<Dynamic<'a>>)> {
+        let frontier = self
+            .vc
+            .recursion
+            .unfold_sink
+            .borrow_mut()
+            .take()
+            .unwrap_or_default();
+        frontier
+    }
+}
+
+impl Drop for UnfoldSinkGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.vc.recursion.unfold_sink.borrow_mut().take();
+    }
+}
+
+fn unfold_constant_calls<'a>(
+    vc: &VCtx<'a>,
+    env: &HashMap<String, Dynamic<'a>>,
+    mut frontier: Vec<(String, Vec<Dynamic<'a>>)>,
+    mut seen: std::collections::HashSet<String>,
+    solver: &Solver<'a>,
+) {
+    let mut asserted_instances = 0;
+    for _ in 1..=CONSTANT_UNFOLD_DEPTH {
+        if frontier.is_empty() || asserted_instances >= CONSTANT_UNFOLD_MAX_INSTANCES {
+            break;
+        }
+        let mut next_frontier = Vec::new();
+        for (name, args) in frontier {
+            if asserted_instances >= CONSTANT_UNFOLD_MAX_INSTANCES {
+                break;
+            }
+            let Some((args, args_key)) = constant_args(&args) else {
+                continue;
+            };
+            if !seen.insert(constant_call_key(&name, &args_key)) {
+                continue;
+            }
+            let Some(atom) = vc.module_env.get_atom(&name) else {
+                continue;
+            };
+            if !vc.callee_congruent(atom)
+                || !caller_outside_scc(vc, atom)
+                || !callee_semantics_match_caller(vc, atom)
+                || !call_arg_sorts_match(vc, atom, &args)
+            {
+                continue;
+            }
+
+            let mut call_env = (*env).clone();
+            for (param, arg) in atom.params.iter().zip(args.iter()) {
+                call_env.insert(param.name.clone(), arg.clone());
+            }
+
+            let _contract_guard = vc.enter_contract_instantiation(&atom.name);
+            let requires = crate::verification::caller_requires_obligation(atom);
+            let req_bool = if requires.trim() == "true" {
+                Bool::from_bool(vc.ctx, true)
+            } else {
+                let req_ast = parse_expression(&requires);
+                let Ok(req_value) = expr_to_z3(vc, &req_ast, &mut call_env, None) else {
+                    continue;
+                };
+                let Some(req_bool) = req_value.as_bool() else {
+                    continue;
+                };
+                req_bool
+            };
+            if req_bool.simplify().as_bool() == Some(false) {
+                continue;
+            }
+
+            let domain: Vec<Sort> = args.iter().map(|arg| arg.get_sort()).collect();
+            let range = call_result_sort(vc, atom);
+            let decl = vc.rec_fn(atom, &domain, &range);
+            let app_args: Vec<&dyn Ast> = args.iter().map(|arg| arg as &dyn Ast).collect();
+            let result = decl.apply(&app_args);
+            call_env.insert("result".to_string(), result);
+
+            let ensures = crate::verification::contract_view(
+                atom,
+                crate::verification::ContractView::CallerEnsures,
+            );
+            if ensures.trim() == "true" {
+                continue;
+            }
+            let ens_ast = parse_expression(&ensures);
+            let sink_guard = UnfoldSinkGuard::new(vc);
+            let Ok(ens_value) = expr_to_z3(vc, &ens_ast, &mut call_env, None) else {
+                continue;
+            };
+            let Some(ens_bool) = ens_value.as_bool() else {
+                continue;
+            };
+            let nested_calls = sink_guard.take_frontier();
+            solver.assert(&req_bool.implies(&ens_bool));
+            asserted_instances += 1;
+            next_frontier.extend(nested_calls);
+        }
+        frontier = next_frontier;
+    }
 }
 
 /// `0 <= A1 ∧ … ∧ 0 <= Ak ∧ lex(B < A)` for Int measures, or the
@@ -1696,7 +1853,11 @@ pub(crate) fn expr_to_z3<'a>(
                             let decl = vc.rec_fn(&callee, &domain, &range);
                             let app_args: Vec<&dyn Ast> =
                                 arg_vals.iter().map(|v| v as &dyn Ast).collect();
-                            decl.apply(&app_args)
+                            let application = decl.apply(&app_args);
+                            if let Some(sink) = vc.recursion.unfold_sink.borrow_mut().as_mut() {
+                                sink.push((callee.name.clone(), arg_vals.clone()));
+                            }
+                            application
                         } else {
                             datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type)
                         };
@@ -1800,6 +1961,17 @@ pub(crate) fn expr_to_z3<'a>(
                             let ens_ast = parse_expression(&caller_ensures);
 
                             if use_rec_fn {
+                                let unfold_key = if solver_opt.is_some()
+                                    && !recursive_instance
+                                    && vc.recursion.unfold_sink.borrow().is_none()
+                                    && caller_outside_scc(vc, &callee)
+                                {
+                                    constant_args(&arg_vals).map(|(_, key)| key)
+                                } else {
+                                    None
+                                };
+                                let unfold_guard =
+                                    unfold_key.as_ref().map(|_| UnfoldSinkGuard::new(vc));
                                 // Congruent recursive call: assume the callee's
                                 // ensures as the induction hypothesis
                                 // `CallerRequires => CallerEnsures`. SCC-internal
@@ -1816,6 +1988,14 @@ pub(crate) fn expr_to_z3<'a>(
                                         scc_internal,
                                     )?;
                                     solver.assert(&ante.implies(&ens_bool));
+                                    if let (Some(unfold_key), Some(unfold_guard)) =
+                                        (unfold_key.as_ref(), unfold_guard.as_ref())
+                                    {
+                                        let frontier = unfold_guard.take_frontier();
+                                        let mut seen = std::collections::HashSet::new();
+                                        seen.insert(constant_call_key(&callee.name, unfold_key));
+                                        unfold_constant_calls(vc, env, frontier, seen, solver);
+                                    }
                                 }
                             } else {
                                 // Equality ensures の特別処理:
@@ -3348,7 +3528,11 @@ pub(crate) fn expr_to_z3<'a>(
                         let decl = vc.rec_fn(&callee_atom, &domain, &range);
                         let app_args: Vec<&dyn Ast> =
                             arg_vals.iter().map(|v| v as &dyn Ast).collect();
-                        decl.apply(&app_args)
+                        let application = decl.apply(&app_args);
+                        if let Some(sink) = vc.recursion.unfold_sink.borrow_mut().as_mut() {
+                            sink.push((callee_atom.name.clone(), arg_vals.clone()));
+                        }
+                        application
                     } else {
                         datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type)
                     };
@@ -3394,6 +3578,17 @@ pub(crate) fn expr_to_z3<'a>(
                         call_env.insert("result".to_string(), result_z3.clone());
                         let ens_ast = parse_expression(&caller_ensures);
                         if use_rec_fn {
+                            let unfold_key = if solver_opt.is_some()
+                                && !recursive_instance
+                                && vc.recursion.unfold_sink.borrow().is_none()
+                                && caller_outside_scc(vc, &callee_atom)
+                            {
+                                constant_args(&arg_vals).map(|(_, key)| key)
+                            } else {
+                                None
+                            };
+                            let unfold_guard =
+                                unfold_key.as_ref().map(|_| UnfoldSinkGuard::new(vc));
                             let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
                             if let (Some(ens_bool), Some(solver)) = (ens_z3.as_bool(), solver_opt) {
                                 let ante = congruent_ensures_antecedent(
@@ -3403,6 +3598,14 @@ pub(crate) fn expr_to_z3<'a>(
                                     scc_internal,
                                 )?;
                                 solver.assert(&ante.implies(&ens_bool));
+                                if let (Some(unfold_key), Some(unfold_guard)) =
+                                    (unfold_key.as_ref(), unfold_guard.as_ref())
+                                {
+                                    let frontier = unfold_guard.take_frontier();
+                                    let mut seen = std::collections::HashSet::new();
+                                    seen.insert(constant_call_key(&callee_atom.name, unfold_key));
+                                    unfold_constant_calls(vc, env, frontier, seen, solver);
+                                }
                             }
                         } else {
                             let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;

@@ -6,6 +6,8 @@ use crate::lowering::{lower, LoweredType};
 
 pub const DEFAULT_CONSTRAINT_BUDGET: usize = 1000;
 
+pub(crate) type UnfoldCall<'a> = (String, Vec<Dynamic<'a>>);
+
 /// A lambda-shaped name in `VCtx::local_lambdas`, so an indirect call
 /// `f(args)` / `call(f, args)` can resolve instead of failing as an
 /// unknown function.
@@ -66,6 +68,7 @@ pub(crate) struct RecursionCtx<'a> {
     /// `(implies(path_conds, obligation), callee_name)` and is drained by the
     /// executor once the preconditions hold.
     pub(crate) pending_termination: std::cell::RefCell<Vec<(Bool<'a>, String)>>,
+    pub(crate) unfold_sink: std::cell::RefCell<Option<Vec<UnfoldCall<'a>>>>,
     /// Depth of lambda bodies being translated at bind time (arbitrary
     /// param constants, not real arguments). Recursive calls there take the
     /// ordinary non-congruent path; the real invocation via
@@ -82,6 +85,7 @@ impl<'a> Default for RecursionCtx<'a> {
             current_measure: std::cell::RefCell::new(None),
             current_scc: std::cell::RefCell::new(None),
             pending_termination: std::cell::RefCell::new(Vec::new()),
+            unfold_sink: std::cell::RefCell::new(None),
             lambda_bind_depth: std::cell::Cell::new(0),
         }
     }

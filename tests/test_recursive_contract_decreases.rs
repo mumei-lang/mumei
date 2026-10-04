@@ -178,7 +178,7 @@ atom use_tri(n: i64)
 const TRI_CONST: &str = r#"
 atom tri(n: i64)
     requires: n >= 0;
-    ensures: result >= 0 && (n == 0 || result == n + tri(n - 1));
+    ensures: result >= 0 && ((n == 0 && result == 0) || (n > 0 && result == n + tri(n - 1)));
     decreases: n;
     body: if n == 0 { 0 } else { n + tri(n - 1) };
 
@@ -754,15 +754,63 @@ fn test_caller_of_decreased_atom_verifies() {
 }
 
 #[test]
-fn test_constant_unfolding_does_not_crash() {
-    // Only one unfolding is instantiated for a concrete argument, so this is
-    // expected to be unprovable; the meaningful assertion is no crash.
+fn test_constant_argument_call_unfolds_and_verifies() {
     let case = verify("tri3", TRI_CONST, "tri3");
-    assert!(case.did_not_crash());
-    eprintln!(
-        "tri3 observed verdict: {:?}",
-        case.verdict().as_deref().unwrap_or("<none>")
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_constant_argument_call_with_wrong_spec_fails() {
+    let source = TRI_CONST.replace("result == 6;", "result == 7;");
+    let case = verify("tri3_wrong", &source, "tri3");
+    assert_case(case, "failed");
+}
+
+#[test]
+fn test_constant_argument_unfolding_respects_depth_bound() {
+    let tri32 = TRI_CONST
+        .replace("atom tri3()", "atom tri32()")
+        .replace("result == 6", "result == 528")
+        .replace("tri(3);", "tri(32);");
+    let case = verify("tri32", &tri32, "tri32");
+    assert_case(case, "verified");
+
+    let tri40 = TRI_CONST
+        .replace("atom tri3()", "atom tri40()")
+        .replace("result == 6", "result == 820")
+        .replace("tri(3);", "tri(40);");
+    let case = verify("tri40", &tri40, "tri40");
+    assert_case(case, "failed");
+}
+
+#[test]
+fn test_constant_argument_call_unfolds_in_bitvec_mode() {
+    let tri_bitvec = TRI_CONST
+        .replace("ensures: result >= 0 && ", "ensures: ")
+        .replace("body: tri(3);", "body: tri(3 + 0);");
+    let case = verify_with_args("tri3_bitvec", &tri_bitvec, "tri3", &["--bitvec-i64"]);
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_constant_argument_call_unfolds_mutual_recursion() {
+    let source =
+        format!("{MUTUAL_DEC}\natom odd3() -> bool\n    ensures: result;\n    body: is_odd(3);\n");
+    let case = verify("odd3", &source, "odd3");
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_nonconstant_argument_call_does_not_unfold() {
+    let tri_definition = TRI_CONST
+        .split("\natom tri3()")
+        .next()
+        .expect("TRI_CONST has tri definition");
+    let source = format!(
+        "{tri_definition}\natom trin(n: i64)\n    requires: n >= 0;\n    ensures: result == n * (n + 1) / 2;\n    body: tri(n);\n"
     );
+    let case = verify("trin", &source, "trin");
+    assert_case(case, "failed");
 }
 
 #[test]
