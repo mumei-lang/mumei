@@ -197,12 +197,15 @@ forall p1: S1, ..., pn: Sn.
   keeps its own trust, label, and trigger, and a rejected clause does not block
   its siblings.
 - **Array parameters carry their length.** The translator models an array's
-  length as a separate integer symbol (`len_<name>`), not as part of the array
-  sort. Quantifying over the array alone would leave `len(arr)` free, and a fact
+  length as a separate symbol (`len_<name>`), not as part of the array sort.
+  That symbol is in the sort of the active `i64` encoding: `Int` normally and a
+  64-bit bit-vector when bit-vector mode is on. Quantifying over the array alone would leave `len(arr)` free, and a fact
   such as `result == len(arr)` could then equate the lengths of unrelated
   arrays. So each array parameter `a` contributes two bound variables, the
   array and `len_a`, both are arguments of the result function, and the
-  antecedent includes `len_a >= 0`. At a call site the length argument is the
+  antecedent includes `len_a >= 0` (a signed comparison in bit-vector mode).
+  The bound length variable, the result-function signature, and the trigger
+  all use the same length sort the translator uses for that context. At a call site the length argument is the
   caller's length term for the actual argument. If the caller has no length
   term for it, the call is not lowered through the result function (§5.2).
 - If `n = 0`, there is nothing to quantify. The fact is the ground formula
