@@ -94,6 +94,7 @@ fn test_subsumption_vc<'a>(ctx: &'a Context, module_env: &'a ModuleEnv) -> VCtx<
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     }
@@ -1193,6 +1194,7 @@ fn test_constraint_budget_exceeded() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -1244,6 +1246,7 @@ fn test_constraint_budget_no_limit() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -2071,6 +2074,7 @@ fn test_subsumption_check_holds_with_requires() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -2315,6 +2319,7 @@ fn test_subsumption_check_bool_param_and_result() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -2400,6 +2405,7 @@ fn test_subsumption_check_call_ref_alias_x() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -2485,6 +2491,7 @@ fn test_subsumption_check_call_ref_aliases_do_not_follow_concrete_names() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -2546,6 +2553,7 @@ fn test_subsumption_check_array_length_does_not_alias_caller_symbol() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -2605,6 +2613,7 @@ fn test_subsumption_check_array_length_aliases_follow_callback_position() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -2667,6 +2676,7 @@ fn test_subsumption_check_fails_without_requires() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -2758,6 +2768,7 @@ fn test_subsumption_check_crossed_param_names() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -2856,6 +2867,7 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -2936,6 +2948,7 @@ fn test_subsumption_check_concrete_true_ensures_fails() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -3414,6 +3427,7 @@ fn test_expr_to_z3_true_false_are_bool() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -3488,6 +3502,7 @@ fn test_expr_to_z3_pow_constant_folds_full_precision() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -3555,6 +3570,7 @@ fn test_tuple_result_indexing_uses_typed_components() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -3722,6 +3738,7 @@ fn test_chained_comparison_normalizes_before_lowering() {
         local_array_elem_types: Default::default(),
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
+        quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
@@ -4147,4 +4164,34 @@ fn test_scalar_match_still_tags_inductive() {
     );
     let tags = detect_logic_fragment_tags(&atom, &module_env);
     assert!(tags.iter().any(|tag| tag == "inductive_data_type"));
+}
+
+#[test]
+fn quantifier_binder_in_detects_bound_variable_through_terms() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let i = Int::new_const(&ctx, "i");
+    let k = Int::new_const(&ctx, "k");
+    let arr = Array::new_const(&ctx, "arr", &z3::Sort::int(&ctx), &z3::Sort::int(&ctx));
+    let arr_i: z3::ast::Dynamic = arr.select(&(&i + &Int::from_i64(&ctx, 1)));
+    let k_dyn: z3::ast::Dynamic = k.clone().into();
+
+    assert_eq!(vc.quantifier_binder_in(std::slice::from_ref(&arr_i)), None);
+    vc.quantifier_binders
+        .borrow_mut()
+        .push(("i".to_string(), i.clone().into()));
+    assert_eq!(
+        vc.quantifier_binder_in(std::slice::from_ref(&arr_i)),
+        Some("i".to_string())
+    );
+    assert_eq!(vc.quantifier_binder_in(std::slice::from_ref(&k_dyn)), None);
+    assert!(vc.reject_quantifier_dependent_call("f", &[k_dyn]).is_ok());
+
+    let err = vc
+        .reject_quantifier_dependent_call("f", &[arr_i])
+        .expect_err("call on a bound variable must be rejected");
+    assert!(is_unverifiable_error_message(&err.to_string()));
+    assert!(crate::verification::spec_validation::is_unsupported_clause_error(&err));
 }

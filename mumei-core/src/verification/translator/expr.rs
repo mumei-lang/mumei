@@ -686,9 +686,11 @@ pub(crate) fn expr_to_z3<'a>(
                     let range_cond =
                         Bool::and(ctx, &[&bound_var.ge(&start_z3), &bound_var.lt(&end_z3)]);
 
-                    let condition_z3 = expr_to_z3(vc, &args[3], env, None)?.as_bool().ok_or(
-                        MumeiError::type_error(format!("{}(): condition must be boolean", name)),
-                    )?;
+                    vc.quantifier_binders
+                        .borrow_mut()
+                        .push((var_name.clone(), bound_var.clone().into()));
+                    let condition_res = expr_to_z3(vc, &args[3], env, None);
+                    vc.quantifier_binders.borrow_mut().pop();
 
                     // 束縛変数を env から復元
                     if let Some(old) = old_val {
@@ -696,6 +698,14 @@ pub(crate) fn expr_to_z3<'a>(
                     } else {
                         env.remove(&var_name);
                     }
+
+                    let condition_z3 =
+                        condition_res?
+                            .as_bool()
+                            .ok_or(MumeiError::type_error(format!(
+                                "{}(): condition must be boolean",
+                                name
+                            )))?;
 
                     let quantifier_expr = if name == "forall" {
                         // ∀ var ∈ [start, end). condition
@@ -821,6 +831,7 @@ pub(crate) fn expr_to_z3<'a>(
                     // ソートは f64 エンコーディング（デフォルト Real、
                     // `--ieee754-f64` で Float）に合わせる。
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    vc.reject_quantifier_dependent_call("sqrt", std::slice::from_ref(&_val))?;
                     // 呼び出しごとに一意な名前を使い、`sqrt(a) + sqrt(b)` の
                     // ような複数呼び出しが同一の Z3 変数に潰れないようにする。
                     static SQRT_COUNTER: std::sync::atomic::AtomicUsize =
@@ -848,6 +859,10 @@ pub(crate) fn expr_to_z3<'a>(
                 "cast_to_int" => {
                     // Z3 0.12 では Float->Int 直接変換がないため、シンボリック整数を返す
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    vc.reject_quantifier_dependent_call(
+                        "cast_to_int",
+                        std::slice::from_ref(&_val),
+                    )?;
                     Ok(Int::new_const(ctx, "cast_result").into())
                 }
                 // =============================================================
@@ -1064,6 +1079,7 @@ pub(crate) fn expr_to_z3<'a>(
                         for arg in args {
                             arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
                         }
+                        vc.reject_quantifier_dependent_call(name, &arg_vals)?;
 
                         // 仮引数名と実引数値の対応を構築
                         let mut call_env = env.clone();
@@ -2588,6 +2604,10 @@ pub(crate) fn expr_to_z3<'a>(
                 let val = expr_to_z3(vc, arg, env, solver_opt)?;
                 arg_z3_values.push(val);
             }
+            vc.reject_quantifier_dependent_call(
+                &format!("perform {effect}.{operation}"),
+                &arg_z3_values,
+            )?;
 
             // Z3 String Sort: verify symbolic parameter constraints
             // Look up the EffectDef to get constraint and param definitions
@@ -2953,6 +2973,7 @@ pub(crate) fn expr_to_z3<'a>(
                     for arg in args {
                         arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
                     }
+                    vc.reject_quantifier_dependent_call(callee_name, &arg_vals)?;
 
                     // 呼び出し先のパラメータ名に引数をマッピング
                     let mut call_env = env.clone();
@@ -3084,6 +3105,7 @@ pub(crate) fn expr_to_z3<'a>(
             for arg in args {
                 arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
             }
+            vc.reject_quantifier_dependent_call("call", &arg_vals)?;
 
             // The callee didn't resolve to a known atom — a concrete
             // `atom_ref` target or contract callee may still store through
