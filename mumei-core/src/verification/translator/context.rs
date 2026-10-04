@@ -154,9 +154,59 @@ pub(crate) struct VCtx<'a> {
     /// alive (Z3 refcount) so a freed pointer can never alias a new const.
     pub(crate) call_result_lens:
         std::cell::RefCell<std::collections::HashMap<usize, (Dynamic<'a>, Dynamic<'a>)>>,
+    /// Variables bound by the `forall` / `exists` quantifiers currently being
+    /// lowered (innermost last), with their Z3 bound constants. A call lowers
+    /// to one result constant per call site, which a quantifier would share
+    /// across every instance of its binder, so a call whose arguments mention
+    /// one of these is rejected (see `reject_quantifier_dependent_call`).
+    pub(crate) quantifier_binders: std::cell::RefCell<Vec<(String, Dynamic<'a>)>>,
+    pub(crate) call_result_symbols: std::cell::RefCell<std::collections::HashSet<String>>,
 }
 
 impl<'a> VCtx<'a> {
+    /// Innermost active quantifier binder occurring in any of `vals`.
+    /// Quantifier sub-terms are not traversed and count as dependent, so the
+    /// check errs on the side of rejecting the call.
+    pub(crate) fn quantifier_binder_in(&self, vals: &[Dynamic<'a>]) -> Option<String> {
+        let binders = self.quantifier_binders.borrow();
+        let innermost = binders.last()?.0.clone();
+        let mut seen = std::collections::HashSet::new();
+        let mut stack: Vec<Dynamic<'a>> = vals.to_vec();
+        while let Some(node) = stack.pop() {
+            if let Some((name, _)) = binders.iter().rev().find(|(_, bound)| *bound == node) {
+                return Some(name.clone());
+            }
+            if !seen.insert(node.clone()) {
+                continue;
+            }
+            match node.kind() {
+                z3::AstKind::App | z3::AstKind::Numeral => stack.extend(node.children()),
+                z3::AstKind::Quantifier => return Some(innermost),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Fail closed on a call whose arguments depend on a quantifier-bound
+    /// variable: the error is classified as an unsupported clause, so the
+    /// enclosing clause (or atom) is reported as unverifiable.
+    pub(crate) fn reject_quantifier_dependent_call(
+        &self,
+        callee: &str,
+        vals: &[Dynamic<'a>],
+    ) -> Result<(), MumeiError> {
+        match self.quantifier_binder_in(vals) {
+            None => Ok(()),
+            Some(binder) => Err(MumeiError::verification(format!(
+                "{QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED}: the call to '{callee}' has an \
+                 argument that depends on '{binder}', which is bound by an enclosing \
+                 forall/exists. Sound per-instance encoding of such calls is planned with \
+                 the lemma-export work; until then the enclosing clause is unverifiable."
+            ))),
+        }
+    }
+
     /// Conjunction of the current branch path conditions (or `true` if
     /// no enclosing `if/else` has narrowed the path). Used at intermediate
     /// check sites (see `path_cond_stack` doc) so that branch guards

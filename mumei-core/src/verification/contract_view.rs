@@ -1,4 +1,4 @@
-use crate::parser::{Atom, ClauseKind, ClauseTrustMode};
+use crate::parser::{Atom, ClauseKind, ClauseTrustMode, QuantifierType};
 use crate::verification::spec_validation::{split_top_level_conjunctions, strip_wrapping_parens};
 use std::collections::{HashMap, HashSet};
 
@@ -16,6 +16,36 @@ pub fn contract_view(atom: &Atom, view: ContractView) -> String {
 
 pub fn dropped_conjuncts(atom: &Atom, view: ContractView) -> Vec<String> {
     contract_view_with_dropped_conjuncts(atom, view).1
+}
+
+/// The full requires obligation a caller must satisfy: the caller-view
+/// requires plus every top-level quantified conjunct extracted into
+/// `forall_constraints` (nested quantifiers stayed in `atom.requires`
+/// and are already part of the view).
+pub fn caller_requires_obligation(atom: &Atom) -> String {
+    let base = contract_view(atom, ContractView::CallerRequires);
+    if atom.forall_constraints.is_empty() {
+        return base;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if !(base.trim().is_empty() || base.trim() == "true") {
+        parts.push(base);
+    }
+    for q in &atom.forall_constraints {
+        let keyword = match q.q_type {
+            QuantifierType::ForAll => "forall",
+            QuantifierType::Exists => "exists",
+        };
+        parts.push(format!(
+            "{keyword}({}, {}, {}, {})",
+            q.var, q.start, q.end, q.condition
+        ));
+    }
+    parts
+        .iter()
+        .map(|part| format!("({part})"))
+        .collect::<Vec<_>>()
+        .join(" && ")
 }
 
 pub fn conjunct_modes(atom: &Atom, kind: ClauseKind) -> Vec<(String, Option<ClauseTrustMode>)> {
@@ -161,7 +191,8 @@ fn normalize_conjunct(conjunct: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        conjunct_modes, contract_view, dropped_conjuncts, flatten_conjuncts, ContractView,
+        caller_requires_obligation, conjunct_modes, contract_view, dropped_conjuncts,
+        flatten_conjuncts, ContractView,
     };
     use crate::parser::{item::parse_atom_from_source, Atom, ClauseKind, ClauseTrustMode};
 
@@ -252,6 +283,41 @@ atom mixed(x: i64, y: i64) -> i64
                 flatten_conjuncts(source)
             );
         }
+    }
+    #[test]
+    fn caller_requires_obligation_appends_quantified_conjuncts() {
+        let plain = parse_atom_from_source(
+            "atom plain(x: i64) -> i64 \
+             requires: x > 0; \
+             ensures: result > 0; \
+             body: x;",
+        );
+        assert_eq!(
+            caller_requires_obligation(&plain),
+            contract_view(&plain, ContractView::CallerRequires)
+        );
+
+        let quantified = parse_atom_from_source(
+            "atom quantified(arr: [i64], n: i64) -> i64 \
+             requires: forall(i, 0, n, arr[i] > 0); \
+             ensures: result > 0; \
+             body: arr[0];",
+        );
+        assert_eq!(
+            caller_requires_obligation(&quantified),
+            "(forall(i, 0, n, arr[i] > 0))"
+        );
+
+        let mixed = parse_atom_from_source(
+            "atom mixed(arr: [i64], n: i64) -> i64 \
+             requires: n >= 1 && forall(i, 0, n, arr[i] > 0); \
+             ensures: result > 0; \
+             body: arr[0];",
+        );
+        assert_eq!(
+            caller_requires_obligation(&mixed),
+            "(n >= 1 && true) && (forall(i, 0, n, arr[i] > 0))"
+        );
     }
 
     #[test]
