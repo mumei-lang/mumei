@@ -292,3 +292,60 @@ atom dyn_q(arr: [i64], n: i64, f: atom_ref(i64) -> i64)
     );
     assert_unverifiable(&dynamic, "dyn_q");
 }
+
+#[test]
+fn call_on_if_wrapped_bound_variable_is_unverifiable() {
+    // `if i >= 0 { i } else { i }` still lowers to a term containing `i`,
+    // so the call must be rejected, not panic or verify unsoundly.
+    let run = verify(
+        "if_wrapped",
+        r#"
+atom if_wrapped(arr: [i64], n: i64)
+    requires: n >= 2 && len(arr) >= n && forall(i, 0, n, ident(if i >= 0 { i } else { i }) == i);
+    ensures: result == 0 - 1;
+    body: n;
+"#,
+    );
+    assert_unverifiable(&run, "if_wrapped");
+    assert!(
+        !run.text.contains("panicked") && !run.text.contains("cannot be used in patterns"),
+        "{}",
+        run.text
+    );
+}
+
+#[test]
+fn call_on_match_wrapped_bound_variable_is_unverifiable() {
+    // `match i { _ => arr[i] }` also mentions `i` once lowered.
+    let run = verify(
+        "match_wrapped",
+        r#"
+atom match_wrapped(arr: [i64], n: i64)
+    requires: n >= 2 && len(arr) >= n && forall(i, 0, n, ident(match i { _ => arr[i] }) == arr[i]);
+    ensures: result == 0 - 1;
+    body: n;
+"#,
+    );
+    assert_unverifiable(&run, "match_wrapped");
+    assert!(
+        !run.text.contains("panicked") && !run.text.contains("cannot be used in patterns"),
+        "{}",
+        run.text
+    );
+}
+
+#[test]
+fn call_on_let_aliased_bound_variable_is_unverifiable() {
+    // `t` never names `i` syntactically, but the lowered argument still
+    // contains the bound constant, so the call must be rejected.
+    let run = verify(
+        "let_aliased",
+        r#"
+atom let_aliased(arr: [i64], n: i64)
+    requires: n >= 2 && len(arr) >= n && forall(i, 0, n, { let t = i; ident(t) == t });
+    ensures: result == 0 - 1;
+    body: n;
+"#,
+    );
+    assert_unverifiable(&run, "let_aliased");
+}
