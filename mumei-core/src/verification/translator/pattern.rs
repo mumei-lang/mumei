@@ -3,6 +3,7 @@ use super::super::support::*;
 use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
+use crate::parser::EnumVariant;
 use serde_json::json;
 
 pub(crate) fn pattern_to_z3_condition<'a>(
@@ -334,7 +335,29 @@ pub(crate) fn format_counterexample<'a>(
 
     // ターゲット変数の具体的な値を取得
     if let Some(target_val) = model.eval(target, true) {
-        let type_hint = decl_hint.or_else(|| enum_ctx.map(|enum_def| enum_def.name.as_str()));
+        let resolved = if let Some(target_int) = target_val.as_int() {
+            let tag_str = format!("{}", target_int);
+            if let Ok(tag_val) = tag_str.parse::<i64>() {
+                let tag = tag_val as usize;
+                enum_ctx
+                    .and_then(|enum_def| enum_def.variants.get(tag).map(|_| (enum_def, tag)))
+                    .or_else(|| {
+                        module_env.enums.values().find_map(|enum_def| {
+                            enum_def.variants.get(tag).map(|_| (enum_def, tag))
+                        })
+                    })
+            } else {
+                None
+            }
+        } else if target_val.as_datatype().is_some() {
+            datatype_ctor_name(&target_val)
+                .and_then(|name| resolve_ctor_variant(vc, enum_ctx, module_env, &target_val, &name))
+        } else {
+            None
+        };
+        let type_hint = decl_hint
+            .or_else(|| resolved.map(|(enum_def, _)| enum_def.name.as_str()))
+            .or_else(|| enum_ctx.map(|enum_def| enum_def.name.as_str()));
         let (rendering, lowering, status) =
             raise_binding(model, "target", &target_val, type_hint, env, module_env);
         let decoded_string = if lowering == "string" {
@@ -342,23 +365,8 @@ pub(crate) fn format_counterexample<'a>(
         } else {
             None
         };
-        let is_raised_enum = lowering == "enum" && matches!(&status, RaisedStatus::Raised);
-        let integer_tag = is_raised_enum.then(|| {
-            target_val
-                .as_int()
-                .and_then(|integer| integer.as_i64().map(|tag| tag.to_string()))
-                .or_else(|| {
-                    target_val
-                        .as_bv()
-                        .and_then(|bitvector| bitvector.as_u64())
-                        .map(|tag| tag.to_string())
-                })
-        });
-        let message = if is_raised_enum {
-            match integer_tag.flatten() {
-                Some(tag) => format!("{rendering} (tag={tag}) -- missing from match arms"),
-                None => format!("{rendering} -- missing from match arms"),
-            }
+        let message = if let Some((enum_def, idx)) = resolved {
+            format_missing_variant(enum_def, &enum_def.variants[idx], idx as i64)
         } else {
             format!("value = {rendering} -- no matching arm")
         };
@@ -394,4 +402,66 @@ pub(crate) fn format_counterexample<'a>(
             None,
         )
     }
+}
+
+/// `Enum::Variant(T=?, ...) (tag=N) -- missing from match arms` 形式で表示する。
+fn format_missing_variant(edef: &EnumDef, variant: &EnumVariant, tag_val: i64) -> String {
+    let fields_display = if variant.fields.is_empty() {
+        String::new()
+    } else {
+        let field_vals: Vec<String> = variant
+            .fields
+            .iter()
+            .map(|field_type| format!("{}=?", field_type))
+            .collect();
+        format!("({})", field_vals.join(", "))
+    };
+    format!(
+        "{}::{}{} (tag={}) -- missing from match arms",
+        edef.name, variant.name, fields_display, tag_val
+    )
+}
+
+/// モデル値が datatype コンストラクタ適用なら先頭宣言名（= variant 名）を返す。
+/// 0 項の `PEP` でも `(Circle 3)` のようなペイロード付きでも decl 名は同じ。
+fn datatype_ctor_name(target_val: &Dynamic) -> Option<String> {
+    if target_val.kind() != z3::AstKind::App {
+        return None;
+    }
+    Some(target_val.safe_decl().ok()?.name())
+}
+
+/// コンストラクタ名（variant 名）から所属 Enum と tag（variants 内 index）を解決する。
+/// 1. arms から検出した enum_ctx がその variant を持てばそれを使う。
+/// 2. なければ module_env のうちソートがモデル値と一致する Enum
+///    （datatype ソート名は enum 名なので、sort 一致 == 名前一致）。
+fn resolve_ctor_variant<'a>(
+    vc: &VCtx<'a>,
+    enum_ctx: Option<&'a EnumDef>,
+    module_env: &'a ModuleEnv,
+    target_val: &Dynamic,
+    variant_name: &str,
+) -> Option<(&'a EnumDef, usize)> {
+    let target_sort = target_val.as_datatype()?.get_sort();
+    // モデル値のソートが正: enum_ctx は arms からの推測なので、同名 variant を
+    // 持つ別 enum を誤検出している可能性がある。ソートが一致するときだけ使う。
+    if let Some(edef) = enum_ctx {
+        if let Some(sort) = datatype::enum_datatype_sort(vc, edef) {
+            if sort.sort == target_sort {
+                if let Some(idx) = edef.variants.iter().position(|v| v.name == variant_name) {
+                    return Some((edef, idx));
+                }
+            }
+        }
+    }
+    for edef in module_env.enums.values() {
+        if let Some(sort) = datatype::enum_datatype_sort(vc, edef) {
+            if sort.sort == target_sort {
+                if let Some(idx) = edef.variants.iter().position(|v| v.name == variant_name) {
+                    return Some((edef, idx));
+                }
+            }
+        }
+    }
+    None
 }
