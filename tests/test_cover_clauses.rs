@@ -277,6 +277,31 @@ body: x;
 }
 
 #[test]
+fn check_requires_use_pre_body_parameter_values() {
+    let (dir, output, report, text) = verify_source(
+        "check_requires_pre_body_values",
+        r#"
+atom f(x: i64) -> i64
+requires: x > -10 && x < 10;
+requires check: x > 0;
+ensures: result < 0;
+cover "pre one": result == -99;
+body: { x = x - 100; x };
+"#,
+    );
+
+    assert!(output.status.success(), "{text}");
+    assert_eq!(report["cover_results"][0]["status"], "covered");
+    assert_eq!(report["cover_results"][0]["witness"]["x"], "1");
+    assert!(matches!(
+        report["cover_results"][0]["witness"]["result"].as_str(),
+        Some("-99" | "(- 99)")
+    ));
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
 fn guarded_callee_calls_remain_coverable() {
     let (dir, output, report, text) = verify_source(
         "guarded_cover_call",
