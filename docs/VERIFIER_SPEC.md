@@ -372,14 +372,15 @@ Rules:
 - **D1 (eligibility).** A recursive SCC is *eligible* exactly when every member
   declares an atom-level measure, either a single expression `decreases: M;` or
   a tuple `decreases: (M1, ..., Mk);`, whose components are call-free, mention
-  only that member's own parameters and contain no nested tuple (no comma inside
-  a component). All members must declare the same number of components. Each
-  member also has no effects, no `ref mut` or `consume` parameters, is not
-  `async`, has no type parameters, is at the default verified trust level, has
-  no `ensures assume` clause, and has only scalar (`Int`- or `Bool`-sorted)
-  parameters and result. A
-  parenthesised single expression such as `(n)` or `(a + b)` is a one-component
-  measure. `recursion.rs::member_unsupported_reason`,
+  only that member's own parameters and contain no nested tuple (commas inside
+  parentheses are tuple separators; commas inside `{...}` or `[...]`, such as
+  match-arm separators, are allowed). All members must declare the same number
+  of components. Each member also has no effects, no `ref mut` or `consume`
+  parameters, is not `async`, has no type parameters, is at the default
+  verified trust level, has no `ensures assume` clause, and has only scalar
+  (`Int`- or `Bool`-sorted) parameters and result. A parenthesised single
+  expression such as `(n)` or `(a + b)` is a one-component measure.
+  `recursion.rs::member_unsupported_reason`,
   `recursion.rs::measure_components`.
 - **D2 (congruent calls).** While the main verification of an atom runs
   (`executor.rs::verify_inner`), a call to a member `g` of an eligible SCC, from

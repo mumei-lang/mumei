@@ -209,6 +209,21 @@ fn resolve_edge_name(module_env: &ModuleEnv, name: &str) -> Option<String> {
     module_env.get_atom(&fqn).map(|a| a.name.clone())
 }
 
+fn has_tuple_comma(text: &str) -> bool {
+    let mut delimiters = Vec::new();
+    for ch in text.chars() {
+        match ch {
+            '(' | '[' | '{' => delimiters.push(ch),
+            ')' | ']' | '}' => {
+                delimiters.pop();
+            }
+            ',' if delimiters.is_empty() || delimiters.last() == Some(&'(') => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Components of a `decreases` clause: the parts of an outer `(m1, ..., mk)`
 /// tuple, or the whole text for a single measure.
 pub(crate) fn measure_components(text: &str) -> Vec<String> {
@@ -398,7 +413,7 @@ fn measure_is_valid(atom: &Atom) -> Result<(), String> {
                 atom.name
             ));
         }
-        if measure.contains(',') {
+        if has_tuple_comma(&measure) {
             return Err(format!(
                 "decreases measure of atom '{}' must not nest tuples",
                 atom.name
@@ -663,7 +678,7 @@ pub fn recursive_contract_hint_diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use super::measure_components;
+    use super::{has_tuple_comma, measure_components};
 
     #[test]
     fn splits_only_outer_decreases_tuples() {
@@ -686,6 +701,21 @@ mod tests {
                 expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
                 "{text}"
             );
+        }
+    }
+
+    #[test]
+    fn detects_tuple_commas_by_innermost_delimiter() {
+        let cases = [
+            ("match n { 0 => 0, _ => n }", false),
+            ("((m, k))", true),
+            ("(b, a) + 1", true),
+            ("n", false),
+            ("match n { 0 => (a, b), _ => n }", true),
+        ];
+
+        for (text, expected) in cases {
+            assert_eq!(has_tuple_comma(text), expected, "{text}");
         }
     }
 }

@@ -497,6 +497,24 @@ fn test_parenthesized_single_measure_verifies() {
 }
 
 #[test]
+fn test_match_measures_verify() {
+    let single_match = TRI_DEC.replace("decreases: n;", "decreases: match n { 0 => 0, _ => n };");
+    assert_case(
+        verify("tri_match_measure", &single_match, "tri"),
+        "verified",
+    );
+
+    let tuple_match = LEXDOWN.replace(
+        "decreases: (m, n);",
+        "decreases: (match m { 0 => 0, _ => m }, n);",
+    );
+    assert_case(
+        verify("lexdown_match_component", &tuple_match, "lexdown"),
+        "verified",
+    );
+}
+
+#[test]
 fn test_ackermann_with_lexicographic_decreases_verifies() {
     let case = verify("ackermann", ACKERMANN, "ack");
     assert_case(case, "verified");
