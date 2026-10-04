@@ -154,6 +154,12 @@ pub(crate) struct VCtx<'a> {
     /// alive (Z3 refcount) so a freed pointer can never alias a new const.
     pub(crate) call_result_lens:
         std::cell::RefCell<std::collections::HashMap<usize, (Dynamic<'a>, Dynamic<'a>)>>,
+    /// Callee atoms whose caller-side contract (`requires`/`ensures`) is being
+    /// lowered at a call site right now. A call to one of these while its own
+    /// contract is being lowered is a recursive instance: it gets a fresh,
+    /// unconstrained result instead of instantiating the contract again, which
+    /// only drops assumptions and keeps call lowering finite.
+    pub(crate) contracts_in_instantiation: std::cell::RefCell<Vec<String>>,
 }
 
 impl<'a> VCtx<'a> {
@@ -169,6 +175,33 @@ impl<'a> VCtx<'a> {
             let refs: Vec<&Bool<'a>> = stack.iter().collect();
             Bool::and(self.ctx, &refs)
         }
+    }
+
+    pub(crate) fn is_instantiating_contract(&self, atom: &str) -> bool {
+        self.contracts_in_instantiation
+            .borrow()
+            .iter()
+            .any(|entry| entry == atom)
+    }
+
+    pub(crate) fn enter_contract_instantiation(
+        &self,
+        atom: &str,
+    ) -> ContractInstantiationGuard<'_, 'a> {
+        self.contracts_in_instantiation
+            .borrow_mut()
+            .push(atom.to_string());
+        ContractInstantiationGuard { vc: self }
+    }
+}
+
+pub(crate) struct ContractInstantiationGuard<'v, 'a> {
+    vc: &'v VCtx<'a>,
+}
+
+impl Drop for ContractInstantiationGuard<'_, '_> {
+    fn drop(&mut self) {
+        let _ = self.vc.contracts_in_instantiation.borrow_mut().pop();
     }
 }
 

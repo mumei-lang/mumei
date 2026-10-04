@@ -354,6 +354,7 @@ pub fn verify_impl_with_options(
             local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
             local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
             call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
+            contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
             bitvec_i64_global: bitvec_i64,
         };
 

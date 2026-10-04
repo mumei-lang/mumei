@@ -1059,6 +1059,8 @@ pub(crate) fn expr_to_z3<'a>(
                         for arg in args {
                             arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
                         }
+                        let recursive_instance = vc.is_instantiating_contract(&callee.name);
+                        // The unconstrained recursive result only weakens assumptions.
 
                         // 仮引数名と実引数値の対応を構築
                         let mut call_env = env.clone();
@@ -1120,7 +1122,8 @@ pub(crate) fn expr_to_z3<'a>(
                             &callee,
                             crate::verification::ContractView::CallerRequires,
                         );
-                        if caller_requires.trim() != "true" {
+                        if caller_requires.trim() != "true" && !recursive_instance {
+                            let _contract_guard = vc.enter_contract_instantiation(&callee.name);
                             if let Some(solver) = solver_opt {
                                 let req_ast = parse_expression(&caller_requires);
                                 let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
@@ -1180,71 +1183,76 @@ pub(crate) fn expr_to_z3<'a>(
                         // 呼び出し元のコンテキストで検証する。
                         // get_traits_for_method で全候補を取得し、find_impl で callee の型に
                         // 対して実際にトレイトが impl されている候補のみ適用する。
-                        if let Some(solver) = solver_opt {
-                            let callee_type = callee
-                                .params
-                                .first()
-                                .and_then(|p| p.type_name.as_deref())
-                                .unwrap_or("i64");
-                            let candidates = vc.module_env.get_traits_for_method(name);
-                            // find_impl で正しいトレイトを絞り込む
-                            let matched = candidates
-                                .iter()
-                                .find(|(tn, _)| vc.module_env.find_impl(tn, callee_type).is_some());
-                            if let Some((_trait_name, trait_method)) = matched {
-                                for (i, constraint_opt) in
-                                    trait_method.param_constraints.iter().enumerate()
-                                {
-                                    if let Some(constraint) = constraint_opt {
-                                        if let Some(arg_val) = arg_vals.get(i) {
-                                            let param_name = callee
-                                                .params
-                                                .get(i)
-                                                .map(|p| p.name.as_str())
-                                                .unwrap_or("v");
-                                            let concrete_constraint: String =
-                                                replace_constraint_placeholder(
-                                                    constraint, param_name,
+                        if !recursive_instance {
+                            if let Some(solver) = solver_opt {
+                                let callee_type = callee
+                                    .params
+                                    .first()
+                                    .and_then(|p| p.type_name.as_deref())
+                                    .unwrap_or("i64");
+                                let candidates = vc.module_env.get_traits_for_method(name);
+                                // find_impl で正しいトレイトを絞り込む
+                                let matched = candidates.iter().find(|(tn, _)| {
+                                    vc.module_env.find_impl(tn, callee_type).is_some()
+                                });
+                                if let Some((_trait_name, trait_method)) = matched {
+                                    for (i, constraint_opt) in
+                                        trait_method.param_constraints.iter().enumerate()
+                                    {
+                                        if let Some(constraint) = constraint_opt {
+                                            if let Some(arg_val) = arg_vals.get(i) {
+                                                let param_name = callee
+                                                    .params
+                                                    .get(i)
+                                                    .map(|p| p.name.as_str())
+                                                    .unwrap_or("v");
+                                                let concrete_constraint: String =
+                                                    replace_constraint_placeholder(
+                                                        constraint, param_name,
+                                                    );
+                                                let mut constraint_env: Env = env.clone();
+                                                constraint_env.insert(
+                                                    param_name.to_string(),
+                                                    arg_val.clone(),
                                                 );
-                                            let mut constraint_env: Env = env.clone();
-                                            constraint_env
-                                                .insert(param_name.to_string(), arg_val.clone());
-                                            let constraint_ast =
-                                                parse_expression(&concrete_constraint);
-                                            if let Ok(constraint_z3) = expr_to_z3(
-                                                vc,
-                                                &constraint_ast,
-                                                &mut constraint_env,
-                                                None,
-                                            ) {
-                                                if let Some(constraint_bool) =
-                                                    constraint_z3.as_bool()
-                                                {
-                                                    if vc.cover_obligations.is_some() {
-                                                        record_cover_obligation(
-                                                            vc,
-                                                            constraint_bool,
-                                                        );
-                                                    } else {
-                                                        solver.push();
-                                                        for cond in
-                                                            vc.path_cond_stack.borrow().iter()
-                                                        {
-                                                            solver.assert(cond);
-                                                        }
-                                                        solver.assert(&constraint_bool.not());
-                                                        if solver.check() == SatResult::Sat {
+                                                let constraint_ast =
+                                                    parse_expression(&concrete_constraint);
+                                                if let Ok(constraint_z3) = expr_to_z3(
+                                                    vc,
+                                                    &constraint_ast,
+                                                    &mut constraint_env,
+                                                    None,
+                                                ) {
+                                                    if let Some(constraint_bool) =
+                                                        constraint_z3.as_bool()
+                                                    {
+                                                        if vc.cover_obligations.is_some() {
+                                                            record_cover_obligation(
+                                                                vc,
+                                                                constraint_bool,
+                                                            );
+                                                        } else {
+                                                            solver.push();
+                                                            for cond in
+                                                                vc.path_cond_stack.borrow().iter()
+                                                            {
+                                                                solver.assert(cond);
+                                                            }
+                                                            solver.assert(&constraint_bool.not());
+                                                            if solver.check() == SatResult::Sat {
+                                                                solver.pop(1);
+                                                                return Err(
+                                                                    MumeiError::verification(
+                                                                        format!(
+                                                                            "Call to '{}': trait method parameter constraint '{}' not satisfied for argument {}",
+                                                                            name, constraint, i
+                                                                        )
+                                                                    ).with_help(
+                                                                        "トレイトメソッドのパラメータ制約が満たされていません。引数の値を確認してください"
+                                                                    ));
+                                                            }
                                                             solver.pop(1);
-                                                            return Err(MumeiError::verification(
-                                                                format!(
-                                                                    "Call to '{}': trait method parameter constraint '{}' not satisfied for argument {}",
-                                                                    name, constraint, i
-                                                                )
-                                                            ).with_help(
-                                                                "トレイトメソッドのパラメータ制約が満たされていません。引数の値を確認してください"
-                                                            ));
                                                         }
-                                                        solver.pop(1);
                                                     }
                                                 }
                                             }
@@ -1322,9 +1330,10 @@ pub(crate) fn expr_to_z3<'a>(
                             );
                             bind_struct_fields(&mut call_env, &result_name, &result_fields);
                             bind_struct_fields(&mut call_env, "result", &result_fields);
-                            if let (Some(solver), true) =
-                                (solver_opt, callee_semantics_match_caller(vc, &callee))
-                            {
+                            if let (Some(solver), true) = (
+                                solver_opt,
+                                !recursive_instance && callee_semantics_match_caller(vc, &callee),
+                            ) {
                                 assume_struct_invariants(
                                     vc,
                                     solver,
@@ -1365,8 +1374,10 @@ pub(crate) fn expr_to_z3<'a>(
                             crate::verification::ContractView::CallerEnsures,
                         );
                         if caller_ensures.trim() != "true"
+                            && !recursive_instance
                             && callee_semantics_match_caller(vc, &callee)
                         {
+                            let _contract_guard = vc.enter_contract_instantiation(&callee.name);
                             call_env.insert("result".to_string(), result_z3.clone());
                             if let Some(len_sym) = &result_len {
                                 call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
@@ -2800,6 +2811,7 @@ pub(crate) fn expr_to_z3<'a>(
                     for arg in args {
                         arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
                     }
+                    let recursive_instance = vc.is_instantiating_contract(&callee_atom.name);
 
                     // 呼び出し先のパラメータ名に引数をマッピング
                     let mut call_env = env.clone();
@@ -2816,7 +2828,8 @@ pub(crate) fn expr_to_z3<'a>(
                         &callee_atom,
                         crate::verification::ContractView::CallerRequires,
                     );
-                    if caller_requires.trim() != "true" {
+                    if caller_requires.trim() != "true" && !recursive_instance {
+                        let _contract_guard = vc.enter_contract_instantiation(&callee_atom.name);
                         let req_ast = parse_expression(&caller_requires);
                         let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
                         if let Some(req_bool) = req_z3.as_bool() {
@@ -2862,9 +2875,10 @@ pub(crate) fn expr_to_z3<'a>(
                         );
                         bind_struct_fields(&mut call_env, &result_name, &result_fields);
                         bind_struct_fields(&mut call_env, "result", &result_fields);
-                        if let (Some(solver), true) =
-                            (solver_opt, callee_semantics_match_caller(vc, &callee_atom))
-                        {
+                        if let (Some(solver), true) = (
+                            solver_opt,
+                            !recursive_instance && callee_semantics_match_caller(vc, &callee_atom),
+                        ) {
                             assume_struct_invariants(
                                 vc,
                                 solver,
@@ -2881,7 +2895,8 @@ pub(crate) fn expr_to_z3<'a>(
                         &callee_atom,
                         crate::verification::ContractView::CallerEnsures,
                     );
-                    if caller_ensures.trim() != "true" {
+                    if caller_ensures.trim() != "true" && !recursive_instance {
+                        let _contract_guard = vc.enter_contract_instantiation(&callee_atom.name);
                         call_env.insert("result".to_string(), result_z3.clone());
                         let ens_ast = parse_expression(&caller_ensures);
                         let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;

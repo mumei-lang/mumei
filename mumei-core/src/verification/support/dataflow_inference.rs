@@ -254,7 +254,7 @@ fn trace_eval_atom_call(
         callee,
         crate::verification::ContractView::CallerRequires,
     );
-    if !trace_eval_bool_clause(&caller_requires, &mut call_env, module_env)? {
+    if !trace_eval_bool_clause(&caller_requires, &mut call_env, module_env, depth)? {
         return None;
     }
     let body = parse_body_expr(&callee.body_expr);
@@ -270,7 +270,7 @@ fn trace_eval_atom_call(
     }
     let body_ensures =
         crate::verification::contract_view(callee, crate::verification::ContractView::BodyEnsures);
-    if !trace_eval_bool_clause(&body_ensures, &mut call_env, module_env)? {
+    if !trace_eval_bool_clause(&body_ensures, &mut call_env, module_env, depth)? {
         return None;
     }
     Some(result)
@@ -280,12 +280,13 @@ fn trace_eval_bool_clause(
     clause: &str,
     env: &mut HashMap<String, i64>,
     module_env: &ModuleEnv,
+    depth: usize,
 ) -> Option<bool> {
     if clause.trim().is_empty() || clause.trim() == "true" {
         return Some(true);
     }
     let expr = parse_expression(clause);
-    let value = trace_eval_expr(&expr, env, module_env, 0)?;
+    let value = trace_eval_expr(&expr, env, module_env, depth)?;
     trace_value_as_bool(&value)
 }
 
