@@ -1461,6 +1461,56 @@ fn append_certificate_lean_escalation_diagnostics(
         if current_hash.as_deref() != Some(atom_cert.content_hash.as_str()) {
             continue;
         }
+        if atom_cert.z3_check_result != "lean_verified" && live_settled.contains(&atom_cert.name) {
+            continue;
+        }
+        // Kernel-axiom audit failures are distinct from stale translator
+        // metadata and pending escalations, so check the audit first.
+        match proof_cert::lean_axiom_audit(atom_cert) {
+            proof_cert::LeanAxiomAudit::Rejected { disallowed } => {
+                diagnostics.push(serde_json::json!({
+                    "range": atom_name_range(source, atom),
+                    "severity": 2,
+                    "source": "mumei-lean",
+                    "message": format!(
+                        "Lean escalation: axiom_rejected (disallowed kernel axioms: {:?}; certificate {})",
+                        disallowed,
+                        cert_path.display()
+                    ),
+                    "data": {
+                        "lean_escalation": {
+                            "status": "axiom_rejected",
+                            "atom": atom_cert.name,
+                            "z3_result_class": atom_cert.z3_result_class,
+                            "certificate": cert_path.to_string_lossy(),
+                            "disallowed": disallowed,
+                        }
+                    }
+                }));
+                continue;
+            }
+            proof_cert::LeanAxiomAudit::Error => {
+                diagnostics.push(serde_json::json!({
+                    "range": atom_name_range(source, atom),
+                    "severity": 2,
+                    "source": "mumei-lean",
+                    "message": format!(
+                        "Lean escalation: axiom_rejected (kernel axiom audit errored; certificate {})",
+                        cert_path.display()
+                    ),
+                    "data": {
+                        "lean_escalation": {
+                            "status": "axiom_rejected",
+                            "atom": atom_cert.name,
+                            "z3_result_class": atom_cert.z3_result_class,
+                            "certificate": cert_path.to_string_lossy(),
+                        }
+                    }
+                }));
+                continue;
+            }
+            proof_cert::LeanAxiomAudit::Passed { .. } | proof_cert::LeanAxiomAudit::Unaudited => {}
+        }
         // Same membership rule as the escalation bundle: an atom is pending
         // while it carries an escalation reason and Lean has not closed it.
         if atom_cert.z3_check_result != "lean_verified" {

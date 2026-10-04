@@ -88,6 +88,63 @@ fn mark_lean_verified(atom: &mut Value, theorem_name: &str) {
     });
 }
 
+const MULTI_ATOM_UNKNOWN_SOURCE: &str = concat!(
+    "atom symbolic_pow_a(x: i64, y: i64) -> i64\n  requires: x >= 0;\n  ensures: result == x**y && result == x;\n  body: x;\n\n",
+    "atom symbolic_pow_b(x: i64, y: i64) -> i64\n  requires: x >= 1;\n  ensures: result == x**y && result == x;\n  body: x;\n",
+);
+
+fn escalated_atom_diagnostics(audit: &str, kernel_axioms: Option<Value>) -> Vec<Value> {
+    let dir = unique_temp_dir("mumei-lsp-lean-escalated-audit");
+    let source_path = dir.join("escalated.mm");
+    let cert_path = dir.join("escalated.proof.json");
+    std::fs::write(&source_path, MULTI_ATOM_UNKNOWN_SOURCE).expect("write source");
+
+    let generated = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--proof-cert")
+        .arg("--output")
+        .arg(&cert_path)
+        .arg(&source_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run mumei verify --proof-cert");
+    assert!(
+        cert_path.exists(),
+        "certificate was not written (status {:?}):\n{}",
+        generated.status.code(),
+        String::from_utf8_lossy(&generated.stderr)
+    );
+
+    let raw = std::fs::read_to_string(&cert_path).expect("read certificate");
+    let mut cert: Value = serde_json::from_str(&raw).expect("parse certificate");
+    let atom = cert["atoms"]
+        .as_array_mut()
+        .expect("atoms")
+        .iter_mut()
+        .find(|atom| atom["name"] == "symbolic_pow_b")
+        .expect("symbolic_pow_b certificate entry");
+    assert!(
+        atom["escalation_reason"].as_str().is_some(),
+        "expected an escalation reason: {atom:#}"
+    );
+    assert!(
+        atom["z3_check_result"] == "unknown" || atom["z3_check_result"] == "skipped",
+        "expected an unresolved escalation entry: {atom:#}"
+    );
+    mark_lean_verified(atom, "symbolic_pow_b_spec");
+    atom["z3_check_result"] = Value::String("unknown".to_string());
+    atom["status"] = Value::String("unverified".to_string());
+    atom["lean_result_metadata"]["axiom_audit"] = Value::String(audit.to_string());
+    if let Some(kernel_axioms) = kernel_axioms {
+        atom["lean_result_metadata"]["kernel_axioms"] = kernel_axioms;
+    }
+    std::fs::write(&cert_path, cert.to_string()).expect("write patched certificate");
+
+    let diagnostics = did_open_diagnostics(&source_path, MULTI_ATOM_UNKNOWN_SOURCE);
+    let _ = std::fs::remove_dir_all(&dir);
+    diagnostics
+}
+
 fn lean_escalation(diagnostic: &Value) -> Option<&Value> {
     diagnostic.pointer("/data/lean_escalation")
 }
@@ -336,14 +393,170 @@ fn lean_verified_without_current_lean_metadata_is_reported_as_stale_not_verified
 }
 
 #[test]
+fn lsp_reports_rejected_lean_kernel_axiom_audit() {
+    let dir = unique_temp_dir("mumei-lsp-lean-axiom-rejected");
+    let source =
+        "atom clamp_low(x: i64) -> i64\n  requires: x >= 0;\n  ensures: result >= 0;\n  body: x;\n";
+    let source_path = dir.join("rejected.mm");
+    let cert_path = dir.join("rejected.proof.json");
+    std::fs::write(&source_path, source).expect("write source");
+
+    let generated = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--proof-cert")
+        .arg("--output")
+        .arg(&cert_path)
+        .arg(&source_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run mumei verify --proof-cert");
+    assert!(generated.status.success());
+
+    let raw = std::fs::read_to_string(&cert_path).expect("read certificate");
+    let mut cert: Value = serde_json::from_str(&raw).expect("parse certificate");
+    mark_lean_verified(&mut cert["atoms"][0], "clamp_low_spec");
+    cert["atoms"][0]["lean_result_metadata"]["kernel_axioms"] = serde_json::json!(["sorryAx"]);
+    cert["atoms"][0]["lean_result_metadata"]["axiom_audit"] = Value::String("passed".to_string());
+    std::fs::write(&cert_path, cert.to_string()).expect("write patched certificate");
+
+    let diagnostics = did_open_diagnostics(&source_path, source);
+    let lean: Vec<&Value> = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.get("source").and_then(Value::as_str) == Some("mumei-lean"))
+        .collect();
+    assert_eq!(lean.len(), 1, "{diagnostics:#?}");
+    let escalation = lean_escalation(lean[0]).expect("lean_escalation payload");
+    assert_eq!(
+        escalation.get("status").and_then(Value::as_str),
+        Some("axiom_rejected"),
+        "{escalation}"
+    );
+    assert!(
+        lean[0]
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("sorryAx")),
+        "{lean:#?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lsp_reports_rejected_audit_for_escalated_unknown_atom() {
+    let diagnostics = escalated_atom_diagnostics("passed", Some(serde_json::json!(["sorryAx"])));
+    let escalation = diagnostics
+        .iter()
+        .filter_map(lean_escalation)
+        .find(|escalation| {
+            escalation.get("atom").and_then(Value::as_str) == Some("symbolic_pow_b")
+                && escalation.get("status").and_then(Value::as_str) == Some("axiom_rejected")
+        })
+        .unwrap_or_else(|| panic!("expected axiom_rejected diagnostic: {diagnostics:#?}"));
+    assert_eq!(escalation["disallowed"], serde_json::json!(["sorryAx"]));
+    assert!(
+        !diagnostics
+            .iter()
+            .filter_map(lean_escalation)
+            .any(|escalation| {
+                escalation.get("atom").and_then(Value::as_str) == Some("symbolic_pow_b")
+                    && escalation.get("status").and_then(Value::as_str) == Some("pending")
+            }),
+        "rejected audit must not also be reported as pending: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn lsp_reports_audit_error_for_escalated_unknown_atom() {
+    let diagnostics = escalated_atom_diagnostics("error", None);
+    let escalation = diagnostics
+        .iter()
+        .filter_map(lean_escalation)
+        .find(|escalation| {
+            escalation.get("atom").and_then(Value::as_str) == Some("symbolic_pow_b")
+                && escalation.get("status").and_then(Value::as_str) == Some("axiom_rejected")
+        })
+        .unwrap_or_else(|| panic!("expected axiom_rejected diagnostic: {diagnostics:#?}"));
+    assert!(escalation.get("disallowed").is_none(), "{escalation}");
+    assert!(
+        !diagnostics
+            .iter()
+            .filter_map(lean_escalation)
+            .any(|escalation| {
+                escalation.get("atom").and_then(Value::as_str) == Some("symbolic_pow_b")
+                    && escalation.get("status").and_then(Value::as_str) == Some("pending")
+            }),
+        "rejected audit must not also be reported as pending: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn lsp_suppresses_stale_rejected_audit_for_live_settled_atom() {
+    let dir = unique_temp_dir("mumei-lsp-lean-audit-settled");
+    let source = concat!(
+        "atom linear(x: i64) -> i64\n",
+        "  requires: x >= 0;\n",
+        "  ensures: result == x + 1;\n",
+        "  body: x + 1;\n",
+    );
+    let source_path = dir.join("settled.mm");
+    let cert_path = dir.join("settled.proof.json");
+    std::fs::write(&source_path, source).expect("write source");
+
+    let generated = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--proof-cert")
+        .arg("--output")
+        .arg(&cert_path)
+        .arg(&source_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run mumei verify --proof-cert");
+    assert!(
+        cert_path.exists(),
+        "certificate was not written (status {:?}):\n{}",
+        generated.status.code(),
+        String::from_utf8_lossy(&generated.stderr)
+    );
+
+    let raw = std::fs::read_to_string(&cert_path).expect("read certificate");
+    let mut cert: Value = serde_json::from_str(&raw).expect("parse certificate");
+    let atom = cert["atoms"]
+        .as_array_mut()
+        .expect("atoms")
+        .iter_mut()
+        .find(|atom| atom["name"] == "linear")
+        .expect("linear certificate entry");
+    mark_lean_verified(atom, "linear_spec");
+    atom["z3_check_result"] = Value::String("unknown".to_string());
+    atom["status"] = Value::String("unverified".to_string());
+    atom["escalation_reason"] = Value::String("nonlinear_arithmetic".to_string());
+    atom["lean_result_metadata"]["kernel_axioms"] = serde_json::json!(["sorryAx"]);
+    atom["lean_result_metadata"]["axiom_audit"] = Value::String("passed".to_string());
+    std::fs::write(&cert_path, cert.to_string()).expect("write patched certificate");
+
+    let diagnostics = did_open_diagnostics(&source_path, source);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    for status in ["axiom_rejected", "pending"] {
+        assert!(
+            !diagnostics
+                .iter()
+                .filter_map(lean_escalation)
+                .any(|escalation| {
+                    escalation.get("atom").and_then(Value::as_str) == Some("linear")
+                        && escalation.get("status").and_then(Value::as_str) == Some(status)
+                }),
+            "live-settled atom must not be reported as {status}: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
 fn lsp_reports_every_pending_escalation_recorded_in_the_sibling_certificate() {
     let dir = unique_temp_dir("mumei-lsp-lean-pending-all");
     // Two undecided atoms: in-process verification stops at the first one, so
     // the second pending escalation can only come from the certificate.
-    let source = concat!(
-        "atom symbolic_pow_a(x: i64, y: i64) -> i64\n  requires: x >= 0;\n  ensures: result == x**y && result == x;\n  body: x;\n\n",
-        "atom symbolic_pow_b(x: i64, y: i64) -> i64\n  requires: x >= 1;\n  ensures: result == x**y && result == x;\n  body: x;\n",
-    );
+    let source = MULTI_ATOM_UNKNOWN_SOURCE;
     let source_path = dir.join("pending_all.mm");
     let cert_path = dir.join("pending_all.proof.json");
     std::fs::write(&source_path, source).expect("write source");
