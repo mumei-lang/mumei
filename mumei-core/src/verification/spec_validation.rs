@@ -153,7 +153,7 @@ fn check_with_deadline(solver: &Solver<'_>, ctx: &Context, timeout_ms: u64) -> S
                 }
             }
         });
-        let result = solver.check();
+        let result = crate::verification::phase_artifacts::check(solver);
         *done.lock().expect("solver watchdog mutex poisoned") = true;
         wake.notify_one();
         result

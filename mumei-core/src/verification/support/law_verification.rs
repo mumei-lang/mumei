@@ -419,7 +419,7 @@ pub fn verify_impl_with_options(
                     discharge_bv_div_obligations(&vc, &solver)?;
 
                     solver.assert(&law_bool.not());
-                    let law_check = solver.check();
+                    let law_check = crate::verification::phase_artifacts::check(&solver);
                     if law_check == SatResult::Unknown {
                         solver.pop(1);
                         return Err(MumeiError::verification_at(
