@@ -434,6 +434,16 @@ fn lower_clause_with_skip<'a>(
     let clause_ast = parse_expression(trimmed);
     let clause_z3 = match expr_to_z3(vc, &clause_ast, env, solver_opt) {
         Ok(value) => value,
+        // Dropping a requires would quietly weaken the assumptions and could
+        // turn into a plain failure; keep the atom unverifiable instead.
+        Err(err)
+            if label == "requires"
+                && err
+                    .to_string()
+                    .contains(QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED) =>
+        {
+            return Err(err);
+        }
         Err(err) if is_unsupported_clause_error(&err) => {
             push_skip_warning(
                 diagnostics,
@@ -1487,6 +1497,7 @@ pub(crate) fn verify_inner(
         local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
+        quantifier_binders: Default::default(),
         bitvec_i64_global,
     };
     let mut env: Env = HashMap::new();
@@ -1579,12 +1590,15 @@ pub(crate) fn verify_inner(
 
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
         let expr_ast = parse_expression(&q.condition);
-        let condition_z3 = expr_to_z3(&vc, &expr_ast, &mut env, None)?
-            .as_bool()
-            .ok_or(MumeiError::verification_at(
-                "Condition must be boolean",
-                atom.span.clone(),
-            ))?;
+        vc.quantifier_binders
+            .borrow_mut()
+            .push((q.var.clone(), i.clone().into()));
+        let condition_res = expr_to_z3(&vc, &expr_ast, &mut env, None);
+        vc.quantifier_binders.borrow_mut().pop();
+        let condition_z3 = condition_res?.as_bool().ok_or(MumeiError::verification_at(
+            "Condition must be boolean",
+            atom.span.clone(),
+        ))?;
 
         // Extract `arr[<idx>]` sub-expressions from the forall condition so we
         // can (1) propagate them as explicit Z3 quantifier patterns for

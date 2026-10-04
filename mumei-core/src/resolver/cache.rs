@@ -8,7 +8,9 @@ use std::path::Path;
 
 /// Bump when verifier semantics change so cached proofs are re-derived.
 /// Version 3 enables checker-first MIR borrow checking.
-pub const VERIFIER_POLICY_VERSION: u32 = 3;
+/// Version 4 stops lowering calls whose arguments depend on a quantifier-bound
+/// variable, so earlier "verified" results for such atoms must be re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {

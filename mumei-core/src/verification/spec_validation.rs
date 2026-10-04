@@ -527,6 +527,7 @@ fn validation_ctx<'a>(
         local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
+        quantifier_binders: Default::default(),
         bitvec_i64_global,
     }
 }
@@ -632,6 +633,7 @@ pub(crate) fn is_unsupported_clause_error(err: &impl std::fmt::Display) -> bool 
             "Unsupported exponentiation: exponent must be a non-negative integer constant",
         )
         || message.contains(UNSUPPORTED_TUPLE_RESULT_INDEXING)
+        || message.contains(crate::verification::QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED)
 }
 
 fn assert_parameter_refinements<'a>(

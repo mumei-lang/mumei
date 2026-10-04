@@ -1291,8 +1291,15 @@ pub fn z3_result_from_error_message(message: &str) -> Option<&'static str> {
 pub const UNVERIFIABLE_ERROR_PREFIX: &str =
     "Unverifiable: skipped unsupported Z3 clause(s) in ensures.";
 
+/// Marker for a call whose arguments depend on a variable bound by an
+/// enclosing `forall` / `exists`. Such calls are not lowered (see
+/// `VCtx::reject_quantifier_dependent_call`), and the atom is unverifiable.
+pub const QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED: &str =
+    "Unsupported call under quantifier: calls whose arguments depend on a quantifier-bound variable are not supported yet";
+
 pub fn is_unverifiable_error_message(message: &str) -> bool {
     message.contains(UNVERIFIABLE_ERROR_PREFIX)
+        || message.contains(QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED)
 }
 
 pub fn classify_atom_for_lean_escalation(
