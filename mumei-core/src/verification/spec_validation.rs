@@ -127,10 +127,11 @@ pub fn check_spec_satisfiability(
 }
 
 fn check_with_deadline(solver: &Solver<'_>, ctx: &Context, timeout_ms: u64) -> SatResult {
+    let query = crate::verification::phase_artifacts::capture(solver);
     let handle = ctx.handle();
     let done = Mutex::new(false);
     let wake = Condvar::new();
-    std::thread::scope(|scope| {
+    let result = std::thread::scope(|scope| {
         scope.spawn(|| {
             let deadline = Instant::now()
                 + Duration::from_millis(timeout_ms.saturating_add(SOLVER_INTERRUPT_GRACE_MS));
@@ -153,11 +154,13 @@ fn check_with_deadline(solver: &Solver<'_>, ctx: &Context, timeout_ms: u64) -> S
                 }
             }
         });
-        let result = crate::verification::phase_artifacts::check(solver);
+        let result = solver.check();
         *done.lock().expect("solver watchdog mutex poisoned") = true;
         wake.notify_one();
         result
-    })
+    });
+    query.record(result);
+    result
 }
 
 pub fn check_spec_satisfiability_with_property_based(

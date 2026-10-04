@@ -181,20 +181,43 @@ pub fn record_cached_atom(source_file: &str, atom: &str) {
 
 #[track_caller]
 pub(crate) fn check(solver: &Solver) -> SatResult {
-    let origin = std::panic::Location::caller();
-    let query = prepare_query(solver, &[], false, origin.file(), origin.line());
+    let query = capture(solver);
     let result = solver.check();
-    record_query_result(query, result);
+    query.record(result);
     result
 }
 
 #[track_caller]
-pub(crate) fn check_assumptions(solver: &Solver, assumptions: &[Bool]) -> SatResult {
+pub(crate) fn capture(solver: &Solver) -> CapturedQuery {
+    capture_query(solver, &[], false)
+}
+
+#[track_caller]
+fn capture_query(solver: &Solver, assumptions: &[Bool], check_assumptions: bool) -> CapturedQuery {
     let origin = std::panic::Location::caller();
-    let query = prepare_query(solver, assumptions, true, origin.file(), origin.line());
+    CapturedQuery(prepare_query(
+        solver,
+        assumptions,
+        check_assumptions,
+        origin.file(),
+        origin.line(),
+    ))
+}
+
+#[track_caller]
+pub(crate) fn check_assumptions(solver: &Solver, assumptions: &[Bool]) -> SatResult {
+    let query = capture_query(solver, assumptions, true);
     let result = solver.check_assumptions(assumptions);
-    record_query_result(query, result);
+    query.record(result);
     result
+}
+
+pub(crate) struct CapturedQuery(Option<PendingQuery>);
+
+impl CapturedQuery {
+    pub(crate) fn record(self, result: SatResult) {
+        record_query_result(self.0, result);
+    }
 }
 
 struct PendingQuery {
@@ -388,10 +411,14 @@ fn disable() {
 
 #[cfg(test)]
 mod tests {
-    use super::{begin_atom, complete_phase, disable, enable, finish_atom, phase_slug, sanitize};
+    use super::{
+        begin_atom, capture, complete_phase, disable, enable, finish_atom, phase_slug, sanitize,
+    };
     use serde_json::Value;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use z3::ast::Bool;
+    use z3::{Config, Context, Solver};
 
     #[test]
     fn artifact_path_components_are_sanitized() {
@@ -414,6 +441,35 @@ mod tests {
             std::process::id()
         ));
         enable(directory.clone()).unwrap();
+
+        begin_atom("source.mm", "captured_query");
+        let context = Context::new(&Config::new());
+        let solver = Solver::new(&context);
+        solver.assert(&Bool::from_bool(&context, true));
+        let query = capture(&solver);
+        let query_path = directory
+            .join("source.mm")
+            .join("captured_query")
+            .join("0001-phase-0-units-unit-consistency.smt2");
+        let query_text = fs::read_to_string(&query_path).unwrap();
+        assert!(query_text.contains("(assert true)"));
+        assert!(query_text.ends_with("(check-sat)\n"));
+        let result = solver.check();
+        query.record(result);
+        complete_phase("Phase 0-units: unit consistency");
+        let verified: Result<(), &str> = Ok(());
+        finish_atom(&verified);
+        let captured: Value = serde_json::from_slice(
+            &fs::read(
+                directory
+                    .join("source.mm")
+                    .join("captured_query")
+                    .join("phases.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(captured["phases"][0]["queries"][0]["result"], "sat");
 
         begin_atom("source.mm", "early_error");
         let early_error: Result<(), &str> = Err("early failure");
