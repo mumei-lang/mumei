@@ -142,6 +142,7 @@ mod tests {
                 invariant: None,
                 effects: vec![],
                 return_type: Some("i64".to_string()),
+                decreases: None,
                 span: Span::default(),
                 effect_pre: std::collections::HashMap::new(),
                 effect_post: std::collections::HashMap::new(),

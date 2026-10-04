@@ -1,0 +1,97 @@
+name: Core Tests
+
+# Curated root targets pass on develop; add new targets once they are green.
+
+on:
+  pull_request:
+    paths:
+      - 'mumei-core/**'
+      - 'mumei-emit-**/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/core-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  core-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libz3-dev z3 libzstd-dev
+          # Use the signed-by pattern (apt-key is deprecated on Ubuntu 22.04+).
+          # Matches release.yml for consistency.
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          codename=$(lsb_release -cs)
+          echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-17.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
+
+      - name: Set up modern Z3
+        uses: ./.github/actions/setup-z3
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-core-tests-${{ hashFiles('Cargo.toml', '**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: |
+            cargo-core-tests-
+
+      - name: Test mumei-core library
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
+        run: cargo test -p mumei-core --lib
+
+      - name: Run curated root integration tests
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
+        # Cases that call the mumei-lean bridge (scripts/bridge.py) are skipped:
+        # this job doesn't check out mumei-lean.
+        run: |
+          cargo test --no-fail-fast \
+            --test test_verify_exit_codes \
+            --test test_verify_ensures_outcomes \
+            --test test_cover_clauses \
+            --test test_clause_trust_modes \
+            --test test_struct_invariant \
+            --test test_spurious_detection \
+            --test test_data_flow_trace \
+            --test test_phase_artifacts \
+            --test test_verify_sarif \
+            --test test_bitvec_i64 \
+            --test test_codegen_enum_resolution \
+            --test test_decidable_fragment \
+            --test test_differential_fuzz \
+            --test test_lambda_codegen \
+            --test test_lambda_indirect_call \
+            --test test_property_based_soundness \
+            --test test_counterexample_raising \
+            --test test_quantified_requires \
+            --test test_quantifier_calls \
+            --test test_recursive_contract_calls \
+            --test test_recursive_contract_decreases \
+            --test test_str_builtins \
+            --test test_reconstruction_loss \
+            --test test_units \
+            --test test_concurrency \
+            -- \
+            --skip escalate_lean_promotes_outside_fragment_to_candidate_bundle \
+            --skip nlsat_first_fixture_outside_window_keeps_lean_escalation

@@ -676,6 +676,7 @@ mod tests {
             invariant: None,
             effects: vec![],
             return_type: Some("i64".to_string()),
+            decreases: None,
             span: Span::default(),
             effect_pre: pre
                 .map(|state| HashMap::from([("Channel".to_string(), state.to_string())]))

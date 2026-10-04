@@ -1460,6 +1460,124 @@ atom probe(n: i64)
             .starts_with("arr[i] >= 0"));
     }
 
+    fn only_atom(source: &str) -> Atom {
+        parse_module(source)
+            .into_iter()
+            .find_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .expect("one atom")
+    }
+
+    #[test]
+    fn test_forall_nested_under_disjunction_stays_in_requires() {
+        let atom = only_atom(
+            r#"
+atom probe(arr: [i64], n: i64)
+    requires: n >= 1 && len(arr) >= n && (n == 5 || forall(i, 0, n, arr[i] > 0));
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        assert!(atom.forall_constraints.is_empty());
+        assert_eq!(
+            atom.requires,
+            "n >= 1 && len(arr) >= n &&(n == 5 || forall(i, 0, n, arr[i] > 0))"
+        );
+    }
+
+    #[test]
+    fn test_forall_nested_under_negation_stays_in_requires() {
+        let atom = only_atom(
+            r#"
+atom probe(arr: [i64], n: i64)
+    requires: n >= 1 && len(arr) >= n && !forall(i, 0, n, arr[i] > 0);
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        assert!(atom.forall_constraints.is_empty());
+        assert_eq!(
+            atom.requires,
+            "n >= 1 && len(arr) >= n && ! forall(i, 0, n, arr[i] > 0)"
+        );
+    }
+
+    #[test]
+    fn test_forall_wrapped_in_parens_is_extracted() {
+        let atom = only_atom(
+            r#"
+atom probe(arr: [i64], n: i64)
+    requires: n >= 0 && (forall(i, 0, n, arr[i] > 0));
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        assert_eq!(atom.forall_constraints.len(), 1);
+        assert_eq!(atom.requires, "n >= 0 &&(true)");
+    }
+
+    #[test]
+    fn test_forall_in_repeated_clause_is_extracted() {
+        let atom = only_atom(
+            r#"
+atom probe(arr: [i64], n: i64)
+    requires: n >= 0 && len(arr) >= n;
+    requires: forall(i, 0, n, arr[i] > 0);
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        assert_eq!(atom.forall_constraints.len(), 1);
+        assert_eq!(atom.requires, "(n >= 0 && len(arr) >= n) && (true)");
+    }
+
+    #[test]
+    fn test_forall_under_top_level_disjunction_stays_in_requires() {
+        let atom = only_atom(
+            r#"
+atom probe(arr: [i64], n: i64)
+    requires: a || b && forall(i, 0, n, arr[i] > 0);
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        assert!(atom.forall_constraints.is_empty());
+        assert_eq!(atom.requires, "a || b && forall(i, 0, n, arr[i] > 0)");
+    }
+
+    #[test]
+    fn test_forall_in_comparison_stays_in_requires() {
+        let atom = only_atom(
+            r#"
+atom probe(arr: [i64], n: i64, x: i64)
+    requires: forall(i, 0, n, arr[i] > 0) == true && x > 0;
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        assert!(atom.forall_constraints.is_empty());
+        assert_eq!(
+            atom.requires,
+            "forall(i, 0, n, arr[i] > 0) == true && x > 0"
+        );
+    }
+
+    #[test]
+    fn test_forall_next_to_if_expression_stays_in_requires() {
+        let atom = only_atom(
+            r#"
+atom probe(arr: [i64], n: i64)
+    requires: if n > 0 { true } else { true } && forall(i, 0, n, arr[i] > 0);
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        assert!(atom.forall_constraints.is_empty());
+        assert_eq!(
+            atom.requires,
+            "if n > 0 { true} else { true} && forall(i, 0, n, arr[i] > 0)"
+        );
+    }
+
     #[test]
     fn test_parse_atom_with_consume() {
         let source = r#"
@@ -2681,6 +2799,78 @@ atom fine(x: i64) -> i64
         assert!(
             item::parse_module_from_source_checked(source).is_ok(),
             "every known atom clause should parse cleanly"
+        );
+    }
+
+    #[test]
+    fn test_parse_atom_decreases_clause() {
+        let source = r#"
+atom tri(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result >= 0;
+    decreases: n;
+    body: { if n == 0 { 0 } else { n + tri(n - 1) } };
+"#;
+        let atom = parse_module(source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "tri" => Some(atom),
+                _ => None,
+            })
+            .expect("atom tri");
+        assert_eq!(atom.decreases.as_deref(), Some("n"));
+    }
+
+    #[test]
+    fn test_parse_atom_decreases_compound_expression() {
+        let source = r#"
+atom f(a: i64, b: i64) -> i64
+    requires: a >= 0 && b >= 0;
+    decreases: a + b;
+    body: { a };
+"#;
+        let atom = parse_module(source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "f" => Some(atom),
+                _ => None,
+            })
+            .expect("atom f");
+        assert_eq!(atom.decreases.as_deref(), Some("a + b"));
+    }
+
+    #[test]
+    fn test_parse_atom_without_decreases() {
+        let source = r#"
+atom g(x: i64) -> i64
+    requires: true;
+    body: { x };
+"#;
+        let atom = parse_module(source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "g" => Some(atom),
+                _ => None,
+            })
+            .expect("atom g");
+        assert!(atom.decreases.is_none());
+    }
+
+    #[test]
+    fn test_parse_atom_duplicate_decreases_fails() {
+        let source = r#"
+atom h(x: i64) -> i64
+    requires: true;
+    decreases: x;
+    decreases: x - 1;
+    body: { x };
+"#;
+        let err = item::parse_module_from_source_checked(source)
+            .expect_err("a duplicate decreases clause must fail the checked parse");
+        assert!(
+            err.iter()
+                .any(|f| f.contains("duplicate `decreases` clause in atom 'h'")),
+            "expected a duplicate-decreases failure, got {err:?}"
         );
     }
 }

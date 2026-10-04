@@ -48,6 +48,7 @@ fn base_atom(name: &str) -> Atom {
         invariant: None,
         effects: Vec::new(),
         return_type: None,
+        decreases: None,
         span: span(5),
         effect_pre: HashMap::new(),
         effect_post: HashMap::new(),
