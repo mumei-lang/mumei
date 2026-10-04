@@ -93,6 +93,7 @@ jobs:
             --test test_quantified_requires \
             --test test_quantifier_calls \
             --test test_recursive_contract_calls \
+            --test test_recursive_contract_decreases \
             --test test_str_builtins \
             --test test_reconstruction_loss \
             --test test_units \

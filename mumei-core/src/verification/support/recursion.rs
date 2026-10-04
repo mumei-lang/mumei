@@ -209,6 +209,56 @@ fn resolve_edge_name(module_env: &ModuleEnv, name: &str) -> Option<String> {
     module_env.get_atom(&fqn).map(|a| a.name.clone())
 }
 
+pub(crate) fn measure_components(text: &str) -> Vec<String> {
+    let text = text.trim();
+    if text == "()" {
+        return vec![String::new()];
+    }
+    if !text.starts_with('(') {
+        return vec![text.to_string()];
+    }
+
+    let mut parens = 1usize;
+    let mut brackets = 0usize;
+    let mut braces = 0usize;
+    let mut separators = Vec::new();
+    let mut closing = None;
+    for (index, ch) in text.char_indices().skip(1) {
+        match ch {
+            '(' => parens += 1,
+            ')' => {
+                if parens == 0 {
+                    return vec![text.to_string()];
+                }
+                parens -= 1;
+                if parens == 0 && brackets == 0 && braces == 0 {
+                    closing = Some(index);
+                    break;
+                }
+            }
+            '[' => brackets += 1,
+            ']' => brackets = brackets.saturating_sub(1),
+            '{' => braces += 1,
+            '}' => braces = braces.saturating_sub(1),
+            ',' if parens == 1 && brackets == 0 && braces == 0 => separators.push(index),
+            _ => {}
+        }
+    }
+    if closing != Some(text.len() - 1) || separators.is_empty() {
+        return vec![text.to_string()];
+    }
+
+    let inner = &text[1..text.len() - 1];
+    let mut components = Vec::with_capacity(separators.len() + 1);
+    let mut start = 0;
+    for separator in separators {
+        components.push(inner[start..separator - 1].trim().to_string());
+        start = separator;
+    }
+    components.push(inner[start..].trim().to_string());
+    components
+}
+
 /// Variable names referenced anywhere in `expr`.
 fn collect_variables_expr(expr: &Expr, out: &mut HashSet<String>) {
     match expr {
@@ -330,28 +380,36 @@ fn is_scalar_int_or_bool(module_env: &ModuleEnv, type_name: Option<&str>) -> boo
 /// Check that `atom`'s `decreases` measure is call-free and only references
 /// the atom's own params (plus literals/arithmetic).
 fn measure_is_valid(atom: &Atom) -> Result<(), String> {
-    let measure = atom.decreases.as_deref().unwrap_or("").trim();
-    if measure.is_empty() {
-        return Err(format!(
-            "atom '{}' has an empty decreases clause",
-            atom.name
-        ));
-    }
-    let ast = parse_expression(measure);
-    if !collect_call_edges_expr(&ast).is_empty() {
-        return Err(format!(
-            "decreases measure of atom '{}' must not contain calls",
-            atom.name
-        ));
-    }
-    let mut vars = HashSet::new();
-    collect_variables_expr(&ast, &mut vars);
+    let measures = measure_components(atom.decreases.as_deref().unwrap_or(""));
     let params: HashSet<&str> = atom.params.iter().map(|p| p.name.as_str()).collect();
-    if let Some(unknown) = vars.iter().find(|v| !params.contains(v.as_str())) {
-        return Err(format!(
-            "decreases measure of atom '{}' references '{}' which is not a parameter",
-            atom.name, unknown
-        ));
+    for measure in measures {
+        if measure.is_empty() {
+            return Err(format!(
+                "atom '{}' has an empty decreases clause",
+                atom.name
+            ));
+        }
+        if measure_components(&measure).len() > 1 {
+            return Err(format!(
+                "decreases measure of atom '{}' must not nest tuples",
+                atom.name
+            ));
+        }
+        let ast = parse_expression(&measure);
+        if !collect_call_edges_expr(&ast).is_empty() {
+            return Err(format!(
+                "decreases measure of atom '{}' must not contain calls",
+                atom.name
+            ));
+        }
+        let mut vars = HashSet::new();
+        collect_variables_expr(&ast, &mut vars);
+        if let Some(unknown) = vars.iter().find(|v| !params.contains(v.as_str())) {
+            return Err(format!(
+                "decreases measure of atom '{}' references '{}' which is not a parameter",
+                atom.name, unknown
+            ));
+        }
     }
     Ok(())
 }
@@ -523,7 +581,34 @@ pub fn recursive_scc(module_env: &ModuleEnv, atom_name: &str) -> Option<Recursiv
             member_unsupported_reason(module_env, atom)
         });
         match reason {
-            None => RecursiveSccEligibility::Eligible,
+            None => {
+                let arities: Vec<(String, usize)> = scc
+                    .iter()
+                    .filter_map(|member| {
+                        module_env.get_atom(member).map(|atom| {
+                            (
+                                member.clone(),
+                                measure_components(atom.decreases.as_deref().unwrap_or("")).len(),
+                            )
+                        })
+                    })
+                    .collect();
+                if arities
+                    .first()
+                    .is_some_and(|(_, first)| arities.iter().any(|(_, arity)| arity != first))
+                {
+                    let list = arities
+                        .iter()
+                        .map(|(member, arity)| format!("{member} has {arity}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    RecursiveSccEligibility::Unsupported(format!(
+                        "SCC members declare `decreases` measures of different arity: {list}"
+                    ))
+                } else {
+                    RecursiveSccEligibility::Eligible
+                }
+            }
             Some(reason) => RecursiveSccEligibility::Unsupported(reason),
         }
     };
@@ -572,4 +657,33 @@ pub fn recursive_contract_hint_diagnostic(
         tags: vec![code.to_string()],
         escalation_reason: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::measure_components;
+
+    #[test]
+    fn splits_only_outer_decreases_tuples() {
+        let cases = [
+            ("n", vec!["n"]),
+            ("(m, n)", vec!["m", "n"]),
+            ("(m + 1, n, k)", vec!["m + 1", "n", "k"]),
+            ("(n)", vec!["(n)"]),
+            ("(a + b)", vec!["(a + b)"]),
+            ("(a) + (b)", vec!["(a) + (b)"]),
+            ("(f(a, b))", vec!["(f(a, b))"]),
+            ("(m, )", vec!["m", ""]),
+            ("()", vec![""]),
+            ("(a, (b, c))", vec!["a", "(b, c)"]),
+        ];
+
+        for (text, expected) in cases {
+            assert_eq!(
+                measure_components(text),
+                expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "{text}"
+            );
+        }
+    }
 }
