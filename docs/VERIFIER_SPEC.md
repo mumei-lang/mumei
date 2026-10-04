@@ -383,11 +383,17 @@ Rules:
   equal arguments therefore have equal results. Auxiliary contexts (spec
   validation, vacuity, property-based checks) keep fresh constants.
   `translator/context.rs::VCtx::callee_congruent`, `VCtx::rec_fn`.
+  A call whose argument depends on a variable bound by an enclosing
+  `forall`/`exists` is rejected first by `VCtx::reject_quantifier_dependent_call`,
+  recursive calls included, so the enclosing clause is unverifiable (exit `3`)
+  and no `rec_fn#` application or termination obligation is built for it.
 - **D3 (assumed ensures).** At a congruent call the callee's caller-visible
   `ensures` is assumed as the implication
-  `CallerRequires(args) ⇒ CallerEnsures(args, rec_fn#g(args))`. For a call
+  `R(args) ⇒ CallerEnsures(args, rec_fn#g(args))`, where `R` is
+  `contract_view.rs::caller_requires_obligation(g)`: the caller-view requires
+  plus `g`'s top-level quantified requires conjuncts. For a call
   between two members of the same SCC, the antecedent also contains the path
-  conditions at the call. A call in a body still checks `CallerRequires(args)`
+  conditions at the call. A call in a body still checks the same `R`
   as an obligation, as for any other call. A recursive call reached while the
   callee's contract is already being instantiated uses the same application
   and does not instantiate the contract again.
@@ -412,7 +418,8 @@ Rules:
   changes the verdict. `recursion.rs::recursive_contract_hint_diagnostic`.
 - **D6 (cache).** The `decreases` text is part of the atom hash and the proof
   hash, and a callee's `decreases` is part of every caller's proof hash.
-  `mumei-core/src/resolver/cache.rs`.
+  `mumei-core/src/resolver/cache.rs`. These rules are enabled by
+  `VERIFIER_POLICY_VERSION` 7.
 
 ## Keeping this document in sync
 
