@@ -152,8 +152,8 @@ rejected with the listed reason ([§9.2](#92-rejection-reasons)):
 | E1 | The clause mode is plain or `assume`. | `hidden_clause` (input error) |
 | E2 | The exporting atom's own verification succeeded in this run or came from a valid cache entry, and the clause's `ensures_outcomes` entry is `proved` (plain) or `assumed` (`assume`). `vacuous`, `always_false`, `fails_on_some_inputs`, `fails`, `unknown`, and `skipped` all block export. | `clause_not_proved` |
 | E3 | The atom is not `trusted` / `unverified`, is not `extern`, and has no declared effects, no `ref` / `ref mut` / `consume` parameters, and is not `async`. The result must be a function of the parameters alone. | `impure_or_trusted` |
-| E4 | The body is known to terminate: no recursion and no loops, or every loop has a checked `decreases` measure and recursion is absent. Recursive atoms are not exportable until mumei checks a recursion measure. | `termination_not_established` |
-| E5 | Every parameter and the return type lower to a single solver sort that the result function can use: `Int`, `Real`, `Bool`, the bit-vector sorts, or a one-dimensional array of those. Tuple returns, structs, enums, strings, `atom_ref` parameters, and generic parameters are not exportable in the first version. | `unsupported_signature` |
+| E4 | The body is known to terminate: no loops, or every loop has a checked `decreases` measure, and no recursion (direct or mutual). The rule is transitive: every atom the body calls must satisfy E3 and E4 as well, so a postcondition that relies on a callee's partial-correctness `ensures` is never exported. Recursive atoms are not exportable until mumei checks a recursion measure. | `termination_not_established` |
+| E5 | Every parameter lowers to a sort the result function can take: `Int`, `Real`, `Bool`, the bit-vector sorts, or a one-dimensional array of those. Array parameters are passed together with their length ([§3.1](#31-form-of-an-exported-fact)). The return type is one of the scalar sorts; array returns, tuple returns, structs, enums, strings, `atom_ref` parameters, and generic parameters are not exportable in the first version. | `unsupported_signature` |
 | E6 | The clause and the antecedent ([§3.1](#31-form-of-an-exported-fact)) lower without the call-site fallbacks (no `ClauseLoweringOutcome` other than `Lowered`). Every call inside them is itself to an exporting atom, so it can be lowered as a result-function application. | `unlowerable` / `unexported_dependency` |
 | E7 | The antecedent contains no quantifier. Quantifiers in the clause itself are allowed only as `forall` with an admissible array `select` pattern, which is what today's lowering already produces. | `quantified_antecedent` / `unsupported_quantifier` |
 | E8 | A safe trigger exists ([§4](#4-trigger-selection)). | `no_safe_trigger`, `arithmetic_trigger`, `trigger_incomplete`, `matching_loop` |
@@ -196,6 +196,15 @@ forall p1: S1, ..., pn: Sn.
 - **One fact per exported clause.** Clauses are not conjoined, so each fact
   keeps its own trust, label, and trigger, and a rejected clause does not block
   its siblings.
+- **Array parameters carry their length.** The translator models an array's
+  length as a separate integer symbol (`len_<name>`), not as part of the array
+  sort. Quantifying over the array alone would leave `len(arr)` free, and a fact
+  such as `result == len(arr)` could then equate the lengths of unrelated
+  arrays. So each array parameter `a` contributes two bound variables, the
+  array and `len_a`, both are arguments of the result function, and the
+  antecedent includes `len_a >= 0`. At a call site the length argument is the
+  caller's length term for the actual argument. If the caller has no length
+  term for it, the call is not lowered through the result function (§5.2).
 - If `n = 0`, there is nothing to quantify. The fact is the ground formula
   `BodyRequires_g() => E[result := lemma_fn_g()]` and needs no trigger.
 - The result function name is deterministic and has no counter. It is the
@@ -502,8 +511,10 @@ non-zero, so existing fingerprints are unchanged.
 
 ### 6.3 What "byte-identical" is checked against
 
-The implementation PR must add a regression test that, for every `.mm` file in
-`std/` and `tests/` that has no export annotation:
+The implementation PR must add a regression test that, for every atom in
+`std/` and `tests/` that does not use the feature in the sense of R4 (no export
+annotation on the atom and none in its transitive callee set; today that is
+every atom):
 
 1. the SMT-LIB text of each solver context (`Solver::to_string()` captured by a
    test-only hook) is identical with the feature compiled in and with it
