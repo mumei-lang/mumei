@@ -61,4 +61,6 @@ jobs:
         run: cargo test --workspace --lib --bins
 
       - name: Integration tests
-        run: cargo test --test '*' --no-fail-fast
+        # mumei-ffi-tests is covered by ffi-contract-tests.yml, including its
+        # generation and coverage gates.
+        run: cargo test --workspace --exclude mumei-ffi-tests --test '*' --no-fail-fast
