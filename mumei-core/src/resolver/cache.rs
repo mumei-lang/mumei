@@ -494,17 +494,28 @@ pub fn compute_proof_hash_with_flags(
     // instance. Any cached proof minted before this fix could have relied on
     // the unsound sharing, so atoms that carry the pattern get a marker in
     // their hash; atoms that do not are byte-identical to before.
-    if atom_has_binder_scoped_call(atom, true)
+    if binder_call_marker_applies(atom, module_env, &visited) {
+        hasher.update(b"|binder_call_fail_closed_v1");
+    }
+
+    format!("{:x}", hasher.finalize())
+}
+
+/// Whether the proof hash for `atom` carries the fail-closed binder-call
+/// marker: true when the atom's own clauses/body — or the requires/ensures of
+/// any transitive callee in `visited` — contain a call to a non-builtin callee
+/// whose arguments mention a `forall`/`exists` bound variable.
+fn binder_call_marker_applies(
+    atom: &Atom,
+    module_env: &ModuleEnv,
+    visited: &HashSet<String>,
+) -> bool {
+    atom_has_binder_scoped_call(atom, true)
         || visited.iter().any(|callee_name| {
             module_env
                 .get_atom(callee_name)
                 .is_some_and(|callee_atom| atom_has_binder_scoped_call(callee_atom, false))
         })
-    {
-        hasher.update(b"|binder_call_fail_closed_v1");
-    }
-
-    format!("{:x}", hasher.finalize())
 }
 
 /// Call names the expression translator handles as builtins — they never mint
@@ -1156,14 +1167,13 @@ body: x;
 
     #[test]
     fn bound_call_in_requires_adds_the_marker() {
-        let (module_env, atom) = env_and_atom(
+        let (_, atom) = env_and_atom(
             &format!(
                 "{IDENT}\natom all_equal_probe(arr: [i64], n: i64) -> i64\nrequires: n >= 2 && len(arr) >= n && forall(i, 0, n, ident(arr[i]) == arr[i]);\nensures: arr[0] == arr[1];\nbody: n;\n"
             ),
             "all_equal_probe",
         );
         assert!(atom_has_binder_scoped_call(&atom, true));
-        let _ = module_env;
     }
 
     #[test]
@@ -1191,9 +1201,11 @@ body: x;
         // The caller's own spec has no bound call, but its callee's ensures
         // does — the hash must carry the marker.
         assert!(!atom_has_binder_scoped_call(&caller, true));
-        let hash_with_marker = compute_proof_hash(&caller, &module_env);
         let (_, callee) = env_and_atom(&source, "callee");
         assert!(atom_has_binder_scoped_call(&callee, false));
+        let visited: HashSet<String> = ["callee".to_string()].into_iter().collect();
+        assert!(binder_call_marker_applies(&caller, &module_env, &visited));
+
         // And a caller to a clean callee stays unmarked.
         let clean_source = format!(
             "{IDENT}\natom clean_callee(x: i64) -> i64\nrequires: true;\nensures: result == x;\nbody: x;\n\natom clean_caller(x: i64) -> i64\nrequires: true;\nensures: result == x;\nbody: {{ clean_callee(x) }};\n"
@@ -1204,10 +1216,12 @@ body: x;
             .entry("clean_caller".to_string())
             .or_default()
             .insert("clean_callee".to_string());
-        let hash_clean = compute_proof_hash(&clean_caller, &clean_env);
-        // Sanity: both hashes are well-formed hex.
-        assert_eq!(hash_with_marker.len(), 64);
-        assert_eq!(hash_clean.len(), 64);
+        let clean_visited: HashSet<String> = ["clean_callee".to_string()].into_iter().collect();
+        assert!(!binder_call_marker_applies(
+            &clean_caller,
+            &clean_env,
+            &clean_visited
+        ));
     }
 
     #[test]
@@ -1244,14 +1258,31 @@ body: n;
         assert!(!atom_has_binder_scoped_call(&atom, true));
     }
 
+    /// Golden hashes computed with the code from before the fail-closed
+    /// binder-call fix: marker-free atoms must keep byte-identical proof
+    /// hashes, so the marker never changes hashing for unmarked atoms.
     #[test]
-    fn unmarked_atoms_keep_identical_hashes() {
-        // An atom without the pattern hashes identically to one byte-for-byte
-        // equivalent modulo the binder marker logic — the marker is only
-        // appended when the pattern is present, so just check determinism.
-        let source = format!(
+    fn unmarked_atoms_keep_byte_identical_hashes() {
+        let plain_source = format!(
             "{IDENT}\natom plain(x: i64) -> i64\nrequires: ident(x) == x;\nensures: result == x;\nbody: x;\n"
         );
-        assert_eq!(hash(&source, "plain"), hash(&source, "plain"));
+        assert_eq!(
+            hash(&plain_source, "plain"),
+            "a3f9dc980fae70d7a9935a897fbaf537e1f24128680d8db24f02793e2dc9dcfb"
+        );
+
+        let sorted_source = "atom sorted_probe(arr: [i64], n: i64) -> i64\nrequires: n >= 2 && len(arr) >= n && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);\nensures: arr[0] <= arr[1];\nbody: n;\n";
+        assert_eq!(
+            hash(sorted_source, "sorted_probe"),
+            "10b939552687d80793422e3b173f7a1d18c53b9e3324798dcc87b88ff37c3974"
+        );
+
+        let ground_source = format!(
+            "{IDENT}\natom ground(arr: [i64], n: i64) -> i64\nrequires: n >= 1 && len(arr) >= n && forall(i, 0, n, arr[i] >= ident(0));\nensures: arr[0] >= 0;\nbody: n;\n"
+        );
+        assert_eq!(
+            hash(&ground_source, "ground"),
+            "b414eb0440a41ab78e1c4fa3b9bf564b65a8e834d128c27126e68783816feb82"
+        );
     }
 }
