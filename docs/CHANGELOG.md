@@ -12,6 +12,11 @@
   lowered in place. This removes an unsound free hypothesis
   (`n == 5 || forall(...)` used to assert the forall unconditionally) and
   a spurious "requires clause is unsatisfiable" on `!forall(...)`.
+- Quantifier binders are fresh constants now: a `forall(i, …)` / `exists(i, …)`
+  no longer captures an outer variable or parameter that happens to share
+  the bound name (previously callers could satisfy quantified preconditions
+  for free, and a requires-side binder over a same-named param bound the
+  parameter instead of the quantified variable).
 - `VERIFIER_POLICY_VERSION` bumped to 6 so cached proofs are re-derived.
 
 ### 2026-09-27: v0.6.20 release version bump

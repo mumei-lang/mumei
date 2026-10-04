@@ -312,6 +312,85 @@ body: 0;
     std::fs::remove_dir_all(dir).ok();
 }
 
+// A8: binder capture — a caller parameter sharing the callee's bound name
+// must not satisfy the quantified obligation for free.
+#[test]
+fn caller_param_named_like_bound_var_does_not_capture() {
+    let (dir, output, payload) = verify_json(
+        "caller_i",
+        &format!(
+            r#"{NEEDS_POS}
+atom caller_i(arr: [i64], i: i64) -> i64
+requires: i >= 1 && len(arr) >= i;
+ensures: result > 0;
+body: needs_pos(arr, i);
+"#
+        ),
+    );
+    let text = output_text(&output);
+    assert!(!output.status.success(), "{text}");
+    assert_failed_with(&payload, "caller_i", &dir, "precondition_violated");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+// A9: the same caller verifies when it establishes the obligation with
+// its own quantifier over a differently named binder.
+#[test]
+fn caller_param_shares_bound_var_but_establishes_obligation() {
+    let (dir, output, payload) = verify_json(
+        "caller_k",
+        &format!(
+            r#"{NEEDS_POS}
+atom caller_k(arr: [i64], i: i64) -> i64
+requires: i >= 1 && len(arr) >= i && forall(k, 0, i, arr[k] > 0);
+ensures: result > 0;
+body: needs_pos(arr, i);
+"#
+        ),
+    );
+    assert_verified(&output, &payload);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+// A10: an ensures quantifier must not capture a same-named parameter —
+// this atom claims `arr[i] > 0` over a range it never established.
+#[test]
+fn ensures_forall_does_not_capture_same_named_param() {
+    let (dir, output, payload) = verify_json(
+        "ens_cap",
+        r#"
+atom ens_cap(arr: [i64], i: i64) -> i64
+requires: i >= 2 && len(arr) >= i;
+ensures: forall(i, 0, i, arr[i] > 0);
+body: 0;
+"#,
+    );
+    let text = output_text(&output);
+    assert!(!output.status.success(), "{text}");
+    assert_eq!(
+        atom_failure_type(&dir, &payload, "ens_cap"),
+        "postcondition_violated"
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
+// A11: the requires-side binder over a same-named parameter still binds
+// the quantified variable, not the parameter.
+#[test]
+fn requires_forall_over_same_named_param_verifies() {
+    let (dir, output, payload) = verify_json(
+        "req_cap",
+        r#"
+atom req_cap(arr: [i64], i: i64) -> i64
+requires: i >= 2 && len(arr) >= i && forall(i, 0, i, arr[i] > 0);
+ensures: arr[0] > 0;
+body: 0;
+"#,
+    );
+    assert_verified(&output, &payload);
+    std::fs::remove_dir_all(dir).ok();
+}
+
 // A7: repeated `requires:` clauses keep the quantifier extractable.
 #[test]
 fn repeated_requires_clause_forall_is_enforced_at_call_sites() {

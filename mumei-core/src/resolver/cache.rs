@@ -11,7 +11,8 @@ use std::path::Path;
 /// Versions 4 and 5 are reserved by in-flight PRs (#673, and the
 /// recursive-contracts PR stacked on #675).
 /// Version 6 checks a callee's quantified requires at call sites and keeps
-/// quantifiers nested under non-conjunctive operators in the requires text.
+/// quantifiers nested under non-conjunctive operators in the requires text,
+/// and stops quantifier binders from capturing same-named outer variables.
 pub const VERIFIER_POLICY_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

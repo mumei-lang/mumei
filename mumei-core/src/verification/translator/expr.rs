@@ -677,7 +677,9 @@ pub(crate) fn expr_to_z3<'a>(
                     )?;
 
                     // 束縛変数を一時的に env に追加して condition を評価
-                    let bound_var = Int::new_const(ctx, var_name.as_str());
+                    // Fresh const: a same-named outer variable must not be
+                    // captured by the quantifier binder.
+                    let bound_var = Int::fresh_const(ctx, var_name.as_str());
                     let old_val = env.insert(var_name.clone(), bound_var.clone().into());
 
                     let range_cond =
