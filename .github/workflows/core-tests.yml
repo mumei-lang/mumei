@@ -1,7 +1,6 @@
 name: Core Tests
 
 # Curated root targets pass on develop; add new targets once they are green.
-# test_units is excluded until #687 lands, and test_concurrency until #688 lands.
 
 on:
   pull_request:
@@ -93,4 +92,6 @@ jobs:
             --test test_quantifier_calls \
             --test test_recursive_contract_calls \
             --test test_str_builtins \
-            --test test_reconstruction_loss
+            --test test_reconstruction_loss \
+            --test test_units \
+            --test test_concurrency
