@@ -135,6 +135,7 @@ The complete CLI command table is in [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md), M
 | [Plugin Guide](docs/PLUGIN_GUIDE.md) | Emitter plugin development |
 | [Proof Certificate](docs/PROOF_CERTIFICATE.md) | Proof certificate schema and usage |
 | [Spec Guide](docs/SPEC_GUIDE.md) | Spec-writing guidelines for Z3-decidable fragments |
+| [Lemma Export](docs/LEMMA_EXPORT.md) | Design spec for exporting `ensures` as triggered quantified facts |
 | [FFI](docs/FFI.md) | Foreign function interface (Rust/C) |
 | [Concurrency](docs/CONCURRENCY.md) | Async/await and deadlock-free resource hierarchy |
 | [Editors](docs/EDITORS.md) | VS Code and LSP editor integration |

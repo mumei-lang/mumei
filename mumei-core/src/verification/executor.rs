@@ -31,6 +31,22 @@ fn clause_label_for<'a>(
         .map(|label| label.label.as_str())
 }
 
+fn body_identifier_names(body: &str) -> Vec<String> {
+    let mut names = body
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|name| {
+            name.chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        })
+        .map(str::to_string)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
 pub fn clause_label_for_atom<'a>(
     atom: &'a crate::parser::Atom,
     kind: crate::parser::ClauseKind,
@@ -1508,6 +1524,7 @@ fn verify_inner_impl(
         local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
+        call_result_symbols: Default::default(),
         bitvec_i64_global,
     };
     let mut env: Env = HashMap::new();
@@ -1522,15 +1539,6 @@ fn verify_inner_impl(
             datatype::param_z3_value_for_vc(&vc, param.name.as_str(), param.type_name.as_deref());
         env.insert(param.name.clone(), var);
     }
-    let cover_input_values: Env = atom
-        .params
-        .iter()
-        .filter_map(|param| {
-            env.get(&param.name)
-                .cloned()
-                .map(|value| (param.name.clone(), value))
-        })
-        .collect();
     seed_tuple_result_components(
         &ctx,
         &mut env,
@@ -1875,7 +1883,7 @@ fn verify_inner_impl(
     }
 
     // Checked requires use pre-body values inside each cover's solver frame.
-    let cover_pre_body_env: Option<Env<'_>> = (!atom.covers.is_empty()).then(|| env.clone());
+    let pre_body_env = env.clone();
 
     // 3b. エイリアシング検証 (Aliasing Prevention)
     // requires が assert された後に実行する。
@@ -2142,6 +2150,7 @@ fn verify_inner_impl(
                     solver.assert(&ens_bool.not());
                     let ensures_check = crate::verification::phase_artifacts::check(&solver);
                     let mut spurious_candidate_help = None;
+                    let mut counterexample_provenance = None;
                     let (
                         ce_a,
                         ce_b,
@@ -2152,21 +2161,28 @@ fn verify_inner_impl(
                     ) = if ensures_check == SatResult::Sat {
                         // Extract counterexample from Z3 model
                         if let Some(model) = solver.get_model() {
-                            let mut ce_json = serde_json::Map::new();
+                            let mut raised_counterexample = raise_atom_counterexample(
+                                &model,
+                                atom,
+                                &pre_body_env,
+                                module_env,
+                                false,
+                            );
+                            let ce_json = raised_counterexample
+                                .to_counterexample_json()
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default();
                             let mut model_map = HashMap::new();
-                            for param in &atom.params {
-                                if let Some(var_z3) = env.get(&param.name) {
-                                    if let Some(val) = model.eval(var_z3, true) {
-                                        let val_str = format!("{}", val);
-                                        ce_json.insert(param.name.clone(), json!(val_str));
-                                    }
-                                }
-                            }
-                            let mut reconstruction_variables = HashMap::new();
                             let mut model_values: HashMap<String, CexValue> = HashMap::new();
                             for (name, var_z3) in &env {
-                                reconstruction_variables.insert(name.clone(), var_z3.clone());
-                                if let Some(val) = model.eval(var_z3, true) {
+                                let model_value =
+                                    if atom.params.iter().any(|param| param.name == *name) {
+                                        pre_body_env.get(name).unwrap_or(var_z3)
+                                    } else {
+                                        var_z3
+                                    };
+                                if let Some(val) = model.eval(model_value, true) {
                                     if let Some(int_value) = z3_dynamic_to_i64(&val) {
                                         model_map.insert(name.clone(), int_value);
                                     }
@@ -2175,6 +2191,128 @@ fn verify_inner_impl(
                                     }
                                 }
                             }
+                            let mut loss_bindings = Vec::new();
+                            for param in &atom.params {
+                                if let Some(value) = pre_body_env.get(&param.name) {
+                                    loss_bindings.push((
+                                        param.name.clone(),
+                                        param.type_name.clone(),
+                                        value.clone(),
+                                    ));
+                                }
+                            }
+                            let length_companions = atom
+                                .params
+                                .iter()
+                                .filter_map(|param| {
+                                    let type_name = param.type_name.as_deref()?;
+                                    let lowering =
+                                        length_companion_lowering(type_name, module_env)?;
+                                    let value = pre_body_env.get(&format!("len_{}", param.name))?;
+                                    Some(raise_length_companion(
+                                        &model,
+                                        &param.name,
+                                        value,
+                                        lowering,
+                                    ))
+                                })
+                                .collect::<Vec<_>>();
+                            if tuple_component_types(atom.return_type.as_deref()).is_none() {
+                                if let Some(result) = env.get("result") {
+                                    loss_bindings.push((
+                                        "result".to_string(),
+                                        atom.return_type.clone(),
+                                        result.clone(),
+                                    ));
+                                }
+                            }
+                            let params = atom
+                                .params
+                                .iter()
+                                .map(|param| param.name.as_str())
+                                .collect::<HashSet<_>>();
+                            for name in body_identifier_names(&atom.body_expr) {
+                                if name == "result"
+                                    || params.contains(name.as_str())
+                                    || name.starts_with("__")
+                                    || name.starts_with("len_")
+                                {
+                                    continue;
+                                }
+                                if let Some(value) = env.get(&name) {
+                                    loss_bindings.push((name, None, value.clone()));
+                                }
+                            }
+                            let mut loss_env = env.clone();
+                            for param in &atom.params {
+                                if let Some(value) = pre_body_env.get(&param.name) {
+                                    loss_env.insert(param.name.clone(), value.clone());
+                                    for symbol in [
+                                        format!("len_{}", param.name),
+                                        format!("__z3_arr_{}", param.name),
+                                    ] {
+                                        if let Some(value) = pre_body_env.get(&symbol) {
+                                            loss_env.insert(symbol, value.clone());
+                                        }
+                                    }
+                                    let struct_prefix = format!("__struct_{}_", param.name);
+                                    let alias_prefix = format!("{}_", param.name);
+                                    for (symbol, value) in &pre_body_env {
+                                        if symbol.starts_with(&struct_prefix)
+                                            || symbol.starts_with(&alias_prefix)
+                                        {
+                                            loss_env.insert(symbol.clone(), value.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            let raised_loss = RaisedCounterexample::from_bindings(
+                                &model,
+                                loss_bindings,
+                                &loss_env,
+                                module_env,
+                            );
+                            let length_companion_names = length_companions
+                                .iter()
+                                .map(|value| value.source_name.clone())
+                                .collect::<HashSet<_>>();
+                            let mut raised_loss = raised_loss;
+                            raised_loss.values.extend(length_companions);
+                            raised_loss
+                                .values
+                                .sort_by(|left, right| left.source_name.cmp(&right.source_name));
+                            raised_loss
+                                .omitted_solver_symbols
+                                .retain(|symbol| !length_companion_names.contains(symbol));
+                            for value in &raised_loss.values {
+                                if !raised_counterexample
+                                    .values
+                                    .iter()
+                                    .any(|raised| raised.source_name == value.source_name)
+                                {
+                                    raised_counterexample.values.push(value.clone());
+                                }
+                            }
+                            raised_counterexample
+                                .omitted_solver_symbols
+                                .extend(raised_loss.omitted_solver_symbols.iter().cloned());
+                            raised_counterexample
+                                .omitted_solver_symbols
+                                .retain(|symbol| !length_companion_names.contains(symbol));
+                            raised_counterexample
+                                .values
+                                .sort_by(|a, b| a.source_name.cmp(&b.source_name));
+                            raised_counterexample.omitted_solver_symbols.sort();
+                            raised_counterexample.omitted_solver_symbols.dedup();
+                            counterexample_provenance =
+                                Some(raised_counterexample.provenance_json());
+                            let loss_values = raised_loss
+                                .to_loss_json()
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect();
                             let a_str = ce_json
                                 .get(atom.params.first().map(|p| p.name.as_str()).unwrap_or(""))
                                 .and_then(|v| v.as_str())
@@ -2192,11 +2330,11 @@ fn verify_inner_impl(
                             };
                             let data_flow_trace =
                                 build_data_flow_trace(atom, &model_map, module_env, hir_atom);
-                            let reconstruction_loss = Some(ReconstructionLoss::from_z3_model(
-                                atom.ensures.clone(),
-                                &model,
-                                &reconstruction_variables,
-                            ));
+                            let reconstruction_loss =
+                                Some(ReconstructionLoss::from_counter_example(
+                                    atom.ensures.clone(),
+                                    loss_values,
+                                ));
                             let mut validation_status = None;
                             if enable_spurious_detection {
                                 let validation =
@@ -2271,7 +2409,10 @@ fn verify_inner_impl(
                                 atom.span.clone(),
                             )
                             .with_help(help)
-                            .with_counterexample(ce_value.clone()));
+                            .with_counterexample_provenance(
+                                ce_value.clone(),
+                                counterexample_provenance.clone(),
+                            ));
                         }
                         let constraint_mappings =
                             build_constraint_mappings_for_atom(atom, module_env);
@@ -2319,11 +2460,19 @@ fn verify_inner_impl(
                         }
                         if ce_value.is_some() {
                             extra_report_fields["counterexample_fidelity"] =
-                                json!(counterexample_fidelity(
+                                json!(raised_counterexample_fidelity(
                                     phase_contract(ENSURES_PHASE)
                                         .expect("ensures phase is declared"),
                                     validation_status.as_deref(),
+                                    counterexample_provenance
+                                        .as_ref()
+                                        .and_then(|provenance| provenance.get("complete"))
+                                        .and_then(serde_json::Value::as_bool)
+                                        .unwrap_or(false),
                                 ));
+                            if let Some(provenance) = counterexample_provenance.clone() {
+                                extra_report_fields["counterexample_provenance"] = provenance;
+                            }
                         }
                         save_visualizer_report(
                             output_dir,
@@ -2375,7 +2524,10 @@ fn verify_inner_impl(
                             atom.span.clone(),
                         )
                         .with_help(help)
-                        .with_counterexample(ce_value.clone());
+                        .with_counterexample_provenance(
+                            ce_value.clone(),
+                            counterexample_provenance.clone(),
+                        );
                         for mapping in &constraint_mappings {
                             if mapping.span.line > 0 {
                                 let related_src_span = span_to_source_span("", &mapping.span);
@@ -2706,9 +2858,7 @@ fn verify_inner_impl(
 
             vc.cover_obligations = Some(std::cell::RefCell::new(Vec::new()));
             solver.push();
-            let mut check_env = cover_pre_body_env
-                .clone()
-                .expect("cover pre-body environment is available");
+            let mut check_env = pre_body_env.clone();
             let mut check_requires_skipped = false;
             for mode in atom.clause_modes.iter().filter(|mode| {
                 mode.kind == crate::parser::ClauseKind::Requires
@@ -2789,24 +2939,31 @@ fn verify_inner_impl(
                 solver.assert(obligation);
             }
             let cover_check = crate::verification::phase_artifacts::check(&solver);
-            let witness = if cover_check == SatResult::Sat {
+            let raised_witness = if cover_check == SatResult::Sat {
                 solver.get_model().map(|model| {
-                    let mut witness = serde_json::Map::new();
-                    for param in &atom.params {
-                        if let Some(var_z3) = cover_input_values.get(&param.name) {
-                            if let Some(value) = model.eval(var_z3, true) {
-                                witness.insert(param.name.clone(), json!(format!("{}", value)));
-                            }
-                        }
-                    }
+                    let mut witness_env = pre_body_env.clone();
                     if tuple_component_types(atom.return_type.as_deref()).is_none() {
-                        if let Some(result_z3) = env.get("result") {
-                            if let Some(value) = model.eval(result_z3, true) {
-                                witness.insert("result".to_string(), json!(format!("{}", value)));
+                        if let Some(result) = env.get("result") {
+                            witness_env.insert("result".to_string(), result.clone());
+                            for (name, value) in &env {
+                                if name.starts_with("__struct_result_")
+                                    || name.starts_with("result_")
+                                    || name == "len_result"
+                                    || name.starts_with("__z3_arr_result")
+                                {
+                                    witness_env.insert(name.clone(), value.clone());
+                                }
                             }
                         }
                     }
-                    serde_json::Value::Object(witness)
+                    let raised = raise_atom_counterexample(
+                        &model,
+                        atom,
+                        &witness_env,
+                        module_env,
+                        tuple_component_types(atom.return_type.as_deref()).is_none(),
+                    );
+                    (raised.to_counterexample_json(), raised.provenance_json())
                 })
             } else {
                 None
@@ -2814,12 +2971,19 @@ fn verify_inner_impl(
             solver.pop(1);
 
             match cover_check {
-                SatResult::Sat => cover_results.push(json!({
-                    "clause": cover.clause,
-                    "label": cover.label,
-                    "status": "covered",
-                    "witness": witness.unwrap_or(serde_json::Value::Null),
-                })),
+                SatResult::Sat => {
+                    let mut result = json!({
+                        "clause": cover.clause,
+                        "label": cover.label,
+                        "status": "covered",
+                        "witness": raised_witness.as_ref().map(|(witness, _)| witness.clone())
+                            .unwrap_or(serde_json::Value::Null),
+                    });
+                    if let Some((_, provenance)) = raised_witness {
+                        result["witness_provenance"] = provenance;
+                    }
+                    cover_results.push(result);
+                }
                 SatResult::Unsat => {
                     let reason = format!(
                         "cover \"{cover_name}\" is unreachable: no execution satisfying requires reaches a state where {} holds",

@@ -162,6 +162,7 @@ fn verify_mutated_body(
         local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();

@@ -86,10 +86,10 @@ impl VerifyOutcome {
     /// `failed` counts every atom reported as failed in the summary;
     /// `solver_inconclusive` is the subset of those whose Z3 result was
     /// `unknown` / `timeout` / `resource_limit` / `spurious_candidate` rather
-    /// than a confirmed counterexample. `open_escalations` counts Lean
-    /// escalation candidates Z3 left `unknown` or spurious that the bridge did
-    /// not discharge as `lean_verified`; an open obligation is not a verdict
-    /// either way.
+    /// than a confirmed counterexample.
+    /// `open_escalations` counts Lean escalation candidates Z3 left
+    /// inconclusive that the bridge did not discharge as `lean_verified`; an
+    /// open obligation is not a verdict either way.
     fn from_counts(
         failed: usize,
         solver_inconclusive: usize,
@@ -145,7 +145,9 @@ fn early_outcome(outcome: VerifyOutcome, message: &str, json_output: bool) -> Ve
     outcome
 }
 
-/// Solver results that leave an obligation without a verdict. A spurious candidate is included because a counterexample that does not replay under Mumei semantics neither proves nor refutes the clause.
+/// Z3 results that are not a verdict. A `spurious_candidate` is a model the
+/// counterexample replay could not confirm against the Mumei semantics, so it
+/// is no more a rejection than an `unknown` is.
 pub(super) fn is_solver_inconclusive(z3_result: &str) -> bool {
     matches!(
         z3_result,
@@ -2206,9 +2208,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
 
     // Proposal B: --json outputs report.json content to stdout
     // Candidates promoted from a Z3 `unsat` (outside the decidable fragment,
-    // or a contract-trusted import) already carry a verdict; candidates Z3
-    // left `unknown` or classified as spurious that Lean did not discharge
-    // are still open.
+    // or a contract-trusted import) already carry a verdict; only candidates
+    // Z3 left inconclusive and Lean did not discharge are still open.
     let open_escalations = cert_results
         .iter()
         .filter(|(name, (z3_result, status))| {

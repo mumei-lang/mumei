@@ -154,6 +154,7 @@ pub(crate) struct VCtx<'a> {
     /// alive (Z3 refcount) so a freed pointer can never alias a new const.
     pub(crate) call_result_lens:
         std::cell::RefCell<std::collections::HashMap<usize, (Dynamic<'a>, Dynamic<'a>)>>,
+    pub(crate) call_result_symbols: std::cell::RefCell<std::collections::HashSet<String>>,
 }
 
 impl<'a> VCtx<'a> {
