@@ -337,6 +337,11 @@ pub(crate) fn format_counterexample<'a>(
         let type_hint = decl_hint.or_else(|| enum_ctx.map(|enum_def| enum_def.name.as_str()));
         let (rendering, lowering, status) =
             raise_binding(model, "target", &target_val, type_hint, env, module_env);
+        let decoded_string = if lowering == "string" {
+            decode_model_string(&target_val, &rendering)
+        } else {
+            None
+        };
         let is_raised_enum = lowering == "enum" && matches!(&status, RaisedStatus::Raised);
         let integer_tag = is_raised_enum.then(|| {
             target_val
@@ -364,6 +369,7 @@ pub(crate) fn format_counterexample<'a>(
                 rendering,
                 lowering,
                 source_type: type_hint.map(str::to_string),
+                decoded_string,
                 status,
             }],
             omitted_solver_symbols: Vec::new(),

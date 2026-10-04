@@ -264,6 +264,48 @@ fn string_length_companion_is_raised_in_loss_and_provenance() {
 }
 
 #[test]
+fn non_ascii_string_loss_is_decoded_with_source_length() {
+    // On develop at d5fe4b6, loss `s` was `\u{e6}\u{97}\u{a5}\u{e6}\u{9c}\u{ac}` and `len_s` was 6.
+    let dir = std::env::temp_dir().join(format!(
+        "mumei_non_ascii_string_loss_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir).expect("create report directory");
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--json")
+        .arg("--enable-spurious-detection")
+        .arg("--report-dir")
+        .arg(&dir)
+        .arg("tests/negative/test_str_non_ascii_cex.mm")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run non-ASCII string counterexample fixture");
+    assert!(
+        !output.status.success(),
+        "fixture must fail verification: {}",
+        output_text(&output)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: Value =
+        serde_json::from_str(stdout.trim()).expect("verify --json emits one JSON payload");
+    let provenance = &payload["counterexample_provenance"]["values"]["s"];
+    assert_eq!(provenance["status"], "raised");
+    assert!(payload["counterexample"]["s"]
+        .as_str()
+        .expect("public counterexample contains string rendering")
+        .contains(r"\u{e6}\u{97}\u{a5}\u{e6}\u{9c}\u{ac}"));
+    let loss = &payload["semantic_feedback"]["reconstruction_loss"]["counter_example"];
+    assert_eq!(loss["s"], "日本");
+    assert_eq!(loss["len_s"], 2);
+    cleanup(dir);
+}
+
+#[test]
 fn array_parameter_is_retained_even_when_it_cannot_be_raised() {
     // Previously array parameters could disappear into raw array and length symbols.
     let (dir, output, report) = verify_source(
@@ -305,6 +347,33 @@ body: n;
     if provenance["status"] == "unraisable" {
         assert_eq!(report["counterexample_fidelity"], "approximate");
     }
+    cleanup(dir);
+}
+
+#[test]
+fn bitvec_array_length_companion_is_raised() {
+    let (dir, output, report) = verify_source(
+        "bitvec_array_length",
+        r#"
+atom array_length_failure(arr: [i64], n: i64) -> i64
+requires: n > 0 && len(arr) == n;
+ensures: result > n;
+body: n;
+"#,
+        &["--bitvec-i64", "--disable-spurious-detection"],
+    );
+    assert!(
+        !output.status.success(),
+        "the false ensures clause must fail"
+    );
+    let length = &report["counterexample_provenance"]["values"]["len_arr"];
+    assert_eq!(length["status"], "raised");
+    assert_eq!(length["lowering"], "array_length");
+    assert!(
+        report["semantic_feedback"]["reconstruction_loss"]["counter_example"]["len_arr"]
+            .as_i64()
+            .is_some()
+    );
     cleanup(dir);
 }
 

@@ -463,6 +463,7 @@ mod tests {
                     rendering: "7".to_string(),
                     lowering: "int",
                     source_type: Some("i64".to_string()),
+                    decoded_string: None,
                     status: verification::RaisedStatus::Raised,
                 },
                 verification::RaisedValue {
@@ -471,6 +472,7 @@ mod tests {
                     rendering: "true".to_string(),
                     lowering: "bool",
                     source_type: Some("bool".to_string()),
+                    decoded_string: None,
                     status: verification::RaisedStatus::Raised,
                 },
             ],

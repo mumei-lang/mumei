@@ -20,11 +20,17 @@ pub struct RaisedValue {
     pub rendering: String,
     pub lowering: &'static str,
     pub source_type: Option<String>,
+    pub decoded_string: Option<String>,
     pub status: RaisedStatus,
 }
 
 impl RaisedValue {
     pub fn to_loss_json(&self) -> Value {
+        if self.lowering == "string" && matches!(self.status, RaisedStatus::Raised) {
+            if let Some(decoded) = &self.decoded_string {
+                return Value::String(decoded.clone());
+            }
+        }
         loss_json_from_raised_rendering(
             &self.rendering,
             self.lowering,
@@ -52,6 +58,7 @@ pub fn loss_json_from_raised_rendering(rendering: &str, lowering: &str, is_raise
             .map(Value::Number)
             .unwrap_or_else(|| Value::String(rendering.to_string())),
         "string" => string_value_from_rendering(rendering)
+            .and_then(|value| decode_z3_string_escapes(&value))
             .map(Value::String)
             .unwrap_or_else(|| Value::String(rendering.to_string())),
         "bool" => match rendering {
@@ -74,6 +81,115 @@ fn string_value_from_rendering(rendering: &str) -> Option<String> {
         value.push(character);
     }
     Some(value)
+}
+
+pub fn decode_model_string(value: &Dynamic<'_>, raw: &str) -> Option<String> {
+    let value = value
+        .as_string()
+        .and_then(|string| string.as_string())
+        .or_else(|| string_value_from_rendering(raw))?;
+    decode_z3_string_escapes(&value)
+}
+
+fn decode_z3_string_escapes(value: &str) -> Option<String> {
+    let mut characters = value.chars();
+    let mut decoded = String::with_capacity(value.len());
+    let mut escaped_bytes = Vec::new();
+
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            flush_escaped_bytes(&mut escaped_bytes, &mut decoded);
+            decoded.push(character);
+            continue;
+        }
+
+        let Some(escape) = characters.next() else {
+            decoded.push('\\');
+            break;
+        };
+        if escape != 'u' {
+            flush_escaped_bytes(&mut escaped_bytes, &mut decoded);
+            decoded.push('\\');
+            decoded.push(escape);
+            continue;
+        }
+        match characters.next()? {
+            '{' => {
+                let mut digits = String::new();
+                loop {
+                    match characters.next()? {
+                        '}' if !digits.is_empty() => break,
+                        digit if digit.is_ascii_hexdigit() && digits.len() < 5 => {
+                            digits.push(digit);
+                        }
+                        _ => return None,
+                    }
+                }
+                let codepoint = u32::from_str_radix(&digits, 16).ok()?;
+                let scalar = char::from_u32(codepoint)?;
+                if codepoint <= u8::MAX as u32 {
+                    escaped_bytes.push(codepoint as u8);
+                } else {
+                    flush_escaped_bytes(&mut escaped_bytes, &mut decoded);
+                    decoded.push(scalar);
+                }
+            }
+            first_digit => {
+                if !first_digit.is_ascii_hexdigit() {
+                    return None;
+                }
+                let mut digits = String::with_capacity(4);
+                digits.push(first_digit);
+                for _ in 0..3 {
+                    let digit = characters.next()?;
+                    if !digit.is_ascii_hexdigit() {
+                        return None;
+                    }
+                    digits.push(digit);
+                }
+                let code_unit = u16::from_str_radix(&digits, 16).ok()?;
+                flush_escaped_bytes(&mut escaped_bytes, &mut decoded);
+                let codepoint = if (0xd800..=0xdbff).contains(&code_unit) {
+                    if characters.next()? != '\\' || characters.next()? != 'u' {
+                        return None;
+                    }
+                    let mut low_digits = String::with_capacity(4);
+                    for _ in 0..4 {
+                        let digit = characters.next()?;
+                        if !digit.is_ascii_hexdigit() {
+                            return None;
+                        }
+                        low_digits.push(digit);
+                    }
+                    let low = u16::from_str_radix(&low_digits, 16).ok()?;
+                    if !(0xdc00..=0xdfff).contains(&low) {
+                        return None;
+                    }
+                    0x10000 + (((code_unit as u32 - 0xd800) << 10) | (low as u32 - 0xdc00))
+                } else if (0xdc00..=0xdfff).contains(&code_unit) {
+                    return None;
+                } else {
+                    u32::from(code_unit)
+                };
+                decoded.push(char::from_u32(codepoint)?);
+            }
+        }
+    }
+    flush_escaped_bytes(&mut escaped_bytes, &mut decoded);
+    Some(decoded)
+}
+
+fn flush_escaped_bytes(bytes: &mut Vec<u8>, decoded: &mut String) {
+    if bytes.is_empty() {
+        return;
+    }
+    if let Ok(value) = std::str::from_utf8(bytes) {
+        decoded.push_str(value);
+    } else {
+        decoded.extend(bytes.drain(..).map(char::from));
+        return;
+    }
+    bytes.clear();
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -188,12 +304,18 @@ impl RaisedCounterexample {
                     Some(name),
                 ),
             };
+            let decoded_string = if lowering == "string" {
+                decode_model_string(&evaluated, &rendering)
+            } else {
+                None
+            };
             raised.values.push(RaisedValue {
                 source_name: name.clone(),
                 solver_name: None,
                 rendering,
                 lowering,
                 source_type,
+                decoded_string,
                 status,
             });
         }
@@ -221,6 +343,7 @@ impl RaisedCounterexample {
                             rendering,
                             lowering: "tuple",
                             source_type: None,
+                            decoded_string: None,
                             status: RaisedStatus::Unraisable {
                                 reason: "tuple result components are not linked to the body"
                                     .to_string(),
@@ -242,6 +365,7 @@ impl RaisedCounterexample {
                         rendering,
                         lowering: "old",
                         source_type: None,
+                        decoded_string: None,
                         status: RaisedStatus::Unraisable {
                             reason: "pre-state provenance is unavailable".to_string(),
                         },
@@ -377,9 +501,15 @@ pub fn raise_named_model_value<'ctx>(
     module_env: &ModuleEnv,
 ) -> RaisedValue {
     let (rendering, lowering, status) = raise_model_value(model, value, type_hint, module_env);
+    let decoded_string = if lowering == "string" {
+        decode_model_string(value, &rendering)
+    } else {
+        None
+    };
     RaisedValue {
         source_name: source_name.into(),
         solver_name: None,
+        decoded_string,
         rendering,
         lowering,
         source_type: type_hint.map(str::to_string),
@@ -396,21 +526,35 @@ pub fn raise_length_companion<'ctx>(
     let (rendering, status) = match model.eval(value, true) {
         Some(evaluated) => {
             let raw = evaluated.to_string();
-            match evaluated.as_int().and_then(|integer| integer.as_i64()) {
-                Some(length) => (length.to_string(), RaisedStatus::Raised),
-                None => {
-                    let reason = if evaluated.as_int().is_some() {
-                        "length companion is outside the supported i64 range"
-                    } else {
-                        "length companion did not evaluate to a Z3 Int"
-                    };
-                    (
-                        raw,
-                        RaisedStatus::Unraisable {
-                            reason: reason.to_string(),
-                        },
-                    )
+            let length = if let Some(integer) = evaluated.as_int() {
+                integer
+                    .as_i64()
+                    .ok_or_else(|| "length companion is outside the supported i64 range".into())
+            } else if let Some(bitvector) = evaluated.as_bv() {
+                if bitvector.get_size() != 64 {
+                    Err(format!(
+                        "expected a 64-bit bit-vector length, found a {}-bit bit-vector",
+                        bitvector.get_size()
+                    ))
+                } else {
+                    bitvector
+                        .as_u64()
+                        .or_else(|| bitvector.as_i64().map(|bits| bits as u64))
+                        .map(|bits| bits as i64)
+                        .ok_or_else(|| "could not decode the bit-vector length".to_string())
                 }
+            } else {
+                Err("length companion did not evaluate to a Z3 Int or 64-bit bit-vector".into())
+            };
+            match length {
+                Ok(length) if length >= 0 => (length.to_string(), RaisedStatus::Raised),
+                Ok(_) => (
+                    raw,
+                    RaisedStatus::Unraisable {
+                        reason: "negative length companion is not a valid source length".into(),
+                    },
+                ),
+                Err(reason) => (raw, RaisedStatus::Unraisable { reason }),
             }
         }
         None => (
@@ -426,6 +570,7 @@ pub fn raise_length_companion<'ctx>(
         rendering,
         lowering,
         source_type: None,
+        decoded_string: None,
         status,
     }
 }
@@ -576,7 +721,13 @@ fn raise_model_value_with_env<'ctx>(
             .unwrap_or_else(|| {
                 unraisable(raw.clone(), "bool", "could not decode the boolean value")
             }),
-        Some(LoweredType::Str) => (raw, "string", RaisedStatus::Raised),
+        Some(LoweredType::Str) => {
+            if decode_model_string(value, &raw).is_some() {
+                (raw, "string", RaisedStatus::Raised)
+            } else {
+                unraisable(raw, "string", "could not decode the solver string")
+            }
+        }
         Some(LoweredType::F32) => unraisable(
             raw,
             "f32",
@@ -1208,14 +1359,15 @@ pub fn raise_atom_counterexample<'ctx>(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_ieee754_f64, length_companion_lowering, loss_json_from_raised_rendering,
-        raise_length_companion, raise_model_value, RaisedCounterexample, RaisedStatus, RaisedValue,
+        decode_ieee754_f64, decode_model_string, decode_z3_string_escapes,
+        length_companion_lowering, loss_json_from_raised_rendering, raise_length_companion,
+        raise_model_value, RaisedCounterexample, RaisedStatus, RaisedValue,
     };
     use crate::parser::{RefinedType, Span};
     use crate::verification::ModuleEnv;
     use serde_json::Value;
     use std::collections::HashMap;
-    use z3::ast::{Ast, Bool, Dynamic, Float, Int, Real, BV};
+    use z3::ast::{Ast, Bool, Dynamic, Float, Int, Real, String as Z3String, BV};
     use z3::{Config, Context, SatResult, Solver};
 
     #[test]
@@ -1406,6 +1558,7 @@ mod tests {
             rendering: u64::MAX.to_string(),
             lowering: "bitvec_u64",
             source_type: Some("u64".to_string()),
+            decoded_string: None,
             status: RaisedStatus::Raised,
         };
         assert_eq!(unsigned.to_loss_json(), Value::Number(u64::MAX.into()));
@@ -1416,6 +1569,7 @@ mod tests {
             rendering: "solver-value".to_string(),
             lowering: "int",
             source_type: Some("i64".to_string()),
+            decoded_string: None,
             status: RaisedStatus::Unraisable {
                 reason: "unsupported integer range".to_string(),
             },
@@ -1431,6 +1585,7 @@ mod tests {
             rendering: "Shape::Circle(1)".to_string(),
             lowering: "enum",
             source_type: Some("Shape".to_string()),
+            decoded_string: None,
             status: RaisedStatus::Raised,
         };
         assert_eq!(
@@ -1444,6 +1599,70 @@ mod tests {
         assert_eq!(
             loss_json_from_raised_rendering("\"a\"\"b\"", "string", true),
             Value::String("a\"b".to_string())
+        );
+        assert_eq!(
+            loss_json_from_raised_rendering(
+                r#""\u{e6}\u{97}\u{a5}\u{e6}\u{9c}\u{ac}""#,
+                "string",
+                true
+            ),
+            Value::String("日本".to_string())
+        );
+        let decoded = RaisedValue {
+            source_name: "s".to_string(),
+            solver_name: None,
+            rendering: r#""\u{e6}\u{97}\u{a5}\u{e6}\u{9c}\u{ac}""#.to_string(),
+            lowering: "string",
+            source_type: Some("Str".to_string()),
+            decoded_string: Some("日本".to_string()),
+            status: RaisedStatus::Raised,
+        };
+        assert_eq!(decoded.to_loss_json(), Value::String("日本".to_string()));
+    }
+
+    #[test]
+    fn model_strings_decode_z3_escapes_and_preserve_raw_fallbacks() {
+        assert_eq!(
+            decode_z3_string_escapes(r"\u{65e5}\u{672c}").as_deref(),
+            Some("日本")
+        );
+        assert_eq!(
+            decode_z3_string_escapes(r"\u65e5\u672c").as_deref(),
+            Some("日本")
+        );
+        assert_eq!(decode_z3_string_escapes(r"\u{zz}"), None);
+        assert_eq!(decode_z3_string_escapes(r"\u{d800}"), None);
+        assert_eq!(decode_z3_string_escapes(r"\uD800"), None);
+
+        let config = Config::new();
+        let context = Context::new(&config);
+        let non_string: Dynamic = Bool::from_bool(&context, true).into();
+        assert_eq!(
+            decode_model_string(&non_string, r#""a""b""#).as_deref(),
+            Some("a\"b")
+        );
+    }
+
+    #[test]
+    fn model_string_probe_decodes_z3_unicode_and_control_escapes() {
+        let config = Config::new();
+        let context = Context::new(&config);
+        let solver = Solver::new(&context);
+        solver.assert(&Bool::from_bool(&context, true));
+        assert_eq!(solver.check(), SatResult::Sat);
+        let model = solver.get_model().unwrap();
+        let expected = "日本a\"b\\c\n\t\r\\n";
+        let value: Dynamic = Z3String::from_str(&context, expected).unwrap().into();
+        let evaluated = model.eval(&value, true).unwrap();
+        let raw = evaluated.to_string();
+        let exposed = evaluated
+            .as_string()
+            .and_then(|string| string.as_string())
+            .expect("Z3 model value is a string");
+        assert_eq!(
+            decode_z3_string_escapes(&exposed).as_deref(),
+            Some(expected),
+            "Z3 exposed string was {exposed:?}; rendering was {raw:?}"
         );
     }
 
@@ -1467,10 +1686,46 @@ mod tests {
         assert_eq!(
             raised.status,
             RaisedStatus::Unraisable {
-                reason: "length companion did not evaluate to a Z3 Int".to_string(),
+                reason: "length companion did not evaluate to a Z3 Int or 64-bit bit-vector"
+                    .to_string(),
             }
         );
         assert_eq!(raised.to_loss_json(), Value::String("true".to_string()));
+    }
+
+    #[test]
+    fn length_companions_accept_nonnegative_bv64_and_reject_negative_or_wrong_width_values() {
+        let config = Config::new();
+        let context = Context::new(&config);
+        let solver = Solver::new(&context);
+        solver.assert(&Bool::from_bool(&context, true));
+        assert_eq!(solver.check(), SatResult::Sat);
+        let model = solver.get_model().unwrap();
+
+        let valid: Dynamic = BV::from_u64(&context, 9, 64).into();
+        let raised = raise_length_companion(&model, "arr", &valid, "array_length");
+        assert_eq!(raised.rendering, "9");
+        assert_eq!(raised.status, RaisedStatus::Raised);
+        assert_eq!(raised.to_loss_json(), Value::Number(9.into()));
+
+        let negative: Dynamic = BV::from_i64(&context, -1, 64).into();
+        let raised = raise_length_companion(&model, "arr", &negative, "array_length");
+        assert_eq!(
+            raised.status,
+            RaisedStatus::Unraisable {
+                reason: "negative length companion is not a valid source length".to_string(),
+            }
+        );
+
+        let wrong_width: Dynamic = BV::from_u64(&context, 9, 32).into();
+        let raised = raise_length_companion(&model, "arr", &wrong_width, "array_length");
+        assert_eq!(
+            raised.status,
+            RaisedStatus::Unraisable {
+                reason: "expected a 64-bit bit-vector length, found a 32-bit bit-vector"
+                    .to_string(),
+            }
+        );
     }
 
     #[test]
