@@ -201,8 +201,8 @@ fn call_result_sort<'a>(vc: &VCtx<'a>, callee: &Atom) -> Sort<'a> {
     )
 }
 
-/// Lexicographic termination obligation for Int or signed bit-vector measures.
-/// Returns None when arities or component sorts are incompatible.
+/// `0 <= A1 ∧ … ∧ 0 <= Ak ∧ lex(B < A)` for Int measures, or the signed bit-vector equivalent.
+/// A one-component measure builds exactly `0 <= A ∧ B < A`. Returns None when the arities differ or a component pair lowers to incompatible sorts.
 pub(crate) fn termination_measure_obligation<'a>(
     ctx: &'a Context,
     measure_a: &[Dynamic<'a>],
