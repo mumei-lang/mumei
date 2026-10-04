@@ -155,10 +155,18 @@ pub(crate) fn collect_call_edges_stmt(stmt: &Stmt) -> Vec<String> {
 }
 
 /// Contract clause texts of an atom: `requires`/`ensures` already carry the
-/// labelled and moded clause texts (the parser conjoins them), so they are
-/// the complete contract surface.
+/// labelled and moded clause texts (the parser conjoins them). Top-level
+/// quantified requires conjuncts are moved into `forall_constraints` by the
+/// parser instead, so their `start`/`end`/`condition` texts are included
+/// too — together they are the complete contract surface.
 fn contract_clause_texts(atom: &Atom) -> Vec<&str> {
-    vec![atom.requires.as_str(), atom.ensures.as_str()]
+    let mut texts = vec![atom.requires.as_str(), atom.ensures.as_str()];
+    for q in &atom.forall_constraints {
+        texts.push(q.start.as_str());
+        texts.push(q.end.as_str());
+        texts.push(q.condition.as_str());
+    }
+    texts
 }
 
 /// Edges from the atom's contract clauses only (requires/ensures), resolved

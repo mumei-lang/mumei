@@ -793,3 +793,136 @@ fn test_lambda_bound_but_never_invoked_verifies() {
     let case = verify("lu", LAM_UNINVOKED, "lu");
     assert_case(case, "verified");
 }
+
+// Fix 4: calls inside top-level quantified requires conjuncts are SCC edges,
+// so `qp` is a recursive call and needs a termination obligation.
+const QP_QUANTIFIED_SELF_REQUIRES: &str = r#"
+atom qp(n: i64) -> i64
+    requires: n >= 0 && forall(i, 0, n, qp(n) >= 0);
+    ensures: result >= 0;
+    decreases: n;
+    body: 0;
+"#;
+
+// A binder-dependent call is still rejected by
+// `reject_quantifier_dependent_call` before any congruent lowering.
+const QP2_BINDER_CALL: &str = r#"
+atom qp2(n: i64) -> i64
+    requires: n >= 0 && forall(i, 0, n, qp2(i) >= 0);
+    ensures: result >= 0;
+    decreases: n;
+    body: 0;
+"#;
+
+const LOOP_DECREASING: &str = r#"
+atom wl(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result >= 0;
+    decreases: n;
+    body: {
+        let s = 0;
+        let i = 0;
+        while i < n
+        invariant: i >= 0 && i <= n && s >= 0
+        decreases: n - i
+        {
+            s = s + wl(n - 1);
+            i = i + 1;
+        };
+        s
+    };
+"#;
+
+const LOOP_STABLE: &str = r#"
+atom wb(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result >= 0;
+    decreases: n;
+    body: {
+        let s = 0;
+        let i = 0;
+        while i < n
+        invariant: i >= 0 && i <= n && s >= 0
+        decreases: n - i
+        {
+            s = s + wb(n);
+            i = i + 1;
+        };
+        s
+    };
+"#;
+
+// `s == 0` only holds through congruence: `wc(n - 1) - wc(n - 1)` is 0 only
+// because the two identical calls share one `rec_fn#wc` result.
+const LOOP_CONGRUENT: &str = r#"
+atom wc(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result >= 0;
+    decreases: n;
+    body: {
+        let s = 0;
+        let i = 0;
+        while i < n
+        invariant: i >= 0 && i <= n && s == 0
+        decreases: n - i
+        {
+            s = s + wc(n - 1) - wc(n - 1);
+            i = i + 1;
+        };
+        s
+    };
+"#;
+
+#[test]
+fn test_quantified_requires_self_call_fails_termination() {
+    let case = verify("qp", QP_QUANTIFIED_SELF_REQUIRES, "qp");
+    assert!(case.did_not_crash());
+    assert_verdict(&case, "failed");
+    assert_eq!(
+        case.failure_type().as_deref(),
+        Some("termination_measure_violation"),
+        "qp should report termination_measure_violation; report:\n{:?}",
+        case.report
+    );
+}
+
+#[test]
+fn test_quantified_requires_binder_call_stays_unverifiable() {
+    let case = verify("qp2", QP2_BINDER_CALL, "qp2");
+    assert!(case.did_not_crash());
+    assert_eq!(
+        case.output.status.code(),
+        Some(3),
+        "qp2 should exit 3; stdout:\n{}",
+        String::from_utf8_lossy(&case.output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&case.output.stdout);
+    assert!(
+        stdout.contains("Unsupported call under quantifier"),
+        "expected the QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED marker; stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn test_recursive_call_in_loop_decreases_verifies() {
+    let case = verify("wl", LOOP_DECREASING, "wl");
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_recursive_call_in_loop_stable_fails_termination() {
+    let case = verify("wb", LOOP_STABLE, "wb");
+    assert_verdict(&case, "failed");
+    assert_eq!(
+        case.failure_type().as_deref(),
+        Some("termination_measure_violation"),
+        "wb should report termination_measure_violation; report:\n{:?}",
+        case.report
+    );
+}
+
+#[test]
+fn test_recursive_call_in_loop_congruent_invariant_verifies() {
+    let case = verify("wc", LOOP_CONGRUENT, "wc");
+    assert_case(case, "verified");
+}
