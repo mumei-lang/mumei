@@ -5,6 +5,7 @@ use super::*;
 use crate::lowering::{lower, LoweredType};
 use crate::verification::raising::{
     call_result_handles, mark_abstract_call_result_struct_unraisable, references_call_result,
+    resolve_source_base_type,
 };
 use crate::verification::translator::may_write::CalleeRef;
 use serde_json::json;
@@ -1167,22 +1168,41 @@ pub(crate) fn expr_to_z3<'a>(
                                                             vc.module_env,
                                                         );
                                                         if raised_value.lowering == "struct" {
-                                                            let field_prefix =
-                                                                format!("__struct_{}_", param.name);
                                                             let references_abstract_result =
                                                                 references_call_result(
                                                                     arg_val,
                                                                     &call_result_handles,
-                                                                ) || call_env.iter().any(
-                                                                    |(name, field_value)| {
-                                                                        name.starts_with(
-                                                                            &field_prefix,
-                                                                        ) && references_call_result(
-                                                                            field_value,
-                                                                            &call_result_handles,
+                                                                ) || param
+                                                                    .type_name
+                                                                    .as_deref()
+                                                                    .and_then(|type_name| {
+                                                                        let base_type =
+                                                                            resolve_source_base_type(
+                                                                                type_name,
+                                                                                vc.module_env,
+                                                                            );
+                                                                        vc.module_env
+                                                                            .get_struct(&base_type)
+                                                                    })
+                                                                    .is_some_and(|struct_def| {
+                                                                        struct_def.fields.iter().any(
+                                                                            |field| {
+                                                                                call_env
+                                                                                    .get(&struct_field_key(
+                                                                                        &param.name,
+                                                                                        &field.name,
+                                                                                    ))
+                                                                                    .is_some_and(
+                                                                                        |field_value| {
+                                                                                            references_call_result(
+                                                                                                field_value,
+                                                                                                &call_result_handles,
+                                                                                            )
+                                                                                        },
+                                                                                    )
+                                                                            },
                                                                         )
-                                                                    },
-                                                                );
+                                                                    });
                                                             if references_abstract_result {
                                                                 let raw_rendering = model
                                                                     .eval(arg_val, true)

@@ -1203,7 +1203,7 @@ fn exact_dyadic_f32(numerator: i64, denominator: i64) -> Option<f32> {
     (rounded.is_finite() && rounded as f64 == value).then_some(rounded)
 }
 
-fn resolve_source_base_type(type_name: &str, module_env: &ModuleEnv) -> String {
+pub(crate) fn resolve_source_base_type(type_name: &str, module_env: &ModuleEnv) -> String {
     let mut base = type_name.to_string();
     let mut seen = HashSet::new();
     while seen.insert(base.clone()) {

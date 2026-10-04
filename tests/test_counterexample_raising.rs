@@ -384,6 +384,44 @@ body: {
 }
 
 #[test]
+fn callsite_struct_result_field_prefix_does_not_match_other_bindings() {
+    let source = r#"
+struct Pt { a: i64, b: i64 }
+
+atom check(p: Pt, p_x: Pt) -> i64
+requires: p.a > 0;
+ensures: true;
+body: p.a;
+
+atom mk(x: i64) -> Pt
+requires: true;
+ensures: true;
+body: Pt { a: x, b: 0 };
+
+atom caller2(p_x: Pt, q: Pt) -> i64
+requires: true;
+ensures: true;
+body: {
+    let p_r = mk(p_x.a);
+    check(q, p_r)
+};
+"#
+    .to_string();
+    let (dir, diagnostic) = verify_callsite_source("callsite_struct_prefix_collision", &source);
+    assert_eq!(
+        diagnostic.pointer("/data/counterexample_provenance/values/p/status"),
+        Some(&Value::String("raised".to_string()))
+    );
+    let rendering = diagnostic
+        .pointer("/data/counterexample/p")
+        .and_then(Value::as_str)
+        .expect("raised struct argument");
+    assert!(rendering.starts_with("Pt { a: "), "{rendering}");
+    assert!(rendering.contains(", b: "), "{rendering}");
+    cleanup(dir);
+}
+
+#[test]
 fn bitvec_i64_counterexample_is_signed_decimal() {
     // Before raising, the same value was printed as a hexadecimal #x bit-vector.
     let (dir, output, report) = verify_source(
