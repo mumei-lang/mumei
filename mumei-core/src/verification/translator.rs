@@ -19,6 +19,7 @@ pub(crate) use context::{
     LocalLambda, VCtx,
 };
 
+pub(crate) use expr::termination_violation_error;
 pub(crate) use expr::{
     discharge_bv_div_obligations, discharge_bv_shift_obligations, div_safety_status, expr_to_z3,
     has_new_obligations, obligation_marks, rebind_deferred_obligations, shift_range_status,

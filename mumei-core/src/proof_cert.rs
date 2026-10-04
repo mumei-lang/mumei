@@ -97,6 +97,7 @@ mod tests {
             invariant: None,
             effects: vec![],
             return_type: None,
+            decreases: None,
             span: crate::parser::Span::new("test.mm", 0, 0, 0),
             effect_pre: HashMap::new(),
             effect_post: HashMap::new(),

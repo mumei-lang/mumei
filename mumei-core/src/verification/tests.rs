@@ -49,6 +49,7 @@ fn test_atom(
         invariant: None,
         effects: vec![],
         return_type: return_type.map(str::to_string),
+        decreases: None,
         span: Span::default(),
         effect_pre: HashMap::new(),
         effect_post: HashMap::new(),
@@ -95,9 +96,9 @@ fn test_subsumption_vc<'a>(ctx: &'a Context, module_env: &'a ModuleEnv) -> VCtx<
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     }
 }
@@ -263,6 +264,28 @@ fn test_contract_mutation_detection() {
 
     let mut mutated = atom.clone();
     mutated.ensures = "result >= a".to_string();
+    let err = verify_contract_integrity(&mutated, &manifest).unwrap_err();
+
+    assert!(matches!(err, MumeiError::ContractMutation { .. }));
+}
+
+#[test]
+fn test_contract_integrity_verification_flags_decreases_mutation() {
+    let mut atom = test_atom(
+        "bounded_dec",
+        vec![test_param("a", Some("i64")), test_param("b", Some("i64"))],
+        "a >= 0 && b >= 0",
+        "result == a + b",
+        "a + b",
+        Some("i64"),
+    );
+    atom.decreases = Some("a".to_string());
+    let mut module_env = ModuleEnv::new();
+    module_env.register_atom(&atom);
+    let manifest = generate_contract_manifest(&module_env);
+
+    let mut mutated = atom.clone();
+    mutated.decreases = Some("a + 1".to_string());
     let err = verify_contract_integrity(&mutated, &manifest).unwrap_err();
 
     assert!(matches!(err, MumeiError::ContractMutation { .. }));
@@ -1197,9 +1220,9 @@ fn test_constraint_budget_exceeded() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
 
@@ -1251,9 +1274,9 @@ fn test_constraint_budget_no_limit() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
 
@@ -1771,6 +1794,7 @@ fn test_build_semantic_feedback_sub_constraints() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::default(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
@@ -2081,9 +2105,9 @@ fn test_subsumption_check_holds_with_requires() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2116,6 +2140,7 @@ fn test_subsumption_check_holds_with_requires() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::default(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
@@ -2328,9 +2353,9 @@ fn test_subsumption_check_bool_param_and_result() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2363,6 +2388,7 @@ fn test_subsumption_check_bool_param_and_result() {
         invariant: None,
         effects: vec![],
         return_type: Some("bool".to_string()),
+        decreases: None,
         span: Span::default(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
@@ -2416,9 +2442,9 @@ fn test_subsumption_check_call_ref_alias_x() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2451,6 +2477,7 @@ fn test_subsumption_check_call_ref_alias_x() {
         invariant: None,
         effects: vec![],
         return_type: Some("i64".to_string()),
+        decreases: None,
         span: Span::default(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
@@ -2504,9 +2531,9 @@ fn test_subsumption_check_call_ref_aliases_do_not_follow_concrete_names() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
     let concrete = test_atom(
@@ -2568,9 +2595,9 @@ fn test_subsumption_check_array_length_does_not_alias_caller_symbol() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
     let concrete = test_atom(
@@ -2630,9 +2657,9 @@ fn test_subsumption_check_array_length_aliases_follow_callback_position() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
     let concrete = test_atom(
@@ -2695,9 +2722,9 @@ fn test_subsumption_check_fails_without_requires() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2730,6 +2757,7 @@ fn test_subsumption_check_fails_without_requires() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::default(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
@@ -2789,9 +2817,9 @@ fn test_subsumption_check_crossed_param_names() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2835,6 +2863,7 @@ fn test_subsumption_check_crossed_param_names() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::default(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
@@ -2890,9 +2919,9 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2925,6 +2954,7 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::default(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
@@ -2973,9 +3003,9 @@ fn test_subsumption_check_concrete_true_ensures_fails() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -3008,6 +3038,7 @@ fn test_subsumption_check_concrete_true_ensures_fails() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::default(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
@@ -3192,6 +3223,7 @@ fn test_infer_requires_substitutes_callee_params() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::new("", 0, 0, 0),
         effect_pre: HashMap::new(),
         effect_post: HashMap::new(),
@@ -3238,6 +3270,7 @@ fn test_infer_requires_substitutes_callee_params() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::new("", 0, 0, 0),
         effect_pre: HashMap::new(),
         effect_post: HashMap::new(),
@@ -3290,6 +3323,7 @@ fn quantified_needs_atom() -> Atom {
         clause_modes: Vec::new(),
         covers: Vec::new(),
         requires: "n >= 0 && true".to_string(),
+        decreases: None,
         forall_constraints: vec![Quantifier {
             q_type: QuantifierType::ForAll,
             var: "i".to_string(),
@@ -3346,6 +3380,7 @@ fn caller_calling_needs(arg_scalar: &str, call_args: &str) -> Atom {
         covers: Vec::new(),
         requires: "true".to_string(),
         forall_constraints: vec![],
+        decreases: None,
         ensures: "true".to_string(),
         body_expr: format!("needs(xs, {call_args})"),
         consumed_params: vec![],
@@ -3590,9 +3625,9 @@ fn test_expr_to_z3_true_false_are_bool() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -3667,9 +3702,9 @@ fn test_expr_to_z3_pow_constant_folds_full_precision() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -3737,9 +3772,9 @@ fn test_tuple_result_indexing_uses_typed_components() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -3907,9 +3942,9 @@ fn test_chained_comparison_normalizes_before_lowering() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
-
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
