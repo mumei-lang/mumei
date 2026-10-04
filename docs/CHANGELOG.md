@@ -45,6 +45,15 @@
   `recursive_contract_needs_decreases` / `recursive_contract_unsupported`
   hint diagnostic; the call semantics and verdict are unchanged.
 - **Verifier policy version**: bumped to 7 so cached proofs are re-derived.
+### Unreleased: call-arity checking at call sites
+
+- Calls whose argument count differs from the callee's parameter count are
+  rejected with `expected N argument(s), got M` at every call path — direct
+  calls and `call(atom_ref(..))` — instead of silently dropping extra
+  arguments or surfacing as an unrelated `precondition (requires) not
+  satisfied` failure.
+- `VERIFIER_POLICY_VERSION` bumped to 9 so cached proofs are re-derived.
+
 ### Unreleased: quantified `requires` checked at call sites
 
 - Quantified `requires` conjuncts (`forall`/`exists` at the top level of
