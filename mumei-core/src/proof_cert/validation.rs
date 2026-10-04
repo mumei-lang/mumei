@@ -191,6 +191,13 @@ pub fn verify_certificate(
                     } else {
                         "proven".to_string()
                     }
+                } else if allow_lean_verified
+                    && matches!(
+                        lean_axiom_audit(ac),
+                        LeanAxiomAudit::Rejected { .. } | LeanAxiomAudit::Error
+                    )
+                {
+                    "axiom_rejected".to_string()
                 } else {
                     "unproven".to_string()
                 }

@@ -1,4 +1,6 @@
-use mumei_core::proof_cert::{refresh_certificate_integrity, LeanResultMetadata, ProofCertificate};
+use mumei_core::proof_cert::{
+    refresh_certificate_integrity, EscalationReason, LeanResultMetadata, ProofCertificate,
+};
 use mumei_core::verification;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -91,6 +93,35 @@ fn patch_lean_verified(
         kernel_axioms: kernel_axioms
             .map(|axioms| axioms.iter().map(|axiom| (*axiom).to_string()).collect()),
         axiom_audit: axiom_audit.map(str::to_string),
+        ..Default::default()
+    });
+    refresh_certificate_integrity(&mut cert);
+    std::fs::write(
+        cert_path,
+        serde_json::to_string_pretty(&cert).expect("serialize certificate"),
+    )
+    .expect("write patched certificate");
+}
+
+fn patch_escalated_rejected(cert_path: &Path) {
+    let raw = std::fs::read_to_string(cert_path).expect("read certificate");
+    let mut cert: ProofCertificate = serde_json::from_str(&raw).expect("deserialize certificate");
+    let atom = &mut cert.atoms[0];
+    atom.z3_check_result = "unknown".to_string();
+    atom.z3_result_class = "unknown".to_string();
+    atom.status = "unverified".to_string();
+    atom.escalation_reason = Some(EscalationReason::NonlinearArithmetic);
+    atom.translator_version = verification::LEAN_TRANSLATOR_VERSION.to_string();
+    atom.bridge_lemma_hash = verification::LEAN_BRIDGE_LEMMA_HASH.to_string();
+    atom.lean_result_metadata = Some(LeanResultMetadata {
+        status: "lean_verified".to_string(),
+        theorem_name: "clamp_low_spec".to_string(),
+        translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+        bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+        proof_path: "Generated/Test.lean".to_string(),
+        diagnostics: vec![],
+        kernel_axioms: Some(vec!["sorryAx".to_string()]),
+        axiom_audit: Some("passed".to_string()),
         ..Default::default()
     });
     refresh_certificate_integrity(&mut cert);
@@ -218,4 +249,34 @@ fn verify_cert_reports_rejected_audits_and_strict_requires_audit_metadata() {
         String::from_utf8_lossy(&strict.stderr)
     );
     assert!(String::from_utf8_lossy(&strict.stderr).contains("unaudited"));
+}
+
+#[test]
+fn verify_cert_reports_escalated_rejected_audit_only_with_opt_in() {
+    let dir = fixture_dir("escalated_axiom_audit");
+    let source = dir.join("main.mm");
+    let cert = dir.join("main.proof.json");
+    std::fs::write(&source, SOURCE).expect("write source");
+    certify(&source, &cert);
+    patch_escalated_rejected(&cert);
+
+    let rejected = verify_cert(&cert, &source, true, false);
+    assert_eq!(
+        rejected.status.code(),
+        Some(1),
+        "an opted-in rejected audit must exit 1\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    let rejected_stdout = String::from_utf8_lossy(&rejected.stdout);
+    assert!(rejected_stdout.contains("clamp_low: axiom_rejected"));
+    assert!(rejected_stdout.contains("kernel_axioms: [\"sorryAx\"]"));
+    assert!(rejected_stdout.contains("axiom_audit: rejected"));
+
+    let unproven = verify_cert(&cert, &source, false, false);
+    let unproven_stdout = String::from_utf8_lossy(&unproven.stdout);
+    assert!(unproven_stdout.contains("clamp_low: unproven"));
+    assert!(!unproven_stdout.contains("clamp_low: axiom_rejected"));
+    assert!(unproven_stdout.contains("kernel_axioms: [\"sorryAx\"]"));
+    assert!(unproven_stdout.contains("axiom_audit: rejected"));
 }

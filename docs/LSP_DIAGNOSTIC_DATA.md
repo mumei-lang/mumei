@@ -83,6 +83,8 @@ A kernel-axiom audit rejection produces a severity `2` diagnostic:
 
 `disallowed` lists the non-standard kernel axioms reported by the rejected
 `axiom_audit`. An audit error also uses `axiom_rejected` but omits `disallowed`.
+This diagnostic is also emitted for an escalated atom whose certificate still
+records its Z3 result but whose attached Lean result failed the audit.
 
 ## `mumei-intent` data
 

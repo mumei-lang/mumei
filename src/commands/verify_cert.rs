@@ -103,12 +103,18 @@ pub(crate) fn cmd_verify_cert(
             if !ac.ensures.is_empty() {
                 println!("      ensures: {}", ac.ensures);
             }
-            if ac.z3_check_result == "lean_verified" {
-                if let Some(metadata) = ac
+            if ac.z3_check_result == "lean_verified"
+                || ac
                     .lean_result_metadata
                     .as_ref()
                     .or(ac.lean_metadata.as_ref())
-                {
+                    .is_some()
+            {
+                let lean_metadata = ac
+                    .lean_result_metadata
+                    .as_ref()
+                    .or(ac.lean_metadata.as_ref());
+                if let Some(metadata) = lean_metadata {
                     if let Some(kernel_axioms) = metadata.kernel_axioms.as_ref() {
                         println!("      kernel_axioms: {:?}", kernel_axioms);
                     }

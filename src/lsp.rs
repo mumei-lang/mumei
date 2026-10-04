@@ -1461,42 +1461,8 @@ fn append_certificate_lean_escalation_diagnostics(
         if current_hash.as_deref() != Some(atom_cert.content_hash.as_str()) {
             continue;
         }
-        // Same membership rule as the escalation bundle: an atom is pending
-        // while it carries an escalation reason and Lean has not closed it.
-        if atom_cert.z3_check_result != "lean_verified" {
-            let Some(reason) = atom_cert.escalation_reason.as_ref() else {
-                continue;
-            };
-            if live_settled.contains(&atom_cert.name)
-                || live_pending_atom == Some(atom_cert.name.as_str())
-            {
-                continue;
-            }
-            let reason = reason.as_str();
-            diagnostics.push(serde_json::json!({
-                "range": atom_name_range(source, atom),
-                "severity": 1,
-                "source": "mumei-z3",
-                "message": format!(
-                    "Lean escalation: pending (z3 {}, reason {}; certificate {})",
-                    atom_cert.z3_result_class,
-                    reason,
-                    cert_path.display()
-                ),
-                "data": {
-                    "lean_escalation": {
-                        "status": "pending",
-                        "atom": atom_cert.name,
-                        "z3_result_class": atom_cert.z3_result_class,
-                        "escalation_reason": reason,
-                        "certificate": cert_path.to_string_lossy(),
-                    }
-                }
-            }));
-            continue;
-        }
         // Kernel-axiom audit failures are distinct from stale translator
-        // metadata, so check the audit before the translator gate.
+        // metadata and pending escalations, so check the audit first.
         match proof_cert::lean_axiom_audit(atom_cert) {
             proof_cert::LeanAxiomAudit::Rejected { disallowed } => {
                 diagnostics.push(serde_json::json!({
@@ -1541,6 +1507,40 @@ fn append_certificate_lean_escalation_diagnostics(
                 continue;
             }
             proof_cert::LeanAxiomAudit::Passed { .. } | proof_cert::LeanAxiomAudit::Unaudited => {}
+        }
+        // Same membership rule as the escalation bundle: an atom is pending
+        // while it carries an escalation reason and Lean has not closed it.
+        if atom_cert.z3_check_result != "lean_verified" {
+            let Some(reason) = atom_cert.escalation_reason.as_ref() else {
+                continue;
+            };
+            if live_settled.contains(&atom_cert.name)
+                || live_pending_atom == Some(atom_cert.name.as_str())
+            {
+                continue;
+            }
+            let reason = reason.as_str();
+            diagnostics.push(serde_json::json!({
+                "range": atom_name_range(source, atom),
+                "severity": 1,
+                "source": "mumei-z3",
+                "message": format!(
+                    "Lean escalation: pending (z3 {}, reason {}; certificate {})",
+                    atom_cert.z3_result_class,
+                    reason,
+                    cert_path.display()
+                ),
+                "data": {
+                    "lean_escalation": {
+                        "status": "pending",
+                        "atom": atom_cert.name,
+                        "z3_result_class": atom_cert.z3_result_class,
+                        "escalation_reason": reason,
+                        "certificate": cert_path.to_string_lossy(),
+                    }
+                }
+            }));
+            continue;
         }
         // Same acceptance rule as `verify_certificate`: a `lean_verified`
         // entry counts only when its Lean result metadata is current;
