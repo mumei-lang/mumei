@@ -315,8 +315,6 @@ fn undischarged_spurious_escalation_candidate_is_inconclusive() {
     write(&dir, "spurious.mm", SPURIOUS_SRC);
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .arg("verify")
-        .arg("--solver-timeout")
-        .arg("50")
         .arg("--escalate-lean")
         .arg("--proof-cert")
         .arg("--output")
