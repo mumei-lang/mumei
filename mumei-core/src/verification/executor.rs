@@ -1686,19 +1686,23 @@ fn verify_inner_impl(
     if atom.decreases.is_some() {
         if let Some(scc) = vc.recursive_scc_of(&atom.name) {
             if scc.is_eligible() {
-                let measure_ast = parse_expression(atom.decreases.as_deref().unwrap_or("0"));
-                let measure = expr_to_z3(&vc, &measure_ast, &mut env, None)?;
-                if measure.as_int().is_none() && measure.as_bv().is_none() {
-                    return Err(MumeiError::verification_at(
-                        format!(
-                            "decreases clause of '{}' must be an integer expression",
-                            atom.name
-                        ),
-                        atom.span.clone(),
-                    ));
+                let mut measures = Vec::new();
+                for component in measure_components(atom.decreases.as_deref().unwrap_or("0")) {
+                    let measure_ast = parse_expression(&component);
+                    let measure = expr_to_z3(&vc, &measure_ast, &mut env, None)?;
+                    if measure.as_int().is_none() && measure.as_bv().is_none() {
+                        return Err(MumeiError::verification_at(
+                            format!(
+                                "decreases clause of '{}' must be an integer expression",
+                                atom.name
+                            ),
+                            atom.span.clone(),
+                        ));
+                    }
+                    measures.push(measure);
                 }
                 *vc.recursion.current_scc.borrow_mut() = Some(scc);
-                *vc.recursion.current_measure.borrow_mut() = Some(measure);
+                *vc.recursion.current_measure.borrow_mut() = Some(measures);
             }
         }
     }

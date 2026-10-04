@@ -228,7 +228,7 @@ impl EmitTarget {
 
 /// Current emitter plugin ABI version. Bump when the Emitter trait
 /// signature or HirAtom/ModuleEnv layout changes in a breaking way.
-pub const EMITTER_ABI_VERSION: u32 = 1;
+pub const EMITTER_ABI_VERSION: u32 = 3;
 
 /// Trait-object wrapper for an emitter loaded out-of-process. Plugins
 /// must be `Send + Sync` so they can be shared across threads in the
@@ -476,13 +476,15 @@ impl Emitter for CHeaderEmitter {
         module_env: &ModuleEnv,
         _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
-        let atom = &hir_atom.atom;
+        let signature = &hir_atom.signature;
+        let contract = &hir_atom.contract;
         let header_path = output_path.with_extension("h");
 
         // Generate header guard name from atom name (uppercase + _H)
         let guard_name = format!(
             "{}_H",
-            atom.name
+            signature
+                .name
                 .to_uppercase()
                 .replace("::", "_")
                 .replace('-', "_")
@@ -500,38 +502,38 @@ impl Emitter for CHeaderEmitter {
         content.push('\n');
 
         // Doxygen documentation block
-        let has_pre = atom.requires != "true";
-        let has_post = atom.ensures != "true";
+        let has_pre = contract.requires_text != "true";
+        let has_post = contract.ensures_text != "true";
         if has_pre || has_post {
             content.push_str("/**\n");
-            let c_fn_name = atom.name.replace("::", "_");
+            let c_fn_name = signature.name.replace("::", "_");
             content.push_str(&format!(" * @brief {}\n", c_fn_name));
             if has_pre {
-                content.push_str(&format!(" * @pre {}\n", atom.requires));
+                content.push_str(&format!(" * @pre {}\n", contract.requires_text));
             }
             if has_post {
-                content.push_str(&format!(" * @post {}\n", atom.ensures));
+                content.push_str(&format!(" * @post {}\n", contract.ensures_text));
             }
             content.push_str(" */\n");
         } else {
             // Even without contracts, add @brief
-            let c_fn_name = atom.name.replace("::", "_");
+            let c_fn_name = signature.name.replace("::", "_");
             content.push_str(&format!("/** @brief {} */\n", c_fn_name));
         }
 
         // Build parameter list
-        let params: Vec<String> = atom
+        let params: Vec<String> = signature
             .params
             .iter()
             .map(|p| {
-                let c_type = match &p.type_name {
+                let c_type = match &p.ty {
                     Some(tn) => {
                         let base = module_env.resolve_base_type(tn);
                         mumei_type_to_c(&base).to_string()
                     }
                     None => "int64_t".to_string(),
                 };
-                format!("{} {}", c_type, p.name)
+                format!("{} {}", c_type, p.declared_name())
             })
             .collect();
 
@@ -542,10 +544,10 @@ impl Emitter for CHeaderEmitter {
         };
 
         // Return type
-        let return_type = mumei_return_type_to_c(atom.return_type.as_deref(), module_env);
+        let return_type = mumei_return_type_to_c(signature.return_type.as_deref(), module_env);
 
         // Function name: replace :: with _ for C compatibility
-        let c_fn_name = atom.name.replace("::", "_");
+        let c_fn_name = signature.name.replace("::", "_");
 
         // extern "C" function declaration
         content.push_str(&format!(
@@ -570,7 +572,7 @@ impl Emitter for CHeaderEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir::{HirEffectSet, HirExpr, HirStmt};
+    use crate::hir::{lower_atom_metadata, HirEffectSet, HirExpr, HirStmt};
     use crate::parser::ast::{Expr, Param, Span, Stmt, TrustLevel};
 
     /// Helper: build a minimal HirAtom for testing CHeaderEmitter.
@@ -582,37 +584,41 @@ mod tests {
         return_type: Option<String>,
     ) -> HirAtom {
         use crate::parser::ast::Atom;
+        let body = HirStmt::Expr(HirExpr::Number(0));
+        let atom = Atom {
+            name: name.to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params,
+            trace_id: None,
+            spec_metadata: std::collections::HashMap::new(),
+            clause_labels: Vec::new(),
+            clause_modes: Vec::new(),
+            covers: Vec::new(),
+            requires: requires.to_string(),
+            forall_constraints: vec![],
+            ensures: ensures.to_string(),
+            body_expr: "0".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type,
+            decreases: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let (signature, contract, meta) = lower_atom_metadata(&atom, &body, None);
         HirAtom {
-            body: HirStmt::Expr(HirExpr::Number(0)),
-            requires_hir: HirExpr::Number(1),
-            ensures_hir: HirExpr::Number(1),
-            atom: Atom {
-                name: name.to_string(),
-                type_params: vec![],
-                where_bounds: vec![],
-                params,
-                trace_id: None,
-                spec_metadata: std::collections::HashMap::new(),
-                clause_labels: Vec::new(),
-                clause_modes: Vec::new(),
-                covers: Vec::new(),
-                requires: requires.to_string(),
-                forall_constraints: vec![],
-                ensures: ensures.to_string(),
-                body_expr: "0".to_string(),
-                consumed_params: vec![],
-                resources: vec![],
-                is_async: false,
-                trust_level: TrustLevel::Verified,
-                max_unroll: None,
-                invariant: None,
-                effects: vec![],
-                return_type,
-                decreases: None,
-                span: Span::default(),
-                effect_pre: std::collections::HashMap::new(),
-                effect_post: std::collections::HashMap::new(),
-            },
+            body,
+            signature,
+            contract,
+            meta,
+            atom,
             body_stmt: Stmt::Expr(Expr::Number(0), Span::default()),
             effect_set: HirEffectSet::default(),
         }
@@ -894,7 +900,7 @@ mod tests {
 
     #[test]
     fn test_emitter_abi_version_constant() {
-        assert_eq!(EMITTER_ABI_VERSION, 1);
+        assert_eq!(EMITTER_ABI_VERSION, 3);
     }
 
     /// Phase 3: `mumei add --emitter` installs into exactly the location the

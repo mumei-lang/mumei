@@ -57,7 +57,7 @@ pub(crate) struct RecursionCtx<'a> {
         std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<z3::FuncDecl<'a>>>>,
     /// The current atom's lowered `decreases` measure, when it is verified
     /// inside an eligible SCC.
-    pub(crate) current_measure: std::cell::RefCell<Option<Dynamic<'a>>>,
+    pub(crate) current_measure: std::cell::RefCell<Option<Vec<Dynamic<'a>>>>,
     /// The current atom's eligible SCC.
     pub(crate) current_scc:
         std::cell::RefCell<Option<std::rc::Rc<super::super::support::RecursiveScc>>>,

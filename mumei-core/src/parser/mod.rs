@@ -2803,6 +2803,28 @@ atom fine(x: i64) -> i64
     }
 
     #[test]
+    fn test_parse_module_checked_rejects_top_level_junk() {
+        let failures = item::parse_module_from_source_checked("this is not valid mumei\n")
+            .expect_err("prose is not a module");
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.starts_with("unexpected token this at top level at 1:1")),
+            "expected a top-level diagnostic, got {failures:?}"
+        );
+
+        let stray_brace = "atom a(x: i64) -> i64\nensures: result == x;\nbody: { x }\n}\n";
+        assert!(item::parse_module_from_source_checked(stray_brace).is_err());
+
+        let items = item::parse_module_from_source_checked(
+            "atom a(x: i64) -> i64 { ensures: result == x; body: { x } }\n\
+             atom b(x: i64) -> i64\nensures: result == x;\nbody: x;\n",
+        )
+        .expect("braced atoms and a trailing `;` are valid");
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
     fn test_parse_atom_decreases_clause() {
         let source = r#"
 atom tri(n: i64) -> i64

@@ -459,3 +459,21 @@ fn json_input_error_still_emits_a_summary_payload() {
     assert_eq!(payload["verified"], serde_json::json!(0));
     assert!(payload["diagnostics"][0]["message"].is_string());
 }
+
+#[test]
+fn unparsable_source_is_an_input_error() {
+    // Top-level text that is not an item used to be skipped token by token,
+    // so the file "verified" with zero items.
+    for (name, source) in [("prose", "this is not valid mumei\n"), ("braces", "}}}\n")] {
+        let dir = temp_dir(&format!("unparsable_{name}"));
+        write(&dir, "bad.mm", source);
+        let output = verify(&dir, &["bad.mm"]);
+        assert_exit(&output, EXIT_INPUT_ERROR);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("at top level"), "{stderr}");
+    }
+
+    let dir = temp_dir("comment_only");
+    write(&dir, "comment.mm", "// nothing to verify yet\n");
+    assert_exit(&verify(&dir, &["comment.mm"]), EXIT_VERIFIED);
+}
