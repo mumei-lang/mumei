@@ -265,7 +265,6 @@ pub fn run() {
 // =============================================================================
 // 診断（パースエラー検出）
 // =============================================================================
-/// ソースコードをパースして diagnostics を生成
 /// One `mumei` error per checked-parse failure. Only top-level failures carry a
 /// module-relative `line:col`; the rest are anchored at the start of the file.
 fn parse_failure_diagnostics(failures: &[String]) -> Vec<serde_json::Value> {
@@ -297,6 +296,7 @@ fn top_level_failure_position(failure: &str) -> Option<(u64, u64)> {
     Some((line.checked_sub(1)?, col.checked_sub(1)?))
 }
 
+/// ソースコードをパースして diagnostics を生成
 fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
     let path = uri_to_path(uri);
     if let Some(path) = path.as_deref() {
