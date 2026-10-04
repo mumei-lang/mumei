@@ -51,27 +51,50 @@ struct CaseResult {
     name: &'static str,
     target: &'static str,
     output: Output,
+    payload: Option<Value>,
     report: Option<Value>,
 }
 
 impl CaseResult {
-    fn verdict(&self) -> Option<&str> {
+    fn verdict(&self) -> Option<String> {
+        if let Some(diagnostics) = self
+            .payload
+            .as_ref()
+            .and_then(|payload| payload["diagnostics"].as_array())
+        {
+            if let Some(diagnostic) = diagnostics
+                .iter()
+                .rev()
+                .find(|diagnostic| diagnostic["atom"].as_str() == Some(self.target))
+            {
+                let code = diagnostic["code"].as_str()?;
+                return Some(
+                    match code {
+                        "failed" => "failed",
+                        "unverifiable" | "unknown" => "unknown",
+                        other => other,
+                    }
+                    .to_string(),
+                );
+            }
+        }
+
         let report = self.report.as_ref()?;
-        if report["atom"].as_str() != Some(self.target) {
-            return None;
-        }
-        match report["status"].as_str()? {
-            "success" => Some("verified"),
-            "unverifiable" => Some("unknown"),
-            "failed" => Some("failed"),
-            _ => None,
-        }
+        (report["atom"].as_str() == Some(self.target)
+            && report["status"].as_str() == Some("success"))
+        .then(|| "verified".to_string())
     }
 
     fn did_not_crash(&self) -> bool {
         self.output.status.code().is_some_and(|code| code != 134)
             && !String::from_utf8_lossy(&self.output.stderr).contains("overflowed its stack")
     }
+}
+
+fn parse_json_output(output: &Output) -> Option<Value> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_start = stdout.find('{')?;
+    serde_json::from_str(&stdout[json_start..]).ok()
 }
 
 fn verify(name: &'static str, source: &str, target: &'static str) -> CaseResult {
@@ -90,11 +113,13 @@ fn verify(name: &'static str, source: &str, target: &'static str) -> CaseResult 
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .arg("verify")
         .arg(&fixture)
+        .arg("--json")
         .arg("--report-dir")
         .arg(&dir)
         .current_dir(&dir)
         .output()
         .expect("run verify");
+    let payload = parse_json_output(&output);
     let report = std::fs::read_to_string(dir.join("report.json"))
         .ok()
         .and_then(|content| serde_json::from_str(&content).ok());
@@ -103,31 +128,14 @@ fn verify(name: &'static str, source: &str, target: &'static str) -> CaseResult 
         name,
         target,
         output,
+        payload,
         report,
-    }
-}
-
-fn report_cases(cases: &[CaseResult]) {
-    for case in cases {
-        let stdout = String::from_utf8_lossy(&case.output.stdout);
-        let stderr = String::from_utf8_lossy(&case.output.stderr);
-        eprintln!(
-            "{} target={} verdict={:?} status={:?} overflow_stdout={} overflow_stderr={} stdout={:?} stderr={:?}",
-            case.name,
-            case.target,
-            case.verdict(),
-            case.output.status,
-            stdout.contains("overflowed its stack"),
-            stderr.contains("overflowed its stack"),
-            stdout.chars().take(250).collect::<String>(),
-            stderr.chars().take(250).collect::<String>()
-        );
     }
 }
 
 fn assert_verdict(case: &CaseResult, expected: &str) {
     assert_eq!(
-        case.verdict(),
+        case.verdict().as_deref(),
         Some(expected),
         "{} should be {expected}; stdout:\n{}\nstderr:\n{}",
         case.name,
@@ -136,10 +144,26 @@ fn assert_verdict(case: &CaseResult, expected: &str) {
     );
 }
 
+fn assert_case(case: CaseResult, expected: &str) {
+    assert!(
+        case.did_not_crash(),
+        "{} crashed; status={:?}\nstdout:\n{}\nstderr:\n{}",
+        case.name,
+        case.output.status,
+        String::from_utf8_lossy(&case.output.stdout),
+        String::from_utf8_lossy(&case.output.stderr)
+    );
+    assert_verdict(&case, expected);
+}
+
 #[test]
-fn recursive_contract_calls_are_finite_and_fail_closed() {
-    let cases = vec![
-        verify("tri", TRI, "tri"),
+fn tri_does_not_crash_and_is_not_proved() {
+    assert_case(verify("tri", TRI, "tri"), "failed");
+}
+
+#[test]
+fn use_ok_verifies() {
+    assert_case(
         verify(
             "use_ok",
             &format!(
@@ -147,6 +171,13 @@ fn recursive_contract_calls_are_finite_and_fail_closed() {
             ),
             "use_ok",
         ),
+        "verified",
+    );
+}
+
+#[test]
+fn use_bad_fails() {
+    assert_case(
         verify(
             "use_bad",
             &format!(
@@ -154,6 +185,13 @@ fn recursive_contract_calls_are_finite_and_fail_closed() {
             ),
             "use_bad",
         ),
+        "failed",
+    );
+}
+
+#[test]
+fn tri_bad_fails() {
+    assert_case(
         verify(
             "tri_bad",
             r#"
@@ -164,6 +202,13 @@ atom tri_bad(n: i64)
 "#,
             "tri_bad",
         ),
+        "failed",
+    );
+}
+
+#[test]
+fn use_ev_verifies() {
+    assert_case(
         verify(
             "use_ev",
             &format!(
@@ -171,6 +216,13 @@ atom tri_bad(n: i64)
             ),
             "use_ev",
         ),
+        "verified",
+    );
+}
+
+#[test]
+fn use_ev_bad_fails() {
+    assert_case(
         verify(
             "use_ev_bad",
             &format!(
@@ -178,6 +230,13 @@ atom tri_bad(n: i64)
             ),
             "use_ev_bad",
         ),
+        "failed",
+    );
+}
+
+#[test]
+fn use_g_verifies() {
+    assert_case(
         verify(
             "use_g",
             &format!(
@@ -185,6 +244,13 @@ atom tri_bad(n: i64)
             ),
             "use_g",
         ),
+        "verified",
+    );
+}
+
+#[test]
+fn use_g_bad_fails() {
+    assert_case(
         verify(
             "use_g_bad",
             &format!(
@@ -192,6 +258,13 @@ atom tri_bad(n: i64)
             ),
             "use_g_bad",
         ),
+        "failed",
+    );
+}
+
+#[test]
+fn use_h_verifies() {
+    assert_case(
         verify(
             "use_h",
             &format!(
@@ -199,6 +272,13 @@ atom tri_bad(n: i64)
             ),
             "use_h",
         ),
+        "verified",
+    );
+}
+
+#[test]
+fn use_h_bad_fails() {
+    assert_case(
         verify(
             "use_h_bad",
             &format!(
@@ -206,6 +286,13 @@ atom tri_bad(n: i64)
             ),
             "use_h_bad",
         ),
+        "failed",
+    );
+}
+
+#[test]
+fn use_g2_verifies() {
+    assert_case(
         verify(
             "use_g2",
             &format!(
@@ -213,6 +300,13 @@ atom tri_bad(n: i64)
             ),
             "use_g2",
         ),
+        "verified",
+    );
+}
+
+#[test]
+fn use_g2_bad_fails() {
+    assert_case(
         verify(
             "use_g2_bad",
             &format!(
@@ -220,26 +314,6 @@ atom tri_bad(n: i64)
             ),
             "use_g2_bad",
         ),
-    ];
-    report_cases(&cases);
-
-    let crashes: Vec<&str> = cases
-        .iter()
-        .filter(|case| !case.did_not_crash())
-        .map(|case| case.name)
-        .collect();
-    assert!(crashes.is_empty(), "recursive cases crashed: {crashes:?}");
-
-    assert_verdict(&cases[0], "failed");
-    assert_verdict(&cases[1], "verified");
-    assert_ne!(cases[2].verdict(), Some("verified"), "use_bad");
-    assert_ne!(cases[3].verdict(), Some("verified"), "tri_bad");
-    assert_verdict(&cases[4], "verified");
-    assert_ne!(cases[5].verdict(), Some("verified"), "use_ev_bad");
-    assert_verdict(&cases[6], "verified");
-    assert_ne!(cases[7].verdict(), Some("verified"), "use_g_bad");
-    assert_verdict(&cases[8], "verified");
-    assert_ne!(cases[9].verdict(), Some("verified"), "use_h_bad");
-    assert_verdict(&cases[10], "verified");
-    assert_ne!(cases[11].verdict(), Some("verified"), "use_g2_bad");
+        "failed",
+    );
 }
