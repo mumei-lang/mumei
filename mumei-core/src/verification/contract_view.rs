@@ -18,6 +18,48 @@ pub fn dropped_conjuncts(atom: &Atom, view: ContractView) -> Vec<String> {
     contract_view_with_dropped_conjuncts(atom, view).1
 }
 
+pub fn conjunct_modes(atom: &Atom, kind: ClauseKind) -> Vec<(String, Option<ClauseTrustMode>)> {
+    let source = match kind {
+        ClauseKind::Requires => &atom.requires,
+        ClauseKind::Ensures => &atom.ensures,
+    };
+    let mut assume_counts = HashMap::<String, usize>::new();
+    let mut check_counts = HashMap::<String, usize>::new();
+    for mode in atom.clause_modes.iter().filter(|mode| mode.kind == kind) {
+        let counts = match &mode.mode {
+            ClauseTrustMode::Assume => &mut assume_counts,
+            ClauseTrustMode::Check => &mut check_counts,
+        };
+        for conjunct in flatten_conjuncts(&mode.clause) {
+            *counts.entry(conjunct).or_default() += 1;
+        }
+    }
+
+    fn consume(counts: &mut HashMap<String, usize>, conjunct: &str) -> bool {
+        if let Some(count) = counts.get_mut(conjunct) {
+            if *count > 0 {
+                *count -= 1;
+                return true;
+            }
+        }
+        false
+    }
+
+    flatten_conjuncts(source)
+        .into_iter()
+        .map(|conjunct| {
+            let mode = if consume(&mut assume_counts, &conjunct) {
+                Some(ClauseTrustMode::Assume)
+            } else if consume(&mut check_counts, &conjunct) {
+                Some(ClauseTrustMode::Check)
+            } else {
+                None
+            };
+            (conjunct, mode)
+        })
+        .collect()
+}
+
 fn contract_view_with_dropped_conjuncts(atom: &Atom, view: ContractView) -> (String, Vec<String>) {
     let (kind, source, dropped_mode) = match view {
         ContractView::BodyRequires => {
@@ -118,8 +160,99 @@ fn normalize_conjunct(conjunct: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{contract_view, dropped_conjuncts, ContractView};
-    use crate::parser::item::parse_atom_from_source;
+    use super::{
+        conjunct_modes, contract_view, dropped_conjuncts, flatten_conjuncts, ContractView,
+    };
+    use crate::parser::{item::parse_atom_from_source, Atom, ClauseKind, ClauseTrustMode};
+
+    fn assert_view_matches_classifier(atom: &Atom, view: ContractView) {
+        let (kind, dropped_mode) = match view {
+            ContractView::BodyRequires => (ClauseKind::Requires, ClauseTrustMode::Check),
+            ContractView::CallerRequires => (ClauseKind::Requires, ClauseTrustMode::Assume),
+            ContractView::BodyEnsures => (ClauseKind::Ensures, ClauseTrustMode::Assume),
+            ContractView::CallerEnsures => (ClauseKind::Ensures, ClauseTrustMode::Check),
+        };
+        let retained: Vec<_> = conjunct_modes(atom, kind)
+            .into_iter()
+            .filter_map(|(text, mode)| (mode.as_ref() != Some(&dropped_mode)).then_some(text))
+            .collect();
+        let expected = if retained.is_empty() {
+            "true".to_string()
+        } else {
+            retained
+                .iter()
+                .map(|conjunct| format!("({conjunct})"))
+                .collect::<Vec<_>>()
+                .join(" && ")
+        };
+        assert_eq!(contract_view(atom, view), expected, "{view:?}");
+    }
+
+    #[test]
+    fn conjunct_modes_agree_with_contract_views_for_mixed_and_duplicate_clauses() {
+        let mixed = parse_atom_from_source(
+            r#"
+atom mixed(x: i64, y: i64) -> i64
+    requires: x > 0;
+    requires assume: y > 0;
+    requires check "upper bound": x < 100;
+    ensures: result > 0;
+    ensures assume: result < 1000;
+    cover "hit": x == 5;
+    body: x;
+"#,
+        );
+        let duplicate = parse_atom_from_source(
+            "atom duplicate(x: i64) -> i64 \
+             requires: x > 0; \
+             requires assume: x > 0; \
+             ensures: (result > 0); \
+             body: x;",
+        );
+        let views = [
+            ContractView::BodyRequires,
+            ContractView::CallerRequires,
+            ContractView::BodyEnsures,
+            ContractView::CallerEnsures,
+        ];
+
+        for atom in [&mixed, &duplicate] {
+            for view in views {
+                assert_view_matches_classifier(atom, view);
+            }
+        }
+
+        let duplicate_modes = conjunct_modes(&duplicate, ClauseKind::Requires);
+        assert_eq!(
+            duplicate_modes,
+            vec![
+                ("x > 0".to_string(), Some(ClauseTrustMode::Assume)),
+                ("x > 0".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn conjunct_modes_preserve_plain_source_conjuncts() {
+        let atom = parse_atom_from_source(
+            "atom plain(x: i64) -> i64 \
+             requires: x > 0 && x < 10; \
+             ensures: result > 0; \
+             body: x;",
+        );
+
+        for (kind, source) in [
+            (ClauseKind::Requires, atom.requires.as_str()),
+            (ClauseKind::Ensures, atom.ensures.as_str()),
+        ] {
+            let modes = conjunct_modes(&atom, kind);
+            assert!(modes.iter().all(|(_, mode)| mode.is_none()));
+            assert_eq!(
+                modes.into_iter().map(|(text, _)| text).collect::<Vec<_>>(),
+                flatten_conjuncts(source)
+            );
+        }
+    }
 
     #[test]
     fn views_apply_clause_modes_without_losing_duplicate_conjuncts() {

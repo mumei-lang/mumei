@@ -405,7 +405,7 @@ impl Emitter for RuntimeMonitorEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mumei_core::hir::{HirEffectSet, HirExpr, HirStmt};
+    use mumei_core::hir::{lower_atom_metadata, HirEffectSet, HirExpr, HirStmt};
     use mumei_core::parser::ast::{Expr, Param, Span, Stmt, TrustLevel};
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -448,10 +448,13 @@ mod tests {
     }
 
     fn hir(atom: Atom) -> HirAtom {
+        let body = HirStmt::Expr(HirExpr::Number(0));
+        let (signature, contract, meta) = lower_atom_metadata(&atom, &body, None);
         HirAtom {
-            body: HirStmt::Expr(HirExpr::Number(0)),
-            requires_hir: HirExpr::Number(1),
-            ensures_hir: HirExpr::Number(1),
+            body,
+            signature,
+            contract,
+            meta,
             atom,
             body_stmt: Stmt::Expr(Expr::Number(0), Span::default()),
             effect_set: HirEffectSet::default(),

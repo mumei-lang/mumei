@@ -1,3 +1,12 @@
+### 2026-10-04: HIR carries signature, contract and metadata (emitter ABI 2)
+
+- `HirAtom` now carries signature, ordered contract clauses, and atom metadata
+  alongside the existing AST-backed fields.
+- Emitter plugins must use ABI 2; ABI-1 plugins fail loading with an ABI
+  mismatch and must be rebuilt.
+
+---
+
 ### 2026-09-27: v0.6.20 release version bump
 
 - **Workspace and member crate versions**: bumped versions from `0.6.19` to

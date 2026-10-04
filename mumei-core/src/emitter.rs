@@ -228,7 +228,7 @@ impl EmitTarget {
 
 /// Current emitter plugin ABI version. Bump when the Emitter trait
 /// signature or HirAtom/ModuleEnv layout changes in a breaking way.
-pub const EMITTER_ABI_VERSION: u32 = 1;
+pub const EMITTER_ABI_VERSION: u32 = 2;
 
 /// Trait-object wrapper for an emitter loaded out-of-process. Plugins
 /// must be `Send + Sync` so they can be shared across threads in the
@@ -570,7 +570,7 @@ impl Emitter for CHeaderEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir::{HirEffectSet, HirExpr, HirStmt};
+    use crate::hir::{lower_atom_metadata, HirEffectSet, HirExpr, HirStmt};
     use crate::parser::ast::{Expr, Param, Span, Stmt, TrustLevel};
 
     /// Helper: build a minimal HirAtom for testing CHeaderEmitter.
@@ -582,36 +582,40 @@ mod tests {
         return_type: Option<String>,
     ) -> HirAtom {
         use crate::parser::ast::Atom;
+        let body = HirStmt::Expr(HirExpr::Number(0));
+        let atom = Atom {
+            name: name.to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params,
+            trace_id: None,
+            spec_metadata: std::collections::HashMap::new(),
+            clause_labels: Vec::new(),
+            clause_modes: Vec::new(),
+            covers: Vec::new(),
+            requires: requires.to_string(),
+            forall_constraints: vec![],
+            ensures: ensures.to_string(),
+            body_expr: "0".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let (signature, contract, meta) = lower_atom_metadata(&atom, &body, None);
         HirAtom {
-            body: HirStmt::Expr(HirExpr::Number(0)),
-            requires_hir: HirExpr::Number(1),
-            ensures_hir: HirExpr::Number(1),
-            atom: Atom {
-                name: name.to_string(),
-                type_params: vec![],
-                where_bounds: vec![],
-                params,
-                trace_id: None,
-                spec_metadata: std::collections::HashMap::new(),
-                clause_labels: Vec::new(),
-                clause_modes: Vec::new(),
-                covers: Vec::new(),
-                requires: requires.to_string(),
-                forall_constraints: vec![],
-                ensures: ensures.to_string(),
-                body_expr: "0".to_string(),
-                consumed_params: vec![],
-                resources: vec![],
-                is_async: false,
-                trust_level: TrustLevel::Verified,
-                max_unroll: None,
-                invariant: None,
-                effects: vec![],
-                return_type,
-                span: Span::default(),
-                effect_pre: std::collections::HashMap::new(),
-                effect_post: std::collections::HashMap::new(),
-            },
+            body,
+            signature,
+            contract,
+            meta,
+            atom,
             body_stmt: Stmt::Expr(Expr::Number(0), Span::default()),
             effect_set: HirEffectSet::default(),
         }
@@ -893,7 +897,7 @@ mod tests {
 
     #[test]
     fn test_emitter_abi_version_constant() {
-        assert_eq!(EMITTER_ABI_VERSION, 1);
+        assert_eq!(EMITTER_ABI_VERSION, 2);
     }
 
     /// Phase 3: `mumei add --emitter` installs into exactly the location the
