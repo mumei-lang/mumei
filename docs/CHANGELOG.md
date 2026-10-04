@@ -1,3 +1,26 @@
+### Unreleased: quantified `requires` checked at call sites
+
+- Quantified `requires` conjuncts (`forall`/`exists` at the top level of
+  the clause) are now part of the callee obligation checked at every call
+  site — direct calls, `call(atom_ref(..))`, contract subsumption, cover
+  obligations, and dataflow requires-inference. Previously they were only
+  assumed inside the callee body, so callers could invoke atoms like
+  `needs_pos` without ever establishing the quantified precondition.
+- Quantifiers nested under `||`, `!`, `if`/`then`/`else`/`match`, `|`
+  (lambda/bit-or/`|>`), `=>`, or non-conjunctive positions are no longer
+  hoisted into top-level facts: they stay in the requires text and are
+  lowered in place. This removes an unsound free hypothesis
+  (`n == 5 || forall(...)` used to assert the forall unconditionally) and
+  a spurious "requires clause is unsatisfiable" on `!forall(...)`.
+- Quantifier binders are fresh constants now: a `forall(i, …)` / `exists(i, …)`
+  no longer captures an outer variable or parameter that happens to share
+  the bound name (previously callers could satisfy quantified preconditions
+  for free, and a requires-side binder over a same-named param bound the
+  parameter instead of the quantified variable).
+- `VERIFIER_POLICY_VERSION` bumped to 6 so cached proofs are re-derived.
+
+---
+
 ### 2026-10-04: fail closed on calls under quantifiers
 
 - A call inside `forall` / `exists` whose arguments depend on the bound
