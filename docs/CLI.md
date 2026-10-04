@@ -133,18 +133,19 @@ phase name with non-alphanumeric runs replaced by `-`. Each `.smt2` file
 contains comments for the atom, phase, and source origin, followed by the
 solver text and its `(check-sat)` or `(check-sat-assuming (...))` command.
 
-`phases.json` has `version: 1`, `atom`, `source_file`, `outcome`, `error`, and
-an ordered `phases` array. Each phase entry has `phase`, `result`, and
-`queries`; each query has `index`, `file`, `origin`, and solver `result`
-(`sat`, `unsat`, or `unknown`). Completed phases are included even when they
-have no queries. Results may be `passed`, `failed`, `unknown`, `unverifiable`,
-`contradiction`, or `aborted`. For an unchanged cached atom, the file records
-`outcome: "cached"` and an empty `phases` array. An unrecognized phase is
-retained verbatim and marked `in_phase_contract: false`. `phases.json` also
-includes `partial: false` when all writes succeeded and `partial: true` when a
-query write failed.
+`phases.json` has `version: 1`, `atom`, `source_file`, `outcome`, `error`,
+`partial`, and an ordered `phases` array. `partial` is `true` when a query
+could not be captured; otherwise it is `false`. Each phase entry has `phase`,
+`result`, and `queries`; each query has `index`, `file`, `origin`, and solver
+`result` (`sat`, `unsat`, or `unknown`). Completed phases are included even
+when they have no queries. Results may be `passed`, `failed`, `unknown`,
+`unverifiable`, `contradiction`, or `aborted`. For an unchanged cached atom,
+the file records `outcome: "cached"` and an empty `phases` array. An
+unrecognized phase is retained verbatim and marked `in_phase_contract: false`.
 
 Phase capture is diagnostic only: it does not change solver input, the
 incremental-cache key, verification verdicts, `report.json`, `--json` output,
-or exit codes. If an artifact write fails, a single warning is printed to
-stderr after verification; the failure never changes the exit code.
+or exit codes. If artifact writes fail, one warning is printed to stderr after
+verification, including with `--json`:
+`warning: --keep-phase-artifacts: <n> artifact write(s) failed (first: <path>: <io error>); phase artifacts are incomplete`.
+The failure never changes the verdict, report, JSON output, or exit code.

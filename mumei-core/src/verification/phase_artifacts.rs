@@ -12,6 +12,8 @@ static SINK: Mutex<Option<State>> = Mutex::new(None);
 struct State {
     directory: PathBuf,
     stack: Vec<AtomTrace>,
+    write_failures: usize,
+    first_write_failure: Option<String>,
 }
 
 struct AtomTrace {
@@ -23,6 +25,7 @@ struct AtomTrace {
     phases: Vec<PhaseTrace>,
     completed_contracts: usize,
     query_count: usize,
+    partial: bool,
 }
 
 struct PhaseTrace {
@@ -41,13 +44,26 @@ struct QueryTrace {
 }
 
 pub fn enable(directory: PathBuf) -> std::io::Result<()> {
-    fs::create_dir_all(&directory)?;
+    let first_write_failure = fs::create_dir_all(&directory)
+        .err()
+        .map(|error| format!("{}: {error}", directory.display()));
     let mut sink = lock_sink();
     *sink = Some(State {
         directory,
         stack: Vec::new(),
+        write_failures: if first_write_failure.is_some() { 1 } else { 0 },
+        first_write_failure,
     });
     Ok(())
+}
+
+pub fn write_failures() -> Option<(usize, String)> {
+    let sink = lock_sink();
+    let state = sink.as_ref()?;
+    if state.write_failures == 0 {
+        return None;
+    }
+    Some((state.write_failures, state.first_write_failure.clone()?))
 }
 
 pub(crate) fn begin_atom(source_file: &str, atom: &str) {
@@ -69,6 +85,7 @@ pub(crate) fn begin_atom(source_file: &str, atom: &str) {
         phases: Vec::new(),
         completed_contracts: 0,
         query_count: 0,
+        partial: false,
     });
 }
 
@@ -113,7 +130,9 @@ pub(crate) fn finish_atom<T, E: std::fmt::Display>(result: &Result<T, E>) {
             }
         }
     }
-    write_atom_trace(&atom);
+    if let Err((path, error)) = write_atom_trace(&atom) {
+        record_write_failure(state, &path, &error);
+    }
 }
 
 pub(crate) fn complete_phase(name: &str) {
@@ -176,8 +195,11 @@ pub fn record_cached_atom(source_file: &str, atom: &str) {
         phases: Vec::new(),
         completed_contracts: 0,
         query_count: 0,
+        partial: false,
     };
-    write_atom_trace(&cached);
+    if let Err((path, error)) = write_atom_trace(&cached) {
+        record_write_failure(state, &path, &error);
+    }
 }
 
 #[track_caller]
@@ -237,53 +259,71 @@ fn prepare_query(
 ) -> Option<PendingQuery> {
     let mut sink = lock_sink();
     let state = sink.as_mut()?;
-    let atom = state.stack.last_mut()?;
-    let phase_name = PHASE_CONTRACTS
-        .get(atom.completed_contracts)
-        .or_else(|| PHASE_CONTRACTS.last())?
-        .name;
-    let index = atom.query_count.checked_add(1)?;
-    if !atom
-        .phases
-        .iter_mut()
-        .any(|record| record.phase == phase_name)
-    {
-        let known = phase_contract(phase_name).is_some();
-        atom.phases.push(PhaseTrace {
-            phase: phase_name.to_string(),
-            in_phase_contract: (!known).then_some(false),
-            result: "in_progress".to_string(),
-            error: None,
-            queries: Vec::new(),
-        });
+    let (pending, failure) = {
+        let atom = state.stack.last_mut()?;
+        let phase_name = PHASE_CONTRACTS
+            .get(atom.completed_contracts)
+            .or_else(|| PHASE_CONTRACTS.last())?
+            .name;
+        let index = atom.query_count.checked_add(1)?;
+        if !atom
+            .phases
+            .iter_mut()
+            .any(|record| record.phase == phase_name)
+        {
+            let known = phase_contract(phase_name).is_some();
+            atom.phases.push(PhaseTrace {
+                phase: phase_name.to_string(),
+                in_phase_contract: (!known).then_some(false),
+                result: "in_progress".to_string(),
+                error: None,
+                queries: Vec::new(),
+            });
+        }
+        let slug = phase_slug(phase_name);
+        let file_name = format!("{index:04}-{slug}.smt2");
+        let file_path = atom.directory.join(&file_name);
+        let assumptions_text = assumptions
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let command = if check_assumptions {
+            format!("(check-sat-assuming ({assumptions_text}))")
+        } else {
+            "(check-sat)".to_string()
+        };
+        let query_text = format!(
+            "; atom: {}\n; phase: {}\n; origin: {}:{}\n{}\n{}\n",
+            atom.atom, phase_name, source, line, solver, command
+        );
+        let write_result = match fs::create_dir_all(&atom.directory) {
+            Ok(()) => fs::write(&file_path, query_text).map_err(|error| (file_path.clone(), error)),
+            Err(error) => Err((atom.directory.clone(), error)),
+        };
+        match write_result {
+            Ok(()) => {
+                atom.query_count = index;
+                (
+                    Some(PendingQuery {
+                        file: Some(file_path),
+                        phase: Some(phase_name.to_string()),
+                        index,
+                        origin: format!("{source}:{line}"),
+                    }),
+                    None,
+                )
+            }
+            Err((path, error)) => {
+                atom.partial = true;
+                (None, Some((path, error)))
+            }
+        }
+    };
+    if let Some((path, error)) = failure {
+        record_write_failure(state, &path, &error);
     }
-    let slug = phase_slug(phase_name);
-    let file_name = format!("{index:04}-{slug}.smt2");
-    let file_path = atom.directory.join(&file_name);
-    let assumptions_text = assumptions
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let command = if check_assumptions {
-        format!("(check-sat-assuming ({assumptions_text}))")
-    } else {
-        "(check-sat)".to_string()
-    };
-    let query_text = format!(
-        "; atom: {}\n; phase: {}\n; origin: {}:{}\n{}\n{}\n",
-        atom.atom, phase_name, source, line, solver, command
-    );
-    fs::create_dir_all(&atom.directory).ok()?;
-    fs::write(&file_path, query_text).ok()?;
-    atom.query_count = index;
-    let pending = PendingQuery {
-        file: Some(file_path),
-        phase: Some(phase_name.to_string()),
-        index,
-        origin: format!("{source}:{line}"),
-    };
-    Some(pending)
+    pending
 }
 
 fn record_query_result(query: Option<PendingQuery>, result: SatResult) {
@@ -320,8 +360,10 @@ fn sat_result_name(result: SatResult) -> &'static str {
     }
 }
 
-fn write_atom_trace(atom: &AtomTrace) {
-    let _ = fs::create_dir_all(&atom.directory);
+fn write_atom_trace(atom: &AtomTrace) -> Result<(), (PathBuf, std::io::Error)> {
+    if let Err(error) = fs::create_dir_all(&atom.directory) {
+        return Err((atom.directory.clone(), error));
+    }
     let phases = atom
         .phases
         .iter()
@@ -351,12 +393,22 @@ fn write_atom_trace(atom: &AtomTrace) {
         "source_file": atom.source_file,
         "outcome": atom.outcome.as_deref().unwrap_or("error"),
         "error": atom.error,
+        "partial": atom.partial,
         "phases": phases,
     });
-    let _ = fs::write(
-        atom.directory.join("phases.json"),
+    let path = atom.directory.join("phases.json");
+    fs::write(
+        &path,
         serde_json::to_vec_pretty(&document).unwrap_or_default(),
-    );
+    )
+    .map_err(|error| (path, error))
+}
+
+fn record_write_failure(state: &mut State, path: &std::path::Path, error: &std::io::Error) {
+    state.write_failures += 1;
+    if state.first_write_failure.is_none() {
+        state.first_write_failure = Some(format!("{}: {error}", path.display()));
+    }
 }
 
 fn sanitize(value: &str) -> String {
@@ -419,7 +471,7 @@ fn disable() {
 mod tests {
     use super::{
         begin_atom, capture, complete_phase, disable, enable, finish_atom, path_component,
-        phase_slug, sanitize,
+        phase_slug, sanitize, write_failures,
     };
     use serde_json::Value;
     use std::fs;
@@ -485,6 +537,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        assert_eq!(captured["partial"], false);
         assert_eq!(captured["phases"][0]["queries"][0]["result"], "sat");
 
         begin_atom("source.mm", "early_error");
@@ -527,6 +580,32 @@ mod tests {
             "Phase 5: ensures verification"
         );
         assert_eq!(after_body["phases"][1]["result"], "aborted");
+
+        begin_atom("blocked.mm", "failed_write");
+        let blocked_query_path = directory
+            .join(path_component("blocked.mm"))
+            .join(path_component("failed_write"))
+            .join("0001-phase-0-units-unit-consistency.smt2");
+        fs::create_dir_all(&blocked_query_path).unwrap();
+        let query = capture(&solver);
+        query.record(solver.check());
+        complete_phase("Phase 0-units: unit consistency");
+        finish_atom(&verified);
+        let partial: Value = serde_json::from_slice(
+            &fs::read(
+                directory
+                    .join(path_component("blocked.mm"))
+                    .join(path_component("failed_write"))
+                    .join("phases.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(partial["partial"], true);
+        assert_eq!(partial["phases"][0]["queries"], serde_json::json!([]));
+        let (count, first) = write_failures().unwrap();
+        assert!(count >= 1);
+        assert!(first.contains(&blocked_query_path.display().to_string()));
 
         let verified: Result<(), &str> = Ok(());
         begin_atom("a/b.mm", "shared");

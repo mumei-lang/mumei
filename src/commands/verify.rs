@@ -212,6 +212,14 @@ fn write_sarif_fallback(
     }
 }
 
+fn warn_phase_artifact_write_failures() {
+    if let Some((count, first)) = verification::phase_artifacts::write_failures() {
+        eprintln!(
+            "warning: --keep-phase-artifacts: {count} artifact write(s) failed (first: {first}); phase artifacts are incomplete"
+        );
+    }
+}
+
 pub(crate) fn cmd_verify_command(command: Command) {
     // Attach parent OTel context from TRACEPARENT/TRACESTATE env vars so that
     // all spans created within this command are children of the caller's trace.
@@ -353,6 +361,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     json,
                 );
             }
+            warn_phase_artifact_write_failures();
             std::process::exit(EXIT_INPUT_ERROR);
         }
         println!(
@@ -452,6 +461,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
         if let Some(sarif) = &sarif {
             write_sarif_fallback(sarif, report_dir.as_deref(), worst, json);
         }
+        warn_phase_artifact_write_failures();
         if worst.is_failure() {
             std::process::exit(worst.exit_code());
         }
@@ -587,6 +597,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                 }
             }
         }
+        warn_phase_artifact_write_failures();
         if outcome.is_failure() {
             std::process::exit(outcome.exit_code());
         }

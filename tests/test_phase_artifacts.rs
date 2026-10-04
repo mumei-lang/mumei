@@ -277,3 +277,67 @@ fn cache_reuse_is_unchanged_and_cached_atoms_are_marked() {
     assert_eq!(phases_json["phases"], serde_json::json!([]));
     std::fs::remove_dir_all(root).expect("remove fixture directory");
 }
+
+#[test]
+fn artifact_write_failures_warn_without_changing_json_or_exit_code() {
+    let root = temp_dir("write_failure");
+    let input = root.join("write_failure.mm");
+    std::fs::write(&input, VERIFIED).expect("write fixture");
+
+    let discovery_cwd = root.join("discovery");
+    let discovery_phase_dir = discovery_cwd.join("phase_artifacts");
+    std::fs::create_dir_all(&discovery_cwd).expect("create discovery cwd");
+    let discovery = run_verify(
+        &input,
+        &discovery_cwd,
+        &discovery_cwd.join("reports"),
+        Some(&discovery_phase_dir),
+        false,
+        None,
+    );
+    assert_eq!(discovery.status.code(), Some(0));
+    let source_dir =
+        find_artifact_component(&discovery_phase_dir, input.to_string_lossy().as_ref());
+    let source_component = source_dir
+        .file_name()
+        .expect("source component")
+        .to_os_string();
+
+    let baseline_cwd = root.join("baseline");
+    std::fs::create_dir_all(&baseline_cwd).expect("create baseline cwd");
+    let baseline = run_verify(
+        &input,
+        &baseline_cwd,
+        &baseline_cwd.join("reports"),
+        None,
+        true,
+        None,
+    );
+
+    let blocked_cwd = root.join("blocked");
+    let blocked_phase_dir = blocked_cwd.join("phase_artifacts");
+    std::fs::create_dir_all(&blocked_phase_dir).expect("create blocked phase directory");
+    std::fs::write(blocked_phase_dir.join(source_component), "blocked")
+        .expect("block source component");
+    let blocked = run_verify(
+        &input,
+        &blocked_cwd,
+        &blocked_cwd.join("reports"),
+        Some(&blocked_phase_dir),
+        true,
+        None,
+    );
+
+    assert_eq!(baseline.status.code(), Some(0));
+    assert_eq!(baseline.status.code(), blocked.status.code());
+    assert_eq!(baseline.stdout, blocked.stdout);
+    let warning_lines = String::from_utf8_lossy(&blocked.stderr)
+        .lines()
+        .filter(|line| line.starts_with("warning: --keep-phase-artifacts: "))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(warning_lines.len(), 1);
+    assert!(warning_lines[0].contains("artifact write(s) failed (first: "));
+    assert!(warning_lines[0].ends_with("); phase artifacts are incomplete"));
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
+}
