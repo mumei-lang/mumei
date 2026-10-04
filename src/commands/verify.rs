@@ -165,6 +165,25 @@ fn find_atom_span<'a>(items: &'a [Item], name: &str) -> Option<&'a parser::Span>
     None
 }
 
+fn find_session_caller_span<'a>(
+    items: &'a [Item],
+    atom_name: &str,
+    caller_file: &str,
+) -> Option<&'a parser::Span> {
+    items.iter().find_map(|item| match item {
+        Item::Atom(atom) if atom.name == atom_name => {
+            let source_file = atom
+                .spec_metadata
+                .get("source_file")
+                .filter(|file| !file.is_empty())
+                .map(String::as_str)
+                .unwrap_or(atom.span.file.as_str());
+            (source_file == caller_file).then_some(&atom.span)
+        }
+        _ => None,
+    })
+}
+
 fn write_sarif_fallback(
     sarif: &RefCell<super::verify_sarif::SarifCollector>,
     report_dir: Option<&str>,
@@ -1831,7 +1850,11 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                     if let Some(sarif) = sarif {
                         sarif.borrow_mut().push_session_protocol_violation(
                             violation,
-                            find_atom_span(&items, &violation.caller_atom),
+                            find_session_caller_span(
+                                &items,
+                                &violation.caller_atom,
+                                &violation.caller_file,
+                            ),
                         );
                     }
                     failed += 1;
@@ -2544,6 +2567,48 @@ pub(crate) fn save_cross_spec_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn atom_item(span_file: &str, source_file: Option<&str>) -> Item {
+        let mut atom = parser::parse_module(
+            r#"
+atom shared() -> i64
+requires: true;
+ensures: result == 0;
+body: 0;
+"#,
+        )
+        .into_iter()
+        .find_map(|item| match item {
+            Item::Atom(atom) => Some(atom),
+            _ => None,
+        })
+        .expect("parse test atom");
+        atom.span.file = span_file.to_string();
+        if let Some(source_file) = source_file {
+            atom.spec_metadata
+                .insert("source_file".to_string(), source_file.to_string());
+        }
+        Item::Atom(atom)
+    }
+
+    #[test]
+    fn session_caller_span_requires_matching_source_file() {
+        let items = vec![
+            atom_item("span-a.mm", Some("source-a.mm")),
+            atom_item("span-b.mm", None),
+        ];
+
+        assert_eq!(
+            find_session_caller_span(&items, "shared", "source-a.mm")
+                .map(|span| span.file.as_str()),
+            Some("span-a.mm")
+        );
+        assert_eq!(
+            find_session_caller_span(&items, "shared", "span-b.mm").map(|span| span.file.as_str()),
+            Some("span-b.mm")
+        );
+        assert!(find_session_caller_span(&items, "shared", "missing.mm").is_none());
+    }
 
     fn test_certificate(name: &str) -> proof_cert::ProofCertificate {
         let atom = serde_json::from_value(serde_json::json!({
