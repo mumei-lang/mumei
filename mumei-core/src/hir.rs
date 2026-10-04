@@ -1509,6 +1509,35 @@ atom quantified(n: i64)
     }
 
     #[test]
+    fn atom_contract_keeps_nested_quantifiers_in_clause_text() {
+        let atom = parse_atom_from_source(
+            r#"
+atom nested(n: i64)
+    requires: n == 5 || forall(i, 0, n, i >= 0);
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        let hir = lower_atom_to_hir(&atom);
+
+        assert!(hir.contract.quantifiers.is_empty());
+        let clauses: Vec<_> = hir
+            .contract
+            .clauses
+            .iter()
+            .filter(|clause| {
+                clause.kind == HirClauseKind::Requires
+                    && clause.mode == HirClauseMode::Plain
+                    && clause.text.contains("forall(")
+                    && clause.text.contains("i >= 0")
+            })
+            .collect();
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].text, "n == 5 || forall(i, 0, n, i >= 0)");
+        assert!(clauses[0].expr.is_some());
+    }
+
+    #[test]
     fn duplicate_conjunct_modes_assign_assume_before_plain() {
         let atom = parse_atom_from_source(
             "atom duplicate(x: i64) -> i64 \
