@@ -1162,13 +1162,34 @@ pub(crate) fn expr_to_z3<'a>(
                                                                     param.type_name.as_deref(),
                                                                     vc.module_env,
                                                                 );
-                                                            let solver_name = env.iter().find_map(
-                                                                |(name, value)| {
+                                                            let argument_rendering =
+                                                                arg_val.to_string();
+                                                            let mut matching_names = env
+                                                                .iter()
+                                                                .filter_map(|(name, value)| {
                                                                     (value.to_string()
-                                                                        == arg_val.to_string())
-                                                                    .then(|| name.clone())
-                                                                },
-                                                            );
+                                                                        == argument_rendering)
+                                                                        .then_some(name.as_str())
+                                                                })
+                                                                .collect::<Vec<_>>();
+                                                            matching_names.sort_by_key(|name| {
+                                                                (
+                                                                    !matches!(
+                                                                        classify_solver_symbol(
+                                                                            name,
+                                                                            &source_bindings,
+                                                                            vc.module_env,
+                                                                        ),
+                                                                        SolverSymbolClassification::Source(
+                                                                            _
+                                                                        )
+                                                                    ),
+                                                                    *name,
+                                                                )
+                                                            });
+                                                            let solver_name = matching_names
+                                                                .first()
+                                                                .map(|name| (*name).to_string());
                                                             if solver_name.as_deref().is_some_and(
                                                                 |name| name != param.name,
                                                             ) {

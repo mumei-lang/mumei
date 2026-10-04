@@ -306,3 +306,45 @@ body: x;
     assert_eq!(report["counterexample_fidelity"], "exact");
     cleanup(dir);
 }
+
+#[test]
+fn struct_body_local_is_not_reported_as_its_integer_handle() {
+    // Previously the local struct handle was raised as an integer and reported as "0".
+    let (dir, output, report) = verify_source(
+        "struct_body_local",
+        r#"
+struct Pt { a: i64, b: i64 }
+
+atom mk(x: i64) -> i64
+requires: x >= 0;
+ensures: result > 100;
+body: {
+    let q = Pt { a: x, b: 1 };
+    q.a
+};
+"#,
+        &["--disable-spurious-detection"],
+    );
+    assert!(
+        !output.status.success(),
+        "the false ensures clause must fail: {}",
+        output_text(&output)
+    );
+
+    let loss = &report["semantic_feedback"]["reconstruction_loss"]["counter_example"];
+    let q_rendering = loss["q"].as_str().expect("structured q rendering");
+    let q_provenance = &report["counterexample_provenance"]["values"]["q"];
+    assert_ne!(q_provenance["lowering"], "int");
+    match q_provenance["status"].as_str() {
+        Some("raised") => {
+            assert_eq!(q_provenance["lowering"], "struct");
+            assert_eq!(q_provenance["source_type"], "Pt");
+            assert_ne!(q_rendering, "0");
+            assert!(q_rendering.starts_with("Pt { a: "), "{q_rendering}");
+            assert!(q_rendering.contains(", b: 1"), "{q_rendering}");
+        }
+        Some("unraisable") => {}
+        status => panic!("expected raised or unraisable q provenance, got {status:?}"),
+    }
+    cleanup(dir);
+}

@@ -137,20 +137,46 @@ impl RaisedCounterexample {
         for (name, source_type, value) in &bindings {
             selected.insert(name.clone());
             let evaluated = model.eval(value, true).unwrap_or_else(|| value.clone());
-            let (rendering, lowering, status) = raise_model_value_with_env(
-                model,
-                &evaluated,
-                source_type.as_deref(),
-                module_env,
-                env,
-                Some(name),
-            );
+            let inferred_type = if source_type.is_none() {
+                infer_untyped_struct_type(name, env, module_env)
+            } else {
+                Ok(None)
+            };
+            let source_type = source_type.clone().or_else(|| {
+                inferred_type
+                    .as_ref()
+                    .ok()
+                    .and_then(|inferred| inferred.clone())
+            });
+            let (rendering, lowering, status) = match inferred_type {
+                Err(reason) => (
+                    evaluated.to_string(),
+                    "struct",
+                    RaisedStatus::Unraisable { reason },
+                ),
+                Ok(_) if source_type.is_none() && has_untyped_array_metadata(name, env) => (
+                    evaluated.to_string(),
+                    "array",
+                    RaisedStatus::Unraisable {
+                        reason: "array metadata is present but its element type is unavailable"
+                            .to_string(),
+                    },
+                ),
+                Ok(_) => raise_model_value_with_env(
+                    model,
+                    &evaluated,
+                    source_type.as_deref(),
+                    module_env,
+                    env,
+                    Some(name),
+                ),
+            };
             raised.values.push(RaisedValue {
                 source_name: name.clone(),
                 solver_name: None,
                 rendering,
                 lowering,
-                source_type: source_type.clone(),
+                source_type,
                 status,
             });
         }
@@ -219,6 +245,61 @@ impl RaisedCounterexample {
         raised.omitted_solver_symbols.dedup();
         raised
     }
+}
+
+fn infer_untyped_struct_type(
+    binding: &str,
+    env: &HashMap<String, Dynamic<'_>>,
+    module_env: &ModuleEnv,
+) -> Result<Option<String>, String> {
+    let mut candidates = module_env
+        .structs
+        .iter()
+        .filter_map(|(type_name, structure)| {
+            let total_fields = structure.fields.len();
+            if total_fields == 0 {
+                return None;
+            }
+            let present_fields = structure
+                .fields
+                .iter()
+                .filter(|field| {
+                    env.contains_key(&struct_field_key(binding, &field.name))
+                        || env.contains_key(&format!("{binding}_{}", field.name))
+                })
+                .count();
+            (present_fields > 0).then(|| (type_name.clone(), present_fields, total_fields))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+
+    if candidates.is_empty() {
+        let helper_prefix = format!("__struct_{binding}_");
+        if env.keys().any(|symbol| symbol.starts_with(&helper_prefix)) {
+            return Err(
+                "struct field symbols are present but no matching struct definition is available"
+                    .to_string(),
+            );
+        }
+        return Ok(None);
+    }
+    if candidates.len() != 1 {
+        return Err(
+            "struct field symbols are ambiguous across multiple struct definitions".to_string(),
+        );
+    }
+
+    let (type_name, present_fields, total_fields) = candidates.pop().expect("one candidate");
+    if present_fields != total_fields {
+        return Err(format!(
+            "struct field symbols for `{binding}` are incomplete for type `{type_name}`"
+        ));
+    }
+    Ok(Some(type_name))
+}
+
+fn has_untyped_array_metadata(binding: &str, env: &HashMap<String, Dynamic<'_>>) -> bool {
+    env.contains_key(&format!("len_{binding}")) || env.contains_key(&format!("__z3_arr_{binding}"))
 }
 
 pub fn classify_solver_symbol(
@@ -714,7 +795,14 @@ fn raise_struct_value<'ctx>(
     for field in &struct_def.fields {
         let key = struct_field_key(&flat_binding, &field.name);
         let alternate_key = struct_field_key(binding, &field.name);
-        let Some(field_value) = env.get(&key).or_else(|| env.get(&alternate_key)) else {
+        let alias_key = format!("{flat_binding}_{}", field.name);
+        let alternate_alias_key = format!("{binding}_{}", field.name);
+        let Some(field_value) = env
+            .get(&key)
+            .or_else(|| env.get(&alternate_key))
+            .or_else(|| env.get(&alias_key))
+            .or_else(|| env.get(&alternate_alias_key))
+        else {
             return unraisable(
                 raw,
                 "struct",
