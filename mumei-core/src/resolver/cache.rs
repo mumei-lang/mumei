@@ -683,12 +683,17 @@ fn atom_has_binder_scoped_call(atom: &Atom, check_body: bool) -> bool {
     // `forall_constraints`; walk each condition with its bound variable on
     // the binder stack.
     for quantifier in &atom.forall_constraints {
-        let mut binders = vec![quantifier.var.clone()];
+        // Bounds are evaluated outside the binder scope, matching the
+        // Call("forall") arm of `expr_has_binder_scoped_call`.
         for clause in [&quantifier.start, &quantifier.end] {
-            if expr_has_binder_scoped_call(&crate::parser::parse_expression(clause), &mut binders) {
+            if expr_has_binder_scoped_call(
+                &crate::parser::parse_expression(clause),
+                &mut Vec::new(),
+            ) {
                 return true;
             }
         }
+        let mut binders = vec![quantifier.var.clone()];
         if expr_has_binder_scoped_call(
             &crate::parser::parse_expression(&quantifier.condition),
             &mut binders,
@@ -1250,6 +1255,17 @@ ensures: arr[0] <= arr[1];
 body: n;
 "#;
         let (_, atom) = env_and_atom(source, "sorted_probe");
+        assert!(!atom_has_binder_scoped_call(&atom, true));
+    }
+
+    #[test]
+    fn call_in_quantifier_bound_is_not_marked() {
+        // `ident(n)` is the quantifier's end bound, which is evaluated
+        // outside the binder scope, so the atom is not marked.
+        let source = format!(
+            "{IDENT}\natom bounded(arr: [i64], n: i64) -> i64\nrequires: n >= 1 && len(arr) >= n && forall(i, 0, ident(n), arr[i] >= 0);\nensures: result == n;\nbody: n;\n"
+        );
+        let (_, atom) = env_and_atom(&source, "bounded");
         assert!(!atom_has_binder_scoped_call(&atom, true));
     }
 
