@@ -134,6 +134,24 @@ fn solver_unknown_without_counterexample_is_inconclusive() {
 }
 
 #[test]
+fn rejection_of_an_atom_named_like_a_solver_result_is_still_a_rejection() {
+    // The semantics check rejects the atom before Z3 runs; its error quotes the
+    // atom name, which must not be mistaken for a solver result.
+    for name in ["timeout", "spurious_candidate"] {
+        let dir = temp_dir(&format!("named_{name}"));
+        write(
+            &dir,
+            "named.mm",
+            &format!(
+                "atom {name}(x: i64) -> i64\nrequires: x >= 0;\nensures: result >= 0;\nsemantics: bogus;\nbody: {{ x }};\n"
+            ),
+        );
+        let output = verify(&dir, &["named.mm"]);
+        assert_exit(&output, EXIT_REJECTED);
+    }
+}
+
+#[test]
 fn spurious_counterexample_candidate_is_inconclusive() {
     let dir = temp_dir("spurious");
     write(&dir, "spurious.mm", SPURIOUS_SRC);
@@ -440,4 +458,22 @@ fn json_input_error_still_emits_a_summary_payload() {
     assert_eq!(payload["exit_code"], serde_json::json!(EXIT_INPUT_ERROR));
     assert_eq!(payload["verified"], serde_json::json!(0));
     assert!(payload["diagnostics"][0]["message"].is_string());
+}
+
+#[test]
+fn unparsable_source_is_an_input_error() {
+    // Top-level text that is not an item used to be skipped token by token,
+    // so the file "verified" with zero items.
+    for (name, source) in [("prose", "this is not valid mumei\n"), ("braces", "}}}\n")] {
+        let dir = temp_dir(&format!("unparsable_{name}"));
+        write(&dir, "bad.mm", source);
+        let output = verify(&dir, &["bad.mm"]);
+        assert_exit(&output, EXIT_INPUT_ERROR);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("at top level"), "{stderr}");
+    }
+
+    let dir = temp_dir("comment_only");
+    write(&dir, "comment.mm", "// nothing to verify yet\n");
+    assert_exit(&verify(&dir, &["comment.mm"]), EXIT_VERIFIED);
 }

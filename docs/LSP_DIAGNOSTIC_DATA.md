@@ -9,7 +9,7 @@ does not define a second vocabulary.
 | `source` | Severity | Meaning |
 | --- | ---: | --- |
 | `mumei` | 1 | Mumei parse or language-server diagnostic. |
-| `mumei-z3` | 1 | Z3 verification failure or a pending Lean escalation. |
+| `mumei-z3` | 1 or 2 | Z3 verification failure or a pending Lean escalation. Severity `2` when Z3 neither proved nor refuted the atom (see below), `1` otherwise. |
 | `mumei-lean` | 3 | An atom whose certificate has `z3_check_result == "lean_verified"`. |
 | `mumei-agent` | 2 | Agent-reported specification health or cross-validation issue. |
 | `mumei-intent` | 2 | Intent drift at or above the `0.75` threshold. |
@@ -47,6 +47,12 @@ Z3 diagnostics may carry:
 }
 ```
 
+A `mumei-z3` diagnostic is a warning (severity `2`) when the result is
+inconclusive in the same sense as `mumei verify` exit code `3`: Z3 returned
+`unknown` / `timeout` / `resource_limit`, its model was a
+`spurious_candidate`, or the atom is `unverifiable`.  A confirmed
+counterexample or contract violation stays an error (severity `1`).
+
 `counterexample` maps source names to rendered string values. It is also appended to the
 diagnostic message as `Counter-example: a = 1, b = 2`, unless the message
 already contains `Counter-example:`.  A pending escalation is also reflected
@@ -68,9 +74,11 @@ values and provenance.
 In-process verification stops at the first failing atom.  When a sibling
 `<file>.proof.json` certificate exists, every other atom it records with an
 `escalation_reason` and a `z3_check_result` other than `lean_verified` also
-receives a severity `1` `mumei-z3` diagnostic with the same `lean_escalation`
+receives a `mumei-z3` diagnostic with the same `lean_escalation`
 payload plus `"certificate": "<path>"`, so all pending escalations in the file
-are shown, each exactly once.
+are shown, each exactly once.  Its severity is `2` when the recorded
+`z3_check_result` is `unknown` / `timeout` / `resource_limit` /
+`spurious_candidate` / `skipped` (no Z3 verdict), and `1` otherwise.
 
 ## `mumei-lean` data
 

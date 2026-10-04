@@ -22,4 +22,3 @@ atom code_of_a(a: A) -> i64
             Z => 2
         }
     }
-}
