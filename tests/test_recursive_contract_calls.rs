@@ -97,8 +97,12 @@ impl CaseResult {
     }
 
     fn did_not_crash(&self) -> bool {
-        self.output.status.code().is_some_and(|code| code != 134)
-            && !String::from_utf8_lossy(&self.output.stderr).contains("overflowed its stack")
+        // 0 verified, 1 rejected, 3 inconclusive (docs/CLI.md); anything else,
+        // including signal termination, is not a verdict.
+        let stderr = String::from_utf8_lossy(&self.output.stderr);
+        matches!(self.output.status.code(), Some(0 | 1 | 3))
+            && !stderr.contains("overflowed its stack")
+            && !stderr.contains("panicked")
     }
 }
 
