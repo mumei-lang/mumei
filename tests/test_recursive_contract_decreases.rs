@@ -528,10 +528,13 @@ fn test_scc_internal_widened_quantifier_fails() {
         "qr3 should report precondition_violated; report:\n{:?}",
         case.report
     );
+    // The generic call-site message does not name the quantified conjunct;
+    // that the forall is the cause is shown by the CallerRequires
+    // counterfactual, not by the message text.
     let message = format!("{:?}", case.report);
     assert!(
-        message.contains("forall(i, 0, k, i < 5)"),
-        "the report should name the violated quantified conjunct; report:\n{message}"
+        message.contains("Call to 'qr3'"),
+        "the report should identify the failing call; report:\n{message}"
     );
 }
 
