@@ -187,6 +187,32 @@ atom tri3()
     body: tri(3);
 "#;
 
+const NAT_REFINEMENT_REPRO: &str = r#"
+type Nat = i64 where v >= 0;
+
+atom f(n: Nat) -> i64
+    ensures: (n == 0 && result == 0) || (n > 0 && result == 1 + f(n - 1));
+    decreases: n;
+    body: if n == 0 { 0 } else { 1 + f(n - 1) };
+
+atom bad() -> i64
+    ensures: result == 0;
+    body: f(0);
+"#;
+
+const NAT_TRI_CONST: &str = r#"
+type Nat = i64 where v >= 0;
+
+atom tri(n: Nat) -> i64
+    ensures: (n == 0 && result == 0) || (n > 0 && result == n + tri(n - 1));
+    decreases: n;
+    body: if n == 0 { 0 } else { n + tri(n - 1) };
+
+atom tri3()
+    ensures: result == 6;
+    body: tri(3);
+"#;
+
 const EFFECT_REC: &str = r#"
 effect Tick;
 
@@ -764,6 +790,28 @@ fn test_constant_argument_call_with_wrong_spec_fails() {
     let source = TRI_CONST.replace("result == 6;", "result == 7;");
     let case = verify("tri3_wrong", &source, "tri3");
     assert_case(case, "failed");
+}
+
+#[test]
+fn test_refined_parameter_predicates_guard_constant_unfolding() {
+    let valid = verify("refined_nat", NAT_REFINEMENT_REPRO, "bad");
+    assert_case(valid, "verified");
+
+    let wrong_source =
+        NAT_REFINEMENT_REPRO.replace("ensures: result == 0;", "ensures: result == 999;");
+    let wrong = verify("refined_nat_wrong", &wrong_source, "bad");
+    assert!(
+        !wrong.diagnostic_message_contains("failed", "Contradiction found"),
+        "wrong refined postcondition must fail without a contradiction diagnostic: {:?}",
+        wrong.verdict()
+    );
+    assert_case(wrong, "failed");
+}
+
+#[test]
+fn test_constant_refined_nat_argument_unfolds_without_requires() {
+    let case = verify("nat_tri3", NAT_TRI_CONST, "tri3");
+    assert_case(case, "verified");
 }
 
 #[test]

@@ -269,6 +269,46 @@ impl Drop for UnfoldSinkGuard<'_, '_> {
     }
 }
 
+fn constant_call_antecedent<'a>(
+    vc: &VCtx<'a>,
+    atom: &Atom,
+    args: &[Dynamic<'a>],
+    call_env: &HashMap<String, Dynamic<'a>>,
+) -> Option<Bool<'a>> {
+    let requires = crate::verification::caller_requires_obligation(atom);
+    let mut terms = Vec::new();
+    if requires.trim() == "true" {
+        terms.push(Bool::from_bool(vc.ctx, true));
+    } else {
+        let req_ast = parse_expression(&requires);
+        let mut req_env = call_env.clone();
+        let req_value = expr_to_z3(vc, &req_ast, &mut req_env, None).ok()?;
+        terms.push(req_value.as_bool()?);
+    }
+
+    for (param, arg) in atom.params.iter().zip(args) {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let Some(refined) = vc.module_env.get_type(type_name) else {
+            continue;
+        };
+
+        if refined._base_type == "u64" {
+            terms.push(nonneg_constraint(vc.ctx, arg)?);
+        }
+
+        let mut refinement_env = call_env.clone();
+        refinement_env.insert(refined.operand.clone(), arg.clone());
+        let predicate_ast = parse_expression(&refined.predicate_raw);
+        let predicate_value = expr_to_z3(vc, &predicate_ast, &mut refinement_env, None).ok()?;
+        terms.push(predicate_value.as_bool()?);
+    }
+
+    let term_refs: Vec<&Bool> = terms.iter().collect();
+    Some(Bool::and(vc.ctx, &term_refs))
+}
+
 fn unfold_constant_calls<'a>(
     vc: &VCtx<'a>,
     env: &HashMap<String, Dynamic<'a>>,
@@ -312,20 +352,10 @@ fn unfold_constant_calls<'a>(
             }
 
             let _contract_guard = vc.enter_contract_instantiation(&atom.name);
-            let requires = crate::verification::caller_requires_obligation(atom);
-            let req_bool = if requires.trim() == "true" {
-                Bool::from_bool(vc.ctx, true)
-            } else {
-                let req_ast = parse_expression(&requires);
-                let Ok(req_value) = expr_to_z3(vc, &req_ast, &mut call_env, None) else {
-                    continue;
-                };
-                let Some(req_bool) = req_value.as_bool() else {
-                    continue;
-                };
-                req_bool
+            let Some(antecedent) = constant_call_antecedent(vc, atom, &args, &call_env) else {
+                continue;
             };
-            if req_bool.simplify().as_bool() == Some(false) {
+            if antecedent.simplify().as_bool() == Some(false) {
                 continue;
             }
 
@@ -352,7 +382,7 @@ fn unfold_constant_calls<'a>(
                 continue;
             };
             let nested_calls = sink_guard.take_frontier();
-            solver.assert(&req_bool.implies(&ens_bool));
+            solver.assert(&antecedent.implies(&ens_bool));
             asserted_instances += 1;
             next_frontier.extend(nested_calls);
         }
