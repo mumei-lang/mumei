@@ -532,8 +532,11 @@ pub fn recursive_contract_hint_diagnostic(
     atom: &Atom,
     module_env: &ModuleEnv,
 ) -> Option<Diagnostic> {
-    let scc = recursive_scc(module_env, &atom.name)?;
     let contract_edges = contract_call_edges(module_env, atom);
+    if contract_edges.is_empty() {
+        return None;
+    }
+    let scc = recursive_scc(module_env, &atom.name)?;
     if !contract_edges.iter().any(|e| scc.contains(e)) {
         return None;
     }

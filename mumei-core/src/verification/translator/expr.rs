@@ -261,11 +261,9 @@ pub(crate) fn termination_violation_error<'a>(
     .with_counterexample(ce)
 }
 
-/// Termination bookkeeping shared by the direct-call and `call(atom_ref(..))`
-/// paths: when `callee` is a congruent SCC member and the call is lexically
-/// in the current atom's own body/contract (not inside an instantiated callee
-/// contract), record or check `0 <= M_A && M_B(args) < M_A`.
-#[allow(clippy::too_many_arguments)]
+/// Whether `callee` is a member of the current atom's SCC and the call sits
+/// lexically in the atom's own body/contract (not inside an instantiated
+/// callee contract).
 fn scc_internal_call<'a>(vc: &VCtx<'a>, callee: &Atom) -> bool {
     vc.contracts_in_instantiation.borrow().is_empty()
         && vc
@@ -277,6 +275,10 @@ fn scc_internal_call<'a>(vc: &VCtx<'a>, callee: &Atom) -> bool {
             .unwrap_or(false)
 }
 
+/// Termination bookkeeping shared by the direct-call and `call(atom_ref(..))`
+/// paths: when `callee` is a congruent SCC member and the call is lexically
+/// in the current atom's own body/contract (not inside an instantiated callee
+/// contract), record or check `0 <= M_A && M_B(args) < M_A`.
 fn termination_obligation_at_call<'a>(
     vc: &VCtx<'a>,
     callee: &Atom,
@@ -333,7 +335,6 @@ fn termination_obligation_at_call<'a>(
 /// holds where the decrease was proved).
 fn congruent_ensures_antecedent<'a>(
     vc: &VCtx<'a>,
-    callee: &Atom,
     caller_requires: &str,
     call_env: &mut Env<'a>,
     scc_internal: bool,
@@ -347,7 +348,6 @@ fn congruent_ensures_antecedent<'a>(
             .as_bool()
             .unwrap_or_else(|| Bool::from_bool(ctx, true))
     };
-    let _ = callee;
     if scc_internal {
         let mut conds: Vec<Bool<'a>> = vc.path_cond_stack.borrow().clone();
         conds.push(req);
@@ -1620,7 +1620,6 @@ pub(crate) fn expr_to_z3<'a>(
                                 {
                                     let ante = congruent_ensures_antecedent(
                                         vc,
-                                        &callee,
                                         &caller_requires,
                                         &mut call_env,
                                         scc_internal,
@@ -3173,7 +3172,6 @@ pub(crate) fn expr_to_z3<'a>(
                             if let (Some(ens_bool), Some(solver)) = (ens_z3.as_bool(), solver_opt) {
                                 let ante = congruent_ensures_antecedent(
                                     vc,
-                                    &callee_atom,
                                     &caller_requires,
                                     &mut call_env,
                                     scc_internal,

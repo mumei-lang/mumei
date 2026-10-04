@@ -559,6 +559,11 @@ fn lower_clause_with_skip<'a>(
             );
             return Ok(ClauseLoweringOutcome::Skipped);
         }
+        // Termination errors carry a counterexample that the generic
+        // rewrap below would drop; propagate them unchanged.
+        Err(err) if format!("{err}").contains("Termination measure violation") => {
+            return Err(err);
+        }
         Err(err) => {
             return Err(MumeiError::verification_at(
                 format!("failed to lower {} clause '{}': {}", label, trimmed, err),
@@ -2130,9 +2135,15 @@ pub(crate) fn verify_inner(
             } else {
                 FAILURE_PRECONDITION_VIOLATED
             };
+            let counterexample = counterexample_from_error(&e);
             let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
-            let semantic_fb =
-                build_semantic_feedback(&constraint_mappings, None, atom, body_failure_type, None);
+            let semantic_fb = build_semantic_feedback(
+                &constraint_mappings,
+                counterexample.as_ref(),
+                atom,
+                body_failure_type,
+                None,
+            );
             save_visualizer_report(
                 output_dir,
                 "failed",
@@ -2140,7 +2151,7 @@ pub(crate) fn verify_inner(
                 "N/A",
                 "N/A",
                 &err_str,
-                None,
+                counterexample.as_ref(),
                 body_failure_type,
                 semantic_fb.as_ref(),
                 Some(&atom.span),

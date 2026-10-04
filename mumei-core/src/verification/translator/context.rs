@@ -257,27 +257,22 @@ impl<'a> VCtx<'a> {
         callee: &crate::parser::Atom,
         domain: &[z3::Sort<'a>],
         range: &z3::Sort<'a>,
-    ) -> z3::FuncDecl<'a> {
+    ) -> std::rc::Rc<z3::FuncDecl<'a>> {
+        if let Some(decl) = self.recursion.rec_fns.borrow().get(&callee.name) {
+            return decl.clone();
+        }
         let domain_refs: Vec<&z3::Sort<'a>> = domain.iter().collect();
-        // FuncDecl is not Clone; FuncDecl::new with the same name and
-        // signature returns the same underlying declaration, so a fresh
-        // construction is equivalent to reusing a cached one.
-        let decl = z3::FuncDecl::new(
+        let decl = std::rc::Rc::new(z3::FuncDecl::new(
             self.ctx,
             format!("rec_fn#{}", callee.name),
             &domain_refs,
             range,
-        );
+        ));
         self.recursion
             .rec_fns
             .borrow_mut()
-            .insert(callee.name.clone(), std::rc::Rc::new(decl));
-        z3::FuncDecl::new(
-            self.ctx,
-            format!("rec_fn#{}", callee.name),
-            &domain_refs,
-            range,
-        )
+            .insert(callee.name.clone(), decl.clone());
+        decl
     }
 
     pub(crate) fn is_instantiating_contract(&self, atom: &str) -> bool {

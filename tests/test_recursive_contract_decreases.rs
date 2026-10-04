@@ -271,7 +271,7 @@ fn assert_case(case: CaseResult, expected: &str) {
     assert_verdict(&case, expected);
 }
 
-fn assert_termination(case: &CaseResult) {
+fn assert_termination(case: &CaseResult, param: &str) {
     assert!(
         case.did_not_crash(),
         "{} crashed; stderr:\n{}",
@@ -291,6 +291,18 @@ fn assert_termination(case: &CaseResult) {
         Some(1),
         "{} should exit 1",
         case.name
+    );
+    let counterexample = case
+        .report
+        .as_ref()
+        .and_then(|report| report["counterexample"].as_object());
+    assert!(
+        counterexample
+            .map(|ce| ce.contains_key(param))
+            .unwrap_or(false),
+        "{} should report a counterexample binding '{param}'; report:\n{:?}",
+        case.name,
+        case.report
     );
 }
 
@@ -327,25 +339,25 @@ fn test_wrong_recurrence_with_decreases_fails() {
 #[test]
 fn test_self_call_in_ensures_fails_termination() {
     let case = verify("bad_self", BAD_SELF, "bad");
-    assert_termination(&case);
+    assert_termination(&case, "x");
 }
 
 #[test]
 fn test_call_without_decreasing_argument_fails_termination() {
     let case = verify("no_decrease", NO_DECREASE_CALL, "f");
-    assert_termination(&case);
+    assert_termination(&case, "n");
 }
 
 #[test]
 fn test_growing_call_argument_fails_termination() {
     let case = verify("growing", GROWING_CALL, "f");
-    assert_termination(&case);
+    assert_termination(&case, "n");
 }
 
 #[test]
 fn test_negative_measure_fails_termination() {
     let case = verify("negative", NEGATIVE_MEASURE, "neg");
-    assert_termination(&case);
+    assert_termination(&case, "n");
 }
 
 #[test]

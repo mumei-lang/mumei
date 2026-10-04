@@ -331,8 +331,8 @@ atom tri(n: i64)
     body: { if n == 0 { 0 } else { n + tri(n - 1) } };
 ```
 
-When an atom on a recursive call cycle (a directly recursive atom or a
-mutually recursive SCC) declares `decreases`, every recursive call in its body
+When an atom sits on an **eligible** recursive call cycle (see "Recursive
+contracts" below) and declares `decreases`, every recursive call in its body
 and in its `requires`/`ensures` contract must prove, under the current path
 conditions and the caller's requires:
 
@@ -346,13 +346,18 @@ A call that cannot prove both fails with
 ### Recursive contracts
 
 On an **eligible** recursive SCC — every member declares `decreases`, has a
-call-free measure over its own parameters only, uses no effects, no `ref`,
-`ref mut`, `consume`, `async`, or type parameters, is `Verified` (not
+call-free measure over its own parameters only, uses no effects, no `ref mut`,
+`consume`, `async`, or type parameters, is `Verified` (not
 `trusted`), has no assume-mode ensures, and every parameter and result is a
-scalar `Int`/`Bool` — recursive calls in `requires`/`ensures` are *congruent*:
-the call result is an application of an uninterpreted function
-`rec_fn#<callee>` shared by every member, and the callee's ensures is assumed
-under the implication `CallerRequires ⇒ CalleeEnsures`. This makes
+scalar `Int`/`Bool` — calls to an SCC member are *congruent* during the
+verified atom's evaluation: the call result is an application of an
+uninterpreted function `rec_fn#<callee>` shared by every member, and the
+callee's ensures is assumed under the implication
+`CallerRequires ⇒ CallerEnsures`. This applies to recursive calls in bodies
+and in `requires`/`ensures` contracts, and also to calls from a caller outside
+the SCC (e.g. `use_tri` above — its own contract may then mention
+`tri(n - 1)`). For calls inside the SCC itself the antecedent additionally
+conjoins the path conditions under which the decrease was proved. This makes
 specifications like the `tri` contract above provable, including the mutual
 `is_even`/`is_odd` pair.
 
@@ -366,6 +371,7 @@ recursive calls produce fresh, unconstrained results — and the verifier emits
 an advisory `recursive_contract_needs_decreases` or
 `recursive_contract_unsupported` hint diagnostic instead. The hint never
 changes the verdict.
+
 ---
 ## Module System
 ### Import Syntax

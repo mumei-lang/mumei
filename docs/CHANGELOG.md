@@ -6,10 +6,11 @@
   `M_callee(args) < M` under the path conditions and the caller's requires;
   violations fail with `termination_measure_violation` (exit 1).
 - **Congruent recursive contracts**: on an eligible recursive SCC (all members
-  declare `decreases`, call-free measure over params, no effects/`ref`/`ref
+  declare `decreases`, call-free measure over params, no effects/`ref
   mut`/`consume`/`async`/type params, `Verified`, scalar `Int`/`Bool`
   signatures), recursive contract calls share an uninterpreted `rec_fn#` and
-  assume the callee ensures under `CallerRequires ⇒ CalleeEnsures`, so
+  assume the callee ensures under `CallerRequires ⇒ CallerEnsures` (with path
+  conditions conjoined to the antecedent for SCC-internal calls), so
   contracts like `result == n + tri(n - 1)` (including mutual recursion) are
   provable.
 - **Advisory hints**: atoms on ineligible recursive cycles get a

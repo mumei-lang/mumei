@@ -387,7 +387,7 @@ without parsing stderr. `warnings` stays advisory-only.
 Advisory codes produced by the recursive-contract analysis are
 `recursive_contract_needs_decreases` (atom on a recursive SCC where a member
 lacks `decreases`) and `recursive_contract_unsupported` (the SCC uses a
-feature outside the congruent-contract fragment: effects, `ref`/`ref
+feature outside the congruent-contract fragment: effects, `ref
 mut`/`consume`, `async`, type params, `trusted`, assume-mode ensures, or
 non-scalar `Int`/`Bool` signatures). Both carry `severity: "hint"` and never
 change the verdict.
