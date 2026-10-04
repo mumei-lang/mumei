@@ -1436,7 +1436,8 @@ fn verify_inner_impl(
         // `<name>[` token. Avoids paying parse cost twice and matches the
         // common `arr[i]`, `data[k]` shapes used in the std lib.
         q.condition.contains('[')
-    });
+    }) || (atom.requires.contains('[')
+        && (atom.requires.contains("forall(") || atom.requires.contains("exists(")));
     let timeout_multiplier = match (has_string_constraints_cell_pre.get(), has_array_forall) {
         (true, true) => 3,
         (true, false) => 2,

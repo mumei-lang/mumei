@@ -1118,10 +1118,8 @@ pub(crate) fn expr_to_z3<'a>(
                         }
 
                         // requires の検証: 呼び出し元のコンテキストで事前条件が満たされるか
-                        let caller_requires = crate::verification::contract_view(
-                            &callee,
-                            crate::verification::ContractView::CallerRequires,
-                        );
+                        let caller_requires =
+                            crate::verification::caller_requires_obligation(&callee);
                         if caller_requires.trim() != "true" {
                             if let Some(solver) = solver_opt {
                                 let req_ast = parse_expression(&caller_requires);
@@ -2823,10 +2821,8 @@ pub(crate) fn expr_to_z3<'a>(
                     }
 
                     // requires を呼び出し元のコンテキストで検証
-                    let caller_requires = crate::verification::contract_view(
-                        &callee_atom,
-                        crate::verification::ContractView::CallerRequires,
-                    );
+                    let caller_requires =
+                        crate::verification::caller_requires_obligation(&callee_atom);
                     if caller_requires.trim() != "true" {
                         let req_ast = parse_expression(&caller_requires);
                         let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
