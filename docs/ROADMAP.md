@@ -2716,7 +2716,7 @@ templates are:
 - **M3**: ✅ unchanged-prefix テンプレ + `forall` 翻訳のコスト制御、opt-in 構文。CLI フラグは parser が config より先に実行されるため Deferred。
 - **スコープ外**: CEGIS による不変量の反例駆動 *修正*（反例からの式修补は B-4/mumei-agent 側の管轄）、`decreases` の自動推論、ネスト loop の交互不変量、非線形・浮動小数点不変量。
 
-## P33: 検証診断と信頼境界の明示化（VC 結果分類・phase contract・bridge 公理監査）— 🚧 Wave 1 実装中
+## P33: 検証診断と信頼境界の明示化（VC 結果分類・phase contract・bridge 公理監査）— ✅ Implemented (Wave 1–2)
 
 **目的**: 「通った / 落ちた」の 2 値だった検証結果に *なぜ* を付け、検証器自身が置いている前提（フェーズ間の事実、反例の忠実度、Lean bridge の信頼境界）を宣言・監査可能にする。いずれも既存の fail-closed 方針を緩めない — 追加するのは診断と監査のみで、`unknown` を証明・到達不能として扱う経路は設けない。
 
