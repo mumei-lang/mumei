@@ -19,9 +19,10 @@ use std::path::Path;
 /// Version 9 rejects calls whose argument count differs from the callee's
 /// parameter count, so earlier "verified" results for such calls must be
 /// re-derived.
-/// Version 10 unfolds constant-argument calls into eligible recursive SCCs up to a fixed depth.
-/// Version 11 guards unfolded instances with callee parameter refinements.
-pub const VERIFIER_POLICY_VERSION: u32 = 11;
+/// Version 10 unfolds constant-argument calls into eligible recursive SCCs
+/// up to a fixed depth, guarding each instance with the callee's requires
+/// and parameter refinements.
+pub const VERIFIER_POLICY_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
