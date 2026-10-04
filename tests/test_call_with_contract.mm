@@ -25,7 +25,7 @@ atom add(a: i64, b: i64)
 atom apply(x: i64, f: atom_ref(i64) -> i64)
     requires: x >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
     body: call(f, x);
 
 // --- Test 2: call_with_contract with requires and ensures ---
@@ -43,7 +43,7 @@ atom apply_twice(x: i64, f: atom_ref(i64) -> i64)
 atom fold_two(a: i64, b: i64, f: atom_ref(i64, i64) -> i64)
     requires: a >= 0 && b >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0 && y >= 0, ensures: result >= 0;
     body: call(f, a, b);
 
 // --- Test 4: Callers using concrete atom_ref ---
@@ -66,7 +66,7 @@ atom test_fold_two_add()
 atom option_map_pattern(opt: i64, f: atom_ref(i64) -> i64)
     requires: opt >= 0 && opt <= 1;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
     body: {
         match opt {
             0 => 0,
