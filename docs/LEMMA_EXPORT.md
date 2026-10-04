@@ -246,9 +246,12 @@ the precondition. This is the case the quantified fact exists for, and it is
 the only case where it *replaces* per-call instantiation rather than adding to
 it.
 
-A call under a binder to a **non-exporting** callee is lowered exactly as
-today. That path has the pre-existing problem described in
-[§1](#1-background-what-calls-do-today); fixing it is out of scope here.
+A call under a binder to a **non-exporting** callee keeps the behavior of the
+base commit. Once the prerequisite fix
+([#672](https://github.com/mumei-lang/mumei/pull/672), see
+[§1](#1-background-what-calls-do-today)) has landed, that behavior is to
+report the atom `unverifiable` (exit `3`) whenever such a call's arguments
+depend on the bound variable. Lemma export does not change it.
 
 **R3. When the quantified fact is asserted.** For an importing atom, collect the
 set `X` of exporting callees `g` such that `lemma_fn_g` occurs under a binder
@@ -524,7 +527,10 @@ every atom):
 1. the SMT-LIB text of each solver context (`Solver::to_string()` captured by a
    test-only hook) is identical with the feature compiled in and with it
    disabled;
-2. the proof hash is identical to the value computed on the base commit;
+2. the proof hash is identical to the value computed on the base commit. The
+   base commit already contains the prerequisite fix of
+   [§13](#13-open-questions) item 1, so its fail-closed handling of
+   non-exporting binder calls is part of the baseline, not a difference;
 3. `report.json` is identical apart from timing fields.
 
 Item 2 can reuse `scripts/std_proof_baseline.json` and the `stdlib-proof-gate`
