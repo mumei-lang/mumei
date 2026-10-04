@@ -237,7 +237,7 @@ pub(crate) fn check_contract_subsumption<'a>(
             solver.assert(contract_requires_bool);
         }
         solver.assert(&concrete_requires_bool.not());
-        let sat_result = solver.check();
+        let sat_result = crate::verification::phase_artifacts::check(solver);
         solver.pop(1);
 
         if sat_result == SatResult::Sat {
@@ -306,7 +306,7 @@ pub(crate) fn check_contract_subsumption<'a>(
     }
     solver.assert(&concrete_bool);
     solver.assert(&contract_bool.not());
-    let sat_result = solver.check();
+    let sat_result = crate::verification::phase_artifacts::check(solver);
     solver.pop(1);
 
     if sat_result == SatResult::Sat {

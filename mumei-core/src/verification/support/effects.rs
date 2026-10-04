@@ -907,7 +907,7 @@ pub(crate) fn verify_effect_params(atom: &Atom, module_env: &ModuleEnv) -> Mumei
                                 parse_constraint_to_z3_string(&z3_ctx, constraint, &param_z3_str);
                             if let Some(constraint_bool) = maybe_bool {
                                 solver.assert(&constraint_bool);
-                                Some(solver.check())
+                                Some(crate::verification::phase_artifacts::check(&solver))
                             } else {
                                 None
                             }

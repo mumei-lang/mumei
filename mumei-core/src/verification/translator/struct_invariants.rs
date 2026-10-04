@@ -263,7 +263,7 @@ pub(crate) fn check_struct_invariants<'a>(
         solver.assert(&vc.path_cond_conj());
         solver.assert(&invariant.not());
         let checkpoint = profiler_checkpoint(vc);
-        let verdict = solver.check();
+        let verdict = crate::verification::phase_artifacts::check(solver);
         profile_solver_check(vc, checkpoint);
         solver.pop(1);
         match verdict {

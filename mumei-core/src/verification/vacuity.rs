@@ -218,7 +218,7 @@ fn verify_mutated_body(
     };
     solver.push();
     solver.assert(&ens_bool.not());
-    let passed = solver.check() == SatResult::Unsat;
+    let passed = crate::verification::phase_artifacts::check(&solver) == SatResult::Unsat;
     solver.pop(1);
     passed
 }
