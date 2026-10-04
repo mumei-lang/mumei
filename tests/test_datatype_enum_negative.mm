@@ -16,4 +16,3 @@ atom code_of(c: Color) -> i64
             Green => 1
         }
     }
-}

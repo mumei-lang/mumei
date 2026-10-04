@@ -1510,7 +1510,20 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 items.push(Item::Atom(atom));
             }
 
-            _ => {
+            // A `;` after an item (e.g. `body: { ... };`) is accepted.
+            Token::Semicolon => {
+                ctx.advance();
+            }
+
+            other => {
+                let (line, col) = ctx
+                    .tokens_ref()
+                    .get(ctx.pos())
+                    .map(|t| (t.line, t.col))
+                    .unwrap_or((0, 0));
+                ctx.syntax_failure(format!(
+                    "unexpected token {other} at top level at {line}:{col}; expected an item such as `atom`, `type`, `struct` or `import`"
+                ));
                 ctx.advance();
             }
         }
@@ -1814,6 +1827,12 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         None
     };
 
+    // Clauses may be wrapped in braces: `atom f(x: i64) -> i64 { ... }`.
+    let braced = ctx.peek() == &Token::LBrace;
+    if braced {
+        ctx.advance();
+    }
+
     let mut requires_raw = "true".to_string();
     let mut ensures = "true".to_string();
     let mut clause_labels = Vec::new();
@@ -2041,6 +2060,9 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                 ctx.advance();
             }
         }
+    }
+    if braced {
+        ctx.expect(Token::RBrace);
     }
 
     let mut params = params;
