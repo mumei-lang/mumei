@@ -170,14 +170,6 @@ pub fn unsupported_semantics_value(atom: &Atom) -> Option<&str> {
 /// atom keeps the default `Int` encoding, so its proof certificate is
 /// unchanged.
 pub fn atom_requires_bitvector_semantics(atom: &Atom) -> bool {
-    atom_requires_bitvector_semantics_without_covers(atom)
-        || atom
-            .covers
-            .iter()
-            .any(|cover| expr_has_bitwise_op(&parse_expression(&cover.clause)))
-}
-
-fn atom_requires_bitvector_semantics_without_covers(atom: &Atom) -> bool {
     if atom
         .spec_metadata
         .get("semantics")
@@ -215,7 +207,7 @@ pub fn atom_requires_bitvector_semantics_in_module(atom: &Atom, module_env: &Mod
         let Some(current_atom) = module_env.atoms.get(&current) else {
             continue;
         };
-        if current != atom.name && atom_requires_bitvector_semantics_without_covers(current_atom) {
+        if current != atom.name && atom_requires_bitvector_semantics(current_atom) {
             return true;
         }
         if atom_struct_invariants(current_atom, module_env)
@@ -927,8 +919,8 @@ pub(crate) fn atom_contract_text(atom: &Atom) -> String {
 /// reasoning — still carries `nonlinear_arithmetic` and stays outside the
 /// fragment.
 /// A bitwise operator anywhere in the contract — including the loop invariant
-/// and the bounds and condition of an extracted quantifier — or in a cover
-/// clause decides the encoding, since those clauses share the same sorts.
+/// and the bounds and condition of an extracted quantifier — decides the
+/// encoding, since all of those clauses are lowered with the same sorts.
 fn atom_uses_bitvector_semantics(
     atom: &Atom,
     requires: &Expr,
@@ -949,7 +941,7 @@ fn atom_uses_bitvector_semantics(
         })
 }
 
-fn expr_has_bitwise_op(expr: &Expr) -> bool {
+pub(crate) fn expr_has_bitwise_op(expr: &Expr) -> bool {
     match expr {
         Expr::BinaryOp(left, op, right) => {
             matches!(op, Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr)

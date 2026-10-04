@@ -88,7 +88,7 @@ body: if x < 0 { 0 - x } else { x };
 }
 
 #[test]
-fn bitwise_cover_selects_bitvector_semantics() {
+fn bitwise_cover_without_bitvec_mode_is_unknown() {
     let (dir, output, report, text) = verify_source(
         "bitwise_cover",
         r#"
@@ -101,8 +101,91 @@ body: x;
     );
 
     assert!(output.status.success(), "{text}");
+    assert_eq!(report["cover_results"][0]["status"], "unknown");
+    assert!(
+        text.contains("semantics: bitvec")
+            || report["diagnostics"].as_array().is_some_and(|diagnostics| {
+                diagnostics.iter().any(|diagnostic| {
+                    diagnostic
+                        .as_str()
+                        .is_some_and(|text| text.contains("semantics: bitvec"))
+                })
+            }),
+        "{text}\n{report}"
+    );
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn bitwise_cover_with_explicit_bitvec_mode_is_covered() {
+    let (dir, output, report, text) = verify_source(
+        "bitwise_cover_bitvec",
+        r#"
+atom bw(x: i64) -> i64
+semantics: bitvec;
+requires: x >= 0 && x < 100;
+ensures: result >= 0;
+cover "odd": (x & 1) == 1;
+body: x;
+"#,
+    );
+
+    assert!(output.status.success(), "{text}");
     assert_eq!(report["cover_results"][0]["status"], "covered");
     assert!(is_odd_witness(&report["cover_results"][0]["witness"]["x"]));
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn bitwise_cover_keeps_callers_in_int_mode() {
+    let (dir, output, _report, text) = verify_source(
+        "bitwise_cover_int_caller",
+        r#"
+atom bw(x: i64) -> i64
+requires: x >= 0 && x < 100;
+ensures: result == x;
+cover "odd": (x & 1) == 1;
+body: x;
+
+atom caller(x: i64) -> i64
+requires: x >= 0 && x < 100;
+ensures: result == x;
+body: bw(x);
+"#,
+    );
+
+    assert!(output.status.success(), "{text}");
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
+fn call_facts_from_one_cover_do_not_leak_into_later_covers() {
+    let (dir, output, report, text) = verify_source(
+        "cover_call_facts_leak",
+        r#"
+atom neg(y: i64) -> i64
+requires: y < 0;
+ensures: result == y && y < 0;
+body: y;
+
+atom caller(x: i64) -> i64
+requires: x > -10 && x < 10;
+ensures: result == x;
+cover "neg call": neg(x) == -1;
+cover "positive": x == 5;
+body: x;
+"#,
+    );
+
+    assert!(output.status.success(), "{text}");
+    assert_eq!(report["cover_results"][0]["label"], "neg call");
+    assert_eq!(report["cover_results"][0]["status"], "covered");
+    assert_eq!(report["cover_results"][1]["label"], "positive");
+    assert_eq!(report["cover_results"][1]["status"], "covered");
+    assert_eq!(report["cover_results"][1]["witness"]["x"], "5");
 
     std::fs::remove_dir_all(dir).expect("remove fixture directory");
 }

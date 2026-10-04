@@ -2647,7 +2647,21 @@ pub(crate) fn verify_inner(
                 continue;
             }
 
+            if !vc.bitvec_i64 && expr_has_bitwise_op(&parse_expression(&cover.clause)) {
+                diagnostics.push(format!(
+                    "warning: reachability of cover clause {cover_name:?} is unknown because it uses bitwise operators but the atom is verified with the Int encoding; add `semantics: bitvec;` to check it"
+                ));
+                cover_results.push(json!({
+                    "clause": cover.clause,
+                    "label": cover.label,
+                    "status": "unknown",
+                    "witness": serde_json::Value::Null,
+                }));
+                continue;
+            }
+
             vc.cover_obligations = Some(std::cell::RefCell::new(Vec::new()));
+            solver.push();
             let lowered_cover = lower_clause_with_skip(
                 &vc,
                 &mut env,
@@ -2662,7 +2676,14 @@ pub(crate) fn verify_inner(
                 .take()
                 .expect("cover obligation collection is active")
                 .into_inner();
-            let cover_bool = match lowered_cover? {
+            let lowered_cover = match lowered_cover {
+                Ok(lowered_cover) => lowered_cover,
+                Err(err) => {
+                    solver.pop(1);
+                    return Err(err);
+                }
+            };
+            let cover_bool = match lowered_cover {
                 ClauseLoweringOutcome::Trivial => Bool::from_bool(&ctx, true),
                 ClauseLoweringOutcome::Skipped => {
                     diagnostics.push(format!(
@@ -2674,12 +2695,12 @@ pub(crate) fn verify_inner(
                         "status": "unknown",
                         "witness": serde_json::Value::Null,
                     }));
+                    solver.pop(1);
                     continue;
                 }
                 ClauseLoweringOutcome::Lowered(cover_bool) => cover_bool,
             };
 
-            solver.push();
             solver.assert(&cover_bool);
             for obligation in &cover_obligations {
                 solver.assert(obligation);
