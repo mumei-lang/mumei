@@ -121,8 +121,10 @@ from `spec_validation.rs::split_top_level_conjunctions`.
 Rules:
 
 - **E1 (refutation first).** The holds query is made only when the refutation
-  query is Sat, so a `proved`, `unknown`, or `skipped` conjunct costs one check
-  and a failing conjunct costs two. `executor.rs::verify_inner` (Phase 5).
+  query is Sat, so a `proved` or `unknown` conjunct costs one check, a
+  `skipped` conjunct costs none, and a failing conjunct costs two. A
+  refutation that returns Unknown ends Phase 5 at once: the atom fails with a
+  "Z3 returned unknown" error, which is inconclusive (rule X2). `executor.rs::verify_inner` (Phase 5).
 - **E2 (reachability is learned, never guessed).** `context_reachability`
   starts as `unknown`; a Sat refutation proves the context reachable, and
   Phase 6 sets it from its own check of `ctx` (`reachable` on Sat,
@@ -131,8 +133,9 @@ Rules:
   ("Logic contradiction", Phase 6), not a success. Before rejecting, Phase 6
   reports every conjunct that Phase 5 classified as `proved` as `vacuous`
   instead and adds a "vacuous verification context" diagnostic, so the reader
-  can see why the proof meant nothing. `executor.rs::verify_inner` (Phase 6). Phase 1i additionally flags
-  vacuous specifications when vacuity checking is enabled
+  can see why the proof meant nothing. `executor.rs::verify_inner` (Phase 6).
+  Phase 1i additionally flags vacuous specifications when vacuity checking is
+  enabled
   (`vacuity.rs::check_spec_vacuity_for_hir`).
 - **E4 (spurious counterexamples are not failures of `Q`).** When spurious
   detection is enabled and a Sat refutation's model does not reproduce the
@@ -262,11 +265,13 @@ Rules:
   certificate's `assumed_clauses` list as `requires: <clause>` or
   `ensures: <clause>`. `mumei-core/src/proof_cert/generation.rs` (atom
   certificate construction), field in `proof_cert/models.rs`.
-- **T2 (Lean kernel-axiom allowlist).** A `lean_verified` atom is accepted only
-  if its Lean audit passed and every kernel axiom it depends on is one of
-  `propext`, `Classical.choice`, `Quot.sound`. Any other axiom, an audit status
-  of `rejected` or `error`, or `passed` without an axiom list makes the audit
-  fail. `mumei-core/src/proof_cert/validation.rs::lean_axiom_audit`,
+- **T2 (Lean kernel-axiom allowlist).** The Lean audit of a certificate atom
+  passes only if every kernel axiom it reports is one of `propext`,
+  `Classical.choice`, `Quot.sound`. Any other axiom, an audit status of
+  `rejected`, `error`, or any unrecognised value, or `passed` without an axiom
+  list makes the audit fail (`Rejected` or `Error`). An atom with no Lean
+  metadata, or with neither an audit status nor an axiom list, is `Unaudited`
+  (rule T4). `mumei-core/src/proof_cert/validation.rs::lean_axiom_audit`,
   `LEAN_STANDARD_KERNEL_AXIOMS`.
 - **T3 (failed audits are named).** With `--allow-lean-verified`, a certificate
   atom whose audit is rejected or errored is reported as `axiom_rejected`,
