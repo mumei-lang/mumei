@@ -81,3 +81,11 @@ fn wrong_arity_qualified_std_call_reports_arity() {
         "expected 2 argument(s), got 1",
     );
 }
+
+#[test]
+fn wrong_arity_callref_reports_arity() {
+    expect_arity_error(
+        "tests/test_call_arity_callref.mm",
+        "expected 2 argument(s), got 1",
+    );
+}
