@@ -206,9 +206,9 @@ unchanged.
    parser types, and switch `expr_emit.rs` / `pattern_emit.rs`. This is the
    largest LLVM change and is purely structural.
 7. **Drop the AST from the emitter interface.** Once no emitter reads
-   `hir_atom.atom` or `body_stmt`, stop exposing them to emitters: either a
-   separate `EmitAtom` view that holds only HIR, passed to `Emitter::emit`, or
-   moving `atom` / `body_stmt` behind a core-only accessor. Verification and
+   `hir_atom.atom` or `body_stmt`, stop exposing them to emitters: pass a
+   separate `EmitAtom` view that holds only HIR to `Emitter::emit` (see
+   "Decisions"). Verification and
    the CLI keep using the AST. `ExternBlock` and `ModuleEnv` are replaced by
    HIR-owned summaries only if a later need appears; they are not required for
    the goal. Bumps `EMITTER_ABI_VERSION`.
@@ -258,7 +258,8 @@ any order after step 1.
   mode visible. Whether a wrapper should assert `requires assume` clauses at
   runtime, or a monitor should check `ensures check` clauses, is a behavioural
   decision; the migration keeps today's behaviour (all clauses, as printed
-  now) and leaves any change to a separate PR.
+  now) and leaves any change to a separate PR. The policy that PR follows is
+  under "Decisions" below.
 
 ## Tests that guard each step
 
@@ -282,13 +283,31 @@ The `Verify Standard Library` workflow is a useful end-to-end signal for steps
 5–6 because it builds the compiler, but it does not compare emitted artifacts;
 the goldens above are what actually guard output.
 
-## Open questions
+## Decisions
 
-- Should `HirContract` also carry `cover` clauses for emitters, or only
-  `requires` / `ensures`? No emitter prints covers today.
-- Should step 7 introduce a separate HIR-only view type for emitters, or
-  remove `atom` / `body_stmt` from `HirAtom` and give verification its own
-  wrapper? The first is less disruptive; the second makes HIR the single
-  representation everywhere.
-- Should wrappers and monitors start honouring clause trust modes (see
-  "Contract semantics")? That is a behaviour change and needs its own PR.
+These were open questions in the first draft of this design. The answers
+below fix the direction; each behaviour change still lands in its own PR.
+
+- **Emitter view (step 7).** Add a separate HIR-only `EmitAtom` view and
+  hand that to `Emitter::emit`, instead of removing `atom` / `body_stmt` from
+  `HirAtom`. Steps 1–6 add the HIR fields next to the AST, every emitter
+  moves one at a time with byte-identical output, and the AST leaves the
+  emitter interface only at step 7. External plugins see the AST disappear
+  in that single breaking step.
+- **Covers in `HirContract`.** `HirContract` carries `cover` clauses as
+  `HirClauseKind::Cover`. JSON and the proof book may record or print them.
+  Wrappers and the monitor ignore them: a cover is a reachability query
+  answered at verification time, not a condition that must hold at runtime,
+  so it must never become a runtime assertion.
+- **Clause trust modes in wrappers and monitors.** Once step 3 or 4 has made
+  `HirClause::mode` visible, a separate PR applies this policy:
+  - Wrappers (Python, Rust) keep checking every `requires` clause at runtime,
+    whatever its mode, because their callers are unverified.
+  - The monitor adds runtime checks for `requires assume` and
+    `ensures assume` clauses. Nothing proves them statically, so they are
+    trust boundaries in the sense of [`VERIFIER_SPEC.md`](VERIFIER_SPEC.md).
+  - `ensures check` clauses are proved inside the atom and are treated like
+    plain `ensures` clauses.
+
+  Until that PR lands, every emitter keeps today's behaviour (see "Contract
+  semantics").

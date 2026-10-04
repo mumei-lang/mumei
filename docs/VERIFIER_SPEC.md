@@ -348,7 +348,11 @@ Rules (all in `src/commands/verify.rs`):
 - **X4 (spurious candidates).** The solver result of a spurious counterexample
   is `spurious_candidate`, which is not in the inconclusive set, so such an
   atom currently counts as rejected (`1`) even though the conjunct's outcome is
-  `unknown` (rule E4).
+  `unknown` (rule E4). The intended contract is inconclusive (`3`), because a
+  candidate that does not replay neither proves nor refutes the clause. Both
+  codes are non-zero, so the change stays fail-closed. It will land in a
+  separate PR that updates [`CLI.md`](CLI.md#exit-codes) and adds a
+  regression test. Until then this rule describes the current behaviour.
 - **X5 (directories).** A directory run exits with the most severe per-file
   outcome, ordered `5 > 4 > 1 > 3 > 0`. `VerifyOutcome::combine`.
 
