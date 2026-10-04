@@ -978,8 +978,8 @@ Each step must keep the byte-identity test green.
    prerequisite for the implementation (§12). It rejects a call whose arguments
    mention a bound variable as `unverifiable` (exit `3`) instead of sharing one
    result constant across instances. It does not bump
-   `VERIFIER_POLICY_VERSION`; only atoms that contain the pattern, directly or
-   through a callee, get an extra proof-hash marker. Under R2 such calls to
+   `VERIFIER_POLICY_VERSION`; only atoms that contain a call under a binder,
+   directly or through a callee, get an extra proof-hash marker. Under R2 such calls to
    exporting callees later become result-function applications; calls to
    non-exporting callees stay `unverifiable`.
 2. **Recursion measures.** E4 rejects all recursive exporters. Should mumei add a
