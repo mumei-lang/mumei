@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 use super::super::support::*;
 use super::super::*;
+use super::context::UnfoldCall;
 use super::*;
 use crate::lowering::{lower, LoweredType};
 use crate::verification::raising::{
@@ -252,15 +253,13 @@ impl<'v, 'a> UnfoldSinkGuard<'v, 'a> {
         Self { vc }
     }
 
-    fn take_frontier(&self) -> Vec<(String, Vec<Dynamic<'a>>)> {
-        let frontier = self
-            .vc
+    fn take_frontier(&self) -> Vec<UnfoldCall<'a>> {
+        self.vc
             .recursion
             .unfold_sink
             .borrow_mut()
             .take()
-            .unwrap_or_default();
-        frontier
+            .unwrap_or_default()
     }
 }
 
@@ -273,7 +272,7 @@ impl Drop for UnfoldSinkGuard<'_, '_> {
 fn unfold_constant_calls<'a>(
     vc: &VCtx<'a>,
     env: &HashMap<String, Dynamic<'a>>,
-    mut frontier: Vec<(String, Vec<Dynamic<'a>>)>,
+    mut frontier: Vec<UnfoldCall<'a>>,
     mut seen: std::collections::HashSet<String>,
     solver: &Solver<'a>,
 ) {

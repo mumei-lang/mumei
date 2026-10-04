@@ -68,6 +68,8 @@ pub(crate) struct RecursionCtx<'a> {
     /// `(implies(path_conds, obligation), callee_name)` and is drained by the
     /// executor once the preconditions hold.
     pub(crate) pending_termination: std::cell::RefCell<Vec<(Bool<'a>, String)>>,
+    /// `rec_fn#` applications recorded while unfolding a constant-argument
+    /// contract instance (§8 D7); `Some` while one is active.
     pub(crate) unfold_sink: std::cell::RefCell<Option<Vec<UnfoldCall<'a>>>>,
     /// Depth of lambda bodies being translated at bind time (arbitrary
     /// param constants, not real arguments). Recursive calls there take the

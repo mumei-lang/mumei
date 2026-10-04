@@ -785,6 +785,7 @@ fn test_constant_argument_unfolding_respects_depth_bound() {
 
 #[test]
 fn test_constant_argument_call_unfolds_in_bitvec_mode() {
+    // Bare `3` lowers as Int, so it misses `tri`'s BV64 parameter sort.
     let tri_bitvec = TRI_CONST
         .replace("ensures: result >= 0 && ", "ensures: ")
         .replace("body: tri(3);", "body: tri(3 + 0);");
