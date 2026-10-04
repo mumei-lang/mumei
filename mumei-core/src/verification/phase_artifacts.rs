@@ -44,15 +44,13 @@ struct QueryTrace {
 }
 
 pub fn enable(directory: PathBuf) -> std::io::Result<()> {
-    let first_write_failure = fs::create_dir_all(&directory)
-        .err()
-        .map(|error| format!("{}: {error}", directory.display()));
+    fs::create_dir_all(&directory)?;
     let mut sink = lock_sink();
     *sink = Some(State {
         directory,
         stack: Vec::new(),
-        write_failures: if first_write_failure.is_some() { 1 } else { 0 },
-        first_write_failure,
+        write_failures: 0,
+        first_write_failure: None,
     });
     Ok(())
 }
@@ -622,7 +620,22 @@ mod tests {
         assert!(first_directory.join("phases.json").exists());
         assert!(second_directory.join("phases.json").exists());
 
+        let preserved_directory = directory.join("preserved_after_enable_failure");
+        enable(preserved_directory.clone()).unwrap();
+        let regular_file_parent = directory.join("regular_file_parent");
+        fs::write(&regular_file_parent, "not a directory").unwrap();
+        assert!(enable(regular_file_parent.join("artifacts")).is_err());
+        assert_eq!(write_failures(), None);
+        begin_atom("source.mm", "preserved");
+        finish_atom(&verified);
+        assert!(preserved_directory
+            .join(path_component("source.mm"))
+            .join(path_component("preserved"))
+            .join("phases.json")
+            .exists());
+
         disable();
+        fs::remove_file(regular_file_parent).unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -341,3 +341,29 @@ fn artifact_write_failures_warn_without_changing_json_or_exit_code() {
     assert!(warning_lines[0].ends_with("); phase artifacts are incomplete"));
     std::fs::remove_dir_all(root).expect("remove fixture directory");
 }
+
+#[test]
+fn artifact_enable_failure_preserves_internal_error_exit_code() {
+    let root = temp_dir("enable_failure");
+    let input = root.join("enable_failure.mm");
+    std::fs::write(&input, VERIFIED).expect("write fixture");
+    let cwd = root.join("cwd");
+    std::fs::create_dir_all(&cwd).expect("create current directory");
+    let regular_file_parent = root.join("regular_file_parent");
+    std::fs::write(&regular_file_parent, "not a directory").expect("write blocking file");
+
+    let output = run_verify(
+        &input,
+        &cwd,
+        &cwd.join("reports"),
+        Some(&regular_file_parent.join("artifacts")),
+        false,
+        None,
+    );
+    assert_eq!(output.status.code(), Some(5));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Failed to enable phase-artifact capture")
+    );
+
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
+}
