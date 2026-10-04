@@ -2801,4 +2801,76 @@ atom fine(x: i64) -> i64
             "every known atom clause should parse cleanly"
         );
     }
+
+    #[test]
+    fn test_parse_atom_decreases_clause() {
+        let source = r#"
+atom tri(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result >= 0;
+    decreases: n;
+    body: { if n == 0 { 0 } else { n + tri(n - 1) } };
+"#;
+        let atom = parse_module(source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "tri" => Some(atom),
+                _ => None,
+            })
+            .expect("atom tri");
+        assert_eq!(atom.decreases.as_deref(), Some("n"));
+    }
+
+    #[test]
+    fn test_parse_atom_decreases_compound_expression() {
+        let source = r#"
+atom f(a: i64, b: i64) -> i64
+    requires: a >= 0 && b >= 0;
+    decreases: a + b;
+    body: { a };
+"#;
+        let atom = parse_module(source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "f" => Some(atom),
+                _ => None,
+            })
+            .expect("atom f");
+        assert_eq!(atom.decreases.as_deref(), Some("a + b"));
+    }
+
+    #[test]
+    fn test_parse_atom_without_decreases() {
+        let source = r#"
+atom g(x: i64) -> i64
+    requires: true;
+    body: { x };
+"#;
+        let atom = parse_module(source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "g" => Some(atom),
+                _ => None,
+            })
+            .expect("atom g");
+        assert!(atom.decreases.is_none());
+    }
+
+    #[test]
+    fn test_parse_atom_duplicate_decreases_fails() {
+        let source = r#"
+atom h(x: i64) -> i64
+    requires: true;
+    decreases: x;
+    decreases: x - 1;
+    body: { x };
+"#;
+        let err = item::parse_module_from_source_checked(source)
+            .expect_err("a duplicate decreases clause must fail the checked parse");
+        assert!(
+            err.iter()
+                .any(|f| f.contains("duplicate `decreases` clause in atom 'h'")),
+            "expected a duplicate-decreases failure, got {err:?}"
+        );
+    }
 }

@@ -207,6 +207,7 @@ mod tests {
                 invariant: None,
                 effects,
                 return_type,
+                decreases: None,
                 span: Span::default(),
                 effect_pre,
                 effect_post,

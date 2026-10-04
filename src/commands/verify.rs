@@ -148,7 +148,7 @@ fn early_outcome(outcome: VerifyOutcome, message: &str, json_output: bool) -> Ve
 /// Z3 results that are not a verdict. A `spurious_candidate` is a model the
 /// counterexample replay could not confirm against the Mumei semantics, so it
 /// is no more a rejection than an `unknown` is.
-pub(super) fn is_solver_inconclusive(z3_result: &str) -> bool {
+pub(crate) fn is_solver_inconclusive(z3_result: &str) -> bool {
     matches!(
         z3_result,
         "unknown" | "timeout" | "resource_limit" | "spurious_candidate"
@@ -820,6 +820,11 @@ fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyCon
         let _ = collect_decidable_fragment_diagnostic(atom, ctx.module_env, ctx.json_output)
             .inspect(|d| ctx.diagnostics.push(d.clone()))
             .is_some();
+    }
+    if let Some(diagnostic) =
+        collect_recursive_contract_diagnostic(atom, ctx.module_env, ctx.json_output)
+    {
+        ctx.diagnostics.push(diagnostic);
     }
     if (ctx.warn_untyped_arrays || ctx.strict_array_types) && !ctx.module_env.is_verified(name) {
         if let Some(diagnostic) =
