@@ -266,6 +266,37 @@ pub fn run() {
 // 診断（パースエラー検出）
 // =============================================================================
 /// ソースコードをパースして diagnostics を生成
+/// One `mumei` error per checked-parse failure. Only top-level failures carry a
+/// module-relative `line:col`; the rest are anchored at the start of the file.
+fn parse_failure_diagnostics(failures: &[String]) -> Vec<serde_json::Value> {
+    failures
+        .iter()
+        .map(|failure| {
+            let (line, character) = top_level_failure_position(failure).unwrap_or((0, 0));
+            serde_json::json!({
+                "range": {
+                    "start": { "line": line, "character": character },
+                    "end": { "line": line, "character": character + 1 }
+                },
+                "severity": 1,
+                "source": "mumei",
+                "message": format!("Parse error: {failure}")
+            })
+        })
+        .collect()
+}
+
+fn top_level_failure_position(failure: &str) -> Option<(u64, u64)> {
+    let rest = failure.split_once(" at top level at ")?.1;
+    let location = rest
+        .split(|c: char| c != ':' && !c.is_ascii_digit())
+        .next()?;
+    let (line, col) = location.split_once(':')?;
+    let line: u64 = line.parse().ok()?;
+    let col: u64 = col.parse().ok()?;
+    Some((line.checked_sub(1)?, col.checked_sub(1)?))
+}
+
 fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
     let path = uri_to_path(uri);
     if let Some(path) = path.as_deref() {
@@ -276,8 +307,11 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
         }
     }
 
-    // Phase 1: パースできるか
-    let items = parser::parse_module(source);
+    // Phase 1: パースできるか（`mumei verify` と同じ checked parser）
+    let items = match parser::parse_module_checked(source) {
+        Ok(items) => items,
+        Err(failures) => return parse_failure_diagnostics(&failures),
+    };
     let mut diagnostics = Vec::new();
 
     // ソースが空でない場合にアイテムが0個 → パースエラーの可能性
@@ -2141,5 +2175,42 @@ body: n + 1;
         for kw in MUMEI_KEYWORDS {
             assert!(seen.insert(kw), "Duplicate keyword: {}", kw);
         }
+    }
+
+    #[test]
+    fn test_diagnose_reports_top_level_junk_next_to_a_valid_atom() {
+        let source = "atom id(x: i64) -> i64 { ensures: result == x; body: { x } }\nnot an item\n";
+        let diagnostics = diagnose("untitled:junk.mm", source);
+        assert_eq!(diagnostics.len(), 3, "{diagnostics:?}");
+        let first = &diagnostics[0];
+        assert_eq!(first["severity"], 1);
+        assert_eq!(first["range"]["start"]["line"], 1);
+        assert_eq!(first["range"]["start"]["character"], 0);
+        assert!(first["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Parse error: unexpected token not at top level at 2:1"));
+        assert_eq!(diagnostics[2]["range"]["start"]["character"], 7);
+    }
+
+    #[test]
+    fn test_diagnose_accepts_well_formed_and_comment_only_sources() {
+        let atom = "atom id(x: i64) -> i64 { ensures: result == x; body: { x } };\n";
+        assert!(diagnose("untitled:ok.mm", atom).is_empty());
+        assert!(diagnose("untitled:empty.mm", "// nothing yet\n").is_empty());
+    }
+
+    #[test]
+    fn test_top_level_failure_position_ignores_nested_locations() {
+        assert_eq!(
+            top_level_failure_position("unexpected token } at top level at 3:12; expected"),
+            Some((2, 11))
+        );
+        assert_eq!(
+            top_level_failure_position(
+                "while loop requires an 'invariant' clause, found { at 1:26"
+            ),
+            None
+        );
     }
 }
