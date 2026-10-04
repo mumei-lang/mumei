@@ -204,7 +204,7 @@ pub(crate) fn shift_range_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> Shif
         solver.push();
         solver.assert(&path_cond);
         solver.assert(&bv_shift_out_of_range(vc.ctx, &amount));
-        let result = solver.check();
+        let result = crate::verification::phase_artifacts::check(solver);
         solver.pop(1);
         match result {
             SatResult::Sat => return ShiftRangeStatus::OutOfRange,
@@ -244,7 +244,7 @@ pub(crate) fn div_safety_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> DivSa
         solver.push();
         solver.assert(&path_cond);
         solver.assert(&rb._eq(&zero));
-        let divides_by_zero = solver.check();
+        let divides_by_zero = crate::verification::phase_artifacts::check(solver);
         solver.pop(1);
         match divides_by_zero {
             SatResult::Sat => return DivSafetyStatus::DivisionByZero,
@@ -254,7 +254,7 @@ pub(crate) fn div_safety_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> DivSa
         solver.push();
         solver.assert(&path_cond);
         solver.assert(&Bool::and(ctx, &[&lb._eq(&min), &rb._eq(&minus_one)]));
-        let overflows = solver.check();
+        let overflows = crate::verification::phase_artifacts::check(solver);
         solver.pop(1);
         match overflows {
             SatResult::Sat => return DivSafetyStatus::Overflow,
@@ -348,7 +348,7 @@ fn bv_binary_op<'a>(
                     solver.assert(cond);
                 }
                 solver.assert(&bv_shift_out_of_range(ctx, &rb));
-                let result = solver.check();
+                let result = crate::verification::phase_artifacts::check(solver);
                 solver.pop(1);
                 match result {
                     SatResult::Sat => return Err(out_of_range_shift_error()),
@@ -383,7 +383,8 @@ fn bv_binary_op<'a>(
                     solver.assert(cond);
                 }
                 solver.assert(&rb._eq(&zero));
-                let divides_by_zero = solver.check() == SatResult::Sat;
+                let divides_by_zero =
+                    crate::verification::phase_artifacts::check(solver) == SatResult::Sat;
                 solver.pop(1);
                 if divides_by_zero {
                     return Err(MumeiError::verification(
@@ -401,7 +402,8 @@ fn bv_binary_op<'a>(
                     solver.assert(cond);
                 }
                 solver.assert(&Bool::and(ctx, &[&lb._eq(&min), &rb._eq(&minus_one)]));
-                let overflows = solver.check() == SatResult::Sat;
+                let overflows =
+                    crate::verification::phase_artifacts::check(solver) == SatResult::Sat;
                 solver.pop(1);
                 if overflows {
                     return Err(MumeiError::verification(
@@ -1138,7 +1140,9 @@ pub(crate) fn expr_to_z3<'a>(
                                             solver.assert(cond);
                                         }
                                         solver.assert(&req_bool.not());
-                                        if solver.check() == SatResult::Sat {
+                                        if crate::verification::phase_artifacts::check(solver)
+                                            == SatResult::Sat
+                                        {
                                             // Extract counterexample: concrete argument values
                                             // that violate the callee's precondition.
                                             let ce_value = if let Some(model) = solver.get_model() {
@@ -1233,7 +1237,7 @@ pub(crate) fn expr_to_z3<'a>(
                                                             solver.assert(cond);
                                                         }
                                                         solver.assert(&constraint_bool.not());
-                                                        if solver.check() == SatResult::Sat {
+                                                        if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                                                             solver.pop(1);
                                                             return Err(MumeiError::verification(
                                                                 format!(
@@ -1693,7 +1697,7 @@ pub(crate) fn expr_to_z3<'a>(
                     .ok_or(MumeiError::type_error("Index must be integer"))?;
                 solver.push();
                 solver.assert(&safe.not());
-                if solver.check() == SatResult::Sat {
+                if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                     solver.pop(1);
                     return Err(MumeiError::verification(format!(
                         "Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})",
@@ -1915,7 +1919,8 @@ pub(crate) fn expr_to_z3<'a>(
                                 solver.assert(cond);
                             }
                             solver.assert(&ri._eq(&Int::from_i64(ctx, 0)));
-                            if solver.check() == SatResult::Sat {
+                            if crate::verification::phase_artifacts::check(solver) == SatResult::Sat
+                            {
                                 // Extract counterexample: find which variables cause divisor == 0
                                 let (ce_hint, div_feedback) =
                                     if let Some(model) = solver.get_model() {
@@ -2109,7 +2114,9 @@ pub(crate) fn expr_to_z3<'a>(
                                 if let Some(solver) = solver_opt {
                                     solver.push();
                                     solver.assert(&constraint_bool.not());
-                                    if solver.check() == SatResult::Sat {
+                                    if crate::verification::phase_artifacts::check(solver)
+                                        == SatResult::Sat
+                                    {
                                         solver.pop(1);
                                         return Err(MumeiError::verification(format!(
                                             "Struct '{}' field '{}' constraint violated: {}",
@@ -2224,7 +2231,8 @@ pub(crate) fn expr_to_z3<'a>(
                 let coverage = Bool::or(ctx, &arm_refs);
                 check_solver.push();
                 check_solver.assert(&coverage.not());
-                let exhaustive = check_solver.check() == SatResult::Unsat;
+                let exhaustive =
+                    crate::verification::phase_artifacts::check(check_solver) == SatResult::Unsat;
                 check_solver.pop(1);
 
                 if !exhaustive {
@@ -2232,7 +2240,7 @@ pub(crate) fn expr_to_z3<'a>(
                     // solver はまだ Sat 状態なので、再度チェックして model を取得
                     check_solver.push();
                     check_solver.assert(&coverage.not());
-                    if check_solver.check() == SatResult::Sat {
+                    if crate::verification::phase_artifacts::check(check_solver) == SatResult::Sat {
                         let counterexample = if let Some(model) = check_solver.get_model() {
                             // ターゲット変数の具体的な値を取得
                             format_counterexample(
@@ -2678,7 +2686,9 @@ pub(crate) fn expr_to_z3<'a>(
                             solver.push();
                             // held が true であることを仮定し、矛盾がなければ保持中
                             solver.assert(&held_bool);
-                            if solver.check() != SatResult::Unsat {
+                            if crate::verification::phase_artifacts::check(solver)
+                                != SatResult::Unsat
+                            {
                                 solver.pop(1);
                                 return Err(MumeiError::verification(
                                     format!(
@@ -2715,7 +2725,8 @@ pub(crate) fn expr_to_z3<'a>(
                             // __alive_ が false（消費済み）であることを Z3 で確認
                             solver.push();
                             solver.assert(&alive_bool.not()); // alive = false を仮定
-                            if solver.check() == SatResult::Sat {
+                            if crate::verification::phase_artifacts::check(solver) == SatResult::Sat
+                            {
                                 // 消費済み変数が存在する → await 後のアクセスは use-after-free
                                 // await ポイントでの状態をマーク（後続の検証で参照）
                                 let await_consumed_key = format!("__await_consumed_{}", var_name);
@@ -2823,7 +2834,9 @@ pub(crate) fn expr_to_z3<'a>(
                             if let Some(solver) = solver_opt {
                                 solver.push();
                                 solver.assert(&req_bool.not());
-                                if solver.check() == SatResult::Sat {
+                                if crate::verification::phase_artifacts::check(solver)
+                                    == SatResult::Sat
+                                {
                                     solver.pop(1);
                                     return Err(MumeiError::verification(format!(
                                         "call(atom_ref({})): precondition '{}' may not hold at call site",
@@ -2993,7 +3006,8 @@ pub(crate) fn expr_to_z3<'a>(
                                         if let Some(solver) = solver_opt {
                                             solver.push();
                                             solver.assert(&req_bool.not());
-                                            let sat_result = solver.check();
+                                            let sat_result =
+                                                crate::verification::phase_artifacts::check(solver);
                                             solver.pop(1);
                                             if sat_result == SatResult::Sat {
                                                 return Err(MumeiError::verification(format!(

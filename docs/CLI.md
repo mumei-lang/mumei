@@ -79,3 +79,61 @@ JSON. `--emit loss-vector` / `--emit structured-feedback` print the emitted
 artifact to stdout as a second JSON document ahead of the summary. A directory
 run with `--json` prints one payload per file followed by the text summary;
 parse it line-oriented or verify files individually.
+
+### SARIF output
+
+`mumei verify <file-or-directory> --emit sarif` writes a SARIF 2.1.0 log to
+`<report-dir or .>/report.sarif`. A directory run contains the results from all
+files in one log. Each result refers to an existing failure type, verification
+outcome, or status; its `properties` always includes `atom` and `obligation`
+(`requires`, `ensures`, `cover`, `atom`, or `lean_proof`), with `clause`,
+`label`, `outcome`, `failure_type`, `z3_result`, `context_reachability`,
+`counterexample`, `counterexample_fidelity`, and `witness` when available.
+Covered cover clauses are represented as pass results (`kind: "pass"`,
+`level: "none"`). `ruleIndex` refers to the matching entry in the run's rules.
+
+| Finding | SARIF rule ID | Level |
+|---|---|---|
+| Failed atom or postcondition | report failure type (or `failed`) | `error` |
+| Vacuous, unknown, or skipped ensures clause | `vacuous`, `unknown`, or `skipped` | `warning` |
+| Unverifiable atom | `unverifiable` | `warning` |
+| Unknown cover result | `unknown` | `warning` |
+| Covered cover result | `covered` | `none` (pass result) |
+| Assumed clause | `assumed_clause` | `note` |
+| Axiom-audit rejection | `axiom_rejected` | `error` |
+
+The SARIF invocation records the combined process exit code (including all
+files in a directory run); `executionSuccessful` is true for exit codes 0, 1,
+and 3. Requesting SARIF does not change verification verdicts, the `--json`
+payload, or the exit-code contract above.
+
+### Preserving phase artifacts
+
+`mumei verify <file-or-directory> --keep-phase-artifacts <DIR>` preserves each
+atom's verification phases and the SMT-LIB queries issued during them:
+
+```text
+<DIR>/<source>/<atom>/phases.json
+<DIR>/<source>/<atom>/<NNNN>-<phase-slug>.smt2
+```
+
+`<source>` is the atom's source path with every character outside
+`[A-Za-z0-9._-]` replaced by `_`; `<atom>` uses the same sanitization (so
+`S::m` becomes `S__m`). An empty component becomes `_`. `NNNN` is a 1-based
+query number for that atom, and the phase slug is the lower-case phase name
+with non-alphanumeric runs replaced by `-`. Each `.smt2` file contains comments
+for the atom, phase, and source origin, followed by the solver text and its
+`(check-sat)` or `(check-sat-assuming (...))` command.
+
+`phases.json` has `version: 1`, `atom`, `source_file`, `outcome`, `error`, and
+an ordered `phases` array. Each phase entry has `phase`, `result`, and
+`queries`; each query has `index`, `file`, `origin`, and solver `result`
+(`sat`, `unsat`, or `unknown`). Completed phases are included even when they
+have no queries. Results may be `passed`, `failed`, `unknown`, `unverifiable`,
+`contradiction`, or `aborted`. For an unchanged cached atom, the file records
+`outcome: "cached"` and an empty `phases` array. An unrecognized phase is
+retained verbatim and marked `in_phase_contract: false`.
+
+Phase capture is diagnostic only: it does not change solver input, the
+incremental-cache key, verification verdicts, `report.json`, `--json` output,
+or exit codes.

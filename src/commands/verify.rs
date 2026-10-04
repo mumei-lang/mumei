@@ -10,6 +10,7 @@ use mumei_core::{
     structured_feedback::{Location, StructuredFeedback},
     verification,
 };
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::Once;
@@ -147,6 +148,51 @@ fn is_solver_inconclusive(z3_result: &str) -> bool {
     matches!(z3_result, "unknown" | "timeout" | "resource_limit")
 }
 
+fn find_atom_span<'a>(items: &'a [Item], name: &str) -> Option<&'a parser::Span> {
+    for item in items {
+        match item {
+            Item::Atom(atom) if atom.name == name => return Some(&atom.span),
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    if format!("{}::{}", impl_block.struct_name, method.name) == name {
+                        return Some(&method.span);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn write_sarif_fallback(
+    sarif: &RefCell<super::verify_sarif::SarifCollector>,
+    report_dir: Option<&str>,
+    outcome: VerifyOutcome,
+    quiet_output: bool,
+) {
+    if sarif.borrow().written {
+        return;
+    }
+    let output_dir = report_dir.map(Path::new).unwrap_or(Path::new("."));
+    let path = output_dir.join("report.sarif");
+    let write_result = std::fs::create_dir_all(output_dir).and_then(|()| {
+        let document = sarif.borrow().document(outcome);
+        serde_json::to_vec_pretty(&document)
+            .map_err(std::io::Error::other)
+            .and_then(|contents| std::fs::write(&path, contents))
+    });
+    match write_result {
+        Ok(()) => {
+            sarif.borrow_mut().written = true;
+            if !quiet_output {
+                println!("  SARIF log written to: {}", path.display());
+            }
+        }
+        Err(error) => eprintln!("Warning: failed to write SARIF fallback: {error}"),
+    }
+}
+
 pub(crate) fn cmd_verify_command(command: Command) {
     // Attach parent OTel context from TRACEPARENT/TRACESTATE env vars so that
     // all spans created within this command are children of the caller's trace.
@@ -164,6 +210,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
         no_emit,
         output,
         report_dir,
+        keep_phase_artifacts,
         json,
         strict_imports,
         allow_lean_verified,
@@ -224,6 +271,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
     let emit_structured_feedback = matches!(emit.as_deref(), Some("structured-feedback"));
     let emit_human_review_queue = matches!(emit.as_deref(), Some("human-review-queue"));
     let emit_proof_graph = matches!(emit.as_deref(), Some("proof-graph"));
+    let emit_sarif = matches!(emit.as_deref(), Some("sarif"));
     if let Some(other) = emit.as_deref() {
         if !emit_escalation_bundle
             && !matches!(other, "escalation-metrics")
@@ -233,9 +281,10 @@ pub(crate) fn cmd_verify_command(command: Command) {
             && !emit_structured_feedback
             && !emit_human_review_queue
             && !emit_proof_graph
+            && !emit_sarif
         {
             eprintln!(
-                    "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, loss-vector, structured-feedback, human-review-queue, proof-graph",
+                    "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, loss-vector, structured-feedback, human-review-queue, proof-graph, sarif",
                     other
                 );
             std::process::exit(EXIT_USAGE_ERROR);
@@ -245,6 +294,16 @@ pub(crate) fn cmd_verify_command(command: Command) {
     let intent_fidelity = resolve_intent_fidelity(intent_fidelity);
     let artifact_paths = resolve_artifact_paths(artifact_paths);
     let budget_policy_fingerprint = resolve_budget_policy_fingerprint(budget_policy_fingerprint);
+    if let Some(directory) = &keep_phase_artifacts {
+        if let Err(error) = verification::phase_artifacts::enable(PathBuf::from(directory)) {
+            eprintln!(
+                "Failed to enable phase-artifact capture at '{}': {error}",
+                directory
+            );
+            std::process::exit(EXIT_INTERNAL_ERROR);
+        }
+    }
+    let sarif = emit_sarif.then(|| RefCell::new(super::verify_sarif::SarifCollector::new()));
     // The proof graph is a projection of the cross-spec analysis, so asking for
     // it implies running that analysis.
     let enable_cross_spec = cross_spec_verify || !cross_spec_files.is_empty() || emit_proof_graph;
@@ -267,6 +326,14 @@ pub(crate) fn cmd_verify_command(command: Command) {
         files.sort();
         if files.is_empty() {
             eprintln!("❌ No .mm files found in '{}'", input);
+            if let Some(sarif) = &sarif {
+                write_sarif_fallback(
+                    sarif,
+                    report_dir.as_deref(),
+                    VerifyOutcome::InputError,
+                    json,
+                );
+            }
             std::process::exit(EXIT_INPUT_ERROR);
         }
         println!(
@@ -283,6 +350,9 @@ pub(crate) fn cmd_verify_command(command: Command) {
             // on the last file, with the other files supplied as cross-spec
             // inputs. Writing it per file would leave only the last file's atoms.
             let emit_proof_graph_here = emit_proof_graph && position + 1 == files.len();
+            if let Some(sarif) = &sarif {
+                sarif.borrow_mut().prior_outcome = worst;
+            }
             let mut per_file_cross_spec_files = cross_spec_files.clone();
             if emit_proof_graph_here {
                 per_file_cross_spec_files.extend(
@@ -308,6 +378,8 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     emit_structured_feedback,
                     emit_human_review_queue,
                     emit_proof_graph: emit_proof_graph_here,
+                    sarif: sarif.as_ref(),
+                    write_sarif: emit_sarif && position + 1 == files.len(),
                     cert_output: output.as_deref(),
                     report_dir: report_dir.as_deref(),
                     json_output: json,
@@ -338,10 +410,16 @@ pub(crate) fn cmd_verify_command(command: Command) {
                 Ok(outcome) => outcome,
                 Err(_) => {
                     eprintln!("  ❌ '{}': internal error (panic)", file_str);
+                    if let Some(sarif) = &sarif {
+                        sarif.borrow_mut().push_panic_notification(&file_str);
+                    }
                     VerifyOutcome::InternalError
                 }
             };
             worst = worst.combine(outcome);
+            if let Some(sarif) = &sarif {
+                sarif.borrow_mut().prior_outcome = worst;
+            }
             if outcome.is_failure() {
                 total_fail += 1;
             } else {
@@ -352,6 +430,9 @@ pub(crate) fn cmd_verify_command(command: Command) {
             "\n🗡️  Directory verify summary: {} passed, {} failed",
             total_ok, total_fail
         );
+        if let Some(sarif) = &sarif {
+            write_sarif_fallback(sarif, report_dir.as_deref(), worst, json);
+        }
         if worst.is_failure() {
             std::process::exit(worst.exit_code());
         }
@@ -372,6 +453,8 @@ pub(crate) fn cmd_verify_command(command: Command) {
                 emit_structured_feedback,
                 emit_human_review_queue,
                 emit_proof_graph,
+                sarif: sarif.as_ref(),
+                write_sarif: emit_sarif,
                 cert_output: output.as_deref(),
                 report_dir: report_dir.as_deref(),
                 json_output: json,
@@ -402,9 +485,16 @@ pub(crate) fn cmd_verify_command(command: Command) {
             Ok(outcome) => outcome,
             Err(_) => {
                 eprintln!("  ❌ '{}': internal error (panic)", input);
+                if let Some(sarif) = &sarif {
+                    sarif.borrow_mut().push_panic_notification(&input);
+                }
                 VerifyOutcome::InternalError
             }
         };
+        if let Some(sarif) = &sarif {
+            sarif.borrow_mut().prior_outcome = outcome;
+            write_sarif_fallback(sarif, report_dir.as_deref(), outcome, json);
+        }
         // --detect-spec-drift: compare old cert with newly generated cert
         if let Some(ref old_cert_path) = detect_spec_drift {
             let old_cert_file = std::fs::read_to_string(old_cert_path);
@@ -499,6 +589,8 @@ pub(crate) struct VerifyOptions<'a> {
     pub(crate) emit_structured_feedback: bool,
     pub(crate) emit_human_review_queue: bool,
     pub(crate) emit_proof_graph: bool,
+    pub(crate) sarif: Option<&'a RefCell<super::verify_sarif::SarifCollector>>,
+    pub(crate) write_sarif: bool,
     pub(crate) cert_output: Option<&'a str>,
     pub(crate) report_dir: Option<&'a str>,
     pub(crate) json_output: bool,
@@ -550,6 +642,7 @@ struct VerifyContext<'a> {
         Vec<verification::invariant_inference::InferredInvariant>,
     >,
     cert_results: &'a mut std::collections::HashMap<String, (String, String)>,
+    sarif: Option<&'a RefCell<super::verify_sarif::SarifCollector>>,
     verified: &'a mut usize,
     failed: &'a mut usize,
     unverifiable: &'a mut usize,
@@ -622,6 +715,35 @@ fn write_cached_success_report(
 }
 
 fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'_>) {
+    let Some(sarif) = ctx.sarif else {
+        verify_single_atom_inner(atom, name, ctx);
+        return;
+    };
+    let failure_start = ctx.failure_diagnostics.len();
+    let diagnostic_start = ctx.diagnostics.len();
+    let imported_contract_trusted = ctx.module_env.is_verified(name);
+    verify_single_atom_inner(atom, name, ctx);
+    let report = std::fs::read_to_string(ctx.output_dir.join("report.json"))
+        .ok()
+        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+        .filter(|report| report["atom"].as_str() == Some(name));
+    let failure_diagnostics = ctx.failure_diagnostics[failure_start..].to_vec();
+    let diagnostics = ctx.diagnostics[diagnostic_start..].to_vec();
+    let cert_result = ctx.cert_results.get(name);
+    sarif
+        .borrow_mut()
+        .collect_atom(super::verify_sarif::AtomFindings {
+            atom,
+            name,
+            report: report.as_ref(),
+            cert_result,
+            failure_diagnostics: &failure_diagnostics,
+            diagnostics: &diagnostics,
+            imported_contract_trusted,
+        });
+}
+
+fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'_>) {
     // report.json describes the most recent atom only. Atoms rejected before Z3
     // runs (type/unit errors) write none, so a file left by a previous run or a
     // previous atom must not be mistaken for this atom's result.
@@ -744,6 +866,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                     }
                 }
             }
+            verification::phase_artifacts::record_cached_atom(&atom.span.file, name);
             if ctx.emit_structured_feedback {
                 ctx.structured_feedbacks
                     .push(structured_feedback_for_passed_atom(atom));
@@ -1242,6 +1365,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         emit_structured_feedback,
         emit_human_review_queue,
         emit_proof_graph,
+        sarif,
+        write_sarif,
         cert_output,
         report_dir,
         json_output,
@@ -1268,6 +1393,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         detect_loops,
         suggest_cegis,
     } = options;
+    let sarif_result_start = sarif.map_or(0, |collector| collector.borrow().results.len());
     if emit_loss_vector {
         std::env::set_var(verification::ENABLE_RECONSTRUCTION_LOSS_ENV, "1");
     }
@@ -1546,6 +1672,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                     reconstruction_losses: &mut reconstruction_losses,
                     inferred_invariants: &mut inferred_invariants,
                     cert_results: &mut cert_results,
+                    sarif,
                     verified: &mut verified,
                     failed: &mut failed,
                     unverifiable: &mut unverifiable,
@@ -1582,6 +1709,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                         reconstruction_losses: &mut reconstruction_losses,
                         inferred_invariants: &mut inferred_invariants,
                         cert_results: &mut cert_results,
+                        sarif,
                         verified: &mut verified,
                         failed: &mut failed,
                         unverifiable: &mut unverifiable,
@@ -1784,6 +1912,15 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                             verified += stats.newly_proven;
                             escalated = escalated.saturating_sub(stats.lean_verified);
                             lean_verified_atoms.extend(stats.lean_verified_atoms.iter().cloned());
+                            if let Some(sarif) = sarif {
+                                for (atom_name, disallowed) in &stats.axiom_rejected_atoms {
+                                    sarif.borrow_mut().push_axiom_rejected(
+                                        atom_name,
+                                        disallowed.as_deref(),
+                                        find_atom_span(&items, atom_name),
+                                    );
+                                }
+                            }
                             if !quiet_output {
                                 for atom_name in &stats.lean_verified_atoms {
                                     println!("  lean_verified: {atom_name}");
@@ -1902,6 +2039,12 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         }
     }
 
+    if let Some(sarif) = sarif {
+        sarif
+            .borrow_mut()
+            .remove_lean_verified(sarif_result_start, &lean_verified_atoms);
+    }
+
     if let Some(cross_spec_result) = proof_graph_cross_spec {
         let mut statuses = proof_graph_statuses(
             &cert_results,
@@ -1997,13 +2140,43 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                 && !lean_verified_atoms.iter().any(|a| a == *name)
         })
         .count();
-    let outcome = VerifyOutcome::from_counts(
+    let mut outcome = VerifyOutcome::from_counts(
         failed,
         solver_inconclusive,
         unverifiable,
         open_escalations,
         infra_errors,
     );
+    if write_sarif {
+        if let Some(sarif) = sarif {
+            let path = output_dir.join("report.sarif");
+            let write_result = std::fs::create_dir_all(output_dir).and_then(|()| {
+                let document = sarif.borrow().document(outcome);
+                serde_json::to_vec_pretty(&document)
+                    .map_err(std::io::Error::other)
+                    .and_then(|contents| std::fs::write(&path, contents))
+            });
+            match write_result {
+                Ok(()) => {
+                    sarif.borrow_mut().written = true;
+                    if !quiet_output {
+                        println!("  SARIF log written to: {}", path.display());
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Failed to write SARIF log '{}': {error}", path.display());
+                    infra_errors += 1;
+                    outcome = VerifyOutcome::from_counts(
+                        failed,
+                        solver_inconclusive,
+                        unverifiable,
+                        open_escalations,
+                        infra_errors,
+                    );
+                }
+            }
+        }
+    }
     if json_output {
         let report_path = output_dir.join("report.json");
         // When the module contains a mix of passing and failing/unverifiable atoms,
