@@ -3,11 +3,13 @@
 - `mumei verify` now exits `3` (inconclusive) instead of `1` when an atom's only
   failure is a counterexample candidate that spurious detection could not
   confirm. The atom's ensures outcome was already `unknown`; the exit code now
-  agrees with it. A confirmed counterexample still exits `1`, and so does any
-  counterexample under `--disable-spurious-detection`.
+  agrees with it. A counterexample that is not classified as spurious still
+  exits `1`, and so does every counterexample under `--disable-spurious-detection`.
 - With `--escalate-lean`, a spurious candidate that the Lean bridge does not
   discharge now counts as an open escalation, so the run exits `3`. Before
   this change such a run exited `0` and reported "Verification passed".
+- `--emit sarif` now reports such atoms as warnings for review, as it already
+  did for `unknown` results, instead of as failures.
 
 ---
 

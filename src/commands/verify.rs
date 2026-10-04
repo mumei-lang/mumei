@@ -146,7 +146,7 @@ fn early_outcome(outcome: VerifyOutcome, message: &str, json_output: bool) -> Ve
 }
 
 /// Solver results that leave an obligation without a verdict. A spurious candidate is included because a counterexample that does not replay under Mumei semantics neither proves nor refutes the clause.
-fn is_solver_inconclusive(z3_result: &str) -> bool {
+pub(super) fn is_solver_inconclusive(z3_result: &str) -> bool {
     matches!(
         z3_result,
         "unknown" | "timeout" | "resource_limit" | "spurious_candidate"

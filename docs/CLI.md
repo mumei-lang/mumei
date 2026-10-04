@@ -52,7 +52,7 @@ keep working.
 | Code | Meaning | Typical cause |
 |---|---|---|
 | `0` | Verified | every obligation discharged (or delegated to an accepted certificate) |
-| `1` | Rejected | Z3 counterexample that spurious detection confirms (or any Z3 counterexample under `--disable-spurious-detection`), contract / type / session-protocol violation, strict array-type violation |
+| `1` | Rejected | Z3 counterexample that spurious detection does not classify as a spurious candidate (with `--disable-spurious-detection`, every Z3 counterexample), contract / type / session-protocol violation, strict array-type violation |
 | `2` | Usage error | invalid command-line arguments (reported by the argument parser), including unsupported `--emit` / `--no-emit` targets |
 | `3` | Inconclusive | no counterexample, but an obligation ended `unknown` / `timeout` / `resource_limit`, was reported `unverifiable` (unsupported Z3 clause), produced only a spurious counterexample candidate (the model does not replay under Mumei semantics or depends on uninterpreted symbols), or is a `--escalate-lean` candidate (Z3 `unknown` or spurious) that the Lean bridge did not discharge |
 | `4` | Input error | the input file, a `--cross-spec-files` entry, or the directory could not be read, parsed, or resolved (missing file, unresolved import, empty directory) |
@@ -100,6 +100,7 @@ results (`error` > `warning` > `note` > `none`); rule order follows first use.
 | Finding | SARIF rule ID | Level |
 |---|---|---|
 | Failed atom or postcondition | report failure type (or `failed`) | `error` |
+| Spurious counterexample candidate | `spurious_candidate` | `warning` (review) |
 | Vacuous, unknown, or skipped ensures clause | `vacuous`, `unknown`, or `skipped` | `warning` |
 | Unverifiable atom | `unverifiable` | `warning` |
 | Unknown cover result | `unknown` | `warning` |
