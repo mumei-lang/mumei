@@ -150,6 +150,9 @@ state where its expression holds. It may be labeled, and may refer to parameters
 or `result`; a satisfying model is included as a witness in the verification
 report. Covers are checked after the final verification check. Trusted atoms skip
 body verification, so their covers are not checked and produce a warning.
+Covers do not change how an atom is encoded. Under the default Int encoding, a
+cover that uses a bitwise operator is reported as `unknown`; add
+`semantics: bitvec;` to check it.
 
 ```mumei
 cover "zero": result == 0;
