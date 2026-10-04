@@ -93,103 +93,65 @@ pub fn decode_model_string(value: &Dynamic<'_>, raw: &str) -> Option<String> {
 
 fn decode_z3_string_escapes(value: &str) -> Option<String> {
     let mut characters = value.chars();
-    let mut decoded = String::with_capacity(value.len());
-    let mut escaped_bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(value.len());
 
     while let Some(character) = characters.next() {
-        if character != '\\' {
-            flush_escaped_bytes(&mut escaped_bytes, &mut decoded);
-            decoded.push(character);
-            continue;
-        }
-
-        let Some(escape) = characters.next() else {
-            decoded.push('\\');
-            break;
-        };
-        if escape != 'u' {
-            flush_escaped_bytes(&mut escaped_bytes, &mut decoded);
-            decoded.push('\\');
-            decoded.push(escape);
-            continue;
-        }
-        match characters.next()? {
-            '{' => {
-                let mut digits = String::new();
-                loop {
-                    match characters.next()? {
-                        '}' if !digits.is_empty() => break,
-                        digit if digit.is_ascii_hexdigit() && digits.len() < 5 => {
-                            digits.push(digit);
+        if character == '\\' {
+            match characters.next() {
+                Some('u') => {
+                    let codepoint = match characters.next()? {
+                        '{' => {
+                            let mut digits = String::new();
+                            loop {
+                                match characters.next()? {
+                                    '}' if !digits.is_empty() => break,
+                                    digit if digit.is_ascii_hexdigit() && digits.len() < 5 => {
+                                        digits.push(digit);
+                                    }
+                                    _ => return None,
+                                }
+                            }
+                            u32::from_str_radix(&digits, 16).ok()?
                         }
-                        _ => return None,
-                    }
-                }
-                let codepoint = u32::from_str_radix(&digits, 16).ok()?;
-                let scalar = char::from_u32(codepoint)?;
-                if codepoint <= u8::MAX as u32 {
-                    escaped_bytes.push(codepoint as u8);
-                } else {
-                    flush_escaped_bytes(&mut escaped_bytes, &mut decoded);
-                    decoded.push(scalar);
-                }
-            }
-            first_digit => {
-                if !first_digit.is_ascii_hexdigit() {
-                    return None;
-                }
-                let mut digits = String::with_capacity(4);
-                digits.push(first_digit);
-                for _ in 0..3 {
-                    let digit = characters.next()?;
-                    if !digit.is_ascii_hexdigit() {
+                        first_digit => {
+                            if !first_digit.is_ascii_hexdigit() {
+                                return None;
+                            }
+                            let mut digits = String::with_capacity(4);
+                            digits.push(first_digit);
+                            for _ in 0..3 {
+                                let digit = characters.next()?;
+                                if !digit.is_ascii_hexdigit() {
+                                    return None;
+                                }
+                                digits.push(digit);
+                            }
+                            u32::from_str_radix(&digits, 16).ok()?
+                        }
+                    };
+                    if codepoint > u8::MAX as u32 {
                         return None;
                     }
-                    digits.push(digit);
+                    bytes.push(codepoint as u8);
                 }
-                let code_unit = u16::from_str_radix(&digits, 16).ok()?;
-                flush_escaped_bytes(&mut escaped_bytes, &mut decoded);
-                let codepoint = if (0xd800..=0xdbff).contains(&code_unit) {
-                    if characters.next()? != '\\' || characters.next()? != 'u' {
-                        return None;
-                    }
-                    let mut low_digits = String::with_capacity(4);
-                    for _ in 0..4 {
-                        let digit = characters.next()?;
-                        if !digit.is_ascii_hexdigit() {
+                Some(character) => {
+                    for character in ['\\', character] {
+                        if character as u32 > u8::MAX as u32 {
                             return None;
                         }
-                        low_digits.push(digit);
+                        bytes.push(character as u8);
                     }
-                    let low = u16::from_str_radix(&low_digits, 16).ok()?;
-                    if !(0xdc00..=0xdfff).contains(&low) {
-                        return None;
-                    }
-                    0x10000 + (((code_unit as u32 - 0xd800) << 10) | (low as u32 - 0xdc00))
-                } else if (0xdc00..=0xdfff).contains(&code_unit) {
-                    return None;
-                } else {
-                    u32::from(code_unit)
-                };
-                decoded.push(char::from_u32(codepoint)?);
+                }
+                None => bytes.push(b'\\'),
             }
+            continue;
         }
+        if character as u32 > u8::MAX as u32 {
+            return None;
+        }
+        bytes.push(character as u8);
     }
-    flush_escaped_bytes(&mut escaped_bytes, &mut decoded);
-    Some(decoded)
-}
-
-fn flush_escaped_bytes(bytes: &mut Vec<u8>, decoded: &mut String) {
-    if bytes.is_empty() {
-        return;
-    }
-    if let Ok(value) = std::str::from_utf8(bytes) {
-        decoded.push_str(value);
-    } else {
-        decoded.extend(bytes.drain(..).map(char::from));
-        return;
-    }
-    bytes.clear();
+    String::from_utf8(bytes).ok()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1621,15 +1583,13 @@ mod tests {
     }
 
     #[test]
-    fn model_strings_decode_z3_escapes_and_preserve_raw_fallbacks() {
+    fn model_strings_decode_byte_escapes_and_preserve_raw_fallbacks() {
         assert_eq!(
-            decode_z3_string_escapes(r"\u{65e5}\u{672c}").as_deref(),
+            decode_z3_string_escapes(r"\u{e6}\u{97}\u{a5}\u{e6}\u{9c}\u{ac}").as_deref(),
             Some("日本")
         );
-        assert_eq!(
-            decode_z3_string_escapes(r"\u65e5\u672c").as_deref(),
-            Some("日本")
-        );
+        assert_eq!(decode_z3_string_escapes(r"\u{65e5}\u{672c}"), None);
+        assert_eq!(decode_z3_string_escapes(r"\u{e6}"), None);
         assert_eq!(decode_z3_string_escapes(r"\u{zz}"), None);
         assert_eq!(decode_z3_string_escapes(r"\u{d800}"), None);
         assert_eq!(decode_z3_string_escapes(r"\uD800"), None);

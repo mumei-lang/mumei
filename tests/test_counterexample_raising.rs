@@ -259,12 +259,12 @@ fn string_length_companion_is_raised_in_loss_and_provenance() {
     let len_s = loss["len_s"]
         .as_i64()
         .expect("raised string length is an integer");
-    assert_eq!(len_s, string.chars().count() as i64);
+    assert_eq!(len_s, string.len() as i64);
     cleanup(dir);
 }
 
 #[test]
-fn non_ascii_string_loss_is_decoded_with_source_length() {
+fn non_ascii_string_loss_is_decoded_with_byte_length() {
     // On develop at d5fe4b6, loss `s` was `\u{e6}\u{97}\u{a5}\u{e6}\u{9c}\u{ac}` and `len_s` was 6.
     let dir = std::env::temp_dir().join(format!(
         "mumei_non_ascii_string_loss_{}_{}",
@@ -301,7 +301,8 @@ fn non_ascii_string_loss_is_decoded_with_source_length() {
         .contains(r"\u{e6}\u{97}\u{a5}\u{e6}\u{9c}\u{ac}"));
     let loss = &payload["semantic_feedback"]["reconstruction_loss"]["counter_example"];
     assert_eq!(loss["s"], "日本");
-    assert_eq!(loss["len_s"], 2);
+    // len_s is the byte length, matching the solver lowering, runtime strlen, and develop.
+    assert_eq!(loss["len_s"], 6);
     cleanup(dir);
 }
 

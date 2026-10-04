@@ -2185,33 +2185,12 @@ pub(crate) fn verify_inner(
                                     let lowering =
                                         length_companion_lowering(type_name, module_env)?;
                                     let value = pre_body_env.get(&format!("len_{}", param.name))?;
-                                    let mut raised = raise_length_companion(
+                                    Some(raise_length_companion(
                                         &model,
                                         &param.name,
                                         value,
                                         lowering,
-                                    );
-                                    if lowering == "str_length" {
-                                        if let Some(string_value) = pre_body_env.get(&param.name) {
-                                            let evaluated = model
-                                                .eval(string_value, true)
-                                                .unwrap_or_else(|| string_value.clone());
-                                            if let Some(decoded) = decode_model_string(
-                                                &evaluated,
-                                                &evaluated.to_string(),
-                                            ) {
-                                                let byte_length = decoded.len() as i64;
-                                                if matches!(&raised.status, RaisedStatus::Raised)
-                                                    && raised.rendering.parse::<i64>().ok()
-                                                        == Some(byte_length)
-                                                {
-                                                    raised.rendering =
-                                                        decoded.chars().count().to_string();
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Some(raised)
+                                    ))
                                 })
                                 .collect::<Vec<_>>();
                             if tuple_component_types(atom.return_type.as_deref()).is_none() {
