@@ -391,16 +391,16 @@ fn measure_is_valid(atom: &Atom) -> Result<(), String> {
                 atom.name
             ));
         }
-        if measure_components(&measure).len() > 1 {
-            return Err(format!(
-                "decreases measure of atom '{}' must not nest tuples",
-                atom.name
-            ));
-        }
         let ast = parse_expression(&measure);
         if !collect_call_edges_expr(&ast).is_empty() {
             return Err(format!(
                 "decreases measure of atom '{}' must not contain calls",
+                atom.name
+            ));
+        }
+        if measure.contains(',') {
+            return Err(format!(
+                "decreases measure of atom '{}' must not nest tuples",
                 atom.name
             ));
         }

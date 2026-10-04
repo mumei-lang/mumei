@@ -556,19 +556,43 @@ fn test_mixed_arity_mutual_recursion_is_unsupported() {
 
 #[test]
 fn test_tuple_call_and_nested_tuple_measures_are_unsupported() {
-    for (name, source, expected_message) in [
+    let with_measure = |measure: &str| {
+        NESTED_TUPLE_MEASURE.replace("decreases: (n, (n, 0));", &format!("decreases: {measure};"))
+    };
+    let cases = [
         (
             "tuple_call_measure",
-            TUPLE_CALL_MEASURE,
+            TUPLE_CALL_MEASURE.to_string(),
             "must not contain calls",
         ),
         (
             "nested_tuple_measure",
-            NESTED_TUPLE_MEASURE,
+            NESTED_TUPLE_MEASURE.to_string(),
             "must not nest tuples",
         ),
-    ] {
-        let case = verify(name, source, "f");
+        (
+            "nested_tuple_with_double_parentheses",
+            with_measure("(n, ((n, 0)))"),
+            "must not nest tuples",
+        ),
+        (
+            "nested_tuple_with_arithmetic",
+            with_measure("(n, (n, 0) + 1)"),
+            "must not nest tuples",
+        ),
+        (
+            "single_measure_with_tuple_arithmetic",
+            with_measure("(n, 0) + 1"),
+            "must not nest tuples",
+        ),
+        (
+            "tuple_call_with_comma",
+            with_measure("(f(n, n))"),
+            "must not contain calls",
+        ),
+    ];
+    for (name, source, expected_message) in cases {
+        let case = verify(name, &source, "f");
         assert!(case.did_not_crash(), "{name} crashed");
         assert!(
             case.has_diagnostic_code("recursive_contract_unsupported"),

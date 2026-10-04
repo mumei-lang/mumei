@@ -372,7 +372,8 @@ Rules:
 - **D1 (eligibility).** A recursive SCC is *eligible* exactly when every member
   declares an atom-level measure, either a single expression `decreases: M;` or
   a tuple `decreases: (M1, ..., Mk);`, whose components are call-free, mention
-  only that member's own parameters and are not tuples themselves. All members
+  only that member's own parameters and contain no nested tuple (no comma inside
+  a component). All members
   must declare the same number of components. Each member also has no effects,
   no `ref mut` or `consume` parameters, is not `async`, has no type parameters,
   is at the default verified trust level, has no `ensures assume` clause, and
