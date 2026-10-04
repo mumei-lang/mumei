@@ -576,6 +576,9 @@ pub fn compute_contract_hash(atom: &crate::parser::Atom) -> String {
         hash_field(&mut hasher, "quantifier.condition", &q.condition);
     }
     hash_field(&mut hasher, "ensures", &atom.ensures);
+    if let Some(ref dec) = atom.decreases {
+        hash_field(&mut hasher, "decreases", dec);
+    }
     if !atom.clause_modes.is_empty() {
         for mode in &atom.clause_modes {
             hash_field(

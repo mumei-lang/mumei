@@ -270,6 +270,28 @@ fn test_contract_mutation_detection() {
 }
 
 #[test]
+fn test_contract_integrity_verification_flags_decreases_mutation() {
+    let mut atom = test_atom(
+        "bounded_dec",
+        vec![test_param("a", Some("i64")), test_param("b", Some("i64"))],
+        "a >= 0 && b >= 0",
+        "result == a + b",
+        "a + b",
+        Some("i64"),
+    );
+    atom.decreases = Some("a".to_string());
+    let mut module_env = ModuleEnv::new();
+    module_env.register_atom(&atom);
+    let manifest = generate_contract_manifest(&module_env);
+
+    let mut mutated = atom.clone();
+    mutated.decreases = Some("a + 1".to_string());
+    let err = verify_contract_integrity(&mutated, &manifest).unwrap_err();
+
+    assert!(matches!(err, MumeiError::ContractMutation { .. }));
+}
+
+#[test]
 fn test_contract_integrity_verification_allows_implementation_changes() {
     let atom = test_atom(
         "bounded_add",
