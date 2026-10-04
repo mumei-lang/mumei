@@ -507,49 +507,6 @@ pub fn raise_named_binding<'ctx>(
     }
 }
 
-pub fn call_result_handles<'ctx>(
-    env: &HashMap<String, Dynamic<'ctx>>,
-    module_env: &ModuleEnv,
-) -> HashSet<String> {
-    fn is_source_identifier(name: &str) -> bool {
-        let mut chars = name.chars();
-        chars
-            .next()
-            .is_some_and(|character| character == '_' || character.is_alphabetic())
-            && chars.all(|character| character == '_' || character.is_alphanumeric())
-    }
-
-    fn is_call_result_handle(handle: &str, module_env: &ModuleEnv) -> bool {
-        let Some(rest) = handle.strip_prefix("call_") else {
-            return false;
-        };
-        let Some((callee, id)) = rest.rsplit_once('_') else {
-            return false;
-        };
-        if callee.is_empty() || id.parse::<usize>().is_err() {
-            return false;
-        }
-        let namespaced_callee = callee.replace('.', "::");
-        module_env.get_atom(callee).is_some() || module_env.get_atom(&namespaced_callee).is_some()
-    }
-
-    let mut handles = HashSet::new();
-    for key in env.keys() {
-        let Some(name) = key.strip_prefix("__struct_") else {
-            continue;
-        };
-        for (separator, _) in name.match_indices('_') {
-            let handle = &name[..separator];
-            let field = &name[separator + 1..];
-            if is_source_identifier(field) && is_call_result_handle(handle, module_env) {
-                handles.insert(handle.to_string());
-                break;
-            }
-        }
-    }
-    handles
-}
-
 pub(crate) fn references_call_result(value: &Dynamic<'_>, handles: &HashSet<String>) -> bool {
     fn visit(value: &Dynamic<'_>, handles: &HashSet<String>, visited: &mut HashSet<usize>) -> bool {
         if !visited.insert(value.get_z3_ast() as usize) {
@@ -578,15 +535,12 @@ pub(crate) fn references_call_result(value: &Dynamic<'_>, handles: &HashSet<Stri
     visit(value, handles, &mut HashSet::new())
 }
 
-pub(crate) fn mark_abstract_call_result_struct_unraisable(
-    value: &mut RaisedValue,
-    raw_rendering: String,
-) {
+pub(crate) fn mark_abstract_call_result_unraisable(value: &mut RaisedValue, raw_rendering: String) {
     value.rendering = raw_rendering;
-    value.lowering = "struct";
     value.status = RaisedStatus::Unraisable {
-        reason: "struct argument comes from an abstract callee result; its fields are not tied to source values"
-            .to_string(),
+        reason:
+            "argument comes from an abstract callee result; its value is not tied to source values"
+                .to_string(),
     };
 }
 
@@ -1432,7 +1386,7 @@ pub fn raise_atom_counterexample<'ctx>(
 #[cfg(test)]
 mod tests {
     use super::{
-        call_result_handles, decode_ieee754_f64, decode_model_string, decode_z3_string_escapes,
+        decode_ieee754_f64, decode_model_string, decode_z3_string_escapes,
         length_companion_lowering, loss_json_from_raised_rendering, raise_length_companion,
         raise_model_value, references_call_result, RaisedCounterexample, RaisedStatus, RaisedValue,
     };
@@ -1442,34 +1396,6 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use z3::ast::{Ast, Bool, Dynamic, Float, Int, Real, String as Z3String, BV};
     use z3::{Config, Context, SatResult, Solver};
-
-    #[test]
-    fn call_result_handles_require_a_known_callee_and_decimal_id() {
-        let atom = crate::parser::parse_atom(
-            "atom mk() -> i64\nrequires: true;\nensures: true;\nbody: 0;",
-        );
-        let mut module_env = ModuleEnv::new();
-        module_env.register_atom(&atom);
-        let mut namespaced_atom = atom.clone();
-        namespaced_atom.name = "pkg::mk".to_string();
-        module_env.register_atom(&namespaced_atom);
-
-        let config = Config::new();
-        let context = Context::new(&config);
-        let value: Dynamic = Int::from_i64(&context, 0).into();
-        let env = HashMap::from([
-            ("__struct_call_mk_12_a".to_string(), value.clone()),
-            ("__struct_call_pkg.mk_3_a".to_string(), value.clone()),
-            ("__struct_call_x_a".to_string(), value.clone()),
-            ("__struct_call_unknown_1_a".to_string(), value.clone()),
-            ("__struct_call_mk_nope_a".to_string(), value),
-        ]);
-
-        assert_eq!(
-            call_result_handles(&env, &module_env),
-            HashSet::from(["call_mk_12".to_string(), "call_pkg.mk_3".to_string()])
-        );
-    }
 
     #[test]
     fn call_result_references_are_found_recursively_without_prefix_collisions() {

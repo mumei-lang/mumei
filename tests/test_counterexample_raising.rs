@@ -128,6 +128,40 @@ ensures: true;
 body: p.a;
 "#;
 
+const CHECK_INT_CALLEE: &str = r#"
+atom check_int(n: i64) -> i64
+requires: n > 0;
+ensures: true;
+body: n;
+"#;
+
+const MK_I_CALLEE: &str = r#"
+atom mk_i(x: i64) -> i64
+requires: true;
+ensures: true;
+body: x;
+"#;
+
+const ABSTRACT_CALL_RESULT_REASON: &str =
+    "argument comes from an abstract callee result; its value is not tied to source values";
+
+fn assert_callsite_argument_unraisable(diagnostic: &Value, source_name: &str) {
+    let status_path = format!("/data/counterexample_provenance/values/{source_name}/status");
+    let reason_path = format!("/data/counterexample_provenance/values/{source_name}/reason");
+    assert_eq!(
+        diagnostic.pointer(&status_path).and_then(Value::as_str),
+        Some("unraisable")
+    );
+    assert_eq!(
+        diagnostic.pointer(&reason_path).and_then(Value::as_str),
+        Some(ABSTRACT_CALL_RESULT_REASON)
+    );
+    assert_eq!(
+        diagnostic.pointer("/data/counterexample_provenance/complete"),
+        Some(&Value::Bool(false))
+    );
+}
+
 fn verify_callsite_source(name: &str, source: &str) -> (PathBuf, Value) {
     let (dir, output, report) =
         verify_source(name, source, &["--json", "--enable-spurious-detection"]);
@@ -138,9 +172,9 @@ fn verify_callsite_source(name: &str, source: &str) -> (PathBuf, Value) {
     );
     assert_eq!(report["status"], "failed");
     assert!(
-        report["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("Call to 'check': precondition")),
+        report["reason"].as_str().is_some_and(|reason| {
+            reason.contains("precondition (requires) not satisfied at call site")
+        }),
         "{report}"
     );
     let diagnostic = lsp_diagnostic_for_source(name, source);
@@ -319,24 +353,10 @@ body: check(mk(x));
 "#
     );
     let (dir, diagnostic) = verify_callsite_source("callsite_struct_call_result", &source);
-    assert_eq!(
-        diagnostic.pointer("/data/counterexample_provenance/values/p/status"),
-        Some(&Value::String("unraisable".to_string()))
-    );
-    assert_eq!(
-        diagnostic.pointer("/data/counterexample_provenance/values/p/reason"),
-        Some(&Value::String(
-            "struct argument comes from an abstract callee result; its fields are not tied to source values"
-                .to_string()
-        ))
-    );
+    assert_callsite_argument_unraisable(&diagnostic, "p");
     assert_eq!(
         diagnostic.pointer("/data/counterexample/p"),
         Some(&Value::String("0".to_string()))
-    );
-    assert_eq!(
-        diagnostic.pointer("/data/counterexample_provenance/complete"),
-        Some(&Value::Bool(false))
     );
     cleanup(dir);
 }
@@ -361,24 +381,10 @@ body: {
 "#
     );
     let (dir, diagnostic) = verify_callsite_source("callsite_struct_call_alias", &source);
-    assert_eq!(
-        diagnostic.pointer("/data/counterexample_provenance/values/p/status"),
-        Some(&Value::String("unraisable".to_string()))
-    );
-    assert_eq!(
-        diagnostic.pointer("/data/counterexample_provenance/values/p/reason"),
-        Some(&Value::String(
-            "struct argument comes from an abstract callee result; its fields are not tied to source values"
-                .to_string()
-        ))
-    );
+    assert_callsite_argument_unraisable(&diagnostic, "p");
     assert_eq!(
         diagnostic.pointer("/data/counterexample/p"),
         Some(&Value::String("0".to_string()))
-    );
-    assert_eq!(
-        diagnostic.pointer("/data/counterexample_provenance/complete"),
-        Some(&Value::Bool(false))
     );
     cleanup(dir);
 }
@@ -418,6 +424,84 @@ body: {
         .expect("raised struct argument");
     assert!(rendering.starts_with("Pt { a: "), "{rendering}");
     assert!(rendering.contains(", b: "), "{rendering}");
+    cleanup(dir);
+}
+
+#[test]
+fn callsite_scalar_direct_call_result_stays_unraisable() {
+    let source = format!(
+        "{MK_I_CALLEE}\n{CHECK_INT_CALLEE}\n{}",
+        r#"
+atom caller_direct(x: i64) -> i64
+requires: true;
+ensures: true;
+body: check_int(mk_i(x));
+"#
+    );
+    let (dir, diagnostic) = verify_callsite_source("callsite_scalar_direct_call_result", &source);
+    assert_callsite_argument_unraisable(&diagnostic, "n");
+    cleanup(dir);
+}
+
+#[test]
+fn callsite_scalar_let_alias_of_call_result_stays_unraisable() {
+    let source = format!(
+        "{MK_I_CALLEE}\n{CHECK_INT_CALLEE}\n{}",
+        r#"
+atom caller_alias(x: i64) -> i64
+requires: true;
+ensures: true;
+body: {
+    let y = mk_i(x);
+    check_int(y)
+};
+"#
+    );
+    let (dir, diagnostic) = verify_callsite_source("callsite_scalar_call_alias", &source);
+    assert_callsite_argument_unraisable(&diagnostic, "n");
+    cleanup(dir);
+}
+
+#[test]
+fn callsite_struct_literal_scalar_call_field_stays_unraisable() {
+    let source = format!(
+        "{MK_I_CALLEE}\n{}",
+        r#"
+struct Pt { a: i64, b: i64 }
+
+atom check(p: Pt) -> i64
+requires: p.a > 0;
+ensures: true;
+body: p.a;
+
+atom caller_struct_field(x: i64) -> i64
+requires: true;
+ensures: true;
+body: check(Pt { a: mk_i(x), b: 1 });
+"#
+    );
+    let (dir, diagnostic) =
+        verify_callsite_source("callsite_struct_literal_scalar_call_field", &source);
+    assert_callsite_argument_unraisable(&diagnostic, "p");
+    cleanup(dir);
+}
+
+#[test]
+fn callsite_scalar_source_argument_stays_raised() {
+    let source = format!(
+        "{CHECK_INT_CALLEE}\n{}",
+        r#"
+atom caller_source(x: i64) -> i64
+requires: true;
+ensures: true;
+body: check_int(x);
+"#
+    );
+    let (dir, diagnostic) = verify_callsite_source("callsite_scalar_source_argument", &source);
+    assert_eq!(
+        diagnostic.pointer("/data/counterexample_provenance/values/n/status"),
+        Some(&Value::String("raised".to_string()))
+    );
     cleanup(dir);
 }
 
