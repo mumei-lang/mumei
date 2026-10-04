@@ -148,6 +148,7 @@ fn verify_mutated_body(
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        quantifier_binders: std::cell::RefCell::new(Vec::new()),
         held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
         acquire_counter: std::cell::RefCell::new(0),
         loop_counter: std::cell::RefCell::new(0),

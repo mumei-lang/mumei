@@ -162,6 +162,36 @@ fn user_defines_callee(vc: &VCtx<'_>, name: &str) -> bool {
     vc.local_lambdas.borrow().contains_key(name) || vc.module_env.get_atom(name).is_some()
 }
 
+/// Fail closed when a call that mints a fresh result constant appears under a
+/// `forall`/`exists` and one of its arguments mentions the bound variable.
+/// The lowering shares that single constant across every instance of the
+/// quantifier, so encoding the call would equate results that can differ per
+/// instance — an unsoundness. Calls whose arguments are all ground are
+/// unaffected.
+fn reject_binder_scoped_call(vc: &VCtx<'_>, callee_name: &str, args: &[Expr]) -> MumeiResult<()> {
+    let binders = vc.quantifier_binders.borrow();
+    if binders.is_empty() {
+        return Ok(());
+    }
+    for arg in args {
+        for binder in binders.iter() {
+            if expr_mentions_var(arg, binder) {
+                return Err(MumeiError::verification(format!(
+                    "{} Call to '{}' uses quantifier-bound variable '{}' in an argument.",
+                    crate::verification::UNSUPPORTED_BINDER_CALL_PREFIX,
+                    callee_name,
+                    binder
+                ))
+                .with_help(
+                    "Move the call out of the quantifier, or rewrite it so its arguments \
+                     do not mention the bound variable.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Discharge the shift-range obligations collected while lowering clauses
 /// without a solver (`requires`, `ensures`, invariants). Called once the
 /// atom's solver holds the preconditions, so a shift amount that a `requires`
@@ -681,9 +711,18 @@ pub(crate) fn expr_to_z3<'a>(
                     let range_cond =
                         Bool::and(ctx, &[&bound_var.ge(&start_z3), &bound_var.lt(&end_z3)]);
 
-                    let condition_z3 = expr_to_z3(vc, &args[3], env, None)?.as_bool().ok_or(
-                        MumeiError::type_error(format!("{}(): condition must be boolean", name)),
-                    )?;
+                    // Track the binder while lowering the condition so that a
+                    // call whose arguments mention `var_name` fails closed.
+                    vc.quantifier_binders.borrow_mut().push(var_name.clone());
+                    let condition_result = expr_to_z3(vc, &args[3], env, None);
+                    vc.quantifier_binders.borrow_mut().pop();
+                    let condition_z3 =
+                        condition_result?
+                            .as_bool()
+                            .ok_or(MumeiError::type_error(format!(
+                                "{}(): condition must be boolean",
+                                name
+                            )))?;
 
                     // 束縛変数を env から復元
                     if let Some(old) = old_val {
@@ -1054,6 +1093,7 @@ pub(crate) fn expr_to_z3<'a>(
                         .cloned()
                         .or_else(|| vc.module_env.get_atom(&fqn_name).cloned());
                     if let Some(callee) = resolved_callee {
+                        reject_binder_scoped_call(vc, name, args)?;
                         // 引数を評価
                         let mut arg_vals = Vec::new();
                         for arg in args {
@@ -2795,6 +2835,7 @@ pub(crate) fn expr_to_z3<'a>(
 
             if let Some(ref callee_name) = atom_name {
                 if let Some(callee_atom) = vc.module_env.get_atom(callee_name).cloned() {
+                    reject_binder_scoped_call(vc, callee_name, args)?;
                     // 引数を Z3 で評価
                     let mut arg_vals = Vec::new();
                     for arg in args {
@@ -2924,6 +2965,13 @@ pub(crate) fn expr_to_z3<'a>(
             // callee が Variable で、current_atom のパラメータに contract(f) が
             // 宣言されている場合、その契約を使って結果を制約する。
             // これにより trusted マーカーなしで高階関数を検証できる。
+
+            let dynamic_callee_name = match callee.as_ref() {
+                Expr::Variable(var) => var.as_str(),
+                Expr::AtomRef { name } => name.as_str(),
+                _ => "call",
+            };
+            reject_binder_scoped_call(vc, dynamic_callee_name, args)?;
 
             let mut arg_vals = Vec::new();
             for arg in args {

@@ -78,6 +78,12 @@ pub(crate) struct VCtx<'a> {
     /// implied by being in the `else` of `if n <= 1`) participate in the
     /// satisfiability query without leaking into sibling branches.
     pub(crate) path_cond_stack: std::cell::RefCell<Vec<Bool<'a>>>,
+    /// Names of `forall`/`exists` bound variables whose scope surrounds the
+    /// expression currently being lowered. A call whose arguments mention one
+    /// of these names is rejected (fail-closed): the call-lowering path mints
+    /// a single fresh result constant shared by every instance of the
+    /// quantifier, so encoding it would be unsound.
+    pub(crate) quantifier_binders: std::cell::RefCell<Vec<String>>,
     pub(crate) held_resources: std::cell::RefCell<std::collections::HashMap<String, usize>>,
     pub(crate) acquire_counter: std::cell::RefCell<usize>,
     /// Monotonic per-context ID used to namespace loop snapshots during

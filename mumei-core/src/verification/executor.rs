@@ -1473,6 +1473,7 @@ pub(crate) fn verify_inner(
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: Some(&has_string_constraints_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        quantifier_binders: std::cell::RefCell::new(Vec::new()),
         held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
         acquire_counter: std::cell::RefCell::new(0),
         loop_counter: std::cell::RefCell::new(0),
@@ -1579,7 +1580,13 @@ pub(crate) fn verify_inner(
 
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
         let expr_ast = parse_expression(&q.condition);
-        let condition_z3 = expr_to_z3(&vc, &expr_ast, &mut env, None)?
+        // Track the binder while lowering the condition so that a call whose
+        // arguments mention `q.var` fails closed. The pop runs on every exit
+        // path (the `?` below is applied only after the result is captured).
+        vc.quantifier_binders.borrow_mut().push(q.var.clone());
+        let condition_result = expr_to_z3(&vc, &expr_ast, &mut env, None);
+        vc.quantifier_binders.borrow_mut().pop();
+        let condition_z3 = condition_result?
             .as_bool()
             .ok_or(MumeiError::verification_at(
                 "Condition must be boolean",

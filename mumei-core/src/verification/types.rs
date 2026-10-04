@@ -1291,8 +1291,14 @@ pub fn z3_result_from_error_message(message: &str) -> Option<&'static str> {
 pub const UNVERIFIABLE_ERROR_PREFIX: &str =
     "Unverifiable: skipped unsupported Z3 clause(s) in ensures.";
 
+/// A call inside a `forall`/`exists` whose arguments mention the bound
+/// variable cannot be encoded soundly (the lowered result constant would be
+/// shared by every instance), so it is reported as unverifiable.
+pub const UNSUPPORTED_BINDER_CALL_PREFIX: &str =
+    "Unverifiable: a call whose arguments use a quantifier-bound variable is not supported.";
+
 pub fn is_unverifiable_error_message(message: &str) -> bool {
-    message.contains(UNVERIFIABLE_ERROR_PREFIX)
+    message.contains(UNVERIFIABLE_ERROR_PREFIX) || message.contains(UNSUPPORTED_BINDER_CALL_PREFIX)
 }
 
 pub fn classify_atom_for_lean_escalation(

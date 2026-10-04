@@ -549,3 +549,200 @@ atom clean_identity(x: i64) -> i64
 
     std::fs::remove_dir_all(report_dir).expect("remove all-success aggregate fixture dir");
 }
+
+#[test]
+fn verify_binder_call_in_requires_is_unverifiable() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "binder_call_requires",
+        r#"
+atom ident(x: i64) -> i64
+  requires: true;
+  ensures: result == x;
+  body: x;
+
+atom all_equal_probe(arr: [i64], n: i64) -> i64
+  requires: n >= 2 && len(arr) >= n
+        && forall(i, 0, n, ident(arr[i]) == arr[i]);
+  ensures: arr[0] == arr[1];
+  body: n;
+"#,
+    );
+    let report_dir = fixture.parent().unwrap();
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "binder-scoped call should exit 3\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("'all_equal_probe': unverifiable ⚠️"),
+        "expected all_equal_probe unverifiable, got:\n{combined}"
+    );
+    assert!(
+        !combined.contains("'all_equal_probe': verified"),
+        "unsound verified result, got:\n{combined}"
+    );
+    assert!(
+        combined.contains("'ident': verified"),
+        "expected ident verified, got:\n{combined}"
+    );
+
+    std::fs::remove_dir_all(report_dir).expect("remove binder_call_requires fixture dir");
+}
+
+#[test]
+fn verify_binder_call_in_ensures_is_unverifiable() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "binder_call_ensures",
+        r#"
+atom ident(x: i64) -> i64
+  requires: true;
+  ensures: result == x;
+  body: x;
+
+atom ensures_forall(arr: [i64], n: i64) -> i64
+  requires: n >= 1 && len(arr) >= n;
+  ensures: forall(i, 0, n, ident(arr[i]) == arr[i]);
+  body: n;
+"#,
+    );
+    let report_dir = fixture.parent().unwrap();
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "binder-scoped call in ensures should exit 3\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("'ensures_forall': unverifiable ⚠️"),
+        "expected ensures_forall unverifiable, got:\n{combined}"
+    );
+
+    std::fs::remove_dir_all(report_dir).expect("remove binder_call_ensures fixture dir");
+}
+
+#[test]
+fn verify_binder_call_using_outer_nested_var_is_unverifiable() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "binder_call_nested_outer",
+        r#"
+atom ident(x: i64) -> i64
+  requires: true;
+  ensures: result == x;
+  body: x;
+
+atom nested_outer(arr: [i64], n: i64) -> i64
+  requires: n >= 2 && len(arr) >= n
+        && forall(i, 0, n, forall(j, 0, n, ident(arr[i]) == arr[i]));
+  ensures: arr[0] == arr[1];
+  body: n;
+"#,
+    );
+    let report_dir = fixture.parent().unwrap();
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "binder-scoped call on outer var should exit 3\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("'nested_outer': unverifiable ⚠️"),
+        "expected nested_outer unverifiable, got:\n{combined}"
+    );
+
+    std::fs::remove_dir_all(report_dir).expect("remove binder_call_nested_outer fixture dir");
+}
+
+#[test]
+fn verify_ground_call_under_binder_still_verifies() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "binder_ground_call",
+        r#"
+atom ident(x: i64) -> i64
+  requires: true;
+  ensures: result == x;
+  body: x;
+
+atom ground_probe(arr: [i64], n: i64) -> i64
+  requires: n >= 1 && len(arr) >= n && forall(i, 0, n, arr[i] >= ident(0));
+  ensures: result == n;
+  body: n;
+"#,
+    );
+    let report_dir = fixture.parent().unwrap();
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
+
+    assert!(
+        output.status.success(),
+        "ground call under binder should verify\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("'ground_probe': verified"),
+        "expected ground_probe verified, got:\n{combined}"
+    );
+
+    std::fs::remove_dir_all(report_dir).expect("remove binder_ground_call fixture dir");
+}

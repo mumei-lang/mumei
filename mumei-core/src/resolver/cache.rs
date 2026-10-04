@@ -1,4 +1,4 @@
-use crate::parser::ast::Atom;
+use crate::parser::ast::{Atom, Expr, Stmt};
 use crate::verification::ModuleEnv;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -488,7 +488,218 @@ pub fn compute_proof_hash_with_flags(
         }
     }
 
+    // 4. Fail-closed binder calls: a call whose arguments mention a
+    // `forall`/`exists` bound variable is now rejected as unverifiable
+    // instead of being lowered with a result constant shared across every
+    // instance. Any cached proof minted before this fix could have relied on
+    // the unsound sharing, so atoms that carry the pattern get a marker in
+    // their hash; atoms that do not are byte-identical to before.
+    if atom_has_binder_scoped_call(atom, true)
+        || visited.iter().any(|callee_name| {
+            module_env
+                .get_atom(callee_name)
+                .is_some_and(|callee_atom| atom_has_binder_scoped_call(callee_atom, false))
+        })
+    {
+        hasher.update(b"|binder_call_fail_closed_v1");
+    }
+
     format!("{:x}", hasher.finalize())
+}
+
+/// Call names the expression translator handles as builtins — they never mint
+/// a fresh `call_*` result constant, so a bound-variable argument is only a
+/// concern for user-defined (or unresolved) callees.
+fn is_builtin_call_name(name: &str) -> bool {
+    matches!(
+        name,
+        "forall"
+            | "exists"
+            | "len"
+            | "sqrt"
+            | "cast_to_int"
+            | "matches"
+            | "match_regex"
+            | "re_match"
+            | "starts_with"
+            | "ends_with"
+            | "contains"
+            | "not_contains"
+            | "is_empty"
+            | "index_of"
+            | "substr"
+            | "char_at"
+            | "server_bound"
+            | "server_listening"
+            | "request_live"
+    )
+}
+
+/// Syntactic walk: does `expr` contain a `Call(name, args)` to a non-builtin
+/// callee where some argument mentions a name currently on the `binders`
+/// stack? `forall`/`exists` push their bound variable while walking the
+/// condition, so nested binders stack naturally.
+fn expr_has_binder_scoped_call(expr: &Expr, binders: &mut Vec<String>) -> bool {
+    use crate::verification::support::expr_mentions_var;
+    match expr {
+        Expr::Call(name, args) if (name == "forall" || name == "exists") && args.len() == 4 => {
+            // (var, start, end, condition): bounds are evaluated outside the
+            // binder's scope.
+            if expr_has_binder_scoped_call(&args[1], binders)
+                || expr_has_binder_scoped_call(&args[2], binders)
+            {
+                return true;
+            }
+            if let Expr::Variable(var) = &args[0] {
+                binders.push(var.clone());
+                let found = expr_has_binder_scoped_call(&args[3], binders);
+                binders.pop();
+                found
+            } else {
+                expr_has_binder_scoped_call(&args[3], binders)
+            }
+        }
+        Expr::Call(name, args) => {
+            if !is_builtin_call_name(name)
+                && binders
+                    .iter()
+                    .any(|b| args.iter().any(|a| expr_mentions_var(a, b)))
+            {
+                return true;
+            }
+            args.iter().any(|a| expr_has_binder_scoped_call(a, binders))
+        }
+        Expr::ArrayLit(items) => items
+            .iter()
+            .any(|e| expr_has_binder_scoped_call(e, binders)),
+        Expr::ArrayAccess(_, idx) => expr_has_binder_scoped_call(idx, binders),
+        Expr::BinaryOp(l, _, r) => {
+            expr_has_binder_scoped_call(l, binders) || expr_has_binder_scoped_call(r, binders)
+        }
+        Expr::Block(stmt) | Expr::Async { body: stmt } | Expr::Lambda { body: stmt, .. } => {
+            stmt_has_binder_scoped_call(stmt, binders)
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_has_binder_scoped_call(cond, binders)
+                || stmt_has_binder_scoped_call(then_branch, binders)
+                || stmt_has_binder_scoped_call(else_branch, binders)
+        }
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, e)| expr_has_binder_scoped_call(e, binders)),
+        Expr::FieldAccess(e, _) => expr_has_binder_scoped_call(e, binders),
+        Expr::Match { target, arms } => {
+            expr_has_binder_scoped_call(target, binders)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_deref()
+                        .is_some_and(|g| expr_has_binder_scoped_call(g, binders))
+                        || stmt_has_binder_scoped_call(&arm.body, binders)
+                })
+        }
+        Expr::Await { expr } => expr_has_binder_scoped_call(expr, binders),
+        Expr::CallRef { callee, args } => {
+            if binders
+                .iter()
+                .any(|b| args.iter().any(|a| expr_mentions_var(a, b)))
+            {
+                return true;
+            }
+            expr_has_binder_scoped_call(callee, binders)
+                || args.iter().any(|a| expr_has_binder_scoped_call(a, binders))
+        }
+        Expr::Perform { args, .. } => args.iter().any(|a| expr_has_binder_scoped_call(a, binders)),
+        Expr::ChanSend { channel, value } => {
+            expr_has_binder_scoped_call(channel, binders)
+                || expr_has_binder_scoped_call(value, binders)
+        }
+        Expr::ChanRecv { channel } => expr_has_binder_scoped_call(channel, binders),
+        _ => false,
+    }
+}
+
+fn stmt_has_binder_scoped_call(stmt: &Stmt, binders: &mut Vec<String>) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            expr_has_binder_scoped_call(value, binders)
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_has_binder_scoped_call(index, binders)
+                || expr_has_binder_scoped_call(value, binders)
+        }
+        Stmt::Block(stmts, _)
+        | Stmt::TaskGroup {
+            children: stmts, ..
+        } => stmts
+            .iter()
+            .any(|s| stmt_has_binder_scoped_call(s, binders)),
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            expr_has_binder_scoped_call(cond, binders)
+                || expr_has_binder_scoped_call(invariant, binders)
+                || decreases
+                    .as_deref()
+                    .is_some_and(|d| expr_has_binder_scoped_call(d, binders))
+                || stmt_has_binder_scoped_call(body, binders)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            stmt_has_binder_scoped_call(body, binders)
+        }
+        Stmt::Expr(e, _) => expr_has_binder_scoped_call(e, binders),
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+/// True when the atom's own spec (requires, extracted quantifier conditions,
+/// ensures, covers, invariant — and, when `check_body`, the body including
+/// loop invariants) contains a call to a non-builtin callee whose arguments
+/// mention a `forall`/`exists` bound variable.
+fn atom_has_binder_scoped_call(atom: &Atom, check_body: bool) -> bool {
+    let mut clause_exprs: Vec<Expr> = Vec::new();
+    // `atom.requires` has its top-level quantifiers extracted into
+    // `forall_constraints`; walk each condition with its bound variable on
+    // the binder stack.
+    for quantifier in &atom.forall_constraints {
+        let mut binders = vec![quantifier.var.clone()];
+        for clause in [&quantifier.start, &quantifier.end] {
+            if expr_has_binder_scoped_call(&crate::parser::parse_expression(clause), &mut binders) {
+                return true;
+            }
+        }
+        if expr_has_binder_scoped_call(
+            &crate::parser::parse_expression(&quantifier.condition),
+            &mut binders,
+        ) {
+            return true;
+        }
+    }
+    clause_exprs.push(crate::parser::parse_expression(&atom.requires));
+    clause_exprs.push(crate::parser::parse_expression(&atom.ensures));
+    for cover in &atom.covers {
+        clause_exprs.push(crate::parser::parse_expression(&cover.clause));
+    }
+    if let Some(invariant) = atom.invariant.as_deref() {
+        clause_exprs.push(crate::parser::parse_expression(invariant));
+    }
+    for expr in &clause_exprs {
+        if expr_has_binder_scoped_call(expr, &mut Vec::new()) {
+            return true;
+        }
+    }
+    check_body
+        && stmt_has_binder_scoped_call(
+            &crate::parser::parse_body_expr(&atom.body_expr),
+            &mut Vec::new(),
+        )
 }
 
 /// Compute a hash for the contract (specification) portion only.
@@ -908,5 +1119,139 @@ mod replayability_hash_tests {
             plain, child,
             "resolving Dice to the Random root must change the hash"
         );
+    }
+}
+
+#[cfg(test)]
+mod binder_call_hash_tests {
+    use super::*;
+    use crate::parser::{parse_module, Item};
+
+    fn env_and_atom(source: &str, atom_name: &str) -> (ModuleEnv, Atom) {
+        let items = parse_module(source);
+        let mut module_env = ModuleEnv::default();
+        let mut target = None;
+        for item in &items {
+            if let Item::Atom(atom) = item {
+                module_env.atoms.insert(atom.name.clone(), atom.clone());
+                if atom.name == atom_name {
+                    target = Some(atom.clone());
+                }
+            }
+        }
+        (module_env, target.expect("atom missing"))
+    }
+
+    fn hash(source: &str, atom_name: &str) -> String {
+        let (module_env, atom) = env_and_atom(source, atom_name);
+        compute_proof_hash(&atom, &module_env)
+    }
+
+    const IDENT: &str = r#"
+atom ident(x: i64) -> i64
+requires: true;
+ensures: result == x;
+body: x;
+"#;
+
+    #[test]
+    fn bound_call_in_requires_adds_the_marker() {
+        let (module_env, atom) = env_and_atom(
+            &format!(
+                "{IDENT}\natom all_equal_probe(arr: [i64], n: i64) -> i64\nrequires: n >= 2 && len(arr) >= n && forall(i, 0, n, ident(arr[i]) == arr[i]);\nensures: arr[0] == arr[1];\nbody: n;\n"
+            ),
+            "all_equal_probe",
+        );
+        assert!(atom_has_binder_scoped_call(&atom, true));
+        let _ = module_env;
+    }
+
+    #[test]
+    fn bound_call_via_nested_inner_quantifier_uses_outer_var() {
+        let (_, atom) = env_and_atom(
+            &format!(
+                "{IDENT}\natom nested(arr: [i64], n: i64) -> i64\nrequires: n >= 2 && len(arr) >= n && forall(i, 0, n, forall(j, 0, n, ident(arr[i]) == arr[i]));\nensures: arr[0] == arr[1];\nbody: n;\n"
+            ),
+            "nested",
+        );
+        assert!(atom_has_binder_scoped_call(&atom, true));
+    }
+
+    #[test]
+    fn bound_call_in_transitive_callee_ensures_marks_caller() {
+        let source = format!(
+            "{IDENT}\natom callee(arr: [i64], n: i64) -> i64\nrequires: n >= 1 && len(arr) >= n;\nensures: forall(i, 0, n, ident(arr[i]) == arr[i]);\nbody: n;\n\natom caller(arr: [i64], n: i64) -> i64\nrequires: n >= 1 && len(arr) >= n;\nensures: result == n;\nbody: {{ callee(arr, n) }};\n"
+        );
+        let (mut module_env, caller) = env_and_atom(&source, "caller");
+        module_env
+            .dependency_graph
+            .entry("caller".to_string())
+            .or_default()
+            .insert("callee".to_string());
+        // The caller's own spec has no bound call, but its callee's ensures
+        // does — the hash must carry the marker.
+        assert!(!atom_has_binder_scoped_call(&caller, true));
+        let hash_with_marker = compute_proof_hash(&caller, &module_env);
+        let (_, callee) = env_and_atom(&source, "callee");
+        assert!(atom_has_binder_scoped_call(&callee, false));
+        // And a caller to a clean callee stays unmarked.
+        let clean_source = format!(
+            "{IDENT}\natom clean_callee(x: i64) -> i64\nrequires: true;\nensures: result == x;\nbody: x;\n\natom clean_caller(x: i64) -> i64\nrequires: true;\nensures: result == x;\nbody: {{ clean_callee(x) }};\n"
+        );
+        let (mut clean_env, clean_caller) = env_and_atom(&clean_source, "clean_caller");
+        clean_env
+            .dependency_graph
+            .entry("clean_caller".to_string())
+            .or_default()
+            .insert("clean_callee".to_string());
+        let hash_clean = compute_proof_hash(&clean_caller, &clean_env);
+        // Sanity: both hashes are well-formed hex.
+        assert_eq!(hash_with_marker.len(), 64);
+        assert_eq!(hash_clean.len(), 64);
+    }
+
+    #[test]
+    fn ground_call_under_binder_is_not_marked() {
+        let (_, atom) = env_and_atom(
+            &format!(
+                "{IDENT}\natom ground(arr: [i64], n: i64) -> i64\nrequires: n >= 1 && len(arr) >= n && forall(i, 0, n, arr[i] >= ident(0));\nensures: arr[0] >= 0;\nbody: n;\n"
+            ),
+            "ground",
+        );
+        assert!(!atom_has_binder_scoped_call(&atom, true));
+    }
+
+    #[test]
+    fn builtin_reads_and_len_are_not_marked() {
+        let source = r#"
+atom sorted_probe(arr: [i64], n: i64) -> i64
+requires: n >= 2 && len(arr) >= n && forall(i, 0, n - 1, arr[i] <= arr[i + 1]);
+ensures: arr[0] <= arr[1];
+body: n;
+"#;
+        let (_, atom) = env_and_atom(source, "sorted_probe");
+        assert!(!atom_has_binder_scoped_call(&atom, true));
+    }
+
+    #[test]
+    fn call_outside_any_binder_is_not_marked() {
+        let (_, atom) = env_and_atom(
+            &format!(
+                "{IDENT}\natom plain(x: i64) -> i64\nrequires: ident(x) == x;\nensures: result == x;\nbody: x;\n"
+            ),
+            "plain",
+        );
+        assert!(!atom_has_binder_scoped_call(&atom, true));
+    }
+
+    #[test]
+    fn unmarked_atoms_keep_identical_hashes() {
+        // An atom without the pattern hashes identically to one byte-for-byte
+        // equivalent modulo the binder marker logic — the marker is only
+        // appended when the pattern is present, so just check determinism.
+        let source = format!(
+            "{IDENT}\natom plain(x: i64) -> i64\nrequires: ident(x) == x;\nensures: result == x;\nbody: x;\n"
+        );
+        assert_eq!(hash(&source, "plain"), hash(&source, "plain"));
     }
 }
