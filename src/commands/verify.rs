@@ -992,6 +992,7 @@ struct LeanBridgeApplyStats {
     lean_verified: usize,
     newly_proven: usize,
     lean_verified_atoms: Vec<String>,
+    axiom_rejected_atoms: Vec<(String, Option<Vec<String>>)>,
 }
 
 fn format_count_map(map: &std::collections::BTreeMap<String, usize>) -> String {
@@ -1098,15 +1099,29 @@ fn apply_lean_cert_to_proof_certificate(
         if candidate.z3_check_result == "lean_verified"
             && lean_candidate_metadata_is_current(candidate)
         {
-            let was_already_proven = atom.z3_check_result == "unsat" && atom.status == "verified";
-            atom.z3_check_result = "lean_verified".to_string();
-            atom.status = "verified".to_string();
-            atom.translator_version = candidate.translator_version.clone();
-            atom.bridge_lemma_hash = candidate.bridge_lemma_hash.clone();
-            stats.lean_verified += 1;
-            stats.lean_verified_atoms.push(atom.name.clone());
-            if !was_already_proven {
-                stats.newly_proven += 1;
+            match proof_cert::lean_axiom_audit(atom) {
+                proof_cert::LeanAxiomAudit::Passed { .. }
+                | proof_cert::LeanAxiomAudit::Unaudited => {
+                    let was_already_proven =
+                        atom.z3_check_result == "unsat" && atom.status == "verified";
+                    atom.z3_check_result = "lean_verified".to_string();
+                    atom.status = "verified".to_string();
+                    atom.translator_version = candidate.translator_version.clone();
+                    atom.bridge_lemma_hash = candidate.bridge_lemma_hash.clone();
+                    stats.lean_verified += 1;
+                    stats.lean_verified_atoms.push(atom.name.clone());
+                    if !was_already_proven {
+                        stats.newly_proven += 1;
+                    }
+                }
+                proof_cert::LeanAxiomAudit::Rejected { disallowed } => {
+                    stats
+                        .axiom_rejected_atoms
+                        .push((atom.name.clone(), Some(disallowed)));
+                }
+                proof_cert::LeanAxiomAudit::Error => {
+                    stats.axiom_rejected_atoms.push((atom.name.clone(), None));
+                }
             }
         }
     }
@@ -1759,6 +1774,17 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                                 for atom_name in &stats.lean_verified_atoms {
                                     println!("  lean_verified: {atom_name}");
                                 }
+                                for (atom_name, disallowed) in &stats.axiom_rejected_atoms {
+                                    match disallowed {
+                                        Some(disallowed) => eprintln!(
+                                            "  ⚠️  axiom_rejected: {atom_name} (disallowed: {})",
+                                            disallowed.join(", ")
+                                        ),
+                                        None => eprintln!(
+                                            "  ⚠️  axiom_rejected: {atom_name} (axiom audit error)"
+                                        ),
+                                    }
+                                }
                                 println!(
                                     "  Lean bridge certificate applied: {} lean_verified atom(s) from {}",
                                     stats.lean_verified,
@@ -2295,3 +2321,153 @@ pub(crate) fn save_cross_spec_report(
 // =============================================================================
 // mumei init — generate project template
 // =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_certificate(name: &str) -> proof_cert::ProofCertificate {
+        let atom = serde_json::from_value(serde_json::json!({
+            "name": name,
+            "z3_check_result": "unknown",
+            "content_hash": "content-hash",
+            "status": "unverified"
+        }))
+        .expect("deserialize minimal atom certificate");
+        proof_cert::ProofCertificate {
+            version: "1.1".to_string(),
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+            mumei_version: String::new(),
+            z3_version: String::new(),
+            file: "test.mm".to_string(),
+            atoms: vec![atom],
+            reconstruction_loss: None,
+            self_correction_summary: None,
+            package_name: None,
+            package_version: None,
+            certificate_hash: String::new(),
+            all_verified: false,
+            harness_contract: None,
+            intent_fidelity: None,
+            artifact_paths: None,
+            budget_policy_fingerprint: None,
+        }
+    }
+
+    fn test_bundle(
+        name: &str,
+        axiom_audit: Option<&str>,
+        kernel_axioms: Option<Vec<&str>>,
+    ) -> proof_cert::EscalationBundle {
+        let metadata = proof_cert::LeanResultMetadata {
+            status: "lean_verified".to_string(),
+            theorem_name: "Test.atom".to_string(),
+            translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+            bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+            axiom_audit: axiom_audit.map(str::to_string),
+            kernel_axioms: kernel_axioms
+                .map(|axioms| axioms.into_iter().map(str::to_string).collect()),
+            ..proof_cert::LeanResultMetadata::default()
+        };
+        proof_cert::EscalationBundle {
+            version: "1.0".to_string(),
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+            file: "test.mm".to_string(),
+            mumei_version: String::new(),
+            package_name: None,
+            package_version: None,
+            summary: proof_cert::EscalationBundleSummary::default(),
+            candidates: vec![proof_cert::EscalationCandidate {
+                name: name.to_string(),
+                z3_check_result: "lean_verified".to_string(),
+                z3_result_class: "unknown".to_string(),
+                status: "lean_verified".to_string(),
+                content_hash: "content-hash".to_string(),
+                proof_hash: "proof-hash".to_string(),
+                dependencies: Vec::new(),
+                effects: Vec::new(),
+                requires: "true".to_string(),
+                ensures: "result >= 0".to_string(),
+                body_expr: "0".to_string(),
+                body_summary: "0".to_string(),
+                escalation_reason: proof_cert::EscalationReason::NonlinearArithmetic,
+                logic_fragment_tag: None,
+                logic_fragment_tags: Vec::new(),
+                translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+                binder_mapping: Default::default(),
+                bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+                manual_lemma_reason: None,
+                translator_ir: verification::TranslatorIRMetadata::default(),
+                lean_metadata: None,
+                lean_result_metadata: Some(metadata),
+            }],
+        }
+    }
+
+    #[test]
+    fn promotes_candidates_with_a_passed_kernel_axiom_audit() {
+        let mut cert = test_certificate("atom");
+        let bundle = test_bundle(
+            "atom",
+            Some("passed"),
+            Some(vec!["propext", "Classical.choice", "Quot.sound"]),
+        );
+
+        let stats = apply_lean_cert_to_proof_certificate(&mut cert, &bundle);
+
+        assert_eq!(cert.atoms[0].z3_check_result, "lean_verified");
+        assert_eq!(stats.lean_verified, 1);
+        assert!(stats.axiom_rejected_atoms.is_empty());
+    }
+
+    #[test]
+    fn rejects_candidates_with_disallowed_kernel_axioms() {
+        let mut cert = test_certificate("atom");
+        let bundle = test_bundle("atom", Some("passed"), Some(vec!["sorryAx"]));
+
+        let stats = apply_lean_cert_to_proof_certificate(&mut cert, &bundle);
+
+        assert_eq!(cert.atoms[0].z3_check_result, "unknown");
+        assert_eq!(cert.atoms[0].status, "unverified");
+        assert_eq!(stats.lean_verified, 0);
+        assert_eq!(stats.newly_proven, 0);
+        assert!(stats.lean_verified_atoms.is_empty());
+        assert_eq!(
+            stats.axiom_rejected_atoms,
+            vec![("atom".to_string(), Some(vec!["sorryAx".to_string()]))]
+        );
+        assert_eq!(
+            cert.atoms[0]
+                .lean_result_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.kernel_axioms.as_ref()),
+            Some(&vec!["sorryAx".to_string()])
+        );
+    }
+
+    #[test]
+    fn records_axiom_audit_errors_without_promoting_candidates() {
+        let mut cert = test_certificate("atom");
+        let bundle = test_bundle("atom", Some("error"), None);
+
+        let stats = apply_lean_cert_to_proof_certificate(&mut cert, &bundle);
+
+        assert_eq!(cert.atoms[0].z3_check_result, "unknown");
+        assert_eq!(cert.atoms[0].status, "unverified");
+        assert_eq!(stats.lean_verified, 0);
+        assert_eq!(stats.newly_proven, 0);
+        assert_eq!(stats.axiom_rejected_atoms, vec![("atom".to_string(), None)]);
+    }
+
+    #[test]
+    fn promotes_legacy_candidates_without_audit_fields() {
+        let mut cert = test_certificate("atom");
+        let bundle = test_bundle("atom", None, None);
+
+        let stats = apply_lean_cert_to_proof_certificate(&mut cert, &bundle);
+
+        assert_eq!(cert.atoms[0].z3_check_result, "lean_verified");
+        assert_eq!(stats.lean_verified, 1);
+        assert!(stats.axiom_rejected_atoms.is_empty());
+    }
+}

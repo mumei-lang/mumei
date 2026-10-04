@@ -127,10 +127,10 @@ CodeLens entries use the following literal `kind` values:
 
 ## Renderer rules
 
-Renderers reflect `lean_verified`, `escalation_reason`, and
-`z3_result_class` verbatim.  Do not introduce alternate names.  The only
-`status` values are `pending` and `lean_verified`.  Unknown keys must be
-ignored, not remapped.
+Renderers reflect `lean_verified`, `escalation_reason`, `z3_result_class`, and
+`disallowed` verbatim.  Do not introduce alternate names.  The only `status`
+values are `pending`, `lean_verified`, and `axiom_rejected`.  Unknown keys must
+be ignored, not remapped.
 
 ## Editor reference implementations
 
