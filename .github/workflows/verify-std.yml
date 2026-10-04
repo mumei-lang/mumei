@@ -88,6 +88,15 @@ jobs:
           LIBCLANG_PATH: /usr/lib/llvm-17/lib
         run: cargo build --release
 
+      - name: Check mumei loads Z3 from setup-z3
+        run: |
+          ldd ./target/release/mumei | grep libz3
+          resolved=$(ldd ./target/release/mumei | awk '$1 == "libz3.so.4" { print $3 }')
+          case "$resolved" in
+            "$Z3_SYS_Z3_LIB_DIR"/*) echo "libz3.so.4 resolves to $resolved" ;;
+            *) echo "::error::libz3.so.4 resolves to '${resolved}', not under $Z3_SYS_Z3_LIB_DIR"; exit 1 ;;
+          esac
+
       - name: Verify std on PR head
         env:
           LLVM_SYS_170_PREFIX: /usr/lib/llvm-17

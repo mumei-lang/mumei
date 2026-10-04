@@ -22,6 +22,10 @@ runs:
         test -x "$z3_dir/bin/z3"
         test -f "$z3_dir/bin/libz3.so"
         test -f "$z3_dir/include/z3.h"
+        # z3-sys links -lz3 from the default search path (apt's libz3.so,
+        # SONAME libz3.so.4) and ignores Z3_SYS_Z3_LIB_DIR. The bundle only
+        # ships libz3.so, so without this the loader falls back to apt's Z3.
+        ln -sf libz3.so "$z3_dir/bin/libz3.so.4"
         library_path="$z3_dir/bin"
         if [ -n "${LD_LIBRARY_PATH:-}" ]; then
           library_path="$library_path:$LD_LIBRARY_PATH"
@@ -31,3 +35,7 @@ runs:
           echo "Z3_SYS_Z3_LIB_DIR=$z3_dir/bin"
           echo "LD_LIBRARY_PATH=$library_path"
         } >> "$GITHUB_ENV"
+
+    - name: Show Z3 library SONAME
+      shell: bash
+      run: readelf -d "$Z3_SYS_Z3_LIB_DIR/libz3.so" | grep SONAME
