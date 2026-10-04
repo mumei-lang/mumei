@@ -1,5 +1,23 @@
 use std::process::Command;
 
+static REPORT_DIR_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// Unique report dir per verify run: report.json defaults to the shared
+// repo-root cwd, which concurrent `mumei` processes from other tests clobber.
+fn unique_report_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "mumei_concurrency_report_{}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+        REPORT_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+    ));
+    std::fs::create_dir_all(&dir).expect("create report dir");
+    dir
+}
+
 fn write_fixture(name: &str, source: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "mumei_concurrency_test_{}_{}",
@@ -151,12 +169,16 @@ body: {
 "#,
     );
 
+    let report_dir = unique_report_dir();
     let output = Command::new(bin)
         .arg("verify")
+        .arg("--report-dir")
+        .arg(&report_dir)
         .arg(&fixture)
         .current_dir(manifest_dir)
         .output()
         .unwrap_or_else(|err| panic!("failed to verify task_group:any fixture: {err}"));
+    let _ = std::fs::remove_dir_all(&report_dir);
 
     assert!(
         !output.status.success(),
@@ -322,12 +344,16 @@ fn verify_fixture(name: &str, source: &str) -> std::process::Output {
     let bin = env!("CARGO_BIN_EXE_mumei");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let fixture = write_fixture(name, source);
+    let report_dir = unique_report_dir();
     let output = Command::new(bin)
         .arg("verify")
+        .arg("--report-dir")
+        .arg(&report_dir)
         .arg(&fixture)
         .current_dir(manifest_dir)
         .output()
         .unwrap_or_else(|err| panic!("failed to verify fixture {name}: {err}"));
+    let _ = std::fs::remove_dir_all(&report_dir);
     std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
     output
 }
@@ -645,13 +671,17 @@ body: {{
 "
     );
     let fixture = write_fixture("task_group_ownership_json", &source);
+    let report_dir = unique_report_dir();
     let output = Command::new(bin)
         .arg("verify")
+        .arg("--report-dir")
+        .arg(&report_dir)
         .arg(&fixture)
         .arg("--json")
         .current_dir(manifest_dir)
         .output()
         .expect("failed to run verify --json");
+    let _ = std::fs::remove_dir_all(&report_dir);
     std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -701,13 +731,17 @@ ensures: result > x;
 body: x;
 "#,
     );
+    let report_dir = unique_report_dir();
     let output = Command::new(bin)
         .arg("verify")
+        .arg("--report-dir")
+        .arg(&report_dir)
         .arg(&fixture)
         .arg("--json")
         .current_dir(manifest_dir)
         .output()
         .expect("failed to run verify --json");
+    let _ = std::fs::remove_dir_all(&report_dir);
     std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
 
     let stdout = String::from_utf8_lossy(&output.stdout);

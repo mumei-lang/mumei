@@ -20,18 +20,40 @@ fn write_fixture(name: &str, source: &str) -> PathBuf {
     path
 }
 
+static REPORT_DIR_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// Unique report dir per run: report.json defaults to the shared repo-root
+// cwd, which concurrent `mumei` processes from other tests clobber.
+fn unique_report_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "mumei_verify_json_diagnostics_{}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+        REPORT_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+    ));
+    std::fs::create_dir_all(&dir).expect("create report dir");
+    dir
+}
+
 fn verify_json(
     fixture: &PathBuf,
     extra_args: &[&str],
 ) -> (std::process::Output, serde_json::Value) {
+    let report_dir = unique_report_dir();
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .arg("verify")
         .arg(fixture)
         .arg("--json")
+        .arg("--report-dir")
+        .arg(&report_dir)
         .args(extra_args)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("failed to run verify --json");
+    let _ = std::fs::remove_dir_all(&report_dir);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let json_start = stdout
         .find('{')
