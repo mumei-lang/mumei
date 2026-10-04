@@ -261,3 +261,48 @@ body: x;
     );
     cleanup(dir);
 }
+
+#[test]
+fn u64_counterexample_keeps_integer_provenance_and_replays_exactly() {
+    // Before typed raising, u64 model values were unraisable and reduced fidelity.
+    let (dir, output, report) = verify_source(
+        "u64_counterexample",
+        r#"
+atom u64_counterexample(x: u64) -> u64
+requires: x == 7;
+ensures: result > 10;
+body: x;
+"#,
+        &["--enable-spurious-detection"],
+    );
+    assert!(
+        !output.status.success(),
+        "the false ensures clause must fail: {}",
+        output_text(&output)
+    );
+    assert_eq!(report["counterexample"]["x"], "7");
+    assert_eq!(
+        report["counterexample_provenance"]["values"]["x"]["status"],
+        "raised"
+    );
+    assert_eq!(
+        report["counterexample_provenance"]["values"]["x"]["lowering"],
+        "int"
+    );
+    let reconstruction_loss = &report["semantic_feedback"]["reconstruction_loss"];
+    assert_eq!(reconstruction_loss["counter_example"]["x"], 7);
+    let x_component = reconstruction_loss["loss_components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|component| component["variable"] == "x")
+        .expect("x loss component");
+    assert_eq!(x_component["observed"], 7);
+    assert_eq!(x_component["magnitude"], 7.0);
+    assert_eq!(
+        report["semantic_feedback"]["counterexample_validation_status"],
+        "validated"
+    );
+    assert_eq!(report["counterexample_fidelity"], "exact");
+    cleanup(dir);
+}

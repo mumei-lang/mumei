@@ -337,18 +337,38 @@ pub(crate) fn format_counterexample<'a>(
         let type_hint = decl_hint.or_else(|| enum_ctx.map(|enum_def| enum_def.name.as_str()));
         let (rendering, lowering, status) =
             raise_binding(model, "target", &target_val, type_hint, env, module_env);
+        let is_raised_enum = lowering == "enum" && matches!(&status, RaisedStatus::Raised);
+        let integer_tag = is_raised_enum.then(|| {
+            target_val
+                .as_int()
+                .and_then(|integer| integer.as_i64().map(|tag| tag.to_string()))
+                .or_else(|| {
+                    target_val
+                        .as_bv()
+                        .and_then(|bitvector| bitvector.as_u64())
+                        .map(|tag| tag.to_string())
+                })
+        });
+        let message = if is_raised_enum {
+            match integer_tag.flatten() {
+                Some(tag) => format!("{rendering} (tag={tag}) -- missing from match arms"),
+                None => format!("{rendering} -- missing from match arms"),
+            }
+        } else {
+            format!("value = {rendering} -- no matching arm")
+        };
         let raised = RaisedCounterexample {
             values: vec![RaisedValue {
                 source_name: "target".to_string(),
                 solver_name: None,
-                rendering: rendering.clone(),
+                rendering,
                 lowering,
                 source_type: type_hint.map(str::to_string),
                 status,
             }],
             omitted_solver_symbols: Vec::new(),
         };
-        (format!("{} -- no matching arm", rendering), Some(raised))
+        (message, Some(raised))
     } else {
         // 評価に失敗した場合、アームの情報からヒントを生成
         let covered: Vec<String> = arms

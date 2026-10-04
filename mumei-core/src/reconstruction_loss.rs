@@ -1,4 +1,4 @@
-use crate::verification::{raise_model_value, ModuleEnv};
+use crate::verification::{raise_named_model_value, ModuleEnv};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -151,8 +151,8 @@ impl ReconstructionLoss {
         let module_env = ModuleEnv::new();
         for (name, variable) in variables {
             if let Some(value) = model.eval(variable, true) {
-                let (rendering, _, _) = raise_model_value(model, &value, None, &module_env);
-                counter_example.insert(name.clone(), Value::String(rendering));
+                let raised = raise_named_model_value(model, name, &value, None, &module_env);
+                counter_example.insert(name.clone(), raised.to_loss_json());
             }
         }
         Self::from_counter_example(violated_property, counter_example)
@@ -318,7 +318,7 @@ fn parse_loss_vector(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use z3::ast::{Ast, Int};
+    use z3::ast::{Ast, Bool, Int};
     use z3::{Config, Context, SatResult, Solver};
 
     #[test]
@@ -340,20 +340,37 @@ mod tests {
         assert_eq!(loss.schema_version, RECONSTRUCTION_LOSS_SCHEMA_VERSION);
         assert_eq!(
             loss.counter_example.get("x"),
-            Some(&Value::String("7".to_string()))
+            Some(&Value::Number(7.into()))
         );
         assert_eq!(loss.loss_set_size, 1);
         assert_eq!(loss.loss_vector.len(), 1);
         assert_eq!(loss.loss_vector[0].violated_property, "result > 10");
         assert_eq!(
             loss.loss_vector[0].counter_example.get("x"),
-            Some(&Value::String("7".to_string()))
+            Some(&Value::Number(7.into()))
         );
         assert_eq!(loss.loss_vector[0].magnitude, 7.0);
         assert_eq!(loss.loss_components[0].variable, "x");
         assert_eq!(loss.loss_components[0].magnitude, 7.0);
         assert!(!loss.is_zero_loss());
         assert_eq!(loss.total_magnitude(), 7.0);
+    }
+
+    #[test]
+    fn test_from_z3_model_preserves_boolean_values() {
+        let config = Config::new();
+        let context = Context::new(&config);
+        let solver = Solver::new(&context);
+        let flag = Bool::new_const(&context, "flag");
+        solver.assert(&flag);
+
+        assert_eq!(solver.check(), SatResult::Sat);
+        let model = solver.get_model().expect("sat model");
+        let variables = HashMap::from([("flag".to_string(), Dynamic::from(&flag))]);
+
+        let loss = ReconstructionLoss::from_z3_model("result > 0", &model, &variables);
+
+        assert_eq!(loss.counter_example.get("flag"), Some(&Value::Bool(true)));
     }
 
     #[test]

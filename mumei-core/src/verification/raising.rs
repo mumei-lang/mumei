@@ -2,7 +2,7 @@ use super::module_env::ModuleEnv;
 use super::translator::struct_field_key;
 use crate::lowering::{lower, LoweredType};
 use crate::parser::{Atom, EnumDef};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Map, Number, Value};
 use std::collections::{HashMap, HashSet};
 use z3::ast::{Ast, Dynamic, Int};
 use z3::Model;
@@ -21,6 +21,42 @@ pub struct RaisedValue {
     pub lowering: &'static str,
     pub source_type: Option<String>,
     pub status: RaisedStatus,
+}
+
+impl RaisedValue {
+    pub fn to_loss_json(&self) -> Value {
+        loss_json_from_raised_rendering(
+            &self.rendering,
+            self.lowering,
+            matches!(self.status, RaisedStatus::Raised),
+        )
+    }
+}
+
+pub fn loss_json_from_raised_rendering(rendering: &str, lowering: &str, is_raised: bool) -> Value {
+    if !is_raised {
+        return Value::String(rendering.to_string());
+    }
+    match lowering {
+        "int" | "bitvec_i64" | "bitvec_i32" | "bitvec_u64" | "bitvec_u32" => rendering
+            .parse::<i64>()
+            .map(Number::from)
+            .or_else(|_| rendering.parse::<u64>().map(Number::from))
+            .map(Value::Number)
+            .unwrap_or_else(|_| Value::String(rendering.to_string())),
+        "real_f64" | "ieee754_f64" | "real_f32" | "ieee754_f32" => rendering
+            .parse::<f64>()
+            .ok()
+            .and_then(Number::from_f64)
+            .map(Value::Number)
+            .unwrap_or_else(|| Value::String(rendering.to_string())),
+        "bool" => match rendering {
+            "true" => Value::Bool(true),
+            "false" => Value::Bool(false),
+            _ => Value::String(rendering.to_string()),
+        },
+        _ => Value::String(rendering.to_string()),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -42,6 +78,14 @@ impl RaisedCounterexample {
         let mut values = Map::new();
         for value in &self.values {
             values.insert(value.source_name.clone(), json!(value.rendering));
+        }
+        Value::Object(values)
+    }
+
+    pub fn to_loss_json(&self) -> Value {
+        let mut values = Map::new();
+        for value in &self.values {
+            values.insert(value.source_name.clone(), value.to_loss_json());
         }
         Value::Object(values)
     }
@@ -307,42 +351,42 @@ fn raise_model_value_with_env<'ctx>(
     }
 
     match base.map(lower) {
-        Some(LoweredType::I64) if value.as_bv().is_some() => {
-            let bv = value.as_bv().expect("checked above");
-            if bv.get_size() != 64 {
-                return unraisable(raw, "bitvec_i64", "expected a 64-bit bit-vector");
+        Some(
+            integer_type @ (LoweredType::I64
+            | LoweredType::I32
+            | LoweredType::U64
+            | LoweredType::U32),
+        ) if value.as_bv().is_some() => raise_integer_bitvector(value, raw, integer_type),
+        Some(
+            integer_type @ (LoweredType::I64
+            | LoweredType::I32
+            | LoweredType::U64
+            | LoweredType::U32),
+        ) if value.as_int().is_some() => raise_integer_value(value, raw, Some(integer_type)),
+        None if value.as_int().is_some() => raise_integer_value(value, raw, None),
+        Some(LoweredType::F64) if value.as_float().is_some() => {
+            let float = value.as_float().expect("checked above");
+            let sort = float.get_sort();
+            if (sort.float_exponent_size(), sort.float_significand_size()) != (Some(11), Some(53)) {
+                return unraisable(
+                    raw,
+                    "ieee754_f64",
+                    &format!(
+                        "expected IEEE Float(11, 53), found {}",
+                        solver_sort_description(value)
+                    ),
+                );
             }
-            bv.as_u64()
-                .map(|bits| (bits as i64).to_string())
-                .or_else(|| bv.as_i64().map(|integer| integer.to_string()))
-                .map(|rendering| (rendering, "bitvec_i64", RaisedStatus::Raised))
+            decode_ieee754_f64(&raw)
+                .map(|number| (format!("{number:?}"), "ieee754_f64", RaisedStatus::Raised))
                 .unwrap_or_else(|| {
                     unraisable(
                         raw.clone(),
-                        "bitvec_i64",
-                        "could not decode the 64-bit value",
+                        "ieee754_f64",
+                        "unsupported IEEE 754 model rendering",
                     )
                 })
         }
-        Some(LoweredType::I64) | None if value.as_int().is_some() => value
-            .as_int()
-            .and_then(|integer| integer.as_i64())
-            .map(|integer| (integer.to_string(), "int", RaisedStatus::Raised))
-            .or_else(|| {
-                parse_solver_integer(&raw).map(|integer| (integer, "int", RaisedStatus::Raised))
-            })
-            .unwrap_or_else(|| {
-                unraisable(raw.clone(), "int", "integer is outside the source range")
-            }),
-        Some(LoweredType::F64) if value.as_float().is_some() => decode_ieee754_f64(&raw)
-            .map(|number| (format!("{number:?}"), "ieee754_f64", RaisedStatus::Raised))
-            .unwrap_or_else(|| {
-                unraisable(
-                    raw.clone(),
-                    "ieee754_f64",
-                    "unsupported IEEE 754 model rendering",
-                )
-            }),
         Some(LoweredType::F64) if value.as_real().is_some() => {
             let exact = value
                 .as_real()
@@ -352,6 +396,38 @@ fn raise_model_value_with_env<'ctx>(
                 .map(|number| (format!("{number:?}"), "real_f64", RaisedStatus::Raised))
                 .unwrap_or_else(|| unraisable(raw.clone(), "real_f64", "no exact f64 rendering"))
         }
+        Some(LoweredType::F32) if value.as_float().is_some() => {
+            let float = value.as_float().expect("checked above");
+            let sort = float.get_sort();
+            if (sort.float_exponent_size(), sort.float_significand_size()) != (Some(8), Some(24)) {
+                return unraisable(
+                    raw,
+                    "ieee754_f32",
+                    &format!(
+                        "expected IEEE Float(8, 24), found {}",
+                        solver_sort_description(value)
+                    ),
+                );
+            }
+            decode_ieee754_f32(&raw)
+                .map(|number| (format!("{number:?}"), "ieee754_f32", RaisedStatus::Raised))
+                .unwrap_or_else(|| {
+                    unraisable(
+                        raw.clone(),
+                        "ieee754_f32",
+                        "unsupported IEEE 754 binary32 model rendering",
+                    )
+                })
+        }
+        Some(LoweredType::F32) if value.as_real().is_some() => {
+            let exact = value
+                .as_real()
+                .and_then(|real| real.as_real())
+                .and_then(|(numerator, denominator)| exact_dyadic_f32(numerator, denominator));
+            exact
+                .map(|number| (format!("{number:?}"), "real_f32", RaisedStatus::Raised))
+                .unwrap_or_else(|| unraisable(raw.clone(), "real_f32", "no exact f32 rendering"))
+        }
         Some(LoweredType::Bool) => value
             .as_bool()
             .and_then(|boolean| boolean.as_bool())
@@ -360,11 +436,151 @@ fn raise_model_value_with_env<'ctx>(
                 unraisable(raw.clone(), "bool", "could not decode the boolean value")
             }),
         Some(LoweredType::Str) => (raw, "string", RaisedStatus::Raised),
+        Some(LoweredType::F32) => unraisable(
+            raw,
+            "f32",
+            &format!(
+                "expected a Real or IEEE Float(8, 24) for f32, found {}",
+                solver_sort_description(value)
+            ),
+        ),
+        Some(LoweredType::F64) => unraisable(
+            raw,
+            "f64",
+            &format!(
+                "expected a Real or IEEE Float(11, 53) for f64, found {}",
+                solver_sort_description(value)
+            ),
+        ),
+        Some(
+            integer_type @ (LoweredType::I64
+            | LoweredType::I32
+            | LoweredType::U64
+            | LoweredType::U32),
+        ) => unraisable(
+            raw,
+            "int",
+            &format!(
+                "expected a Z3 Int or matching-width bit-vector for {}, found {}",
+                integer_type_name(&integer_type),
+                solver_sort_description(value)
+            ),
+        ),
         _ => unraisable(
             raw,
             "unknown",
             "no source lowering is available for this model value",
         ),
+    }
+}
+
+fn integer_type_name(lowered: &LoweredType) -> &'static str {
+    match lowered {
+        LoweredType::I64 => "i64",
+        LoweredType::I32 => "i32",
+        LoweredType::U64 => "u64",
+        LoweredType::U32 => "u32",
+        _ => "integer",
+    }
+}
+
+fn integer_bitvector_lowering(lowered: &LoweredType) -> Option<(&'static str, u32, bool)> {
+    match lowered {
+        LoweredType::I64 => Some(("bitvec_i64", 64, true)),
+        LoweredType::I32 => Some(("bitvec_i32", 32, true)),
+        LoweredType::U64 => Some(("bitvec_u64", 64, false)),
+        LoweredType::U32 => Some(("bitvec_u32", 32, false)),
+        _ => None,
+    }
+}
+
+fn raise_integer_bitvector(
+    value: &Dynamic<'_>,
+    raw: String,
+    lowered: LoweredType,
+) -> (String, &'static str, RaisedStatus) {
+    let (lowering, width, signed) =
+        integer_bitvector_lowering(&lowered).expect("integer lowering has bit-vector metadata");
+    let bv = value.as_bv().expect("caller checked for bit-vector");
+    if bv.get_size() != width {
+        return unraisable(
+            raw,
+            lowering,
+            &format!(
+                "expected a {width}-bit bit-vector for {}, found a {}-bit bit-vector",
+                integer_type_name(&lowered),
+                bv.get_size()
+            ),
+        );
+    }
+    let Some(bits) = bv
+        .as_u64()
+        .or_else(|| bv.as_i64().map(|value| value as u64))
+    else {
+        return unraisable(raw, lowering, "could not decode the bit-vector value");
+    };
+    let rendering = match (width, signed) {
+        (64, true) => (bits as i64).to_string(),
+        (32, true) => (bits as u32 as i32).to_string(),
+        (64, false) => bits.to_string(),
+        (32, false) => (bits as u32).to_string(),
+        _ => unreachable!("integer lowering has a supported bit width"),
+    };
+    (rendering, lowering, RaisedStatus::Raised)
+}
+
+fn raise_integer_value(
+    value: &Dynamic<'_>,
+    raw: String,
+    lowered: Option<LoweredType>,
+) -> (String, &'static str, RaisedStatus) {
+    let integer = value.as_int().expect("caller checked for integer");
+    let value = integer
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| integer.as_u64().map(i128::from))
+        .or_else(|| parse_solver_integer(&raw));
+    let rendering = value.and_then(|value| match lowered {
+        Some(LoweredType::I64) => i64::try_from(value).ok().map(|value| value.to_string()),
+        Some(LoweredType::I32) => i32::try_from(value).ok().map(|value| value.to_string()),
+        Some(LoweredType::U64) => u64::try_from(value).ok().map(|value| value.to_string()),
+        Some(LoweredType::U32) => u32::try_from(value).ok().map(|value| value.to_string()),
+        Some(_) => None,
+        None => Some(value.to_string()),
+    });
+    rendering
+        .map(|rendering| (rendering, "int", RaisedStatus::Raised))
+        .unwrap_or_else(|| {
+            unraisable(
+                raw,
+                "int",
+                "integer is outside the declared source type range",
+            )
+        })
+}
+
+fn solver_sort_description(value: &Dynamic<'_>) -> String {
+    if let Some(float) = value.as_float() {
+        let sort = float.get_sort();
+        return match (sort.float_exponent_size(), sort.float_significand_size()) {
+            (Some(exponent), Some(significand)) => {
+                format!("IEEE Float({exponent}, {significand})")
+            }
+            _ => "IEEE floating-point sort".to_string(),
+        };
+    }
+    if value.as_int().is_some() {
+        "Int".to_string()
+    } else if value.as_real().is_some() {
+        "Real".to_string()
+    } else if let Some(bitvector) = value.as_bv() {
+        format!("{}-bit bit-vector", bitvector.get_size())
+    } else if value.as_bool().is_some() {
+        "Bool".to_string()
+    } else if value.as_string().is_some() {
+        "String".to_string()
+    } else {
+        "unknown".to_string()
     }
 }
 
@@ -609,6 +825,12 @@ fn exact_dyadic_f64(numerator: i64, denominator: i64) -> Option<f64> {
     (scaled == numerator as f64).then_some(value)
 }
 
+fn exact_dyadic_f32(numerator: i64, denominator: i64) -> Option<f32> {
+    let value = exact_dyadic_f64(numerator, denominator)?;
+    let rounded = value as f32;
+    (rounded.is_finite() && rounded as f64 == value).then_some(rounded)
+}
+
 fn resolve_source_base_type(type_name: &str, module_env: &ModuleEnv) -> String {
     let mut base = type_name.to_string();
     let mut seen = HashSet::new();
@@ -624,15 +846,14 @@ fn resolve_source_base_type(type_name: &str, module_env: &ModuleEnv) -> String {
     base
 }
 
-fn parse_solver_integer(raw: &str) -> Option<String> {
+fn parse_solver_integer(raw: &str) -> Option<i128> {
     if let Some(inner) = raw
         .strip_prefix("(- ")
         .and_then(|value| value.strip_suffix(')'))
     {
-        let integer = inner.parse::<i128>().ok()?;
-        Some((-integer).to_string())
+        inner.parse::<i128>().ok()?.checked_neg()
     } else {
-        raw.parse::<i128>().ok().map(|integer| integer.to_string())
+        raw.parse::<i128>().ok()
     }
 }
 
@@ -694,6 +915,60 @@ pub fn decode_ieee754_f64(rendering: &str) -> Option<f64> {
     };
     let bits = (sign << 63) | (exponent_bits << 52) | significand;
     Some(f64::from_bits(bits))
+}
+
+fn decode_ieee754_f32(rendering: &str) -> Option<f32> {
+    match rendering.trim() {
+        "(_ +zero 8 24)" => return Some(0.0),
+        "(_ -zero 8 24)" => return Some(-0.0),
+        "(_ +oo 8 24)" => return Some(f32::INFINITY),
+        "(_ -oo 8 24)" => return Some(f32::NEG_INFINITY),
+        "(_ NaN 8 24)" => return Some(f32::NAN),
+        _ => {}
+    }
+    let parts: Vec<_> = rendering
+        .trim()
+        .strip_prefix("(fp ")
+        .and_then(|text| text.strip_suffix(')'))?
+        .split_whitespace()
+        .collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let sign_bits = parts[0].strip_prefix("#b")?;
+    if sign_bits.len() != 1 {
+        return None;
+    }
+    let sign = sign_bits.parse::<u32>().ok()?;
+    let exponent_bits = if let Some(binary) = parts[1].strip_prefix("#b") {
+        if binary.len() != 8 {
+            return None;
+        }
+        u32::from_str_radix(binary, 2).ok()?
+    } else {
+        let hex = parts[1].strip_prefix("#x")?;
+        if hex.len() != 2 {
+            return None;
+        }
+        u32::from_str_radix(hex, 16).ok()?
+    };
+    let significand = if let Some(binary) = parts[2].strip_prefix("#b") {
+        if binary.len() != 23 {
+            return None;
+        }
+        u32::from_str_radix(binary, 2).ok()?
+    } else {
+        let hex = parts[2].strip_prefix("#x")?;
+        if hex.len() != 6 {
+            return None;
+        }
+        u32::from_str_radix(hex, 16).ok()?
+    };
+    if significand >= (1 << 23) {
+        return None;
+    }
+    let bits = (sign << 31) | (exponent_bits << 23) | significand;
+    Some(f32::from_bits(bits))
 }
 
 fn helper_symbol_is_for_binding(
@@ -776,11 +1051,14 @@ pub fn raise_atom_counterexample<'ctx>(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_ieee754_f64, raise_model_value, RaisedCounterexample, RaisedStatus};
+    use super::{
+        decode_ieee754_f64, raise_model_value, RaisedCounterexample, RaisedStatus, RaisedValue,
+    };
     use crate::parser::{RefinedType, Span};
     use crate::verification::ModuleEnv;
+    use serde_json::Value;
     use std::collections::HashMap;
-    use z3::ast::{Ast, Bool, Dynamic, Int, Real, BV};
+    use z3::ast::{Ast, Bool, Dynamic, Float, Int, Real, BV};
     use z3::{Config, Context, SatResult, Solver};
 
     #[test]
@@ -929,6 +1207,157 @@ mod tests {
         assert_eq!(rendering, "-1");
         assert_eq!(lowering, "bitvec_i64");
         assert_eq!(status, RaisedStatus::Raised);
+    }
+
+    #[test]
+    fn raises_non_i64_integer_sorts_as_decimal() {
+        let config = Config::new();
+        let context = Context::new(&config);
+        let solver = Solver::new(&context);
+        solver.assert(&Bool::from_bool(&context, true));
+        assert_eq!(solver.check(), SatResult::Sat);
+        let model = solver.get_model().unwrap();
+
+        for (type_name, value, expected) in [
+            (
+                "u64",
+                Int::from_u64(&context, u64::MAX),
+                u64::MAX.to_string(),
+            ),
+            ("i32", Int::from_i64(&context, -17), "-17".to_string()),
+            (
+                "u32",
+                Int::from_u64(&context, u64::from(u32::MAX)),
+                u32::MAX.to_string(),
+            ),
+        ] {
+            let dynamic: Dynamic = value.into();
+            let evaluated = model.eval(&dynamic, true).unwrap();
+            let (rendering, lowering, status) =
+                raise_model_value(&model, &evaluated, Some(type_name), &ModuleEnv::new());
+            assert_eq!(rendering, expected, "{type_name}");
+            assert_eq!(lowering, "int", "{type_name}");
+            assert_eq!(status, RaisedStatus::Raised, "{type_name}");
+        }
+    }
+
+    #[test]
+    fn loss_json_preserves_unsigned_numbers_and_fail_closed_strings() {
+        let unsigned = RaisedValue {
+            source_name: "x".to_string(),
+            solver_name: None,
+            rendering: u64::MAX.to_string(),
+            lowering: "bitvec_u64",
+            source_type: Some("u64".to_string()),
+            status: RaisedStatus::Raised,
+        };
+        assert_eq!(unsigned.to_loss_json(), Value::Number(u64::MAX.into()));
+
+        let unraisable = RaisedValue {
+            source_name: "x".to_string(),
+            solver_name: None,
+            rendering: "solver-value".to_string(),
+            lowering: "int",
+            source_type: Some("i64".to_string()),
+            status: RaisedStatus::Unraisable {
+                reason: "unsupported integer range".to_string(),
+            },
+        };
+        assert_eq!(
+            unraisable.to_loss_json(),
+            Value::String("solver-value".to_string())
+        );
+
+        let structured = RaisedValue {
+            source_name: "shape".to_string(),
+            solver_name: None,
+            rendering: "Shape::Circle(1)".to_string(),
+            lowering: "enum",
+            source_type: Some("Shape".to_string()),
+            status: RaisedStatus::Raised,
+        };
+        assert_eq!(
+            structured.to_loss_json(),
+            Value::String("Shape::Circle(1)".to_string())
+        );
+    }
+
+    #[test]
+    fn bitvector_integer_types_use_declared_signedness_and_width() {
+        let config = Config::new();
+        let context = Context::new(&config);
+        let solver = Solver::new(&context);
+        solver.assert(&Bool::from_bool(&context, true));
+        assert_eq!(solver.check(), SatResult::Sat);
+        let model = solver.get_model().unwrap();
+
+        for (type_name, value, expected, expected_lowering) in [
+            (
+                "u64",
+                BV::from_u64(&context, u64::MAX, 64),
+                u64::MAX.to_string(),
+                "bitvec_u64",
+            ),
+            (
+                "i32",
+                BV::from_i64(&context, -1, 32),
+                "-1".to_string(),
+                "bitvec_i32",
+            ),
+            (
+                "u32",
+                BV::from_u64(&context, u64::from(u32::MAX), 32),
+                u32::MAX.to_string(),
+                "bitvec_u32",
+            ),
+        ] {
+            let dynamic: Dynamic = value.into();
+            let evaluated = model.eval(&dynamic, true).unwrap();
+            let (rendering, lowering, status) =
+                raise_model_value(&model, &evaluated, Some(type_name), &ModuleEnv::new());
+            assert_eq!(rendering, expected, "{type_name}");
+            assert_eq!(lowering, expected_lowering, "{type_name}");
+            assert_eq!(status, RaisedStatus::Raised, "{type_name}");
+        }
+    }
+
+    #[test]
+    fn f32_values_follow_only_matching_real_or_ieee_sorts() {
+        let config = Config::new();
+        let context = Context::new(&config);
+        let solver = Solver::new(&context);
+        let real = Real::from_real(&context, 1, 2);
+        let ieee = Float::from_f32(&context, 0.5);
+        let integer = Int::from_i64(&context, 1);
+        solver.assert(&Bool::from_bool(&context, true));
+        assert_eq!(solver.check(), SatResult::Sat);
+        let model = solver.get_model().unwrap();
+
+        let real: Dynamic = model.eval(&real, true).unwrap().into();
+        let (rendering, lowering, status) =
+            raise_model_value(&model, &real, Some("f32"), &ModuleEnv::new());
+        assert_eq!(rendering, "0.5");
+        assert_eq!(lowering, "real_f32");
+        assert_eq!(status, RaisedStatus::Raised);
+
+        let ieee: Dynamic = model.eval(&ieee, true).unwrap().into();
+        let (rendering, lowering, status) =
+            raise_model_value(&model, &ieee, Some("f32"), &ModuleEnv::new());
+        assert_eq!(rendering, "0.5");
+        assert_eq!(lowering, "ieee754_f32");
+        assert_eq!(status, RaisedStatus::Raised);
+
+        let integer: Dynamic = model.eval(&integer, true).unwrap().into();
+        let (rendering, lowering, status) =
+            raise_model_value(&model, &integer, Some("f32"), &ModuleEnv::new());
+        assert_eq!(rendering, "1");
+        assert_eq!(lowering, "f32");
+        assert_eq!(
+            status,
+            RaisedStatus::Unraisable {
+                reason: "expected a Real or IEEE Float(8, 24) for f32, found Int".to_string()
+            }
+        );
     }
 
     #[test]

@@ -2252,7 +2252,7 @@ pub(crate) fn verify_inner(
                             counterexample_provenance =
                                 Some(raised_counterexample.provenance_json());
                             let loss_values = raised_loss
-                                .to_counterexample_json()
+                                .to_loss_json()
                                 .as_object()
                                 .cloned()
                                 .unwrap_or_default()

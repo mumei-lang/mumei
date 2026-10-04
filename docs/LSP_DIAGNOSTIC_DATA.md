@@ -58,6 +58,10 @@ source type and solver symbol, and an unraisable reason. `complete` is false
 when any reported value could not be raised. `omitted_solver_symbols` lists
 internal or otherwise unreported solver symbols.
 
+Primitive lowering labels include `int`, signed `bitvec_i64`/`bitvec_i32`,
+unsigned `bitvec_u64`/`bitvec_u32`, exact `real_f64`/`real_f32`, and
+`ieee754_f64`/`ieee754_f32` for matching IEEE floating-point sorts.
+
 In-process verification stops at the first failing atom.  When a sibling
 `<file>.proof.json` certificate exists, every other atom it records with an
 `escalation_reason` and a `z3_check_result` other than `lean_verified` also

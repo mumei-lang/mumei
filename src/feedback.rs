@@ -329,15 +329,43 @@ pub(crate) fn reconstruction_loss_from_error(
     error: &verification::MumeiError,
     violated_property: &str,
 ) -> Option<ReconstructionLoss> {
-    if let verification::MumeiError::VerificationError {
+    let verification::MumeiError::VerificationError {
         counterexample: Some(counterexample),
+        counterexample_provenance,
         ..
     } = error
+    else {
+        return None;
+    };
+    let mut values = counterexample.as_object()?.clone();
+    if let Some(provenance_values) = counterexample_provenance
+        .as_ref()
+        .and_then(|provenance| provenance.get("values"))
+        .and_then(serde_json::Value::as_object)
     {
-        ReconstructionLoss::from_counterexample_value(violated_property.to_string(), counterexample)
-    } else {
-        None
+        for (name, provenance) in provenance_values {
+            let Some(rendering) = counterexample.get(name).and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let Some(lowering) = provenance
+                .get("lowering")
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let is_raised =
+                provenance.get("status").and_then(serde_json::Value::as_str) == Some("raised");
+            values.insert(
+                name.clone(),
+                verification::loss_json_from_raised_rendering(rendering, lowering, is_raised),
+            );
+        }
     }
+    Some(ReconstructionLoss::from_counter_example(
+        violated_property.to_string(),
+        values.into_iter().collect(),
+    ))
 }
 
 pub(crate) fn parse_artifact_paths(value: &str) -> Option<Vec<String>> {
@@ -393,7 +421,7 @@ pub(crate) fn resolve_budget_policy_fingerprint(cli_value: Option<String>) -> Op
 
 #[cfg(test)]
 mod tests {
-    use super::{counterexample_model_from_error, verification};
+    use super::{counterexample_model_from_error, reconstruction_loss_from_error, verification};
     use verification::MumeiError;
 
     #[test]
@@ -423,5 +451,42 @@ mod tests {
         assert!(!model.contains_key("other"));
         assert_eq!(model.get("x"), Some(&verification::CexValue::Int(-1)));
         assert_eq!(model.get("flag"), Some(&verification::CexValue::Bool(true)));
+    }
+
+    #[test]
+    fn reconstruction_loss_uses_counterexample_provenance_types() {
+        let raised = verification::RaisedCounterexample {
+            values: vec![
+                verification::RaisedValue {
+                    source_name: "x".to_string(),
+                    solver_name: None,
+                    rendering: "7".to_string(),
+                    lowering: "int",
+                    source_type: Some("i64".to_string()),
+                    status: verification::RaisedStatus::Raised,
+                },
+                verification::RaisedValue {
+                    source_name: "flag".to_string(),
+                    solver_name: None,
+                    rendering: "true".to_string(),
+                    lowering: "bool",
+                    source_type: Some("bool".to_string()),
+                    status: verification::RaisedStatus::Raised,
+                },
+            ],
+            omitted_solver_symbols: Vec::new(),
+        };
+        let error = MumeiError::verification("counterexample").with_raised_counterexample(&raised);
+
+        let loss = reconstruction_loss_from_error(&error, "result > 10").unwrap();
+
+        assert_eq!(
+            loss.counter_example.get("x"),
+            Some(&serde_json::Value::Number(7.into()))
+        );
+        assert_eq!(
+            loss.counter_example.get("flag"),
+            Some(&serde_json::Value::Bool(true))
+        );
     }
 }
