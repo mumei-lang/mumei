@@ -267,15 +267,22 @@ pub fn run() {
 // =============================================================================
 /// One `mumei` error per checked-parse failure. Only top-level failures carry a
 /// module-relative `line:col`; the rest are anchored at the start of the file.
-fn parse_failure_diagnostics(failures: &[String]) -> Vec<serde_json::Value> {
+fn parse_failure_diagnostics(source: &str, failures: &[String]) -> Vec<serde_json::Value> {
     failures
         .iter()
         .map(|failure| {
-            let (line, character) = top_level_failure_position(failure).unwrap_or((0, 0));
+            let (line, start, end) = top_level_failure_position(failure)
+                .and_then(|(line, char_col)| {
+                    let text = source.lines().nth(line)?;
+                    let start: usize = text.chars().take(char_col).map(char::len_utf16).sum();
+                    let width = text.chars().nth(char_col).map_or(1, char::len_utf16);
+                    Some((line, start, start + width))
+                })
+                .unwrap_or((0, 0, 1));
             serde_json::json!({
                 "range": {
-                    "start": { "line": line, "character": character },
-                    "end": { "line": line, "character": character + 1 }
+                    "start": { "line": line, "character": start },
+                    "end": { "line": line, "character": end }
                 },
                 "severity": 1,
                 "source": "mumei",
@@ -285,14 +292,17 @@ fn parse_failure_diagnostics(failures: &[String]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn top_level_failure_position(failure: &str) -> Option<(u64, u64)> {
-    let rest = failure.split_once(" at top level at ")?.1;
+/// 0-based `(line, char column)` of a top-level failure. The parser's
+/// location is the last ` at top level at ` in the message, because the
+/// quoted token before it can contain the same text.
+fn top_level_failure_position(failure: &str) -> Option<(usize, usize)> {
+    let rest = failure.rsplit_once(" at top level at ")?.1;
     let location = rest
         .split(|c: char| c != ':' && !c.is_ascii_digit())
         .next()?;
     let (line, col) = location.split_once(':')?;
-    let line: u64 = line.parse().ok()?;
-    let col: u64 = col.parse().ok()?;
+    let line: usize = line.parse().ok()?;
+    let col: usize = col.parse().ok()?;
     Some((line.checked_sub(1)?, col.checked_sub(1)?))
 }
 
@@ -310,7 +320,19 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
     // Phase 1: パースできるか（`mumei verify` と同じ checked parser）
     let items = match parser::parse_module_checked(source) {
         Ok(items) => items,
-        Err(failures) => return parse_failure_diagnostics(&failures),
+        Err(failures) => {
+            // Verification would only repeat the syntax error, but intent
+            // drift and spec health still apply to whatever parses.
+            let mut diagnostics = parse_failure_diagnostics(source, &failures);
+            let items = parser::parse_module(source);
+            append_intent_drift_diagnostics(source, &items, &mut diagnostics);
+            if let Some(path) = path.as_deref() {
+                if path.extension().and_then(|ext| ext.to_str()) == Some("mm") {
+                    append_agent_spec_diagnostics(uri, source, &mut diagnostics);
+                }
+            }
+            return diagnostics;
+        }
     };
     let mut diagnostics = Vec::new();
 
@@ -2181,8 +2203,7 @@ body: n + 1;
     fn test_diagnose_reports_top_level_junk_next_to_a_valid_atom() {
         let source = "atom id(x: i64) -> i64 { ensures: result == x; body: { x } }\nnot an item\n";
         let diagnostics = diagnose("untitled:junk.mm", source);
-        assert_eq!(diagnostics.len(), 3, "{diagnostics:?}");
-        let first = &diagnostics[0];
+        let first = diagnostics.first().expect("a parse error");
         assert_eq!(first["severity"], 1);
         assert_eq!(first["range"]["start"]["line"], 1);
         assert_eq!(first["range"]["start"]["character"], 0);
@@ -2190,7 +2211,44 @@ body: n + 1;
             .as_str()
             .unwrap()
             .starts_with("Parse error: unexpected token not at top level at 2:1"));
-        assert_eq!(diagnostics[2]["range"]["start"]["character"], 7);
+    }
+
+    #[test]
+    fn test_parse_error_ranges_use_utf16_and_the_parser_location() {
+        // `x` is char 4 but UTF-16 unit 5: the emoji is a surrogate pair.
+        let diagnostics = diagnose("untitled:emoji.mm", "\"\u{1F600}\" x\n");
+        let x = diagnostics
+            .iter()
+            .find(|d| {
+                d["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("token x at top level")
+            })
+            .expect("a diagnostic for `x`");
+        assert_eq!(x["range"]["start"]["line"], 0);
+        assert_eq!(x["range"]["start"]["character"], 5);
+        assert_eq!(x["range"]["end"]["character"], 6);
+
+        let quoted = diagnose("untitled:quoted.mm", "\n\"oops at top level at 5:6\"\n");
+        assert_eq!(quoted[0]["range"]["start"]["line"], 1, "{quoted:?}");
+        assert_eq!(quoted[0]["range"]["start"]["character"], 0);
+    }
+
+    #[test]
+    fn test_intent_drift_survives_a_syntax_error_elsewhere() {
+        let atom = "atom complex(a: i64, b: i64) requires: a >= 0 && b >= 0 && a != b && a < 100 && b < 100; ensures: result >= a && result >= b && result == a + b && result < 200; effects: [IO]; body: { if a > b { if a > 50 { a + b } else { b + a } } else { if b > 50 { b + a } else { a + b } } };\n";
+        let drift = |diagnostics: &[serde_json::Value]| {
+            diagnostics
+                .iter()
+                .filter(|d| d["source"] == "mumei-intent")
+                .count()
+        };
+        let clean = drift(&diagnose("untitled:clean.mm", atom));
+        assert!(clean > 0, "fixture should trigger intent drift");
+        let broken = diagnose("untitled:broken.mm", &format!("{atom}not an item\n"));
+        assert!(broken.iter().any(|d| d["severity"] == 1));
+        assert_eq!(drift(&broken), clean, "{broken:?}");
     }
 
     #[test]
@@ -2205,6 +2263,12 @@ body: n + 1;
         assert_eq!(
             top_level_failure_position("unexpected token } at top level at 3:12; expected"),
             Some((2, 11))
+        );
+        assert_eq!(
+            top_level_failure_position(
+                "unexpected token \"a at top level at 9:9\" at top level at 2:3; expected"
+            ),
+            Some((1, 2))
         );
         assert_eq!(
             top_level_failure_position(
