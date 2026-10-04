@@ -120,6 +120,7 @@ The complete CLI command table is in [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md), M
 | [Standard Library](docs/STDLIB.md) | Option, Result, List, BoundedArray, sort |
 | [Examples & Tests](docs/EXAMPLES.md) | Verification suite, `.mm` code samples, and negative tests |
 | [Architecture](docs/ARCHITECTURE.md) | Compiler internals and repository structure |
+| [Verifier Specification](docs/VERIFIER_SPEC.md) | Declarative rules for what `mumei verify` decides: phases, outcomes, trust modes, trust boundaries, exit codes |
 | [Report Schema](docs/REPORT_SCHEMA.md) | `report.json`, semantic feedback, and rich diagnostics JSON |
 | [Cross-Spec Verification](docs/CROSS_SPEC_GUIDE.md) | System-wide contract consistency, invariants, and dependency cycles |
 | [Toolchain](docs/TOOLCHAIN.md) | CLI commands, package management, CI/release |
@@ -133,6 +134,7 @@ The complete CLI command table is in [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md), M
 | [Diagnostics](docs/DIAGNOSTICS.md) | Multi-span diagnostics, compound constraint decomposition |
 | [Meta-Architect](docs/META_ARCHITECT.md) | Contract conflict analysis and interface refactoring tools |
 | [Plugin Guide](docs/PLUGIN_GUIDE.md) | Emitter plugin development |
+| [HIR Emitter Design](docs/HIR_EMITTER_DESIGN.md) | Design for making HIR the single input to every emitter |
 | [Proof Certificate](docs/PROOF_CERTIFICATE.md) | Proof certificate schema and usage |
 | [Spec Guide](docs/SPEC_GUIDE.md) | Spec-writing guidelines for Z3-decidable fragments |
 | [FFI](docs/FFI.md) | Foreign function interface (Rust/C) |
