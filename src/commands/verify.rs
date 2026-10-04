@@ -1410,6 +1410,47 @@ fn run_lean_bridge(
     Ok((lean_cert_path, lean_bundle))
 }
 
+/// Stages per-atom report.json (and atom artifacts like `*_heatmap.json`) in
+/// a private temp dir when no `--report-dir` was given. On drop — every
+/// `cmd_verify` return path — publishes the finished reports to the original
+/// output dir and removes the staging dir. Best effort throughout.
+struct ReportStaging {
+    staging: PathBuf,
+    publish_to: PathBuf,
+}
+
+impl Drop for ReportStaging {
+    fn drop(&mut self) {
+        if let Ok(entries) = std::fs::read_dir(&self.staging) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                // temp_dir may live on another filesystem, so publish via a
+                // copy to a dotfile in the target dir + atomic rename.
+                let tmp = self
+                    .publish_to
+                    .join(format!(".{name}.{}.tmp", std::process::id()));
+                if std::fs::copy(&path, &tmp).is_ok() {
+                    let _ = std::fs::rename(&tmp, self.publish_to.join(&name));
+                } else {
+                    let _ = std::fs::remove_file(&tmp);
+                }
+            }
+        }
+        // A run whose last atom wrote no report.json must not leave a stale
+        // one behind (each atom removes report.json before writing its own).
+        if !self.staging.join("report.json").exists() {
+            let _ = std::fs::remove_file(self.publish_to.join("report.json"));
+        }
+        let _ = std::fs::remove_dir_all(&self.staging);
+    }
+}
+
 pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
     let VerifyOptions {
         input,
@@ -1524,6 +1565,28 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
     if report_dir.is_some() {
         let _ = std::fs::create_dir_all(output_dir);
     }
+    // Without --report-dir the per-atom report.json is staged in a private
+    // temp dir so two concurrent `mumei verify` runs in the same cwd can't
+    // overwrite each other's intermediate reports; the guard publishes the
+    // finished reports back to output_dir (cwd) when cmd_verify returns.
+    let staging_dir = report_dir.is_none().then(|| {
+        std::env::temp_dir().join(format!(
+            "mumei-verify-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ))
+    });
+    if let Some(dir) = &staging_dir {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _report_staging = staging_dir.as_ref().map(|dir| ReportStaging {
+        staging: dir.clone(),
+        publish_to: output_dir.to_path_buf(),
+    });
+    let atom_report_dir = staging_dir.as_deref().unwrap_or(output_dir);
     let verification_config = verification::VerificationConfig {
         timeout_ms: effective_timeout_ms,
         global_max_unroll: build_cfg.max_unroll,
@@ -1686,7 +1749,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                 match verification::verify_impl_with_options(
                     impl_def,
                     &module_env,
-                    output_dir,
+                    atom_report_dir,
                     verification_config.ieee754_f64,
                     verification_config.bitvec_i64,
                 ) {
@@ -1705,7 +1768,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                             solver_inconclusive += 1;
                         }
                         if let Some(sarif) = sarif {
-                            let report = read_fresh_impl_report(output_dir, &label, started_at);
+                            let report =
+                                read_fresh_impl_report(atom_report_dir, &label, started_at);
                             sarif.borrow_mut().push_trait_law_failure(
                                 &label,
                                 &error_message,
@@ -1728,7 +1792,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                     module_env: &mut module_env,
                     verification_cache: &mut verification_cache,
                     verification_config: &verification_config,
-                    output_dir,
+                    output_dir: atom_report_dir,
                     source: &source,
                     json_output,
                     quiet_output,
@@ -1765,7 +1829,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                         module_env: &mut module_env,
                         verification_cache: &mut verification_cache,
                         verification_config: &verification_config,
-                        output_dir,
+                        output_dir: atom_report_dir,
                         source: &source,
                         json_output,
                         quiet_output,
@@ -2261,7 +2325,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         }
     }
     if json_output {
-        let report_path = output_dir.join("report.json");
+        let report_path = atom_report_dir.join("report.json");
         // When the module contains a mix of passing and failing/unverifiable atoms,
         // report.json only reflects the last atom. Emitting a per-atom report in that
         // case would hide failures and report a spurious success. Fall back to the
