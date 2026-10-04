@@ -119,13 +119,20 @@ New HIR types, owned by `mumei-core/src/hir.rs` and built once by
 ```rust
 pub struct HirParam {
     pub name: String,
+    pub consume: bool,       // preserves the declared `consume` marker
     pub ty: Option<String>,   // as written; resolution stays in ModuleEnv
     pub by_ref: HirRefKind,   // Value | Ref | RefMut
+}
+
+pub struct HirDeclaredEffect {
+    pub name: String,
+    pub negated: bool,
 }
 
 pub struct HirSignature {
     pub name: String,
     pub params: Vec<HirParam>,
+    pub effects: Vec<HirDeclaredEffect>,     // declaration order, duplicates kept
     pub return_type: Option<String>,          // as written
     pub inferred_return_type: Option<String>, // from the HIR body when absent
     pub is_async: bool,
@@ -141,6 +148,8 @@ pub struct HirClause {
 
 pub struct HirContract {
     pub clauses: Vec<HirClause>,
+    pub requires_text: String, // conjoined source text, for byte-compatible printing
+    pub ensures_text: String,  // conjoined source text, for byte-compatible printing
 }
 
 pub struct HirAtomMeta {
@@ -183,8 +192,10 @@ unchanged.
    test constructors). Bumps `EMITTER_ABI_VERSION` (see Risks).
 2. **Move the leaf emitters.** JSON, C header, and proof book read only
    metadata and contract text; switch them to `signature` / `contract` /
-   `meta`. Proof book takes `content_hash` from `meta` instead of hashing the
-   AST.
+   `meta`. Step 1 could not reproduce their output because it lost the
+   `consume` marker, exact `requires`/`ensures` text, and ordered declared
+   effects. Step 2 adds those fields and bumps the emitter ABI to 3. Proof book
+   takes `content_hash` from `meta` instead of hashing the AST.
 3. **Move the wrappers.** Python and Rust print contract expressions from
    `HirClause::expr` with a small HIR printer instead of
    `translate_contract_to_python` / `translate_contract_to_rust` string
@@ -226,10 +237,11 @@ any order after step 1.
   every step that changes a type reachable from `Emitter::emit` must bump
   `EMITTER_ABI_VERSION`; old plugins then fail to load with the existing
   "ABI version mismatch" error instead of misbehaving.
-- Two bumps are planned (steps 1 and 7). Steps 2–6 change only built-in
-  emitters and the HIR node enums introduced in step 6; if step 6 changes
-  `HirExpr` variants, it is a third bump. Grouping step 6 with step 7 keeps it
-  to two.
+- Three bumps are planned (steps 1, 2, and 7). Step 2 added `consume`,
+  `requires_text`/`ensures_text`, and ordered declared effects because the
+  step-1 HIR shape could not reproduce leaf-emitter output, and bumped the ABI
+  to 3. If step 6 changes `HirExpr` variants separately, it requires another
+  bump; grouping steps 6 and 7 keeps the plan to three.
 - Plugins that read `hir_atom.atom` keep working until step 7. Step 7 is a
   breaking change for them and needs a note in [`PLUGIN_GUIDE.md`](PLUGIN_GUIDE.md)
   and the changelog, with the HIR fields to use instead.

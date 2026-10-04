@@ -252,14 +252,33 @@ pub enum HirRefKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HirParam {
     pub name: String,
+    pub consume: bool,
     pub ty: Option<String>,
     pub by_ref: HirRefKind,
+}
+
+impl HirParam {
+    /// The parameter as written in the signature, e.g. `consume x`.
+    pub fn declared_name(&self) -> String {
+        if self.consume {
+            format!("consume {}", self.name)
+        } else {
+            self.name.clone()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirDeclaredEffect {
+    pub name: String,
+    pub negated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HirSignature {
     pub name: String,
     pub params: Vec<HirParam>,
+    pub effects: Vec<HirDeclaredEffect>,
     pub return_type: Option<String>,
     pub inferred_return_type: Option<String>,
     pub is_async: bool,
@@ -309,6 +328,10 @@ pub struct HirContract {
     pub clauses: Vec<HirClause>,
     /// Quantified preconditions, which the parser keeps out of the `requires` text.
     pub quantifiers: Vec<HirQuantifier>,
+    /// Conjoined source text for printing; `clauses` is the structured per-conjunct view.
+    pub requires_text: String,
+    /// Conjoined source text for printing; `clauses` is the structured per-conjunct view.
+    pub ensures_text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -406,6 +429,7 @@ pub fn lower_atom_metadata(
                     .next()
                     .unwrap_or(&param.name)
                     .to_string(),
+                consume: param.name.starts_with("consume "),
                 ty: param.type_name.clone(),
                 by_ref: if param.is_ref_mut {
                     HirRefKind::RefMut
@@ -414,6 +438,14 @@ pub fn lower_atom_metadata(
                 } else {
                     HirRefKind::Value
                 },
+            })
+            .collect(),
+        effects: atom
+            .effects
+            .iter()
+            .map(|effect| HirDeclaredEffect {
+                name: effect.name.clone(),
+                negated: effect.negated,
             })
             .collect(),
         return_type: atom.return_type.clone(),
@@ -484,6 +516,8 @@ pub fn lower_atom_metadata(
     let contract = HirContract {
         clauses,
         quantifiers,
+        requires_text: atom.requires.clone(),
+        ensures_text: atom.ensures.clone(),
     };
 
     let trust_boundaries = crate::trust_boundary::classify_trust_boundaries(
@@ -1493,6 +1527,9 @@ atom quantified(n: i64)
         );
         let hir = lower_atom_to_hir(&atom);
 
+        assert_eq!(hir.contract.requires_text, atom.requires);
+        assert_eq!(hir.contract.ensures_text, atom.ensures);
+        assert_eq!(hir.contract.requires_text, "n >= 0 && true");
         assert!(hir.contract.clauses.iter().any(|clause| {
             clause.kind == HirClauseKind::Requires
                 && clause.mode == HirClauseMode::Plain
@@ -1506,6 +1543,54 @@ atom quantified(n: i64)
         assert_eq!(quantifier.end, "n");
         assert_eq!(quantifier.condition, "i >= 0");
         assert!(quantifier.condition_expr.is_some());
+    }
+
+    #[test]
+    fn atom_signature_preserves_declared_parameters_and_effects() {
+        let atom = parse_atom_from_source(
+            r#"
+atom metadata(consume a: i64, ref b: i64, ref mut c: i64, plain, amount: NonNegative)
+    requires: a >= 0 && forall(i, 0, a, i >= 0);
+    ensures: result >= a && result >= 0;
+    effects: [Zeta, Alpha, Zeta, !Beta];
+    body: a;
+"#,
+        );
+        let hir = lower_atom_to_hir(&atom);
+
+        assert_eq!(hir.signature.params[0].name, "a");
+        assert!(hir.signature.params[0].consume);
+        assert_eq!(hir.signature.params[0].declared_name(), "consume a");
+        assert_eq!(hir.signature.params[0].by_ref, HirRefKind::Value);
+
+        assert_eq!(hir.signature.params[1].name, "b");
+        assert!(!hir.signature.params[1].consume);
+        assert_eq!(hir.signature.params[1].declared_name(), "b");
+        assert_eq!(hir.signature.params[1].by_ref, HirRefKind::Ref);
+
+        assert_eq!(hir.signature.params[2].name, "c");
+        assert_eq!(hir.signature.params[2].declared_name(), "c");
+        assert_eq!(hir.signature.params[2].by_ref, HirRefKind::RefMut);
+
+        assert_eq!(hir.signature.params[3].name, "plain");
+        assert_eq!(hir.signature.params[3].ty, None);
+        assert_eq!(hir.signature.params[4].ty.as_deref(), Some("NonNegative"));
+        assert_eq!(hir.contract.requires_text, atom.requires);
+        assert_eq!(hir.contract.ensures_text, atom.ensures);
+        assert_eq!(hir.signature.effects.len(), 4);
+        assert_eq!(
+            hir.signature
+                .effects
+                .iter()
+                .map(|effect| (effect.name.as_str(), effect.negated))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Zeta", false),
+                ("Alpha", false),
+                ("Zeta", false),
+                ("Beta", true)
+            ]
+        );
     }
 
     #[test]
