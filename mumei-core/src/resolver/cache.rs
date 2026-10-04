@@ -8,7 +8,7 @@ use std::path::Path;
 
 /// Bump when verifier semantics change so cached proofs are re-derived.
 /// Version 3 enables checker-first MIR borrow checking.
-/// Version 4 is reserved by the draft in PR #673.
+/// Versions 4 (PR #673) and 6 (PR #682) are taken by other open PRs.
 /// Version 5 adds atom-level `decreases` clauses and congruent recursive
 /// contracts (recursive SCC termination checking).
 pub const VERIFIER_POLICY_VERSION: u32 = 5;
