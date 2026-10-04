@@ -1,5 +1,25 @@
 use serde_json::Value;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{fs, process::Command};
+
+static REPORT_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+// Each verify run gets its own report dir so concurrent `mumei` processes
+// (from this or other test binaries) can't clobber one another's report.json
+// in the shared repo-root cwd.
+fn unique_report_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "mumei_infer_invariants_{}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+        REPORT_DIR_COUNTER.fetch_add(1, Ordering::SeqCst),
+    ));
+    fs::create_dir_all(&dir).expect("create report dir");
+    dir
+}
 
 fn run(path: &str, json: bool) -> std::process::Output {
     let root = env!("CARGO_MANIFEST_DIR");
@@ -7,6 +27,7 @@ fn run(path: &str, json: bool) -> std::process::Output {
     let _ = fs::remove_dir_all(format!("{root}/tests/negative/.mumei"));
     let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
     command.arg("verify");
+    command.arg("--report-dir").arg(unique_report_dir());
     if json {
         command.arg("--json");
     }

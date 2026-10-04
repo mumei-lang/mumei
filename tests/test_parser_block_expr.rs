@@ -1,9 +1,29 @@
 use std::fs;
 use std::process::Command;
 
+static REPORT_DIR_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// Unique report dir per verify run: report.json defaults to the shared
+// repo-root cwd, which concurrent `mumei` processes clobber.
+fn unique_report_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "mumei_parser_block_expr_{}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+        REPORT_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+    ));
+    std::fs::create_dir_all(&dir).expect("create report dir");
+    dir
+}
+
 fn verify(file: &str) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_mumei"))
         .arg("verify")
+        .arg("--report-dir")
+        .arg(unique_report_dir())
         .arg(file)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
@@ -58,6 +78,8 @@ fn total_constraints(file: &str) -> usize {
         .args([
             "verify",
             "--json",
+            "--report-dir",
+            unique_report_dir().to_str().expect("UTF-8 report dir"),
             uncached.to_str().expect("UTF-8 fixture path"),
         ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))

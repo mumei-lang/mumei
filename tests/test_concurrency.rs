@@ -1,5 +1,23 @@
 use std::process::Command;
 
+static REPORT_DIR_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// Unique report dir per verify run: report.json defaults to the shared
+// repo-root cwd, which concurrent `mumei` processes from other tests clobber.
+fn unique_report_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "mumei_concurrency_report_{}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+        REPORT_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+    ));
+    std::fs::create_dir_all(&dir).expect("create report dir");
+    dir
+}
+
 fn write_fixture(name: &str, source: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "mumei_concurrency_test_{}_{}",
@@ -153,6 +171,8 @@ body: {
 
     let output = Command::new(bin)
         .arg("verify")
+        .arg("--report-dir")
+        .arg(unique_report_dir())
         .arg(&fixture)
         .current_dir(manifest_dir)
         .output()
@@ -324,6 +344,8 @@ fn verify_fixture(name: &str, source: &str) -> std::process::Output {
     let fixture = write_fixture(name, source);
     let output = Command::new(bin)
         .arg("verify")
+        .arg("--report-dir")
+        .arg(unique_report_dir())
         .arg(&fixture)
         .current_dir(manifest_dir)
         .output()
@@ -647,6 +669,8 @@ body: {{
     let fixture = write_fixture("task_group_ownership_json", &source);
     let output = Command::new(bin)
         .arg("verify")
+        .arg("--report-dir")
+        .arg(unique_report_dir())
         .arg(&fixture)
         .arg("--json")
         .current_dir(manifest_dir)
@@ -703,6 +727,8 @@ body: x;
     );
     let output = Command::new(bin)
         .arg("verify")
+        .arg("--report-dir")
+        .arg(unique_report_dir())
         .arg(&fixture)
         .arg("--json")
         .current_dir(manifest_dir)
