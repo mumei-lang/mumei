@@ -75,8 +75,27 @@ fn datatype_enum_missing_arm_fails_with_ctor_name() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("Match is not exhaustive") && combined.contains("Blue"),
+        combined.contains("Match is not exhaustive") && combined.contains("Color::Blue (tag=2)"),
         "expected uncovered-constructor counterexample naming 'Blue', got:\n{combined}"
+    );
+}
+
+#[test]
+fn datatype_enum_missing_payload_arm_shows_fields_and_tag() {
+    let output = mumei_verify("tests/test_datatype_enum_payload_negative.mm");
+    assert!(
+        !output.status.success(),
+        "non-exhaustive enum match should fail verification"
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("Match is not exhaustive")
+            && combined.contains("Shape::Circle(i64=?) (tag=1)"),
+        "expected payload-variant counterexample `(fields) (tag=N)`, got:\n{combined}"
     );
 }
 
