@@ -288,9 +288,27 @@ pub struct HirClause {
     pub expr: Option<HirExpr>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirQuantifierKind {
+    ForAll,
+    Exists,
+}
+
+#[derive(Debug, Clone)]
+pub struct HirQuantifier {
+    pub kind: HirQuantifierKind,
+    pub var: String,
+    pub start: String,
+    pub end: String,
+    pub condition: String,
+    pub condition_expr: Option<HirExpr>,
+}
+
 #[derive(Debug, Clone)]
 pub struct HirContract {
     pub clauses: Vec<HirClause>,
+    /// Quantified preconditions, which the parser keeps out of the `requires` text.
+    pub quantifiers: Vec<HirQuantifier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,7 +400,12 @@ pub fn lower_atom_metadata(
             .params
             .iter()
             .map(|param| HirParam {
-                name: param.name.clone(),
+                name: param
+                    .name
+                    .rsplit(' ')
+                    .next()
+                    .unwrap_or(&param.name)
+                    .to_string(),
                 ty: param.type_name.clone(),
                 by_ref: if param.is_ref_mut {
                     HirRefKind::RefMut
@@ -440,7 +463,28 @@ pub fn lower_atom_metadata(
             module_env,
         ));
     }
-    let contract = HirContract { clauses };
+    let quantifiers = atom
+        .forall_constraints
+        .iter()
+        .map(|quantifier| HirQuantifier {
+            kind: match &quantifier.q_type {
+                crate::parser::QuantifierType::ForAll => HirQuantifierKind::ForAll,
+                crate::parser::QuantifierType::Exists => HirQuantifierKind::Exists,
+            },
+            var: quantifier.var.clone(),
+            start: quantifier.start.clone(),
+            end: quantifier.end.clone(),
+            condition: quantifier.condition.clone(),
+            condition_expr: Some(lower_expr_with_env(
+                &parse_expression(&quantifier.condition),
+                module_env,
+            )),
+        })
+        .collect();
+    let contract = HirContract {
+        clauses,
+        quantifiers,
+    };
 
     let trust_boundaries = crate::trust_boundary::classify_trust_boundaries(
         atom,
@@ -1317,7 +1361,7 @@ mod tests {
     fn atom_signature_carries_parameters_and_return_types() {
         let atom = parse_atom_from_source(
             r#"
-async atom signature(value: i64, ref shared: i64, ref mut mutable: i64) -> i64
+async atom signature(value: i64, ref shared: i64, ref mut mutable: i64, consume x: i64) -> i64
     requires: value >= 0;
     ensures: result >= 0;
     body: value;
@@ -1342,6 +1386,7 @@ async atom signature(value: i64, ref shared: i64, ref mut mutable: i64) -> i64
                 ("value", Some("i64"), HirRefKind::Value),
                 ("shared", Some("i64"), HirRefKind::Ref),
                 ("mutable", Some("i64"), HirRefKind::RefMut),
+                ("x", Some("i64"), HirRefKind::Value),
             ]
         );
         assert_eq!(hir.signature.return_type.as_deref(), Some("i64"));
@@ -1434,6 +1479,33 @@ atom clauses(x: i64, y: i64) -> i64
             .clauses
             .iter()
             .all(|clause| clause.expr.is_some()));
+    }
+
+    #[test]
+    fn atom_contract_carries_quantified_preconditions() {
+        let atom = parse_atom_from_source(
+            r#"
+atom quantified(n: i64)
+    requires: n >= 0 && forall(i, 0, n, i >= 0);
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        let hir = lower_atom_to_hir(&atom);
+
+        assert!(hir.contract.clauses.iter().any(|clause| {
+            clause.kind == HirClauseKind::Requires
+                && clause.mode == HirClauseMode::Plain
+                && clause.text == "n >= 0"
+        }));
+        assert_eq!(hir.contract.quantifiers.len(), 1);
+        let quantifier = &hir.contract.quantifiers[0];
+        assert_eq!(quantifier.kind, HirQuantifierKind::ForAll);
+        assert_eq!(quantifier.var, "i");
+        assert_eq!(quantifier.start, "0");
+        assert_eq!(quantifier.end, "n");
+        assert_eq!(quantifier.condition, "i >= 0");
+        assert!(quantifier.condition_expr.is_some());
     }
 
     #[test]

@@ -32,9 +32,10 @@ Every plugin must export:
 
 The ABI version must match `mumei_core::emitter::EMITTER_ABI_VERSION`.
 
-ABI 2 adds `signature`, `contract`, and `meta` to `HirAtom` and removes
-`requires_hir` and `ensures_hir`. Plugins built against ABI 1 are rejected at
-load time with an ABI version mismatch and must be rebuilt against ABI 2.
+ABI 2 adds `signature`, `contract` (including quantified preconditions), and
+`meta` to `HirAtom` and removes `requires_hir` and `ensures_hir`. Plugins built
+against ABI 1 are rejected at load time with an ABI version mismatch and must
+be rebuilt against ABI 2.
 
 ## No-op sample plugin
 
