@@ -52,10 +52,11 @@ impl Emitter for RustWrapperEmitter {
         module_env: &ModuleEnv,
         _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
-        let atom = &hir_atom.atom;
+        let signature = &hir_atom.signature;
+        let contract = &hir_atom.contract;
         // Sanitize qualified names (e.g., "MyStruct::my_method" → "MyStruct_my_method")
         // to produce valid Rust identifiers, matching CHeaderEmitter behavior.
-        let fn_name = atom.name.replace("::", "_");
+        let fn_name = signature.name.replace("::", "_");
         let mut rs = String::new();
 
         // File header
@@ -64,19 +65,19 @@ impl Emitter for RustWrapperEmitter {
         rs.push_str("// This file provides safe Rust wrappers around a compiled mumei binary.\n\n");
 
         // Build parameter lists
-        let params: Vec<(String, String)> = atom
+        let params: Vec<(String, String)> = signature
             .params
             .iter()
             .map(|p| {
-                let type_name = p.type_name.as_deref().unwrap_or("i64");
+                let type_name = p.ty.as_deref().unwrap_or("i64");
                 let resolved = module_env.resolve_base_type(type_name);
                 let rust_type = mumei_type_to_rust(&resolved).to_string();
-                (p.name.clone(), rust_type)
+                (p.declared_name(), rust_type)
             })
             .collect();
 
         let return_type = {
-            let ret = atom.return_type.as_deref().unwrap_or("i64");
+            let ret = signature.return_type.as_deref().unwrap_or("i64");
             let resolved = module_env.resolve_base_type(ret);
             mumei_type_to_rust(&resolved).to_string()
         };
@@ -98,20 +99,26 @@ impl Emitter for RustWrapperEmitter {
         // Doc comments for the safe wrapper
         rs.push_str(&format!(
             "/// Safe wrapper for the verified `{}` atom.\n",
-            atom.name
+            signature.name
         ));
         rs.push_str("///\n");
         rs.push_str("/// # Safety\n");
         rs.push_str("/// Calls into a compiled mumei binary via FFI.\n");
         rs.push_str("/// Preconditions are checked at runtime via `assert!`.\n");
         rs.push_str("/// Postconditions are checked via `debug_assert!`.\n");
-        if atom.requires != "true" {
+        if contract.requires_text != "true" {
             rs.push_str("///\n");
-            rs.push_str(&format!("/// # Precondition\n/// `{}`\n", atom.requires));
+            rs.push_str(&format!(
+                "/// # Precondition\n/// `{}`\n",
+                contract.requires_text
+            ));
         }
-        if atom.ensures != "true" {
+        if contract.ensures_text != "true" {
             rs.push_str("///\n");
-            rs.push_str(&format!("/// # Postcondition\n/// `{}`\n", atom.ensures));
+            rs.push_str(&format!(
+                "/// # Postcondition\n/// `{}`\n",
+                contract.ensures_text
+            ));
         }
 
         // Safe wrapper function
@@ -127,11 +134,11 @@ impl Emitter for RustWrapperEmitter {
         ));
 
         // Runtime precondition check
-        if atom.requires != "true" {
+        if contract.requires_text != "true" {
             rs.push_str(&format!(
                 "    assert!({}, \"precondition violated: {}\");\n",
-                translate_contract_to_rust(&atom.requires, &params),
-                atom.requires.replace('"', "\\\"")
+                translate_contract_to_rust(&contract.requires_text, &params),
+                contract.requires_text.replace('"', "\\\"")
             ));
         }
 
@@ -147,11 +154,11 @@ impl Emitter for RustWrapperEmitter {
         ));
 
         // Runtime postcondition check (debug only)
-        if atom.ensures != "true" {
+        if contract.ensures_text != "true" {
             rs.push_str(&format!(
                 "    debug_assert!({}, \"postcondition violated: {}\");\n",
-                translate_contract_to_rust(&atom.ensures, &params),
-                atom.ensures.replace('"', "\\\"")
+                translate_contract_to_rust(&contract.ensures_text, &params),
+                contract.ensures_text.replace('"', "\\\"")
             ));
         }
 

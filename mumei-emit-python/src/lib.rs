@@ -67,10 +67,11 @@ impl Emitter for PythonWrapperEmitter {
         module_env: &ModuleEnv,
         _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
-        let atom = &hir_atom.atom;
+        let signature = &hir_atom.signature;
+        let contract = &hir_atom.contract;
         // Sanitize qualified names (e.g., "MyStruct::my_method" → "MyStruct_my_method")
         // to produce valid Python identifiers, matching CHeaderEmitter behavior.
-        let fn_name = atom.name.replace("::", "_");
+        let fn_name = signature.name.replace("::", "_");
         let mut py = String::new();
 
         // Module header
@@ -81,13 +82,13 @@ impl Emitter for PythonWrapperEmitter {
         // Module docstring with contracts
         py.push_str(&format!(
             "\"\"\"\nFFI wrapper for verified atom `{}`.\n\n",
-            atom.name
+            signature.name
         ));
-        if atom.requires != "true" {
-            py.push_str(&format!("Precondition: {}\n", atom.requires));
+        if contract.requires_text != "true" {
+            py.push_str(&format!("Precondition: {}\n", contract.requires_text));
         }
-        if atom.ensures != "true" {
-            py.push_str(&format!("Postcondition: {}\n", atom.ensures));
+        if contract.ensures_text != "true" {
+            py.push_str(&format!("Postcondition: {}\n", contract.ensures_text));
         }
         py.push_str("\"\"\"\n\n");
 
@@ -97,16 +98,16 @@ impl Emitter for PythonWrapperEmitter {
         py.push_str("from ctypes import ");
 
         // Collect needed ctypes types
-        let mut ctypes_needed: Vec<String> = atom
+        let mut ctypes_needed: Vec<String> = signature
             .params
             .iter()
             .map(|p| {
-                let type_name = p.type_name.as_deref().unwrap_or("i64");
+                let type_name = p.ty.as_deref().unwrap_or("i64");
                 let resolved = module_env.resolve_base_type(type_name);
                 mumei_type_to_ctypes(&resolved).to_string()
             })
             .collect();
-        let ret_type_name = atom.return_type.as_deref().unwrap_or("i64");
+        let ret_type_name = signature.return_type.as_deref().unwrap_or("i64");
         let ret_resolved = module_env.resolve_base_type(ret_type_name);
         let ret_ctype = mumei_type_to_ctypes(&ret_resolved).to_string();
         ctypes_needed.push(ret_ctype.clone());
@@ -137,15 +138,15 @@ impl Emitter for PythonWrapperEmitter {
         py.push_str("_lib = ctypes.CDLL(_LIB_PATH)\n\n");
 
         // Build parameter info
-        let params: Vec<(String, String, String)> = atom
+        let params: Vec<(String, String, String)> = signature
             .params
             .iter()
             .map(|p| {
-                let type_name = p.type_name.as_deref().unwrap_or("i64");
+                let type_name = p.ty.as_deref().unwrap_or("i64");
                 let resolved = module_env.resolve_base_type(type_name);
                 let ctype = mumei_type_to_ctypes(&resolved).to_string();
                 let annotation = mumei_type_to_python_annotation(&resolved).to_string();
-                (p.name.clone(), ctype, annotation)
+                (p.declared_name(), ctype, annotation)
             })
             .collect();
 
@@ -173,24 +174,24 @@ impl Emitter for PythonWrapperEmitter {
         // Docstring
         py.push_str(&format!(
             "    \"\"\"Safe wrapper for verified atom `{}`.\n\n",
-            atom.name
+            signature.name
         ));
         py.push_str("    Calls into a compiled mumei binary via ctypes FFI.\n");
         py.push_str("    Preconditions are checked at runtime via assert.\n");
-        if atom.requires != "true" {
-            py.push_str(&format!("\n    Precondition: {}\n", atom.requires));
+        if contract.requires_text != "true" {
+            py.push_str(&format!("\n    Precondition: {}\n", contract.requires_text));
         }
-        if atom.ensures != "true" {
-            py.push_str(&format!("    Postcondition: {}\n", atom.ensures));
+        if contract.ensures_text != "true" {
+            py.push_str(&format!("    Postcondition: {}\n", contract.ensures_text));
         }
         py.push_str("    \"\"\"\n");
 
         // Runtime precondition check
-        if atom.requires != "true" {
+        if contract.requires_text != "true" {
             py.push_str(&format!(
                 "    assert {}, \"precondition violated: {}\"\n",
-                translate_contract_to_python(&atom.requires),
-                atom.requires.replace('"', "\\\"")
+                translate_contract_to_python(&contract.requires_text),
+                contract.requires_text.replace('"', "\\\"")
             ));
         }
 
@@ -203,11 +204,11 @@ impl Emitter for PythonWrapperEmitter {
         ));
 
         // Runtime postcondition check
-        if atom.ensures != "true" {
+        if contract.ensures_text != "true" {
             py.push_str(&format!(
                 "    assert {}, \"postcondition violated: {}\"\n",
-                translate_contract_to_python(&atom.ensures),
-                atom.ensures.replace('"', "\\\"")
+                translate_contract_to_python(&contract.ensures_text),
+                contract.ensures_text.replace('"', "\\\"")
             ));
         }
 

@@ -1,3 +1,11 @@
+### Unreleased
+
+- Python and Rust wrappers now read their signatures and exact contract text
+  from HIR while retaining their string translators; emitted output is
+  unchanged, and there is no emitter ABI change.
+
+---
+
 ### 2026-10-04: leaf emitters read HIR metadata (emitter ABI 3)
 
 - JSON, C header, and proof book now read signature, contract, and metadata
