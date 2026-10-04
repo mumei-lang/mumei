@@ -7,6 +7,14 @@
 
 ---
 
+### 2026-10-04: SARIF reports spurious candidates as review findings
+
+- `--emit sarif` now reports atoms whose only failure is an unconfirmed
+  (spurious) counterexample candidate as warnings for review, as it already
+  did for `unknown` results, instead of as failures.
+
+---
+
 ### 2026-10-04: atom-level decreases and recursive contracts
 
 - **`decreases:` atom clause**: an atom can declare a termination measure

@@ -148,7 +148,7 @@ fn early_outcome(outcome: VerifyOutcome, message: &str, json_output: bool) -> Ve
 /// Z3 results that are not a verdict. A `spurious_candidate` is a model the
 /// counterexample replay could not confirm against the Mumei semantics, so it
 /// is no more a rejection than an `unknown` is.
-fn is_solver_inconclusive(z3_result: &str) -> bool {
+pub(crate) fn is_solver_inconclusive(z3_result: &str) -> bool {
     matches!(
         z3_result,
         "unknown" | "timeout" | "resource_limit" | "spurious_candidate"
