@@ -1,7 +1,8 @@
 //! Calls inside `forall` / `exists` whose arguments depend on the bound
 //! variable lower to a single result constant shared by every instance of
 //! the binder, which used to make unsound facts provable. Such calls now
-//! fail closed: the atom (or cover clause) is reported as unverifiable.
+//! fail closed: the atom is reported as unverifiable, and a cover clause as
+//! unknown.
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
