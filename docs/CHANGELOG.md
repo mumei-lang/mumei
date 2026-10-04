@@ -19,6 +19,22 @@
   parameter instead of the quantified variable).
 - `VERIFIER_POLICY_VERSION` bumped to 6 so cached proofs are re-derived.
 
+---
+
+### 2026-10-04: fail closed on calls under quantifiers
+
+- A call inside `forall` / `exists` whose arguments depend on the bound
+  variable used to lower to one result constant shared by every instance of
+  the binder, so `requires: forall(i, 0, n, ident(arr[i]) == arr[i])` proved
+  that all elements are equal. Such calls (atom calls, `call(atom_ref(..))`,
+  dynamic `call(f, ..)`, let-bound lambdas, `sqrt`, `cast_to_int`, `perform`)
+  are now rejected and the atom is reported `unverifiable` (exit 3); a
+  `cover` clause reports `unknown`. Calls that don't mention the bound
+  variable are unchanged.
+- `VERIFIER_POLICY_VERSION` is bumped to 4 so cached results are re-derived.
+
+---
+
 ### 2026-09-27: v0.6.20 release version bump
 
 - **Workspace and member crate versions**: bumped versions from `0.6.19` to

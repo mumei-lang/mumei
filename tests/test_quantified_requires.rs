@@ -391,6 +391,89 @@ body: 0;
     std::fs::remove_dir_all(dir).ok();
 }
 
+const IDENT: &str = r#"
+atom ident(x: i64)
+    requires: true;
+    ensures: result == x;
+    body: x;
+"#;
+
+/// Runs `mumei verify` without `--json` (unverifiable exits may not emit a
+/// JSON payload) and returns the fixture dir plus the process output.
+fn verify_plain(name: &str, source: &str) -> (PathBuf, Output) {
+    let (dir, fixture) = write_fixture(name, source);
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--report-dir")
+        .arg(&dir)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run verify");
+    (dir, output)
+}
+
+// P1: a quantified callee obligation that calls an atom on the bound
+// variable fails closed at the call site — the caller is unverifiable,
+// never silently verified.
+#[test]
+fn caller_of_forall_call_obligation_is_unverifiable() {
+    let (dir, output) = verify_plain(
+        "caller_ident",
+        &format!(
+            r#"{IDENT}
+atom needs_ident(arr: [i64], n: i64) -> i64
+requires: n >= 1 && len(arr) >= n && forall(i, 0, n, ident(arr[i]) == arr[i]);
+ensures: result > 0;
+body: arr[0];
+atom caller_ident(arr: [i64], n: i64) -> i64
+requires: n >= 1 && len(arr) >= n;
+ensures: result > 0;
+body: needs_ident(arr, n);
+"#
+        ),
+    );
+    let text = output_text(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "expected inconclusive exit 3:\n{text}"
+    );
+    assert!(
+        text.contains("'caller_ident': unverifiable"),
+        "expected caller_ident unverifiable:\n{text}"
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
+// P3: a forall in the atom's own requires whose condition calls an atom on
+// the bound variable fails closed the same way.
+#[test]
+fn own_forall_call_requires_is_unverifiable() {
+    let (dir, output) = verify_plain(
+        "probe_forall_call",
+        &format!(
+            r#"{IDENT}
+atom probe_forall_call(arr: [i64], n: i64) -> i64
+requires: n >= 2 && len(arr) >= n && forall(i, 0, n, ident(arr[i]) == arr[i]);
+ensures: arr[0] == arr[n - 1];
+body: n;
+"#
+        ),
+    );
+    let text = output_text(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "expected inconclusive exit 3:\n{text}"
+    );
+    assert!(
+        text.contains("'probe_forall_call': unverifiable"),
+        "expected probe_forall_call unverifiable:\n{text}"
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
 // A7: repeated `requires:` clauses keep the quantifier extractable.
 #[test]
 fn repeated_requires_clause_forall_is_enforced_at_call_sites() {

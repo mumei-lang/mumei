@@ -83,6 +83,15 @@ body: if x < 0 { 0 - x } else { x };
     assert_eq!(report["cover_results"][0]["status"], "covered");
     assert_eq!(report["cover_results"][0]["witness"]["x"], "0");
     assert_eq!(report["cover_results"][0]["witness"]["result"], "0");
+    // Previously cover witnesses had no per-value raising provenance.
+    assert_eq!(
+        report["cover_results"][0]["witness_provenance"]["values"]["x"]["status"],
+        "raised"
+    );
+    assert_eq!(
+        report["cover_results"][0]["witness_provenance"]["values"]["result"]["status"],
+        "raised"
+    );
 
     std::fs::remove_dir_all(dir).expect("remove fixture directory");
 }

@@ -386,6 +386,8 @@ body: { ... };
 
 > **Lean escalation for ascending-preservation**: `tests/fixtures/sort_ascending.mm` defines `verified_insertion_sort_ascending` with an ascending ensures (`forall(i, 0, result - 1, arr[i] <= arr[i + 1])`) that Z3 cannot discharge due to Array+forall quantifier timeout. This atom serves as a Lean escalation candidate; the mumei-lean bridge lowers it to `MumeiLean.Sort.insertion_sort_ascending_bridge` backed by mathlib's `List.Sorted`.
 
+> **Calls inside quantifiers**: a call whose arguments depend on the bound variable (`forall(i, 0, n, f(arr[i]) == arr[i])`) is not supported yet. The verifier would otherwise model `f(arr[i])` as a single value shared by every `i`, so it rejects such calls and reports the atom as `unverifiable` (exit 3); an unlowerable `cover` reports `unknown`. Calls whose arguments do not mention the bound variable (`forall(i, 0, n, arr[i] == f(k))`) are unaffected. Sound per-instance encoding is planned with the lemma-export work.
+
 ### Array Element Assignment (`arr[i] = v`)
 Explicit bounds such as `0 <= idx && idx < len` keep array obligations in the decidable fragment. For Z3-stable array access patterns, see [Array and sequence access](SPEC_GUIDE.md#array-and-sequence-access).
 

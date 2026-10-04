@@ -146,6 +146,7 @@ pub enum MumeiError {
         /// Z3 から抽出した反例（counter-example）。
         /// エディタや LSP がインライン装飾用に取り出して表示する。
         counterexample: Option<serde_json::Value>,
+        counterexample_provenance: Option<serde_json::Value>,
     },
     #[error("Contract Mutation: atom '{atom_name}' contract hash changed from {expected_hash} to {actual_hash}")]
     #[diagnostic(code(mumei::contract_mutation))]
@@ -204,6 +205,7 @@ impl MumeiError {
             original_span: Span::default(),
             related: Vec::new(),
             counterexample: None,
+            counterexample_provenance: None,
         }
     }
     pub fn contract_mutation(
@@ -249,6 +251,7 @@ impl MumeiError {
             original_span: span,
             related: Vec::new(),
             counterexample: None,
+            counterexample_provenance: None,
         }
     }
     /// ソースコード付きで VerificationError を生成（リッチ出力対応）
@@ -275,6 +278,7 @@ impl MumeiError {
             original_span: span.clone(),
             related: Vec::new(),
             counterexample: None,
+            counterexample_provenance: None,
         }
     }
     /// Span なしで CodegenError を生成
@@ -414,6 +418,39 @@ impl MumeiError {
         self
     }
 
+    pub fn with_raised_counterexample(
+        mut self,
+        raised: &crate::verification::RaisedCounterexample,
+    ) -> Self {
+        if let MumeiError::VerificationError {
+            counterexample,
+            counterexample_provenance,
+            ..
+        } = &mut self
+        {
+            *counterexample = Some(raised.to_counterexample_json());
+            *counterexample_provenance = Some(raised.provenance_json());
+        }
+        self
+    }
+
+    pub fn with_counterexample_provenance(
+        mut self,
+        ce: Option<serde_json::Value>,
+        provenance: Option<serde_json::Value>,
+    ) -> Self {
+        if let MumeiError::VerificationError {
+            counterexample,
+            counterexample_provenance,
+            ..
+        } = &mut self
+        {
+            *counterexample = ce;
+            *counterexample_provenance = provenance;
+        }
+        self
+    }
+
     /// ソースコードを設定してリッチ出力を有効にする
     /// エラー自身が意味のある original_span を持つ場合はそちらを優先し、
     /// そうでなければ fallback_span（atom 定義の span 等）を使用する。
@@ -447,6 +484,7 @@ impl MumeiError {
                 original_span,
                 related,
                 counterexample,
+                counterexample_provenance,
                 ..
             } => {
                 // Propagate source to related diagnostics that share the same file.
@@ -476,6 +514,7 @@ impl MumeiError {
                     original_span,
                     related: updated_related,
                     counterexample,
+                    counterexample_provenance,
                 }
             }
             MumeiError::ContractMutation {
@@ -572,6 +611,7 @@ impl MumeiError {
                 original_span,
                 related,
                 counterexample,
+                counterexample_provenance,
                 ..
             } => MumeiError::VerificationError {
                 msg,
@@ -581,6 +621,7 @@ impl MumeiError {
                 original_span,
                 related,
                 counterexample,
+                counterexample_provenance,
             },
             MumeiError::ContractMutation {
                 atom_name,
@@ -1291,8 +1332,15 @@ pub fn z3_result_from_error_message(message: &str) -> Option<&'static str> {
 pub const UNVERIFIABLE_ERROR_PREFIX: &str =
     "Unverifiable: skipped unsupported Z3 clause(s) in ensures.";
 
+/// Marker for a call whose arguments depend on a variable bound by an
+/// enclosing `forall` / `exists`. Such calls are not lowered (see
+/// `VCtx::reject_quantifier_dependent_call`), and the atom is unverifiable.
+pub const QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED: &str =
+    "Unsupported call under quantifier: calls whose arguments depend on a quantifier-bound variable are not supported yet";
+
 pub fn is_unverifiable_error_message(message: &str) -> bool {
     message.contains(UNVERIFIABLE_ERROR_PREFIX)
+        || message.contains(QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED)
 }
 
 pub fn classify_atom_for_lean_escalation(

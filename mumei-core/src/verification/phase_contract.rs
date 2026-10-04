@@ -257,11 +257,23 @@ pub fn counterexample_fidelity(
     }
 }
 
+pub fn raised_counterexample_fidelity(
+    phase: &PhaseContract,
+    replay_status: Option<&str>,
+    complete: bool,
+) -> CounterexampleFidelity {
+    if complete {
+        counterexample_fidelity(phase, replay_status)
+    } else {
+        CounterexampleFidelity::Approximate
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        check_phase_order, counterexample_fidelity, phase_contract, CounterexampleFidelity,
-        PhaseContract, PhaseFact, PHASE_CONTRACTS,
+        check_phase_order, counterexample_fidelity, phase_contract, raised_counterexample_fidelity,
+        CounterexampleFidelity, PhaseContract, PhaseFact, PHASE_CONTRACTS,
     };
 
     #[test]
@@ -352,6 +364,20 @@ mod tests {
         assert_eq!(
             counterexample_fidelity(unspecified, None),
             CounterexampleFidelity::Approximate
+        );
+    }
+
+    #[test]
+    fn incomplete_raised_counterexample_is_approximate() {
+        let ensures = phase_contract("Phase 5: ensures verification").unwrap();
+
+        assert_eq!(
+            raised_counterexample_fidelity(ensures, Some("validated"), false),
+            CounterexampleFidelity::Approximate
+        );
+        assert_eq!(
+            raised_counterexample_fidelity(ensures, Some("validated"), true),
+            CounterexampleFidelity::Exact
         );
     }
 }
