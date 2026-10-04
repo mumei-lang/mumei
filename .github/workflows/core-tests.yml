@@ -42,12 +42,6 @@ jobs:
       - name: Set up modern Z3
         uses: ./.github/actions/setup-z3
 
-      # z3-sys links -lz3 from the default search path (apt's libz3.so, SONAME
-      # libz3.so.4) and ignores Z3_SYS_Z3_LIB_DIR. The upstream bundle only ships
-      # libz3.so, so without this link the loader falls back to apt's 4.8.12.
-      - name: Resolve libz3.so.4 to Z3 4.14.1
-        run: ln -sf libz3.so "$Z3_SYS_Z3_LIB_DIR/libz3.so.4"
-
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -80,6 +74,7 @@ jobs:
             --test test_struct_invariant \
             --test test_spurious_detection \
             --test test_data_flow_trace \
+            --test test_hir_leaf_emitters \
             --test test_phase_artifacts \
             --test test_verify_sarif \
             --test test_bitvec_i64 \
@@ -93,6 +88,7 @@ jobs:
             --test test_quantified_requires \
             --test test_quantifier_calls \
             --test test_recursive_contract_calls \
+            --test test_recursive_contract_decreases \
             --test test_str_builtins \
             --test test_reconstruction_loss \
             --test test_units \

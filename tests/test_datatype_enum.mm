@@ -66,7 +66,6 @@ atom ctor_distinct() -> bool
     body: {
         Shape::Point != Shape::Named("x")
     }
-}
 
 // Payload equality flows through the selector: s == Named("hi") forces the
 // Named_0(s) projection to "hi", which the match arm returns.
@@ -91,7 +90,6 @@ atom metric_is_positive(m: Metric) -> bool
             Enabled(b) => false
         }
     }
-}
 
 enum IntList {
     Nil,
@@ -109,7 +107,6 @@ atom head_or(l: IntList) -> i64
             Cons(h, t) => h
         }
     }
-}
 
 // A `let`-bound enum value records its inferred declared type, so `match e`
 // resolves the owning enum deterministically — `Cons` collides with the

@@ -100,6 +100,7 @@ results (`error` > `warning` > `note` > `none`); rule order follows first use.
 | Finding | SARIF rule ID | Level |
 |---|---|---|
 | Failed atom or postcondition | report failure type (or `failed`) | `error` |
+| Spurious counterexample candidate | `spurious_candidate` | `warning` (review) |
 | Vacuous, unknown, or skipped ensures clause | `vacuous`, `unknown`, or `skipped` | `warning` |
 | Unverifiable atom | `unverifiable` | `warning` |
 | Unknown cover result | `unknown` | `warning` |

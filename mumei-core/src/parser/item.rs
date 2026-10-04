@@ -1510,7 +1510,20 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 items.push(Item::Atom(atom));
             }
 
-            _ => {
+            // A `;` after an item (e.g. `body: { ... };`) is accepted.
+            Token::Semicolon => {
+                ctx.advance();
+            }
+
+            other => {
+                let (line, col) = ctx
+                    .tokens_ref()
+                    .get(ctx.pos())
+                    .map(|t| (t.line, t.col))
+                    .unwrap_or((0, 0));
+                ctx.syntax_failure(format!(
+                    "unexpected token {other} at top level at {line}:{col}; expected an item such as `atom`, `type`, `struct` or `import`"
+                ));
                 ctx.advance();
             }
         }
@@ -1814,6 +1827,12 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         None
     };
 
+    // Clauses may be wrapped in braces: `atom f(x: i64) -> i64 { ... }`.
+    let braced = ctx.peek() == &Token::LBrace;
+    if braced {
+        ctx.advance();
+    }
+
     let mut requires_raw = "true".to_string();
     let mut ensures = "true".to_string();
     let mut clause_labels = Vec::new();
@@ -1826,6 +1845,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
     let mut spec_metadata: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut invariant: Option<String> = None;
+    let mut decreases: Option<String> = None;
     let mut effects: Vec<Effect> = Vec::new();
     let mut contracts: Vec<(String, Option<String>, Option<String>)> = Vec::new();
     let mut effect_pre: std::collections::HashMap<String, String> =
@@ -1954,6 +1974,16 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                 invariant = Some(collect_until_semicolon(ctx));
                 ctx.expect(Token::Semicolon);
             }
+            Token::Decreases => {
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                let clause = collect_until_semicolon(ctx);
+                ctx.expect(Token::Semicolon);
+                if decreases.is_some() {
+                    ctx.syntax_failure(format!("duplicate `decreases` clause in atom '{name}'"));
+                }
+                decreases = Some(clause);
+            }
             Token::Effects => {
                 ctx.advance();
                 ctx.expect(Token::Colon);
@@ -2042,6 +2072,9 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
             }
         }
     }
+    if braced {
+        ctx.expect(Token::RBrace);
+    }
 
     let mut params = params;
     for (param_name, fn_req, fn_ens) in &contracts {
@@ -2078,6 +2111,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         invariant,
         effects,
         return_type,
+        decreases,
         span: span_from_token(start_tok),
         effect_pre,
         effect_post,

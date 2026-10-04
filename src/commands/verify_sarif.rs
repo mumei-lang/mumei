@@ -1,4 +1,4 @@
-use super::verify::VerifyOutcome;
+use super::verify::{is_solver_inconclusive, VerifyOutcome};
 use mumei_core::cross_spec::session_types::SessionProtocolViolation;
 use mumei_core::parser::{Atom, ClauseKind, ClauseTrustMode, Span};
 use serde_json::{json, Map, Value};
@@ -75,8 +75,7 @@ impl SarifCollector {
         report: Option<&Value>,
         span: &Span,
     ) {
-        let inconclusive = z3_result
-            .is_some_and(|result| matches!(result, "unknown" | "timeout" | "resource_limit"));
+        let inconclusive = z3_result.is_some_and(is_solver_inconclusive);
         let report_failure_type = report
             .and_then(|report| report["failure_type"].as_str())
             .filter(|failure_type| !failure_type.is_empty());
@@ -475,7 +474,7 @@ fn collect_atom(results: &mut Vec<Value>, findings: AtomFindings<'_>) {
                 } else {
                     "failed"
                 };
-                let warning = matches!(z3_result, "unknown" | "timeout" | "resource_limit")
+                let warning = cert_z3_result.is_some_and(is_solver_inconclusive)
                     || matches!(status, "unverifiable" | "escalation_candidate" | "unknown");
                 let message = matching_failure_diagnostics
                     .first()

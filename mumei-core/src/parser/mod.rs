@@ -2801,4 +2801,98 @@ atom fine(x: i64) -> i64
             "every known atom clause should parse cleanly"
         );
     }
+
+    #[test]
+    fn test_parse_module_checked_rejects_top_level_junk() {
+        let failures = item::parse_module_from_source_checked("this is not valid mumei\n")
+            .expect_err("prose is not a module");
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.starts_with("unexpected token this at top level at 1:1")),
+            "expected a top-level diagnostic, got {failures:?}"
+        );
+
+        let stray_brace = "atom a(x: i64) -> i64\nensures: result == x;\nbody: { x }\n}\n";
+        assert!(item::parse_module_from_source_checked(stray_brace).is_err());
+
+        let items = item::parse_module_from_source_checked(
+            "atom a(x: i64) -> i64 { ensures: result == x; body: { x } }\n\
+             atom b(x: i64) -> i64\nensures: result == x;\nbody: x;\n",
+        )
+        .expect("braced atoms and a trailing `;` are valid");
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_atom_decreases_clause() {
+        let source = r#"
+atom tri(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result >= 0;
+    decreases: n;
+    body: { if n == 0 { 0 } else { n + tri(n - 1) } };
+"#;
+        let atom = parse_module(source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "tri" => Some(atom),
+                _ => None,
+            })
+            .expect("atom tri");
+        assert_eq!(atom.decreases.as_deref(), Some("n"));
+    }
+
+    #[test]
+    fn test_parse_atom_decreases_compound_expression() {
+        let source = r#"
+atom f(a: i64, b: i64) -> i64
+    requires: a >= 0 && b >= 0;
+    decreases: a + b;
+    body: { a };
+"#;
+        let atom = parse_module(source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "f" => Some(atom),
+                _ => None,
+            })
+            .expect("atom f");
+        assert_eq!(atom.decreases.as_deref(), Some("a + b"));
+    }
+
+    #[test]
+    fn test_parse_atom_without_decreases() {
+        let source = r#"
+atom g(x: i64) -> i64
+    requires: true;
+    body: { x };
+"#;
+        let atom = parse_module(source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "g" => Some(atom),
+                _ => None,
+            })
+            .expect("atom g");
+        assert!(atom.decreases.is_none());
+    }
+
+    #[test]
+    fn test_parse_atom_duplicate_decreases_fails() {
+        let source = r#"
+atom h(x: i64) -> i64
+    requires: true;
+    decreases: x;
+    decreases: x - 1;
+    body: { x };
+"#;
+        let err = item::parse_module_from_source_checked(source)
+            .expect_err("a duplicate decreases clause must fail the checked parse");
+        assert!(
+            err.iter()
+                .any(|f| f.contains("duplicate `decreases` clause in atom 'h'")),
+            "expected a duplicate-decreases failure, got {err:?}"
+        );
+    }
 }

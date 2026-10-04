@@ -30,6 +30,7 @@ fn atom(name: &str) -> Atom {
         invariant: None,
         effects: Vec::new(),
         return_type: None,
+        decreases: None,
         span: Span::default(),
         effect_pre: HashMap::new(),
         effect_post: HashMap::new(),

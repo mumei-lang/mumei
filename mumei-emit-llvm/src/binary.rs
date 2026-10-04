@@ -299,45 +299,48 @@ pub fn compile_atoms_to_binary_object(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mumei_core::hir::{HirEffectSet, HirExpr, HirStmt};
+    use mumei_core::hir::{lower_atom_metadata, HirEffectSet, HirExpr, HirStmt};
     use mumei_core::parser::{Atom, Span};
 
     /// Helper to build a minimal HirAtom for testing
     fn make_test_hir_atom(name: &str, body: HirStmt, body_expr: &str) -> HirAtom {
+        let atom = Atom {
+            name: name.to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![],
+            trace_id: None,
+            spec_metadata: std::collections::HashMap::new(),
+            clause_labels: Vec::new(),
+            clause_modes: Vec::new(),
+            covers: Vec::new(),
+            requires: "true".to_string(),
+            forall_constraints: vec![],
+            ensures: "true".to_string(),
+            body_expr: body_expr.to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: mumei_core::parser::TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            decreases: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let body_stmt =
+            mumei_core::parser::Stmt::Expr(mumei_core::parser::Expr::Number(0), Span::default());
+        let (signature, contract, meta) = lower_atom_metadata(&atom, &body, None);
         HirAtom {
             body,
-            requires_hir: HirExpr::Number(1),
-            ensures_hir: HirExpr::Number(1),
-            atom: Atom {
-                name: name.to_string(),
-                type_params: vec![],
-                where_bounds: vec![],
-                params: vec![],
-                trace_id: None,
-                spec_metadata: std::collections::HashMap::new(),
-                clause_labels: Vec::new(),
-                clause_modes: Vec::new(),
-                covers: Vec::new(),
-                requires: "true".to_string(),
-                forall_constraints: vec![],
-                ensures: "true".to_string(),
-                body_expr: body_expr.to_string(),
-                consumed_params: vec![],
-                resources: vec![],
-                is_async: false,
-                trust_level: mumei_core::parser::TrustLevel::Verified,
-                max_unroll: None,
-                invariant: None,
-                effects: vec![],
-                return_type: None,
-                span: Span::default(),
-                effect_pre: std::collections::HashMap::new(),
-                effect_post: std::collections::HashMap::new(),
-            },
-            body_stmt: mumei_core::parser::Stmt::Expr(
-                mumei_core::parser::Expr::Number(0),
-                Span::default(),
-            ),
+            signature,
+            contract,
+            meta,
+            atom,
+            body_stmt,
             effect_set: HirEffectSet::default(),
         }
     }

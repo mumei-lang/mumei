@@ -49,10 +49,11 @@
 // enforcement. Object-based capability model documented as future alternative.
 // =============================================================================
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::parser::{
-    parse_body_expr, parse_expression, Atom, Expr, JoinSemantics, Op, Pattern, Stmt,
+    parse_body_expr, parse_expression, Atom, ClauseKind, ClauseTrustMode, Expr, JoinSemantics, Op,
+    Pattern, Stmt, TrustLevel,
 };
 
 /// Effect set attached to HIR nodes.
@@ -241,17 +242,123 @@ pub struct HirMatchArm {
     pub body: Box<HirStmt>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirRefKind {
+    Value,
+    Ref,
+    RefMut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirParam {
+    pub name: String,
+    pub consume: bool,
+    pub ty: Option<String>,
+    pub by_ref: HirRefKind,
+}
+
+impl HirParam {
+    /// The parameter as written in the signature, e.g. `consume x`.
+    pub fn declared_name(&self) -> String {
+        if self.consume {
+            format!("consume {}", self.name)
+        } else {
+            self.name.clone()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirDeclaredEffect {
+    pub name: String,
+    pub negated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirSignature {
+    pub name: String,
+    pub params: Vec<HirParam>,
+    pub effects: Vec<HirDeclaredEffect>,
+    pub return_type: Option<String>,
+    pub inferred_return_type: Option<String>,
+    pub is_async: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirClauseKind {
+    Requires,
+    Ensures,
+    Cover,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirClauseMode {
+    Plain,
+    Assume,
+    Check,
+}
+
+#[derive(Debug, Clone)]
+pub struct HirClause {
+    pub kind: HirClauseKind,
+    pub mode: HirClauseMode,
+    pub label: Option<String>,
+    pub text: String,
+    pub expr: Option<HirExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirQuantifierKind {
+    ForAll,
+    Exists,
+}
+
+#[derive(Debug, Clone)]
+pub struct HirQuantifier {
+    pub kind: HirQuantifierKind,
+    pub var: String,
+    pub start: String,
+    pub end: String,
+    pub condition: String,
+    pub condition_expr: Option<HirExpr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HirContract {
+    pub clauses: Vec<HirClause>,
+    /// Quantified preconditions, which the parser keeps out of the `requires` text.
+    pub quantifiers: Vec<HirQuantifier>,
+    /// Conjoined source text for printing; `clauses` is the structured per-conjunct view.
+    pub requires_text: String,
+    /// Conjoined source text for printing; `clauses` is the structured per-conjunct view.
+    pub ensures_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirTrustLevel {
+    Verified,
+    Trusted,
+    Unverified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirAtomMeta {
+    pub trust_level: HirTrustLevel,
+    pub trust_boundaries: Vec<crate::trust_boundary::TrustBoundaryKind>,
+    pub effect_pre: HashMap<String, String>,
+    pub effect_post: HashMap<String, String>,
+    pub resources: Vec<String>,
+    pub content_hash: String,
+    pub span: crate::parser::Span,
+}
+
 /// Atom の HIR 版: body が String ではなく構造化された HirStmt として保持される
 #[derive(Debug, Clone)]
 pub struct HirAtom {
     pub body: HirStmt,
-    // NOTE: requires_hir/ensures_hir are not yet consumed by verification (which still re-parses
-    // from atom.requires/ensures strings). They will be used once verification migrates to
-    // HIR-based Z3 constraint generation (Phase 2).
-    #[allow(dead_code)]
-    pub requires_hir: HirExpr,
-    #[allow(dead_code)]
-    pub ensures_hir: HirExpr,
+    pub signature: HirSignature,
+    pub contract: HirContract,
+    pub meta: HirAtomMeta,
     /// 元の Atom（メタデータアクセス用）
     pub atom: Atom,
     /// パース済みの body ステートメント（verification.rs での再パースを避ける）
@@ -277,12 +384,7 @@ pub fn lower_atom_to_hir_with_env(
 ) -> HirAtom {
     let body_stmt = parse_body_expr(&atom.body_expr);
     let body = lower_stmt_with_env(&body_stmt, module_env);
-
-    let requires_expr = parse_expression(&atom.requires);
-    let requires_hir = lower_expr_with_env(&requires_expr, module_env);
-
-    let ensures_expr = parse_expression(&atom.ensures);
-    let ensures_hir = lower_expr_with_env(&ensures_expr, module_env);
+    let (signature, contract, meta) = lower_atom_metadata(atom, &body, module_env);
 
     // Build effect set from atom.effects
     let effect_set = HirEffectSet {
@@ -301,11 +403,168 @@ pub fn lower_atom_to_hir_with_env(
 
     HirAtom {
         body,
-        requires_hir,
-        ensures_hir,
+        signature,
+        contract,
+        meta,
         atom: atom.clone(),
         body_stmt,
         effect_set,
+    }
+}
+
+pub fn lower_atom_metadata(
+    atom: &Atom,
+    body: &HirStmt,
+    module_env: Option<&crate::verification::ModuleEnv>,
+) -> (HirSignature, HirContract, HirAtomMeta) {
+    let signature = HirSignature {
+        name: atom.name.clone(),
+        params: atom
+            .params
+            .iter()
+            .map(|param| HirParam {
+                name: param
+                    .name
+                    .rsplit(' ')
+                    .next()
+                    .unwrap_or(&param.name)
+                    .to_string(),
+                consume: param.name.starts_with("consume "),
+                ty: param.type_name.clone(),
+                by_ref: if param.is_ref_mut {
+                    HirRefKind::RefMut
+                } else if param.is_ref {
+                    HirRefKind::Ref
+                } else {
+                    HirRefKind::Value
+                },
+            })
+            .collect(),
+        effects: atom
+            .effects
+            .iter()
+            .map(|effect| HirDeclaredEffect {
+                name: effect.name.clone(),
+                negated: effect.negated,
+            })
+            .collect(),
+        return_type: atom.return_type.clone(),
+        inferred_return_type: if atom.return_type.is_none() {
+            crate::mir::infer_return_type_from_hir(&atom.params, body)
+        } else {
+            None
+        },
+        is_async: atom.is_async,
+    };
+
+    let mut clauses = Vec::new();
+    for (text, mode) in
+        crate::verification::contract_view::conjunct_modes(atom, ClauseKind::Requires)
+    {
+        let label =
+            crate::verification::executor::clause_label_for_atom(atom, ClauseKind::Requires, &text)
+                .map(str::to_string);
+        clauses.push(lower_contract_clause(
+            text,
+            HirClauseKind::Requires,
+            lower_clause_mode(mode),
+            label,
+            module_env,
+        ));
+    }
+    for (text, mode) in
+        crate::verification::contract_view::conjunct_modes(atom, ClauseKind::Ensures)
+    {
+        let label =
+            crate::verification::executor::clause_label_for_atom(atom, ClauseKind::Ensures, &text)
+                .map(str::to_string);
+        clauses.push(lower_contract_clause(
+            text,
+            HirClauseKind::Ensures,
+            lower_clause_mode(mode),
+            label,
+            module_env,
+        ));
+    }
+    for cover in &atom.covers {
+        clauses.push(lower_contract_clause(
+            cover.clause.clone(),
+            HirClauseKind::Cover,
+            HirClauseMode::Plain,
+            cover.label.clone(),
+            module_env,
+        ));
+    }
+    let quantifiers = atom
+        .forall_constraints
+        .iter()
+        .map(|quantifier| HirQuantifier {
+            kind: match &quantifier.q_type {
+                crate::parser::QuantifierType::ForAll => HirQuantifierKind::ForAll,
+                crate::parser::QuantifierType::Exists => HirQuantifierKind::Exists,
+            },
+            var: quantifier.var.clone(),
+            start: quantifier.start.clone(),
+            end: quantifier.end.clone(),
+            condition: quantifier.condition.clone(),
+            condition_expr: Some(lower_expr_with_env(
+                &parse_expression(&quantifier.condition),
+                module_env,
+            )),
+        })
+        .collect();
+    let contract = HirContract {
+        clauses,
+        quantifiers,
+        requires_text: atom.requires.clone(),
+        ensures_text: atom.ensures.clone(),
+    };
+
+    let trust_boundaries = crate::trust_boundary::classify_trust_boundaries(
+        atom,
+        module_env
+            .map(|env| env.extern_blocks.as_slice())
+            .unwrap_or(&[]),
+    );
+    let meta = HirAtomMeta {
+        trust_level: match &atom.trust_level {
+            TrustLevel::Verified => HirTrustLevel::Verified,
+            TrustLevel::Trusted => HirTrustLevel::Trusted,
+            TrustLevel::Unverified => HirTrustLevel::Unverified,
+        },
+        trust_boundaries,
+        effect_pre: atom.effect_pre.clone(),
+        effect_post: atom.effect_post.clone(),
+        resources: atom.resources.clone(),
+        content_hash: crate::proof_cert::compute_atom_content_hash_v2(atom),
+        span: atom.span.clone(),
+    };
+
+    (signature, contract, meta)
+}
+
+fn lower_clause_mode(mode: Option<ClauseTrustMode>) -> HirClauseMode {
+    match mode {
+        Some(ClauseTrustMode::Assume) => HirClauseMode::Assume,
+        Some(ClauseTrustMode::Check) => HirClauseMode::Check,
+        None => HirClauseMode::Plain,
+    }
+}
+
+fn lower_contract_clause(
+    text: String,
+    kind: HirClauseKind,
+    mode: HirClauseMode,
+    label: Option<String>,
+    module_env: Option<&crate::verification::ModuleEnv>,
+) -> HirClause {
+    let expr = parse_expression(&text);
+    HirClause {
+        kind,
+        mode,
+        label,
+        text,
+        expr: Some(lower_expr_with_env(&expr, module_env)),
     }
 }
 
@@ -1126,9 +1385,295 @@ pub fn lower_stmt_from_str(input: &str) -> HirStmt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::item::parse_atom_from_source;
 
     fn names(names: &[&str]) -> HashSet<String> {
         names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    fn atom_signature_carries_parameters_and_return_types() {
+        let atom = parse_atom_from_source(
+            r#"
+async atom signature(value: i64, ref shared: i64, ref mut mutable: i64, consume x: i64) -> i64
+    requires: value >= 0;
+    ensures: result >= 0;
+    body: value;
+"#,
+        );
+        let hir = lower_atom_to_hir(&atom);
+
+        assert_eq!(hir.signature.name, "signature");
+        assert_eq!(
+            hir.signature
+                .params
+                .iter()
+                .map(|param| {
+                    (
+                        param.name.as_str(),
+                        param.ty.as_deref(),
+                        param.by_ref.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("value", Some("i64"), HirRefKind::Value),
+                ("shared", Some("i64"), HirRefKind::Ref),
+                ("mutable", Some("i64"), HirRefKind::RefMut),
+                ("x", Some("i64"), HirRefKind::Value),
+            ]
+        );
+        assert_eq!(hir.signature.return_type.as_deref(), Some("i64"));
+        assert_eq!(hir.signature.inferred_return_type, None);
+        assert!(hir.signature.is_async);
+
+        let inferred_atom =
+            parse_atom_from_source("atom inferred() requires: true; ensures: true; body: 1.5;");
+        let inferred_hir = lower_atom_to_hir(&inferred_atom);
+        assert_eq!(inferred_hir.signature.return_type, None);
+        assert!(inferred_hir.signature.inferred_return_type.is_some());
+        assert_eq!(
+            inferred_hir.signature.inferred_return_type,
+            crate::mir::infer_atom_return_type(&inferred_atom)
+        );
+    }
+
+    #[test]
+    fn atom_contract_preserves_clause_order_modes_labels_and_expressions() {
+        let atom = parse_atom_from_source(
+            r#"
+atom clauses(x: i64, y: i64) -> i64
+    requires: x > 0;
+    requires assume: y > 0;
+    requires check "lbl": x < 100;
+    ensures: result > 0;
+    ensures assume: result < 1000;
+    cover "hit": x == 5;
+    body: x;
+"#,
+        );
+        let hir = lower_atom_to_hir(&atom);
+        let actual = hir
+            .contract
+            .clauses
+            .iter()
+            .map(|clause| {
+                (
+                    clause.kind.clone(),
+                    clause.mode.clone(),
+                    clause.label.clone(),
+                    clause.text.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    HirClauseKind::Requires,
+                    HirClauseMode::Plain,
+                    None,
+                    "x > 0".to_string()
+                ),
+                (
+                    HirClauseKind::Requires,
+                    HirClauseMode::Assume,
+                    None,
+                    "y > 0".to_string()
+                ),
+                (
+                    HirClauseKind::Requires,
+                    HirClauseMode::Check,
+                    Some("lbl".to_string()),
+                    "x < 100".to_string()
+                ),
+                (
+                    HirClauseKind::Ensures,
+                    HirClauseMode::Plain,
+                    None,
+                    "result > 0".to_string()
+                ),
+                (
+                    HirClauseKind::Ensures,
+                    HirClauseMode::Assume,
+                    None,
+                    "result < 1000".to_string()
+                ),
+                (
+                    HirClauseKind::Cover,
+                    HirClauseMode::Plain,
+                    Some("hit".to_string()),
+                    "x == 5".to_string()
+                ),
+            ]
+        );
+        assert!(hir
+            .contract
+            .clauses
+            .iter()
+            .all(|clause| clause.expr.is_some()));
+    }
+
+    #[test]
+    fn atom_contract_carries_quantified_preconditions() {
+        let atom = parse_atom_from_source(
+            r#"
+atom quantified(n: i64)
+    requires: n >= 0 && forall(i, 0, n, i >= 0);
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        let hir = lower_atom_to_hir(&atom);
+
+        assert_eq!(hir.contract.requires_text, atom.requires);
+        assert_eq!(hir.contract.ensures_text, atom.ensures);
+        assert_eq!(hir.contract.requires_text, "n >= 0 && true");
+        assert!(hir.contract.clauses.iter().any(|clause| {
+            clause.kind == HirClauseKind::Requires
+                && clause.mode == HirClauseMode::Plain
+                && clause.text == "n >= 0"
+        }));
+        assert_eq!(hir.contract.quantifiers.len(), 1);
+        let quantifier = &hir.contract.quantifiers[0];
+        assert_eq!(quantifier.kind, HirQuantifierKind::ForAll);
+        assert_eq!(quantifier.var, "i");
+        assert_eq!(quantifier.start, "0");
+        assert_eq!(quantifier.end, "n");
+        assert_eq!(quantifier.condition, "i >= 0");
+        assert!(quantifier.condition_expr.is_some());
+    }
+
+    #[test]
+    fn atom_signature_preserves_declared_parameters_and_effects() {
+        let atom = parse_atom_from_source(
+            r#"
+atom metadata(consume a: i64, ref b: i64, ref mut c: i64, plain, amount: NonNegative)
+    requires: a >= 0 && forall(i, 0, a, i >= 0);
+    ensures: result >= a && result >= 0;
+    effects: [Zeta, Alpha, Zeta, !Beta];
+    body: a;
+"#,
+        );
+        let hir = lower_atom_to_hir(&atom);
+
+        assert_eq!(hir.signature.params[0].name, "a");
+        assert!(hir.signature.params[0].consume);
+        assert_eq!(hir.signature.params[0].declared_name(), "consume a");
+        assert_eq!(hir.signature.params[0].by_ref, HirRefKind::Value);
+
+        assert_eq!(hir.signature.params[1].name, "b");
+        assert!(!hir.signature.params[1].consume);
+        assert_eq!(hir.signature.params[1].declared_name(), "b");
+        assert_eq!(hir.signature.params[1].by_ref, HirRefKind::Ref);
+
+        assert_eq!(hir.signature.params[2].name, "c");
+        assert_eq!(hir.signature.params[2].declared_name(), "c");
+        assert_eq!(hir.signature.params[2].by_ref, HirRefKind::RefMut);
+
+        assert_eq!(hir.signature.params[3].name, "plain");
+        assert_eq!(hir.signature.params[3].ty, None);
+        assert_eq!(hir.signature.params[4].ty.as_deref(), Some("NonNegative"));
+        assert_eq!(hir.contract.requires_text, atom.requires);
+        assert_eq!(hir.contract.ensures_text, atom.ensures);
+        assert_eq!(hir.signature.effects.len(), 4);
+        assert_eq!(
+            hir.signature
+                .effects
+                .iter()
+                .map(|effect| (effect.name.as_str(), effect.negated))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Zeta", false),
+                ("Alpha", false),
+                ("Zeta", false),
+                ("Beta", true)
+            ]
+        );
+    }
+
+    #[test]
+    fn atom_contract_keeps_nested_quantifiers_in_clause_text() {
+        let atom = parse_atom_from_source(
+            r#"
+atom nested(n: i64)
+    requires: n == 5 || forall(i, 0, n, i >= 0);
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        let hir = lower_atom_to_hir(&atom);
+
+        assert!(hir.contract.quantifiers.is_empty());
+        let clauses: Vec<_> = hir
+            .contract
+            .clauses
+            .iter()
+            .filter(|clause| {
+                clause.kind == HirClauseKind::Requires
+                    && clause.mode == HirClauseMode::Plain
+                    && clause.text.contains("forall(")
+                    && clause.text.contains("i >= 0")
+            })
+            .collect();
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].text, "n == 5 || forall(i, 0, n, i >= 0)");
+        assert!(clauses[0].expr.is_some());
+    }
+
+    #[test]
+    fn duplicate_conjunct_modes_assign_assume_before_plain() {
+        let atom = parse_atom_from_source(
+            "atom duplicate(x: i64) -> i64 \
+             requires: x > 0; \
+             requires assume: x > 0; \
+             ensures: result > 0; \
+             body: x;",
+        );
+        let hir = lower_atom_to_hir(&atom);
+        let requires = hir
+            .contract
+            .clauses
+            .iter()
+            .filter(|clause| clause.kind == HirClauseKind::Requires)
+            .map(|clause| clause.mode.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(requires, vec![HirClauseMode::Assume, HirClauseMode::Plain]);
+    }
+
+    #[test]
+    fn atom_metadata_tracks_trust_boundaries_hash_and_trust_level() {
+        let atom = parse_atom_from_source(
+            "atom assumed(x: i64) -> i64 \
+             requires assume: x > 0; \
+             ensures: result == x; \
+             body: x;",
+        );
+        let hir = lower_atom_to_hir(&atom);
+        let expected_boundaries = crate::trust_boundary::classify_trust_boundaries(&atom, &[]);
+
+        assert_eq!(hir.meta.trust_boundaries, expected_boundaries);
+        assert!(hir
+            .meta
+            .trust_boundaries
+            .contains(&crate::trust_boundary::TrustBoundaryKind::AssumedClause));
+        assert_eq!(
+            hir.meta.content_hash,
+            crate::proof_cert::compute_atom_content_hash_v2(&atom)
+        );
+
+        let trusted = parse_atom_from_source(
+            "trusted atom trusted_contract(x: i64) -> i64 \
+             requires: x >= 0; \
+             ensures: result == x; \
+             body: x;",
+        );
+        assert_eq!(
+            lower_atom_to_hir(&trusted).meta.trust_level,
+            HirTrustLevel::Trusted
+        );
     }
 
     #[test]

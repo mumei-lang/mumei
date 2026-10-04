@@ -20,7 +20,7 @@
 
 use crate::ast::CapabilityType;
 use crate::hir::{HirAtom, HirExpr, HirStmt};
-use crate::parser::Op;
+use crate::parser::{Op, Param};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -791,14 +791,18 @@ pub fn lower_hir_to_mir_with_env(
 /// Infer an atom's return type from its lowered body expression.
 pub fn infer_atom_return_type(atom: &crate::parser::Atom) -> Option<String> {
     let hir = crate::hir::lower_atom_to_hir(atom);
+    infer_return_type_from_hir(&atom.params, &hir.body)
+}
+
+pub fn infer_return_type_from_hir(params: &[Param], body: &HirStmt) -> Option<String> {
     let mut ctx = LowerCtx::new();
-    for param in &hir.atom.params {
+    for param in params {
         let pname = param.name.rsplit(' ').next().unwrap_or(param.name.as_str());
         ctx.alloc_local(Some(pname.to_string()), param.type_name.clone());
     }
-    match &hir.body {
+    match body {
         crate::hir::HirStmt::Expr(expr) => ctx.infer_hir_ty(expr),
-        crate::hir::HirStmt::Block { .. } => ctx.infer_hir_branch_ty(&hir.body),
+        crate::hir::HirStmt::Block { .. } => ctx.infer_hir_branch_ty(body),
         _ => None,
     }
 }
@@ -1554,6 +1558,7 @@ mod tests {
             invariant: None,
             effects: vec![],
             return_type: None,
+            decreases: None,
             span: Span::new("", 1, 1, 0),
             effect_pre: std::collections::HashMap::new(),
             effect_post: std::collections::HashMap::new(),
