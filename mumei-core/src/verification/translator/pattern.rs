@@ -3,6 +3,7 @@ use super::super::support::*;
 use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
+use crate::parser::EnumVariant;
 use serde_json::json;
 
 pub(crate) fn pattern_to_z3_condition<'a>(
@@ -342,24 +343,7 @@ pub(crate) fn format_counterexample<'a>(
                 // まず arms から特定した Enum を優先的に使用
                 if let Some(edef) = enum_ctx {
                     if let Some(variant) = edef.variants.get(tag_val as usize) {
-                        // フィールド値も model から取得を試みる
-                        let mut field_vals = Vec::new();
-                        for (i, field_type) in variant.fields.iter().enumerate() {
-                            let _field_sym_name =
-                                format!("__proj_{}_{}_{}", edef.name, variant.name, i);
-                            // model 内のシンボルを探す（存在すれば具体値を表示）
-                            let field_str = format!("{}=?", field_type);
-                            field_vals.push(field_str);
-                        }
-                        let fields_display = if field_vals.is_empty() {
-                            String::new()
-                        } else {
-                            format!("({})", field_vals.join(", "))
-                        };
-                        return format!(
-                            "{}::{}{} (tag={}) -- missing from match arms",
-                            edef.name, variant.name, fields_display, tag_val
-                        );
+                        return format_missing_variant(edef, variant, tag_val);
                     }
                 }
                 // フォールバック: module_env の全 Enum 定義を走査
@@ -374,6 +358,19 @@ pub(crate) fn format_counterexample<'a>(
             }
             // 整数リテラルとしてフォールバック
             return format!("value = {} -- no matching arm", tag_str);
+        }
+
+        // P10-C 以降、Enum ターゲットは datatype コンストラクタ値（`PEP` や
+        // `(Circle 3)`）として評価される。コンストラクタ宣言名が variant 名なので、
+        // そこから所属 Enum と tag（variants 内 index）を逆引きする。
+        if target_val.as_datatype().is_some() {
+            if let Some(variant_name) = datatype_ctor_name(&target_val) {
+                if let Some((edef, tag_val)) =
+                    resolve_ctor_variant(vc, enum_ctx, module_env, &target_val, &variant_name)
+                {
+                    return format_missing_variant(edef, &edef.variants[tag_val], tag_val as i64);
+                }
+            }
         }
 
         format!("value = {} -- no matching arm", target_str)
@@ -393,4 +390,66 @@ pub(crate) fn format_counterexample<'a>(
             covered.join(", ")
         )
     }
+}
+
+/// `Enum::Variant(T=?, ...) (tag=N) -- missing from match arms` 形式で表示する。
+fn format_missing_variant(edef: &EnumDef, variant: &EnumVariant, tag_val: i64) -> String {
+    let fields_display = if variant.fields.is_empty() {
+        String::new()
+    } else {
+        let field_vals: Vec<String> = variant
+            .fields
+            .iter()
+            .map(|field_type| format!("{}=?", field_type))
+            .collect();
+        format!("({})", field_vals.join(", "))
+    };
+    format!(
+        "{}::{}{} (tag={}) -- missing from match arms",
+        edef.name, variant.name, fields_display, tag_val
+    )
+}
+
+/// モデル値が datatype コンストラクタ適用なら先頭宣言名（= variant 名）を返す。
+/// 0 項の `PEP` でも `(Circle 3)` のようなペイロード付きでも decl 名は同じ。
+fn datatype_ctor_name(target_val: &Dynamic) -> Option<String> {
+    if target_val.kind() != z3::AstKind::App {
+        return None;
+    }
+    Some(target_val.safe_decl().ok()?.name())
+}
+
+/// コンストラクタ名（variant 名）から所属 Enum と tag（variants 内 index）を解決する。
+/// 1. arms から検出した enum_ctx がその variant を持てばそれを使う。
+/// 2. なければ module_env のうちソートがモデル値と一致する Enum
+///    （datatype ソート名は enum 名なので、sort 一致 == 名前一致）。
+fn resolve_ctor_variant<'a>(
+    vc: &VCtx<'a>,
+    enum_ctx: Option<&'a EnumDef>,
+    module_env: &'a ModuleEnv,
+    target_val: &Dynamic,
+    variant_name: &str,
+) -> Option<(&'a EnumDef, usize)> {
+    let target_sort = target_val.as_datatype()?.get_sort();
+    // モデル値のソートが正: enum_ctx は arms からの推測なので、同名 variant を
+    // 持つ別 enum を誤検出している可能性がある。ソートが一致するときだけ使う。
+    if let Some(edef) = enum_ctx {
+        if let Some(sort) = datatype::enum_datatype_sort(vc, edef) {
+            if sort.sort == target_sort {
+                if let Some(idx) = edef.variants.iter().position(|v| v.name == variant_name) {
+                    return Some((edef, idx));
+                }
+            }
+        }
+    }
+    for edef in module_env.enums.values() {
+        if let Some(sort) = datatype::enum_datatype_sort(vc, edef) {
+            if sort.sort == target_sort {
+                if let Some(idx) = edef.variants.iter().position(|v| v.name == variant_name) {
+                    return Some((edef, idx));
+                }
+            }
+        }
+    }
+    None
 }
