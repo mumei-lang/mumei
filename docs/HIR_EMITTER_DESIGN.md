@@ -57,7 +57,7 @@ pub trait Emitter {
 - External plugins are dynamic libraries loaded by `load_external_emitter` /
   `load_external_emitter_from_path`. They export
   `mumei_emitter_abi_version() -> u32`, which must equal `EMITTER_ABI_VERSION`
-  (currently `1`), and `mumei_create_emitter() -> EmitterPluginHandle`, a
+  (currently `3`), and `mumei_create_emitter() -> EmitterPluginHandle`, a
   `#[repr(C)]` pair of the trait object's data and vtable pointers. Calls are
   wrapped in `PanicSafeEmitter`. See [`PLUGIN_GUIDE.md`](PLUGIN_GUIDE.md).
 - The handle is a Rust trait object passed across a dynamic-library boundary.
