@@ -118,17 +118,20 @@ payload, or the exit-code contract above.
 atom's verification phases and the SMT-LIB queries issued during them:
 
 ```text
-<DIR>/<source>/<atom>/phases.json
-<DIR>/<source>/<atom>/<NNNN>-<phase-slug>.smt2
+<DIR>/<source>-<hash8>/<atom>-<hash8>/phases.json
+<DIR>/<source>-<hash8>/<atom>-<hash8>/<NNNN>-<phase-slug>.smt2
 ```
 
 `<source>` is the atom's source path with every character outside
 `[A-Za-z0-9._-]` replaced by `_`; `<atom>` uses the same sanitization (so
-`S::m` becomes `S__m`). An empty component becomes `_`. `NNNN` is a 1-based
-query number for that atom, and the phase slug is the lower-case phase name
-with non-alphanumeric runs replaced by `-`. Each `.smt2` file contains comments
-for the atom, phase, and source origin, followed by the solver text and its
-`(check-sat)` or `(check-sat-assuming (...))` command.
+`S::m` becomes `S__m`). Each component is suffixed with `-<hash8>`, the first
+eight lowercase hexadecimal characters of the SHA-256 hash of the original,
+unsanitized value. The hash keeps distinct paths or atom names from colliding
+when sanitization is lossy. An empty sanitized component becomes `_`. `NNNN`
+is a 1-based query number for that atom, and the phase slug is the lower-case
+phase name with non-alphanumeric runs replaced by `-`. Each `.smt2` file
+contains comments for the atom, phase, and source origin, followed by the
+solver text and its `(check-sat)` or `(check-sat-assuming (...))` command.
 
 `phases.json` has `version: 1`, `atom`, `source_file`, `outcome`, `error`, and
 an ordered `phases` array. Each phase entry has `phase`, `result`, and
@@ -137,8 +140,11 @@ an ordered `phases` array. Each phase entry has `phase`, `result`, and
 have no queries. Results may be `passed`, `failed`, `unknown`, `unverifiable`,
 `contradiction`, or `aborted`. For an unchanged cached atom, the file records
 `outcome: "cached"` and an empty `phases` array. An unrecognized phase is
-retained verbatim and marked `in_phase_contract: false`.
+retained verbatim and marked `in_phase_contract: false`. `phases.json` also
+includes `partial: false` when all writes succeeded and `partial: true` when a
+query write failed.
 
 Phase capture is diagnostic only: it does not change solver input, the
 incremental-cache key, verification verdicts, `report.json`, `--json` output,
-or exit codes.
+or exit codes. If an artifact write fails, a single warning is printed to
+stderr after verification; the failure never changes the exit code.

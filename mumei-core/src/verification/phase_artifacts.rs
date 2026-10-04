@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -56,8 +57,8 @@ pub(crate) fn begin_atom(source_file: &str, atom: &str) {
     };
     let directory = state
         .directory
-        .join(sanitize(source_file))
-        .join(sanitize(atom));
+        .join(path_component(source_file))
+        .join(path_component(atom));
     let _ = fs::remove_dir_all(&directory);
     state.stack.push(AtomTrace {
         directory,
@@ -163,8 +164,8 @@ pub fn record_cached_atom(source_file: &str, atom: &str) {
     };
     let directory = state
         .directory
-        .join(sanitize(source_file))
-        .join(sanitize(atom));
+        .join(path_component(source_file))
+        .join(path_component(atom));
     let _ = fs::remove_dir_all(&directory);
     let cached = AtomTrace {
         directory,
@@ -376,6 +377,11 @@ fn sanitize(value: &str) -> String {
     }
 }
 
+fn path_component(value: &str) -> String {
+    let hash = format!("{:x}", Sha256::digest(value.as_bytes()));
+    format!("{}-{}", sanitize(value), &hash[..8])
+}
+
 fn phase_slug(phase: &str) -> String {
     let mut slug = String::new();
     let mut previous_separator = false;
@@ -412,7 +418,8 @@ fn disable() {
 #[cfg(test)]
 mod tests {
     use super::{
-        begin_atom, capture, complete_phase, disable, enable, finish_atom, phase_slug, sanitize,
+        begin_atom, capture, complete_phase, disable, enable, finish_atom, path_component,
+        phase_slug, sanitize,
     };
     use serde_json::Value;
     use std::fs;
@@ -421,9 +428,18 @@ mod tests {
     use z3::{Config, Context, Solver};
 
     #[test]
-    fn artifact_path_components_are_sanitized() {
+    fn artifact_path_components_are_sanitized_and_distinct() {
         assert_eq!(sanitize("S::m"), "S__m");
         assert_eq!(sanitize(""), "_");
+        for (value, prefix) in [("S::m", "S__m"), ("", "_")] {
+            let component = path_component(value);
+            let hash = component.strip_prefix(&format!("{prefix}-")).unwrap();
+            assert_eq!(hash.len(), 8);
+            assert!(hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        }
+        assert_ne!(path_component("S::m"), path_component("S__m"));
         assert_eq!(
             phase_slug("Phase 5: ensures verification"),
             "phase-5-ensures-verification"
@@ -448,8 +464,8 @@ mod tests {
         solver.assert(&Bool::from_bool(&context, true));
         let query = capture(&solver);
         let query_path = directory
-            .join("source.mm")
-            .join("captured_query")
+            .join(path_component("source.mm"))
+            .join(path_component("captured_query"))
             .join("0001-phase-0-units-unit-consistency.smt2");
         let query_text = fs::read_to_string(&query_path).unwrap();
         assert!(query_text.contains("(assert true)"));
@@ -462,8 +478,8 @@ mod tests {
         let captured: Value = serde_json::from_slice(
             &fs::read(
                 directory
-                    .join("source.mm")
-                    .join("captured_query")
+                    .join(path_component("source.mm"))
+                    .join(path_component("captured_query"))
                     .join("phases.json"),
             )
             .unwrap(),
@@ -477,8 +493,8 @@ mod tests {
         let early: Value = serde_json::from_slice(
             &fs::read(
                 directory
-                    .join("source.mm")
-                    .join("early_error")
+                    .join(path_component("source.mm"))
+                    .join(path_component("early_error"))
                     .join("phases.json"),
             )
             .unwrap(),
@@ -497,8 +513,8 @@ mod tests {
         let after_body: Value = serde_json::from_slice(
             &fs::read(
                 directory
-                    .join("source.mm")
-                    .join("after_body")
+                    .join(path_component("source.mm"))
+                    .join(path_component("after_body"))
                     .join("phases.json"),
             )
             .unwrap(),
@@ -511,6 +527,21 @@ mod tests {
             "Phase 5: ensures verification"
         );
         assert_eq!(after_body["phases"][1]["result"], "aborted");
+
+        let verified: Result<(), &str> = Ok(());
+        begin_atom("a/b.mm", "shared");
+        finish_atom(&verified);
+        begin_atom("a_b.mm", "shared");
+        finish_atom(&verified);
+        let first_directory = directory
+            .join(path_component("a/b.mm"))
+            .join(path_component("shared"));
+        let second_directory = directory
+            .join(path_component("a_b.mm"))
+            .join(path_component("shared"));
+        assert_ne!(first_directory, second_directory);
+        assert!(first_directory.join("phases.json").exists());
+        assert!(second_directory.join("phases.json").exists());
 
         disable();
         fs::remove_dir_all(directory).unwrap();

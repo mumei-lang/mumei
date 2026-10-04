@@ -87,9 +87,8 @@ fn run_verify(
     command.current_dir(cwd).output().expect("run mumei verify")
 }
 
-fn sanitize_path(path: &Path) -> String {
-    let sanitized = path
-        .to_string_lossy()
+fn sanitize_path(value: &str) -> String {
+    let sanitized = value
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
@@ -104,6 +103,34 @@ fn sanitize_path(path: &Path) -> String {
     } else {
         sanitized
     }
+}
+
+fn find_artifact_component(parent: &Path, value: &str) -> PathBuf {
+    let prefix = format!("{}-", sanitize_path(value));
+    let matches = std::fs::read_dir(parent)
+        .expect("read artifact directory")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_dir()))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .strip_prefix(&prefix)
+                .is_some_and(|hash| {
+                    hash.len() == 8
+                        && hash
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+        })
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected one artifact component for {value}"
+    );
+    matches[0].clone()
 }
 
 fn read_json(path: &Path) -> Value {
@@ -172,7 +199,9 @@ fn phase_capture_preserves_verification_outputs_and_records_queries() {
             _ => unreachable!(),
         };
         let source_path = root.join(format!("{name}.mm"));
-        let atom_dir = phase_dir.join(sanitize_path(&source_path)).join(atom_name);
+        let source_dir =
+            find_artifact_component(&phase_dir, source_path.to_string_lossy().as_ref());
+        let atom_dir = find_artifact_component(&source_dir, atom_name);
         let phases_json = read_json(&atom_dir.join("phases.json"));
         assert_eq!(phases_json["version"], 1);
         assert_eq!(phases_json["atom"], atom_name);
@@ -241,7 +270,8 @@ fn cache_reuse_is_unchanged_and_cached_atoms_are_marked() {
     assert!(String::from_utf8_lossy(&second.stdout).contains("skipped (unchanged, cached)"));
     let third = run_verify(&input, &cwd, &reports, Some(&phase_dir), false, None);
     assert_eq!(third.status.code(), Some(0));
-    let atom_dir = phase_dir.join(sanitize_path(&input)).join("inc");
+    let source_dir = find_artifact_component(&phase_dir, input.to_string_lossy().as_ref());
+    let atom_dir = find_artifact_component(&source_dir, "inc");
     let phases_json = read_json(&atom_dir.join("phases.json"));
     assert_eq!(phases_json["outcome"], "cached");
     assert_eq!(phases_json["phases"], serde_json::json!([]));
