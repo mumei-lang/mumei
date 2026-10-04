@@ -304,7 +304,7 @@ Path(args.lean_cert_out).write_text(json.dumps(payload))
         "fermat3",
         "axiom_rejected",
     );
-    assert_eq!(rejected["level"], "error");
+    assert_eq!(rejected["level"], "warning");
     assert_eq!(rejected["properties"]["obligation"], "lean_proof");
     assert_eq!(
         rejected["properties"]["disallowed_axioms"],

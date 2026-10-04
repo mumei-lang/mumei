@@ -100,7 +100,7 @@ Covered cover clauses are represented as pass results (`kind: "pass"`,
 | Unknown cover result | `unknown` | `warning` |
 | Covered cover result | `covered` | `none` (pass result) |
 | Assumed clause | `assumed_clause` | `note` |
-| Axiom-audit rejection | `axiom_rejected` | `error` |
+| Axiom-audit rejection | `axiom_rejected` | `warning` |
 
 The SARIF invocation records the combined process exit code (including all
 files in a directory run); `executionSuccessful` is true for exit codes 0, 1,

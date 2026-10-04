@@ -58,7 +58,7 @@ impl SarifCollector {
         }
         self.results.push(result(
             "axiom_rejected",
-            "error",
+            "warning",
             "fail",
             message,
             span,
@@ -829,7 +829,13 @@ body: { x + 1 };
         let rules = run["tool"]["driver"]["rules"].as_array().unwrap();
         let results = run["results"].as_array().unwrap();
         assert_eq!(results[1]["ruleId"], "axiom_rejected");
+        assert_eq!(results[1]["level"], "warning");
         assert_eq!(results[1]["properties"]["disallowed_axioms"][0], "propext");
+        let rule_index = results[1]["ruleIndex"].as_u64().unwrap_or_default() as usize;
+        assert_eq!(
+            rules[rule_index]["defaultConfiguration"]["level"],
+            "warning"
+        );
         for result in results {
             let index = result["ruleIndex"].as_u64().unwrap_or_default() as usize;
             assert!(index < rules.len());
