@@ -249,6 +249,7 @@ pub(crate) fn repl_register_extern_fn(
         spec_metadata: std::collections::HashMap::new(),
         clause_labels: Vec::new(),
         clause_modes: Vec::new(),
+        covers: Vec::new(),
         requires: ext_fn
             .requires
             .clone()

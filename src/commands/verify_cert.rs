@@ -58,6 +58,7 @@ pub(crate) fn cmd_verify_cert(
     let mut proven = 0;
     let mut changed = 0;
     let mut unproven = 0;
+    let mut axiom_rejected = 0;
     let mut missing = 0;
 
     for (name, status) in &results {
@@ -73,6 +74,10 @@ pub(crate) fn cmd_verify_cert(
             "unproven" => {
                 unproven += 1;
                 "❓"
+            }
+            "axiom_rejected" => {
+                axiom_rejected += 1;
+                "❌"
             }
             _ => {
                 missing += 1;
@@ -103,6 +108,32 @@ pub(crate) fn cmd_verify_cert(
                     "      ⚠️  assumed_clauses: [{}]",
                     ac.assumed_clauses.join(", ")
                 );
+            }
+            if ac.z3_check_result == "lean_verified"
+                || ac
+                    .lean_result_metadata
+                    .as_ref()
+                    .or(ac.lean_metadata.as_ref())
+                    .is_some()
+            {
+                let lean_metadata = ac
+                    .lean_result_metadata
+                    .as_ref()
+                    .or(ac.lean_metadata.as_ref());
+                if let Some(metadata) = lean_metadata {
+                    if let Some(kernel_axioms) = metadata.kernel_axioms.as_ref() {
+                        println!("      kernel_axioms: {:?}", kernel_axioms);
+                    }
+                }
+                let audit = match proof_cert::lean_axiom_audit(ac) {
+                    proof_cert::LeanAxiomAudit::Passed { .. } => "passed".to_string(),
+                    proof_cert::LeanAxiomAudit::Rejected { disallowed } => {
+                        format!("rejected (disallowed: {:?})", disallowed)
+                    }
+                    proof_cert::LeanAxiomAudit::Error => "error".to_string(),
+                    proof_cert::LeanAxiomAudit::Unaudited => "unaudited".to_string(),
+                };
+                println!("      axiom_audit: {}", audit);
             }
         }
     }
@@ -157,16 +188,47 @@ pub(crate) fn cmd_verify_cert(
     }
     println!("All verified: {}", cert.all_verified);
     println!(
-        "Results: {} proven, {} changed, {} unproven, {} missing",
-        proven, changed, unproven, missing
+        "Results: {} proven, {} changed, {} unproven, {} axiom_rejected, {} missing",
+        proven, changed, unproven, axiom_rejected, missing
     );
 
     if changed > 0 {
         println!();
         println!("⚠️  {} atom(s) have changed since certification. Re-run `mumei verify --proof-cert` to update.", changed);
     }
-    let strict_failure = strict && (changed > 0 || unhashed);
-    if strict_failure {
+    let unaudited_lean_atoms: Vec<&str> = if strict && allow_lean_verified {
+        results
+            .iter()
+            .filter_map(|(name, status)| {
+                if status != "proven" {
+                    return None;
+                }
+                let atom = cert
+                    .atoms
+                    .iter()
+                    .find(|atom| atom.name == *name && atom.z3_check_result == "lean_verified")?;
+                if matches!(
+                    proof_cert::lean_axiom_audit(atom),
+                    proof_cert::LeanAxiomAudit::Unaudited
+                ) {
+                    Some(name.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let strict_unaudited_failure = !unaudited_lean_atoms.is_empty();
+    let strict_failure = strict && (changed > 0 || unhashed || strict_unaudited_failure);
+    if strict_unaudited_failure {
+        eprintln!(
+            "❌ --strict: --allow-lean-verified accepted unaudited Lean atom(s): {}. Re-run mumei-lean to attach kernel axiom audit metadata.",
+            unaudited_lean_atoms.join(", ")
+        );
+    }
+    if strict && (changed > 0 || unhashed) {
         println!();
         eprintln!(
             "❌ --strict: certificate '{}' no longer matches '{}' ({} changed atom(s), certificate_hash {}).",
@@ -176,7 +238,7 @@ pub(crate) fn cmd_verify_cert(
             if unhashed { "absent" } else { "present" }
         );
     }
-    if tampered || strict_failure || unproven > 0 || missing > 0 {
+    if tampered || strict_failure || unproven > 0 || axiom_rejected > 0 || missing > 0 {
         std::process::exit(1);
     }
 }

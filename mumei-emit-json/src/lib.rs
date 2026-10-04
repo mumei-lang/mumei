@@ -129,6 +129,7 @@ mod tests {
                 spec_metadata: std::collections::HashMap::new(),
                 clause_labels: Vec::new(),
                 clause_modes: Vec::new(),
+                covers: Vec::new(),
                 requires: "b != 0".to_string(),
                 forall_constraints: vec![],
                 ensures: "result == a / b".to_string(),

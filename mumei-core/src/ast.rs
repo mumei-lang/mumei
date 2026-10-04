@@ -787,6 +787,7 @@ impl Monomorphizer {
             requires: mono_requires,
             clause_labels: generic.clause_labels.clone(),
             clause_modes: mono_clause_modes,
+            covers: generic.covers.clone(),
             forall_constraints: generic.forall_constraints.clone(),
             ensures: mono_ensures,
             body_expr: mono_body,

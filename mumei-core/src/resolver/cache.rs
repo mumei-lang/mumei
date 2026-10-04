@@ -43,7 +43,7 @@ pub(crate) fn compute_hash(source: &str) -> String {
 
 /// Atom の契約+body+メタデータのハッシュを計算する（Incremental Build 用）
 /// 以下のフィールドを結合してハッシュ化する:
-/// - name, requires, ensures, body_expr（基本契約）
+/// - name, requires, ensures, covers, body_expr（基本契約）
 /// - consumed_params, ref params（所有権制約）
 /// - resources, async flag（並行性制約）
 /// - invariant（帰納的不変量）
@@ -60,6 +60,14 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
     hasher.update(atom.requires.as_bytes());
     hasher.update(b"|");
     hasher.update(atom.ensures.as_bytes());
+    for cover in &atom.covers {
+        hasher.update(b"|cover:");
+        hasher.update(cover.clause.as_bytes());
+        if let Some(label) = &cover.label {
+            hasher.update(b"|label=");
+            hasher.update(label.as_bytes());
+        }
+    }
     hasher.update(b"|");
     if !atom.clause_modes.is_empty() {
         for mode in &atom.clause_modes {
@@ -183,6 +191,8 @@ pub struct VerificationCacheEntry {
     pub skipped_clauses: usize,
     #[serde(default)]
     pub inferred_invariants: Vec<crate::verification::invariant_inference::InferredInvariant>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cover_results: Vec<serde_json::Value>,
 }
 
 /// Compute a proof hash that includes transitive dependency signatures and type predicates.
@@ -205,6 +215,14 @@ pub fn compute_proof_hash_with_flags(
     hasher.update(atom.requires.as_bytes());
     hasher.update(b"|");
     hasher.update(atom.ensures.as_bytes());
+    for cover in &atom.covers {
+        hasher.update(b"|cover:");
+        hasher.update(cover.clause.as_bytes());
+        if let Some(label) = &cover.label {
+            hasher.update(b"|label=");
+            hasher.update(label.as_bytes());
+        }
+    }
     hasher.update(b"|");
     if !atom.clause_modes.is_empty() {
         for mode in &atom.clause_modes {
@@ -501,6 +519,14 @@ pub fn compute_contract_hash(atom: &crate::parser::Atom) -> String {
             );
         }
     }
+    for cover in &atom.covers {
+        let mut section = cover.clause.clone();
+        if let Some(label) = &cover.label {
+            section.push_str("|label=");
+            section.push_str(label);
+        }
+        hash_field(&mut hasher, "cover", &section);
+    }
     if let Some(ref inv) = atom.invariant {
         hash_field(&mut hasher, "invariant", inv);
     }
@@ -685,6 +711,7 @@ pub fn migrate_old_cache(base_dir: &Path) {
                         timestamp: timestamp.clone(),
                         skipped_clauses: 0,
                         inferred_invariants: Vec::new(),
+                        cover_results: Vec::new(),
                     },
                 );
             }

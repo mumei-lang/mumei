@@ -941,7 +941,7 @@ fn atom_uses_bitvector_semantics(
         })
 }
 
-fn expr_has_bitwise_op(expr: &Expr) -> bool {
+pub(crate) fn expr_has_bitwise_op(expr: &Expr) -> bool {
     match expr {
         Expr::BinaryOp(left, op, right) => {
             matches!(op, Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr)

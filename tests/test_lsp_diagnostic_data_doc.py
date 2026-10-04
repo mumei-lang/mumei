@@ -38,6 +38,7 @@ def _documented_sources_and_data_keys() -> tuple[set[str], set[str]]:
             "z3_result_class",
             "escalation_reason",
             "certificate",
+            "disallowed",
             "intentDrift",
             "kind",
             "score",

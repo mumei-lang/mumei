@@ -157,6 +157,7 @@ pub fn extern_fn_as_trusted_atom(ext_fn: &ExternFn) -> Atom {
         spec_metadata: HashMap::new(),
         clause_labels: Vec::new(),
         clause_modes: Vec::new(),
+        covers: Vec::new(),
         requires: ext_fn
             .requires
             .clone()
@@ -195,6 +196,7 @@ mod tests {
             spec_metadata: HashMap::new(),
             clause_labels: Vec::new(),
             clause_modes: Vec::new(),
+            covers: Vec::new(),
             requires: "true".to_string(),
             forall_constraints: vec![],
             ensures: "true".to_string(),

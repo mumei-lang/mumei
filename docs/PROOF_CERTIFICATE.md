@@ -18,8 +18,18 @@ keywords: "mumei proof certificate, formal verification, verified imports, Z3, L
 2. The atom-level `translator_version` equals the current `LEAN_TRANSLATOR_VERSION` compiled into mumei.
 3. The atom-level `bridge_lemma_hash` equals the current `LEAN_BRIDGE_LEMMA_HASH` compiled into mumei.
 4. `lean_result_metadata` (or the legacy-compatible `lean_metadata`) has `status == "lean_verified"`, a non-empty `theorem_name`, and the same current `translator_version` and `bridge_lemma_hash`.
+5. The kernel-axiom audit is `passed` and reports only the standard axioms
+   `propext`, `Classical.choice`, and `Quot.sound`; certificates without audit
+   fields remain accepted as legacy `Unaudited` evidence.
 
-If any value is missing or stale, certificate verification returns `stale_translator` when `--allow-lean-verified` is enabled and `unproven` when it is not. The same meaning applies to proof-certificate metadata, MCP consumers of certificate JSON, and CLI output from `mumei verify --allow-lean-verified` / `verify-cert --allow-lean-verified`.
+If translator metadata is missing or stale, certificate verification returns
+`stale_translator` when `--allow-lean-verified` is enabled. A rejected or
+errored kernel-axiom audit returns `axiom_rejected` instead. `verify-cert
+--strict --allow-lean-verified` additionally rejects accepted legacy
+`Unaudited` certificates, requiring a fresh Lean audit. The same meaning
+applies to proof-certificate metadata, MCP consumers of certificate JSON, and
+CLI output from `mumei verify --allow-lean-verified` /
+`verify-cert --allow-lean-verified`.
 
 The standard mumei-lean bridge path is live theorem generation for the current Z3 `unknown` obligation. For the body-semantics fixture, `abs_saturating` is emitted as `Generated.Std.Math.Abs.abs_saturating_correct`, exported as `lean_verified`, and recorded with `known_witness_used = false`. Pre-registered known witnesses remain fallback evidence and are recorded with `known_witness_used = true`; they do not replace the live generated theorem path when that path builds successfully.
 

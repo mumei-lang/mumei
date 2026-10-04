@@ -42,10 +42,11 @@ pub use models::{
 pub use review::{generate_escalation_bundle, generate_human_review_queue};
 
 pub use validation::{
-    check_certificate_hash, get_required_lowering_rules, lean_certificate_metadata_is_current,
-    refresh_certificate_integrity, validate_certificate_translator_versions,
-    validate_translator_version, validate_translator_version_with_semantics, verify_certificate,
-    CertificateHashCheck,
+    check_certificate_hash, get_required_lowering_rules, lean_axiom_audit,
+    lean_certificate_metadata_is_current, refresh_certificate_integrity,
+    validate_certificate_translator_versions, validate_translator_version,
+    validate_translator_version_with_semantics, verify_certificate, CertificateHashCheck,
+    LeanAxiomAudit, LEAN_STANDARD_KERNEL_AXIOMS,
 };
 
 #[cfg(test)]
@@ -83,6 +84,7 @@ mod tests {
             spec_metadata: std::collections::HashMap::new(),
             clause_labels: Vec::new(),
             clause_modes: Vec::new(),
+            covers: Vec::new(),
             requires: requires.to_string(),
             forall_constraints: vec![],
             ensures: ensures.to_string(),
@@ -99,6 +101,35 @@ mod tests {
             effect_pre: HashMap::new(),
             effect_post: HashMap::new(),
         }
+    }
+
+    fn current_lean_metadata() -> LeanResultMetadata {
+        LeanResultMetadata {
+            status: "lean_verified".to_string(),
+            theorem_name: "hard_lemma_correct".to_string(),
+            translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+            bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+            proof_path: "Generated/Test.lean".to_string(),
+            diagnostics: vec![],
+            ..Default::default()
+        }
+    }
+
+    fn certificate_with_lean_metadata(
+        metadata: LeanResultMetadata,
+    ) -> (ProofCertificate, parser::Atom) {
+        let atom = make_test_atom("hard_lemma", "true", "true", "42");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "hard_lemma".to_string(),
+            ("lean_verified".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut cert =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
+        cert.atoms[0].lean_result_metadata = Some(metadata);
+        (cert, atom)
     }
 
     #[test]
@@ -858,6 +889,124 @@ mod tests {
             status_stale_result_metadata[0],
             ("hard_lemma".to_string(), "stale_translator".to_string())
         );
+    }
+
+    #[test]
+    fn test_lean_axiom_audit_verdicts_and_statuses() {
+        let check = |metadata: LeanResultMetadata,
+                     expected_audit: LeanAxiomAudit,
+                     expected_status: &str| {
+            let (cert, atom) = certificate_with_lean_metadata(metadata);
+            assert_eq!(lean_axiom_audit(&cert.atoms[0]), expected_audit);
+            assert_eq!(
+                verify_certificate(&cert, &[&atom], true)[0],
+                ("hard_lemma".to_string(), expected_status.to_string())
+            );
+        };
+
+        let mut passed = current_lean_metadata();
+        passed.kernel_axioms = Some(vec![
+            "propext".to_string(),
+            "Classical.choice".to_string(),
+            "Quot.sound".to_string(),
+        ]);
+        passed.axiom_audit = Some("passed".to_string());
+        check(
+            passed,
+            LeanAxiomAudit::Passed {
+                axioms: vec![
+                    "propext".to_string(),
+                    "Classical.choice".to_string(),
+                    "Quot.sound".to_string(),
+                ],
+            },
+            "proven",
+        );
+
+        let mut forged_pass = current_lean_metadata();
+        forged_pass.kernel_axioms = Some(vec!["sorryAx".to_string()]);
+        forged_pass.axiom_audit = Some("passed".to_string());
+        check(
+            forged_pass,
+            LeanAxiomAudit::Rejected {
+                disallowed: vec!["sorryAx".to_string()],
+            },
+            "axiom_rejected",
+        );
+
+        let mut rejected = current_lean_metadata();
+        rejected.kernel_axioms = Some(vec!["propext".to_string()]);
+        rejected.axiom_audit = Some("rejected".to_string());
+        check(
+            rejected,
+            LeanAxiomAudit::Rejected { disallowed: vec![] },
+            "axiom_rejected",
+        );
+
+        let mut errored = current_lean_metadata();
+        errored.kernel_axioms = Some(vec!["propext".to_string()]);
+        errored.axiom_audit = Some("error".to_string());
+        check(errored, LeanAxiomAudit::Error, "axiom_rejected");
+
+        let mut unaudited = current_lean_metadata();
+        unaudited.axiom_audit = None;
+        unaudited.kernel_axioms = None;
+        check(unaudited, LeanAxiomAudit::Unaudited, "proven");
+
+        let mut inferred_pass = current_lean_metadata();
+        inferred_pass.kernel_axioms = Some(vec!["propext".to_string()]);
+        inferred_pass.axiom_audit = None;
+        check(
+            inferred_pass,
+            LeanAxiomAudit::Passed {
+                axioms: vec!["propext".to_string()],
+            },
+            "proven",
+        );
+
+        let (mut stale_cert, stale_atom) = certificate_with_lean_metadata({
+            let mut metadata = current_lean_metadata();
+            metadata.axiom_audit = Some("rejected".to_string());
+            metadata
+        });
+        stale_cert.atoms[0].translator_version = "old-translator".to_string();
+        assert_eq!(
+            verify_certificate(&stale_cert, &[&stale_atom], true)[0],
+            ("hard_lemma".to_string(), "stale_translator".to_string())
+        );
+    }
+
+    #[test]
+    fn test_refresh_certificate_integrity_rejects_axiom_audit_failure() {
+        let (mut cert, _) = certificate_with_lean_metadata({
+            let mut metadata = current_lean_metadata();
+            metadata.kernel_axioms = Some(vec!["sorryAx".to_string()]);
+            metadata.axiom_audit = Some("passed".to_string());
+            metadata
+        });
+
+        refresh_certificate_integrity(&mut cert);
+        assert!(!cert.all_verified);
+    }
+
+    #[test]
+    fn test_legacy_lean_metadata_roundtrips_without_audit_fields() {
+        let (mut cert, _) = certificate_with_lean_metadata(current_lean_metadata());
+        let encoded = serde_json::to_string(&cert).expect("serialize certificate");
+        assert!(!encoded.contains("\"kernel_axioms\""));
+        assert!(!encoded.contains("\"axiom_audit\""));
+
+        let decoded: ProofCertificate =
+            serde_json::from_str(&encoded).expect("deserialize certificate");
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("re-serialize certificate"),
+            encoded
+        );
+
+        cert.atoms[0].lean_result_metadata = None;
+        assert!(!serde_json::to_string(&cert)
+            .expect("serialize certificate without metadata")
+            .contains("\"kernel_axioms\""));
     }
 
     #[test]

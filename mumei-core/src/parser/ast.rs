@@ -456,6 +456,12 @@ pub struct ClauseMode {
     pub mode: ClauseTrustMode,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverClause {
+    pub clause: String,
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Atom {
     pub name: String,
@@ -469,6 +475,7 @@ pub struct Atom {
     pub requires: String,
     pub clause_labels: Vec<ClauseLabel>,
     pub clause_modes: Vec<ClauseMode>,
+    pub covers: Vec<CoverClause>,
     pub forall_constraints: Vec<Quantifier>,
     pub ensures: String,
     pub body_expr: String,

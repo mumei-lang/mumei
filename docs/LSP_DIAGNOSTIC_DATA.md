@@ -67,6 +67,25 @@ Each Lean-verified atom produces a severity `3` diagnostic with:
 The diagnostic is emitted per atom whose certificate has
 `z3_check_result == "lean_verified"`.
 
+A kernel-axiom audit rejection produces a severity `2` diagnostic:
+
+```json
+{
+  "lean_escalation": {
+    "status": "axiom_rejected",
+    "atom": "...",
+    "z3_result_class": "...",
+    "certificate": "...",
+    "disallowed": ["sorryAx"]
+  }
+}
+```
+
+`disallowed` lists the non-standard kernel axioms reported by the rejected
+`axiom_audit`. An audit error also uses `axiom_rejected` but omits `disallowed`.
+This diagnostic is also emitted for an escalated atom whose certificate still
+records its Z3 result but whose attached Lean result failed the audit.
+
 ## `mumei-intent` data
 
 Intent-drift diagnostics have severity `2` and are emitted when drift is
@@ -110,10 +129,10 @@ CodeLens entries use the following literal `kind` values:
 
 ## Renderer rules
 
-Renderers reflect `lean_verified`, `escalation_reason`, and
-`z3_result_class` verbatim.  Do not introduce alternate names.  The only
-`status` values are `pending` and `lean_verified`.  Unknown keys must be
-ignored, not remapped.
+Renderers reflect `lean_verified`, `escalation_reason`, `z3_result_class`, and
+`disallowed` verbatim.  Do not introduce alternate names.  The only `status`
+values are `pending`, `lean_verified`, and `axiom_rejected`.  Unknown keys must
+be ignored, not remapped.
 
 ## Editor reference implementations
 
