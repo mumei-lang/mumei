@@ -75,8 +75,43 @@ fn datatype_enum_missing_arm_fails_with_ctor_name() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        combined.contains("Match is not exhaustive") && combined.contains("Blue"),
+        combined.contains("Match is not exhaustive") && combined.contains("Color::Blue (tag=2)"),
         "expected uncovered-constructor counterexample naming 'Blue', got:\n{combined}"
+    );
+}
+
+#[test]
+fn datatype_enum_missing_payload_arm_shows_fields_and_tag() {
+    let output = mumei_verify("tests/test_datatype_enum_payload_negative.mm");
+    assert!(
+        !output.status.success(),
+        "non-exhaustive enum match should fail verification"
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("Match is not exhaustive")
+            && combined.contains("Shape::Circle(i64=?) (tag=1)"),
+        "expected payload-variant counterexample `(fields) (tag=N)`, got:\n{combined}"
+    );
+}
+
+#[test]
+fn shared_variant_names_resolve_to_the_target_enum() {
+    // Two enums share variant names; the uncovered arm must be reported on the
+    // target's own enum (A::X), not the other owner of the same-named variants.
+    let output = mumei_verify("tests/test_enum_shared_variant_negative.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("A::X (tag=0)") && !combined.contains("B::"),
+        "counterexample must name the target's enum, got:\n{combined}"
     );
 }
 

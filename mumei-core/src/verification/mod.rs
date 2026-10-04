@@ -25,9 +25,11 @@ pub mod loop_detector;
 pub mod module_env;
 pub mod mutation;
 pub mod nlae_reporter;
+pub mod phase_artifacts;
 pub mod phase_contract;
 pub mod profiler;
 pub mod property_based;
+pub mod raising;
 pub mod spec_validation;
 pub mod spurious_detection;
 pub(crate) mod support;
@@ -47,11 +49,13 @@ pub use module_env::*;
 pub use mutation::{apply_mutation, generate_mutations, MutationOperator, MutationResult};
 pub use nlae_reporter::*;
 pub use phase_contract::{
-    check_phase_order, counterexample_fidelity, phase_contract, CounterexampleFidelity,
-    PhaseContract, PhaseFact, PhaseOrderError, COVER_PHASE, ENSURES_PHASE, PHASE_CONTRACTS,
+    check_phase_order, counterexample_fidelity, phase_contract, raised_counterexample_fidelity,
+    CounterexampleFidelity, PhaseContract, PhaseFact, PhaseOrderError, COVER_PHASE, ENSURES_PHASE,
+    PHASE_CONTRACTS,
 };
 pub use profiler::{ConstraintProfile, IncrementalProfiler, SolverHeatmap};
 pub use property_based::*;
+pub use raising::*;
 pub use spec_validation::*;
 pub use spurious_detection::*;
 pub use support::{

@@ -160,6 +160,7 @@ pub(crate) struct VCtx<'a> {
     /// across every instance of its binder, so a call whose arguments mention
     /// one of these is rejected (see `reject_quantifier_dependent_call`).
     pub(crate) quantifier_binders: std::cell::RefCell<Vec<(String, Dynamic<'a>)>>,
+    pub(crate) call_result_symbols: std::cell::RefCell<std::collections::HashSet<String>>,
 }
 
 impl<'a> VCtx<'a> {

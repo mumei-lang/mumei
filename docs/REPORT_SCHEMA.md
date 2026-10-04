@@ -126,9 +126,27 @@ LSP diagnostics include `relatedInformation` for multi-location errors, enabling
 | `failed_clause` | `string` | No | Failing ensures conjunct on a postcondition violation |
 | `failed_clause_label` | `string` | No | Optional label for the failing ensures conjunct; absent when unlabeled |
 | `counterexample_fidelity` | `"exact" \| "bounded" \| "approximate"` | No | Exact means replayed under Mumei semantics and the violation reproduced; approximate means not replayed or replay was inconclusive; bounded means a bounded-depth phase produced the counterexample |
+| `counterexample_provenance` | `object` | No | Per-value raising status and lowering, optional source type/solver symbol, and omitted internal solver symbols |
+| `cover_results[].witness_provenance` | `object` | Cover results | Raising provenance for the corresponding witness |
 | `suggestion` | `string` | No | Fix suggestion text (counterexample や unsat core を踏まえた動的な修正提案が含まれる場合がある) |
 | `span` | `object` | No | Source location (`file`, `line`, `col`, `len`) |
 | `type_definition_locations` | `array` | No | Constraint source locations |
+
+`counterexample` remains an object mapping source names to rendered strings.
+`counterexample_provenance.values` describes the same reported source values
+with a `raised` or `unraisable` status and the lowering used. Unraisable values
+retain their solver rendering and include a reason; their presence makes
+`complete` false and `counterexample_fidelity` `"approximate"`.
+`omitted_solver_symbols` lists internal solver values that were not emitted as
+source counterexample fields.
+
+Primitive lowering labels include `int` for integer-sorted source integers,
+`bitvec_i64` and `bitvec_i32` for signed bit-vectors, `bitvec_u64` and
+`bitvec_u32` for unsigned bit-vectors, `real_f64` and `real_f32` for exactly
+representable real values, and `ieee754_f64` and `ieee754_f32` for matching
+IEEE floating-point sorts. `str_length` and `array_length` identify the
+solver-side length companions of `Str` and array parameters (`len(s)`); they
+are reported in reconstruction-loss values and provenance.
 
 Ensures reports include `context_reachability` and an `ensures_outcomes` entry
 for each non-trivial lowered, skipped, or assumed clause. Each outcome entry
@@ -278,6 +296,11 @@ Example:
   }
 }
 ```
+
+`mumei verify --emit sarif` also writes `report.sarif` beside the report
+artifacts. It contains a SARIF 2.1.0 run with atom-level and obligation-level
+findings; see [the CLI reference](CLI.md#sarif-output) for its rule mapping and
+properties.
 
 ## proof_graph.json Schema
 

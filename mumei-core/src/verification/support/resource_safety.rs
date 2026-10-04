@@ -121,7 +121,7 @@ pub(crate) fn verify_resource_hierarchy(atom: &Atom, module_env: &ModuleEnv) -> 
             // Priority(r_j) > Priority(r_i) を検証
             solver.push();
             solver.assert(&pri_j.le(pri_i)); // 否定: Priority(r_j) <= Priority(r_i)
-            if solver.check() == SatResult::Sat {
+            if crate::verification::phase_artifacts::check(&solver) == SatResult::Sat {
                 solver.pop(1);
                 let error_span = module_env
                     .resources

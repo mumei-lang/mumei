@@ -70,6 +70,7 @@ pub(crate) fn verify_atom_invariant(
         local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
 
@@ -117,7 +118,7 @@ pub(crate) fn verify_atom_invariant(
             // invariant の否定を assert
             solver.assert(&inv_z3.not());
             // Unsat なら requires → invariant が証明された
-            if solver.check() == SatResult::Sat {
+            if crate::verification::phase_artifacts::check(&solver) == SatResult::Sat {
                 solver.pop(1);
                 return Err(MumeiError::verification_at(
                     format!(
@@ -137,7 +138,7 @@ pub(crate) fn verify_atom_invariant(
         // requires が true の場合、invariant は無条件に成立する必要がある
         solver.push();
         solver.assert(&inv_z3.not());
-        if solver.check() == SatResult::Sat {
+        if crate::verification::phase_artifacts::check(&solver) == SatResult::Sat {
             solver.pop(1);
             return Err(MumeiError::verification_at(
                 format!(
@@ -180,7 +181,7 @@ pub(crate) fn verify_atom_invariant(
 
         // invariant の維持を検証: ¬inv_after が Unsat なら維持されている
         solver.assert(&inv_after.not());
-        if solver.check() == SatResult::Sat {
+        if crate::verification::phase_artifacts::check(&solver) == SatResult::Sat {
             solver.pop(1);
             return Err(MumeiError::verification_at(
                 format!(

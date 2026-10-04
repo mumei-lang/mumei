@@ -95,6 +95,7 @@ fn test_subsumption_vc<'a>(ctx: &'a Context, module_env: &'a ModuleEnv) -> VCtx<
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     }
 }
@@ -1194,6 +1195,7 @@ fn test_constraint_budget_exceeded() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
 
@@ -1245,6 +1247,7 @@ fn test_constraint_budget_no_limit() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
 
@@ -2072,6 +2075,7 @@ fn test_subsumption_check_holds_with_requires() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2316,6 +2320,7 @@ fn test_subsumption_check_bool_param_and_result() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2401,6 +2406,7 @@ fn test_subsumption_check_call_ref_alias_x() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2486,6 +2492,7 @@ fn test_subsumption_check_call_ref_aliases_do_not_follow_concrete_names() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = test_atom(
@@ -2547,6 +2554,7 @@ fn test_subsumption_check_array_length_does_not_alias_caller_symbol() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = test_atom(
@@ -2606,6 +2614,7 @@ fn test_subsumption_check_array_length_aliases_follow_callback_position() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = test_atom(
@@ -2668,6 +2677,7 @@ fn test_subsumption_check_fails_without_requires() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2759,6 +2769,7 @@ fn test_subsumption_check_crossed_param_names() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2857,6 +2868,7 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2937,6 +2949,7 @@ fn test_subsumption_check_concrete_true_ensures_fails() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -3415,6 +3428,7 @@ fn test_expr_to_z3_true_false_are_bool() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -3489,6 +3503,7 @@ fn test_expr_to_z3_pow_constant_folds_full_precision() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -3556,6 +3571,7 @@ fn test_tuple_result_indexing_uses_typed_components() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -3723,6 +3739,7 @@ fn test_chained_comparison_normalizes_before_lowering() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
