@@ -183,10 +183,10 @@ pub(crate) fn check_contract_subsumption<'a>(
     // Without this, the check would ask "for ALL params, does ensures ⇒
     // contract?" which is too strong. We need "for params satisfying
     // requires, does ensures ⇒ contract?".
-    let concrete_requires = crate::verification::contract_view(
-        concrete_atom,
-        crate::verification::ContractView::CallerRequires,
-    );
+    // The contract's requires must imply the concrete atom's requires
+    // including its quantified conjuncts; if a quantifier cannot be
+    // lowered in this positional env this returns Err (fail-closed).
+    let concrete_requires = crate::verification::caller_requires_obligation(concrete_atom);
     let concrete_req = concrete_requires.trim();
     let requires_bool_opt = if concrete_req != "true" && !concrete_req.is_empty() {
         let req_ast = parse_expression(concrete_req);
@@ -237,7 +237,7 @@ pub(crate) fn check_contract_subsumption<'a>(
             solver.assert(contract_requires_bool);
         }
         solver.assert(&concrete_requires_bool.not());
-        let sat_result = solver.check();
+        let sat_result = crate::verification::phase_artifacts::check(solver);
         solver.pop(1);
 
         if sat_result == SatResult::Sat {
@@ -306,7 +306,7 @@ pub(crate) fn check_contract_subsumption<'a>(
     }
     solver.assert(&concrete_bool);
     solver.assert(&contract_bool.not());
-    let sat_result = solver.check();
+    let sat_result = crate::verification::phase_artifacts::check(solver);
     solver.pop(1);
 
     if sat_result == SatResult::Sat {

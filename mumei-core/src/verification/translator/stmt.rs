@@ -319,7 +319,7 @@ fn check_while_invariant<'a>(
             .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
         solver.push();
         solver.assert(&Bool::and(ctx, &[&path_cond, &inv.not()]));
-        let base = solver.check();
+        let base = crate::verification::phase_artifacts::check(solver);
         solver.pop(1);
         if base != SatResult::Unsat {
             return Ok(false);
@@ -344,7 +344,7 @@ fn check_while_invariant<'a>(
                     .as_bool()
                     .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
                 solver.assert(&inv_after.not());
-                Ok(solver.check())
+                Ok(crate::verification::phase_artifacts::check(solver))
             })();
             solver.pop(1);
             result
@@ -652,7 +652,7 @@ pub(crate) fn stmt_to_z3<'a>(
                     .ok_or(MumeiError::type_error("Array index must be integer"))?;
                 solver.push();
                 solver.assert(&safe.not());
-                if solver.check() == SatResult::Sat {
+                if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                     solver.pop(1);
                     return Err(MumeiError::verification(format!(
                         "Potential Out-of-Bounds store on '{}' (index may be < 0 or >= len_{})",
@@ -819,7 +819,7 @@ pub(crate) fn stmt_to_z3<'a>(
                 let path_cond = vc.path_cond_conj();
                 solver.push();
                 solver.assert(&Bool::and(ctx, &[&path_cond, &inv.not()]));
-                if solver.check() == SatResult::Sat {
+                if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                     solver.pop(1);
                     return Err(MumeiError::verification("Invariant fails initially"));
                 }
@@ -852,7 +852,7 @@ pub(crate) fn stmt_to_z3<'a>(
                         .as_bool()
                         .ok_or(MumeiError::type_error("Invariant must be boolean"))?;
                     solver.assert(&inv_after.not());
-                    if solver.check() == SatResult::Sat {
+                    if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                         solver.pop(1);
                         return Err(MumeiError::verification("Invariant not preserved"));
                     }
@@ -890,7 +890,7 @@ pub(crate) fn stmt_to_z3<'a>(
                     solver.assert(&inv_h);
                     solver.assert(&c_h);
                     solver.assert(&v_before.lt(&Int::from_i64(ctx, 0)));
-                    if solver.check() == SatResult::Sat {
+                    if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                         solver.pop(1);
                         *env = env_snapshot;
                         *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
@@ -909,7 +909,7 @@ pub(crate) fn stmt_to_z3<'a>(
                             "decreases expression must be integer",
                         ))?;
                     solver.assert(&v_after.ge(&v_before));
-                    if solver.check() == SatResult::Sat {
+                    if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                         solver.pop(1);
                         *env = env_snapshot;
                         *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
@@ -1010,7 +1010,7 @@ pub(crate) fn stmt_to_z3<'a>(
                             .ok_or(MumeiError::type_error("resource invariant must be boolean"))?;
                         solver.push();
                         solver.assert(&inv_after.not());
-                        let result = solver.check();
+                        let result = crate::verification::phase_artifacts::check(solver);
                         solver.pop(1);
                         match result {
                             z3::SatResult::Sat => {

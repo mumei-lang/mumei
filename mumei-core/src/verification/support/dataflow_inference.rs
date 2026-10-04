@@ -250,6 +250,8 @@ fn trace_eval_atom_call(
         call_env.insert(param.name.clone(), trace_value_as_int(&value)?);
     }
 
+    // Keep the plain caller view: the scalar i64 env cannot evaluate
+    // forall/exists obligations (they would come back None).
     let caller_requires = crate::verification::contract_view(
         callee,
         crate::verification::ContractView::CallerRequires,
@@ -663,10 +665,43 @@ pub(crate) fn infer_requires(atom: &Atom, module_env: &ModuleEnv) -> Vec<String>
     let callees_with_args = collect_callees_with_args_stmt(&body_stmt);
     for (callee_name, call_args) in &callees_with_args {
         if let Some(callee_atom) = module_env.get_atom(callee_name) {
-            let caller_requires = crate::verification::contract_view(
-                callee_atom,
-                crate::verification::ContractView::CallerRequires,
-            );
+            // Quantifiers whose bound variable collides with a callee param
+            // name or appears in an argument expression would be captured by
+            // the placeholder substitution below — alpha-rename them so the
+            // quantified obligation still propagates.
+            let mut renamed_callee = callee_atom.clone();
+            for q in renamed_callee.forall_constraints.iter_mut() {
+                let var_re = regex::Regex::new(&format!(r"\b{}\b", regex::escape(&q.var))).unwrap();
+                let collides = callee_atom.params.iter().any(|p| p.name == q.var)
+                    || call_args
+                        .iter()
+                        .any(|arg| var_re.is_match(&expr_to_source_string(arg)));
+                if !collides {
+                    continue;
+                }
+                let mut fresh = format!("{}_q", q.var);
+                loop {
+                    let fresh_re =
+                        regex::Regex::new(&format!(r"\b{}\b", regex::escape(&fresh))).unwrap();
+                    let taken = callee_atom
+                        .params
+                        .iter()
+                        .any(|p| fresh_re.is_match(&p.name))
+                        || call_args
+                            .iter()
+                            .any(|arg| fresh_re.is_match(&expr_to_source_string(arg)))
+                        || fresh_re.is_match(&q.start)
+                        || fresh_re.is_match(&q.end)
+                        || fresh_re.is_match(&q.condition);
+                    if !taken {
+                        break;
+                    }
+                    fresh.push_str("_q");
+                }
+                q.condition = var_re.replace_all(&q.condition, fresh.as_str()).to_string();
+                q.var = fresh;
+            }
+            let caller_requires = crate::verification::caller_requires_obligation(&renamed_callee);
             if caller_requires != "true" && !caller_requires.is_empty() {
                 let mut substituted_req = caller_requires;
                 // callee の仮引数名と呼び出し引数を zip して置換

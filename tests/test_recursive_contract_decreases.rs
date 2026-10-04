@@ -136,6 +136,51 @@ atom tick(n: i64)
     body: if n == 0 { perform Tick.tick(); 0 } else { perform Tick.tick(); tick(n - 1) };
 "#;
 
+// An eligible recursive atom whose top-level requires carries a scalar
+// quantified conjunct. `caller_requires_obligation` (policy 6) appends the
+// conjunct to the call-site obligation, so a decreasing call still has to
+// establish the quantified precondition.
+const QR_QUANTIFIED_REQUIRES: &str = r#"
+atom qr(n: i64)
+    requires: n >= 0 && forall(i, 0, n, i * i >= 0);
+    ensures: result >= 0;
+    decreases: n;
+    body: if n == 0 { 0 } else { 1 + qr(n - 1) };
+"#;
+
+// Failing twin: `qr2` itself is a clean eligible recursive atom — its
+// recursive call `qr2(n - 1, k)` decreases the measure and satisfies the
+// requires (the caller's quantified conjunct implies the callee's). The
+// outside caller `use_qr2` passes `k = 7`, so the scalar conjuncts hold
+// (`5 >= 0`, `7 >= 0`) but the quantified conjunct instantiated at `k = 7`
+// — `forall(i, 0, 7, i < 5)` — is false. The call therefore fails on the
+// quantified requires conjunct alone, and no termination obligation applies
+// to a call from outside the SCC. The `atom_ref` call site is used because
+// its diagnostic echoes the requires text.
+const QR_QUANTIFIED_REQUIRES_FAIL: &str = r#"
+atom qr2(n: i64, k: i64)
+    requires: n >= 0 && forall(i, 0, k, i < 5);
+    ensures: result >= 0;
+    decreases: n;
+    body: if n == 0 { 0 } else { 1 + qr2(n - 1, k) };
+
+atom use_qr2()
+    requires: true;
+    ensures: result >= 0;
+    body: call(atom_ref(qr2), 5, 7);
+"#;
+
+// A recursive call whose argument depends on a quantifier-bound variable is
+// rejected before any `rec_fn#` application or termination obligation is
+// built: the enclosing clause is unverifiable (exit 3).
+const QF_CALL_UNDER_QUANTIFIER: &str = r#"
+atom qf(n: i64)
+    requires: n >= 0;
+    ensures: forall(i, 0, n, qf(i) >= 0);
+    decreases: n;
+    body: 0;
+"#;
+
 struct CaseResult {
     name: &'static str,
     target: &'static str,
@@ -410,6 +455,59 @@ fn test_constant_unfolding_does_not_crash() {
     eprintln!(
         "tri3 observed verdict: {:?}",
         case.verdict().as_deref().unwrap_or("<none>")
+    );
+}
+
+#[test]
+fn test_quantified_requires_conjunct_verified() {
+    let case = verify("qr", QR_QUANTIFIED_REQUIRES, "qr");
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_quantified_requires_conjunct_violated_fails() {
+    let case = verify("qr2", QR_QUANTIFIED_REQUIRES_FAIL, "use_qr2");
+    assert!(case.did_not_crash());
+    assert_verdict(&case, "failed");
+    assert_eq!(
+        case.failure_type().as_deref(),
+        Some("precondition_violated"),
+        "qr2 should report precondition_violated; report:\n{:?}",
+        case.report
+    );
+    let message = format!("{:?}", case.report);
+    assert!(
+        message.contains("forall(i, 0, k, i < 5)"),
+        "the diagnostic should name the violated quantified conjunct; report:\n{message}"
+    );
+}
+
+#[test]
+fn test_call_under_quantifier_is_unverifiable() {
+    let case = verify("qf", QF_CALL_UNDER_QUANTIFIER, "qf");
+    assert!(case.did_not_crash());
+    assert_eq!(
+        case.report
+            .as_ref()
+            .and_then(|report| report["status"].as_str()),
+        Some("unverifiable"),
+        "qf should be unverifiable; report:\n{:?}",
+        case.report
+    );
+    assert_eq!(
+        case.output.status.code(),
+        Some(3),
+        "qf should exit 3; stdout:\n{}",
+        String::from_utf8_lossy(&case.output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&case.output.stderr);
+    let stdout = String::from_utf8_lossy(&case.output.stdout);
+    let report = format!("{:?}", case.report);
+    assert!(
+        stdout.contains("Unsupported call under quantifier")
+            || stderr.contains("Unsupported call under quantifier")
+            || report.contains("Unsupported call under quantifier"),
+        "expected the QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED marker; stdout:\n{stdout}\nreport:\n{report}"
     );
 }
 

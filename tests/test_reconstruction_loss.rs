@@ -158,7 +158,10 @@ body: { x + 1 };
         payload["reconstruction_losses"][0]["violated_property"],
         "result > 10"
     );
-    assert!(payload["reconstruction_losses"][0]["counter_example"]["x"].is_string());
+    assert_eq!(
+        payload["reconstruction_losses"][0]["counter_example"]["x"],
+        5
+    );
     assert_eq!(payload["reconstruction_losses"][0]["loss_set_size"], 1);
     assert_eq!(payload["reconstruction_losses"][0]["is_zero_loss"], false);
     assert!(payload["reconstruction_losses"][0]["loss_vector"].is_array());

@@ -58,6 +58,13 @@ ensures: result.x == n;
 body: P { x: n };
 "#;
 
+const QUANTIFIED_RECURSIVE_REQUIRES: &str = r#"
+atom q(n: i64)
+    requires: n >= 0 && forall(i, 0, n, q(i) >= 0);
+    ensures: result >= 0;
+    body: n;
+"#;
+
 struct CaseResult {
     name: &'static str,
     target: &'static str,
@@ -97,8 +104,12 @@ impl CaseResult {
     }
 
     fn did_not_crash(&self) -> bool {
-        self.output.status.code().is_some_and(|code| code != 134)
-            && !String::from_utf8_lossy(&self.output.stderr).contains("overflowed its stack")
+        // 0 verified, 1 rejected, 3 inconclusive (docs/CLI.md); anything else,
+        // including signal termination, is not a verdict.
+        let stderr = String::from_utf8_lossy(&self.output.stderr);
+        matches!(self.output.status.code(), Some(0 | 1 | 3))
+            && !stderr.contains("overflowed its stack")
+            && !stderr.contains("panicked")
     }
 }
 
@@ -330,12 +341,12 @@ fn use_g2_bad_fails() {
 }
 
 #[test]
-fn mk_struct_result_reports_failure_without_crashing() {
-    assert_case(verify("mk", STRUCT_P, "mk"), "failed");
+fn mk_struct_result_verifies_without_crashing() {
+    assert_case(verify("mk", STRUCT_P, "mk"), "verified");
 }
 
 #[test]
-fn use_mk_reports_failure_without_crashing() {
+fn use_mk_verifies() {
     assert_case(
         verify(
             "use_mk",
@@ -344,7 +355,7 @@ fn use_mk_reports_failure_without_crashing() {
             ),
             "use_mk",
         ),
-        "failed",
+        "verified",
     );
 }
 
@@ -359,5 +370,17 @@ fn use_mk_bad_fails() {
             "use_mk_bad",
         ),
         "failed",
+    );
+}
+
+#[test]
+fn quantified_recursive_requires_and_caller_fail_closed_without_crashing() {
+    let source = format!(
+        "{QUANTIFIED_RECURSIVE_REQUIRES}\natom use_q(n: i64)\n    requires: n >= 0;\n    ensures: result >= 0;\n    body: q(n);\n"
+    );
+    assert_case(verify("q_quantified_requires", &source, "q"), "unknown");
+    assert_case(
+        verify("use_q_quantified_requires", &source, "use_q"),
+        "unknown",
     );
 }

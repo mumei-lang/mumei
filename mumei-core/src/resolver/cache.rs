@@ -8,10 +8,14 @@ use std::path::Path;
 
 /// Bump when verifier semantics change so cached proofs are re-derived.
 /// Version 3 enables checker-first MIR borrow checking.
-/// Versions 4 (PR #673) and 6 (PR #682) are taken by other open PRs.
-/// Version 5 adds atom-level `decreases` clauses and congruent recursive
-/// contracts (recursive SCC termination checking).
-pub const VERIFIER_POLICY_VERSION: u32 = 5;
+/// Version 4 stops lowering calls whose arguments depend on a quantifier-bound
+/// variable, so earlier "verified" results for such atoms must be re-derived.
+/// Version 6 checks a callee's quantified requires at call sites and keeps
+/// quantifiers nested under non-conjunctive operators in the requires text,
+/// and stops quantifier binders from capturing same-named outer variables.
+/// Version 7 enables recursive contracts: `decreases` termination obligations
+/// and congruent recursive calls.
+pub const VERIFIER_POLICY_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -453,6 +457,24 @@ pub fn compute_proof_hash_with_flags(
                 hasher.update(b"|decreases:");
                 hasher.update(dec.as_bytes());
             }
+            if !callee_atom.forall_constraints.is_empty() {
+                for q in &callee_atom.forall_constraints {
+                    let quantifier_type = match q.q_type {
+                        crate::parser::QuantifierType::ForAll => "forall",
+                        crate::parser::QuantifierType::Exists => "exists",
+                    };
+                    hasher.update(b",quantified_requires:");
+                    hasher.update(quantifier_type.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.var.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.start.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.end.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.condition.as_bytes());
+                }
+            }
             if !callee_atom.clause_modes.is_empty() {
                 for mode in &callee_atom.clause_modes {
                     hasher.update(b",clause_mode:");
@@ -807,6 +829,31 @@ body: { getx(Pair { a: 1, b: 2 }) };
         let after = env_and_hash(&format!(
             "{structs}\ntrusted atom getx(p: Point) -> i64\nrequires: true;\nensures: true;\nbody: {{ p.x }};\n{MAIN}"
         ));
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn callee_quantified_requires_change_invalidates_the_proof_hash() {
+        let before = env_and_hash(
+            "trusted atom getx(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 0 && forall(i, 0, n, arr[i] > 0);\n\
+             ensures: result > 0;\n\
+             body: arr[0];\n\
+             trusted atom main(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 1 && forall(i, 0, n, arr[i] > 1);\n\
+             ensures: result > 0;\n\
+             body: getx(arr, n);\n",
+        );
+        let after = env_and_hash(
+            "trusted atom getx(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 0 && forall(i, 0, n, arr[i] > 1);\n\
+             ensures: result > 0;\n\
+             body: arr[0];\n\
+             trusted atom main(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 1 && forall(i, 0, n, arr[i] > 1);\n\
+             ensures: result > 0;\n\
+             body: getx(arr, n);\n",
+        );
         assert_ne!(before, after);
     }
 

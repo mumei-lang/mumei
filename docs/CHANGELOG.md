@@ -9,16 +9,54 @@
   declare `decreases`, call-free measure over params, no effects/`ref
   mut`/`consume`/`async`/type params, `Verified`, scalar `Int`/`Bool`
   signatures), recursive contract calls share an uninterpreted `rec_fn#` and
-  assume the callee ensures under `CallerRequires ⇒ CallerEnsures` (with path
-  conditions conjoined to the antecedent for SCC-internal calls), so
-  contracts like `result == n + tri(n - 1)` (including mutual recursion) are
-  provable.
+  assume the callee ensures under `R ⇒ CallerEnsures` where `R` is
+  `caller_requires_obligation` (caller-view requires plus quantified requires
+  conjuncts), with path conditions conjoined to the antecedent for
+  SCC-internal calls, so contracts like `result == n + tri(n - 1)` (including
+  mutual recursion) are provable.
 - **Advisory hints**: atoms on ineligible recursive cycles get a
   `recursive_contract_needs_decreases` / `recursive_contract_unsupported`
   hint diagnostic; the call semantics and verdict are unchanged.
-- **Verifier policy version**: bumped to 5 so cached proofs are re-derived.
+- **Verifier policy version**: bumped to 7 so cached proofs are re-derived.
 
-### 2026-09-27: v0.6.20 release version bump
+
+### Unreleased: quantified `requires` checked at call sites
+
+- Quantified `requires` conjuncts (`forall`/`exists` at the top level of
+  the clause) are now part of the callee obligation checked at every call
+  site — direct calls, `call(atom_ref(..))`, contract subsumption, cover
+  obligations, and dataflow requires-inference. Previously they were only
+  assumed inside the callee body, so callers could invoke atoms like
+  `needs_pos` without ever establishing the quantified precondition.
+- Quantifiers nested under `||`, `!`, `if`/`then`/`else`/`match`, `|`
+  (lambda/bit-or/`|>`), `=>`, or non-conjunctive positions are no longer
+  hoisted into top-level facts: they stay in the requires text and are
+  lowered in place. This removes an unsound free hypothesis
+  (`n == 5 || forall(...)` used to assert the forall unconditionally) and
+  a spurious "requires clause is unsatisfiable" on `!forall(...)`.
+- Quantifier binders are fresh constants now: a `forall(i, …)` / `exists(i, …)`
+  no longer captures an outer variable or parameter that happens to share
+  the bound name (previously callers could satisfy quantified preconditions
+  for free, and a requires-side binder over a same-named param bound the
+  parameter instead of the quantified variable).
+- `VERIFIER_POLICY_VERSION` bumped to 6 so cached proofs are re-derived.
+
+---
+
+### 2026-10-04: fail closed on calls under quantifiers
+
+- A call inside `forall` / `exists` whose arguments depend on the bound
+  variable used to lower to one result constant shared by every instance of
+  the binder, so `requires: forall(i, 0, n, ident(arr[i]) == arr[i])` proved
+  that all elements are equal. Such calls (atom calls, `call(atom_ref(..))`,
+  dynamic `call(f, ..)`, let-bound lambdas, `sqrt`, `cast_to_int`, `perform`)
+  are now rejected and the atom is reported `unverifiable` (exit 3); a
+  `cover` clause reports `unknown`. Calls that don't mention the bound
+  variable are unchanged.
+- `VERIFIER_POLICY_VERSION` is bumped to 4 so cached results are re-derived.
+
+---
+
 
 - **Workspace and member crate versions**: bumped versions from `0.6.19` to
   `0.6.20` so `mumei --version`, `mumei inspect`, and proof-certificate

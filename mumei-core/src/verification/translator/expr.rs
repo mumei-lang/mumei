@@ -3,6 +3,9 @@ use super::super::support::*;
 use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
+use crate::verification::raising::{
+    mark_abstract_call_result_unraisable, references_call_result, resolve_source_base_type,
+};
 use crate::verification::translator::may_write::CalleeRef;
 use serde_json::json;
 use z3::{FuncDecl, Sort};
@@ -414,7 +417,7 @@ pub(crate) fn shift_range_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> Shif
         solver.push();
         solver.assert(&path_cond);
         solver.assert(&bv_shift_out_of_range(vc.ctx, &amount));
-        let result = solver.check();
+        let result = crate::verification::phase_artifacts::check(solver);
         solver.pop(1);
         match result {
             SatResult::Sat => return ShiftRangeStatus::OutOfRange,
@@ -454,7 +457,7 @@ pub(crate) fn div_safety_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> DivSa
         solver.push();
         solver.assert(&path_cond);
         solver.assert(&rb._eq(&zero));
-        let divides_by_zero = solver.check();
+        let divides_by_zero = crate::verification::phase_artifacts::check(solver);
         solver.pop(1);
         match divides_by_zero {
             SatResult::Sat => return DivSafetyStatus::DivisionByZero,
@@ -464,7 +467,7 @@ pub(crate) fn div_safety_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> DivSa
         solver.push();
         solver.assert(&path_cond);
         solver.assert(&Bool::and(ctx, &[&lb._eq(&min), &rb._eq(&minus_one)]));
-        let overflows = solver.check();
+        let overflows = crate::verification::phase_artifacts::check(solver);
         solver.pop(1);
         match overflows {
             SatResult::Sat => return DivSafetyStatus::Overflow,
@@ -558,7 +561,7 @@ fn bv_binary_op<'a>(
                     solver.assert(cond);
                 }
                 solver.assert(&bv_shift_out_of_range(ctx, &rb));
-                let result = solver.check();
+                let result = crate::verification::phase_artifacts::check(solver);
                 solver.pop(1);
                 match result {
                     SatResult::Sat => return Err(out_of_range_shift_error()),
@@ -593,7 +596,8 @@ fn bv_binary_op<'a>(
                     solver.assert(cond);
                 }
                 solver.assert(&rb._eq(&zero));
-                let divides_by_zero = solver.check() == SatResult::Sat;
+                let divides_by_zero =
+                    crate::verification::phase_artifacts::check(solver) == SatResult::Sat;
                 solver.pop(1);
                 if divides_by_zero {
                     return Err(MumeiError::verification(
@@ -611,7 +615,8 @@ fn bv_binary_op<'a>(
                     solver.assert(cond);
                 }
                 solver.assert(&Bool::and(ctx, &[&lb._eq(&min), &rb._eq(&minus_one)]));
-                let overflows = solver.check() == SatResult::Sat;
+                let overflows =
+                    crate::verification::phase_artifacts::check(solver) == SatResult::Sat;
                 solver.pop(1);
                 if overflows {
                     return Err(MumeiError::verification(
@@ -885,15 +890,19 @@ pub(crate) fn expr_to_z3<'a>(
                     )?;
 
                     // 束縛変数を一時的に env に追加して condition を評価
-                    let bound_var = Int::new_const(ctx, var_name.as_str());
+                    // Fresh const: a same-named outer variable must not be
+                    // captured by the quantifier binder.
+                    let bound_var = Int::fresh_const(ctx, var_name.as_str());
                     let old_val = env.insert(var_name.clone(), bound_var.clone().into());
 
                     let range_cond =
                         Bool::and(ctx, &[&bound_var.ge(&start_z3), &bound_var.lt(&end_z3)]);
 
-                    let condition_z3 = expr_to_z3(vc, &args[3], env, None)?.as_bool().ok_or(
-                        MumeiError::type_error(format!("{}(): condition must be boolean", name)),
-                    )?;
+                    vc.quantifier_binders
+                        .borrow_mut()
+                        .push((var_name.clone(), bound_var.clone().into()));
+                    let condition_res = expr_to_z3(vc, &args[3], env, None);
+                    vc.quantifier_binders.borrow_mut().pop();
 
                     // 束縛変数を env から復元
                     if let Some(old) = old_val {
@@ -901,6 +910,14 @@ pub(crate) fn expr_to_z3<'a>(
                     } else {
                         env.remove(&var_name);
                     }
+
+                    let condition_z3 =
+                        condition_res?
+                            .as_bool()
+                            .ok_or(MumeiError::type_error(format!(
+                                "{}(): condition must be boolean",
+                                name
+                            )))?;
 
                     let quantifier_expr = if name == "forall" {
                         // ∀ var ∈ [start, end). condition
@@ -1026,6 +1043,7 @@ pub(crate) fn expr_to_z3<'a>(
                     // ソートは f64 エンコーディング（デフォルト Real、
                     // `--ieee754-f64` で Float）に合わせる。
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    vc.reject_quantifier_dependent_call("sqrt", std::slice::from_ref(&_val))?;
                     // 呼び出しごとに一意な名前を使い、`sqrt(a) + sqrt(b)` の
                     // ような複数呼び出しが同一の Z3 変数に潰れないようにする。
                     static SQRT_COUNTER: std::sync::atomic::AtomicUsize =
@@ -1053,6 +1071,10 @@ pub(crate) fn expr_to_z3<'a>(
                 "cast_to_int" => {
                     // Z3 0.12 では Float->Int 直接変換がないため、シンボリック整数を返す
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    vc.reject_quantifier_dependent_call(
+                        "cast_to_int",
+                        std::slice::from_ref(&_val),
+                    )?;
                     Ok(Int::new_const(ctx, "cast_result").into())
                 }
                 // =============================================================
@@ -1271,6 +1293,7 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                         let recursive_instance = vc.is_instantiating_contract(&callee.name);
                         // The unconstrained recursive result only weakens assumptions.
+                        vc.reject_quantifier_dependent_call(name, &arg_vals)?;
                         let cong = vc.callee_congruent(&callee);
                         let scc_internal = cong && scc_internal_call(vc, &callee);
 
@@ -1343,10 +1366,8 @@ pub(crate) fn expr_to_z3<'a>(
                         }
 
                         // requires の検証: 呼び出し元のコンテキストで事前条件が満たされるか
-                        let caller_requires = crate::verification::contract_view(
-                            &callee,
-                            crate::verification::ContractView::CallerRequires,
-                        );
+                        let caller_requires =
+                            crate::verification::caller_requires_obligation(&callee);
                         if caller_requires.trim() != "true" && !recursive_instance {
                             let _contract_guard = vc.enter_contract_instantiation(&callee.name);
                             if let Some(solver) = solver_opt {
@@ -1366,36 +1387,151 @@ pub(crate) fn expr_to_z3<'a>(
                                             solver.assert(cond);
                                         }
                                         solver.assert(&req_bool.not());
-                                        if solver.check() == SatResult::Sat {
+                                        if crate::verification::phase_artifacts::check(solver)
+                                            == SatResult::Sat
+                                        {
                                             // Extract counterexample: concrete argument values
                                             // that violate the callee's precondition.
-                                            let ce_value = if let Some(model) = solver.get_model() {
-                                                let mut ce_json = serde_json::Map::new();
+                                            let raised_counterexample = if let Some(model) =
+                                                solver.get_model()
+                                            {
+                                                let mut raised = RaisedCounterexample::default();
+                                                let call_result_handles =
+                                                    vc.call_result_symbols.borrow().clone();
+                                                let source_bindings = callee
+                                                    .params
+                                                    .iter()
+                                                    .map(|param| param.name.clone())
+                                                    .collect::<HashSet<_>>();
                                                 for (i, param) in callee.params.iter().enumerate() {
                                                     if let Some(arg_val) = arg_vals.get(i) {
-                                                        if let Some(val) = model.eval(arg_val, true)
-                                                        {
-                                                            let val_str = format!("{}", val);
-                                                            ce_json.insert(
-                                                                param.name.clone(),
-                                                                json!(val_str),
+                                                        let mut raised_value = raise_named_binding(
+                                                            &model,
+                                                            param.name.clone(),
+                                                            &param.name,
+                                                            arg_val,
+                                                            param.type_name.as_deref(),
+                                                            &call_env,
+                                                            vc.module_env,
+                                                        );
+                                                        let references_abstract_result =
+                                                            references_call_result(
+                                                                arg_val,
+                                                                &call_result_handles,
+                                                            ) || param
+                                                                .type_name
+                                                                .as_deref()
+                                                                .and_then(|type_name| {
+                                                                    let base_type =
+                                                                        resolve_source_base_type(
+                                                                            type_name,
+                                                                            vc.module_env,
+                                                                        );
+                                                                    vc.module_env
+                                                                        .get_struct(&base_type)
+                                                                })
+                                                                .is_some_and(|struct_def| {
+                                                                    struct_def.fields.iter().any(
+                                                                        |field| {
+                                                                            call_env
+                                                                                .get(&struct_field_key(
+                                                                                    &param.name,
+                                                                                    &field.name,
+                                                                                ))
+                                                                                .is_some_and(
+                                                                                    |field_value| {
+                                                                                        references_call_result(
+                                                                                            field_value,
+                                                                                            &call_result_handles,
+                                                                                        )
+                                                                                    },
+                                                                                )
+                                                                        },
+                                                                    )
+                                                                });
+                                                        if references_abstract_result {
+                                                            let raw_rendering = model
+                                                                .eval(arg_val, true)
+                                                                .unwrap_or_else(|| arg_val.clone())
+                                                                .to_string();
+                                                            mark_abstract_call_result_unraisable(
+                                                                &mut raised_value,
+                                                                raw_rendering,
                                                             );
                                                         }
+                                                        let argument_rendering =
+                                                            arg_val.to_string();
+                                                        let mut matching_names = env
+                                                            .iter()
+                                                            .filter_map(|(name, value)| {
+                                                                (value.to_string()
+                                                                    == argument_rendering)
+                                                                    .then_some(name.as_str())
+                                                            })
+                                                            .collect::<Vec<_>>();
+                                                        matching_names.sort_by_key(|name| {
+                                                            (
+                                                                !matches!(
+                                                                    classify_solver_symbol(
+                                                                        name,
+                                                                        &source_bindings,
+                                                                        vc.module_env,
+                                                                    ),
+                                                                    SolverSymbolClassification::Source(
+                                                                        _
+                                                                    )
+                                                                ),
+                                                                *name,
+                                                            )
+                                                        });
+                                                        let solver_name = matching_names
+                                                            .first()
+                                                            .map(|name| (*name).to_string());
+                                                        if solver_name
+                                                            .as_deref()
+                                                            .is_some_and(|name| name != param.name)
+                                                        {
+                                                            raised_value.solver_name = solver_name;
+                                                        }
+                                                        raised.values.push(raised_value);
                                                     }
                                                 }
-                                                if ce_json.is_empty() {
-                                                    None
-                                                } else {
-                                                    Some(serde_json::Value::Object(ce_json))
-                                                }
+                                                raised.omitted_solver_symbols.extend(
+                                                    env.keys()
+                                                        .filter(|symbol| {
+                                                            matches!(
+                                                        classify_solver_symbol(
+                                                            symbol,
+                                                                &source_bindings,
+                                                                vc.module_env,
+                                                        ),
+                                                        SolverSymbolClassification::Internal
+                                                    )
+                                                        })
+                                                        .cloned(),
+                                                );
+                                                raised.omitted_solver_symbols.sort();
+                                                raised.omitted_solver_symbols.dedup();
+                                                Some(raised)
                                             } else {
                                                 None
                                             };
+                                            let ce_value = raised_counterexample
+                                                .as_ref()
+                                                .map(RaisedCounterexample::to_counterexample_json)
+                                                .filter(|counterexample| {
+                                                    !counterexample
+                                                        .as_object()
+                                                        .is_some_and(serde_json::Map::is_empty)
+                                                });
+                                            let provenance = raised_counterexample
+                                                .as_ref()
+                                                .map(RaisedCounterexample::provenance_json);
                                             solver.pop(1);
                                             return Err(MumeiError::verification(
                                                 format!("Call to '{}': precondition (requires) not satisfied at call site", name)
                                             ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください")
-                                            .with_counterexample(ce_value));
+                                            .with_counterexample_provenance(ce_value, provenance));
                                         }
                                         solver.pop(1);
                                     }
@@ -1464,18 +1600,17 @@ pub(crate) fn expr_to_z3<'a>(
                                                                 solver.assert(cond);
                                                             }
                                                             solver.assert(&constraint_bool.not());
-                                                            if solver.check() == SatResult::Sat {
-                                                                solver.pop(1);
-                                                                return Err(
-                                                                    MumeiError::verification(
-                                                                        format!(
-                                                                            "Call to '{}': trait method parameter constraint '{}' not satisfied for argument {}",
-                                                                            name, constraint, i
-                                                                        )
-                                                                    ).with_help(
-                                                                        "トレイトメソッドのパラメータ制約が満たされていません。引数の値を確認してください"
-                                                                    ));
-                                                            }
+                                                            if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
+                                                            solver.pop(1);
+                                                            return Err(MumeiError::verification(
+                                                                format!(
+                                                                    "Call to '{}': trait method parameter constraint '{}' not satisfied for argument {}",
+                                                                    name, constraint, i
+                                                                )
+                                                            ).with_help(
+                                                                "トレイトメソッドのパラメータ制約が満たされていません。引数の値を確認してください"
+                                                            ));
+                                                        }
                                                             solver.pop(1);
                                                         }
                                                     }
@@ -1493,6 +1628,9 @@ pub(crate) fn expr_to_z3<'a>(
                         let call_id =
                             CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         let result_name = format!("call_{}_{}", name, call_id);
+                        vc.call_result_symbols
+                            .borrow_mut()
+                            .insert(result_name.clone());
 
                         // 戻り値型から Z3 ソートを選択する。明示的な `-> T` 注釈が
                         // あればそれを使い、なければ従来のヒューリスティック
@@ -1961,7 +2099,7 @@ pub(crate) fn expr_to_z3<'a>(
                     .ok_or(MumeiError::type_error("Index must be integer"))?;
                 solver.push();
                 solver.assert(&safe.not());
-                if solver.check() == SatResult::Sat {
+                if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                     solver.pop(1);
                     return Err(MumeiError::verification(format!(
                         "Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})",
@@ -2183,18 +2321,45 @@ pub(crate) fn expr_to_z3<'a>(
                                 solver.assert(cond);
                             }
                             solver.assert(&ri._eq(&Int::from_i64(ctx, 0)));
-                            if solver.check() == SatResult::Sat {
-                                // Extract counterexample: find which variables cause divisor == 0
-                                let (ce_hint, div_feedback) =
+                            if crate::verification::phase_artifacts::check(solver) == SatResult::Sat
+                            {
+                                let (ce_hint, div_feedback, raised_counterexample) =
                                     if let Some(model) = solver.get_model() {
-                                        let divisor_val = model
-                                            .eval(&ri, true)
-                                            .map(|v| format!("{}", v))
-                                            .unwrap_or_else(|| "0".to_string());
-                                        let dividend_val = model
-                                            .eval(&li, true)
-                                            .map(|v| format!("{}", v))
+                                        let dividend = model.eval(&li, true);
+                                        let divisor = model.eval(&ri, true);
+                                        let mut raised = RaisedCounterexample::default();
+                                        if let Some(value) = dividend.as_ref() {
+                                            let value = Dynamic::from(value);
+                                            raised.values.push(raise_named_model_value(
+                                                &model,
+                                                "dividend",
+                                                &value,
+                                                None,
+                                                vc.module_env,
+                                            ));
+                                        }
+                                        if let Some(value) = divisor.as_ref() {
+                                            let value = Dynamic::from(value);
+                                            raised.values.push(raise_named_model_value(
+                                                &model,
+                                                "divisor",
+                                                &value,
+                                                None,
+                                                vc.module_env,
+                                            ));
+                                        }
+                                        let dividend_val = raised
+                                            .values
+                                            .iter()
+                                            .find(|value| value.source_name == "dividend")
+                                            .map(|value| value.rendering.clone())
                                             .unwrap_or_else(|| "?".to_string());
+                                        let divisor_val = raised
+                                            .values
+                                            .iter()
+                                            .find(|value| value.source_name == "divisor")
+                                            .map(|value| value.rendering.clone())
+                                            .unwrap_or_else(|| "0".to_string());
                                         let hint = format!(
                                             " Counter-example: dividend = {}, divisor = {}",
                                             dividend_val, divisor_val
@@ -2203,38 +2368,28 @@ pub(crate) fn expr_to_z3<'a>(
                                             &dividend_val,
                                             &divisor_val,
                                         );
-                                        (hint, Some(fb))
+                                        (hint, Some(fb), Some(raised))
                                     } else {
-                                        (String::new(), None)
+                                        (String::new(), None, None)
                                     };
                                 // Attach structured feedback to error message for upstream reporting
                                 let feedback_hint = div_feedback
                                     .as_ref()
                                     .map(|fb| format!(" [semantic_feedback: {}]", fb))
                                     .unwrap_or_default();
-                                let ce_value = if let Some(model) = solver.get_model() {
-                                    let dividend_val = model
-                                        .eval(&li, true)
-                                        .map(|v| format!("{}", v))
-                                        .unwrap_or_else(|| "?".to_string());
-                                    let divisor_val = model
-                                        .eval(&ri, true)
-                                        .map(|v| format!("{}", v))
-                                        .unwrap_or_else(|| "0".to_string());
-                                    Some(serde_json::json!({
-                                        "dividend": dividend_val,
-                                        "divisor": divisor_val,
-                                    }))
-                                } else {
-                                    None
-                                };
+                                let ce_value = raised_counterexample
+                                    .as_ref()
+                                    .map(RaisedCounterexample::to_counterexample_json);
+                                let provenance = raised_counterexample
+                                    .as_ref()
+                                    .map(RaisedCounterexample::provenance_json);
                                 solver.pop(1);
                                 return Err(MumeiError::verification(format!(
                                     "Potential division by zero.{}{}",
                                     ce_hint, feedback_hint
                                 ))
                                 .with_help("Add a condition divisor != 0 to requires")
-                                .with_counterexample(ce_value));
+                                .with_counterexample_provenance(ce_value, provenance));
                             }
                             solver.pop(1);
                         }
@@ -2377,7 +2532,9 @@ pub(crate) fn expr_to_z3<'a>(
                                 if let Some(solver) = solver_opt {
                                     solver.push();
                                     solver.assert(&constraint_bool.not());
-                                    if solver.check() == SatResult::Sat {
+                                    if crate::verification::phase_artifacts::check(solver)
+                                        == SatResult::Sat
+                                    {
                                         solver.pop(1);
                                         return Err(MumeiError::verification(format!(
                                             "Struct '{}' field '{}' constraint violated: {}",
@@ -2492,7 +2649,8 @@ pub(crate) fn expr_to_z3<'a>(
                 let coverage = Bool::or(ctx, &arm_refs);
                 check_solver.push();
                 check_solver.assert(&coverage.not());
-                let exhaustive = check_solver.check() == SatResult::Unsat;
+                let exhaustive =
+                    crate::verification::phase_artifacts::check(check_solver) == SatResult::Unsat;
                 check_solver.pop(1);
 
                 if !exhaustive {
@@ -2500,19 +2658,21 @@ pub(crate) fn expr_to_z3<'a>(
                     // solver はまだ Sat 状態なので、再度チェックして model を取得
                     check_solver.push();
                     check_solver.assert(&coverage.not());
-                    if check_solver.check() == SatResult::Sat {
-                        let counterexample = if let Some(model) = check_solver.get_model() {
-                            // ターゲット変数の具体的な値を取得
-                            format_counterexample(
-                                &model,
-                                &target_z3,
-                                arms,
-                                vc,
-                                decl_hint.as_deref(),
-                            )
-                        } else {
-                            "unknown value".to_string()
-                        };
+                    if crate::verification::phase_artifacts::check(check_solver) == SatResult::Sat {
+                        let (counterexample, counterexample_provenance) =
+                            if let Some(model) = check_solver.get_model() {
+                                // ターゲット変数の具体的な値を取得
+                                format_counterexample(
+                                    &model,
+                                    &target_z3,
+                                    arms,
+                                    env,
+                                    vc,
+                                    decl_hint.as_deref(),
+                                )
+                            } else {
+                                ("unknown value".to_string(), None)
+                            };
                         check_solver.pop(1);
                         let ce_value = serde_json::json!({
                             "target": counterexample,
@@ -2522,7 +2682,12 @@ pub(crate) fn expr_to_z3<'a>(
                                 "Match is not exhaustive: the following value is not covered by any arm:\n  Counter-example: {}",
                                 counterexample
                             )
-                        ).with_counterexample(Some(ce_value)));
+                        ).with_counterexample_provenance(
+                            Some(ce_value),
+                            counterexample_provenance
+                                .as_ref()
+                                .map(RaisedCounterexample::provenance_json),
+                        ));
                     }
                     check_solver.pop(1);
                     return Err(MumeiError::verification(
@@ -2706,6 +2871,10 @@ pub(crate) fn expr_to_z3<'a>(
                 let val = expr_to_z3(vc, arg, env, solver_opt)?;
                 arg_z3_values.push(val);
             }
+            vc.reject_quantifier_dependent_call(
+                &format!("perform {effect}.{operation}"),
+                &arg_z3_values,
+            )?;
 
             // Z3 String Sort: verify symbolic parameter constraints
             // Look up the EffectDef to get constraint and param definitions
@@ -2946,7 +3115,9 @@ pub(crate) fn expr_to_z3<'a>(
                             solver.push();
                             // held が true であることを仮定し、矛盾がなければ保持中
                             solver.assert(&held_bool);
-                            if solver.check() != SatResult::Unsat {
+                            if crate::verification::phase_artifacts::check(solver)
+                                != SatResult::Unsat
+                            {
                                 solver.pop(1);
                                 return Err(MumeiError::verification(
                                     format!(
@@ -2983,7 +3154,8 @@ pub(crate) fn expr_to_z3<'a>(
                             // __alive_ が false（消費済み）であることを Z3 で確認
                             solver.push();
                             solver.assert(&alive_bool.not()); // alive = false を仮定
-                            if solver.check() == SatResult::Sat {
+                            if crate::verification::phase_artifacts::check(solver) == SatResult::Sat
+                            {
                                 // 消費済み変数が存在する → await 後のアクセスは use-after-free
                                 // await ポイントでの状態をマーク（後続の検証で参照）
                                 let await_consumed_key = format!("__await_consumed_{}", var_name);
@@ -3069,6 +3241,7 @@ pub(crate) fn expr_to_z3<'a>(
                         arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
                     }
                     let recursive_instance = vc.is_instantiating_contract(&callee_atom.name);
+                    vc.reject_quantifier_dependent_call(callee_name, &arg_vals)?;
                     let cong = vc.callee_congruent(&callee_atom);
                     let scc_internal = cong && scc_internal_call(vc, &callee_atom);
 
@@ -3093,10 +3266,8 @@ pub(crate) fn expr_to_z3<'a>(
                     }
 
                     // requires を呼び出し元のコンテキストで検証
-                    let caller_requires = crate::verification::contract_view(
-                        &callee_atom,
-                        crate::verification::ContractView::CallerRequires,
-                    );
+                    let caller_requires =
+                        crate::verification::caller_requires_obligation(&callee_atom);
                     if caller_requires.trim() != "true" && !recursive_instance {
                         let _contract_guard = vc.enter_contract_instantiation(&callee_atom.name);
                         let req_ast = parse_expression(&caller_requires);
@@ -3105,7 +3276,9 @@ pub(crate) fn expr_to_z3<'a>(
                             if let Some(solver) = solver_opt {
                                 solver.push();
                                 solver.assert(&req_bool.not());
-                                if solver.check() == SatResult::Sat {
+                                if crate::verification::phase_artifacts::check(solver)
+                                    == SatResult::Sat
+                                {
                                     solver.pop(1);
                                     return Err(MumeiError::verification(format!(
                                         "call(atom_ref({})): precondition '{}' may not hold at call site",
@@ -3240,6 +3413,7 @@ pub(crate) fn expr_to_z3<'a>(
             for arg in args {
                 arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
             }
+            vc.reject_quantifier_dependent_call("call", &arg_vals)?;
 
             // The callee didn't resolve to a known atom — a concrete
             // `atom_ref` target or contract callee may still store through
@@ -3304,7 +3478,8 @@ pub(crate) fn expr_to_z3<'a>(
                                         if let Some(solver) = solver_opt {
                                             solver.push();
                                             solver.assert(&req_bool.not());
-                                            let sat_result = solver.check();
+                                            let sat_result =
+                                                crate::verification::phase_artifacts::check(solver);
                                             solver.pop(1);
                                             if sat_result == SatResult::Sat {
                                                 return Err(MumeiError::verification(format!(

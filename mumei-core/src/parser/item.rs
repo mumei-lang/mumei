@@ -2339,9 +2339,184 @@ fn quantifier_spans(requires: &str) -> Vec<(usize, usize, usize, QuantifierType)
     spans
 }
 
+/// Byte ranges (into `s`) of the leaf top-level conjuncts of a contract
+/// string. Splits only at depth-0 `&&` (depth over `()[]{}`, skipping the
+/// inside of `"..."` string literals including `\"` escapes), then trims
+/// each piece and strips every enclosing paren pair — but only when the
+/// first `(` matches the final `)` — recursing into a stripped piece that
+/// splits further. A level is kept whole (a single leaf) when its depth 0
+/// contains `||`, `=>`, any `|` (lambda / bit-or / `|>`), or the
+/// whole-word keywords `if`, `then`, `else`, `match`: those bind looser
+/// than `&&` or swallow a trailing `&&`, so a quantifier nested under
+/// them is not a top-level conjunct.
+fn top_level_conjunct_ranges(s: &str) -> Vec<(usize, usize)> {
+    let mut leaves = Vec::new();
+    collect_conjunct_leaves(s, 0, &mut leaves);
+    leaves
+}
+
+fn collect_conjunct_leaves(s: &str, base: usize, out: &mut Vec<(usize, usize)>) {
+    if level_blocks_conjunct_split(s) {
+        let (a, b) = trim_bounds(s, 0, s.len());
+        if a < b {
+            out.push((base + a, base + b));
+        }
+        return;
+    }
+    let bytes = s.as_bytes();
+    let mut piece_start = 0usize;
+    let mut i = 0usize;
+    let mut depth = 0i64;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => i = skip_string_literal(bytes, i),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'&' if depth == 0 && bytes.get(i + 1) == Some(&b'&') => {
+                push_conjunct_piece(s, base, piece_start, i, out);
+                i += 2;
+                piece_start = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    push_conjunct_piece(s, base, piece_start, s.len(), out);
+}
+
+fn push_conjunct_piece(
+    s: &str,
+    base: usize,
+    start: usize,
+    end: usize,
+    out: &mut Vec<(usize, usize)>,
+) {
+    let bytes = s.as_bytes();
+    let (mut a, mut b) = trim_bounds(s, start, end);
+    let mut stripped = false;
+    loop {
+        if b > a + 1 && bytes[a] == b'(' && bytes[b - 1] == b')' {
+            if let Some(close) = matching_paren(s, a) {
+                if close == b - 1 {
+                    a += 1;
+                    b -= 1;
+                    let t = trim_bounds(s, a, b);
+                    a = t.0;
+                    b = t.1;
+                    stripped = true;
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    if a < b {
+        if stripped {
+            // Removing enclosing parens can expose a deeper `&&` split.
+            collect_conjunct_leaves(&s[a..b], base + a, out);
+        } else {
+            out.push((base + a, base + b));
+        }
+    }
+}
+
+fn trim_bounds(s: &str, mut a: usize, mut b: usize) -> (usize, usize) {
+    let bytes = s.as_bytes();
+    while a < b && bytes[a].is_ascii_whitespace() {
+        a += 1;
+    }
+    while b > a && bytes[b - 1].is_ascii_whitespace() {
+        b -= 1;
+    }
+    (a, b)
+}
+
+fn skip_string_literal(bytes: &[u8], quote: usize) -> usize {
+    let mut i = quote + 1;
+    while i < bytes.len() && bytes[i] != b'"' {
+        if bytes[i] == b'\\' {
+            i += 1;
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Byte index of the `)` matching the `(` at `open`, tracking `()[]{}`
+/// depth and skipping string literals.
+fn matching_paren(s: &str, open: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 0i64;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => i = skip_string_literal(bytes, i),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether depth 0 of `s` contains an operator or keyword that must keep
+/// the level from splitting at `&&` (see `top_level_conjunct_ranges`).
+fn level_blocks_conjunct_split(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut depth = 0i64;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => i = skip_string_literal(bytes, i),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'|' if depth == 0 => return true,
+            b'=' if depth == 0 && bytes.get(i + 1) == Some(&b'>') => return true,
+            _ if depth == 0 && (bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') => {
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let preceded = start > 0
+                    && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+                if !preceded && matches!(&s[start..i], "if" | "then" | "else" | "match") {
+                    return true;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Like `quantifier_spans`, but keeps only the spans that cover a whole
+/// leaf top-level conjunct — quantifiers nested under `||`, `!`, `if`,
+/// parens shared with other text, etc. stay in the requires text and are
+/// lowered in place by `expr_to_z3` instead of being hoisted into
+/// `forall_constraints`.
+fn top_level_quantifier_spans(requires: &str) -> Vec<(usize, usize, usize, QuantifierType)> {
+    let leaves = top_level_conjunct_ranges(requires);
+    quantifier_spans(requires)
+        .into_iter()
+        .filter(|(start, _inner_start, end_pos, _q_type)| {
+            let end = (*end_pos + 1).min(requires.len());
+            leaves.contains(&(*start, end))
+        })
+        .collect()
+}
+
 fn extract_quantifiers(requires: &str) -> Vec<Quantifier> {
     let mut quantifiers = Vec::new();
-    for (_start, inner_start, end_pos, q_type) in quantifier_spans(requires) {
+    for (_start, inner_start, end_pos, q_type) in top_level_quantifier_spans(requires) {
         let inner = &requires[inner_start..end_pos];
         // Split on top-level commas only — bound expressions like
         // `min(0, n)` contain commas inside parens.
@@ -2376,7 +2551,7 @@ fn extract_quantifiers(requires: &str) -> Vec<Quantifier> {
 fn strip_quantifiers(requires: &str) -> String {
     let mut result = String::with_capacity(requires.len());
     let mut last = 0;
-    for (start, _inner_start, end_pos, _q_type) in quantifier_spans(requires) {
+    for (start, _inner_start, end_pos, _q_type) in top_level_quantifier_spans(requires) {
         result.push_str(&requires[last..start]);
         result.push_str("true");
         // Unclosed `forall(` scans to the end of the string — clamp so
