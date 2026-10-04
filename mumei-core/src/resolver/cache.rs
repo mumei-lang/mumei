@@ -488,12 +488,15 @@ pub fn compute_proof_hash_with_flags(
         }
     }
 
-    // 4. Fail-closed binder calls: a call whose arguments mention a
-    // `forall`/`exists` bound variable is now rejected as unverifiable
-    // instead of being lowered with a result constant shared across every
-    // instance. Any cached proof minted before this fix could have relied on
-    // the unsound sharing, so atoms that carry the pattern get a marker in
-    // their hash; atoms that do not are byte-identical to before.
+    // 4. Fail-closed binder calls: a call whose lowered arguments contain a
+    // `forall`/`exists` bound constant is now rejected as unverifiable instead
+    // of being lowered with a result constant shared across every instance.
+    // Any cached proof minted before this fix could have relied on the unsound
+    // sharing, so atoms that carry the pattern get a marker in their hash.
+    // The syntactic check below is a conservative superset: it marks every
+    // non-builtin call / call_ref under a binder, even calls the verifier
+    // accepts (e.g. ground arguments), because it cannot see the lowered
+    // terms. Atoms with no call under a binder are byte-identical to before.
     if binder_call_marker_applies(atom, module_env, &visited) {
         hasher.update(b"|binder_call_fail_closed_v1");
     }
@@ -503,8 +506,9 @@ pub fn compute_proof_hash_with_flags(
 
 /// Whether the proof hash for `atom` carries the fail-closed binder-call
 /// marker: true when the atom's own clauses/body — or the requires/ensures of
-/// any transitive callee in `visited` — contain a call to a non-builtin callee
-/// whose arguments mention a `forall`/`exists` bound variable.
+/// any transitive callee in `visited` — contain a non-builtin `Call` or any
+/// `CallRef` inside a `forall`/`exists` condition. Conservative superset of
+/// what the verifier rejects (see `expr_has_binder_scoped_call`).
 fn binder_call_marker_applies(
     atom: &Atom,
     module_env: &ModuleEnv,
@@ -547,11 +551,16 @@ fn is_builtin_call_name(name: &str) -> bool {
 }
 
 /// Syntactic walk: does `expr` contain a `Call(name, args)` to a non-builtin
-/// callee where some argument mentions a name currently on the `binders`
-/// stack? `forall`/`exists` push their bound variable while walking the
-/// condition, so nested binders stack naturally.
+/// callee — or any `CallRef` — anywhere inside a `forall`/`exists` condition?
+/// `forall`/`exists` push their bound variable while walking the condition,
+/// so the non-empty `binders` stack is effectively a quantifier-depth check.
+///
+/// This is a *conservative superset* of what the verifier rejects: the
+/// translator rejects only calls whose lowered arguments contain the bound
+/// constant, but a syntactic pass cannot see that, so it marks every call
+/// under a binder — including ground-argument calls the verifier still
+/// accepts.
 fn expr_has_binder_scoped_call(expr: &Expr, binders: &mut Vec<String>) -> bool {
-    use crate::verification::support::expr_may_mention_var;
     match expr {
         Expr::Call(name, args) if (name == "forall" || name == "exists") && args.len() == 4 => {
             // (var, start, end, condition): bounds are evaluated outside the
@@ -571,11 +580,7 @@ fn expr_has_binder_scoped_call(expr: &Expr, binders: &mut Vec<String>) -> bool {
             }
         }
         Expr::Call(name, args) => {
-            if !is_builtin_call_name(name)
-                && binders
-                    .iter()
-                    .any(|b| args.iter().any(|a| expr_may_mention_var(a, b)))
-            {
+            if !is_builtin_call_name(name) && !binders.is_empty() {
                 return true;
             }
             args.iter().any(|a| expr_has_binder_scoped_call(a, binders))
@@ -614,10 +619,7 @@ fn expr_has_binder_scoped_call(expr: &Expr, binders: &mut Vec<String>) -> bool {
         }
         Expr::Await { expr } => expr_has_binder_scoped_call(expr, binders),
         Expr::CallRef { callee, args } => {
-            if binders
-                .iter()
-                .any(|b| args.iter().any(|a| expr_may_mention_var(a, b)))
-            {
+            if !binders.is_empty() {
                 return true;
             }
             expr_has_binder_scoped_call(callee, binders)
@@ -672,8 +674,9 @@ fn stmt_has_binder_scoped_call(stmt: &Stmt, binders: &mut Vec<String>) -> bool {
 
 /// True when the atom's own spec (requires, extracted quantifier conditions,
 /// ensures, covers, invariant — and, when `check_body`, the body including
-/// loop invariants) contains a call to a non-builtin callee whose arguments
-/// mention a `forall`/`exists` bound variable.
+/// loop invariants) contains a non-builtin `Call` or any `CallRef` inside a
+/// `forall`/`exists` condition. Conservative superset of the verifier's
+/// semantic check — see `expr_has_binder_scoped_call`.
 fn atom_has_binder_scoped_call(atom: &Atom, check_body: bool) -> bool {
     let mut clause_exprs: Vec<Expr> = Vec::new();
     // `atom.requires` has its top-level quantifiers extracted into
@@ -1225,14 +1228,17 @@ body: x;
     }
 
     #[test]
-    fn ground_call_under_binder_is_not_marked() {
+    fn ground_call_under_binder_is_marked_conservatively() {
+        // The verifier accepts this atom (the argument is ground), but the
+        // syntactic marker is a superset: it cannot see that `ident(0)` is
+        // ground, so it marks every non-builtin call under a binder.
         let (_, atom) = env_and_atom(
             &format!(
                 "{IDENT}\natom ground(arr: [i64], n: i64) -> i64\nrequires: n >= 1 && len(arr) >= n && forall(i, 0, n, arr[i] >= ident(0));\nensures: arr[0] >= 0;\nbody: n;\n"
             ),
             "ground",
         );
-        assert!(!atom_has_binder_scoped_call(&atom, true));
+        assert!(atom_has_binder_scoped_call(&atom, true));
     }
 
     #[test]
@@ -1277,12 +1283,12 @@ body: n;
             "10b939552687d80793422e3b173f7a1d18c53b9e3324798dcc87b88ff37c3974"
         );
 
-        let ground_source = format!(
-            "{IDENT}\natom ground(arr: [i64], n: i64) -> i64\nrequires: n >= 1 && len(arr) >= n && forall(i, 0, n, arr[i] >= ident(0));\nensures: arr[0] >= 0;\nbody: n;\n"
-        );
+        // `plain2` has a forall with only array reads — no call under any
+        // binder — so it stays marker-free and byte-identical.
+        let plain2_source = "atom plain2(arr: [i64], n: i64) -> i64\nrequires: n >= 1 && len(arr) >= n && forall(i, 0, n, arr[i] >= 0);\nensures: result == n;\nbody: n;\n";
         assert_eq!(
-            hash(&ground_source, "ground"),
-            "b414eb0440a41ab78e1c4fa3b9bf564b65a8e834d128c27126e68783816feb82"
+            hash(plain2_source, "plain2"),
+            "8539cdef10921ab7704ff36a1f27ca31eefa383263b374c2c2657b64f8d4a952"
         );
     }
 }

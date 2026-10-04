@@ -162,25 +162,52 @@ fn user_defines_callee(vc: &VCtx<'_>, name: &str) -> bool {
     vc.local_lambdas.borrow().contains_key(name) || vc.module_env.get_atom(name).is_some()
 }
 
+/// Whether the bound Z3 constant `needle` occurs as a subterm of `term`.
+/// Z3 ASTs are DAGs, so the walk is iterative with a visited set of raw
+/// `Z3_ast` pointers; equality is pointer equality, which is how Z3
+/// canonicalizes identical constants within a context.
+fn z3_term_contains(term: &Dynamic<'_>, needle: &Dynamic<'_>) -> bool {
+    let needle_ast = needle.get_z3_ast();
+    let mut stack = vec![term.clone()];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(node) = stack.pop() {
+        let ast = node.get_z3_ast();
+        if ast == needle_ast {
+            return true;
+        }
+        if !seen.insert(ast as usize) {
+            continue;
+        }
+        stack.extend(node.children());
+    }
+    false
+}
+
 /// Fail closed when a call that mints a fresh result constant appears under a
-/// `forall`/`exists` and one of its arguments mentions the bound variable.
+/// `forall`/`exists` and one of its *lowered* arguments contains the bound
+/// constant. Checking the lowered term — not the source syntax — also catches
+/// bound uses hidden behind let-aliases and `if`/`match` argument shapes.
 /// The lowering shares that single constant across every instance of the
 /// quantifier, so encoding the call would equate results that can differ per
 /// instance — an unsoundness. Calls whose arguments are all ground are
 /// unaffected.
-fn reject_binder_scoped_call(vc: &VCtx<'_>, callee_name: &str, args: &[Expr]) -> MumeiResult<()> {
+fn reject_binder_scoped_call(
+    vc: &VCtx<'_>,
+    callee_name: &str,
+    arg_vals: &[Dynamic<'_>],
+) -> MumeiResult<()> {
     let binders = vc.quantifier_binders.borrow();
     if binders.is_empty() {
         return Ok(());
     }
-    for arg in args {
-        for binder in binders.iter() {
-            if expr_may_mention_var(arg, binder) {
+    for arg in arg_vals {
+        for (binder_name, binder_ast) in binders.iter() {
+            if z3_term_contains(arg, binder_ast) {
                 return Err(MumeiError::verification(format!(
                     "{} Call to '{}' uses quantifier-bound variable '{}' in an argument.",
                     crate::verification::UNSUPPORTED_BINDER_CALL_PREFIX,
                     callee_name,
-                    binder
+                    binder_name
                 ))
                 .with_help(
                     "Move the call out of the quantifier, or rewrite it so its arguments \
@@ -713,7 +740,9 @@ pub(crate) fn expr_to_z3<'a>(
 
                     // Track the binder while lowering the condition so that a
                     // call whose arguments mention `var_name` fails closed.
-                    vc.quantifier_binders.borrow_mut().push(var_name.clone());
+                    vc.quantifier_binders
+                        .borrow_mut()
+                        .push((var_name.clone(), bound_var.clone().into()));
                     let condition_result = expr_to_z3(vc, &args[3], env, None);
                     vc.quantifier_binders.borrow_mut().pop();
                     let condition_z3 =
@@ -1093,12 +1122,12 @@ pub(crate) fn expr_to_z3<'a>(
                         .cloned()
                         .or_else(|| vc.module_env.get_atom(&fqn_name).cloned());
                     if let Some(callee) = resolved_callee {
-                        reject_binder_scoped_call(vc, name, args)?;
                         // 引数を評価
                         let mut arg_vals = Vec::new();
                         for arg in args {
                             arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
                         }
+                        reject_binder_scoped_call(vc, name, &arg_vals)?;
 
                         // 仮引数名と実引数値の対応を構築
                         let mut call_env = env.clone();
@@ -2835,12 +2864,12 @@ pub(crate) fn expr_to_z3<'a>(
 
             if let Some(ref callee_name) = atom_name {
                 if let Some(callee_atom) = vc.module_env.get_atom(callee_name).cloned() {
-                    reject_binder_scoped_call(vc, callee_name, args)?;
                     // 引数を Z3 で評価
                     let mut arg_vals = Vec::new();
                     for arg in args {
                         arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
                     }
+                    reject_binder_scoped_call(vc, callee_name, &arg_vals)?;
 
                     // 呼び出し先のパラメータ名に引数をマッピング
                     let mut call_env = env.clone();
@@ -2966,17 +2995,16 @@ pub(crate) fn expr_to_z3<'a>(
             // 宣言されている場合、その契約を使って結果を制約する。
             // これにより trusted マーカーなしで高階関数を検証できる。
 
+            let mut arg_vals = Vec::new();
+            for arg in args {
+                arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
+            }
             let dynamic_callee_name = match callee.as_ref() {
                 Expr::Variable(var) => var.as_str(),
                 Expr::AtomRef { name } => name.as_str(),
                 _ => "call",
             };
-            reject_binder_scoped_call(vc, dynamic_callee_name, args)?;
-
-            let mut arg_vals = Vec::new();
-            for arg in args {
-                arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
-            }
+            reject_binder_scoped_call(vc, dynamic_callee_name, &arg_vals)?;
 
             // The callee didn't resolve to a known atom — a concrete
             // `atom_ref` target or contract callee may still store through
@@ -3458,4 +3486,33 @@ fn apply_local_lambda<'a>(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod z3_term_contains_tests {
+    use super::*;
+
+    #[test]
+    fn contains_bound_const_in_arith_and_ite() {
+        let cfg = z3::Config::new();
+        let ctx = z3::Context::new(&cfg);
+        let i = Int::new_const(&ctx, "i");
+        let x = Int::new_const(&ctx, "x");
+        let i_dyn: Dynamic = i.clone().into();
+        let x_dyn: Dynamic = x.clone().into();
+
+        // i + 1 contains i.
+        let zero = Int::from_i64(&ctx, 0);
+        let one = Int::from_i64(&ctx, 1);
+        let sum: Dynamic = (&i + &one).into();
+        assert!(z3_term_contains(&sum, &i_dyn));
+        let ite: Dynamic = i.ge(&zero).ite(&i, &zero).into();
+        assert!(z3_term_contains(&ite, &i_dyn));
+
+        // x + 1 does not contain i.
+        let ground: Dynamic = (&x + &one).into();
+        assert!(!z3_term_contains(&ground, &i_dyn));
+        // And i + 1 does not contain x.
+        assert!(!z3_term_contains(&sum, &x_dyn));
+    }
 }

@@ -1583,7 +1583,9 @@ pub(crate) fn verify_inner(
         // Track the binder while lowering the condition so that a call whose
         // arguments mention `q.var` fails closed. The pop runs on every exit
         // path (the `?` below is applied only after the result is captured).
-        vc.quantifier_binders.borrow_mut().push(q.var.clone());
+        vc.quantifier_binders
+            .borrow_mut()
+            .push((q.var.clone(), i.clone().into()));
         let condition_result = expr_to_z3(&vc, &expr_ast, &mut env, None);
         vc.quantifier_binders.borrow_mut().pop();
         let condition_z3 = condition_result?

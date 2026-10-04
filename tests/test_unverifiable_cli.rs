@@ -850,3 +850,51 @@ atom match_wrapped(arr: [i64], n: i64) -> i64
 
     std::fs::remove_dir_all(report_dir).expect("remove binder_call_match_wrapped fixture dir");
 }
+
+#[test]
+fn verify_binder_call_let_aliased_argument_is_unverifiable() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "binder_call_let_aliased",
+        r#"
+atom ident(x: i64) -> i64
+  requires: true;
+  ensures: result == x;
+  body: x;
+
+atom let_aliased(arr: [i64], n: i64) -> i64
+  requires: n >= 2 && len(arr) >= n
+        && forall(i, 0, n, { let t = i; ident(t) == t });
+  ensures: result == 0 - 1;
+  body: n;
+"#,
+    );
+    let report_dir = fixture.parent().unwrap();
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "let-aliased binder call should exit 3\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("'let_aliased': unverifiable ⚠️"),
+        "expected let_aliased unverifiable, got:\n{combined}"
+    );
+
+    std::fs::remove_dir_all(report_dir).expect("remove binder_call_let_aliased fixture dir");
+}
