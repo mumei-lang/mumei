@@ -41,8 +41,7 @@ pub mod vc_outcome;
 mod tests;
 
 pub use contract_view::{
-    caller_requires_obligation, caller_requires_obligation_with, contract_view, dropped_conjuncts,
-    ContractView,
+    caller_requires_obligation, contract_view, dropped_conjuncts, ContractView,
 };
 pub use executor::*;
 pub use fragment::*;

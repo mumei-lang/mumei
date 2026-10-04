@@ -1,4 +1,4 @@
-use crate::parser::{Atom, ClauseKind, ClauseTrustMode, Quantifier, QuantifierType};
+use crate::parser::{Atom, ClauseKind, ClauseTrustMode, QuantifierType};
 use crate::verification::spec_validation::{split_top_level_conjunctions, strip_wrapping_parens};
 use std::collections::{HashMap, HashSet};
 
@@ -23,20 +23,15 @@ pub fn dropped_conjuncts(atom: &Atom, view: ContractView) -> Vec<String> {
 /// `forall_constraints` (nested quantifiers stayed in `atom.requires`
 /// and are already part of the view).
 pub fn caller_requires_obligation(atom: &Atom) -> String {
-    caller_requires_obligation_with(atom, |_| true)
-}
-
-pub fn caller_requires_obligation_with(atom: &Atom, keep: impl Fn(&Quantifier) -> bool) -> String {
     let base = contract_view(atom, ContractView::CallerRequires);
-    let kept: Vec<&Quantifier> = atom.forall_constraints.iter().filter(|q| keep(q)).collect();
-    if kept.is_empty() {
+    if atom.forall_constraints.is_empty() {
         return base;
     }
     let mut parts: Vec<String> = Vec::new();
     if !(base.trim().is_empty() || base.trim() == "true") {
         parts.push(base);
     }
-    for q in kept {
+    for q in &atom.forall_constraints {
         let keyword = match q.q_type {
             QuantifierType::ForAll => "forall",
             QuantifierType::Exists => "exists",

@@ -442,6 +442,24 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(callee_atom.requires.as_bytes());
             hasher.update(b":");
             hasher.update(callee_atom.ensures.as_bytes());
+            if !callee_atom.forall_constraints.is_empty() {
+                for q in &callee_atom.forall_constraints {
+                    let quantifier_type = match q.q_type {
+                        crate::parser::QuantifierType::ForAll => "forall",
+                        crate::parser::QuantifierType::Exists => "exists",
+                    };
+                    hasher.update(b",quantified_requires:");
+                    hasher.update(quantifier_type.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.var.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.start.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.end.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.condition.as_bytes());
+                }
+            }
             if !callee_atom.clause_modes.is_empty() {
                 for mode in &callee_atom.clause_modes {
                     hasher.update(b",clause_mode:");
@@ -796,6 +814,31 @@ body: { getx(Pair { a: 1, b: 2 }) };
         let after = env_and_hash(&format!(
             "{structs}\ntrusted atom getx(p: Point) -> i64\nrequires: true;\nensures: true;\nbody: {{ p.x }};\n{MAIN}"
         ));
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn callee_quantified_requires_change_invalidates_the_proof_hash() {
+        let before = env_and_hash(
+            "trusted atom getx(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 0 && forall(i, 0, n, arr[i] > 0);\n\
+             ensures: result > 0;\n\
+             body: arr[0];\n\
+             trusted atom main(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 1 && forall(i, 0, n, arr[i] > 1);\n\
+             ensures: result > 0;\n\
+             body: getx(arr, n);\n",
+        );
+        let after = env_and_hash(
+            "trusted atom getx(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 0 && forall(i, 0, n, arr[i] > 1);\n\
+             ensures: result > 0;\n\
+             body: arr[0];\n\
+             trusted atom main(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 1 && forall(i, 0, n, arr[i] > 1);\n\
+             ensures: result > 0;\n\
+             body: getx(arr, n);\n",
+        );
         assert_ne!(before, after);
     }
 

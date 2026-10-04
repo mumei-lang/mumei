@@ -278,9 +278,17 @@ body: 0;
         ),
     );
     let text = output_text(&output);
-    // The forall makes arr[0] <= 0 unreachable, so the cover must not be
-    // reported covered with a witness. cover_results live on report.json
-    // (cov is the last atom) or on the stdout payload.
+    // The forall makes arr[0] <= 0 unreachable. An unreachable cover
+    // aborts the atom with failure_type "cover_unreachable" (the only
+    // per-clause statuses the cover machinery emits are "covered" and
+    // "unknown"; unreachable produces no cover_results entry).
+    assert_eq!(
+        atom_failure_type(&dir, &payload, "cov"),
+        "cover_unreachable",
+        "{text}"
+    );
+    // If a per-clause status entry was emitted, it must not be a covered
+    // witness.
     let cover_status = std::fs::read_to_string(dir.join("report.json"))
         .ok()
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
@@ -294,11 +302,13 @@ body: 0;
                     .map(|entry| entry["status"].as_str().unwrap_or_default().to_string())
             })
         });
-    assert_ne!(
-        cover_status.as_deref(),
-        Some("covered"),
-        "cover reported covered with a violating witness:\n{text}"
-    );
+    if let Some(status) = cover_status {
+        assert_ne!(status, "covered", "{text}");
+        assert!(
+            status == "unknown",
+            "unexpected cover status {status}: {text}"
+        );
+    }
     std::fs::remove_dir_all(dir).ok();
 }
 
