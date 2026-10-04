@@ -643,6 +643,11 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
             .inspect(|d| ctx.diagnostics.push(d.clone()))
             .is_some();
     }
+    if let Some(diagnostic) =
+        collect_recursive_contract_diagnostic(atom, ctx.module_env, ctx.json_output)
+    {
+        ctx.diagnostics.push(diagnostic);
+    }
     if (ctx.warn_untyped_arrays || ctx.strict_array_types) && !ctx.module_env.is_verified(name) {
         if let Some(diagnostic) =
             collect_untyped_array_access_diagnostic(atom, ctx.strict_array_types, ctx.json_output)

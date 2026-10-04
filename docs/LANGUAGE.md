@@ -317,6 +317,55 @@ before the loop and stored in generated temporaries. The loop variable binds
 in the enclosing block like an ordinary `let`; shadowing an outer binding with
 the same name is not restored. Assigning the loop variable in the body is
 rejected.
+
+### Atom-level `decreases:`
+
+An atom may declare a termination measure with a `decreases:` clause in its
+header. The measure is an integer expression over the atom's parameters:
+
+```mumei
+atom tri(n: i64)
+    requires: n >= 0;
+    ensures: result >= 0 && (n == 0 || result == n + tri(n - 1));
+    decreases: n;
+    body: { if n == 0 { 0 } else { n + tri(n - 1) } };
+```
+
+When an atom on a recursive call cycle (a directly recursive atom or a
+mutually recursive SCC) declares `decreases`, every recursive call in its body
+and in its `requires`/`ensures` contract must prove, under the current path
+conditions and the caller's requires:
+
+1. **Bounded below**: `0 <= M` where `M` is the caller's measure, and
+2. **Strict decrease**: `M_callee(args) < M` for the actual arguments.
+
+A call that cannot prove both fails with
+`termination_measure_violation` (exit code 1), e.g.
+`f(n)`, `f(n + 1)`, or a measure that can go negative.
+
+### Recursive contracts
+
+On an **eligible** recursive SCC — every member declares `decreases`, has a
+call-free measure over its own parameters only, uses no effects, no `ref`,
+`ref mut`, `consume`, `async`, or type parameters, is `Verified` (not
+`trusted`), has no assume-mode ensures, and every parameter and result is a
+scalar `Int`/`Bool` — recursive calls in `requires`/`ensures` are *congruent*:
+the call result is an application of an uninterpreted function
+`rec_fn#<callee>` shared by every member, and the callee's ensures is assumed
+under the implication `CallerRequires ⇒ CalleeEnsures`. This makes
+specifications like the `tri` contract above provable, including the mutual
+`is_even`/`is_odd` pair.
+
+Congruent calls are still checked: the contract instantiation itself must
+satisfy the same `0 <= M` / `M_callee(args) < M` obligations, so a contract
+like `ensures: result == bad(x) + 1;` (a call `bad(x)` with no decrease) is
+rejected as a termination violation rather than silently verified.
+
+Atoms on a recursive cycle whose SCC is ineligible keep the old semantics —
+recursive calls produce fresh, unconstrained results — and the verifier emits
+an advisory `recursive_contract_needs_decreases` or
+`recursive_contract_unsupported` hint diagnostic instead. The hint never
+changes the verdict.
 ---
 ## Module System
 ### Import Syntax

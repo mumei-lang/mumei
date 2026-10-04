@@ -42,6 +42,45 @@ pub(crate) enum LocalLambda<'a> {
     Opaque,
 }
 
+/// Congruent recursive-contract state. Only `verify_inner`'s main VCtx sets
+/// `enabled = true`; every auxiliary VCtx (spec validation, vacuity,
+/// invariant, law, property-based) keeps the default so their solver input
+/// is unchanged.
+pub(crate) struct RecursionCtx<'a> {
+    pub(crate) enabled: std::cell::Cell<bool>,
+    /// `recursive_scc` results keyed by atom name (None = not on a cycle).
+    pub(crate) scc_cache: std::cell::RefCell<
+        std::collections::HashMap<String, Option<std::rc::Rc<super::super::support::RecursiveScc>>>,
+    >,
+    /// `rec_fn#<callee>` uninterpreted functions, keyed by callee atom name.
+    pub(crate) rec_fns:
+        std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<z3::FuncDecl<'a>>>>,
+    /// The current atom's lowered `decreases` measure, when it is verified
+    /// inside an eligible SCC.
+    pub(crate) current_measure: std::cell::RefCell<Option<Dynamic<'a>>>,
+    /// The current atom's eligible SCC.
+    pub(crate) current_scc:
+        std::cell::RefCell<Option<std::rc::Rc<super::super::support::RecursiveScc>>>,
+    /// Termination obligations lowered while no solver was available
+    /// (requires/ensures lowering passes `solver_opt = None`): each entry is
+    /// `(implies(path_conds, obligation), callee_name)` and is drained by the
+    /// executor once the preconditions hold.
+    pub(crate) pending_termination: std::cell::RefCell<Vec<(Bool<'a>, String)>>,
+}
+
+impl<'a> Default for RecursionCtx<'a> {
+    fn default() -> Self {
+        RecursionCtx {
+            enabled: std::cell::Cell::new(false),
+            scc_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            rec_fns: std::cell::RefCell::new(std::collections::HashMap::new()),
+            current_measure: std::cell::RefCell::new(None),
+            current_scc: std::cell::RefCell::new(None),
+            pending_termination: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+}
+
 /// 検証時に共有するコンテキスト（ctx, module_env を束ねて引数を削減）
 pub(crate) struct VCtx<'a> {
     pub(crate) ctx: &'a Context,
@@ -160,6 +199,9 @@ pub(crate) struct VCtx<'a> {
     /// unconstrained result instead of instantiating the contract again, which
     /// only drops assumptions and keeps call lowering finite.
     pub(crate) contracts_in_instantiation: std::cell::RefCell<Vec<String>>,
+    /// Congruent recursive-contract state (see `RecursionCtx`). Disabled
+    /// everywhere except `verify_inner`'s main VCtx.
+    pub(crate) recursion: RecursionCtx<'a>,
 }
 
 impl<'a> VCtx<'a> {
@@ -175,6 +217,67 @@ impl<'a> VCtx<'a> {
             let refs: Vec<&Bool<'a>> = stack.iter().collect();
             Bool::and(self.ctx, &refs)
         }
+    }
+
+    /// Cached `recursive_scc` lookup for `atom` (None when not on a cycle or
+    /// when recursion congruence is disabled).
+    pub(crate) fn recursive_scc_of(
+        &self,
+        atom: &str,
+    ) -> Option<std::rc::Rc<super::super::support::RecursiveScc>> {
+        if let Some(entry) = self.recursion.scc_cache.borrow().get(atom) {
+            return entry.clone();
+        }
+        let computed =
+            super::super::support::recursive_scc(self.module_env, atom).map(std::rc::Rc::new);
+        self.recursion
+            .scc_cache
+            .borrow_mut()
+            .insert(atom.to_string(), computed.clone());
+        computed
+    }
+
+    /// Whether `callee` participates in congruent recursive contracts: the
+    /// callee declares `decreases` and sits on an eligible SCC. Callers
+    /// pre-filter on `decreases.is_some()` so the SCC analysis only runs for
+    /// atoms that could qualify.
+    pub(crate) fn callee_congruent(&self, callee: &crate::parser::Atom) -> bool {
+        self.recursion.enabled.get()
+            && callee.decreases.is_some()
+            && self
+                .recursive_scc_of(&callee.name)
+                .map(|scc| scc.is_eligible())
+                .unwrap_or(false)
+    }
+
+    /// `rec_fn#<callee>`: the uninterpreted function backing a congruent
+    /// recursive call, cached per callee name.
+    pub(crate) fn rec_fn(
+        &self,
+        callee: &crate::parser::Atom,
+        domain: &[z3::Sort<'a>],
+        range: &z3::Sort<'a>,
+    ) -> z3::FuncDecl<'a> {
+        let domain_refs: Vec<&z3::Sort<'a>> = domain.iter().collect();
+        // FuncDecl is not Clone; FuncDecl::new with the same name and
+        // signature returns the same underlying declaration, so a fresh
+        // construction is equivalent to reusing a cached one.
+        let decl = z3::FuncDecl::new(
+            self.ctx,
+            format!("rec_fn#{}", callee.name),
+            &domain_refs,
+            range,
+        );
+        self.recursion
+            .rec_fns
+            .borrow_mut()
+            .insert(callee.name.clone(), std::rc::Rc::new(decl));
+        z3::FuncDecl::new(
+            self.ctx,
+            format!("rec_fn#{}", callee.name),
+            &domain_refs,
+            range,
+        )
     }
 
     pub(crate) fn is_instantiating_contract(&self, atom: &str) -> bool {

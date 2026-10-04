@@ -8,7 +8,10 @@ use std::path::Path;
 
 /// Bump when verifier semantics change so cached proofs are re-derived.
 /// Version 3 enables checker-first MIR borrow checking.
-pub const VERIFIER_POLICY_VERSION: u32 = 3;
+/// Version 4 is reserved by the draft in PR #673.
+/// Version 5 adds atom-level `decreases` clauses and congruent recursive
+/// contracts (recursive SCC termination checking).
+pub const VERIFIER_POLICY_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -74,6 +77,10 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
             hasher.update(b"|clause_mode:");
             hasher.update(format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause).as_bytes());
         }
+    }
+    if let Some(ref dec) = atom.decreases {
+        hasher.update(b"|decreases:");
+        hasher.update(dec.as_bytes());
     }
     hasher.update(atom.body_expr.as_bytes());
     // consumed_params も含める（所有権制約の変更を検出）
@@ -229,6 +236,10 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(b"|clause_mode:");
             hasher.update(format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause).as_bytes());
         }
+    }
+    if let Some(ref dec) = atom.decreases {
+        hasher.update(b"|decreases:");
+        hasher.update(dec.as_bytes());
     }
     hasher.update(atom.body_expr.as_bytes());
     for cp in &atom.consumed_params {
@@ -438,6 +449,10 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(callee_atom.requires.as_bytes());
             hasher.update(b":");
             hasher.update(callee_atom.ensures.as_bytes());
+            if let Some(ref dec) = callee_atom.decreases {
+                hasher.update(b"|decreases:");
+                hasher.update(dec.as_bytes());
+            }
             if !callee_atom.clause_modes.is_empty() {
                 for mode in &callee_atom.clause_modes {
                     hasher.update(b",clause_mode:");

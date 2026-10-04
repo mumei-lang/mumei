@@ -408,6 +408,124 @@ enum ClauseLoweringOutcome<'a> {
     Lowered(Bool<'a>),
 }
 
+/// Check every pending termination obligation against the atom's solver,
+/// which now carries the preconditions. On Sat/Unknown the measure is not
+/// guaranteed to decrease: save the failure report and return the error.
+#[allow(clippy::too_many_arguments)]
+fn drain_pending_termination<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    atom: &Atom,
+    module_env: &ModuleEnv,
+    env: &Env<'a>,
+    output_dir: &Path,
+    diagnostics: &[String],
+) -> MumeiResult<()> {
+    let pending: Vec<(Bool<'a>, String)> = vc
+        .recursion
+        .pending_termination
+        .borrow_mut()
+        .drain(..)
+        .collect();
+    for (obligation, callee_name) in &pending {
+        solver.push();
+        solver.assert(&obligation.not());
+        let check = solver.check();
+        let err = if check != SatResult::Unsat {
+            Some(termination_violation_error(vc, solver, env, callee_name))
+        } else {
+            None
+        };
+        solver.pop(1);
+        if let Some(err) = err {
+            let err_str = format!("{}", err);
+            let counterexample = counterexample_from_error(&err);
+            let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
+            let semantic_fb = build_semantic_feedback(
+                &constraint_mappings,
+                counterexample.as_ref(),
+                atom,
+                FAILURE_TERMINATION_MEASURE_VIOLATED,
+                None,
+            );
+            save_visualizer_report(
+                output_dir,
+                "failed",
+                &atom.name,
+                "N/A",
+                "N/A",
+                &err_str,
+                counterexample.as_ref(),
+                FAILURE_TERMINATION_MEASURE_VIOLATED,
+                semantic_fb.as_ref(),
+                Some(&atom.span),
+                Some(&constraint_mappings),
+                None,
+                None,
+                Some(diagnostics),
+                None,
+            );
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+fn counterexample_from_error(err: &MumeiError) -> Option<serde_json::Value> {
+    if let MumeiError::VerificationError {
+        counterexample: Some(ce),
+        ..
+    } = err
+    {
+        Some(ce.clone())
+    } else {
+        None
+    }
+}
+
+/// Save the termination failure report for errors raised while lowering
+/// clauses (which `?` out of `lower_clause_with_skip` with no report) then
+/// return the error unchanged.
+fn report_termination_error(
+    err: MumeiError,
+    atom: &Atom,
+    module_env: &ModuleEnv,
+    output_dir: &Path,
+    diagnostics: &[String],
+) -> MumeiError {
+    let err_str = format!("{}", err);
+    if !err_str.contains("Termination measure violation") {
+        return err;
+    }
+    let counterexample = counterexample_from_error(&err);
+    let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
+    let semantic_fb = build_semantic_feedback(
+        &constraint_mappings,
+        counterexample.as_ref(),
+        atom,
+        FAILURE_TERMINATION_MEASURE_VIOLATED,
+        None,
+    );
+    save_visualizer_report(
+        output_dir,
+        "failed",
+        &atom.name,
+        "N/A",
+        "N/A",
+        &err_str,
+        counterexample.as_ref(),
+        FAILURE_TERMINATION_MEASURE_VIOLATED,
+        semantic_fb.as_ref(),
+        Some(&atom.span),
+        Some(&constraint_mappings),
+        None,
+        None,
+        Some(diagnostics),
+        None,
+    );
+    err
+}
+
 fn normalize_foreign_boolean_literals(clause: &str) -> String {
     lazy_static::lazy_static! {
         static ref TRUE_RE: Regex = Regex::new(r"\bTrue\b").unwrap();
@@ -1488,8 +1606,10 @@ pub(crate) fn verify_inner(
         local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
         contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
+        recursion: Default::default(),
         bitvec_i64_global,
     };
+    vc.recursion.enabled.set(true);
     let mut env: Env = HashMap::new();
 
     // Plan 9: Pre-register parameters with correct Z3 Sort based on their base type.
@@ -1502,6 +1622,30 @@ pub(crate) fn verify_inner(
             datatype::param_z3_value_for_vc(&vc, param.name.as_str(), param.type_name.as_deref());
         env.insert(param.name.clone(), var);
     }
+
+    // Congruent recursive contracts: when this atom declares `decreases` and
+    // sits on an eligible SCC, lower its measure once; SCC-internal calls then
+    // produce `rec_fn#` applications with a termination obligation each.
+    if atom.decreases.is_some() {
+        if let Some(scc) = vc.recursive_scc_of(&atom.name) {
+            if scc.is_eligible() {
+                let measure_ast = parse_expression(atom.decreases.as_deref().unwrap_or("0"));
+                let measure = expr_to_z3(&vc, &measure_ast, &mut env, None)?;
+                if measure.as_int().is_none() && measure.as_bv().is_none() {
+                    return Err(MumeiError::verification_at(
+                        format!(
+                            "decreases clause of '{}' must be an integer expression",
+                            atom.name
+                        ),
+                        atom.span.clone(),
+                    ));
+                }
+                *vc.recursion.current_scc.borrow_mut() = Some(scc);
+                *vc.recursion.current_measure.borrow_mut() = Some(measure);
+            }
+        }
+    }
+
     let cover_input_values: Env = atom
         .params
         .iter()
@@ -1854,6 +1998,18 @@ pub(crate) fn verify_inner(
         }
     }
 
+    // Termination obligations recorded while requires lowered without a
+    // solver: checked now that the preconditions hold.
+    drain_pending_termination(
+        &vc,
+        &solver,
+        atom,
+        module_env,
+        &env,
+        output_dir,
+        &diagnostics,
+    )?;
+
     // Checked requires use pre-body values inside each cover's solver frame.
     let cover_pre_body_env: Option<Env<'_>> = (!atom.covers.is_empty()).then(|| env.clone());
 
@@ -1967,6 +2123,8 @@ pub(crate) fn verify_inner(
             // Determine failure type: division-by-zero and budget exceeded get their own categories
             let body_failure_type = if err_str.contains("division by zero") {
                 FAILURE_DIVISION_BY_ZERO
+            } else if err_str.contains("Termination measure violation") {
+                FAILURE_TERMINATION_MEASURE_VIOLATED
             } else if err_str.contains("Constraint budget exceeded") {
                 "constraint_budget_exceeded"
             } else {
@@ -1997,6 +2155,18 @@ pub(crate) fn verify_inner(
     };
 
     metrics.record_phase("Phase 4: body evaluation", phase_start.elapsed());
+
+    // Termination obligations recorded while the body lowered without a
+    // solver (e.g. recursive calls inside contract texts evaluated offline).
+    drain_pending_termination(
+        &vc,
+        &solver,
+        atom,
+        module_env,
+        &env,
+        output_dir,
+        &diagnostics,
+    )?;
 
     // 4b. Taint Analysis: unverified 関数の呼び出しを検出し警告
     check_taint_propagation(atom, &hir_atom.body_stmt, &env, module_env);
@@ -2105,7 +2275,10 @@ pub(crate) fn verify_inner(
                 "ensures",
                 &mut diagnostics,
                 Some(&solver),
-            )? {
+            )
+            .map_err(|err| {
+                report_termination_error(err, atom, module_env, output_dir, &diagnostics)
+            })? {
                 ClauseLoweringOutcome::Trivial => {}
                 ClauseLoweringOutcome::Skipped => {
                     skipped_ensures = true;
@@ -2116,6 +2289,16 @@ pub(crate) fn verify_inner(
                     ));
                 }
                 ClauseLoweringOutcome::Lowered(ens_bool) => {
+                    // Termination obligations raised while this clause lowered.
+                    drain_pending_termination(
+                        &vc,
+                        &solver,
+                        atom,
+                        module_env,
+                        &env,
+                        output_dir,
+                        &diagnostics,
+                    )?;
                     solver.push();
                     solver.assert(&ens_bool.not());
                     let ensures_check = solver.check();

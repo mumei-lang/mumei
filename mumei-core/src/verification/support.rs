@@ -5,6 +5,7 @@ pub(crate) mod datatype;
 mod effects;
 mod law_verification;
 mod nominal_types;
+pub(crate) mod recursion;
 pub(crate) mod reglan;
 mod replay;
 mod resource_safety;
@@ -41,6 +42,11 @@ pub(crate) use call_graph::{
 };
 
 pub(crate) use nominal_types::{tail_expr, verify_nominal_struct_types};
+
+pub(crate) use recursion::{
+    collect_call_edges_expr, collect_call_edges_stmt, recursive_scc, RecursiveScc,
+    RecursiveSccEligibility,
+};
 
 pub(crate) use task_ownership::{
     analyze_task_ownership, verify_task_ownership, TaskOwnershipViolation,

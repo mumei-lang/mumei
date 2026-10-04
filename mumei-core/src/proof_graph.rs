@@ -542,6 +542,7 @@ mod tests {
             invariant: None,
             effects: vec![],
             return_type: None,
+            decreases: None,
             span: Span::default(),
             effect_pre: HashMap::new(),
             effect_post: HashMap::new(),

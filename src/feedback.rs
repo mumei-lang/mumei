@@ -53,7 +53,9 @@ pub(crate) fn structured_feedback_from_report_file(
 
 pub(crate) fn infer_failure_type_from_error_text(error_text: &str) -> Option<&'static str> {
     let lower = error_text.to_lowercase();
-    if lower.contains("postcondition") || lower.contains("ensures") {
+    if lower.contains("termination measure") {
+        Some(verification::FAILURE_TERMINATION_MEASURE_VIOLATED)
+    } else if lower.contains("postcondition") || lower.contains("ensures") {
         Some(verification::FAILURE_POSTCONDITION_VIOLATED)
     } else if lower.contains("precondition") || lower.contains("requires") {
         Some(verification::FAILURE_PRECONDITION_VIOLATED)
@@ -115,6 +117,29 @@ pub(crate) fn collect_decidable_fragment_diagnostic(
             "  hint: simplify to linear arithmetic, or use `mumei verify --escalate-lean` to delegate to Lean 4"
         );
         eprintln!("  see: docs/SPEC_GUIDE.md#decidable-fragment");
+    }
+    Some(diagnostic)
+}
+
+/// Source-only advisory for atoms on a recursive call cycle whose contract
+/// cannot use congruent recursive calls. Never affects the verdict.
+pub(crate) fn collect_recursive_contract_diagnostic(
+    atom: &parser::Atom,
+    module_env: &verification::ModuleEnv,
+    suppress_output: bool,
+) -> Option<verification::Diagnostic> {
+    let diagnostic = verification::recursive_contract_hint_diagnostic(atom, module_env)?;
+    if !suppress_output {
+        let location = if atom.span.file.is_empty() {
+            format!("<unknown>:{}", atom.span.line)
+        } else {
+            format!("{}:{}", atom.span.file, atom.span.line)
+        };
+        eprintln!(
+            "{}[{}]: {}",
+            diagnostic.severity, diagnostic.code, diagnostic.message
+        );
+        eprintln!("  --> {}", location);
     }
     Some(diagnostic)
 }
