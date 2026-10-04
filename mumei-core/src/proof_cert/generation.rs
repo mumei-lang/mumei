@@ -72,7 +72,7 @@ fn hash_spec_metadata(hasher: &mut Sha256, map: &HashMap<String, String>) {
 /// the atom itself, so a certificate is `changed` whenever the obligations it
 /// vouches for could differ: name, type parameters and bounds, each parameter
 /// (name, type, `&` / `&mut`, HOF contract), return type, `requires`,
-/// `forall` constraints, `ensures`, `invariant`, body, consumed parameters,
+/// `forall` constraints, `ensures`, `covers`, `invariant`, body, consumed parameters,
 /// resources, `async`, trust level, `max_unroll`, effects (with negation and
 /// parameters), effect pre / post states and `spec_metadata` (which carries
 /// `semantics: bitvec`). Maps are hashed in key order. Excluded: the `span`
@@ -126,6 +126,14 @@ pub fn compute_atom_content_hash_v2(atom: &crate::parser::Atom) -> String {
         );
     }
     hash_section(&mut hasher, "ensures", &atom.ensures);
+    for cover in &atom.covers {
+        let mut section = cover.clause.clone();
+        if let Some(label) = &cover.label {
+            section.push_str("|label=");
+            section.push_str(label);
+        }
+        hash_section(&mut hasher, "cover", &section);
+    }
     hash_section(
         &mut hasher,
         "invariant",

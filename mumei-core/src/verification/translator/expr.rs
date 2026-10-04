@@ -545,6 +545,20 @@ fn collect_expr_local_lets(expr: &Expr, local: &mut std::collections::HashSet<St
     }
 }
 
+fn record_cover_obligation<'a>(vc: &VCtx<'a>, obligation: Bool<'a>) {
+    let Some(obligations) = vc.cover_obligations.as_ref() else {
+        return;
+    };
+    let path_conditions = vc.path_cond_stack.borrow();
+    let obligation = if path_conditions.is_empty() {
+        obligation
+    } else {
+        let path_condition = Bool::and(vc.ctx, &path_conditions.iter().collect::<Vec<_>>());
+        path_condition.implies(&obligation)
+    };
+    obligations.borrow_mut().push(obligation);
+}
+
 pub(crate) fn expr_to_z3<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
@@ -1107,47 +1121,52 @@ pub(crate) fn expr_to_z3<'a>(
                                 let req_ast = parse_expression(&callee.requires);
                                 let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
                                 if let Some(req_bool) = req_z3.as_bool() {
-                                    solver.push();
-                                    // Branch guards are assumptions on this
-                                    // path: a call under `if x >= 0` may rely
-                                    // on `x >= 0` to satisfy the callee's
-                                    // requires. Same pattern as the shift /
-                                    // div-by-zero check sites.
-                                    for cond in vc.path_cond_stack.borrow().iter() {
-                                        solver.assert(cond);
-                                    }
-                                    solver.assert(&req_bool.not());
-                                    if solver.check() == SatResult::Sat {
-                                        // Extract counterexample: concrete argument values
-                                        // that violate the callee's precondition.
-                                        let ce_value = if let Some(model) = solver.get_model() {
-                                            let mut ce_json = serde_json::Map::new();
-                                            for (i, param) in callee.params.iter().enumerate() {
-                                                if let Some(arg_val) = arg_vals.get(i) {
-                                                    if let Some(val) = model.eval(arg_val, true) {
-                                                        let val_str = format!("{}", val);
-                                                        ce_json.insert(
-                                                            param.name.clone(),
-                                                            json!(val_str),
-                                                        );
+                                    if vc.cover_obligations.is_some() {
+                                        record_cover_obligation(vc, req_bool);
+                                    } else {
+                                        solver.push();
+                                        // Branch guards are assumptions on this
+                                        // path: a call under `if x >= 0` may rely
+                                        // on `x >= 0` to satisfy the callee's
+                                        // requires. Same pattern as the shift /
+                                        // div-by-zero check sites.
+                                        for cond in vc.path_cond_stack.borrow().iter() {
+                                            solver.assert(cond);
+                                        }
+                                        solver.assert(&req_bool.not());
+                                        if solver.check() == SatResult::Sat {
+                                            // Extract counterexample: concrete argument values
+                                            // that violate the callee's precondition.
+                                            let ce_value = if let Some(model) = solver.get_model() {
+                                                let mut ce_json = serde_json::Map::new();
+                                                for (i, param) in callee.params.iter().enumerate() {
+                                                    if let Some(arg_val) = arg_vals.get(i) {
+                                                        if let Some(val) = model.eval(arg_val, true)
+                                                        {
+                                                            let val_str = format!("{}", val);
+                                                            ce_json.insert(
+                                                                param.name.clone(),
+                                                                json!(val_str),
+                                                            );
+                                                        }
                                                     }
                                                 }
-                                            }
-                                            if ce_json.is_empty() {
-                                                None
+                                                if ce_json.is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(serde_json::Value::Object(ce_json))
+                                                }
                                             } else {
-                                                Some(serde_json::Value::Object(ce_json))
-                                            }
-                                        } else {
-                                            None
-                                        };
+                                                None
+                                            };
+                                            solver.pop(1);
+                                            return Err(MumeiError::verification(
+                                                format!("Call to '{}': precondition (requires) not satisfied at call site", name)
+                                            ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください")
+                                            .with_counterexample(ce_value));
+                                        }
                                         solver.pop(1);
-                                        return Err(MumeiError::verification(
-                                            format!("Call to '{}': precondition (requires) not satisfied at call site", name)
-                                        ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください")
-                                        .with_counterexample(ce_value));
                                     }
-                                    solver.pop(1);
                                 }
                             }
                         }
@@ -1197,23 +1216,32 @@ pub(crate) fn expr_to_z3<'a>(
                                                 if let Some(constraint_bool) =
                                                     constraint_z3.as_bool()
                                                 {
-                                                    solver.push();
-                                                    for cond in vc.path_cond_stack.borrow().iter() {
-                                                        solver.assert(cond);
-                                                    }
-                                                    solver.assert(&constraint_bool.not());
-                                                    if solver.check() == SatResult::Sat {
+                                                    if vc.cover_obligations.is_some() {
+                                                        record_cover_obligation(
+                                                            vc,
+                                                            constraint_bool,
+                                                        );
+                                                    } else {
+                                                        solver.push();
+                                                        for cond in
+                                                            vc.path_cond_stack.borrow().iter()
+                                                        {
+                                                            solver.assert(cond);
+                                                        }
+                                                        solver.assert(&constraint_bool.not());
+                                                        if solver.check() == SatResult::Sat {
+                                                            solver.pop(1);
+                                                            return Err(MumeiError::verification(
+                                                                format!(
+                                                                    "Call to '{}': trait method parameter constraint '{}' not satisfied for argument {}",
+                                                                    name, constraint, i
+                                                                )
+                                                            ).with_help(
+                                                                "トレイトメソッドのパラメータ制約が満たされていません。引数の値を確認してください"
+                                                            ));
+                                                        }
                                                         solver.pop(1);
-                                                        return Err(MumeiError::verification(
-                                                            format!(
-                                                                "Call to '{}': trait method parameter constraint '{}' not satisfied for argument {}",
-                                                                name, constraint, i
-                                                            )
-                                                        ).with_help(
-                                                            "トレイトメソッドのパラメータ制約が満たされていません。引数の値を確認してください"
-                                                        ));
                                                     }
-                                                    solver.pop(1);
                                                 }
                                             }
                                         }

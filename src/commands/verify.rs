@@ -583,7 +583,12 @@ fn read_report_skipped_clauses(output_dir: &Path, atom_name: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn write_cached_success_report(output_dir: &Path, atom: &parser::Atom, skipped_clauses: usize) {
+fn write_cached_success_report(
+    output_dir: &Path,
+    atom: &parser::Atom,
+    skipped_clauses: usize,
+    cover_results: &[serde_json::Value],
+) {
     let mut structured = StructuredFeedback::verification_passed();
     structured.location = Location::from_span(&atom.span);
     let mut report = serde_json::json!({
@@ -605,6 +610,9 @@ fn write_cached_success_report(output_dir: &Path, atom: &parser::Atom, skipped_c
     });
     if skipped_clauses > 0 {
         report["partial"] = serde_json::json!(true);
+    }
+    if !cover_results.is_empty() {
+        report["cover_results"] = serde_json::json!(cover_results);
     }
     let _ = std::fs::create_dir_all(output_dir);
     let _ = std::fs::write(
@@ -740,7 +748,12 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                 ctx.structured_feedbacks
                     .push(structured_feedback_for_passed_atom(atom));
             }
-            write_cached_success_report(ctx.output_dir, atom, skipped_clauses);
+            write_cached_success_report(
+                ctx.output_dir,
+                atom,
+                skipped_clauses,
+                &cached_entry.cover_results,
+            );
             *ctx.skipped_clauses += skipped_clauses;
             *ctx.skipped += 1;
             return;
@@ -779,7 +792,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
         ctx.module_env,
         atom_verification_config,
     ) {
-        Ok(inferred) => {
+        Ok((inferred, cover_results)) => {
             if !inferred.is_empty() {
                 if !ctx.quiet_output {
                     for item in &inferred {
@@ -833,6 +846,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                     ),
                     skipped_clauses,
                     inferred_invariants: inferred,
+                    cover_results,
                 },
             );
             *ctx.verified += 1;

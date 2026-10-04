@@ -46,7 +46,7 @@ pub use mutation::{apply_mutation, generate_mutations, MutationOperator, Mutatio
 pub use nlae_reporter::*;
 pub use phase_contract::{
     check_phase_order, counterexample_fidelity, phase_contract, CounterexampleFidelity,
-    PhaseContract, PhaseFact, PhaseOrderError, ENSURES_PHASE, PHASE_CONTRACTS,
+    PhaseContract, PhaseFact, PhaseOrderError, COVER_PHASE, ENSURES_PHASE, PHASE_CONTRACTS,
 };
 pub use profiler::{ConstraintProfile, IncrementalProfiler, SolverHeatmap};
 pub use property_based::*;

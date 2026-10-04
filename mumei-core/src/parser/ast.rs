@@ -443,6 +443,12 @@ pub struct ClauseLabel {
     pub label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverClause {
+    pub clause: String,
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Atom {
     pub name: String,
@@ -455,6 +461,7 @@ pub struct Atom {
     pub spec_metadata: HashMap<String, String>,
     pub requires: String,
     pub clause_labels: Vec<ClauseLabel>,
+    pub covers: Vec<CoverClause>,
     pub forall_constraints: Vec<Quantifier>,
     pub ensures: String,
     pub body_expr: String,

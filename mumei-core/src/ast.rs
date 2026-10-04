@@ -780,6 +780,7 @@ impl Monomorphizer {
             spec_metadata: std::collections::HashMap::new(),
             requires: mono_requires,
             clause_labels: generic.clause_labels.clone(),
+            covers: generic.covers.clone(),
             forall_constraints: generic.forall_constraints.clone(),
             ensures: mono_ensures,
             body_expr: mono_body,

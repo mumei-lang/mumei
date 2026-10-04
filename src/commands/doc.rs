@@ -1119,6 +1119,7 @@ atom main() -> i64
                             trace_id: None,
                             spec_metadata: std::collections::HashMap::new(),
                             clause_labels: Vec::new(),
+                            covers: Vec::new(),
                             requires: "true".to_string(),
                             forall_constraints: vec![],
                             ensures: "true".to_string(),
