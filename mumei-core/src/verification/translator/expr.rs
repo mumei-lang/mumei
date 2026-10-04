@@ -1145,33 +1145,101 @@ pub(crate) fn expr_to_z3<'a>(
                                         {
                                             // Extract counterexample: concrete argument values
                                             // that violate the callee's precondition.
-                                            let ce_value = if let Some(model) = solver.get_model() {
-                                                let mut ce_json = serde_json::Map::new();
+                                            let raised_counterexample = if let Some(model) =
+                                                solver.get_model()
+                                            {
+                                                let mut raised = RaisedCounterexample::default();
+                                                let source_bindings = callee
+                                                    .params
+                                                    .iter()
+                                                    .map(|param| param.name.clone())
+                                                    .collect::<HashSet<_>>();
                                                 for (i, param) in callee.params.iter().enumerate() {
                                                     if let Some(arg_val) = arg_vals.get(i) {
                                                         if let Some(val) = model.eval(arg_val, true)
                                                         {
-                                                            let val_str = format!("{}", val);
-                                                            ce_json.insert(
-                                                                param.name.clone(),
-                                                                json!(val_str),
-                                                            );
+                                                            let mut raised_value =
+                                                                raise_named_model_value(
+                                                                    &model,
+                                                                    param.name.clone(),
+                                                                    &val,
+                                                                    param.type_name.as_deref(),
+                                                                    vc.module_env,
+                                                                );
+                                                            let argument_rendering =
+                                                                arg_val.to_string();
+                                                            let mut matching_names = env
+                                                                .iter()
+                                                                .filter_map(|(name, value)| {
+                                                                    (value.to_string()
+                                                                        == argument_rendering)
+                                                                        .then_some(name.as_str())
+                                                                })
+                                                                .collect::<Vec<_>>();
+                                                            matching_names.sort_by_key(|name| {
+                                                                (
+                                                                    !matches!(
+                                                                        classify_solver_symbol(
+                                                                            name,
+                                                                            &source_bindings,
+                                                                            vc.module_env,
+                                                                        ),
+                                                                        SolverSymbolClassification::Source(
+                                                                            _
+                                                                        )
+                                                                    ),
+                                                                    *name,
+                                                                )
+                                                            });
+                                                            let solver_name = matching_names
+                                                                .first()
+                                                                .map(|name| (*name).to_string());
+                                                            if solver_name.as_deref().is_some_and(
+                                                                |name| name != param.name,
+                                                            ) {
+                                                                raised_value.solver_name =
+                                                                    solver_name;
+                                                            }
+                                                            raised.values.push(raised_value);
                                                         }
                                                     }
                                                 }
-                                                if ce_json.is_empty() {
-                                                    None
-                                                } else {
-                                                    Some(serde_json::Value::Object(ce_json))
-                                                }
+                                                raised.omitted_solver_symbols.extend(
+                                                    env.keys()
+                                                        .filter(|symbol| {
+                                                            matches!(
+                                                        classify_solver_symbol(
+                                                            symbol,
+                                                                &source_bindings,
+                                                                vc.module_env,
+                                                        ),
+                                                        SolverSymbolClassification::Internal
+                                                    )
+                                                        })
+                                                        .cloned(),
+                                                );
+                                                raised.omitted_solver_symbols.sort();
+                                                raised.omitted_solver_symbols.dedup();
+                                                Some(raised)
                                             } else {
                                                 None
                                             };
+                                            let ce_value = raised_counterexample
+                                                .as_ref()
+                                                .map(RaisedCounterexample::to_counterexample_json)
+                                                .filter(|counterexample| {
+                                                    !counterexample
+                                                        .as_object()
+                                                        .is_some_and(serde_json::Map::is_empty)
+                                                });
+                                            let provenance = raised_counterexample
+                                                .as_ref()
+                                                .map(RaisedCounterexample::provenance_json);
                                             solver.pop(1);
                                             return Err(MumeiError::verification(
                                                 format!("Call to '{}': precondition (requires) not satisfied at call site", name)
                                             ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください")
-                                            .with_counterexample(ce_value));
+                                            .with_counterexample_provenance(ce_value, provenance));
                                         }
                                         solver.pop(1);
                                     }
@@ -1921,17 +1989,43 @@ pub(crate) fn expr_to_z3<'a>(
                             solver.assert(&ri._eq(&Int::from_i64(ctx, 0)));
                             if crate::verification::phase_artifacts::check(solver) == SatResult::Sat
                             {
-                                // Extract counterexample: find which variables cause divisor == 0
-                                let (ce_hint, div_feedback) =
+                                let (ce_hint, div_feedback, raised_counterexample) =
                                     if let Some(model) = solver.get_model() {
-                                        let divisor_val = model
-                                            .eval(&ri, true)
-                                            .map(|v| format!("{}", v))
-                                            .unwrap_or_else(|| "0".to_string());
-                                        let dividend_val = model
-                                            .eval(&li, true)
-                                            .map(|v| format!("{}", v))
+                                        let dividend = model.eval(&li, true);
+                                        let divisor = model.eval(&ri, true);
+                                        let mut raised = RaisedCounterexample::default();
+                                        if let Some(value) = dividend.as_ref() {
+                                            let value = Dynamic::from(value);
+                                            raised.values.push(raise_named_model_value(
+                                                &model,
+                                                "dividend",
+                                                &value,
+                                                None,
+                                                vc.module_env,
+                                            ));
+                                        }
+                                        if let Some(value) = divisor.as_ref() {
+                                            let value = Dynamic::from(value);
+                                            raised.values.push(raise_named_model_value(
+                                                &model,
+                                                "divisor",
+                                                &value,
+                                                None,
+                                                vc.module_env,
+                                            ));
+                                        }
+                                        let dividend_val = raised
+                                            .values
+                                            .iter()
+                                            .find(|value| value.source_name == "dividend")
+                                            .map(|value| value.rendering.clone())
                                             .unwrap_or_else(|| "?".to_string());
+                                        let divisor_val = raised
+                                            .values
+                                            .iter()
+                                            .find(|value| value.source_name == "divisor")
+                                            .map(|value| value.rendering.clone())
+                                            .unwrap_or_else(|| "0".to_string());
                                         let hint = format!(
                                             " Counter-example: dividend = {}, divisor = {}",
                                             dividend_val, divisor_val
@@ -1940,38 +2034,28 @@ pub(crate) fn expr_to_z3<'a>(
                                             &dividend_val,
                                             &divisor_val,
                                         );
-                                        (hint, Some(fb))
+                                        (hint, Some(fb), Some(raised))
                                     } else {
-                                        (String::new(), None)
+                                        (String::new(), None, None)
                                     };
                                 // Attach structured feedback to error message for upstream reporting
                                 let feedback_hint = div_feedback
                                     .as_ref()
                                     .map(|fb| format!(" [semantic_feedback: {}]", fb))
                                     .unwrap_or_default();
-                                let ce_value = if let Some(model) = solver.get_model() {
-                                    let dividend_val = model
-                                        .eval(&li, true)
-                                        .map(|v| format!("{}", v))
-                                        .unwrap_or_else(|| "?".to_string());
-                                    let divisor_val = model
-                                        .eval(&ri, true)
-                                        .map(|v| format!("{}", v))
-                                        .unwrap_or_else(|| "0".to_string());
-                                    Some(serde_json::json!({
-                                        "dividend": dividend_val,
-                                        "divisor": divisor_val,
-                                    }))
-                                } else {
-                                    None
-                                };
+                                let ce_value = raised_counterexample
+                                    .as_ref()
+                                    .map(RaisedCounterexample::to_counterexample_json);
+                                let provenance = raised_counterexample
+                                    .as_ref()
+                                    .map(RaisedCounterexample::provenance_json);
                                 solver.pop(1);
                                 return Err(MumeiError::verification(format!(
                                     "Potential division by zero.{}{}",
                                     ce_hint, feedback_hint
                                 ))
                                 .with_help("Add a condition divisor != 0 to requires")
-                                .with_counterexample(ce_value));
+                                .with_counterexample_provenance(ce_value, provenance));
                             }
                             solver.pop(1);
                         }
@@ -2241,18 +2325,20 @@ pub(crate) fn expr_to_z3<'a>(
                     check_solver.push();
                     check_solver.assert(&coverage.not());
                     if crate::verification::phase_artifacts::check(check_solver) == SatResult::Sat {
-                        let counterexample = if let Some(model) = check_solver.get_model() {
-                            // ターゲット変数の具体的な値を取得
-                            format_counterexample(
-                                &model,
-                                &target_z3,
-                                arms,
-                                vc,
-                                decl_hint.as_deref(),
-                            )
-                        } else {
-                            "unknown value".to_string()
-                        };
+                        let (counterexample, counterexample_provenance) =
+                            if let Some(model) = check_solver.get_model() {
+                                // ターゲット変数の具体的な値を取得
+                                format_counterexample(
+                                    &model,
+                                    &target_z3,
+                                    arms,
+                                    env,
+                                    vc,
+                                    decl_hint.as_deref(),
+                                )
+                            } else {
+                                ("unknown value".to_string(), None)
+                            };
                         check_solver.pop(1);
                         let ce_value = serde_json::json!({
                             "target": counterexample,
@@ -2262,7 +2348,12 @@ pub(crate) fn expr_to_z3<'a>(
                                 "Match is not exhaustive: the following value is not covered by any arm:\n  Counter-example: {}",
                                 counterexample
                             )
-                        ).with_counterexample(Some(ce_value)));
+                        ).with_counterexample_provenance(
+                            Some(ce_value),
+                            counterexample_provenance
+                                .as_ref()
+                                .map(RaisedCounterexample::provenance_json),
+                        ));
                     }
                     check_solver.pop(1);
                     return Err(MumeiError::verification(

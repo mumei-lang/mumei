@@ -325,55 +325,64 @@ pub(crate) fn format_counterexample<'a>(
     model: &z3::Model,
     target: &Dynamic<'a>,
     arms: &[MatchArm],
+    env: &Env<'a>,
     vc: &VCtx<'a>,
     decl_hint: Option<&str>,
-) -> String {
+) -> (String, Option<RaisedCounterexample>) {
     // アームから Enum 定義を特定（ドメイン制約と同じロジック）
     let enum_ctx = detect_enum_from_arms(arms, vc, target, decl_hint);
     let module_env = vc.module_env;
 
     // ターゲット変数の具体的な値を取得
     if let Some(target_val) = model.eval(target, true) {
-        let target_str = format!("{}", target_val);
-
-        // Enum の場合: tag 値からバリアント名を逆引き
-        if let Some(target_int) = target_val.as_int() {
+        let resolved = if let Some(target_int) = target_val.as_int() {
             let tag_str = format!("{}", target_int);
             if let Ok(tag_val) = tag_str.parse::<i64>() {
-                // まず arms から特定した Enum を優先的に使用
-                if let Some(edef) = enum_ctx {
-                    if let Some(variant) = edef.variants.get(tag_val as usize) {
-                        return format_missing_variant(edef, variant, tag_val);
-                    }
-                }
-                // フォールバック: module_env の全 Enum 定義を走査
-                for (enum_name, enum_def) in module_env.enums.iter() {
-                    if let Some(variant) = enum_def.variants.get(tag_val as usize) {
-                        return format!(
-                            "{}::{} (tag={}) -- missing from match arms",
-                            enum_name, variant.name, tag_val
-                        );
-                    }
-                }
+                let tag = tag_val as usize;
+                enum_ctx
+                    .and_then(|enum_def| enum_def.variants.get(tag).map(|_| (enum_def, tag)))
+                    .or_else(|| {
+                        module_env.enums.values().find_map(|enum_def| {
+                            enum_def.variants.get(tag).map(|_| (enum_def, tag))
+                        })
+                    })
+            } else {
+                None
             }
-            // 整数リテラルとしてフォールバック
-            return format!("value = {} -- no matching arm", tag_str);
-        }
-
-        // P10-C 以降、Enum ターゲットは datatype コンストラクタ値（`PEP` や
-        // `(Circle 3)`）として評価される。コンストラクタ宣言名が variant 名なので、
-        // そこから所属 Enum と tag（variants 内 index）を逆引きする。
-        if target_val.as_datatype().is_some() {
-            if let Some(variant_name) = datatype_ctor_name(&target_val) {
-                if let Some((edef, tag_val)) =
-                    resolve_ctor_variant(vc, enum_ctx, module_env, &target_val, &variant_name)
-                {
-                    return format_missing_variant(edef, &edef.variants[tag_val], tag_val as i64);
-                }
-            }
-        }
-
-        format!("value = {} -- no matching arm", target_str)
+        } else if target_val.as_datatype().is_some() {
+            datatype_ctor_name(&target_val)
+                .and_then(|name| resolve_ctor_variant(vc, enum_ctx, module_env, &target_val, &name))
+        } else {
+            None
+        };
+        let type_hint = decl_hint
+            .or_else(|| resolved.map(|(enum_def, _)| enum_def.name.as_str()))
+            .or_else(|| enum_ctx.map(|enum_def| enum_def.name.as_str()));
+        let (rendering, lowering, status) =
+            raise_binding(model, "target", &target_val, type_hint, env, module_env);
+        let decoded_string = if lowering == "string" {
+            decode_model_string(&target_val, &rendering)
+        } else {
+            None
+        };
+        let message = if let Some((enum_def, idx)) = resolved {
+            format_missing_variant(enum_def, &enum_def.variants[idx], idx as i64)
+        } else {
+            format!("value = {rendering} -- no matching arm")
+        };
+        let raised = RaisedCounterexample {
+            values: vec![RaisedValue {
+                source_name: "target".to_string(),
+                solver_name: None,
+                rendering,
+                lowering,
+                source_type: type_hint.map(str::to_string),
+                decoded_string,
+                status,
+            }],
+            omitted_solver_symbols: Vec::new(),
+        };
+        (message, Some(raised))
     } else {
         // 評価に失敗した場合、アームの情報からヒントを生成
         let covered: Vec<String> = arms
@@ -385,9 +394,12 @@ pub(crate) fn format_counterexample<'a>(
                 Pattern::Wildcard => "_".to_string(),
             })
             .collect();
-        format!(
-            "(could not evaluate; covered patterns: [{}])",
-            covered.join(", ")
+        (
+            format!(
+                "(could not evaluate; covered patterns: [{}])",
+                covered.join(", ")
+            ),
+            None,
         )
     }
 }
