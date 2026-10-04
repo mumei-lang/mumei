@@ -1,23 +1,30 @@
 name: Core Tests
 
-# Curated root targets pass on develop; add new targets once they are green.
+# Runs every workspace unit and integration target, so new tests are
+# picked up automatically.
+
+permissions:
+  contents: read
 
 on:
   pull_request:
     paths:
       - 'mumei-core/**'
-      - 'mumei-emit-**/**'
+      - 'mumei-emit-*/**'
       - 'src/**'
       - 'tests/**'
+      - 'std/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/core-tests.yml'
+  push:
+    branches: [develop]
   workflow_dispatch:
 
 jobs:
   core-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,46 +60,20 @@ jobs:
           restore-keys: |
             cargo-core-tests-
 
-      - name: Test mumei-core library
+      - name: Unit tests (lib + bins)
         env:
           LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
           LIBCLANG_PATH: /usr/lib/llvm-17/lib
-        run: cargo test -p mumei-core --lib
+        run: cargo test --workspace --lib --bins
 
-      - name: Run curated root integration tests
+      - name: Integration tests
         env:
           LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
           LIBCLANG_PATH: /usr/lib/llvm-17/lib
-        # Cases that call the mumei-lean bridge (scripts/bridge.py) are skipped:
-        # this job doesn't check out mumei-lean.
+        # mumei-ffi-tests is covered by ffi-contract-tests.yml (generation +
+        # coverage gates). The two skipped cases call the mumei-lean bridge
+        # (scripts/bridge.py), which this job doesn't check out.
         run: |
-          cargo test --no-fail-fast \
-            --test test_verify_exit_codes \
-            --test test_verify_ensures_outcomes \
-            --test test_cover_clauses \
-            --test test_clause_trust_modes \
-            --test test_struct_invariant \
-            --test test_spurious_detection \
-            --test test_data_flow_trace \
-            --test test_hir_leaf_emitters \
-            --test test_phase_artifacts \
-            --test test_verify_sarif \
-            --test test_bitvec_i64 \
-            --test test_codegen_enum_resolution \
-            --test test_decidable_fragment \
-            --test test_differential_fuzz \
-            --test test_lambda_codegen \
-            --test test_lambda_indirect_call \
-            --test test_property_based_soundness \
-            --test test_counterexample_raising \
-            --test test_quantified_requires \
-            --test test_quantifier_calls \
-            --test test_recursive_contract_calls \
-            --test test_recursive_contract_decreases \
-            --test test_str_builtins \
-            --test test_reconstruction_loss \
-            --test test_units \
-            --test test_concurrency \
-            -- \
+          cargo test --workspace --exclude mumei-ffi-tests --test '*' --no-fail-fast -- \
             --skip escalate_lean_promotes_outside_fragment_to_candidate_bundle \
             --skip nlsat_first_fixture_outside_window_keeps_lean_escalation
