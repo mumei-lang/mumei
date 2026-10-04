@@ -330,12 +330,12 @@ fn use_g2_bad_fails() {
 }
 
 #[test]
-fn mk_struct_result_reports_failure_without_crashing() {
-    assert_case(verify("mk", STRUCT_P, "mk"), "failed");
+fn mk_struct_result_verifies_without_crashing() {
+    assert_case(verify("mk", STRUCT_P, "mk"), "verified");
 }
 
 #[test]
-fn use_mk_reports_failure_without_crashing() {
+fn use_mk_verifies() {
     assert_case(
         verify(
             "use_mk",
@@ -344,7 +344,7 @@ fn use_mk_reports_failure_without_crashing() {
             ),
             "use_mk",
         ),
-        "failed",
+        "verified",
     );
 }
 
