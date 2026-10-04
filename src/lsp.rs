@@ -1461,6 +1461,9 @@ fn append_certificate_lean_escalation_diagnostics(
         if current_hash.as_deref() != Some(atom_cert.content_hash.as_str()) {
             continue;
         }
+        if atom_cert.z3_check_result != "lean_verified" && live_settled.contains(&atom_cert.name) {
+            continue;
+        }
         // Kernel-axiom audit failures are distinct from stale translator
         // metadata and pending escalations, so check the audit first.
         match proof_cert::lean_axiom_audit(atom_cert) {

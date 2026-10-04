@@ -490,6 +490,68 @@ fn lsp_reports_audit_error_for_escalated_unknown_atom() {
 }
 
 #[test]
+fn lsp_suppresses_stale_rejected_audit_for_live_settled_atom() {
+    let dir = unique_temp_dir("mumei-lsp-lean-audit-settled");
+    let source = concat!(
+        "atom linear(x: i64) -> i64\n",
+        "  requires: x >= 0;\n",
+        "  ensures: result == x + 1;\n",
+        "  body: x + 1;\n",
+    );
+    let source_path = dir.join("settled.mm");
+    let cert_path = dir.join("settled.proof.json");
+    std::fs::write(&source_path, source).expect("write source");
+
+    let generated = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--proof-cert")
+        .arg("--output")
+        .arg(&cert_path)
+        .arg(&source_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run mumei verify --proof-cert");
+    assert!(
+        cert_path.exists(),
+        "certificate was not written (status {:?}):\n{}",
+        generated.status.code(),
+        String::from_utf8_lossy(&generated.stderr)
+    );
+
+    let raw = std::fs::read_to_string(&cert_path).expect("read certificate");
+    let mut cert: Value = serde_json::from_str(&raw).expect("parse certificate");
+    let atom = cert["atoms"]
+        .as_array_mut()
+        .expect("atoms")
+        .iter_mut()
+        .find(|atom| atom["name"] == "linear")
+        .expect("linear certificate entry");
+    mark_lean_verified(atom, "linear_spec");
+    atom["z3_check_result"] = Value::String("unknown".to_string());
+    atom["status"] = Value::String("unverified".to_string());
+    atom["escalation_reason"] = Value::String("nonlinear_arithmetic".to_string());
+    atom["lean_result_metadata"]["kernel_axioms"] = serde_json::json!(["sorryAx"]);
+    atom["lean_result_metadata"]["axiom_audit"] = Value::String("passed".to_string());
+    std::fs::write(&cert_path, cert.to_string()).expect("write patched certificate");
+
+    let diagnostics = did_open_diagnostics(&source_path, source);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    for status in ["axiom_rejected", "pending"] {
+        assert!(
+            !diagnostics
+                .iter()
+                .filter_map(lean_escalation)
+                .any(|escalation| {
+                    escalation.get("atom").and_then(Value::as_str) == Some("linear")
+                        && escalation.get("status").and_then(Value::as_str) == Some(status)
+                }),
+            "live-settled atom must not be reported as {status}: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
 fn lsp_reports_every_pending_escalation_recorded_in_the_sibling_certificate() {
     let dir = unique_temp_dir("mumei-lsp-lean-pending-all");
     // Two undecided atoms: in-process verification stops at the first one, so
