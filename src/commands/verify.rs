@@ -10,6 +10,7 @@ use mumei_core::{
     structured_feedback::{Location, StructuredFeedback},
     verification,
 };
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::Once;
@@ -84,10 +85,11 @@ impl VerifyOutcome {
 
     /// `failed` counts every atom reported as failed in the summary;
     /// `solver_inconclusive` is the subset of those whose Z3 result was
-    /// `unknown` / `timeout` / `resource_limit` rather than a counterexample.
-    /// `open_escalations` counts Lean escalation candidates Z3 left `unknown`
-    /// that the bridge did not discharge as `lean_verified`; an open
-    /// obligation is not a verdict either way.
+    /// `unknown` / `timeout` / `resource_limit` / `spurious_candidate` rather
+    /// than a confirmed counterexample.
+    /// `open_escalations` counts Lean escalation candidates Z3 left
+    /// inconclusive that the bridge did not discharge as `lean_verified`; an
+    /// open obligation is not a verdict either way.
     fn from_counts(
         failed: usize,
         solver_inconclusive: usize,
@@ -143,8 +145,91 @@ fn early_outcome(outcome: VerifyOutcome, message: &str, json_output: bool) -> Ve
     outcome
 }
 
+/// Z3 results that are not a verdict. A `spurious_candidate` is a model the
+/// counterexample replay could not confirm against the Mumei semantics, so it
+/// is no more a rejection than an `unknown` is.
 fn is_solver_inconclusive(z3_result: &str) -> bool {
-    matches!(z3_result, "unknown" | "timeout" | "resource_limit")
+    matches!(
+        z3_result,
+        "unknown" | "timeout" | "resource_limit" | "spurious_candidate"
+    )
+}
+
+fn find_atom_span<'a>(items: &'a [Item], name: &str) -> Option<&'a parser::Span> {
+    for item in items {
+        match item {
+            Item::Atom(atom) if atom.name == name => return Some(&atom.span),
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    if format!("{}::{}", impl_block.struct_name, method.name) == name {
+                        return Some(&method.span);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_session_caller_span<'a>(
+    items: &'a [Item],
+    atom_name: &str,
+    caller_file: &str,
+) -> Option<&'a parser::Span> {
+    let source_file_matches = |atom: &parser::Atom| {
+        let source_file = atom
+            .spec_metadata
+            .get("source_file")
+            .filter(|file| !file.is_empty())
+            .map(String::as_str)
+            .unwrap_or(atom.span.file.as_str());
+        source_file == caller_file
+    };
+    items.iter().find_map(|item| match item {
+        Item::Atom(atom) if atom.name == atom_name && source_file_matches(atom) => Some(&atom.span),
+        Item::ImplBlock(impl_block) => impl_block.methods.iter().find_map(|method| {
+            let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+            (qualified_name == atom_name && source_file_matches(method)).then_some(&method.span)
+        }),
+        _ => None,
+    })
+}
+
+fn write_sarif_fallback(
+    sarif: &RefCell<super::verify_sarif::SarifCollector>,
+    report_dir: Option<&str>,
+    outcome: VerifyOutcome,
+    quiet_output: bool,
+) {
+    if sarif.borrow().written {
+        return;
+    }
+    let output_dir = report_dir.map(Path::new).unwrap_or(Path::new("."));
+    let path = output_dir.join("report.sarif");
+    let write_result = std::fs::create_dir_all(output_dir).and_then(|()| {
+        let document = sarif.borrow().document(outcome);
+        serde_json::to_vec_pretty(&document)
+            .map_err(std::io::Error::other)
+            .and_then(|contents| std::fs::write(&path, contents))
+    });
+    match write_result {
+        Ok(()) => {
+            sarif.borrow_mut().written = true;
+            if !quiet_output {
+                println!("  SARIF log written to: {}", path.display());
+            }
+        }
+        Err(error) => eprintln!("Warning: failed to write SARIF fallback: {error}"),
+    }
+}
+
+fn warn_phase_artifact_write_failures() {
+    if let Some((count, first)) = verification::phase_artifacts::write_failures() {
+        eprintln!(
+            "warning: --keep-phase-artifacts: {count} artifact write(s) failed (first: {first}); phase artifacts are incomplete"
+        );
+    }
 }
 
 pub(crate) fn cmd_verify_command(command: Command) {
@@ -164,6 +249,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
         no_emit,
         output,
         report_dir,
+        keep_phase_artifacts,
         json,
         strict_imports,
         allow_lean_verified,
@@ -224,6 +310,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
     let emit_structured_feedback = matches!(emit.as_deref(), Some("structured-feedback"));
     let emit_human_review_queue = matches!(emit.as_deref(), Some("human-review-queue"));
     let emit_proof_graph = matches!(emit.as_deref(), Some("proof-graph"));
+    let emit_sarif = matches!(emit.as_deref(), Some("sarif"));
     if let Some(other) = emit.as_deref() {
         if !emit_escalation_bundle
             && !matches!(other, "escalation-metrics")
@@ -233,9 +320,10 @@ pub(crate) fn cmd_verify_command(command: Command) {
             && !emit_structured_feedback
             && !emit_human_review_queue
             && !emit_proof_graph
+            && !emit_sarif
         {
             eprintln!(
-                    "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, loss-vector, structured-feedback, human-review-queue, proof-graph",
+                    "Unsupported verify --emit target '{}'. Supported values: escalation-bundle, escalation-metrics, decidable-metrics, reconstruction-loss, loss-vector, structured-feedback, human-review-queue, proof-graph, sarif",
                     other
                 );
             std::process::exit(EXIT_USAGE_ERROR);
@@ -245,6 +333,16 @@ pub(crate) fn cmd_verify_command(command: Command) {
     let intent_fidelity = resolve_intent_fidelity(intent_fidelity);
     let artifact_paths = resolve_artifact_paths(artifact_paths);
     let budget_policy_fingerprint = resolve_budget_policy_fingerprint(budget_policy_fingerprint);
+    if let Some(directory) = &keep_phase_artifacts {
+        if let Err(error) = verification::phase_artifacts::enable(PathBuf::from(directory)) {
+            eprintln!(
+                "Failed to enable phase-artifact capture at '{}': {error}",
+                directory
+            );
+            std::process::exit(EXIT_INTERNAL_ERROR);
+        }
+    }
+    let sarif = emit_sarif.then(|| RefCell::new(super::verify_sarif::SarifCollector::new()));
     // The proof graph is a projection of the cross-spec analysis, so asking for
     // it implies running that analysis.
     let enable_cross_spec = cross_spec_verify || !cross_spec_files.is_empty() || emit_proof_graph;
@@ -267,6 +365,15 @@ pub(crate) fn cmd_verify_command(command: Command) {
         files.sort();
         if files.is_empty() {
             eprintln!("❌ No .mm files found in '{}'", input);
+            if let Some(sarif) = &sarif {
+                write_sarif_fallback(
+                    sarif,
+                    report_dir.as_deref(),
+                    VerifyOutcome::InputError,
+                    json,
+                );
+            }
+            warn_phase_artifact_write_failures();
             std::process::exit(EXIT_INPUT_ERROR);
         }
         println!(
@@ -283,6 +390,9 @@ pub(crate) fn cmd_verify_command(command: Command) {
             // on the last file, with the other files supplied as cross-spec
             // inputs. Writing it per file would leave only the last file's atoms.
             let emit_proof_graph_here = emit_proof_graph && position + 1 == files.len();
+            if let Some(sarif) = &sarif {
+                sarif.borrow_mut().prior_outcome = worst;
+            }
             let mut per_file_cross_spec_files = cross_spec_files.clone();
             if emit_proof_graph_here {
                 per_file_cross_spec_files.extend(
@@ -308,6 +418,8 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     emit_structured_feedback,
                     emit_human_review_queue,
                     emit_proof_graph: emit_proof_graph_here,
+                    sarif: sarif.as_ref(),
+                    write_sarif: emit_sarif && position + 1 == files.len(),
                     cert_output: output.as_deref(),
                     report_dir: report_dir.as_deref(),
                     json_output: json,
@@ -338,10 +450,16 @@ pub(crate) fn cmd_verify_command(command: Command) {
                 Ok(outcome) => outcome,
                 Err(_) => {
                     eprintln!("  ❌ '{}': internal error (panic)", file_str);
+                    if let Some(sarif) = &sarif {
+                        sarif.borrow_mut().push_panic_notification(&file_str);
+                    }
                     VerifyOutcome::InternalError
                 }
             };
             worst = worst.combine(outcome);
+            if let Some(sarif) = &sarif {
+                sarif.borrow_mut().prior_outcome = worst;
+            }
             if outcome.is_failure() {
                 total_fail += 1;
             } else {
@@ -352,6 +470,10 @@ pub(crate) fn cmd_verify_command(command: Command) {
             "\n🗡️  Directory verify summary: {} passed, {} failed",
             total_ok, total_fail
         );
+        if let Some(sarif) = &sarif {
+            write_sarif_fallback(sarif, report_dir.as_deref(), worst, json);
+        }
+        warn_phase_artifact_write_failures();
         if worst.is_failure() {
             std::process::exit(worst.exit_code());
         }
@@ -372,6 +494,8 @@ pub(crate) fn cmd_verify_command(command: Command) {
                 emit_structured_feedback,
                 emit_human_review_queue,
                 emit_proof_graph,
+                sarif: sarif.as_ref(),
+                write_sarif: emit_sarif,
                 cert_output: output.as_deref(),
                 report_dir: report_dir.as_deref(),
                 json_output: json,
@@ -402,9 +526,16 @@ pub(crate) fn cmd_verify_command(command: Command) {
             Ok(outcome) => outcome,
             Err(_) => {
                 eprintln!("  ❌ '{}': internal error (panic)", input);
+                if let Some(sarif) = &sarif {
+                    sarif.borrow_mut().push_panic_notification(&input);
+                }
                 VerifyOutcome::InternalError
             }
         };
+        if let Some(sarif) = &sarif {
+            sarif.borrow_mut().prior_outcome = outcome;
+            write_sarif_fallback(sarif, report_dir.as_deref(), outcome, json);
+        }
         // --detect-spec-drift: compare old cert with newly generated cert
         if let Some(ref old_cert_path) = detect_spec_drift {
             let old_cert_file = std::fs::read_to_string(old_cert_path);
@@ -478,6 +609,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                 }
             }
         }
+        warn_phase_artifact_write_failures();
         if outcome.is_failure() {
             std::process::exit(outcome.exit_code());
         }
@@ -499,6 +631,8 @@ pub(crate) struct VerifyOptions<'a> {
     pub(crate) emit_structured_feedback: bool,
     pub(crate) emit_human_review_queue: bool,
     pub(crate) emit_proof_graph: bool,
+    pub(crate) sarif: Option<&'a RefCell<super::verify_sarif::SarifCollector>>,
+    pub(crate) write_sarif: bool,
     pub(crate) cert_output: Option<&'a str>,
     pub(crate) report_dir: Option<&'a str>,
     pub(crate) json_output: bool,
@@ -550,6 +684,7 @@ struct VerifyContext<'a> {
         Vec<verification::invariant_inference::InferredInvariant>,
     >,
     cert_results: &'a mut std::collections::HashMap<String, (String, String)>,
+    sarif: Option<&'a RefCell<super::verify_sarif::SarifCollector>>,
     verified: &'a mut usize,
     failed: &'a mut usize,
     unverifiable: &'a mut usize,
@@ -567,6 +702,20 @@ fn first_error_line(error_text: &str) -> String {
         .find(|line| !line.is_empty())
         .unwrap_or("verification failed")
         .to_string()
+}
+
+fn read_fresh_impl_report(
+    output_dir: &Path,
+    label: &str,
+    started_at: std::time::SystemTime,
+) -> Option<serde_json::Value> {
+    let path = output_dir.join("report.json");
+    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+    if modified < started_at {
+        return None;
+    }
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    (report["atom"].as_str() == Some(label)).then_some(report)
 }
 
 fn read_report_skipped_clauses(output_dir: &Path, atom_name: &str) -> usize {
@@ -622,6 +771,35 @@ fn write_cached_success_report(
 }
 
 fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'_>) {
+    let Some(sarif) = ctx.sarif else {
+        verify_single_atom_inner(atom, name, ctx);
+        return;
+    };
+    let failure_start = ctx.failure_diagnostics.len();
+    let diagnostic_start = ctx.diagnostics.len();
+    let imported_contract_trusted = ctx.module_env.is_verified(name);
+    verify_single_atom_inner(atom, name, ctx);
+    let report = std::fs::read_to_string(ctx.output_dir.join("report.json"))
+        .ok()
+        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+        .filter(|report| report["atom"].as_str() == Some(name));
+    let failure_diagnostics = ctx.failure_diagnostics[failure_start..].to_vec();
+    let diagnostics = ctx.diagnostics[diagnostic_start..].to_vec();
+    let cert_result = ctx.cert_results.get(name);
+    sarif
+        .borrow_mut()
+        .collect_atom(super::verify_sarif::AtomFindings {
+            atom,
+            name,
+            report: report.as_ref(),
+            cert_result,
+            failure_diagnostics: &failure_diagnostics,
+            diagnostics: &diagnostics,
+            imported_contract_trusted,
+        });
+}
+
+fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'_>) {
     // report.json describes the most recent atom only. Atoms rejected before Z3
     // runs (type/unit errors) write none, so a file left by a previous run or a
     // previous atom must not be mistaken for this atom's result.
@@ -744,6 +922,7 @@ fn verify_single_atom(atom: &parser::Atom, name: &str, ctx: &mut VerifyContext<'
                     }
                 }
             }
+            verification::phase_artifacts::record_cached_atom(&atom.span.file, name);
             if ctx.emit_structured_feedback {
                 ctx.structured_feedbacks
                     .push(structured_feedback_for_passed_atom(atom));
@@ -1242,6 +1421,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         emit_structured_feedback,
         emit_human_review_queue,
         emit_proof_graph,
+        sarif,
+        write_sarif,
         cert_output,
         report_dir,
         json_output,
@@ -1268,6 +1449,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         detect_loops,
         suggest_cegis,
     } = options;
+    let sarif_result_start = sarif.map_or(0, |collector| collector.borrow().results.len());
     if emit_loss_vector {
         std::env::set_var(verification::ENABLE_RECONSTRUCTION_LOSS_ENV, "1");
     }
@@ -1494,6 +1676,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                         impl_def.trait_name, impl_def.target_type
                     );
                 }
+                let label = format!("impl {} for {}", impl_def.trait_name, impl_def.target_type);
+                let started_at = std::time::SystemTime::now();
                 match verification::verify_impl_with_options(
                     impl_def,
                     &module_env,
@@ -1510,10 +1694,20 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                     Err(e) => {
                         // Same classification as the atom path: a law Z3 could
                         // neither prove nor refute is inconclusive, not a rejection.
-                        if verification::z3_result_from_error_message(&e.to_string())
-                            .is_some_and(is_solver_inconclusive)
-                        {
+                        let error_message = e.to_string();
+                        let z3_result = verification::z3_result_from_error_message(&error_message);
+                        if z3_result.is_some_and(is_solver_inconclusive) {
                             solver_inconclusive += 1;
+                        }
+                        if let Some(sarif) = sarif {
+                            let report = read_fresh_impl_report(output_dir, &label, started_at);
+                            sarif.borrow_mut().push_trait_law_failure(
+                                &label,
+                                &error_message,
+                                z3_result,
+                                report.as_ref(),
+                                &impl_def.span,
+                            );
                         }
                         if !quiet_output {
                             let resolved = resolve_source_for_span(&source, &impl_def.span);
@@ -1546,6 +1740,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                     reconstruction_losses: &mut reconstruction_losses,
                     inferred_invariants: &mut inferred_invariants,
                     cert_results: &mut cert_results,
+                    sarif,
                     verified: &mut verified,
                     failed: &mut failed,
                     unverifiable: &mut unverifiable,
@@ -1582,6 +1777,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                         reconstruction_losses: &mut reconstruction_losses,
                         inferred_invariants: &mut inferred_invariants,
                         cert_results: &mut cert_results,
+                        sarif,
                         verified: &mut verified,
                         failed: &mut failed,
                         unverifiable: &mut unverifiable,
@@ -1672,6 +1868,16 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                         eprintln!(
                             "  ❌ Session protocol violation ({}): {}\n     Suggested fix: {}",
                             violation.kind, violation.message, violation.suggested_fix
+                        );
+                    }
+                    if let Some(sarif) = sarif {
+                        sarif.borrow_mut().push_session_protocol_violation(
+                            violation,
+                            find_session_caller_span(
+                                &items,
+                                &violation.caller_atom,
+                                &violation.caller_file,
+                            ),
                         );
                     }
                     failed += 1;
@@ -1784,6 +1990,15 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                             verified += stats.newly_proven;
                             escalated = escalated.saturating_sub(stats.lean_verified);
                             lean_verified_atoms.extend(stats.lean_verified_atoms.iter().cloned());
+                            if let Some(sarif) = sarif {
+                                for (atom_name, disallowed) in &stats.axiom_rejected_atoms {
+                                    sarif.borrow_mut().push_axiom_rejected(
+                                        atom_name,
+                                        disallowed.as_deref(),
+                                        find_atom_span(&items, atom_name),
+                                    );
+                                }
+                            }
                             if !quiet_output {
                                 for atom_name in &stats.lean_verified_atoms {
                                     println!("  lean_verified: {atom_name}");
@@ -1902,6 +2117,12 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         }
     }
 
+    if let Some(sarif) = sarif {
+        sarif
+            .borrow_mut()
+            .remove_lean_verified(sarif_result_start, &lean_verified_atoms);
+    }
+
     if let Some(cross_spec_result) = proof_graph_cross_spec {
         let mut statuses = proof_graph_statuses(
             &cert_results,
@@ -1988,7 +2209,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
     // Proposal B: --json outputs report.json content to stdout
     // Candidates promoted from a Z3 `unsat` (outside the decidable fragment,
     // or a contract-trusted import) already carry a verdict; only candidates
-    // Z3 left `unknown` and Lean did not discharge are still open.
+    // Z3 left inconclusive and Lean did not discharge are still open.
     let open_escalations = cert_results
         .iter()
         .filter(|(name, (z3_result, status))| {
@@ -1997,13 +2218,43 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                 && !lean_verified_atoms.iter().any(|a| a == *name)
         })
         .count();
-    let outcome = VerifyOutcome::from_counts(
+    let mut outcome = VerifyOutcome::from_counts(
         failed,
         solver_inconclusive,
         unverifiable,
         open_escalations,
         infra_errors,
     );
+    if write_sarif {
+        if let Some(sarif) = sarif {
+            let path = output_dir.join("report.sarif");
+            let write_result = std::fs::create_dir_all(output_dir).and_then(|()| {
+                let document = sarif.borrow().document(outcome);
+                serde_json::to_vec_pretty(&document)
+                    .map_err(std::io::Error::other)
+                    .and_then(|contents| std::fs::write(&path, contents))
+            });
+            match write_result {
+                Ok(()) => {
+                    sarif.borrow_mut().written = true;
+                    if !quiet_output {
+                        println!("  SARIF log written to: {}", path.display());
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Failed to write SARIF log '{}': {error}", path.display());
+                    infra_errors += 1;
+                    outcome = VerifyOutcome::from_counts(
+                        failed,
+                        solver_inconclusive,
+                        unverifiable,
+                        open_escalations,
+                        infra_errors,
+                    );
+                }
+            }
+        }
+    }
     if json_output {
         let report_path = output_dir.join("report.json");
         // When the module contains a mix of passing and failing/unverifiable atoms,
@@ -2339,6 +2590,81 @@ pub(crate) fn save_cross_spec_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn atom_item(span_file: &str, source_file: Option<&str>) -> Item {
+        atom_named_item("shared", span_file, source_file)
+    }
+
+    fn atom_named_item(name: &str, span_file: &str, source_file: Option<&str>) -> Item {
+        let source =
+            format!("atom {name}() -> i64\nrequires: true;\nensures: result == 0;\nbody: 0;\n");
+        let mut atom = parser::parse_module(&source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) => Some(atom),
+                _ => None,
+            })
+            .expect("parse test atom");
+        atom.span.file = span_file.to_string();
+        if let Some(source_file) = source_file {
+            atom.spec_metadata
+                .insert("source_file".to_string(), source_file.to_string());
+        }
+        Item::Atom(atom)
+    }
+
+    fn impl_block_item(span_file: &str) -> Item {
+        let mut impl_block = parser::parse_module(
+            r#"
+impl S {
+    atom m() -> i64
+        requires: true;
+        ensures: result == 0;
+        body: 0;
+}
+"#,
+        )
+        .into_iter()
+        .find_map(|item| match item {
+            Item::ImplBlock(impl_block) => Some(impl_block),
+            _ => None,
+        })
+        .expect("parse test impl block");
+        impl_block.methods[0].span.file = span_file.to_string();
+        Item::ImplBlock(impl_block)
+    }
+
+    #[test]
+    fn session_caller_span_requires_matching_source_file() {
+        let items = vec![
+            atom_item("span-a.mm", Some("source-a.mm")),
+            atom_item("span-b.mm", None),
+        ];
+
+        assert_eq!(
+            find_session_caller_span(&items, "shared", "source-a.mm")
+                .map(|span| span.file.as_str()),
+            Some("span-a.mm")
+        );
+        assert_eq!(
+            find_session_caller_span(&items, "shared", "span-b.mm").map(|span| span.file.as_str()),
+            Some("span-b.mm")
+        );
+        assert!(find_session_caller_span(&items, "shared", "missing.mm").is_none());
+
+        let impl_items = vec![
+            impl_block_item("impl.mm"),
+            atom_named_item("m", "plain.mm", None),
+        ];
+        assert_eq!(
+            find_session_caller_span(&impl_items, "S::m", "impl.mm").map(|span| span.file.as_str()),
+            Some("impl.mm")
+        );
+        assert!(find_session_caller_span(&impl_items, "S::m", "other.mm").is_none());
+
+        let plain_atom = [atom_named_item("m", "plain.mm", None)];
+        assert!(find_session_caller_span(&plain_atom, "S::m", "plain.mm").is_none());
+    }
 
     fn test_certificate(name: &str) -> proof_cert::ProofCertificate {
         let atom = serde_json::from_value(serde_json::json!({
