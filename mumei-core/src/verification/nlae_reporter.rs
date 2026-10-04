@@ -33,6 +33,7 @@ pub const FAILURE_LINEARITY_VIOLATED: &str = "linearity_violated";
 pub const FAILURE_INVARIANT_VIOLATED: &str = "invariant_violated";
 pub const FAILURE_EXHAUSTIVENESS_FAILED: &str = "exhaustiveness_failed";
 pub const FAILURE_RESOURCE_CONFLICT: &str = "resource_conflict";
+pub const FAILURE_TERMINATION_MEASURE_VIOLATED: &str = "termination_measure_violation";
 pub const ENABLE_RECONSTRUCTION_LOSS_ENV: &str = "ENABLE_RECONSTRUCTION_LOSS";
 pub const ENABLE_SELF_CORRECTION_ENV: &str = "ENABLE_SELF_CORRECTION";
 
@@ -94,6 +95,10 @@ pub fn suggestion_for_failure_type(failure_type: &str) -> &'static str {
         FAILURE_EFFECT_NOT_ALLOWED => {
             "Add the required effect to the atom's effect list or the security policy / \
              必要なエフェクトを atom のエフェクトリストまたはセキュリティポリシーに追加してください"
+        }
+        FAILURE_TERMINATION_MEASURE_VIOLATED => {
+            "Make each recursive call's `decreases` measure strictly smaller and non-negative under the atom's requires / \
+             各再帰呼び出しで decreases 測度が requires のもと非負かつ厳密に減少するようにしてください"
         }
         _ => "Review the verification failure and adjust the code or contracts accordingly \
               (検証失敗を確認し、コードまたは契約を適宜修正してください)",

@@ -60,6 +60,7 @@ pub use property_based::*;
 pub use raising::*;
 pub use spec_validation::*;
 pub use spurious_detection::*;
+pub use support::recursion::recursive_contract_hint_diagnostic;
 pub use support::{
     build_data_flow_trace, infer_contracts_json, infer_effects_json, verify_impl,
     verify_impl_with_options, AllowedEffect, DataFlowTrace, ExecutionStep, SecurityPolicy,

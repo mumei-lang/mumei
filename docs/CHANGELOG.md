@@ -1,3 +1,25 @@
+### 2026-10-04: atom-level decreases and recursive contracts
+
+- **`decreases:` atom clause**: an atom can declare a termination measure
+  (`decreases: n;`) over its parameters. Recursive calls — in the body or in
+  the atom's `requires`/`ensures` contract — must prove `0 <= M` and
+  `M_callee(args) < M` under the path conditions and the caller's requires;
+  violations fail with `termination_measure_violation` (exit 1).
+- **Congruent recursive contracts**: on an eligible recursive SCC (all members
+  declare `decreases`, call-free measure over params, no effects/`ref
+  mut`/`consume`/`async`/type params, `Verified`, scalar `Int`/`Bool`
+  signatures), recursive contract calls share an uninterpreted `rec_fn#` and
+  assume the callee ensures under `R ⇒ CallerEnsures` where `R` is
+  `caller_requires_obligation` (caller-view requires plus quantified requires
+  conjuncts), with path conditions conjoined to the antecedent for
+  SCC-internal calls, so contracts like `result == n + tri(n - 1)` (including
+  mutual recursion) are provable.
+- **Advisory hints**: atoms on ineligible recursive cycles get a
+  `recursive_contract_needs_decreases` / `recursive_contract_unsupported`
+  hint diagnostic; the call semantics and verdict are unchanged.
+- **Verifier policy version**: bumped to 7 so cached proofs are re-derived.
+
+
 ### Unreleased: quantified `requires` checked at call sites
 
 - Quantified `requires` conjuncts (`forall`/`exists` at the top level of
@@ -35,7 +57,6 @@
 
 ---
 
-### 2026-09-27: v0.6.20 release version bump
 
 - **Workspace and member crate versions**: bumped versions from `0.6.19` to
   `0.6.20` so `mumei --version`, `mumei inspect`, and proof-certificate
