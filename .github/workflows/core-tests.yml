@@ -69,8 +69,10 @@ jobs:
         env:
           LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
           LIBCLANG_PATH: /usr/lib/llvm-17/lib
+        # Cases that call the mumei-lean bridge (scripts/bridge.py) are skipped:
+        # this job doesn't check out mumei-lean.
         run: |
-          cargo test \
+          cargo test --no-fail-fast \
             --test test_verify_exit_codes \
             --test test_verify_ensures_outcomes \
             --test test_cover_clauses \
@@ -94,4 +96,7 @@ jobs:
             --test test_str_builtins \
             --test test_reconstruction_loss \
             --test test_units \
-            --test test_concurrency
+            --test test_concurrency \
+            -- \
+            --skip escalate_lean_promotes_outside_fragment_to_candidate_bundle \
+            --skip nlsat_first_fixture_outside_window_keeps_lean_escalation
