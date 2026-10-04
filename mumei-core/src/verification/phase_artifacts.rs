@@ -14,6 +14,8 @@ struct State {
     stack: Vec<AtomTrace>,
     write_failures: usize,
     first_write_failure: Option<String>,
+    #[cfg(test)]
+    owner: std::thread::ThreadId,
 }
 
 struct AtomTrace {
@@ -51,13 +53,44 @@ pub fn enable(directory: PathBuf) -> std::io::Result<()> {
         stack: Vec::new(),
         write_failures: 0,
         first_write_failure: None,
+        #[cfg(test)]
+        owner: std::thread::current().id(),
     });
     Ok(())
 }
 
+// Parallel unit tests share the process-global sink: the test that enables
+// it runs on one thread while other tests drive the executor on theirs, so
+// without a filter their atoms and queries would leak into (and renumber) the
+// enabling test's artifacts. Production runs atoms sequentially on the thread
+// that called `enable`, so outside tests the sink answers every caller.
+fn active(sink: &mut Option<State>) -> Option<&mut State> {
+    #[cfg(test)]
+    {
+        sink.as_mut()
+            .filter(|state| state.owner == std::thread::current().id())
+    }
+    #[cfg(not(test))]
+    {
+        sink.as_mut()
+    }
+}
+
+fn active_ref(sink: &Option<State>) -> Option<&State> {
+    #[cfg(test)]
+    {
+        sink.as_ref()
+            .filter(|state| state.owner == std::thread::current().id())
+    }
+    #[cfg(not(test))]
+    {
+        sink.as_ref()
+    }
+}
+
 pub fn write_failures() -> Option<(usize, String)> {
     let sink = lock_sink();
-    let state = sink.as_ref()?;
+    let state = active_ref(&sink)?;
     if state.write_failures == 0 {
         return None;
     }
@@ -66,7 +99,7 @@ pub fn write_failures() -> Option<(usize, String)> {
 
 pub(crate) fn begin_atom(source_file: &str, atom: &str) {
     let mut sink = lock_sink();
-    let Some(state) = sink.as_mut() else {
+    let Some(state) = active(&mut sink) else {
         return;
     };
     let directory = state
@@ -89,7 +122,7 @@ pub(crate) fn begin_atom(source_file: &str, atom: &str) {
 
 pub(crate) fn finish_atom<T, E: std::fmt::Display>(result: &Result<T, E>) {
     let mut sink = lock_sink();
-    let Some(state) = sink.as_mut() else {
+    let Some(state) = active(&mut sink) else {
         return;
     };
     let Some(mut atom) = state.stack.pop() else {
@@ -135,7 +168,7 @@ pub(crate) fn finish_atom<T, E: std::fmt::Display>(result: &Result<T, E>) {
 
 pub(crate) fn complete_phase(name: &str) {
     let mut sink = lock_sink();
-    let Some(atom) = sink.as_mut().and_then(|state| state.stack.last_mut()) else {
+    let Some(atom) = active(&mut sink).and_then(|state| state.stack.last_mut()) else {
         return;
     };
     let contract = phase_contract(name);
@@ -176,7 +209,7 @@ pub(crate) fn complete_phase(name: &str) {
 
 pub fn record_cached_atom(source_file: &str, atom: &str) {
     let mut sink = lock_sink();
-    let Some(state) = sink.as_mut() else {
+    let Some(state) = active(&mut sink) else {
         return;
     };
     let directory = state
@@ -256,7 +289,7 @@ fn prepare_query(
     line: u32,
 ) -> Option<PendingQuery> {
     let mut sink = lock_sink();
-    let state = sink.as_mut()?;
+    let state = active(&mut sink)?;
     let (pending, failure) = {
         let atom = state.stack.last_mut()?;
         let phase_name = PHASE_CONTRACTS
@@ -329,7 +362,7 @@ fn record_query_result(query: Option<PendingQuery>, result: SatResult) {
         return;
     };
     let mut sink = lock_sink();
-    let Some(atom) = sink.as_mut().and_then(|state| state.stack.last_mut()) else {
+    let Some(atom) = active(&mut sink).and_then(|state| state.stack.last_mut()) else {
         return;
     };
     let (Some(file), Some(phase)) = (query.file, query.phase) else {
@@ -473,9 +506,14 @@ mod tests {
     };
     use serde_json::Value;
     use std::fs;
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
     use z3::ast::Bool;
     use z3::{Config, Context, Solver};
+
+    // Tests that call `enable` overwrite the shared sink, so they must not
+    // overlap with each other.
+    static ENABLE_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn artifact_path_components_are_sanitized_and_distinct() {
@@ -498,6 +536,7 @@ mod tests {
 
     #[test]
     fn errors_without_an_active_phase_abort_the_inferred_phase() {
+        let _guard = ENABLE_LOCK.lock().unwrap();
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -636,6 +675,46 @@ mod tests {
 
         disable();
         fs::remove_file(regular_file_parent).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn sink_ignores_atoms_and_queries_from_other_threads() {
+        let _guard = ENABLE_LOCK.lock().unwrap();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mumei-phase-artifacts-thread-{}-{unique}",
+            std::process::id()
+        ));
+        enable(directory.clone()).unwrap();
+
+        begin_atom("owner.mm", "owned");
+        std::thread::spawn(|| {
+            begin_atom("intruder.mm", "intruder");
+            let context = Context::new(&Config::new());
+            let solver = Solver::new(&context);
+            solver.assert(&Bool::from_bool(&context, true));
+            let query = capture(&solver);
+            query.record(solver.check());
+            let intruder_ok: Result<(), &str> = Ok(());
+            finish_atom(&intruder_ok);
+        })
+        .join()
+        .unwrap();
+
+        let verified: Result<(), &str> = Ok(());
+        finish_atom(&verified);
+        assert!(!directory.join(path_component("intruder.mm")).exists());
+        assert!(directory
+            .join(path_component("owner.mm"))
+            .join(path_component("owned"))
+            .join("phases.json")
+            .exists());
+
+        disable();
         fs::remove_dir_all(directory).unwrap();
     }
 }
