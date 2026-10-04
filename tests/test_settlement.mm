@@ -54,5 +54,5 @@ atom test_all_non_negative(arr: [i64], n: i64)
     requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
     ensures: result == 1;
     body: {
-        settlement::verify_all_balances_non_negative(n)
+        settlement::verify_all_balances_non_negative(arr, n)
     };
