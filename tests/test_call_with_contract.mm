@@ -66,7 +66,7 @@ atom test_fold_two_add()
 atom option_map_pattern(opt: i64, f: atom_ref(i64) -> i64)
     requires: opt >= 0 && opt <= 1;
     ensures: result >= 0;
-    contract(f): requires: x >= 0, ensures: result >= 0;
+    contract(f): ensures: result >= 0;
     body: {
         match opt {
             0 => 0,

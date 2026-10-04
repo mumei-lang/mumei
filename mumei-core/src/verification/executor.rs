@@ -852,6 +852,21 @@ fn verify_inner_impl(
     verify_effect_params(atom, module_env)?;
     metrics.record_phase("Phase 1g: effect params", phase_start.elapsed());
 
+    // Phase 1h-2: structured concurrency ownership analysis.
+    // MIR lowering flattens `task_group` children into a sequential chain, so
+    // it cannot see concurrent interleaving or `task_group:any` cancellation.
+    // This AST-level pass rejects concurrent double moves, moves that race with
+    // a sibling's use, unsynchronised shared writes, and parent uses of values
+    // a child consumed or of writes a cancelled child may never have performed.
+    // It runs before 1h so the task-group-specific diagnostic is not pre-empted
+    // by the generic MIR move error.
+    let phase_start = std::time::Instant::now();
+    verify_task_ownership(atom, &hir_atom.body_stmt, module_env)?;
+    metrics.record_phase(
+        "Phase 1h-2: structured concurrency ownership",
+        phase_start.elapsed(),
+    );
+
     // Phase 1h: MIR-based move analysis (Phase 4c integrated)
     // Lower HIR to MIR and run forward dataflow move analysis.
     // Copy types (Int, Nat, Bool, f64, etc.) are distinguished from Move types
@@ -924,25 +939,6 @@ fn verify_inner_impl(
         }
     }
     let move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
-    // MIR lowering + name checks so far belong to Phase 1h; the concurrency
-    // pass below is timed separately so neither span counts the other.
-    let mut mir_elapsed = phase_start.elapsed();
-    // Phase 1h-2: structured concurrency ownership analysis.
-    // Runs before the MIR borrow/move violation reporting below: MIR lowering
-    // flattens `task_group` children into a sequential chain, so it cannot see
-    // concurrent interleaving or `task_group:any` cancellation. Reporting the
-    // concurrency-specific reason first (concurrent double moves, moves that
-    // race with a sibling's use, unsynchronised shared writes, and parent uses
-    // of values a child consumed or of writes a cancelled child may never
-    // have performed) names the actual race instead of a generic sequential
-    // move error. Name checks stay ahead of it so they still fail closed.
-    let concurrency_phase_start = std::time::Instant::now();
-    verify_task_ownership(atom, &hir_atom.body_stmt, module_env)?;
-    metrics.record_phase(
-        "Phase 1h-2: structured concurrency ownership",
-        concurrency_phase_start.elapsed(),
-    );
-    let mir_analysis_start = std::time::Instant::now();
     if mir_body.check_analysis_budget().is_ok() {
         // Insert drops before move analysis so a local consumed on one branch
         // but merely unused on the other is dead on both paths at the merge —
@@ -1028,8 +1024,7 @@ fn verify_inner_impl(
             }
         }
     }
-    mir_elapsed += mir_analysis_start.elapsed();
-    metrics.record_phase("Phase 1h: MIR move analysis", mir_elapsed);
+    metrics.record_phase("Phase 1h: MIR move analysis", phase_start.elapsed());
 
     // Phase 1i: Vacuity checking via mutation testing
     let phase_start = std::time::Instant::now();
@@ -1469,7 +1464,8 @@ fn verify_inner_impl(
         // `<name>[` token. Avoids paying parse cost twice and matches the
         // common `arr[i]`, `data[k]` shapes used in the std lib.
         q.condition.contains('[')
-    });
+    }) || (atom.requires.contains('[')
+        && (atom.requires.contains("forall(") || atom.requires.contains("exists(")));
     let timeout_multiplier = match (has_string_constraints_cell_pre.get(), has_array_forall) {
         (true, true) => 3,
         (true, false) => 2,
@@ -1541,8 +1537,10 @@ fn verify_inner_impl(
         local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
+        contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
+
         bitvec_i64_global,
     };
     let mut env: Env = HashMap::new();
@@ -1606,7 +1604,10 @@ fn verify_inner_impl(
 
     // 1. 量子化制約の処理
     for (q_index, q) in atom.forall_constraints.iter().enumerate() {
-        let i = Int::new_const(&ctx, q.var.as_str());
+        // Fresh const: a same-named atom parameter must not be captured by
+        // the quantifier binder. `q.var` is bound to `i` in env while the
+        // condition and index expressions are lowered (name-based lookup).
+        let i = Int::fresh_const(&ctx, q.var.as_str());
         // Parse start as an expression (supports identifiers, arithmetic, e.g. "n - 1")
         let start = if let Ok(val) = q.start.parse::<i64>() {
             Int::from_i64(&ctx, val)
@@ -1625,6 +1626,7 @@ fn verify_inner_impl(
         };
 
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
+        let old_bound_val = env.insert(q.var.clone(), i.clone().into());
         let expr_ast = parse_expression(&q.condition);
         vc.quantifier_binders
             .borrow_mut()
@@ -1732,6 +1734,11 @@ fn verify_inner_impl(
                     }
                 }
             }
+        }
+        if let Some(old) = old_bound_val {
+            env.insert(q.var.clone(), old);
+        } else {
+            env.remove(&q.var);
         }
     }
 

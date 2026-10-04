@@ -360,6 +360,8 @@ use parentheses or a block in those positions.
 ## Quantifiers in Contracts
 Use bounded ranges or finite collections when possible. For Z3-stable quantifier restrictions, see [Quantifiers](SPEC_GUIDE.md#quantifiers).
 
+A `forall`/`exists` written as a top-level conjunct of `requires` is checked at call sites like any other precondition; quantifiers nested under `||`, `!`, `if`, or other operators stay in the requires text and are lowered in place, so they are assumed by the body and checked at call sites as written.
+
 ```mumei
 // Real insertion-sort body with `arr[i] = val` store syntax.
 // `trusted` for MIR move-analysis false-positive on inner-loop `i = i + 1`.

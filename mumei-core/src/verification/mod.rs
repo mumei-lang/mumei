@@ -41,7 +41,9 @@ pub mod vc_outcome;
 #[cfg(test)]
 mod tests;
 
-pub use contract_view::{contract_view, dropped_conjuncts, ContractView};
+pub use contract_view::{
+    caller_requires_obligation, contract_view, dropped_conjuncts, ContractView,
+};
 pub use executor::*;
 pub use fragment::*;
 pub use loop_detector::*;
