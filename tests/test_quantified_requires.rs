@@ -345,6 +345,10 @@ body: arr[0];
     let diag = atom_diagnostic(&payload, "disj")
         .unwrap_or_else(|| panic!("no diagnostic for disj:\n{payload:#}"));
     assert_eq!(diag["code"], "failed", "{diag:#}");
+    assert_eq!(
+        atom_failure_type(&dir, &payload, "disj"),
+        "postcondition_violated"
+    );
     assert!(
         !text.contains("requires clause is unsatisfiable"),
         "disj must not report an unsatisfiable requires: {text}"
@@ -370,6 +374,10 @@ body: arr[0];
     let diag = atom_diagnostic(&payload, "neg")
         .unwrap_or_else(|| panic!("no diagnostic for neg:\n{payload:#}"));
     assert_eq!(diag["code"], "failed", "{diag:#}");
+    assert_eq!(
+        atom_failure_type(&dir, &payload, "neg"),
+        "postcondition_violated"
+    );
     assert!(
         !text.contains("requires clause is unsatisfiable"),
         "neg must not report an unsatisfiable requires: {text}"
