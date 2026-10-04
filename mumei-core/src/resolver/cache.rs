@@ -551,7 +551,7 @@ fn is_builtin_call_name(name: &str) -> bool {
 /// stack? `forall`/`exists` push their bound variable while walking the
 /// condition, so nested binders stack naturally.
 fn expr_has_binder_scoped_call(expr: &Expr, binders: &mut Vec<String>) -> bool {
-    use crate::verification::support::expr_mentions_var;
+    use crate::verification::support::expr_may_mention_var;
     match expr {
         Expr::Call(name, args) if (name == "forall" || name == "exists") && args.len() == 4 => {
             // (var, start, end, condition): bounds are evaluated outside the
@@ -574,7 +574,7 @@ fn expr_has_binder_scoped_call(expr: &Expr, binders: &mut Vec<String>) -> bool {
             if !is_builtin_call_name(name)
                 && binders
                     .iter()
-                    .any(|b| args.iter().any(|a| expr_mentions_var(a, b)))
+                    .any(|b| args.iter().any(|a| expr_may_mention_var(a, b)))
             {
                 return true;
             }
@@ -616,7 +616,7 @@ fn expr_has_binder_scoped_call(expr: &Expr, binders: &mut Vec<String>) -> bool {
         Expr::CallRef { callee, args } => {
             if binders
                 .iter()
-                .any(|b| args.iter().any(|a| expr_mentions_var(a, b)))
+                .any(|b| args.iter().any(|a| expr_may_mention_var(a, b)))
             {
                 return true;
             }
@@ -1284,5 +1284,46 @@ body: n;
             hash(&ground_source, "ground"),
             "b414eb0440a41ab78e1c4fa3b9bf564b65a8e834d128c27126e68783816feb82"
         );
+    }
+}
+
+#[cfg(test)]
+mod binder_call_nested_expr_tests {
+    use super::*;
+    use crate::parser::{parse_module, Item};
+
+    fn has_binder_call(source: &str, atom_name: &str) -> bool {
+        let items = parse_module(source);
+        for item in &items {
+            if let Item::Atom(atom) = item {
+                if atom.name == atom_name {
+                    return atom_has_binder_scoped_call(atom, true);
+                }
+            }
+        }
+        panic!("atom {atom_name} missing");
+    }
+
+    const IDENT: &str = r#"
+atom ident(x: i64) -> i64
+requires: true;
+ensures: result == x;
+body: x;
+"#;
+
+    #[test]
+    fn bound_var_inside_if_argument_is_marked() {
+        let source = format!(
+            "{IDENT}\natom if_wrapped(arr: [i64], n: i64) -> i64\nrequires: n >= 2 && forall(i, 0, n, ident(if i >= 0 {{ i }} else {{ i }}) == i);\nensures: result == 0 - 1;\nbody: n;\n"
+        );
+        assert!(has_binder_call(&source, "if_wrapped"));
+    }
+
+    #[test]
+    fn bound_var_inside_match_argument_is_marked() {
+        let source = format!(
+            "{IDENT}\natom match_wrapped(arr: [i64], n: i64) -> i64\nrequires: n >= 2 && forall(i, 0, n, ident(match i {{ _ => arr[i] }}) == arr[i]);\nensures: result == 0 - 1;\nbody: n;\n"
+        );
+        assert!(has_binder_call(&source, "match_wrapped"));
     }
 }

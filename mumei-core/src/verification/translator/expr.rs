@@ -175,7 +175,7 @@ fn reject_binder_scoped_call(vc: &VCtx<'_>, callee_name: &str, args: &[Expr]) ->
     }
     for arg in args {
         for binder in binders.iter() {
-            if expr_mentions_var(arg, binder) {
+            if expr_may_mention_var(arg, binder) {
                 return Err(MumeiError::verification(format!(
                     "{} Call to '{}' uses quantifier-bound variable '{}' in an argument.",
                     crate::verification::UNSUPPORTED_BINDER_CALL_PREFIX,

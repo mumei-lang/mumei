@@ -746,3 +746,107 @@ atom ground_probe(arr: [i64], n: i64) -> i64
 
     std::fs::remove_dir_all(report_dir).expect("remove binder_ground_call fixture dir");
 }
+
+#[test]
+fn verify_binder_call_if_wrapped_argument_is_unverifiable() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "binder_call_if_wrapped",
+        r#"
+atom ident(x: i64) -> i64
+  requires: true;
+  ensures: result == x;
+  body: x;
+
+atom if_wrapped(arr: [i64], n: i64) -> i64
+  requires: n >= 2 && len(arr) >= n
+        && forall(i, 0, n, ident(if i >= 0 { i } else { i }) == i);
+  ensures: result == 0 - 1;
+  body: n;
+"#,
+    );
+    let report_dir = fixture.parent().unwrap();
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "if-wrapped binder call should exit 3\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("'if_wrapped': unverifiable ⚠️"),
+        "expected if_wrapped unverifiable, got:\n{combined}"
+    );
+    assert!(
+        !combined.contains("panicked") && !combined.contains("cannot be used in patterns"),
+        "verifier panicked instead of failing closed, got:\n{combined}"
+    );
+
+    std::fs::remove_dir_all(report_dir).expect("remove binder_call_if_wrapped fixture dir");
+}
+
+#[test]
+fn verify_binder_call_match_wrapped_argument_is_unverifiable() {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let fixture = write_fixture(
+        "binder_call_match_wrapped",
+        r#"
+atom ident(x: i64) -> i64
+  requires: true;
+  ensures: result == x;
+  body: x;
+
+atom match_wrapped(arr: [i64], n: i64) -> i64
+  requires: n >= 2 && len(arr) >= n
+        && forall(i, 0, n, ident(match i { _ => arr[i] }) == arr[i]);
+  ensures: result == 0 - 1;
+  body: n;
+"#,
+    );
+    let report_dir = fixture.parent().unwrap();
+
+    let output = Command::new(bin)
+        .arg("verify")
+        .arg(&fixture)
+        .current_dir(manifest_dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify: {err}"));
+
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "match-wrapped binder call should exit 3\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("'match_wrapped': unverifiable ⚠️"),
+        "expected match_wrapped unverifiable, got:\n{combined}"
+    );
+    assert!(
+        !combined.contains("panicked") && !combined.contains("cannot be used in patterns"),
+        "verifier panicked instead of failing closed, got:\n{combined}"
+    );
+
+    std::fs::remove_dir_all(report_dir).expect("remove binder_call_match_wrapped fixture dir");
+}
