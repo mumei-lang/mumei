@@ -104,8 +104,10 @@ Three current behaviours motivate this design. They are reproduced in
    This is a pre-existing soundness bug. Its likely cause is that the fresh
    result constant is created once, outside the binder, so every instance of
    the quantifier shares one value. Fixing it changes solver input for atoms
-   that do not use lemma export, so it belongs in a separate PR (see
-   [§13](#13-open-questions)). The export path specified here must not
+   that do not use lemma export, so it is fixed in a separate PR,
+   [#672](https://github.com/mumei-lang/mumei/pull/672), which makes such calls
+   fail closed as `unverifiable`. The implementation of this spec depends on
+   that fix (see [§13](#13-open-questions)). The export path specified here must not
    reproduce it: an exported call under a binder is always a result-function
    application, never a hoisted constant.
 
@@ -854,7 +856,8 @@ Today: **verified** (exit `0`, `ensures_outcomes` = `proved`). This is wrong:
 the precondition is a tautology given `ident`'s contract, and it says nothing
 about `arr[0]` and `arr[1]`. Replacing `ident(arr[i])` by `arr[i]` makes the same
 atom fail, as it should. This is a pre-existing bug and is not fixed by this
-document.
+document. [#672](https://github.com/mumei-lang/mumei/pull/672) fixes it fail-closed:
+with that change the atom is reported `unverifiable` (exit `3`).
 
 With export (hypothetical syntax `ensures export: result == x;` on `ident`):
 the call is `lemma_fn_ident(select(arr, i))` under the binder (R2), and the
@@ -964,12 +967,15 @@ Each step must keep the byte-identity test green.
 
 ## 13. Open questions
 
-1. **Pre-existing unsoundness (Example E).** Calls under a binder to
-   non-exporting atoms currently share one result constant across all
-   instances. The fix (for example, lowering them as an uninterpreted function
-   with no facts, or rejecting them as `unknown`) changes solver input for atoms
-   that do not use lemma export, so it needs its own PR and a decision on
-   whether to bump `VERIFIER_POLICY_VERSION`. Should it land before step 3?
+1. **Pre-existing unsoundness (Example E). Decided:** the fix lands first, in
+   its own PR ([#672](https://github.com/mumei-lang/mumei/pull/672)), and is a
+   prerequisite for the implementation (§12). It rejects a call whose arguments
+   mention a bound variable as `unverifiable` (exit `3`) instead of sharing one
+   result constant across instances. It does not bump
+   `VERIFIER_POLICY_VERSION`; only atoms that contain the pattern, directly or
+   through a callee, get an extra proof-hash marker. Under R2 such calls to
+   exporting callees later become result-function applications; calls to
+   non-exporting callees stay `unverifiable`.
 2. **Recursion measures.** E4 rejects all recursive exporters. Should mumei add a
    checked `decreases` for recursive atoms, or a realizability check
    (`forall p. requires => exists r. ensures`) as an alternative way to make the
