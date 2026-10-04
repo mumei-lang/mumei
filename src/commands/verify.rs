@@ -170,16 +170,21 @@ fn find_session_caller_span<'a>(
     atom_name: &str,
     caller_file: &str,
 ) -> Option<&'a parser::Span> {
+    let source_file_matches = |atom: &parser::Atom| {
+        let source_file = atom
+            .spec_metadata
+            .get("source_file")
+            .filter(|file| !file.is_empty())
+            .map(String::as_str)
+            .unwrap_or(atom.span.file.as_str());
+        source_file == caller_file
+    };
     items.iter().find_map(|item| match item {
-        Item::Atom(atom) if atom.name == atom_name => {
-            let source_file = atom
-                .spec_metadata
-                .get("source_file")
-                .filter(|file| !file.is_empty())
-                .map(String::as_str)
-                .unwrap_or(atom.span.file.as_str());
-            (source_file == caller_file).then_some(&atom.span)
-        }
+        Item::Atom(atom) if atom.name == atom_name && source_file_matches(atom) => Some(&atom.span),
+        Item::ImplBlock(impl_block) => impl_block.methods.iter().find_map(|method| {
+            let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
+            (qualified_name == atom_name && source_file_matches(method)).then_some(&method.span)
+        }),
         _ => None,
     })
 }
@@ -2580,26 +2585,46 @@ mod tests {
     use super::*;
 
     fn atom_item(span_file: &str, source_file: Option<&str>) -> Item {
-        let mut atom = parser::parse_module(
-            r#"
-atom shared() -> i64
-requires: true;
-ensures: result == 0;
-body: 0;
-"#,
-        )
-        .into_iter()
-        .find_map(|item| match item {
-            Item::Atom(atom) => Some(atom),
-            _ => None,
-        })
-        .expect("parse test atom");
+        atom_named_item("shared", span_file, source_file)
+    }
+
+    fn atom_named_item(name: &str, span_file: &str, source_file: Option<&str>) -> Item {
+        let source =
+            format!("atom {name}() -> i64\nrequires: true;\nensures: result == 0;\nbody: 0;\n");
+        let mut atom = parser::parse_module(&source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) => Some(atom),
+                _ => None,
+            })
+            .expect("parse test atom");
         atom.span.file = span_file.to_string();
         if let Some(source_file) = source_file {
             atom.spec_metadata
                 .insert("source_file".to_string(), source_file.to_string());
         }
         Item::Atom(atom)
+    }
+
+    fn impl_block_item(span_file: &str) -> Item {
+        let mut impl_block = parser::parse_module(
+            r#"
+impl S {
+    atom m() -> i64
+        requires: true;
+        ensures: result == 0;
+        body: 0;
+}
+"#,
+        )
+        .into_iter()
+        .find_map(|item| match item {
+            Item::ImplBlock(impl_block) => Some(impl_block),
+            _ => None,
+        })
+        .expect("parse test impl block");
+        impl_block.methods[0].span.file = span_file.to_string();
+        Item::ImplBlock(impl_block)
     }
 
     #[test]
@@ -2619,6 +2644,19 @@ body: 0;
             Some("span-b.mm")
         );
         assert!(find_session_caller_span(&items, "shared", "missing.mm").is_none());
+
+        let impl_items = vec![
+            impl_block_item("impl.mm"),
+            atom_named_item("m", "plain.mm", None),
+        ];
+        assert_eq!(
+            find_session_caller_span(&impl_items, "S::m", "impl.mm").map(|span| span.file.as_str()),
+            Some("impl.mm")
+        );
+        assert!(find_session_caller_span(&impl_items, "S::m", "other.mm").is_none());
+
+        let plain_atom = [atom_named_item("m", "plain.mm", None)];
+        assert!(find_session_caller_span(&plain_atom, "S::m", "plain.mm").is_none());
     }
 
     fn test_certificate(name: &str) -> proof_cert::ProofCertificate {
