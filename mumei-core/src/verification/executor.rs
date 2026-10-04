@@ -1853,34 +1853,8 @@ pub(crate) fn verify_inner(
         }
     }
 
-    let cover_check_requires: Option<Vec<Bool<'_>>> = if atom.covers.is_empty() {
-        None
-    } else {
-        let mut check_requires = Vec::new();
-        let mut all_check_requires_lowered = true;
-        for mode in atom.clause_modes.iter().filter(|mode| {
-            mode.kind == crate::parser::ClauseKind::Requires
-                && mode.mode == crate::parser::ClauseTrustMode::Check
-        }) {
-            match lower_clause_with_skip(
-                &vc,
-                &mut env,
-                hir_atom,
-                &mode.clause,
-                "requires",
-                &mut diagnostics,
-                None,
-            ) {
-                Ok(ClauseLoweringOutcome::Trivial) => {}
-                Ok(ClauseLoweringOutcome::Lowered(req_bool)) => check_requires.push(req_bool),
-                Ok(ClauseLoweringOutcome::Skipped) | Err(_) => {
-                    all_check_requires_lowered = false;
-                    break;
-                }
-            }
-        }
-        all_check_requires_lowered.then_some(check_requires)
-    };
+    // Checked requires use pre-body values inside each cover's solver frame.
+    let cover_pre_body_env: Option<Env<'_>> = (!atom.covers.is_empty()).then(|| env.clone());
 
     // 3b. エイリアシング検証 (Aliasing Prevention)
     // requires が assert された後に実行する。
@@ -2709,7 +2683,32 @@ pub(crate) fn verify_inner(
 
             vc.cover_obligations = Some(std::cell::RefCell::new(Vec::new()));
             solver.push();
-            let Some(check_requires) = cover_check_requires.as_ref() else {
+            let mut check_env = cover_pre_body_env
+                .clone()
+                .expect("cover pre-body environment is available");
+            let mut check_requires_skipped = false;
+            for mode in atom.clause_modes.iter().filter(|mode| {
+                mode.kind == crate::parser::ClauseKind::Requires
+                    && mode.mode == crate::parser::ClauseTrustMode::Check
+            }) {
+                match lower_clause_with_skip(
+                    &vc,
+                    &mut check_env,
+                    hir_atom,
+                    &mode.clause,
+                    "requires",
+                    &mut diagnostics,
+                    Some(&solver),
+                ) {
+                    Ok(ClauseLoweringOutcome::Trivial) => {}
+                    Ok(ClauseLoweringOutcome::Lowered(req_bool)) => solver.assert(&req_bool),
+                    Ok(ClauseLoweringOutcome::Skipped) | Err(_) => {
+                        check_requires_skipped = true;
+                        break;
+                    }
+                }
+            }
+            if check_requires_skipped {
                 vc.cover_obligations.take();
                 diagnostics.push(format!(
                     "warning: reachability of cover clause {cover_name:?} is unknown because a `requires check` clause could not be lowered"
@@ -2722,9 +2721,6 @@ pub(crate) fn verify_inner(
                 }));
                 solver.pop(1);
                 continue;
-            };
-            for req_bool in check_requires {
-                solver.assert(req_bool);
             }
             let lowered_cover = lower_clause_with_skip(
                 &vc,

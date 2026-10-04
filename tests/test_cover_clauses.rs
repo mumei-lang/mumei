@@ -277,6 +277,54 @@ body: x;
 }
 
 #[test]
+fn check_requires_with_calls_constrain_cover_witnesses() {
+    let (dir, output, report, text) = verify_source(
+        "check_requires_call_negative_cover",
+        r#"
+atom g(x: i64) -> i64
+requires: true;
+ensures: result == x;
+body: x;
+
+atom f(x: i64) -> i64
+requires: x > -10 && x < 10;
+requires check: g(x) > 0;
+ensures: result == x;
+cover "neg": x < 0;
+body: x;
+"#,
+    );
+
+    assert!(!output.status.success(), "{text}");
+    assert_eq!(report["failure_type"], "cover_unreachable");
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+
+    let (dir, output, report, text) = verify_source(
+        "check_requires_call_positive_cover",
+        r#"
+atom g(x: i64) -> i64
+requires: true;
+ensures: result == x;
+body: x;
+
+atom sibling(x: i64) -> i64
+requires: x > -10 && x < 10;
+requires check: g(x) > 0;
+ensures: result == x;
+cover "pos": x == 5;
+body: x;
+"#,
+    );
+
+    assert!(output.status.success(), "{text}");
+    assert_eq!(report["cover_results"][0]["status"], "covered");
+    assert_eq!(report["cover_results"][0]["witness"]["x"], "5");
+
+    std::fs::remove_dir_all(dir).expect("remove fixture directory");
+}
+
+#[test]
 fn check_requires_use_pre_body_parameter_values() {
     let (dir, output, report, text) = verify_source(
         "check_requires_pre_body_values",
