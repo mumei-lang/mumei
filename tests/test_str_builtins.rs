@@ -117,16 +117,18 @@ fn str_len_param_collision_is_rejected() {
 
 #[test]
 fn string_counterexample_replays_lengths_and_builtins() {
+    let report_dir = unique_report_dir();
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .arg("verify")
         .arg("--report-dir")
-        .arg(unique_report_dir())
+        .arg(&report_dir)
         .arg("--json")
         .arg("--enable-spurious-detection")
         .arg("tests/negative/test_str_len_cex.mm")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run string counterexample fixture");
+    let _ = fs::remove_dir_all(&report_dir);
     assert!(!output.status.success(), "fixture must fail verification");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let payload: serde_json::Value =

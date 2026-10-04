@@ -169,14 +169,16 @@ body: {
 "#,
     );
 
+    let report_dir = unique_report_dir();
     let output = Command::new(bin)
         .arg("verify")
         .arg("--report-dir")
-        .arg(unique_report_dir())
+        .arg(&report_dir)
         .arg(&fixture)
         .current_dir(manifest_dir)
         .output()
         .unwrap_or_else(|err| panic!("failed to verify task_group:any fixture: {err}"));
+    let _ = std::fs::remove_dir_all(&report_dir);
 
     assert!(
         !output.status.success(),
@@ -342,14 +344,16 @@ fn verify_fixture(name: &str, source: &str) -> std::process::Output {
     let bin = env!("CARGO_BIN_EXE_mumei");
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let fixture = write_fixture(name, source);
+    let report_dir = unique_report_dir();
     let output = Command::new(bin)
         .arg("verify")
         .arg("--report-dir")
-        .arg(unique_report_dir())
+        .arg(&report_dir)
         .arg(&fixture)
         .current_dir(manifest_dir)
         .output()
         .unwrap_or_else(|err| panic!("failed to verify fixture {name}: {err}"));
+    let _ = std::fs::remove_dir_all(&report_dir);
     std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
     output
 }
@@ -667,15 +671,17 @@ body: {{
 "
     );
     let fixture = write_fixture("task_group_ownership_json", &source);
+    let report_dir = unique_report_dir();
     let output = Command::new(bin)
         .arg("verify")
         .arg("--report-dir")
-        .arg(unique_report_dir())
+        .arg(&report_dir)
         .arg(&fixture)
         .arg("--json")
         .current_dir(manifest_dir)
         .output()
         .expect("failed to run verify --json");
+    let _ = std::fs::remove_dir_all(&report_dir);
     std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -725,15 +731,17 @@ ensures: result > x;
 body: x;
 "#,
     );
+    let report_dir = unique_report_dir();
     let output = Command::new(bin)
         .arg("verify")
         .arg("--report-dir")
-        .arg(unique_report_dir())
+        .arg(&report_dir)
         .arg(&fixture)
         .arg("--json")
         .current_dir(manifest_dir)
         .output()
         .expect("failed to run verify --json");
+    let _ = std::fs::remove_dir_all(&report_dir);
     std::fs::remove_dir_all(fixture.parent().unwrap()).expect("remove concurrency fixture dir");
 
     let stdout = String::from_utf8_lossy(&output.stdout);

@@ -27,15 +27,18 @@ fn run(path: &str, json: bool) -> std::process::Output {
     let _ = fs::remove_dir_all(format!("{root}/tests/negative/.mumei"));
     let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
     command.arg("verify");
-    command.arg("--report-dir").arg(unique_report_dir());
+    let report_dir = unique_report_dir();
+    command.arg("--report-dir").arg(&report_dir);
     if json {
         command.arg("--json");
     }
     command.arg(path);
-    command
+    let output = command
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
-        .expect("run mumei verify")
+        .expect("run mumei verify");
+    let _ = fs::remove_dir_all(&report_dir);
+    output
 }
 
 #[test]

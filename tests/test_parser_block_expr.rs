@@ -20,14 +20,17 @@ fn unique_report_dir() -> std::path::PathBuf {
 }
 
 fn verify(file: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_mumei"))
+    let report_dir = unique_report_dir();
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .arg("verify")
         .arg("--report-dir")
-        .arg(unique_report_dir())
+        .arg(&report_dir)
         .arg(file)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
-        .unwrap_or_else(|err| panic!("failed to run mumei verify {file}: {err}"))
+        .unwrap_or_else(|err| panic!("failed to run mumei verify {file}: {err}"));
+    let _ = fs::remove_dir_all(&report_dir);
+    output
 }
 
 fn run(file: &str) -> std::process::Output {
@@ -74,17 +77,19 @@ fn total_constraints(file: &str) -> usize {
         format!("{source_text}\n// budget probe {}\n", std::process::id()),
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", uncached.display()));
+    let report_dir = unique_report_dir();
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .args([
             "verify",
             "--json",
             "--report-dir",
-            unique_report_dir().to_str().expect("UTF-8 report dir"),
+            report_dir.to_str().expect("UTF-8 report dir"),
             uncached.to_str().expect("UTF-8 fixture path"),
         ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .unwrap_or_else(|err| panic!("failed to run mumei verify --json {file}: {err}"));
+    let _ = fs::remove_dir_all(&report_dir);
     let _ = fs::remove_file(&uncached);
     let text = combined(&output);
     assert!(output.status.success(), "{text}");

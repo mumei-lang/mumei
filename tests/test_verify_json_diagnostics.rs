@@ -42,16 +42,18 @@ fn verify_json(
     fixture: &PathBuf,
     extra_args: &[&str],
 ) -> (std::process::Output, serde_json::Value) {
+    let report_dir = unique_report_dir();
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .arg("verify")
         .arg(fixture)
         .arg("--json")
         .arg("--report-dir")
-        .arg(unique_report_dir())
+        .arg(&report_dir)
         .args(extra_args)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("failed to run verify --json");
+    let _ = std::fs::remove_dir_all(&report_dir);
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let json_start = stdout
         .find('{')
