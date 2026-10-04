@@ -36,6 +36,16 @@ ensures: x * x * x + y * y * y != z * z * z;
 body: { 0 };
 "#;
 
+const SPURIOUS_SRC: &str = r#"
+extern "Rust" {
+  fn ext_f(x: i64) -> i64;
+}
+atom g(x: i64) -> i64
+requires: x > 0;
+ensures: result > 0;
+body: { ext_f(x) };
+"#;
+
 fn temp_dir(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -116,6 +126,49 @@ fn solver_unknown_without_counterexample_is_inconclusive() {
         combined.contains("1 failed"),
         "summary counts stay unchanged; only the exit code differs:\n{combined}"
     );
+}
+
+#[test]
+fn spurious_counterexample_candidate_is_inconclusive() {
+    let dir = temp_dir("spurious");
+    write(&dir, "spurious.mm", SPURIOUS_SRC);
+    let output = verify(&dir, &["spurious.mm"]);
+    assert_exit(&output, EXIT_INCONCLUSIVE);
+    assert!(
+        combined_output(&output).contains("Spurious counterexample"),
+        "candidate should still be reported as spurious:\n{}",
+        combined_output(&output)
+    );
+}
+
+#[test]
+fn spurious_candidate_json_reports_inconclusive_exit_code() {
+    let dir = temp_dir("spurious_json");
+    write(&dir, "spurious.mm", SPURIOUS_SRC);
+    let output = verify(&dir, &["--json", "spurious.mm"]);
+    assert_exit(&output, EXIT_INCONCLUSIVE);
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json prints a JSON payload");
+    assert_eq!(payload["exit_code"], serde_json::json!(EXIT_INCONCLUSIVE));
+    assert_eq!(payload["status"], serde_json::json!("inconclusive"));
+}
+
+#[test]
+fn disabled_spurious_detection_keeps_counterexample_rejected() {
+    let dir = temp_dir("spurious_disabled");
+    write(&dir, "spurious.mm", SPURIOUS_SRC);
+    assert_exit(
+        &verify(&dir, &["--disable-spurious-detection", "spurious.mm"]),
+        EXIT_REJECTED,
+    );
+}
+
+#[test]
+fn rejected_atom_dominates_spurious_candidate() {
+    let dir = temp_dir("spurious_and_rejected");
+    let rejected_src = REJECTED_SRC.replace("atom inc(", "atom rejected_inc(");
+    write(&dir, "mixed.mm", &format!("{SPURIOUS_SRC}\n{rejected_src}"));
+    assert_exit(&verify(&dir, &["mixed.mm"]), EXIT_REJECTED);
 }
 
 #[test]
@@ -227,6 +280,32 @@ fn undischarged_lean_escalation_candidate_is_inconclusive() {
     assert!(
         combined.contains("still open"),
         "summary should say the Lean candidate is still open:\n{combined}"
+    );
+}
+
+#[test]
+fn undischarged_spurious_candidate_lean_escalation_is_inconclusive() {
+    let dir = temp_dir("spurious_open_escalation");
+    let bridge_repo = write_noop_bridge(&dir);
+    write(&dir, "spurious.mm", SPURIOUS_SRC);
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .arg("--solver-timeout")
+        .arg("50")
+        .arg("--escalate-lean")
+        .arg("--proof-cert")
+        .arg("--output")
+        .arg("spurious.proof.json")
+        .arg("spurious.mm")
+        .env("MUMEI_LEAN_PATH", &bridge_repo)
+        .current_dir(&dir)
+        .output()
+        .expect("run mumei verify --escalate-lean");
+    assert_exit(&output, EXIT_INCONCLUSIVE);
+    let combined = combined_output(&output);
+    assert!(
+        combined.contains("still open"),
+        "summary should say the spurious Lean candidate is still open:\n{combined}"
     );
 }
 
