@@ -104,7 +104,7 @@ Covered cover clauses are represented as pass results (`kind: "pass"`,
 | Covered cover result | `covered` | `none` (pass result) |
 | Assumed clause | `assumed_clause` | `note` |
 | Axiom-audit rejection | `axiom_rejected` | `warning` |
-| Trait law violation | `trait_law_violated` (solver result such as `unknown` when inconclusive) | `error` (`warning` when inconclusive) |
+| Trait-law or impl error | `trait_law_violated` when a law has a counterexample; solver result when inconclusive; otherwise `failed` (e.g. a missing method or trait) | `error` (`warning` when inconclusive) |
 | Session protocol violation | violation kind (`duality_mismatch`, `unreachable_receive`, `deadlock_no_progress`) | `error` |
 
 The SARIF invocation records the combined process exit code (including all

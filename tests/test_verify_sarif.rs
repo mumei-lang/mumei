@@ -64,6 +64,15 @@ impl Zeroer for i64 {
 }
 "#;
 
+const MISSING_TRAIT_METHOD_SOURCE: &str = r#"
+trait Zeroer {
+    fn mask2(a: Self, b: Self) -> Self;
+    law zero_mask: mask2(a, a) == 0;
+}
+
+impl Zeroer for i64 {}
+"#;
+
 fn temp_dir(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -265,6 +274,41 @@ fn sarif_reports_failing_trait_laws_without_changing_exit_code() {
     assert_eq!(finding["properties"]["obligation"], "trait_law");
     assert_eq!(finding["properties"]["failure_type"], "trait_law_violated");
     assert!(finding["properties"].get("counterexample").is_some());
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
+}
+
+#[test]
+fn sarif_reports_missing_trait_methods_as_failed_without_changing_exit_code() {
+    let root = temp_dir("missing_trait_method");
+    let fixture = root.join("missing_method.mm");
+    std::fs::write(&fixture, MISSING_TRAIT_METHOD_SOURCE).expect("write missing method fixture");
+    let baseline_cwd = root.join("baseline");
+    let sarif_cwd = root.join("with_sarif");
+    let baseline_reports = baseline_cwd.join("reports");
+    let sarif_reports = sarif_cwd.join("reports");
+    std::fs::create_dir_all(&baseline_cwd).expect("create baseline cwd");
+    std::fs::create_dir_all(&sarif_cwd).expect("create SARIF cwd");
+
+    let baseline = run_verify(&fixture, &baseline_cwd, &baseline_reports, &[]);
+    let with_sarif = run_verify(&fixture, &sarif_cwd, &sarif_reports, &["--emit", "sarif"]);
+    assert_eq!(baseline.status.code(), Some(1));
+    assert_eq!(with_sarif.status.code(), baseline.status.code());
+
+    let document = read_sarif(&sarif_reports.join("report.sarif"));
+    let results = document["runs"][0]["results"].as_array().unwrap();
+    let label = "impl Zeroer for i64";
+    let finding = results
+        .iter()
+        .find(|result| {
+            result["properties"]["atom"] == label
+                && result["properties"]["obligation"] == "trait_law"
+        })
+        .expect("SARIF missing-method finding");
+    assert_eq!(finding["ruleId"], "failed");
+    assert_eq!(finding["level"], "error");
+    assert!(!results.iter().any(|result| {
+        result["properties"]["atom"] == label && result["ruleId"] == "trait_law_violated"
+    }));
     std::fs::remove_dir_all(root).expect("remove fixture directory");
 }
 

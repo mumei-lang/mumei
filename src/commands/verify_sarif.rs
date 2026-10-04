@@ -1,7 +1,6 @@
 use super::verify::VerifyOutcome;
 use mumei_core::cross_spec::session_types::SessionProtocolViolation;
 use mumei_core::parser::{Atom, ClauseKind, ClauseTrustMode, Span};
-use mumei_core::verification::FAILURE_TRAIT_LAW_VIOLATED;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::Path;
@@ -78,20 +77,17 @@ impl SarifCollector {
     ) {
         let inconclusive = z3_result
             .is_some_and(|result| matches!(result, "unknown" | "timeout" | "resource_limit"));
+        let report_failure_type = report
+            .and_then(|report| report["failure_type"].as_str())
+            .filter(|failure_type| !failure_type.is_empty());
         let rule_id = if inconclusive {
             z3_result.expect("inconclusive result")
         } else {
-            FAILURE_TRAIT_LAW_VIOLATED
+            report_failure_type.unwrap_or("failed")
         };
         let level = if inconclusive { "warning" } else { "error" };
         let kind = if inconclusive { "review" } else { "fail" };
-        let outcome = if inconclusive {
-            rule_id
-        } else {
-            report
-                .and_then(|report| report["status"].as_str())
-                .unwrap_or("failed")
-        };
+        let outcome = if inconclusive { rule_id } else { "failed" };
         let mut properties = base_properties(label, "trait_law");
         properties.insert("failure_type".to_string(), json!(rule_id));
         properties.insert("outcome".to_string(), json!(outcome));
@@ -1040,6 +1036,7 @@ body: { x + 1 };
         let report = json!({
             "atom":"impl Add for i64",
             "status":"failed",
+            "failure_type":"trait_law_violated",
             "counterexample":{"a":"1"},
             "counterexample_fidelity":"exact"
         });
@@ -1091,6 +1088,31 @@ body: { x + 1 };
             .unwrap();
         assert_eq!(rules[0]["defaultConfiguration"]["level"], "error");
         assert_eq!(rules[1]["defaultConfiguration"]["level"], "warning");
+    }
+
+    #[test]
+    fn maps_impl_errors_without_law_reports_to_failed() {
+        let atom = source_atom();
+        let mut collector = SarifCollector::new();
+        collector.push_trait_law_failure(
+            "impl Zeroer for i64",
+            "impl Zeroer for i64: missing method 'mask2'",
+            None,
+            None,
+            &atom.span,
+        );
+
+        let finding = &collector.results[0];
+        assert_eq!(finding["ruleId"], "failed");
+        assert_eq!(finding["level"], "error");
+        assert_eq!(finding["kind"], "fail");
+        assert_eq!(finding["properties"]["obligation"], "trait_law");
+        assert_eq!(finding["properties"]["failure_type"], "failed");
+        assert_eq!(finding["properties"]["outcome"], "failed");
+        assert!(finding["message"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("missing method"));
     }
 
     #[test]
