@@ -210,6 +210,9 @@ pub(crate) fn termination_measure_obligation<'a>(
         let zero = Int::from_i64(ctx, 0);
         Some(Bool::and(ctx, &[&zero.le(&a), &b.lt(&a)]))
     } else if let (Some(a), Some(b)) = (measure_a.as_bv(), measure_b.as_bv()) {
+        if a.get_size() != b.get_size() {
+            return None;
+        }
         let zero = BV::from_i64(ctx, 0, a.get_size());
         Some(Bool::and(ctx, &[&zero.bvsle(&a), &b.bvslt(&a)]))
     } else {
@@ -298,7 +301,18 @@ fn termination_obligation_at_call<'a>(
     let measure_b_ast = parse_expression(&measure_text);
     let measure_b = expr_to_z3(vc, &measure_b_ast, call_env, None)?;
     let Some(obligation) = termination_measure_obligation(vc.ctx, &measure_a, &measure_b) else {
-        return Ok(());
+        // The measures lowered to incompatible sorts (Int vs BV, or BV of
+        // different widths). Skipping the check while still asserting the
+        // congruent ensures assumption would be unsound, so fail instead.
+        let atom_name = vc.current_atom.map(|a| a.name.as_str()).unwrap_or("?");
+        let measure_text = vc
+            .current_atom
+            .and_then(|a| a.decreases.as_deref())
+            .unwrap_or("?");
+        return Err(MumeiError::verification(format!(
+            "Termination measure violation: measures of '{atom_name}' and '{}' have incompatible sorts; cannot check decrease of measure '{measure_text}'",
+            callee.name
+        )));
     };
     if let Some(solver) = solver_opt {
         // Check immediately — before the callee requires check and before any
