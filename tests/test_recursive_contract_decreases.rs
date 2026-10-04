@@ -603,9 +603,9 @@ fn test_effectful_recursion_is_unsupported_hint() {
     );
 }
 
-// Fix 1: a callee's eligibility inputs (trust level, effects, async, type
-// params) feed the transitive-dep proof hash, so editing them must not be
-// served by a stale cache entry.
+// A callee's eligibility inputs (trust level, effects, async, type params)
+// feed the transitive-dep proof hash, so editing them must not be served by
+// a stale cache entry.
 const CACHE_BASE: &str = r#"
 atom tri(n: i64) -> i64
     requires: n >= 0;
@@ -741,11 +741,11 @@ fn test_stale_cache_on_callee_effects_change() {
     );
 }
 
-// Fix 2: recursive calls inside a lambda body are checked at bind time with
-// arbitrary param constants; the real invocation through `apply_local_lambda`
-// runs the full congruent path. Callees keep `requires: true` because on
-// develop a lambda body calling any atom with a non-trivial requires already
-// fails at bind time.
+// The bind-time pass over a lambda body uses arbitrary param constants, so
+// recursive calls there are not congruent; the real invocation through
+// `apply_local_lambda` runs the full congruent path. Callees keep
+// `requires: true` because a lambda body calling any atom with a non-trivial
+// requires already fails at bind time.
 const LAM_INVOKED: &str = r#"
 atom lt(n: i64) -> i64
     requires: true;
@@ -794,8 +794,8 @@ fn test_lambda_bound_but_never_invoked_verifies() {
     assert_case(case, "verified");
 }
 
-// Fix 4: calls inside top-level quantified requires conjuncts are SCC edges,
-// so `qp` is a recursive call and needs a termination obligation.
+// Calls inside top-level quantified requires conjuncts are SCC edges, so
+// `qp` is a recursive call and needs a termination obligation.
 const QP_QUANTIFIED_SELF_REQUIRES: &str = r#"
 atom qp(n: i64) -> i64
     requires: n >= 0 && forall(i, 0, n, qp(n) >= 0);
