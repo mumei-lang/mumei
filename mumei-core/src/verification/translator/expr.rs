@@ -201,26 +201,60 @@ fn call_result_sort<'a>(vc: &VCtx<'a>, callee: &Atom) -> Sort<'a> {
     )
 }
 
-/// `0 <= M_A && M_B < M_A` for Int measures, or the signed bit-vector
-/// equivalent (`bvsle`/`bvslt`). Returns None when the two measures lower to
-/// different or non-integer sorts.
+/// `0 <= A1 ∧ … ∧ 0 <= Ak ∧ lex(B < A)` for Int measures, or the
+/// signed bit-vector equivalent. A one-component measure builds exactly
+/// `0 <= A ∧ B < A`. Returns None when the arities differ or a component
+/// pair lowers to incompatible sorts.
 pub(crate) fn termination_measure_obligation<'a>(
     ctx: &'a Context,
-    measure_a: &Dynamic<'a>,
-    measure_b: &Dynamic<'a>,
+    measure_a: &[Dynamic<'a>],
+    measure_b: &[Dynamic<'a>],
 ) -> Option<Bool<'a>> {
-    if let (Some(a), Some(b)) = (measure_a.as_int(), measure_b.as_int()) {
-        let zero = Int::from_i64(ctx, 0);
-        Some(Bool::and(ctx, &[&zero.le(&a), &b.lt(&a)]))
-    } else if let (Some(a), Some(b)) = (measure_a.as_bv(), measure_b.as_bv()) {
-        if a.get_size() != b.get_size() {
-            return None;
-        }
-        let zero = BV::from_i64(ctx, 0, a.get_size());
-        Some(Bool::and(ctx, &[&zero.bvsle(&a), &b.bvslt(&a)]))
-    } else {
-        None
+    if measure_a.is_empty() || measure_a.len() != measure_b.len() {
+        return None;
     }
+    if measure_a.len() == 1 {
+        if let (Some(a), Some(b)) = (measure_a[0].as_int(), measure_b[0].as_int()) {
+            let zero = Int::from_i64(ctx, 0);
+            return Some(Bool::and(ctx, &[&zero.le(&a), &b.lt(&a)]));
+        }
+        if let (Some(a), Some(b)) = (measure_a[0].as_bv(), measure_b[0].as_bv()) {
+            if a.get_size() != b.get_size() {
+                return None;
+            }
+            let zero = BV::from_i64(ctx, 0, a.get_size());
+            return Some(Bool::and(ctx, &[&zero.bvsle(&a), &b.bvslt(&a)]));
+        }
+    }
+
+    let mut nonnegative = Vec::with_capacity(measure_a.len());
+    let mut lexicographic = None;
+    for (a, b) in measure_a.iter().zip(measure_b).rev() {
+        let (nonnegative_component, less, equal) =
+            if let (Some(a), Some(b)) = (a.as_int(), b.as_int()) {
+                let zero = Int::from_i64(ctx, 0);
+                (zero.le(&a), b.lt(&a), b._eq(&a))
+            } else if let (Some(a), Some(b)) = (a.as_bv(), b.as_bv()) {
+                if a.get_size() != b.get_size() {
+                    return None;
+                }
+                let zero = BV::from_i64(ctx, 0, a.get_size());
+                (zero.bvsle(&a), b.bvslt(&a), b._eq(&a))
+            } else {
+                return None;
+            };
+        nonnegative.push(nonnegative_component);
+        lexicographic = Some(match lexicographic {
+            Some(tail) => {
+                let equal_and_tail = Bool::and(ctx, &[&equal, &tail]);
+                Bool::or(ctx, &[&less, &equal_and_tail])
+            }
+            None => less,
+        });
+    }
+    nonnegative.reverse();
+    nonnegative.push(lexicographic?);
+    Some(Bool::and(ctx, &nonnegative.iter().collect::<Vec<_>>()))
 }
 
 /// Counterexample object naming the current atom's parameter values from a
@@ -301,8 +335,13 @@ fn termination_obligation_at_call<'a>(
     let Some(measure_text) = callee.decreases.clone() else {
         return Ok(());
     };
-    let measure_b_ast = parse_expression(&measure_text);
-    let measure_b = expr_to_z3(vc, &measure_b_ast, call_env, None)?;
+    let measure_b = measure_components(&measure_text)
+        .iter()
+        .map(|component| {
+            let measure_ast = parse_expression(component);
+            expr_to_z3(vc, &measure_ast, call_env, None)
+        })
+        .collect::<MumeiResult<Vec<_>>>()?;
     let Some(obligation) = termination_measure_obligation(vc.ctx, &measure_a, &measure_b) else {
         // The measures lowered to incompatible sorts (Int vs BV, or BV of
         // different widths). Skipping the check while still asserting the
@@ -3906,4 +3945,123 @@ fn apply_local_lambda<'a>(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod termination_measure_tests {
+    use super::termination_measure_obligation;
+    use z3::ast::{Bool, Dynamic, Int, BV};
+    use z3::{Config, Context, SatResult, Solver};
+
+    fn int_pair<'ctx>(ctx: &'ctx Context, first: i64, second: i64) -> [Dynamic<'ctx>; 2] {
+        [
+            Int::from_i64(ctx, first).into(),
+            Int::from_i64(ctx, second).into(),
+        ]
+    }
+
+    fn bitvector_pair<'ctx>(ctx: &'ctx Context, first: i64, second: i64) -> [Dynamic<'ctx>; 2] {
+        [
+            BV::from_i64(ctx, first, 64).into(),
+            BV::from_i64(ctx, second, 64).into(),
+        ]
+    }
+
+    fn assert_holds(ctx: &Context, obligation: &Bool) {
+        let solver = Solver::new(ctx);
+        solver.assert(&obligation.not());
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    fn assert_never_holds(ctx: &Context, obligation: &Bool) {
+        let solver = Solver::new(ctx);
+        solver.assert(obligation);
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    #[test]
+    fn single_int_measure_matches_the_previous_obligation() {
+        let ctx = Context::new(&Config::new());
+        let a = Int::new_const(&ctx, "measure_a");
+        let b = Int::new_const(&ctx, "measure_b");
+        let expected = Bool::and(&ctx, &[&Int::from_i64(&ctx, 0).le(&a), &b.lt(&a)]);
+        let actual = termination_measure_obligation(&ctx, &[a.into()], &[b.into()])
+            .expect("compatible integer measures");
+
+        assert_eq!(actual.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn single_bitvector_measure_matches_the_previous_obligation() {
+        let ctx = Context::new(&Config::new());
+        let a = BV::new_const(&ctx, "measure_a", 64);
+        let b = BV::new_const(&ctx, "measure_b", 64);
+        let expected = Bool::and(&ctx, &[&BV::from_i64(&ctx, 0, 64).bvsle(&a), &b.bvslt(&a)]);
+        let actual = termination_measure_obligation(&ctx, &[a.into()], &[b.into()])
+            .expect("compatible bitvector measures");
+
+        assert_eq!(actual.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn lexicographic_int_measure_obligations_match_the_order() {
+        let ctx = Context::new(&Config::new());
+        let cases = [
+            ((2, 0), (1, 100), true),
+            ((1, 5), (1, 4), true),
+            ((1, 4), (1, 4), false),
+            ((1, 4), (2, 0), false),
+            ((1, -1), (1, -2), false),
+        ];
+
+        for ((a1, a2), (b1, b2), should_hold) in cases {
+            let measure_a = int_pair(&ctx, a1, a2);
+            let measure_b = int_pair(&ctx, b1, b2);
+            let obligation = termination_measure_obligation(&ctx, &measure_a, &measure_b)
+                .expect("compatible integer measures");
+
+            if should_hold {
+                assert_holds(&ctx, &obligation);
+            } else {
+                assert_never_holds(&ctx, &obligation);
+            }
+        }
+    }
+
+    #[test]
+    fn lexicographic_bitvector_measure_obligations_use_signed_order() {
+        let ctx = Context::new(&Config::new());
+        let measure_a = bitvector_pair(&ctx, 1, 5);
+        let measure_b = bitvector_pair(&ctx, 1, 4);
+        let obligation = termination_measure_obligation(&ctx, &measure_a, &measure_b)
+            .expect("compatible bitvector measures");
+        assert_holds(&ctx, &obligation);
+
+        let measure_a = bitvector_pair(&ctx, 0, -1);
+        let measure_b = bitvector_pair(&ctx, 0, -2);
+        let obligation = termination_measure_obligation(&ctx, &measure_a, &measure_b)
+            .expect("compatible bitvector measures");
+        assert_never_holds(&ctx, &obligation);
+    }
+
+    #[test]
+    fn incompatible_termination_measure_shapes_return_none() {
+        let ctx = Context::new(&Config::new());
+        let a1 = Int::new_const(&ctx, "a1");
+        let a2 = Int::new_const(&ctx, "a2");
+        let b1 = Int::new_const(&ctx, "b1");
+        assert!(
+            termination_measure_obligation(&ctx, &[a1.into(), a2.into()], &[b1.into()]).is_none()
+        );
+        assert!(termination_measure_obligation(&ctx, &[], &[]).is_none());
+
+        let int_measure = Int::new_const(&ctx, "int_measure");
+        let bitvector_measure = BV::new_const(&ctx, "bitvector_measure", 64);
+        assert!(termination_measure_obligation(
+            &ctx,
+            &[int_measure.into()],
+            &[bitvector_measure.into()]
+        )
+        .is_none());
+    }
 }

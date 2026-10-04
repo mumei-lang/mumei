@@ -370,12 +370,18 @@ connected component (SCC) of an atom.
 Rules:
 
 - **D1 (eligibility).** A recursive SCC is *eligible* exactly when every member
-  declares an atom-level `decreases: M;` whose measure is call-free and mentions
-  only that member's own parameters, has no effects, no `ref mut` or `consume`
+  declares an atom-level measure, either a single expression `decreases: M;` or
+  a tuple `decreases: (M1, ..., Mk);`, whose components are call-free, mention
+  only that member's own parameters and contain no nested tuple (commas inside
+  parentheses are tuple separators; commas inside `{...}` or `[...]`, such as
+  match-arm separators, are allowed). All members must declare the same number
+  of components. Each member also has no effects, no `ref mut` or `consume`
   parameters, is not `async`, has no type parameters, is at the default
   verified trust level, has no `ensures assume` clause, and has only scalar
-  (`Int`- or `Bool`-sorted) parameters and result.
-  `recursion.rs::member_unsupported_reason`.
+  (`Int`- or `Bool`-sorted) parameters and result. A parenthesised single
+  expression such as `(n)` or `(a + b)` is a one-component measure.
+  `recursion.rs::member_unsupported_reason`,
+  `recursion.rs::measure_components`.
 - **D2 (congruent calls).** While the main verification of an atom runs
   (`executor.rs::verify_inner`), a call to a member `g` of an eligible SCC, from
   any caller, lowers to the application `rec_fn#g(args)` of one uninterpreted
@@ -402,13 +408,18 @@ Rules:
   of the same eligible SCC, in `A`'s body and in `A`'s `requires` and
   `ensures`, the verifier checks `0 <= M_A ∧ M_B(args) < M_A` under `A`'s
   body-view requires and the path conditions at the call, including the
-  short-circuit guards of `&&`, `||`, and `if` inside a contract. Bit-vector
-  measures are compared signed. If the check is not Unsat, or the two measures
-  lower to incompatible sorts, the atom is rejected with `failure_type`
+  short-circuit guards of `&&`, `||`, and `if` inside a contract. For tuple
+  measures `M_A = (A1, ..., Ak)` and `M_B = (B1, ..., Bk)` the check is the
+  lexicographic order on non-negative tuples: every `Ai` is non-negative, and
+  `B1 < A1 ∨ (B1 = A1 ∧ (B2 < A2 ∨ (B2 = A2 ∧ ... Bk < Ak)))`. A one-component
+  measure gives exactly the single-expression check. Bit-vector measures are
+  compared signed. If the check is not Unsat, or any pair of components lowers
+  to incompatible sorts, the atom is rejected with `failure_type`
   `termination_measure_violation` (exit `1`) and a counterexample over `A`'s
   parameters. Checking contract-level calls is what rejects a specification
   such as `ensures: result == f(x) + 1;`, which would otherwise assume
-  `f(x) == f(x) + 1`. `translator/expr.rs::termination_obligation_at_call`.
+  `f(x) == f(x) + 1`. `translator/expr.rs::termination_obligation_at_call`,
+  `translator/expr.rs::termination_measure_obligation`.
 - **D5 (ineligible SCCs).** Calls into an ineligible recursive SCC keep fresh
   constants, and a call reached while the callee's contract is already being
   instantiated gets an unconstrained result and skips the callee's contract. When
@@ -419,7 +430,7 @@ Rules:
 - **D6 (cache).** The `decreases` text is part of the atom hash and the proof
   hash, and a callee's `decreases` is part of every caller's proof hash.
   `mumei-core/src/resolver/cache.rs`. These rules are enabled by
-  `VERIFIER_POLICY_VERSION` 7.
+  `VERIFIER_POLICY_VERSION` 7, and tuple measures by version 8.
 
 ## Keeping this document in sync
 
