@@ -1,3 +1,13 @@
+### 2026-10-04: leaf emitters read HIR metadata (emitter ABI 3)
+
+- JSON, C header, and proof book now read signature, contract, and metadata
+  directly from HIR; emitted output is unchanged.
+- HIR now preserves the declared `consume` marker, exact `requires_text` and
+  `ensures_text`, and ordered declared effects.
+- Emitter plugins must use ABI 3; ABI-1 and ABI-2 plugins must be rebuilt.
+
+---
+
 ### 2026-10-04: HIR carries signature, contract and metadata (emitter ABI 2)
 
 - `HirAtom` now carries signature, ordered contract clauses, quantified

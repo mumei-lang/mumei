@@ -1,5 +1,5 @@
 use mumei_core::emitter::{Artifact, ArtifactKind, Emitter};
-use mumei_core::hir::HirAtom;
+use mumei_core::hir::{HirAtom, HirRefKind};
 use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiResult};
 use serde::Serialize;
@@ -38,30 +38,36 @@ impl Emitter for VerifiedJsonEmitter {
         _module_env: &ModuleEnv,
         _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
-        let atom = &hir_atom.atom;
+        let signature = &hir_atom.signature;
+        let contract = &hir_atom.contract;
+        let meta = &hir_atom.meta;
 
-        let params: Vec<VerifiedParam> = atom
+        let params: Vec<VerifiedParam> = signature
             .params
             .iter()
             .map(|p| VerifiedParam {
-                name: p.name.clone(),
-                type_name: p.type_name.clone().unwrap_or_else(|| "i64".to_string()),
-                is_ref: p.is_ref,
-                is_ref_mut: p.is_ref_mut,
+                name: p.declared_name(),
+                type_name: p.ty.clone().unwrap_or_else(|| "i64".to_string()),
+                is_ref: p.by_ref == HirRefKind::Ref,
+                is_ref_mut: p.by_ref == HirRefKind::RefMut,
             })
             .collect();
 
-        let effects: Vec<String> = atom.effects.iter().map(|e| e.name.clone()).collect();
+        let effects: Vec<String> = signature
+            .effects
+            .iter()
+            .map(|effect| effect.name.clone())
+            .collect();
 
-        let trust_level = format!("{:?}", atom.trust_level);
+        let trust_level = format!("{:?}", meta.trust_level);
 
         let verified = VerifiedAtomJson {
-            name: atom.name.clone(),
+            name: signature.name.clone(),
             params,
-            requires: atom.requires.clone(),
-            ensures: atom.ensures.clone(),
+            requires: contract.requires_text.clone(),
+            ensures: contract.ensures_text.clone(),
             effects,
-            return_type: atom
+            return_type: signature
                 .return_type
                 .clone()
                 .unwrap_or_else(|| "i64".to_string()),

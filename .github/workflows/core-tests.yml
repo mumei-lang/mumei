@@ -74,6 +74,7 @@ jobs:
             --test test_struct_invariant \
             --test test_spurious_detection \
             --test test_data_flow_trace \
+            --test test_hir_leaf_emitters \
             --test test_phase_artifacts \
             --test test_verify_sarif \
             --test test_bitvec_i64 \
