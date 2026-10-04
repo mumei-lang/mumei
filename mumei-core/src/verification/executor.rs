@@ -2135,7 +2135,11 @@ pub(crate) fn verify_inner(
             } else {
                 FAILURE_PRECONDITION_VIOLATED
             };
-            let counterexample = counterexample_from_error(&e);
+            let counterexample = if body_failure_type == FAILURE_TERMINATION_MEASURE_VIOLATED {
+                counterexample_from_error(&e)
+            } else {
+                None
+            };
             let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
             let semantic_fb = build_semantic_feedback(
                 &constraint_mappings,
