@@ -2732,14 +2732,15 @@ templates are:
 
 ### Wave 2（優先度: 中）
 
-- **句単位の信頼モード**: atom 単位の `trusted` を句単位へ細分化（「実装側では仮定のみ」「呼び出し側では検査のみ」等）。trust surface メトリクス（P20）と整合させる。
-- **`cover` 句**: assert の双対として「この条件を満たす実行が存在する」ことを要求。witness はテスト生成・監査の入力に使える。
-- **ensures の lemma エクスポート**: 検証済み量化事実をトリガ付きで他 atom の文脈へ供給。
-- **Z3 インクリメンタル再利用**: 句ごとの push/pop と unsat core の再利用でクエリ数増加分を相殺。
-- **`verify-cert` での公理監査表示**: W1-D の監査結果を mumei 側で表示し、拒否済み証明書を受理しない。
+- **句単位の信頼モード**: `requires assume` / `requires check` / `ensures assume` / `ensures check`。`assume` 句は trust boundary（`assumed_clause`）として証明書の `assumed_clauses` に記録する（#664）。
+- **`cover` 句**: assert の双対として「この条件を満たす実行が存在する」ことを検査し、witness を report に出す。到達不能なら `cover_unreachable`（#663）。
+- **`verify-cert` での公理監査表示**: W1-D の監査結果を mumei 側で表示し、標準 3 公理以外への依存や監査失敗を `axiom_rejected` として受理しない（#662）。
+- **Z3 インクリメンタル再利用 — 見送り**: executor は ensures 句ごとに push/pop しており、W1-A で増えるクエリは句が失敗したときの 1 回だけ。文脈の到達可能性は追加クエリを発行せず、Phase 6 の最終 check の結果で事後的に分類している。solver をさらに使い回すと Z3 の判定が変わる事例を W1-A で確認しているため、計測でクエリ数が問題になるまで着手しない。
+- **ensures の lemma エクスポート — Wave 3 へ移動**: 呼び出し側で callee の ensures を前提にする明示的な経路は既にある。自動注入はトリガを付けられるのが配列 select だけで、算術の事実は MBQI 頼みになり、性能と判定が不安定になりやすい。トリガ設計を先に仕様化する。
 
 ### Wave 3（優先度: 低〜長期、記録のみ）
 
+- ensures の lemma エクスポート（トリガ付き量化事実の供給。トリガ設計の仕様化が前提）。
 - refinement 型の witness 必須化、量化束縛への refinement 注入規則。
 - 例外出口ごとの契約と網羅性検査、async の rely/guarantee。
 - 反例の source 復元を lowering の逆写像として体系化。
