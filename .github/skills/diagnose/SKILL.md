@@ -24,7 +24,7 @@ Action:
 
 Expectation:
     Common failure types include:
-    `postcondition_violated`, `precondition_violated`, `division_by_zero`, `trait_law_violated`, `linearity_violated`, `invariant_violated`, `exhaustiveness_failed`, `resource_conflict`, and `effect_not_allowed`.
+    `postcondition_violated`, `precondition_violated`, `division_by_zero`, `trait_law_violated`, `linearity_violated`, `invariant_violated`, `exhaustiveness_failed`, `resource_conflict`, `effect_not_allowed`, and `termination_measure_violation`.
 
 Result:
     Produce a concise diagnosis with the atom name, violated condition, counterexample, and likely root cause.

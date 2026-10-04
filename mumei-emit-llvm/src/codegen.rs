@@ -57,6 +57,7 @@ mod tests {
             invariant: None,
             effects: vec![],
             return_type: return_type.map(str::to_string),
+            decreases: None,
             span: Span::default(),
             effect_pre: Default::default(),
             effect_post: Default::default(),
