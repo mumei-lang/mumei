@@ -430,8 +430,8 @@ Rules:
 - **D6 (cache).** The `decreases` text is part of the atom hash and the proof
   hash, and a callee's `decreases` is part of every caller's proof hash.
   `mumei-core/src/resolver/cache.rs`. These rules are enabled by
-  `VERIFIER_POLICY_VERSION` 7, and tuple measures by version 8.
-  Constant-argument unfolding is enabled by version 9.
+  `VERIFIER_POLICY_VERSION` 7, tuple measures by version 8, call-arity
+  checking by version 9, and constant-argument unfolding by version 10.
 - **D7 (constant-argument unfolding).** For congruent calls with arguments
   that simplify to constants, made by a caller outside the callee's SCC, the
   verifier adds instances of

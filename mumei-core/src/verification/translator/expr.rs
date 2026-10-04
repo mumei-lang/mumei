@@ -295,6 +295,9 @@ fn unfold_constant_calls<'a>(
             let Some(atom) = vc.module_env.get_atom(&name) else {
                 continue;
             };
+            if args.len() != atom.params.len() {
+                continue;
+            }
             if !vc.callee_congruent(atom)
                 || !caller_outside_scc(vc, atom)
                 || !callee_semantics_match_caller(vc, atom)
@@ -1481,6 +1484,14 @@ pub(crate) fn expr_to_z3<'a>(
                         .cloned()
                         .or_else(|| vc.module_env.get_atom(&fqn_name).cloned());
                     if let Some(callee) = resolved_callee {
+                        if callee.params.len() != args.len() {
+                            return Err(MumeiError::verification(format!(
+                                "Call to '{}': expected {} argument(s), got {}",
+                                name,
+                                callee.params.len(),
+                                args.len()
+                            )));
+                        }
                         // 引数を評価
                         let mut arg_vals = Vec::new();
                         for arg in args {
@@ -3453,6 +3464,14 @@ pub(crate) fn expr_to_z3<'a>(
 
             if let Some(ref callee_name) = atom_name {
                 if let Some(callee_atom) = vc.module_env.get_atom(callee_name).cloned() {
+                    if callee_atom.params.len() != args.len() {
+                        return Err(MumeiError::verification(format!(
+                            "Call to '{}': expected {} argument(s), got {}",
+                            callee_name,
+                            callee_atom.params.len(),
+                            args.len()
+                        )));
+                    }
                     // 引数を Z3 で評価
                     let mut arg_vals = Vec::new();
                     for arg in args {

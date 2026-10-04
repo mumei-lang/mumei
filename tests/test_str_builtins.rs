@@ -2,6 +2,24 @@ use std::fs;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+static REPORT_DIR_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// Unique report dir for verify runs at the shared repo-root cwd: a
+// concurrent `mumei` process would otherwise clobber report.json.
+fn unique_report_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "mumei_str_builtins_report_{}_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+        REPORT_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+    ));
+    std::fs::create_dir_all(&dir).expect("create report dir");
+    dir
+}
+
 fn mumei_verify_uncached_with_args(file: &str, args: &[&str]) -> (bool, String) {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
     let nonce = SystemTime::now()
@@ -99,14 +117,18 @@ fn str_len_param_collision_is_rejected() {
 
 #[test]
 fn string_counterexample_replays_lengths_and_builtins() {
+    let report_dir = unique_report_dir();
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .arg("verify")
+        .arg("--report-dir")
+        .arg(&report_dir)
         .arg("--json")
         .arg("--enable-spurious-detection")
         .arg("tests/negative/test_str_len_cex.mm")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("run string counterexample fixture");
+    let _ = fs::remove_dir_all(&report_dir);
     assert!(!output.status.success(), "fixture must fail verification");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let payload: serde_json::Value =
