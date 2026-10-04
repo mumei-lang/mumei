@@ -324,59 +324,31 @@ pub(crate) fn format_counterexample<'a>(
     model: &z3::Model,
     target: &Dynamic<'a>,
     arms: &[MatchArm],
+    env: &Env<'a>,
     vc: &VCtx<'a>,
     decl_hint: Option<&str>,
-) -> String {
+) -> (String, Option<RaisedCounterexample>) {
     // アームから Enum 定義を特定（ドメイン制約と同じロジック）
     let enum_ctx = detect_enum_from_arms(arms, vc, target, decl_hint);
     let module_env = vc.module_env;
 
     // ターゲット変数の具体的な値を取得
     if let Some(target_val) = model.eval(target, true) {
-        let target_str = format!("{}", target_val);
-
-        // Enum の場合: tag 値からバリアント名を逆引き
-        if let Some(target_int) = target_val.as_int() {
-            let tag_str = format!("{}", target_int);
-            if let Ok(tag_val) = tag_str.parse::<i64>() {
-                // まず arms から特定した Enum を優先的に使用
-                if let Some(edef) = enum_ctx {
-                    if let Some(variant) = edef.variants.get(tag_val as usize) {
-                        // フィールド値も model から取得を試みる
-                        let mut field_vals = Vec::new();
-                        for (i, field_type) in variant.fields.iter().enumerate() {
-                            let _field_sym_name =
-                                format!("__proj_{}_{}_{}", edef.name, variant.name, i);
-                            // model 内のシンボルを探す（存在すれば具体値を表示）
-                            let field_str = format!("{}=?", field_type);
-                            field_vals.push(field_str);
-                        }
-                        let fields_display = if field_vals.is_empty() {
-                            String::new()
-                        } else {
-                            format!("({})", field_vals.join(", "))
-                        };
-                        return format!(
-                            "{}::{}{} (tag={}) -- missing from match arms",
-                            edef.name, variant.name, fields_display, tag_val
-                        );
-                    }
-                }
-                // フォールバック: module_env の全 Enum 定義を走査
-                for (enum_name, enum_def) in module_env.enums.iter() {
-                    if let Some(variant) = enum_def.variants.get(tag_val as usize) {
-                        return format!(
-                            "{}::{} (tag={}) -- missing from match arms",
-                            enum_name, variant.name, tag_val
-                        );
-                    }
-                }
-            }
-            // 整数リテラルとしてフォールバック
-            return format!("value = {} -- no matching arm", tag_str);
-        }
-
-        format!("value = {} -- no matching arm", target_str)
+        let type_hint = decl_hint.or_else(|| enum_ctx.map(|enum_def| enum_def.name.as_str()));
+        let (rendering, lowering, status) =
+            raise_binding(model, "target", &target_val, type_hint, env, module_env);
+        let raised = RaisedCounterexample {
+            values: vec![RaisedValue {
+                source_name: "target".to_string(),
+                solver_name: None,
+                rendering: rendering.clone(),
+                lowering,
+                source_type: type_hint.map(str::to_string),
+                status,
+            }],
+            omitted_solver_symbols: Vec::new(),
+        };
+        (format!("{} -- no matching arm", rendering), Some(raised))
     } else {
         // 評価に失敗した場合、アームの情報からヒントを生成
         let covered: Vec<String> = arms
@@ -388,9 +360,12 @@ pub(crate) fn format_counterexample<'a>(
                 Pattern::Wildcard => "_".to_string(),
             })
             .collect();
-        format!(
-            "(could not evaluate; covered patterns: [{}])",
-            covered.join(", ")
+        (
+            format!(
+                "(could not evaluate; covered patterns: [{}])",
+                covered.join(", ")
+            ),
+            None,
         )
     }
 }

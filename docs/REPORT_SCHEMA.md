@@ -126,9 +126,19 @@ LSP diagnostics include `relatedInformation` for multi-location errors, enabling
 | `failed_clause` | `string` | No | Failing ensures conjunct on a postcondition violation |
 | `failed_clause_label` | `string` | No | Optional label for the failing ensures conjunct; absent when unlabeled |
 | `counterexample_fidelity` | `"exact" \| "bounded" \| "approximate"` | No | Exact means replayed under Mumei semantics and the violation reproduced; approximate means not replayed or replay was inconclusive; bounded means a bounded-depth phase produced the counterexample |
+| `counterexample_provenance` | `object` | No | Per-value raising status and lowering, optional source type/solver symbol, and omitted internal solver symbols |
+| `cover_results[].witness_provenance` | `object` | Cover results | Raising provenance for the corresponding witness |
 | `suggestion` | `string` | No | Fix suggestion text (counterexample や unsat core を踏まえた動的な修正提案が含まれる場合がある) |
 | `span` | `object` | No | Source location (`file`, `line`, `col`, `len`) |
 | `type_definition_locations` | `array` | No | Constraint source locations |
+
+`counterexample` remains an object mapping source names to rendered strings.
+`counterexample_provenance.values` describes the same reported source values
+with a `raised` or `unraisable` status and the lowering used. Unraisable values
+retain their solver rendering and include a reason; their presence makes
+`complete` false and `counterexample_fidelity` `"approximate"`.
+`omitted_solver_symbols` lists internal solver values that were not emitted as
+source counterexample fields.
 
 Ensures reports include `context_reachability` and an `ensures_outcomes` entry
 for each non-trivial lowered, skipped, or assumed clause. Each outcome entry

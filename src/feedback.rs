@@ -272,24 +272,49 @@ pub(crate) fn counterexample_model_from_error(
     let mut model = std::collections::HashMap::new();
     if let verification::MumeiError::VerificationError {
         counterexample: Some(serde_json::Value::Object(values)),
+        counterexample_provenance,
         ..
     } = error
     {
         for (name, value) in values {
+            let provenance = counterexample_provenance
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|provenance| provenance.get("values"))
+                .and_then(serde_json::Value::as_object)
+                .and_then(|values| values.get(name))
+                .and_then(serde_json::Value::as_object);
+            if provenance
+                .and_then(|entry| entry.get("status"))
+                .and_then(serde_json::Value::as_str)
+                == Some("unraisable")
+            {
+                continue;
+            }
             let parsed = match value {
                 serde_json::Value::Bool(flag) => Some(verification::CexValue::Bool(*flag)),
                 serde_json::Value::Number(number) => number
                     .as_i64()
                     .map(verification::CexValue::Int)
                     .or_else(|| number.as_f64().map(verification::CexValue::Float)),
-                serde_json::Value::String(text) => text
-                    .parse::<i64>()
-                    .ok()
-                    .map(verification::CexValue::Int)
-                    .or_else(|| {
-                        verification::parse_z3_numeric_to_f64(text)
-                            .map(verification::CexValue::Float)
-                    }),
+                serde_json::Value::String(text) if text == "true" => {
+                    Some(verification::CexValue::Bool(true))
+                }
+                serde_json::Value::String(text) if text == "false" => {
+                    Some(verification::CexValue::Bool(false))
+                }
+                serde_json::Value::String(text)
+                    if !text.contains('{') && !text.starts_with('[') && !text.contains("::") =>
+                {
+                    text.parse::<i64>()
+                        .ok()
+                        .map(verification::CexValue::Int)
+                        .or_else(|| {
+                            verification::parse_z3_numeric_to_f64(text)
+                                .map(verification::CexValue::Float)
+                        })
+                }
+                serde_json::Value::String(_) => None,
                 _ => None,
             };
             if let Some(value) = parsed {
@@ -364,4 +389,39 @@ pub(crate) fn resolve_intent_fidelity(
 
 pub(crate) fn resolve_budget_policy_fingerprint(cli_value: Option<String>) -> Option<String> {
     cli_value.or_else(proof_cert::budget_policy_fingerprint_from_env)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{counterexample_model_from_error, verification};
+    use verification::MumeiError;
+
+    #[test]
+    fn feedback_replay_skips_unraisable_and_structured_renderings() {
+        let error = MumeiError::verification("counterexample").with_counterexample_provenance(
+            Some(serde_json::json!({
+                "point": "Pt { a: 1, b: 2 }",
+                "tuple": "3",
+                "x": "-1",
+                "flag": "true",
+                "other": "not a number"
+            })),
+            Some(serde_json::json!({
+            "values": {
+                    "point": {"status": "raised"},
+                    "tuple": {"status": "unraisable"},
+                    "x": {"status": "raised"},
+                    "flag": {"status": "raised"},
+                    "other": {"status": "raised"}
+                }
+            })),
+        );
+
+        let model = counterexample_model_from_error(&error);
+        assert!(!model.contains_key("point"));
+        assert!(!model.contains_key("tuple"));
+        assert!(!model.contains_key("other"));
+        assert_eq!(model.get("x"), Some(&verification::CexValue::Int(-1)));
+        assert_eq!(model.get("flag"), Some(&verification::CexValue::Bool(true)));
+    }
 }

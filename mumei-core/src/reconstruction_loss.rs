@@ -1,5 +1,6 @@
+use crate::verification::{raise_model_value, ModuleEnv};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Number, Value};
+use serde_json::Value;
 use std::collections::HashMap;
 use z3::ast::Dynamic;
 use z3::Model;
@@ -147,9 +148,11 @@ impl ReconstructionLoss {
         variables: &HashMap<String, Dynamic<'_>>,
     ) -> Self {
         let mut counter_example = HashMap::new();
+        let module_env = ModuleEnv::new();
         for (name, variable) in variables {
             if let Some(value) = model.eval(variable, true) {
-                counter_example.insert(name.clone(), dynamic_to_json(&value));
+                let (rendering, _, _) = raise_model_value(model, &value, None, &module_env);
+                counter_example.insert(name.clone(), Value::String(rendering));
             }
         }
         Self::from_counter_example(violated_property, counter_example)
@@ -221,29 +224,6 @@ impl ReconstructionLoss {
 
 fn default_schema_version() -> String {
     RECONSTRUCTION_LOSS_SCHEMA_VERSION.to_string()
-}
-
-fn dynamic_to_json(value: &Dynamic<'_>) -> Value {
-    if let Some(int_value) = value.as_int().and_then(|int_value| int_value.as_i64()) {
-        return Value::Number(Number::from(int_value));
-    }
-    if let Some((num, den)) = value.as_real().and_then(|real_value| real_value.as_real()) {
-        if den != 0 {
-            if let Some(number) = Number::from_f64(num as f64 / den as f64) {
-                return Value::Number(number);
-            }
-        }
-    }
-    if let Some(bool_value) = value.as_bool().and_then(|bool_value| bool_value.as_bool()) {
-        return Value::Bool(bool_value);
-    }
-    if let Some(string_value) = value
-        .as_string()
-        .and_then(|string_value| string_value.as_string())
-    {
-        return Value::String(string_value);
-    }
-    Value::String(value.to_string())
 }
 
 fn value_to_loss_component(value: &Value) -> Option<f32> {
@@ -360,14 +340,14 @@ mod tests {
         assert_eq!(loss.schema_version, RECONSTRUCTION_LOSS_SCHEMA_VERSION);
         assert_eq!(
             loss.counter_example.get("x"),
-            Some(&Value::Number(7.into()))
+            Some(&Value::String("7".to_string()))
         );
         assert_eq!(loss.loss_set_size, 1);
         assert_eq!(loss.loss_vector.len(), 1);
         assert_eq!(loss.loss_vector[0].violated_property, "result > 10");
         assert_eq!(
             loss.loss_vector[0].counter_example.get("x"),
-            Some(&Value::Number(7.into()))
+            Some(&Value::String("7".to_string()))
         );
         assert_eq!(loss.loss_vector[0].magnitude, 7.0);
         assert_eq!(loss.loss_components[0].variable, "x");
