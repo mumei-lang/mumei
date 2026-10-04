@@ -1,7 +1,7 @@
 name: Core Tests
 
 # Curated root targets pass on develop; add new targets once they are green.
-# test_concurrency is excluded because five of its cases fail on develop.
+# test_units is excluded until #687 lands, and test_concurrency until #688 lands.
 
 on:
   pull_request:
@@ -43,6 +43,12 @@ jobs:
       - name: Set up modern Z3
         uses: ./.github/actions/setup-z3
 
+      # z3-sys links -lz3 from the default search path (apt's libz3.so, SONAME
+      # libz3.so.4) and ignores Z3_SYS_Z3_LIB_DIR. The upstream bundle only ships
+      # libz3.so, so without this link the loader falls back to apt's 4.8.12.
+      - name: Resolve libz3.so.4 to Z3 4.14.1
+        run: ln -sf libz3.so "$Z3_SYS_Z3_LIB_DIR/libz3.so.4"
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -81,4 +87,10 @@ jobs:
             --test test_differential_fuzz \
             --test test_lambda_codegen \
             --test test_lambda_indirect_call \
-            --test test_property_based_soundness
+            --test test_property_based_soundness \
+            --test test_counterexample_raising \
+            --test test_quantified_requires \
+            --test test_quantifier_calls \
+            --test test_recursive_contract_calls \
+            --test test_str_builtins \
+            --test test_reconstruction_loss
