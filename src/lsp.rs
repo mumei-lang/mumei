@@ -307,6 +307,7 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
                 error: e,
                 atom: failed_atom,
                 escalation,
+                inconclusive,
             } = failure;
             let detail = e.to_detail();
             // ErrorDetail の Span から直接位置を取得（substring マッチ不要）
@@ -385,7 +386,7 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
                     "start": { "line": line, "character": col },
                     "end": { "line": line, "character": col + 1 }
                 },
-                "severity": 1,
+                "severity": if inconclusive { 2 } else { 1 },
                 "source": "mumei-z3",
                 "message": message
             });
@@ -883,6 +884,17 @@ struct LspVerifyFailure {
     error: verification::MumeiError,
     atom: Option<String>,
     escalation: Option<verification::LeanEscalationClassification>,
+    /// Z3 neither proved nor refuted the atom (`mumei verify` exit 3), so the
+    /// diagnostic is a warning rather than an error.
+    inconclusive: bool,
+}
+
+/// Z3 results `mumei verify` reports as inconclusive rather than rejected.
+fn is_inconclusive_z3_result(z3_result: &str) -> bool {
+    matches!(
+        z3_result,
+        "unknown" | "timeout" | "resource_limit" | "spurious_candidate"
+    )
 }
 
 /// Outcome of the in-process verification pass over a buffer.
@@ -926,6 +938,7 @@ fn classify_lsp_failure(
         error,
         atom: Some(atom.name.clone()),
         escalation: classification.should_escalate.then_some(classification),
+        inconclusive: is_unverifiable || is_inconclusive_z3_result(&z3_result),
     }
 }
 
@@ -1523,9 +1536,16 @@ fn append_certificate_lean_escalation_diagnostics(
                 continue;
             }
             let reason = reason.as_str();
+            // `skipped`: the certifying run never got a Z3 verdict for the atom.
+            let check = atom_cert.z3_check_result.as_str();
+            let severity = if is_inconclusive_z3_result(check) || check == "skipped" {
+                2
+            } else {
+                1
+            };
             diagnostics.push(serde_json::json!({
                 "range": atom_name_range(source, atom),
-                "severity": 1,
+                "severity": severity,
                 "source": "mumei-z3",
                 "message": format!(
                     "Lean escalation: pending (z3 {}, reason {}; certificate {})",

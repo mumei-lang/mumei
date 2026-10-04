@@ -605,6 +605,15 @@ fn lsp_reports_every_pending_escalation_recorded_in_the_sibling_certificate() {
         vec!["symbolic_pow_a", "symbolic_pow_b"],
         "every pending atom must be reported exactly once: {diagnostics:#?}"
     );
+    // Neither atom was refuted (the certificate records them `skipped`), so
+    // every pending diagnostic is a warning.
+    for diagnostic in diagnostics.iter().filter(|d| lean_escalation(d).is_some()) {
+        assert_eq!(
+            diagnostic.get("severity").and_then(Value::as_u64),
+            Some(2),
+            "{diagnostic:#}"
+        );
+    }
 
     // Editing the second atom into a trivially verified contract without
     // regenerating the certificate must drop its (now stale) pending entry.
@@ -692,5 +701,46 @@ fn live_z3_proof_does_not_hide_a_pending_escalation_that_still_requires_lean() {
         pending,
         vec!["square"],
         "a live Z3 proof must not suppress an escalation the policy still requires: {diagnostics:#?}"
+    );
+}
+
+fn z3_diagnostics(diagnostics: &[Value]) -> Vec<&Value> {
+    diagnostics
+        .iter()
+        .filter(|d| d.get("source").and_then(Value::as_str) == Some("mumei-z3"))
+        .collect()
+}
+
+#[test]
+fn inconclusive_z3_failure_is_a_warning_and_a_counterexample_is_an_error() {
+    let dir = unique_temp_dir("mumei-lsp-z3-severity");
+    let unknown_source = "atom symbolic_pow(x: i64, y: i64) -> i64\n  requires: x >= 0;\n  ensures: result == x**y && result == x;\n  body: x;\n";
+    let unknown_path = dir.join("unknown.mm");
+    std::fs::write(&unknown_path, unknown_source).expect("write source");
+    let unknown = did_open_diagnostics(&unknown_path, unknown_source);
+
+    let rejected_source =
+        "atom too_small(x: i64) -> i64\n  requires: x >= 0;\n  ensures: result > x;\n  body: x;\n";
+    let rejected_path = dir.join("rejected.mm");
+    std::fs::write(&rejected_path, rejected_source).expect("write source");
+    let rejected = did_open_diagnostics(&rejected_path, rejected_source);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let unknown = z3_diagnostics(&unknown);
+    assert_eq!(unknown.len(), 1, "{unknown:#?}");
+    assert_eq!(
+        unknown[0].get("severity").and_then(Value::as_u64),
+        Some(2),
+        "{:#}",
+        unknown[0]
+    );
+
+    let rejected = z3_diagnostics(&rejected);
+    assert_eq!(rejected.len(), 1, "{rejected:#?}");
+    assert_eq!(
+        rejected[0].get("severity").and_then(Value::as_u64),
+        Some(1),
+        "{:#}",
+        rejected[0]
     );
 }
