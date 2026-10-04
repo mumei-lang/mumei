@@ -8,6 +8,11 @@ External tools (e.g., [mumei-agent](https://github.com/mumei-lang/mumei-agent)) 
 - `mumei verify --json file.mm` — outputs report to stdout
 - `mumei verify --report-dir <dir> file.mm` — writes report.json to specified directory
 
+Without `--report-dir`, per-atom reports are staged in a private temp dir and
+the final `report.json` is published to the current directory when the run
+ends, so concurrent runs in the same directory each print their own result;
+the copy left in the directory is from whichever run finished last.
+
 ## Rich Diagnostics
 
 Human-facing diagnostics are powered by [miette](https://crates.io/crates/miette): multi-span source locations, compound constraint decomposition, and expression-level dataflow tracking can all be attached to one verification error.
