@@ -103,6 +103,12 @@ pub(crate) fn cmd_verify_cert(
             if !ac.ensures.is_empty() {
                 println!("      ensures: {}", ac.ensures);
             }
+            if !ac.assumed_clauses.is_empty() {
+                println!(
+                    "      ⚠️  assumed_clauses: [{}]",
+                    ac.assumed_clauses.join(", ")
+                );
+            }
             if ac.z3_check_result == "lean_verified"
                 || ac
                     .lean_result_metadata

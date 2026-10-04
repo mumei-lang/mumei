@@ -116,13 +116,15 @@ pub fn validate_counterexample(
     let symbol_provenance = detect_uninterpreted_symbols(atom, model, module_env);
     let mut eval_env = eval_env_from_model(model);
 
-    match eval_bool_clause(&atom.requires, &mut eval_env, module_env) {
+    let body_requires =
+        crate::verification::contract_view(atom, crate::verification::ContractView::BodyRequires);
+    match eval_bool_clause(&body_requires, &mut eval_env, module_env) {
         Ok(true) => {}
         Ok(false) => {
             return CounterexampleValidationResult {
                 is_valid: false,
                 validation_status: "unvalidated".to_string(),
-                failed_constraints: vec![format!("requires not satisfied: {}", atom.requires)],
+                failed_constraints: vec![format!("requires not satisfied: {body_requires}")],
                 symbol_provenance,
             };
         }
@@ -178,11 +180,13 @@ pub fn validate_counterexample(
         }
     }
 
-    match eval_bool_clause(&atom.ensures, &mut eval_env, module_env) {
+    let body_ensures =
+        crate::verification::contract_view(atom, crate::verification::ContractView::BodyEnsures);
+    match eval_bool_clause(&body_ensures, &mut eval_env, module_env) {
         Ok(false) => CounterexampleValidationResult {
             is_valid: true,
             validation_status: "validated".to_string(),
-            failed_constraints: vec![format!("ensures: {}", atom.ensures)],
+            failed_constraints: vec![format!("ensures: {body_ensures}")],
             symbol_provenance,
         },
         Ok(true) => invalid_counterexample_result(
@@ -741,7 +745,11 @@ fn eval_atom_call(
         }
     }
 
-    if !eval_bool_clause(&callee.requires, &mut call_env, module_env)? {
+    let caller_requires = crate::verification::contract_view(
+        callee,
+        crate::verification::ContractView::CallerRequires,
+    );
+    if !eval_bool_clause(&caller_requires, &mut call_env, module_env)? {
         return Err(format!("callee '{}' requires clause is false", name));
     }
     let body = parse_body_expr(&callee.body_expr);
@@ -755,7 +763,11 @@ fn eval_atom_call(
             call_env.insert("result".to_string(), result.clone());
         }
     }
-    if !eval_bool_clause(&callee.ensures, &mut call_env, module_env)? {
+    let caller_ensures = crate::verification::contract_view(
+        callee,
+        crate::verification::ContractView::CallerEnsures,
+    );
+    if !eval_bool_clause(&caller_ensures, &mut call_env, module_env)? {
         return Err(format!("callee '{}' ensures clause is false", name));
     }
     Ok(result)

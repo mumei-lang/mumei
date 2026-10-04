@@ -143,6 +143,21 @@ before the colon. Labels are diagnostic metadata and do not affect verification.
 For example, `ensures "nonnegative result": result >= 0;` displays the label if
 that postcondition fails.
 
+### Clause trust modes
+
+`requires` and `ensures` may be marked `assume` or `check` before an optional
+label. `assume` creates a trust boundary; `check` is sound and only withholds a
+fact from the other side of the call.
+
+| Clause | Body / implementation | Call sites |
+|---|---|---|
+| `requires: e;` | Assumed | Checked |
+| `requires assume: e;` | Assumed | Not checked |
+| `requires check: e;` | Not assumed | Checked |
+| `ensures: e;` | Proved | Assumed |
+| `ensures assume: e;` | Not proved | Assumed |
+| `ensures check: e;` | Proved | Not assumed |
+
 ### Cover Clauses
 
 A `cover` clause asks whether some execution satisfying `requires` reaches a

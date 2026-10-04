@@ -15,6 +15,7 @@ fn base_atom(name: &str) -> Atom {
         trace_id: None,
         spec_metadata: HashMap::new(),
         clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
         covers: Vec::new(),
         requires: "true".to_string(),
         forall_constraints: Vec::new(),

@@ -444,6 +444,19 @@ pub struct ClauseLabel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClauseTrustMode {
+    Assume,
+    Check,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClauseMode {
+    pub kind: ClauseKind,
+    pub clause: String,
+    pub mode: ClauseTrustMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverClause {
     pub clause: String,
     pub label: Option<String>,
@@ -461,6 +474,7 @@ pub struct Atom {
     pub spec_metadata: HashMap<String, String>,
     pub requires: String,
     pub clause_labels: Vec<ClauseLabel>,
+    pub clause_modes: Vec<ClauseMode>,
     pub covers: Vec<CoverClause>,
     pub forall_constraints: Vec<Quantifier>,
     pub ensures: String,

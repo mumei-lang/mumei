@@ -1116,9 +1116,13 @@ pub(crate) fn expr_to_z3<'a>(
                         }
 
                         // requires の検証: 呼び出し元のコンテキストで事前条件が満たされるか
-                        if callee.requires.trim() != "true" {
+                        let caller_requires = crate::verification::contract_view(
+                            &callee,
+                            crate::verification::ContractView::CallerRequires,
+                        );
+                        if caller_requires.trim() != "true" {
                             if let Some(solver) = solver_opt {
-                                let req_ast = parse_expression(&callee.requires);
+                                let req_ast = parse_expression(&caller_requires);
                                 let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
                                 if let Some(req_bool) = req_z3.as_bool() {
                                     if vc.cover_obligations.is_some() {
@@ -1356,7 +1360,11 @@ pub(crate) fn expr_to_z3<'a>(
                         //   → call_env に result = call_increment_0 を挿入
                         //   → Z3 に call_increment_0 == n + 1 を assert
                         //   → 後続の `increment(x)` で x >= 1 だけでなく x == n + 1 が使える
-                        if callee.ensures.trim() != "true"
+                        let caller_ensures = crate::verification::contract_view(
+                            &callee,
+                            crate::verification::ContractView::CallerEnsures,
+                        );
+                        if caller_ensures.trim() != "true"
                             && callee_semantics_match_caller(vc, &callee)
                         {
                             call_env.insert("result".to_string(), result_z3.clone());
@@ -1364,7 +1372,7 @@ pub(crate) fn expr_to_z3<'a>(
                                 call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
                                 call_env.insert("len_result".to_string(), len_sym.clone());
                             }
-                            let ens_ast = parse_expression(&callee.ensures);
+                            let ens_ast = parse_expression(&caller_ensures);
 
                             // Equality ensures の特別処理:
                             // ensures が `result == expr` の形式の場合、
@@ -2804,8 +2812,12 @@ pub(crate) fn expr_to_z3<'a>(
                     }
 
                     // requires を呼び出し元のコンテキストで検証
-                    if callee_atom.requires.trim() != "true" {
-                        let req_ast = parse_expression(&callee_atom.requires);
+                    let caller_requires = crate::verification::contract_view(
+                        &callee_atom,
+                        crate::verification::ContractView::CallerRequires,
+                    );
+                    if caller_requires.trim() != "true" {
+                        let req_ast = parse_expression(&caller_requires);
                         let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
                         if let Some(req_bool) = req_z3.as_bool() {
                             if let Some(solver) = solver_opt {
@@ -2815,7 +2827,7 @@ pub(crate) fn expr_to_z3<'a>(
                                     solver.pop(1);
                                     return Err(MumeiError::verification(format!(
                                         "call(atom_ref({})): precondition '{}' may not hold at call site",
-                                        callee_name, callee_atom.requires
+                                        callee_name, caller_requires
                                     ))
                                     .with_help(
                                         "呼び出し元で事前条件を満たしていません。引数の制約を確認してください",
@@ -2865,9 +2877,13 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                     }
 
-                    if callee_atom.ensures.trim() != "true" {
+                    let caller_ensures = crate::verification::contract_view(
+                        &callee_atom,
+                        crate::verification::ContractView::CallerEnsures,
+                    );
+                    if caller_ensures.trim() != "true" {
                         call_env.insert("result".to_string(), result_z3.clone());
-                        let ens_ast = parse_expression(&callee_atom.ensures);
+                        let ens_ast = parse_expression(&caller_ensures);
                         let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
                         if let Some(ens_bool) = ens_z3.as_bool() {
                             if let Some(solver) = solver_opt {

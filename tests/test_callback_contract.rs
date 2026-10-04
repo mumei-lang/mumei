@@ -49,6 +49,19 @@ fn callback_contract_subsumption_accepts_valid_callback() {
 }
 
 #[test]
+fn callback_check_ensures_are_not_exposed_to_contract_subsumption() {
+    let (ok, output) = verify_fixture("tests/negative/test_callback_contract_check_ensures.mm");
+    assert!(!ok, "{output}");
+    assert!(output.contains("Contract subsumption failed"), "{output}");
+}
+
+#[test]
+fn callback_plain_ensures_are_exposed_to_contract_subsumption() {
+    let (ok, output) = verify_fixture("tests/positive/test_callback_contract_plain_ensures.mm");
+    assert!(ok, "{output}");
+}
+
+#[test]
 fn callback_contract_subsumption_accepts_requires() {
     let (ok, output) = verify_fixture("tests/positive/test_callback_contract_requires_ok.mm");
     assert!(ok, "{output}");

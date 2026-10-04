@@ -502,6 +502,7 @@ mod tests {
                 trace_id: None,
                 spec_metadata: std::collections::HashMap::new(),
                 clause_labels: Vec::new(),
+                clause_modes: Vec::new(),
                 covers: Vec::new(),
                 requires: "true".to_string(),
                 forall_constraints: vec![],

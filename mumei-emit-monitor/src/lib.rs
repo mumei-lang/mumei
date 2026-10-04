@@ -427,6 +427,7 @@ mod tests {
             trace_id: None,
             spec_metadata: HashMap::new(),
             clause_labels: Vec::new(),
+            clause_modes: Vec::new(),
             covers: Vec::new(),
             requires: "x > 0".to_string(),
             forall_constraints: vec![],

@@ -17,6 +17,7 @@ use std::path::Path;
 use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int, Real, String as Z3String, BV};
 use z3::{Config, Context, SatResult, Solver};
 
+pub mod contract_view;
 pub mod executor;
 pub mod fragment;
 pub mod invariant_inference;
@@ -38,6 +39,7 @@ pub mod vc_outcome;
 #[cfg(test)]
 mod tests;
 
+pub use contract_view::{contract_view, dropped_conjuncts, ContractView};
 pub use executor::*;
 pub use fragment::*;
 pub use loop_detector::*;

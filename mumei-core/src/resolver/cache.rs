@@ -69,6 +69,12 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
         }
     }
     hasher.update(b"|");
+    if !atom.clause_modes.is_empty() {
+        for mode in &atom.clause_modes {
+            hasher.update(b"|clause_mode:");
+            hasher.update(format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause).as_bytes());
+        }
+    }
     hasher.update(atom.body_expr.as_bytes());
     // consumed_params も含める（所有権制約の変更を検出）
     for cp in &atom.consumed_params {
@@ -218,6 +224,12 @@ pub fn compute_proof_hash_with_flags(
         }
     }
     hasher.update(b"|");
+    if !atom.clause_modes.is_empty() {
+        for mode in &atom.clause_modes {
+            hasher.update(b"|clause_mode:");
+            hasher.update(format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause).as_bytes());
+        }
+    }
     hasher.update(atom.body_expr.as_bytes());
     for cp in &atom.consumed_params {
         hasher.update(b"|consume:");
@@ -426,6 +438,14 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(callee_atom.requires.as_bytes());
             hasher.update(b":");
             hasher.update(callee_atom.ensures.as_bytes());
+            if !callee_atom.clause_modes.is_empty() {
+                for mode in &callee_atom.clause_modes {
+                    hasher.update(b",clause_mode:");
+                    hasher.update(
+                        format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause).as_bytes(),
+                    );
+                }
+            }
             for p in &callee_atom.params {
                 hasher.update(b",param_type:");
                 hasher.update(p.type_name.as_deref().unwrap_or("").as_bytes());
@@ -490,6 +510,15 @@ pub fn compute_contract_hash(atom: &crate::parser::Atom) -> String {
         hash_field(&mut hasher, "quantifier.condition", &q.condition);
     }
     hash_field(&mut hasher, "ensures", &atom.ensures);
+    if !atom.clause_modes.is_empty() {
+        for mode in &atom.clause_modes {
+            hash_field(
+                &mut hasher,
+                "clause_mode",
+                &format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause),
+            );
+        }
+    }
     for cover in &atom.covers {
         let mut section = cover.clause.clone();
         if let Some(label) = &cover.label {

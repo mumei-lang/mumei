@@ -1827,8 +1827,9 @@ pub(crate) fn verify_inner(
     // 3. 前提条件 (requires)
     // NOTE: requires は エイリアシング検証より先に assert する必要がある。
     // requires: x != y; のような制約がエイリアシング検証で活用されるため。
-    if atom.requires.trim() != "true" {
-        for (req_idx, req_clause) in split_top_level_conjunctions(&atom.requires)
+    let body_requires = contract_view(atom, ContractView::BodyRequires);
+    if body_requires.trim() != "true" {
+        for (req_idx, req_clause) in split_top_level_conjunctions(&body_requires)
             .into_iter()
             .enumerate()
         {
@@ -1851,6 +1852,9 @@ pub(crate) fn verify_inner(
             }
         }
     }
+
+    // Checked requires use pre-body values inside each cover's solver frame.
+    let cover_pre_body_env: Option<Env<'_>> = (!atom.covers.is_empty()).then(|| env.clone());
 
     // 3b. エイリアシング検証 (Aliasing Prevention)
     // requires が assert された後に実行する。
@@ -2065,7 +2069,20 @@ pub(crate) fn verify_inner(
     let mut skipped_ensures = false;
     let mut context_reachability = ContextReachability::Unknown;
     let mut ensures_outcomes = Vec::new();
-    if atom.ensures.trim() != "true" {
+    for clause in dropped_conjuncts(atom, ContractView::BodyEnsures) {
+        let label =
+            clause_label_for(atom, crate::parser::ClauseKind::Ensures, &clause).map(str::to_string);
+        let warning = match &label {
+            Some(label) => format!(
+                "assumed ensures clause `{clause}` with label `{label}` is trusted and was not proved"
+            ),
+            None => format!("assumed ensures clause `{clause}` is trusted and was not proved"),
+        };
+        diagnostics.push(format!("warning: {warning}"));
+        ensures_outcomes.push((clause, ClauseOutcome::Assumed, label));
+    }
+    let body_ensures = contract_view(atom, ContractView::BodyEnsures);
+    if body_ensures.trim() != "true" {
         if tuple_component_types(atom.return_type.as_deref()).is_none() {
             // `[e0, …]` tail or `arr` tail: ensures clauses index `result[i]`
             // through `__z3_arr_result`/`len_result` — wire them like a let.
@@ -2078,7 +2095,7 @@ pub(crate) fn verify_inner(
             );
             env.insert("result".to_string(), body_result.clone());
         }
-        for ens_clause in split_top_level_conjunctions(&atom.ensures) {
+        for ens_clause in split_top_level_conjunctions(&body_ensures) {
             match lower_clause_with_skip(
                 &vc,
                 &mut env,
@@ -2091,7 +2108,11 @@ pub(crate) fn verify_inner(
                 ClauseLoweringOutcome::Trivial => {}
                 ClauseLoweringOutcome::Skipped => {
                     skipped_ensures = true;
-                    ensures_outcomes.push((ens_clause.trim().to_string(), ClauseOutcome::Skipped));
+                    ensures_outcomes.push((
+                        ens_clause.trim().to_string(),
+                        ClauseOutcome::Skipped,
+                        None,
+                    ));
                 }
                 ClauseLoweringOutcome::Lowered(ens_bool) => {
                     solver.push();
@@ -2214,7 +2235,7 @@ pub(crate) fn verify_inner(
                     if spurious_candidate_help.is_some() {
                         clause_outcome = ClauseOutcome::Unknown;
                     }
-                    ensures_outcomes.push((ens_clause.trim().to_string(), clause_outcome));
+                    ensures_outcomes.push((ens_clause.trim().to_string(), clause_outcome, None));
                     let outcome_summary =
                         ensures_outcome_summary(context_reachability, &ensures_outcomes);
                     if ensures_check == SatResult::Sat {
@@ -2489,7 +2510,7 @@ pub(crate) fn verify_inner(
         SatResult::Unknown => ContextReachability::Unknown,
     };
     if final_check == SatResult::Unsat {
-        for (_, outcome) in &mut ensures_outcomes {
+        for (_, outcome, _) in &mut ensures_outcomes {
             if *outcome == ClauseOutcome::Proved {
                 *outcome = ClauseOutcome::Vacuous;
             }
@@ -2662,6 +2683,45 @@ pub(crate) fn verify_inner(
 
             vc.cover_obligations = Some(std::cell::RefCell::new(Vec::new()));
             solver.push();
+            let mut check_env = cover_pre_body_env
+                .clone()
+                .expect("cover pre-body environment is available");
+            let mut check_requires_skipped = false;
+            for mode in atom.clause_modes.iter().filter(|mode| {
+                mode.kind == crate::parser::ClauseKind::Requires
+                    && mode.mode == crate::parser::ClauseTrustMode::Check
+            }) {
+                match lower_clause_with_skip(
+                    &vc,
+                    &mut check_env,
+                    hir_atom,
+                    &mode.clause,
+                    "requires",
+                    &mut diagnostics,
+                    Some(&solver),
+                ) {
+                    Ok(ClauseLoweringOutcome::Trivial) => {}
+                    Ok(ClauseLoweringOutcome::Lowered(req_bool)) => solver.assert(&req_bool),
+                    Ok(ClauseLoweringOutcome::Skipped) | Err(_) => {
+                        check_requires_skipped = true;
+                        break;
+                    }
+                }
+            }
+            if check_requires_skipped {
+                vc.cover_obligations.take();
+                diagnostics.push(format!(
+                    "warning: reachability of cover clause {cover_name:?} is unknown because a `requires check` clause could not be lowered"
+                ));
+                cover_results.push(json!({
+                    "clause": cover.clause,
+                    "label": cover.label,
+                    "status": "unknown",
+                    "witness": serde_json::Value::Null,
+                }));
+                solver.pop(1);
+                continue;
+            }
             let lowered_cover = lower_clause_with_skip(
                 &vc,
                 &mut env,
@@ -3162,14 +3222,20 @@ fn z3_dynamic_to_cex_value(value: &Dynamic) -> Option<CexValue> {
 
 fn ensures_outcome_summary(
     context_reachability: ContextReachability,
-    outcomes: &[(String, ClauseOutcome)],
+    outcomes: &[(String, ClauseOutcome, Option<String>)],
 ) -> serde_json::Value {
     json!({
         "context_reachability": context_reachability,
-        "ensures_outcomes": outcomes.iter().map(|(clause, outcome)| json!({
-            "clause": clause,
-            "outcome": outcome,
-        })).collect::<Vec<_>>(),
+        "ensures_outcomes": outcomes.iter().map(|(clause, outcome, label)| {
+            let mut entry = json!({
+                "clause": clause,
+                "outcome": outcome,
+            });
+            if let Some(label) = label {
+                entry["label"] = json!(label);
+            }
+            entry
+        }).collect::<Vec<_>>(),
     })
 }
 

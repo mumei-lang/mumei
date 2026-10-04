@@ -832,6 +832,107 @@ atom labeled(x: i64) -> i64
     }
 
     #[test]
+    fn test_parse_clause_trust_modes_with_optional_labels() {
+        let atom = parse_atom(
+            r#"
+atom modes(x: i64) -> i64
+    requires assume "trusted input": x > 0;
+    requires check: x < 10;
+    ensures assume "trusted result": result > 0;
+    ensures check: result < 20;
+    body: x;
+"#,
+        );
+
+        assert_eq!(
+            atom.clause_modes,
+            vec![
+                ClauseMode {
+                    kind: ClauseKind::Requires,
+                    clause: "x > 0".to_string(),
+                    mode: ClauseTrustMode::Assume,
+                },
+                ClauseMode {
+                    kind: ClauseKind::Requires,
+                    clause: "x < 10".to_string(),
+                    mode: ClauseTrustMode::Check,
+                },
+                ClauseMode {
+                    kind: ClauseKind::Ensures,
+                    clause: "result > 0".to_string(),
+                    mode: ClauseTrustMode::Assume,
+                },
+                ClauseMode {
+                    kind: ClauseKind::Ensures,
+                    clause: "result < 20".to_string(),
+                    mode: ClauseTrustMode::Check,
+                },
+            ]
+        );
+        assert_eq!(atom.clause_labels.len(), 2);
+        assert_eq!(atom.clause_labels[0].label, "trusted input");
+        assert_eq!(atom.clause_labels[1].label, "trusted result");
+
+        let errors = item::parse_module_from_source_checked(
+            r#"
+atom bad_mode(x: i64) -> i64
+    requires foo: x > 0;
+    ensures: result > 0;
+    body: x;
+"#,
+        )
+        .expect_err("unknown clause mode must be a syntax failure");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("unknown clause trust mode 'foo'")),
+            "unexpected syntax errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_quantified_moded_requires() {
+        for (mode, quantifier) in [("check", "forall"), ("assume", "exists")] {
+            let source = format!(
+                r#"
+atom quantified(arr: [i64], n: i64) -> i64
+    requires {mode}: {quantifier}(i, 0, n, arr[i] > 0);
+    ensures: result > 0;
+    body: arr[0];
+"#
+            );
+            let errors = item::parse_module_from_source_checked(&source)
+                .expect_err("quantified moded requires must be rejected");
+            assert!(
+                errors.iter().any(|error| error
+                    == "clause trust modes (assume/check) are not supported on requires clauses containing quantifiers (forall/exists)"),
+                "unexpected syntax errors: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_keeps_unmoded_quantified_requires() {
+        let items = item::parse_module_from_source_checked(
+            r#"
+atom quantified(arr: [i64], n: i64) -> i64
+    requires: n >= 1 && forall(i, 0, n, arr[i] > 0);
+    ensures: result > 0;
+    body: arr[0];
+"#,
+        )
+        .expect("ordinary quantified requires remain supported");
+        let atom = items
+            .iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) => Some(atom),
+                _ => None,
+            })
+            .expect("quantified atom");
+        assert_eq!(atom.forall_constraints.len(), 1);
+    }
+
+    #[test]
     fn test_parse_cover_clauses_and_contextual_cover_identifier() {
         let covered = parse_atom(
             r#"
