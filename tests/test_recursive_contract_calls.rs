@@ -47,6 +47,17 @@ atom g2(n: i64)
     body: n;
 "#;
 
+const STRUCT_P: &str = r#"
+struct P {
+    x: i64,
+    invariant: self.x >= 0 && mk(0).x >= 0
+}
+atom mk(n: i64) -> P
+requires: n >= 0;
+ensures: result.x == n;
+body: P { x: n };
+"#;
+
 struct CaseResult {
     name: &'static str,
     target: &'static str,
@@ -313,6 +324,39 @@ fn use_g2_bad_fails() {
                 "{G2}\natom use_g2_bad()\n    requires: true;\n    ensures: result == 7;\n    body: g2(0);\n"
             ),
             "use_g2_bad",
+        ),
+        "failed",
+    );
+}
+
+#[test]
+fn mk_struct_result_reports_failure_without_crashing() {
+    assert_case(verify("mk", STRUCT_P, "mk"), "failed");
+}
+
+#[test]
+fn use_mk_reports_failure_without_crashing() {
+    assert_case(
+        verify(
+            "use_mk",
+            &format!(
+                "{STRUCT_P}\natom use_mk(n: i64) -> P\nrequires: n >= 0;\nensures: result.x == n;\nbody: mk(n);\n"
+            ),
+            "use_mk",
+        ),
+        "failed",
+    );
+}
+
+#[test]
+fn use_mk_bad_fails() {
+    assert_case(
+        verify(
+            "use_mk_bad",
+            &format!(
+                "{STRUCT_P}\natom use_mk_bad(n: i64) -> P\nrequires: n >= 0;\nensures: result.x == n + 1;\nbody: mk(n);\n"
+            ),
+            "use_mk_bad",
         ),
         "failed",
     );

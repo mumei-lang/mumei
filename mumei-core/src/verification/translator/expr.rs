@@ -1334,6 +1334,7 @@ pub(crate) fn expr_to_z3<'a>(
                                 solver_opt,
                                 !recursive_instance && callee_semantics_match_caller(vc, &callee),
                             ) {
+                                let _contract_guard = vc.enter_contract_instantiation(&callee.name);
                                 assume_struct_invariants(
                                     vc,
                                     solver,
@@ -2879,6 +2880,8 @@ pub(crate) fn expr_to_z3<'a>(
                             solver_opt,
                             !recursive_instance && callee_semantics_match_caller(vc, &callee_atom),
                         ) {
+                            let _contract_guard =
+                                vc.enter_contract_instantiation(&callee_atom.name);
                             assume_struct_invariants(
                                 vc,
                                 solver,
