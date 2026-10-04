@@ -4,8 +4,7 @@ use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
 use crate::verification::raising::{
-    call_result_handles, mark_abstract_call_result_struct_unraisable, references_call_result,
-    resolve_source_base_type,
+    mark_abstract_call_result_unraisable, references_call_result, resolve_source_base_type,
 };
 use crate::verification::translator::may_write::CalleeRef;
 use serde_json::json;
@@ -1150,7 +1149,7 @@ pub(crate) fn expr_to_z3<'a>(
                                             {
                                                 let mut raised = RaisedCounterexample::default();
                                                 let call_result_handles =
-                                                    call_result_handles(&call_env, vc.module_env);
+                                                    vc.call_result_symbols.borrow().clone();
                                                 let source_bindings = callee
                                                     .params
                                                     .iter()
@@ -1167,54 +1166,50 @@ pub(crate) fn expr_to_z3<'a>(
                                                             &call_env,
                                                             vc.module_env,
                                                         );
-                                                        if raised_value.lowering == "struct" {
-                                                            let references_abstract_result =
-                                                                references_call_result(
-                                                                    arg_val,
-                                                                    &call_result_handles,
-                                                                ) || param
-                                                                    .type_name
-                                                                    .as_deref()
-                                                                    .and_then(|type_name| {
-                                                                        let base_type =
-                                                                            resolve_source_base_type(
-                                                                                type_name,
-                                                                                vc.module_env,
-                                                                            );
-                                                                        vc.module_env
-                                                                            .get_struct(&base_type)
-                                                                    })
-                                                                    .is_some_and(|struct_def| {
-                                                                        struct_def.fields.iter().any(
-                                                                            |field| {
-                                                                                call_env
-                                                                                    .get(&struct_field_key(
-                                                                                        &param.name,
-                                                                                        &field.name,
-                                                                                    ))
-                                                                                    .is_some_and(
-                                                                                        |field_value| {
-                                                                                            references_call_result(
-                                                                                                field_value,
-                                                                                                &call_result_handles,
-                                                                                            )
-                                                                                        },
-                                                                                    )
-                                                                            },
-                                                                        )
-                                                                    });
-                                                            if references_abstract_result {
-                                                                let raw_rendering = model
-                                                                    .eval(arg_val, true)
-                                                                    .unwrap_or_else(|| {
-                                                                        arg_val.clone()
-                                                                    })
-                                                                    .to_string();
-                                                                mark_abstract_call_result_struct_unraisable(
-                                                                    &mut raised_value,
-                                                                    raw_rendering,
-                                                                );
-                                                            }
+                                                        let references_abstract_result =
+                                                            references_call_result(
+                                                                arg_val,
+                                                                &call_result_handles,
+                                                            ) || param
+                                                                .type_name
+                                                                .as_deref()
+                                                                .and_then(|type_name| {
+                                                                    let base_type =
+                                                                        resolve_source_base_type(
+                                                                            type_name,
+                                                                            vc.module_env,
+                                                                        );
+                                                                    vc.module_env
+                                                                        .get_struct(&base_type)
+                                                                })
+                                                                .is_some_and(|struct_def| {
+                                                                    struct_def.fields.iter().any(
+                                                                        |field| {
+                                                                            call_env
+                                                                                .get(&struct_field_key(
+                                                                                    &param.name,
+                                                                                    &field.name,
+                                                                                ))
+                                                                                .is_some_and(
+                                                                                    |field_value| {
+                                                                                        references_call_result(
+                                                                                            field_value,
+                                                                                            &call_result_handles,
+                                                                                        )
+                                                                                    },
+                                                                                )
+                                                                        },
+                                                                    )
+                                                                });
+                                                        if references_abstract_result {
+                                                            let raw_rendering = model
+                                                                .eval(arg_val, true)
+                                                                .unwrap_or_else(|| arg_val.clone())
+                                                                .to_string();
+                                                            mark_abstract_call_result_unraisable(
+                                                                &mut raised_value,
+                                                                raw_rendering,
+                                                            );
                                                         }
                                                         let argument_rendering =
                                                             arg_val.to_string();
@@ -1381,6 +1376,9 @@ pub(crate) fn expr_to_z3<'a>(
                         let call_id =
                             CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         let result_name = format!("call_{}_{}", name, call_id);
+                        vc.call_result_symbols
+                            .borrow_mut()
+                            .insert(result_name.clone());
 
                         // 戻り値型から Z3 ソートを選択する。明示的な `-> T` 注釈が
                         // あればそれを使い、なければ従来のヒューリスティック
