@@ -58,6 +58,13 @@ ensures: result.x == n;
 body: P { x: n };
 "#;
 
+const QUANTIFIED_RECURSIVE_REQUIRES: &str = r#"
+atom q(n: i64)
+    requires: n >= 0 && forall(i, 0, n, q(i) >= 0);
+    ensures: result >= 0;
+    body: n;
+"#;
+
 struct CaseResult {
     name: &'static str,
     target: &'static str,
@@ -363,5 +370,17 @@ fn use_mk_bad_fails() {
             "use_mk_bad",
         ),
         "failed",
+    );
+}
+
+#[test]
+fn quantified_recursive_requires_and_caller_fail_closed_without_crashing() {
+    let source = format!(
+        "{QUANTIFIED_RECURSIVE_REQUIRES}\natom use_q(n: i64)\n    requires: n >= 0;\n    ensures: result >= 0;\n    body: q(n);\n"
+    );
+    assert_case(verify("q_quantified_requires", &source, "q"), "unknown");
+    assert_case(
+        verify("use_q_quantified_requires", &source, "use_q"),
+        "unknown",
     );
 }

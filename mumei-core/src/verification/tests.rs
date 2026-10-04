@@ -95,6 +95,9 @@ fn test_subsumption_vc<'a>(ctx: &'a Context, module_env: &'a ModuleEnv) -> VCtx<
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     }
 }
@@ -1194,6 +1197,9 @@ fn test_constraint_budget_exceeded() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
 
@@ -1245,6 +1251,9 @@ fn test_constraint_budget_no_limit() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
 
@@ -2072,6 +2081,9 @@ fn test_subsumption_check_holds_with_requires() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2316,6 +2328,9 @@ fn test_subsumption_check_bool_param_and_result() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2401,6 +2416,9 @@ fn test_subsumption_check_call_ref_alias_x() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2486,6 +2504,9 @@ fn test_subsumption_check_call_ref_aliases_do_not_follow_concrete_names() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let concrete = test_atom(
@@ -2547,6 +2568,9 @@ fn test_subsumption_check_array_length_does_not_alias_caller_symbol() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let concrete = test_atom(
@@ -2606,6 +2630,9 @@ fn test_subsumption_check_array_length_aliases_follow_callback_position() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let concrete = test_atom(
@@ -2668,6 +2695,9 @@ fn test_subsumption_check_fails_without_requires() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2759,6 +2789,9 @@ fn test_subsumption_check_crossed_param_names() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2857,6 +2890,9 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2937,6 +2973,9 @@ fn test_subsumption_check_concrete_true_ensures_fails() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -3219,6 +3258,142 @@ fn test_infer_requires_substitutes_callee_params() {
     );
 }
 
+fn quantified_needs_atom() -> Atom {
+    use std::collections::HashMap;
+    Atom {
+        name: "needs".to_string(),
+        type_params: vec![],
+        where_bounds: vec![],
+        params: vec![
+            Param {
+                name: "arr".to_string(),
+                type_name: Some("[i64]".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            },
+            Param {
+                name: "n".to_string(),
+                type_name: Some("i64".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            },
+        ],
+        trace_id: None,
+        spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
+        requires: "n >= 0 && true".to_string(),
+        forall_constraints: vec![Quantifier {
+            q_type: QuantifierType::ForAll,
+            var: "i".to_string(),
+            start: "0".to_string(),
+            end: "n".to_string(),
+            condition: "arr[i] > 0".to_string(),
+        }],
+        ensures: "result > 0".to_string(),
+        body_expr: "arr[0]".to_string(),
+        consumed_params: vec![],
+        resources: vec![],
+        is_async: false,
+        trust_level: TrustLevel::Verified,
+        max_unroll: None,
+        invariant: None,
+        effects: vec![],
+        return_type: None,
+        span: Span::new("", 0, 0, 0),
+        effect_pre: HashMap::new(),
+        effect_post: HashMap::new(),
+    }
+}
+
+fn caller_calling_needs(arg_scalar: &str, call_args: &str) -> Atom {
+    use std::collections::HashMap;
+    Atom {
+        name: "caller".to_string(),
+        type_params: vec![],
+        where_bounds: vec![],
+        params: vec![
+            Param {
+                name: "xs".to_string(),
+                type_name: Some("[i64]".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            },
+            Param {
+                name: arg_scalar.to_string(),
+                type_name: Some("i64".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            },
+        ],
+        trace_id: None,
+        spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
+        requires: "true".to_string(),
+        forall_constraints: vec![],
+        ensures: "true".to_string(),
+        body_expr: format!("needs(xs, {call_args})"),
+        consumed_params: vec![],
+        resources: vec![],
+        is_async: false,
+        trust_level: TrustLevel::Verified,
+        max_unroll: None,
+        invariant: None,
+        effects: vec![],
+        return_type: None,
+        span: Span::new("", 0, 0, 0),
+        effect_pre: HashMap::new(),
+        effect_post: HashMap::new(),
+    }
+}
+
+#[test]
+fn test_infer_requires_alpha_renames_colliding_quantifier_var() {
+    let mut env = ModuleEnv::new();
+    env.register_atom(&quantified_needs_atom());
+    // The caller passes its own `i` as `n`; the callee's bound `i` would be
+    // captured by the parameter substitution, so it is alpha-renamed.
+    let caller = caller_calling_needs("i", "i");
+    let inferred = infer_requires(&caller, &env);
+    assert!(
+        inferred
+            .iter()
+            .any(|r| r == "(i >= 0 && true) && (forall(i_q, 0, i, xs[i_q] > 0))"),
+        "Expected alpha-renamed quantified obligation, got: {:?}",
+        inferred
+    );
+}
+
+#[test]
+fn test_infer_requires_keeps_non_colliding_quantifier_var() {
+    let mut env = ModuleEnv::new();
+    env.register_atom(&quantified_needs_atom());
+    let caller = caller_calling_needs("m", "m");
+    let inferred = infer_requires(&caller, &env);
+    assert!(
+        inferred
+            .iter()
+            .any(|r| r == "(m >= 0 && true) && (forall(i, 0, m, xs[i] > 0))"),
+        "Expected quantified obligation with bound var kept, got: {:?}",
+        inferred
+    );
+}
+
 // ---- expr_to_source_string tests ----
 
 #[test]
@@ -3415,6 +3590,9 @@ fn test_expr_to_z3_true_false_are_bool() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -3489,6 +3667,9 @@ fn test_expr_to_z3_pow_constant_folds_full_precision() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -3556,6 +3737,9 @@ fn test_tuple_result_indexing_uses_typed_components() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -3723,6 +3907,9 @@ fn test_chained_comparison_normalizes_before_lowering() {
         local_lambdas: Default::default(),
         call_result_lens: Default::default(),
         contracts_in_instantiation: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -4147,4 +4334,34 @@ fn test_scalar_match_still_tags_inductive() {
     );
     let tags = detect_logic_fragment_tags(&atom, &module_env);
     assert!(tags.iter().any(|tag| tag == "inductive_data_type"));
+}
+
+#[test]
+fn quantifier_binder_in_detects_bound_variable_through_terms() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let i = Int::new_const(&ctx, "i");
+    let k = Int::new_const(&ctx, "k");
+    let arr = Array::new_const(&ctx, "arr", &z3::Sort::int(&ctx), &z3::Sort::int(&ctx));
+    let arr_i: z3::ast::Dynamic = arr.select(&(&i + &Int::from_i64(&ctx, 1)));
+    let k_dyn: z3::ast::Dynamic = k.clone().into();
+
+    assert_eq!(vc.quantifier_binder_in(std::slice::from_ref(&arr_i)), None);
+    vc.quantifier_binders
+        .borrow_mut()
+        .push(("i".to_string(), i.clone().into()));
+    assert_eq!(
+        vc.quantifier_binder_in(std::slice::from_ref(&arr_i)),
+        Some("i".to_string())
+    );
+    assert_eq!(vc.quantifier_binder_in(std::slice::from_ref(&k_dyn)), None);
+    assert!(vc.reject_quantifier_dependent_call("f", &[k_dyn]).is_ok());
+
+    let err = vc
+        .reject_quantifier_dependent_call("f", &[arr_i])
+        .expect_err("call on a bound variable must be rejected");
+    assert!(is_unverifiable_error_message(&err.to_string()));
+    assert!(crate::verification::spec_validation::is_unsupported_clause_error(&err));
 }

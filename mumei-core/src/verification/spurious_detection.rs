@@ -746,6 +746,8 @@ fn eval_atom_call(
         }
     }
 
+    // Keep the plain caller view: this evaluator has no forall/exists or
+    // array values, so a quantified obligation would abort every replay.
     let caller_requires = crate::verification::contract_view(
         callee,
         crate::verification::ContractView::CallerRequires,
