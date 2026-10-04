@@ -91,6 +91,24 @@ fn unrelated_atom() -> Atom {
     atom
 }
 
+fn normalize_mumei_version_line(text: &str) -> String {
+    let mut normalized = text
+        .lines()
+        .map(|line| {
+            if line.starts_with("| **Mumei Version** | `") && line.ends_with("` |") {
+                "| **Mumei Version** | `<MUMEI_VERSION>` |"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.ends_with('\n') {
+        normalized.push('\n');
+    }
+    normalized
+}
+
 #[test]
 fn verified_json_emitter_reads_hir_and_matches_develop_golden() {
     let expected = r#"{
@@ -190,7 +208,7 @@ fn proof_book_emitter_reads_hir_and_matches_develop_golden() {
 |-------|-------|
 | **Atom** | `rich_atom` |
 | **Trust Level** | `Trusted` |
-| **Mumei Version** | `0.6.20` |
+| **Mumei Version** | `<MUMEI_VERSION>` |
 | **Content Hash** | `8567d01de94d94ae` |
 | **Async** | Yes |
 
@@ -249,7 +267,13 @@ result >= a && result >= amount
     let before = ProofBookEmitter
         .emit(&hir, Path::new("/tmp/rich_atom"), &module_env, &[])
         .unwrap();
-    assert_eq!(before[0].data, expected.as_bytes());
+    let actual = String::from_utf8(before[0].data.clone()).unwrap();
+    assert!(actual.lines().any(|line| {
+        line.strip_prefix("| **Mumei Version** | `")
+            .and_then(|value| value.strip_suffix("` |"))
+            .is_some_and(|version| !version.trim().is_empty())
+    }));
+    assert_eq!(normalize_mumei_version_line(&actual), expected);
 
     let expected_hash = mumei_core::proof_cert::compute_atom_content_hash_v2(&hir.atom);
     assert_eq!(hir.meta.content_hash, expected_hash);
