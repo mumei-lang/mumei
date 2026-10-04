@@ -479,6 +479,117 @@ pub fn raise_named_model_value<'ctx>(
     }
 }
 
+pub fn raise_named_binding<'ctx>(
+    model: &Model<'ctx>,
+    source_name: impl Into<String>,
+    binding: &str,
+    value: &Dynamic<'ctx>,
+    type_hint: Option<&str>,
+    env: &HashMap<String, Dynamic<'ctx>>,
+    module_env: &ModuleEnv,
+) -> RaisedValue {
+    let evaluated = model.eval(value, true).unwrap_or_else(|| value.clone());
+    let (rendering, lowering, status) =
+        raise_model_value_with_env(model, &evaluated, type_hint, module_env, env, Some(binding));
+    let decoded_string = if lowering == "string" {
+        decode_model_string(&evaluated, &rendering)
+    } else {
+        None
+    };
+    RaisedValue {
+        source_name: source_name.into(),
+        solver_name: None,
+        rendering,
+        lowering,
+        source_type: type_hint.map(str::to_string),
+        decoded_string,
+        status,
+    }
+}
+
+pub fn call_result_handles<'ctx>(
+    env: &HashMap<String, Dynamic<'ctx>>,
+    module_env: &ModuleEnv,
+) -> HashSet<String> {
+    fn is_source_identifier(name: &str) -> bool {
+        let mut chars = name.chars();
+        chars
+            .next()
+            .is_some_and(|character| character == '_' || character.is_alphabetic())
+            && chars.all(|character| character == '_' || character.is_alphanumeric())
+    }
+
+    fn is_call_result_handle(handle: &str, module_env: &ModuleEnv) -> bool {
+        let Some(rest) = handle.strip_prefix("call_") else {
+            return false;
+        };
+        let Some((callee, id)) = rest.rsplit_once('_') else {
+            return false;
+        };
+        if callee.is_empty() || id.parse::<usize>().is_err() {
+            return false;
+        }
+        let namespaced_callee = callee.replace('.', "::");
+        module_env.get_atom(callee).is_some() || module_env.get_atom(&namespaced_callee).is_some()
+    }
+
+    let mut handles = HashSet::new();
+    for key in env.keys() {
+        let Some(name) = key.strip_prefix("__struct_") else {
+            continue;
+        };
+        for (separator, _) in name.match_indices('_') {
+            let handle = &name[..separator];
+            let field = &name[separator + 1..];
+            if is_source_identifier(field) && is_call_result_handle(handle, module_env) {
+                handles.insert(handle.to_string());
+                break;
+            }
+        }
+    }
+    handles
+}
+
+pub(crate) fn references_call_result(value: &Dynamic<'_>, handles: &HashSet<String>) -> bool {
+    fn visit(value: &Dynamic<'_>, handles: &HashSet<String>, visited: &mut HashSet<usize>) -> bool {
+        if !visited.insert(value.get_z3_ast() as usize) {
+            return false;
+        }
+        if value.kind() == z3::AstKind::App {
+            let decl = value.decl();
+            if decl.kind() == z3::DeclKind::UNINTERPRETED && decl.arity() == 0 {
+                let name = decl.name().to_string();
+                if handles.iter().any(|handle| {
+                    name == *handle
+                        || name
+                            .strip_prefix(handle)
+                            .is_some_and(|suffix| suffix.starts_with('_'))
+                }) {
+                    return true;
+                }
+            }
+        }
+        value
+            .children()
+            .iter()
+            .any(|child| visit(child, handles, visited))
+    }
+
+    visit(value, handles, &mut HashSet::new())
+}
+
+pub(crate) fn mark_abstract_call_result_struct_unraisable(
+    value: &mut RaisedValue,
+    raw_rendering: String,
+) {
+    value.rendering = raw_rendering;
+    value.lowering = "struct";
+    value.status = RaisedStatus::Unraisable {
+        reason: "struct argument comes from an abstract callee result; its fields are not tied to source values"
+            .to_string(),
+    };
+}
+
 pub fn raise_length_companion<'ctx>(
     model: &Model<'ctx>,
     binding: &str,
@@ -1092,7 +1203,7 @@ fn exact_dyadic_f32(numerator: i64, denominator: i64) -> Option<f32> {
     (rounded.is_finite() && rounded as f64 == value).then_some(rounded)
 }
 
-fn resolve_source_base_type(type_name: &str, module_env: &ModuleEnv) -> String {
+pub(crate) fn resolve_source_base_type(type_name: &str, module_env: &ModuleEnv) -> String {
     let mut base = type_name.to_string();
     let mut seen = HashSet::new();
     while seen.insert(base.clone()) {
@@ -1321,16 +1432,57 @@ pub fn raise_atom_counterexample<'ctx>(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_ieee754_f64, decode_model_string, decode_z3_string_escapes,
+        call_result_handles, decode_ieee754_f64, decode_model_string, decode_z3_string_escapes,
         length_companion_lowering, loss_json_from_raised_rendering, raise_length_companion,
-        raise_model_value, RaisedCounterexample, RaisedStatus, RaisedValue,
+        raise_model_value, references_call_result, RaisedCounterexample, RaisedStatus, RaisedValue,
     };
     use crate::parser::{RefinedType, Span};
     use crate::verification::ModuleEnv;
     use serde_json::Value;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use z3::ast::{Ast, Bool, Dynamic, Float, Int, Real, String as Z3String, BV};
     use z3::{Config, Context, SatResult, Solver};
+
+    #[test]
+    fn call_result_handles_require_a_known_callee_and_decimal_id() {
+        let atom = crate::parser::parse_atom(
+            "atom mk() -> i64\nrequires: true;\nensures: true;\nbody: 0;",
+        );
+        let mut module_env = ModuleEnv::new();
+        module_env.register_atom(&atom);
+        let mut namespaced_atom = atom.clone();
+        namespaced_atom.name = "pkg::mk".to_string();
+        module_env.register_atom(&namespaced_atom);
+
+        let config = Config::new();
+        let context = Context::new(&config);
+        let value: Dynamic = Int::from_i64(&context, 0).into();
+        let env = HashMap::from([
+            ("__struct_call_mk_12_a".to_string(), value.clone()),
+            ("__struct_call_pkg.mk_3_a".to_string(), value.clone()),
+            ("__struct_call_x_a".to_string(), value.clone()),
+            ("__struct_call_unknown_1_a".to_string(), value.clone()),
+            ("__struct_call_mk_nope_a".to_string(), value),
+        ]);
+
+        assert_eq!(
+            call_result_handles(&env, &module_env),
+            HashSet::from(["call_mk_12".to_string(), "call_pkg.mk_3".to_string()])
+        );
+    }
+
+    #[test]
+    fn call_result_references_are_found_recursively_without_prefix_collisions() {
+        let config = Config::new();
+        let context = Context::new(&config);
+        let handles = HashSet::from(["call_mk_12".to_string()]);
+        let field = Int::new_const(&context, "call_mk_12_a");
+        let nested: Dynamic = (&field + &Int::from_i64(&context, 1)).into();
+        let unrelated: Dynamic = Int::new_const(&context, "call_mk_120_a").into();
+
+        assert!(references_call_result(&nested, &handles));
+        assert!(!references_call_result(&unrelated, &handles));
+    }
 
     #[test]
     fn non_dyadic_real_keeps_solver_rendering_as_unraisable() {

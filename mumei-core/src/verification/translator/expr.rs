@@ -3,6 +3,10 @@ use super::super::support::*;
 use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
+use crate::verification::raising::{
+    call_result_handles, mark_abstract_call_result_struct_unraisable, references_call_result,
+    resolve_source_base_type,
+};
 use crate::verification::translator::may_write::CalleeRef;
 use serde_json::json;
 use z3::{FuncDecl, Sort};
@@ -1149,6 +1153,8 @@ pub(crate) fn expr_to_z3<'a>(
                                                 solver.get_model()
                                             {
                                                 let mut raised = RaisedCounterexample::default();
+                                                let call_result_handles =
+                                                    call_result_handles(&call_env, vc.module_env);
                                                 let source_bindings = callee
                                                     .params
                                                     .iter()
@@ -1156,52 +1162,99 @@ pub(crate) fn expr_to_z3<'a>(
                                                     .collect::<HashSet<_>>();
                                                 for (i, param) in callee.params.iter().enumerate() {
                                                     if let Some(arg_val) = arg_vals.get(i) {
-                                                        if let Some(val) = model.eval(arg_val, true)
-                                                        {
-                                                            let mut raised_value =
-                                                                raise_named_model_value(
-                                                                    &model,
-                                                                    param.name.clone(),
-                                                                    &val,
-                                                                    param.type_name.as_deref(),
-                                                                    vc.module_env,
-                                                                );
-                                                            let argument_rendering =
-                                                                arg_val.to_string();
-                                                            let mut matching_names = env
-                                                                .iter()
-                                                                .filter_map(|(name, value)| {
-                                                                    (value.to_string()
-                                                                        == argument_rendering)
-                                                                        .then_some(name.as_str())
-                                                                })
-                                                                .collect::<Vec<_>>();
-                                                            matching_names.sort_by_key(|name| {
-                                                                (
-                                                                    !matches!(
-                                                                        classify_solver_symbol(
-                                                                            name,
-                                                                            &source_bindings,
-                                                                            vc.module_env,
-                                                                        ),
-                                                                        SolverSymbolClassification::Source(
-                                                                            _
+                                                        let mut raised_value = raise_named_binding(
+                                                            &model,
+                                                            param.name.clone(),
+                                                            &param.name,
+                                                            arg_val,
+                                                            param.type_name.as_deref(),
+                                                            &call_env,
+                                                            vc.module_env,
+                                                        );
+                                                        if raised_value.lowering == "struct" {
+                                                            let references_abstract_result =
+                                                                references_call_result(
+                                                                    arg_val,
+                                                                    &call_result_handles,
+                                                                ) || param
+                                                                    .type_name
+                                                                    .as_deref()
+                                                                    .and_then(|type_name| {
+                                                                        let base_type =
+                                                                            resolve_source_base_type(
+                                                                                type_name,
+                                                                                vc.module_env,
+                                                                            );
+                                                                        vc.module_env
+                                                                            .get_struct(&base_type)
+                                                                    })
+                                                                    .is_some_and(|struct_def| {
+                                                                        struct_def.fields.iter().any(
+                                                                            |field| {
+                                                                                call_env
+                                                                                    .get(&struct_field_key(
+                                                                                        &param.name,
+                                                                                        &field.name,
+                                                                                    ))
+                                                                                    .is_some_and(
+                                                                                        |field_value| {
+                                                                                            references_call_result(
+                                                                                                field_value,
+                                                                                                &call_result_handles,
+                                                                                            )
+                                                                                        },
+                                                                                    )
+                                                                            },
                                                                         )
-                                                                    ),
-                                                                    *name,
-                                                                )
-                                                            });
-                                                            let solver_name = matching_names
-                                                                .first()
-                                                                .map(|name| (*name).to_string());
-                                                            if solver_name.as_deref().is_some_and(
-                                                                |name| name != param.name,
-                                                            ) {
-                                                                raised_value.solver_name =
-                                                                    solver_name;
+                                                                    });
+                                                            if references_abstract_result {
+                                                                let raw_rendering = model
+                                                                    .eval(arg_val, true)
+                                                                    .unwrap_or_else(|| {
+                                                                        arg_val.clone()
+                                                                    })
+                                                                    .to_string();
+                                                                mark_abstract_call_result_struct_unraisable(
+                                                                    &mut raised_value,
+                                                                    raw_rendering,
+                                                                );
                                                             }
-                                                            raised.values.push(raised_value);
                                                         }
+                                                        let argument_rendering =
+                                                            arg_val.to_string();
+                                                        let mut matching_names = env
+                                                            .iter()
+                                                            .filter_map(|(name, value)| {
+                                                                (value.to_string()
+                                                                    == argument_rendering)
+                                                                    .then_some(name.as_str())
+                                                            })
+                                                            .collect::<Vec<_>>();
+                                                        matching_names.sort_by_key(|name| {
+                                                            (
+                                                                !matches!(
+                                                                    classify_solver_symbol(
+                                                                        name,
+                                                                        &source_bindings,
+                                                                        vc.module_env,
+                                                                    ),
+                                                                    SolverSymbolClassification::Source(
+                                                                        _
+                                                                    )
+                                                                ),
+                                                                *name,
+                                                            )
+                                                        });
+                                                        let solver_name = matching_names
+                                                            .first()
+                                                            .map(|name| (*name).to_string());
+                                                        if solver_name
+                                                            .as_deref()
+                                                            .is_some_and(|name| name != param.name)
+                                                        {
+                                                            raised_value.solver_name = solver_name;
+                                                        }
+                                                        raised.values.push(raised_value);
                                                     }
                                                 }
                                                 raised.omitted_solver_symbols.extend(
