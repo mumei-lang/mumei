@@ -76,8 +76,14 @@ impl SarifCollector {
     pub(crate) fn remove_lean_verified(&mut self, start: usize, atom_names: &[String]) {
         let mut index = 0;
         self.results.retain(|result| {
+            let properties = &result["properties"];
+            let obligation = properties["obligation"].as_str();
+            let is_verified_obligation =
+                matches!(obligation, Some("atom" | "ensures" | "requires"));
             let keep = index < start
-                || !result["properties"]["atom"]
+                || !is_verified_obligation
+                || result["ruleId"] == "assumed_clause"
+                || !properties["atom"]
                     .as_str()
                     .is_some_and(|name| atom_names.iter().any(|verified| verified == name));
             index += 1;
@@ -544,7 +550,12 @@ fn nonempty(value: Option<&str>) -> Option<&str> {
 
 fn sarif_uri(file: &str) -> String {
     let normalized = file.replace('\\', "/");
-    let uri = if Path::new(file).is_absolute() || normalized.starts_with('/') {
+    let bytes = normalized.as_bytes();
+    let windows_drive_path =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/';
+    let uri = if windows_drive_path {
+        format!("file:///{normalized}")
+    } else if Path::new(file).is_absolute() || normalized.starts_with('/') {
         format!("file://{normalized}")
     } else {
         normalized
@@ -830,6 +841,8 @@ body: { x + 1 };
     fn absolute_paths_become_file_uris_and_columns_are_one_based() {
         assert_eq!(sarif_uri("/tmp/a file.mm"), "file:///tmp/a%20file.mm");
         assert_eq!(sarif_uri("src/a file.mm"), "src/a%20file.mm");
+        assert_eq!(sarif_uri("/tmp/a.mm"), "file:///tmp/a.mm");
+        assert_eq!(sarif_uri(r"C:\x\a.mm"), "file:///C:/x/a.mm");
         let atom = source_atom();
         let report = json!({
             "atom":"f",
@@ -847,6 +860,38 @@ body: { x + 1 };
             results[0]["locations"][0]["physicalLocation"]["region"]["endColumn"],
             7
         );
+    }
+
+    #[test]
+    fn lean_discharge_preserves_assumptions_and_cover_results() {
+        let mut collector = SarifCollector::new();
+        collector.results = vec![
+            json!({
+                "ruleId":"failed",
+                "properties":{"atom":"f","obligation":"atom"}
+            }),
+            json!({
+                "ruleId":"unknown",
+                "properties":{"atom":"f","obligation":"ensures"}
+            }),
+            json!({
+                "ruleId":"assumed_clause",
+                "properties":{"atom":"f","obligation":"ensures"}
+            }),
+            json!({
+                "ruleId":"covered",
+                "kind":"pass",
+                "properties":{"atom":"f","obligation":"cover"}
+            }),
+        ];
+        let before_start = collector.results[0].clone();
+
+        collector.remove_lean_verified(1, &["f".to_string()]);
+
+        assert_eq!(collector.results.len(), 3);
+        assert_eq!(collector.results[0], before_start);
+        assert_eq!(collector.results[1]["ruleId"], "assumed_clause");
+        assert_eq!(collector.results[2]["ruleId"], "covered");
     }
 
     #[test]

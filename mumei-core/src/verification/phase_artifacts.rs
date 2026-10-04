@@ -96,18 +96,26 @@ pub(crate) fn finish_atom<T, E: std::fmt::Display>(result: &Result<T, E>) {
             } else if atom
                 .phases
                 .last()
-                .is_some_and(|phase| phase.result == "passed")
-                && atom.completed_contracts < PHASE_CONTRACTS.len()
+                .is_none_or(|phase| phase.result == "passed")
             {
-                let phase = PHASE_CONTRACTS[atom.completed_contracts].name;
-                if !atom.phases.iter().any(|record| record.phase == phase) {
-                    atom.phases.push(PhaseTrace {
-                        phase: phase.to_string(),
-                        in_phase_contract: Some(true),
-                        result: "aborted".to_string(),
-                        error: Some(message),
-                        queries: Vec::new(),
-                    });
+                let next_phase_index = if atom.phases.is_empty() {
+                    PHASE_CONTRACTS
+                        .iter()
+                        .position(|phase| phase.name == "Phase 0a: spec validation")
+                        .unwrap_or(atom.completed_contracts)
+                } else {
+                    atom.completed_contracts
+                };
+                if let Some(phase) = PHASE_CONTRACTS.get(next_phase_index) {
+                    if !atom.phases.iter().any(|record| record.phase == phase.name) {
+                        atom.phases.push(PhaseTrace {
+                            phase: phase.name.to_string(),
+                            in_phase_contract: Some(true),
+                            result: "aborted".to_string(),
+                            error: Some(message),
+                            queries: Vec::new(),
+                        });
+                    }
                 }
             }
         }
@@ -214,27 +222,16 @@ fn prepare_query(
     let mut sink = lock_sink();
     let state = sink.as_mut()?;
     let atom = state.stack.last_mut()?;
-    atom.query_count += 1;
-    let index = atom.query_count;
-    let phase = atom
-        .phases
-        .iter()
-        .rev()
-        .find(|record| record.in_phase_contract == Some(false) && record.result == "in_progress")
-        .map(|record| record.phase.clone())
-        .or_else(|| {
-            PHASE_CONTRACTS
-                .get(atom.completed_contracts)
-                .map(|phase| phase.name.to_string())
-        });
-    let phase_name = phase.as_deref()?;
-    let phase_record = if let Some(record) = atom
+    let phase_name = PHASE_CONTRACTS
+        .get(atom.completed_contracts)
+        .or_else(|| PHASE_CONTRACTS.last())?
+        .name;
+    let index = atom.query_count.checked_add(1)?;
+    if !atom
         .phases
         .iter_mut()
-        .find(|record| record.phase == phase_name)
+        .any(|record| record.phase == phase_name)
     {
-        record
-    } else {
         let known = phase_contract(phase_name).is_some();
         atom.phases.push(PhaseTrace {
             phase: phase_name.to_string(),
@@ -243,8 +240,7 @@ fn prepare_query(
             error: None,
             queries: Vec::new(),
         });
-        atom.phases.last_mut().expect("just added phase")
-    };
+    }
     let slug = phase_slug(phase_name);
     let file_name = format!("{index:04}-{slug}.smt2");
     let file_path = atom.directory.join(&file_name);
@@ -262,15 +258,15 @@ fn prepare_query(
         "; atom: {}\n; phase: {}\n; origin: {}:{}\n{}\n{}\n",
         atom.atom, phase_name, source, line, solver, command
     );
-    let _ = fs::create_dir_all(&atom.directory);
-    let _ = fs::write(&file_path, query_text);
+    fs::create_dir_all(&atom.directory).ok()?;
+    fs::write(&file_path, query_text).ok()?;
+    atom.query_count = index;
     let pending = PendingQuery {
         file: Some(file_path),
         phase: Some(phase_name.to_string()),
         index,
         origin: format!("{source}:{line}"),
     };
-    let _ = phase_record;
     Some(pending)
 }
 
@@ -394,8 +390,16 @@ fn lock_sink() -> std::sync::MutexGuard<'static, Option<State>> {
 }
 
 #[cfg(test)]
+fn disable() {
+    *lock_sink() = None;
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{phase_slug, sanitize};
+    use super::{begin_atom, complete_phase, disable, enable, finish_atom, phase_slug, sanitize};
+    use serde_json::Value;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn artifact_path_components_are_sanitized() {
@@ -405,5 +409,59 @@ mod tests {
             phase_slug("Phase 5: ensures verification"),
             "phase-5-ensures-verification"
         );
+    }
+
+    #[test]
+    fn errors_without_an_active_phase_abort_the_inferred_phase() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mumei-phase-artifacts-state-{}-{unique}",
+            std::process::id()
+        ));
+        enable(directory.clone()).unwrap();
+
+        begin_atom("source.mm", "early_error");
+        let early_error: Result<(), &str> = Err("early failure");
+        finish_atom(&early_error);
+        let early: Value = serde_json::from_slice(
+            &fs::read(
+                directory
+                    .join("source.mm")
+                    .join("early_error")
+                    .join("phases.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(early["phases"][0]["phase"], "Phase 0a: spec validation");
+        assert_eq!(early["phases"][0]["result"], "aborted");
+
+        begin_atom("source.mm", "after_body");
+        complete_phase("Phase 4: body evaluation");
+        let body_error: Result<(), &str> = Err("ensures failed");
+        finish_atom(&body_error);
+        let after_body: Value = serde_json::from_slice(
+            &fs::read(
+                directory
+                    .join("source.mm")
+                    .join("after_body")
+                    .join("phases.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(after_body["phases"][0]["phase"], "Phase 4: body evaluation");
+        assert_eq!(after_body["phases"][0]["result"], "passed");
+        assert_eq!(
+            after_body["phases"][1]["phase"],
+            "Phase 5: ensures verification"
+        );
+        assert_eq!(after_body["phases"][1]["result"], "aborted");
+
+        disable();
+        fs::remove_dir_all(directory).unwrap();
     }
 }
