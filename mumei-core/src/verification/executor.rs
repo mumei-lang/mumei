@@ -924,6 +924,25 @@ fn verify_inner_impl(
         }
     }
     let move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
+    // MIR lowering + name checks so far belong to Phase 1h; the concurrency
+    // pass below is timed separately so neither span counts the other.
+    let mut mir_elapsed = phase_start.elapsed();
+    // Phase 1h-2: structured concurrency ownership analysis.
+    // Runs before the MIR borrow/move violation reporting below: MIR lowering
+    // flattens `task_group` children into a sequential chain, so it cannot see
+    // concurrent interleaving or `task_group:any` cancellation. Reporting the
+    // concurrency-specific reason first (concurrent double moves, moves that
+    // race with a sibling's use, unsynchronised shared writes, and parent uses
+    // of values a child consumed or of writes a cancelled child may never
+    // have performed) names the actual race instead of a generic sequential
+    // move error. Name checks stay ahead of it so they still fail closed.
+    let concurrency_phase_start = std::time::Instant::now();
+    verify_task_ownership(atom, &hir_atom.body_stmt, module_env)?;
+    metrics.record_phase(
+        "Phase 1h-2: structured concurrency ownership",
+        concurrency_phase_start.elapsed(),
+    );
+    let mir_analysis_start = std::time::Instant::now();
     if mir_body.check_analysis_budget().is_ok() {
         // Insert drops before move analysis so a local consumed on one branch
         // but merely unused on the other is dead on both paths at the merge —
@@ -1009,20 +1028,8 @@ fn verify_inner_impl(
             }
         }
     }
-    metrics.record_phase("Phase 1h: MIR move analysis", phase_start.elapsed());
-
-    // Phase 1h-2: structured concurrency ownership analysis.
-    // MIR lowering flattens `task_group` children into a sequential chain, so
-    // it cannot see concurrent interleaving or `task_group:any` cancellation.
-    // This AST-level pass rejects concurrent double moves, moves that race with
-    // a sibling's use, unsynchronised shared writes, and parent uses of values
-    // a child consumed or of writes a cancelled child may never have performed.
-    let phase_start = std::time::Instant::now();
-    verify_task_ownership(atom, &hir_atom.body_stmt, module_env)?;
-    metrics.record_phase(
-        "Phase 1h-2: structured concurrency ownership",
-        phase_start.elapsed(),
-    );
+    mir_elapsed += mir_analysis_start.elapsed();
+    metrics.record_phase("Phase 1h: MIR move analysis", mir_elapsed);
 
     // Phase 1i: Vacuity checking via mutation testing
     let phase_start = std::time::Instant::now();
