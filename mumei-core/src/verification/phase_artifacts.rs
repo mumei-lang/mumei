@@ -536,7 +536,9 @@ mod tests {
 
     #[test]
     fn errors_without_an_active_phase_abort_the_inferred_phase() {
-        let _guard = ENABLE_LOCK.lock().unwrap();
+        let _guard = ENABLE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -680,7 +682,9 @@ mod tests {
 
     #[test]
     fn sink_ignores_atoms_and_queries_from_other_threads() {
-        let _guard = ENABLE_LOCK.lock().unwrap();
+        let _guard = ENABLE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
