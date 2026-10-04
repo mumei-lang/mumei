@@ -602,3 +602,141 @@ fn test_effectful_recursion_is_unsupported_hint() {
         "decreases on an unsupported SCC must not change the verdict"
     );
 }
+
+// Fix 1: a callee's eligibility inputs (trust level, effects, async, type
+// params) feed the transitive-dep proof hash, so editing them must not be
+// served by a stale cache entry.
+const CACHE_BASE: &str = r#"
+atom tri(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result >= 0;
+    decreases: n;
+    body: if n == 0 { 0 } else { n + tri(n - 1) };
+
+atom use2(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result == 0;
+    body: tri(n) - tri(n);
+"#;
+
+const CACHE_TRUSTED: &str = r#"
+trusted atom tri(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result >= 0;
+    decreases: n;
+    body: if n == 0 { 0 } else { n + tri(n - 1) };
+
+atom use2(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result == 0;
+    body: tri(n) - tri(n);
+"#;
+
+const CACHE_EFFECTS: &str = r#"
+effect Log;
+atom tri(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result >= 0;
+    decreases: n;
+    effects: [Log];
+    body: if n == 0 { 0 } else { n + tri(n - 1) };
+
+atom use2(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result == 0;
+    body: tri(n) - tri(n);
+"#;
+
+// Runs `verify` twice in the same directory under the same file name, so the
+// second run exercises the on-disk cache written by the first.
+fn verify_twice(
+    name: &'static str,
+    first: &str,
+    second: &str,
+    target: &'static str,
+) -> (CaseResult, CaseResult) {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "mumei_recursive_decreases_{name}_{}_{}",
+        std::process::id(),
+        nonce
+    ));
+    std::fs::create_dir_all(&dir).expect("create fixture directory");
+    let fixture = dir.join(format!("{name}.mm"));
+    let run = |source: &str| {
+        std::fs::write(&fixture, source).expect("write fixture");
+        let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .arg("verify")
+            .arg(&fixture)
+            .arg("--json")
+            .arg("--report-dir")
+            .arg(&dir)
+            .current_dir(&dir)
+            .output()
+            .expect("run verify");
+        let payload = parse_json_output(&output);
+        let report = std::fs::read_to_string(dir.join("report.json"))
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok());
+        CaseResult {
+            name,
+            target,
+            output,
+            payload,
+            report,
+        }
+    };
+    let first_result = run(first);
+    let second_result = run(second);
+    let _ = std::fs::remove_dir_all(dir);
+    (first_result, second_result)
+}
+
+#[test]
+fn test_stale_cache_on_callee_trust_level_change() {
+    let (first, second) = verify_twice("cache_trust", CACHE_BASE, CACHE_TRUSTED, "use2");
+    assert_case(first, "verified");
+    let fresh = verify("cache_trust_fresh", CACHE_TRUSTED, "use2");
+    assert!(
+        second.did_not_crash(),
+        "cached run crashed; stderr:\n{}",
+        String::from_utf8_lossy(&second.output.stderr)
+    );
+    assert_ne!(
+        second.verdict().as_deref(),
+        Some("verified"),
+        "use2 must not verify from a stale cache entry"
+    );
+    assert_eq!(
+        second.output.status.code(),
+        fresh.output.status.code(),
+        "cached run must match a fresh run of the new source; fresh stdout:\n{}",
+        String::from_utf8_lossy(&fresh.output.stdout)
+    );
+}
+
+#[test]
+fn test_stale_cache_on_callee_effects_change() {
+    let (first, second) = verify_twice("cache_eff", CACHE_BASE, CACHE_EFFECTS, "use2");
+    assert_case(first, "verified");
+    let fresh = verify("cache_eff_fresh", CACHE_EFFECTS, "use2");
+    assert!(
+        second.did_not_crash(),
+        "cached run crashed; stderr:\n{}",
+        String::from_utf8_lossy(&second.output.stderr)
+    );
+    assert_ne!(
+        second.verdict().as_deref(),
+        Some("verified"),
+        "use2 must not verify from a stale cache entry"
+    );
+    assert_eq!(
+        second.output.status.code(),
+        fresh.output.status.code(),
+        "cached run must match a fresh run of the new source; fresh stdout:\n{}",
+        String::from_utf8_lossy(&fresh.output.stdout)
+    );
+}

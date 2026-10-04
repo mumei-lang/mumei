@@ -457,6 +457,35 @@ pub fn compute_proof_hash_with_flags(
                 hasher.update(b"|decreases:");
                 hasher.update(dec.as_bytes());
             }
+            for e in &callee_atom.effects {
+                hasher.update(b",effect:");
+                hasher.update(e.name.as_bytes());
+                if e.negated {
+                    hasher.update(b",negated");
+                }
+                for p in &e.params {
+                    hasher.update(b",param:");
+                    hasher.update(p.value.as_bytes());
+                }
+            }
+            if callee_atom.trust_level != crate::parser::TrustLevel::Verified {
+                hasher.update(b",trust:");
+                hasher.update(
+                    match callee_atom.trust_level {
+                        crate::parser::TrustLevel::Trusted => "trusted",
+                        crate::parser::TrustLevel::Unverified => "unverified",
+                        crate::parser::TrustLevel::Verified => "verified",
+                    }
+                    .as_bytes(),
+                );
+            }
+            if callee_atom.is_async {
+                hasher.update(b",async");
+            }
+            if !callee_atom.type_params.is_empty() {
+                hasher.update(b",type_params:");
+                hasher.update(callee_atom.type_params.join(",").as_bytes());
+            }
             if !callee_atom.forall_constraints.is_empty() {
                 for q in &callee_atom.forall_constraints {
                     let quantifier_type = match q.q_type {
