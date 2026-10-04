@@ -512,6 +512,7 @@ mod tests {
             invariant: None,
             effects: vec![],
             return_type,
+            decreases: None,
             span: span.clone(),
             effect_pre: std::collections::HashMap::new(),
             effect_post: std::collections::HashMap::new(),

@@ -231,6 +231,7 @@ mod tests {
             invariant: None,
             effects: vec![],
             return_type: return_type.map(|s| s.to_string()),
+            decreases: None,
             span: Span::default(),
             effect_pre: std::collections::HashMap::new(),
             effect_post: std::collections::HashMap::new(),

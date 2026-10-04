@@ -488,6 +488,8 @@ pub struct Atom {
     pub effects: Vec<Effect>,
     /// Plan 18: Explicit return type annotation (e.g., `-> Str`). Defaults to None (i64).
     pub return_type: Option<String>,
+    /// Termination measure for recursive contracts (`decreases: <expr>;`).
+    pub decreases: Option<String>,
     pub span: Span,
     /// Modular Verification: required effect pre-states
     /// e.g., { "File" => "Open" } means File must be in Open state before this atom

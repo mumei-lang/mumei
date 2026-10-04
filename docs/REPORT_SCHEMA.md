@@ -407,6 +407,14 @@ without parsing stderr. `warnings` stays advisory-only.
 | `tags` | `array` | Status tag plus `z3_<result>` (e.g. `z3_sat`, `z3_unknown`) |
 | `escalation_reason` | `string` | Present only for entries with `code: "escalation_candidate"` |
 
+Advisory codes produced by the recursive-contract analysis are
+`recursive_contract_needs_decreases` (atom on a recursive SCC where a member
+lacks `decreases`) and `recursive_contract_unsupported` (the SCC uses a
+feature outside the congruent-contract fragment: effects, `ref
+mut`/`consume`, `async`, type params, `trusted`, assume-mode ensures, or
+non-scalar `Int`/`Bool` signatures). Both carry `severity: "hint"` and never
+change the verdict.
+
 Every entry is an object with this field set; legacy string diagnostics coming
 from `report.json` are normalised to `code: "note"` / `severity: "warning"` with
 the original text as `message`. Entries are de-duplicated by (`atom`, `code`,

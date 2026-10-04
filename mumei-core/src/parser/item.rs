@@ -1826,6 +1826,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
     let mut spec_metadata: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut invariant: Option<String> = None;
+    let mut decreases: Option<String> = None;
     let mut effects: Vec<Effect> = Vec::new();
     let mut contracts: Vec<(String, Option<String>, Option<String>)> = Vec::new();
     let mut effect_pre: std::collections::HashMap<String, String> =
@@ -1954,6 +1955,16 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                 invariant = Some(collect_until_semicolon(ctx));
                 ctx.expect(Token::Semicolon);
             }
+            Token::Decreases => {
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                let clause = collect_until_semicolon(ctx);
+                ctx.expect(Token::Semicolon);
+                if decreases.is_some() {
+                    ctx.syntax_failure(format!("duplicate `decreases` clause in atom '{name}'"));
+                }
+                decreases = Some(clause);
+            }
             Token::Effects => {
                 ctx.advance();
                 ctx.expect(Token::Colon);
@@ -2078,6 +2089,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         invariant,
         effects,
         return_type,
+        decreases,
         span: span_from_token(start_tok),
         effect_pre,
         effect_post,

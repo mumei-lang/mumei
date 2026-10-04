@@ -124,14 +124,14 @@ pub const PHASE_CONTRACTS: &[PhaseContract] = &[
         counterexample_fidelity: None,
     },
     PhaseContract {
-        name: "Phase 1h: MIR move analysis",
+        name: "Phase 1h-2: structured concurrency ownership",
         requires: NO_FACTS,
         establishes: NO_FACTS,
         invalidates: NO_FACTS,
         counterexample_fidelity: None,
     },
     PhaseContract {
-        name: "Phase 1h-2: structured concurrency ownership",
+        name: "Phase 1h: MIR move analysis",
         requires: NO_FACTS,
         establishes: NO_FACTS,
         invalidates: NO_FACTS,
