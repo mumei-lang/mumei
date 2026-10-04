@@ -164,8 +164,9 @@ inconsistent fact `forall x. x == 0`. Without termination, the exported fact
 can be false for some inputs, and a false quantified fact makes every importing
 atom vacuously provable.
 
-Rejection never changes the exporting atom's own verdict. A rejected clause is
-still proved, assumed, or hidden exactly as today; it just is not exported.
+Apart from E1, which is an input error, rejection never changes the exporting
+atom's own verdict. A rejected clause is still proved or assumed exactly as
+today; it just is not exported.
 
 ## 3. The exported fact and when it is used
 
@@ -181,7 +182,8 @@ forall p1: S1, ..., pn: Sn.
 ```
 
 - `Si` is the solver sort of `Ti`, and `lemma_fn_g : S1 x ... x Sn -> S_R` is
-  the result function.
+  the result function. `lemma_fn_g` is this document's shorthand; the actual
+  solver symbol is given in the last bullet of this list.
 - The antecedent is the conjunction of the `ContractView::BodyRequires` clauses
   (plain `requires` and `requires assume`). That is the context in which the
   clause was proved against the body, so the implication is sound. Using
@@ -267,9 +269,8 @@ these hold:
   read `select(a, i)`. Arithmetic (`+`, `-`, `*`, `/`, `%`), comparisons,
   boolean connectives, equality, `if` / ITE, casts, and bit-vector operators are
   never trigger heads.
-- **T2. Arguments.** Each argument is a bound variable, a literal, a parameter
-  of the enclosing context that is not bound, or itself an admissible trigger
-  term. An argument such as `x + 1` disqualifies `t`. This is the rule that
+- **T2. Arguments.** Each argument is a bound variable, a literal, or itself
+  an admissible trigger term. An argument such as `x + 1` disqualifies `t`. This is the rule that
   rejects arithmetic-only triggers and the most common source of matching
   loops.
 - **T3. No ITE anywhere in `t`.** This is the existing `is_admissible_trigger`
@@ -445,8 +446,9 @@ switch back to MBQI (see [§13](#13-open-questions)).
   importer's semantics flags differ from the exporter's, see
   `callee_semantics_match_caller`) is not asserted, and the call sites that
   needed it are lowered as R1 ground calls where possible. A call under a binder
-  that can then not be lowered is reported as `unknown` with
-  `lemma_export_unlowerable`; it is never treated as true.
+  that can then not be lowered makes the atom `unknown`, with a
+  `lemma_import_unlowerable` diagnostic ([§9.2](#92-rejection-reasons)); it is
+  never treated as true.
 
 ### 5.3 Determinism
 
@@ -479,8 +481,12 @@ which is the same pattern used for clause modes and covers:
   and certificate do, so its hash must change when an annotation changes.
 - **Importing atom.** If the transitive callee set contains an exporting clause,
   append `lemma_import_v1:` followed by the canonical list of
-  `(callee, clause index, trust, triggers)` for every exported fact that could be
-  asserted in this atom, plus the constant `LEMMA_EXPORT_MAX_INSTANCES`. The
+  `(callee, clause index, trust, triggers, status)` for every annotated clause
+  in the transitive callee set, plus the constant `LEMMA_EXPORT_MAX_INSTANCES`.
+  `status` is `exported` or the rejection reason. It is included because E2
+  makes the export set depend on the exporter's verdict: if an exporter's clause
+  goes from `proved` to `unknown`, its importers must not reuse a cached result
+  that relied on it. The
   callees' contract text is already in the transitive section, so a change to an
   exported clause body already changes the importer's hash.
 
@@ -549,7 +555,7 @@ without that dependency being visible and audited.
   as a hypothesis does not escalate the atom; the status stays as it was
   (`unknown`), never `lean_verified`.
 - **Discharging the hypotheses.** A `lean_verified` importer certificate lists
-  its hypotheses in `lemma_imports` ([§9.3](#93-certificate-fields)).
+  its hypotheses in `lemma_imports` ([§9.3](#93-report-and-certificate-fields)).
   `verify-cert` accepts it only if every listed fact refers to an exporter entry
   in the same certificate set with a matching clause hash and an accepted status:
   `proven` or `lean_verified` for `trust: "proved"`. A fact with
@@ -567,8 +573,9 @@ without that dependency being visible and audited.
 
 ### 9.1 Rules
 
-1. A rejected export never weakens the exporting atom's verdict and never
-   strengthens an importer's verdict.
+1. A rejected export never changes the exporting atom's verdict (except for
+   the `lemma_export_hidden_clause` input error) and never strengthens an
+   importer's verdict.
 2. `unknown` from any phase stays `unknown`. No exported fact is ever used to
    turn `unknown` into `proved`, `covered`, or unreachable.
 3. A clause that cannot be lowered for export is not exported; a call site that
@@ -604,14 +611,20 @@ The diagnostic `code` is `lemma_export_rejected` and the reason is in
 | `trigger_incomplete` | A user trigger group does not cover every parameter. |
 | `matching_loop` | The fact lies on, or depends on, a cycle (§4.4). |
 
-Example message: `ensures "exact" of 'tri' is not exported: matching loop (tri -> tri via tri(n - 1))`.
+Example message: `ensures #1 of 'tri' is not exported: matching loop (tri -> tri via tri(n - 1))`.
+
+One more code is reported on the importer side, not the exporter: a warning
+`lemma_import_unlowerable` when an exported fact cannot be lowered in this
+importer (for example a semantics mismatch, §5.2). The affected atom's verdict
+is `unknown` unless it fails for another reason first.
 
 ### 9.3 Report and certificate fields
 
 All proposed fields are omitted when empty, so reports of atoms that do not use
 the feature are unchanged.
 
-`report.json` of an **exporting** atom:
+`report.json` of an **exporting** atom (the two entries come from `abs_val`
+and `tri`; they are shown in one list for brevity):
 
 ```json
 "lemma_exports": [
@@ -716,7 +729,7 @@ The implementation PR, or the PR right after it, adds a measurement script under
 ## 11. Worked examples
 
 Each example was run with the current `mumei verify --json` on `develop`
-(debug build), each in a fresh directory so no `.mm` cache could restore an
+(debug build), each in a fresh directory so no `.mumei_cache` could restore an
 older result. "Today" is what the current verifier does; "With export" is what
 this specification requires once implemented. Examples that need the
 annotation are hypothetical and are marked so.
