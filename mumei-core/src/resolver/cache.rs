@@ -16,7 +16,10 @@ use std::path::Path;
 /// Version 7 enables recursive contracts: `decreases` termination obligations
 /// and congruent recursive calls.
 /// Version 8 accepts lexicographic `decreases: (m1, ..., mk);` measures.
-pub const VERIFIER_POLICY_VERSION: u32 = 8;
+/// Version 9 rejects calls whose argument count differs from the callee's
+/// parameter count, so earlier "verified" results for such calls must be
+/// re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {

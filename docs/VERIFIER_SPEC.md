@@ -430,7 +430,8 @@ Rules:
 - **D6 (cache).** The `decreases` text is part of the atom hash and the proof
   hash, and a callee's `decreases` is part of every caller's proof hash.
   `mumei-core/src/resolver/cache.rs`. These rules are enabled by
-  `VERIFIER_POLICY_VERSION` 7, and tuple measures by version 8.
+  `VERIFIER_POLICY_VERSION` 7, tuple measures by version 8, and call-arity
+  checking by version 9.
 
 ## Keeping this document in sync
 
