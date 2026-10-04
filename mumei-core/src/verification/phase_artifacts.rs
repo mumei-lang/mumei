@@ -98,15 +98,7 @@ pub(crate) fn finish_atom<T, E: std::fmt::Display>(result: &Result<T, E>) {
                 .last()
                 .is_none_or(|phase| phase.result == "passed")
             {
-                let next_phase_index = if atom.phases.is_empty() {
-                    PHASE_CONTRACTS
-                        .iter()
-                        .position(|phase| phase.name == "Phase 0a: spec validation")
-                        .unwrap_or(atom.completed_contracts)
-                } else {
-                    atom.completed_contracts
-                };
-                if let Some(phase) = PHASE_CONTRACTS.get(next_phase_index) {
+                if let Some(phase) = PHASE_CONTRACTS.get(atom.completed_contracts) {
                     if !atom.phases.iter().any(|record| record.phase == phase.name) {
                         atom.phases.push(PhaseTrace {
                             phase: phase.name.to_string(),
@@ -436,7 +428,10 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(early["phases"][0]["phase"], "Phase 0a: spec validation");
+        assert_eq!(
+            early["phases"][0]["phase"],
+            "Phase 0-units: unit consistency"
+        );
         assert_eq!(early["phases"][0]["result"], "aborted");
 
         begin_atom("source.mm", "after_body");
