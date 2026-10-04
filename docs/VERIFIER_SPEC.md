@@ -1,8 +1,8 @@
 ---
 layout: default
 title: "Verifier Specification — Mumei"
-description: "Declarative rules for what mumei verify decides: phase contracts, ensures outcomes, clause trust modes, cover clauses, trust boundaries, counterexample fidelity, and exit codes."
-keywords: "mumei verifier specification, phase contracts, ensures outcomes, trust boundary, cover, counterexample fidelity"
+description: "Declarative rules for what mumei verify decides: phase contracts, ensures outcomes, clause trust modes, cover clauses, trust boundaries, counterexample fidelity, exit codes, and recursive contracts."
+keywords: "mumei verifier specification, phase contracts, ensures outcomes, trust boundary, cover, counterexample fidelity, recursive contracts, decreases"
 ---
 
 # Verifier Specification
@@ -344,9 +344,11 @@ Rules (all in `src/commands/verify.rs`):
   `mumei-core/src/verification/types.rs::z3_result_from_error_message`.
 - **X3 (outcome to code).** Under rule X1, for an atom that is not escalated to
   Lean: `always_false`, `fails_on_some_inputs`, `fails`, a contradiction
-  (`vacuous`), and an unreachable cover reject (`1`); a refutation or final
-  check that returns Unknown is inconclusive (`3`); a `skipped` conjunct makes
-  the atom unverifiable (`3`). `proved` and `assumed` do not lower the result.
+  (`vacuous`), and an unreachable cover reject (`1`); a
+  `termination_measure_violation` (rule D4) rejects (`1`); a refutation or
+  final check that returns Unknown is inconclusive (`3`); a `skipped`
+  conjunct makes the atom unverifiable (`3`). `proved` and `assumed` do not
+  lower the result.
 - **X4 (spurious candidates).** The solver result of a spurious counterexample
   is `spurious_candidate`, which is in the inconclusive set (rule X2), so such
   an atom exits `3`, matching the conjunct's `unknown` outcome (rule E4). A
@@ -355,6 +357,62 @@ Rules (all in `src/commands/verify.rs`):
   candidate.
 - **X5 (directories).** A directory run exits with the most severe per-file
   outcome, ordered `5 > 4 > 1 > 3 > 0`. `VerifyOutcome::combine`.
+
+## 8. Recursive contracts
+
+An atom is *recursive* when it lies on a cycle of the atom call graph. The
+graph has an edge for every call in the body and in the contracts (`requires`
+and `ensures` in every clause mode, labelled or not), for direct calls and for
+static `call(atom_ref(f), ..)` calls. A self-loop is a cycle.
+`verification/support/recursion.rs::recursive_scc` computes the strongly
+connected component (SCC) of an atom.
+
+Rules:
+
+- **D1 (eligibility).** A recursive SCC is *eligible* exactly when every member
+  declares an atom-level `decreases: M;` whose measure is call-free and mentions
+  only that member's own parameters, has no effects, no `ref mut` or `consume`
+  parameters, is not `async`, has no type parameters, is at the default
+  verified trust level, has no `ensures assume` clause, and has only scalar
+  (`Int`- or `Bool`-sorted) parameters and result.
+  `recursion.rs::member_unsupported_reason`.
+- **D2 (congruent calls).** While the main verification of an atom runs
+  (`executor.rs::verify_inner`), a call to a member `g` of an eligible SCC, from
+  any caller, lowers to the application `rec_fn#g(args)` of one uninterpreted
+  function per atom, instead of a fresh `call_<name>_<n>` constant. Calls with
+  equal arguments therefore have equal results. Auxiliary contexts (spec
+  validation, vacuity, property-based checks) keep fresh constants.
+  `translator/context.rs::VCtx::callee_congruent`, `VCtx::rec_fn`.
+- **D3 (assumed ensures).** At a congruent call the callee's caller-visible
+  `ensures` is assumed as the implication
+  `CallerRequires(args) ⇒ CallerEnsures(args, rec_fn#g(args))`. For a call
+  between two members of the same SCC, the antecedent also contains the path
+  conditions at the call. A call in a body still checks `CallerRequires(args)`
+  as an obligation, as for any other call. A recursive call reached while the
+  callee's contract is already being instantiated uses the same application
+  and does not instantiate the contract again.
+  `translator/expr.rs::congruent_ensures_antecedent`.
+- **D4 (termination obligation).** At every call from member `A` to member `B`
+  of the same eligible SCC, in `A`'s body and in `A`'s `requires` and
+  `ensures`, the verifier checks `0 <= M_A ∧ M_B(args) < M_A` under `A`'s
+  body-view requires and the path conditions at the call, including the
+  short-circuit guards of `&&`, `||`, and `if` inside a contract. Bit-vector
+  measures are compared signed. If the check is not Unsat, or the two measures
+  lower to incompatible sorts, the atom is rejected with `failure_type`
+  `termination_measure_violation` (exit `1`) and a counterexample over `A`'s
+  parameters. Checking contract-level calls is what rejects a specification
+  such as `ensures: result == f(x) + 1;`, which would otherwise assume
+  `f(x) == f(x) + 1`. `translator/expr.rs::termination_obligation_at_call`.
+- **D5 (ineligible SCCs).** Calls into an ineligible recursive SCC keep fresh
+  constants, and a call reached while the callee's contract is already being
+  instantiated gets an unconstrained result and skips the callee's contract. When
+  the atom's own contract calls into its SCC, the verifier adds an advisory
+  `recursive_contract_needs_decreases` (some member has no `decreases`) or
+  `recursive_contract_unsupported` (any other D1 failure) diagnostic. Neither
+  changes the verdict. `recursion.rs::recursive_contract_hint_diagnostic`.
+- **D6 (cache).** The `decreases` text is part of the atom hash and the proof
+  hash, and a callee's `decreases` is part of every caller's proof hash.
+  `mumei-core/src/resolver/cache.rs`.
 
 ## Keeping this document in sync
 

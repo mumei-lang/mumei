@@ -72,6 +72,9 @@ source and with the current `mumei verify`.
   `call_<name>_<n>` from a process-wide counter, binds the parameters to the
   actual arguments, lowers the caller-visible `ensures`, and asserts them.
   Two calls with the same arguments get two unrelated result constants.
+  Calls into an eligible recursive SCC are the exception: they lower to one
+  uninterpreted function application `rec_fn#<name>(args)` per callee
+  ([`VERIFIER_SPEC.md`](VERIFIER_SPEC.md#8-recursive-contracts), rule D2).
 - **Quantifiers.** `forall(i, lo, hi, body)` lowers to a solver quantifier over
   an integer bound variable. Array reads `arr[e]` whose index mentions the bound
   variable become E-matching patterns. Terms containing `if`/ITE are rejected as
@@ -97,6 +100,9 @@ Three current behaviours motivate this design. They are reproduced in
 2. Two calls with identical arguments are not known to return the same value,
    because each gets its own fresh constant
    ([Example D](#example-d-congruence-between-two-equal-calls)).
+   Calls into an eligible recursive SCC are already congruent (rule D2 of
+   [`VERIFIER_SPEC.md`](VERIFIER_SPEC.md#8-recursive-contracts)); every other call
+   is not.
 3. A call under a binder in `requires` is currently over-approximated in the
    unsafe direction: the verifier proves `arr[0] == arr[1]` from a `requires`
    that only says `forall(i, 0, n, ident(arr[i]) == arr[i])`
@@ -154,7 +160,7 @@ rejected with the listed reason ([§9.2](#92-rejection-reasons)):
 | E1 | The clause mode is plain or `assume`. | `hidden_clause` (input error) |
 | E2 | The exporting atom's own verification succeeded in this run or came from a valid cache entry, and the clause's `ensures_outcomes` entry is `proved` (plain) or `assumed` (`assume`). `vacuous`, `always_false`, `fails_on_some_inputs`, `fails`, `unknown`, and `skipped` all block export. | `clause_not_proved` |
 | E3 | The atom is not `trusted` / `unverified`, is not `extern`, and has no declared effects, no `ref` / `ref mut` / `consume` parameters, and is not `async`. The result must be a function of the parameters alone. | `impure_or_trusted` |
-| E4 | The body is known to terminate: no loops, or every loop has a checked `decreases` measure, and no recursion (direct or mutual). The rule is transitive: every atom the body calls must satisfy E3 and E4 as well, so a postcondition that relies on a callee's partial-correctness `ensures` is never exported. Recursive atoms are not exportable until mumei checks a recursion measure. | `termination_not_established` |
+| E4 | The body is known to terminate: no loops, or every loop has a checked `decreases` measure, and any recursion (direct or mutual) is inside an eligible recursive SCC, whose atom-level `decreases` measures are checked at every recursive call ([`VERIFIER_SPEC.md`](VERIFIER_SPEC.md#8-recursive-contracts), rules D1 and D4). The rule is transitive: every atom the body calls must satisfy E3 and E4 as well, so a postcondition that relies on a callee's partial-correctness `ensures` is never exported. | `termination_not_established` |
 | E5 | Every parameter lowers to a sort the result function can take: `Int`, `Real`, `Bool`, the bit-vector sorts, or a one-dimensional array of those. Array parameters are passed together with their length ([§3.1](#31-form-of-an-exported-fact)). The return type is one of the scalar sorts; array returns, tuple returns, structs, enums, strings, `atom_ref` parameters, and generic parameters are not exportable in the first version. | `unsupported_signature` |
 | E6 | The clause and the antecedent ([§3.1](#31-form-of-an-exported-fact)) lower without the call-site fallbacks (no `ClauseLoweringOutcome` other than `Lowered`). Every call inside them is itself to an exporting atom, so it can be lowered as a result-function application. | `unlowerable` / `unexported_dependency` |
 | E7 | The antecedent contains no quantifier. Quantifiers in the clause itself are allowed only as `forall` with an admissible array `select` pattern, which is what today's lowering already produces. | `quantified_antecedent` / `unsupported_quantifier` |
@@ -407,8 +413,8 @@ Examples:
   trigger itself. No edge, exported.
 - `ensures: n == 0 || result == n + tri(n - 1)` on `tri`: `A_F` contains
   `tri(n - 1)`, which matches the trigger head `tri`. Self-edge, rejected. (It
-  would also fail T2 if written as a user trigger, and E4 because `tri` is
-  recursive.)
+  would also fail T2 if written as a user trigger, and E4 unless `tri` declares
+  a checked `decreases`.)
 - A fact whose clause reads `arr[i + 1]` with a user trigger `arr[i]`:
   `select(arr, i + 1)` is not the trigger term but has the trigger head, so it
   is a self-edge and is rejected.
@@ -622,7 +628,7 @@ The diagnostic `code` is `lemma_export_rejected` and the reason is in
 | `hidden_clause` | Export annotation on `ensures check` (error, code `lemma_export_hidden_clause`). |
 | `clause_not_proved` | The clause outcome is not `proved` / `assumed` (E2). |
 | `impure_or_trusted` | Trusted, unverified, extern, effectful, `ref` / `consume` parameter, or async (E3). |
-| `termination_not_established` | Recursive, or a loop without a checked `decreases` (E4). |
+| `termination_not_established` | Recursive outside an eligible recursive SCC, or a loop without a checked `decreases` (E4). |
 | `unsupported_signature` | A parameter or return sort cannot be a bound variable or result function (E5). |
 | `unlowerable` | The clause or antecedent needs a lowering fallback (E6). |
 | `unexported_dependency` | The clause calls a non-exporting atom (E6). |
@@ -835,12 +841,13 @@ atom tri_step(n: i64)
 Today: `tri_step` fails (exit `1`, "Spurious counterexample detected"), because
 the call in `body` and the call in `ensures` are two unrelated constants.
 
-With export: `tri` is recursive, so E4 rejects export for it
-(`termination_not_established`) and nothing changes. The example still shows
-what R1 buys for a non-recursive exporter: with result-function terms the two
-calls are the same term `lemma_fn_tri(n - 1)`, and a hand-written SMT-LIB
-encoding returns `unsat` without any quantifier instantiation. Whether a
-congruence-only mode should be offered to recursive atoms is an open question.
+With `decreases: n;` added to `tri`, its SCC is eligible and `tri_step`
+verifies without any export: both calls lower to the same term
+`rec_fn#tri(n - 1)` (rule D2 of [`VERIFIER_SPEC.md`](VERIFIER_SPEC.md#8-recursive-contracts)).
+Without `decreases`, `tri_step` fails as described above. For a non-recursive
+exporter, R1 gives the same congruence: the two calls become the same term
+`lemma_fn_tri(n - 1)`, and a hand-written SMT-LIB encoding returns `unsat`
+without any quantifier instantiation.
 
 ### Example E: pre-existing unsoundness for calls under a binder in `requires`
 
@@ -891,6 +898,10 @@ call only returns when `y == 0`. As a quantified fact, `ensures x == 0` would
 become `forall x. x == 0`, which is false and would make every importer that
 mentions `only_zero` anywhere, even in a specification, vacuously provable. E4
 rejects it (`termination_not_established`).
+
+Adding `decreases: x;` to `only_zero` does not make it exportable: the body
+call `only_zero(x)` does not decrease the measure, so the atom is rejected with
+`termination_measure_violation`.
 
 ### Example G: arithmetic-only lemma atom
 
@@ -982,13 +993,17 @@ Each step must keep the byte-identity test green.
    directly or through a callee, get an extra proof-hash marker. Under R2 such calls to
    exporting callees later become result-function applications; calls to
    non-exporting callees stay `unverifiable`.
-2. **Recursion measures.** E4 rejects all recursive exporters. Should mumei add a
-   checked `decreases` for recursive atoms, or a realizability check
-   (`forall p. requires => exists r. ensures`) as an alternative way to make the
-   exported fact consistent?
-3. **Congruence-only mode.** R1's result-function renaming is useful even when a
-   clause is not exportable (Example D). Should a non-exportable atom be able
-   to opt into congruence only?
+2. **Recursion measures. Decided:** mumei checks atom-level `decreases` for
+   recursive SCCs ([#684](https://github.com/mumei-lang/mumei/pull/684);
+   [`VERIFIER_SPEC.md`](VERIFIER_SPEC.md#8-recursive-contracts)). A recursive
+   exporter satisfies E4 when its SCC is eligible. A realizability check is not
+   pursued.
+3. **Congruence-only mode.** Partly answered by
+   [#684](https://github.com/mumei-lang/mumei/pull/684): calls into an eligible
+   recursive SCC are congruent (`rec_fn#<name>`) without export. Open: should a
+   non-recursive, non-exportable atom be able to opt in, and should the export
+   result function of an atom in an eligible SCC be the same symbol as
+   `rec_fn#<name>`, so that exported facts and recursive calls stay congruent?
 4. **MBQI for array importers.** §5 turns MBQI off for any context that contains
    an exported fact, including atoms that rely on MBQI for their own array
    quantifiers today. If §10 shows many `proved` → `unknown` changes, do we want
