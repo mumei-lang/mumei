@@ -86,9 +86,12 @@ parse it line-oriented or verify files individually.
 `<report-dir or .>/report.sarif`. A directory run contains the results from all
 files in one log. Each result refers to an existing failure type, verification
 outcome, or status; its `properties` always includes `atom` and `obligation`
-(`requires`, `ensures`, `cover`, `atom`, or `lean_proof`), with `clause`,
+(`requires`, `ensures`, `cover`, `atom`, `lean_proof`, `trait_law`, or
+`session_protocol`), with `clause`,
 `label`, `outcome`, `failure_type`, `z3_result`, `context_reachability`,
 `counterexample`, `counterexample_fidelity`, and `witness` when available.
+Session-protocol results also include `effect`, `protocol_state`,
+`protocol_path`, `callee_atom`, and `suggested_fix`.
 Covered cover clauses are represented as pass results (`kind: "pass"`,
 `level: "none"`). `ruleIndex` refers to the matching entry in the run's rules.
 
@@ -101,6 +104,8 @@ Covered cover clauses are represented as pass results (`kind: "pass"`,
 | Covered cover result | `covered` | `none` (pass result) |
 | Assumed clause | `assumed_clause` | `note` |
 | Axiom-audit rejection | `axiom_rejected` | `warning` |
+| Trait law violation | `trait_law_violated` (solver result such as `unknown` when inconclusive) | `error` (`warning` when inconclusive) |
+| Session protocol violation | violation kind (`duality_mismatch`, `unreachable_receive`, `deadlock_no_progress`) | `error` |
 
 The SARIF invocation records the combined process exit code (including all
 files in a directory run); `executionSuccessful` is true for exit codes 0, 1,

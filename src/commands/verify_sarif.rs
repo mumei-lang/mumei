@@ -1,5 +1,7 @@
 use super::verify::VerifyOutcome;
+use mumei_core::cross_spec::session_types::SessionProtocolViolation;
 use mumei_core::parser::{Atom, ClauseKind, ClauseTrustMode, Span};
+use mumei_core::verification::FAILURE_TRAIT_LAW_VIOLATED;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::Path;
@@ -64,6 +66,92 @@ impl SarifCollector {
             span,
             properties,
         ));
+    }
+
+    pub(crate) fn push_trait_law_failure(
+        &mut self,
+        label: &str,
+        error_message: &str,
+        z3_result: Option<&str>,
+        report: Option<&Value>,
+        span: &Span,
+    ) {
+        let inconclusive = z3_result
+            .is_some_and(|result| matches!(result, "unknown" | "timeout" | "resource_limit"));
+        let rule_id = if inconclusive {
+            z3_result.expect("inconclusive result")
+        } else {
+            FAILURE_TRAIT_LAW_VIOLATED
+        };
+        let level = if inconclusive { "warning" } else { "error" };
+        let kind = if inconclusive { "review" } else { "fail" };
+        let outcome = if inconclusive {
+            rule_id
+        } else {
+            report
+                .and_then(|report| report["status"].as_str())
+                .unwrap_or("failed")
+        };
+        let mut properties = base_properties(label, "trait_law");
+        properties.insert("failure_type".to_string(), json!(rule_id));
+        properties.insert("outcome".to_string(), json!(outcome));
+        if let Some(z3_result) = z3_result {
+            properties.insert("z3_result".to_string(), json!(z3_result));
+        }
+        if let Some(report) = report {
+            for field in ["counterexample", "counterexample_fidelity"] {
+                if let Some(value) = report.get(field) {
+                    properties.insert(field.to_string(), value.clone());
+                }
+            }
+        }
+        self.results.push(result(
+            rule_id,
+            level,
+            kind,
+            format!(
+                "{} ({})",
+                first_line(error_message),
+                format_impl_label(label)
+            ),
+            Some(span),
+            properties,
+        ));
+    }
+
+    pub(crate) fn push_session_protocol_violation(
+        &mut self,
+        violation: &SessionProtocolViolation,
+        span: Option<&Span>,
+    ) {
+        let mut properties = base_properties(&violation.caller_atom, "session_protocol");
+        properties.insert("effect".to_string(), json!(violation.effect));
+        properties.insert(
+            "protocol_state".to_string(),
+            json!(violation.protocol_state),
+        );
+        properties.insert("protocol_path".to_string(), json!(violation.protocol_path));
+        properties.insert("callee_atom".to_string(), json!(violation.callee_atom));
+        properties.insert("suggested_fix".to_string(), json!(violation.suggested_fix));
+        let finding = match span {
+            Some(span) => result(
+                &violation.kind,
+                "error",
+                "fail",
+                violation.message.clone(),
+                Some(span),
+                properties,
+            ),
+            None => result_at_file(
+                &violation.kind,
+                "error",
+                "fail",
+                violation.message.clone(),
+                &violation.caller_file,
+                properties,
+            ),
+        };
+        self.results.push(finding);
     }
 
     pub(crate) fn push_panic_notification(&mut self, file: &str) {
@@ -462,6 +550,23 @@ fn result(
     value
 }
 
+fn result_at_file(
+    rule_id: &str,
+    level: &str,
+    kind: &str,
+    message: String,
+    file: &str,
+    properties: Map<String, Value>,
+) -> Value {
+    let mut value = result(rule_id, level, kind, message, None, properties);
+    value["locations"] = json!([{
+        "physicalLocation": {
+            "artifactLocation": {"uri": sarif_uri(file)}
+        }
+    }]);
+    value
+}
+
 fn collect_rules(results: &[Value]) -> Vec<Value> {
     let mut rules = Vec::new();
     let mut seen = HashMap::new();
@@ -497,9 +602,21 @@ fn rule_description(rule_id: &str) -> &'static str {
         "covered" => "A witness satisfies the cover clause.",
         "assumed_clause" => "The clause is trusted rather than proved.",
         "axiom_rejected" => "Lean rejected the proof during kernel axiom audit.",
+        "trait_law_violated" => "The trait implementation does not satisfy an algebraic law.",
+        "duality_mismatch" => "The session protocol roles do not have matching transitions.",
+        "unreachable_receive" => "The session protocol contains a receive that cannot be reached.",
+        "deadlock_no_progress" => "The session protocol can deadlock without progress.",
         "failed" => "The atom failed verification.",
         _ => "A verification finding reported by Mumei.",
     }
+}
+
+fn format_impl_label(label: &str) -> String {
+    label
+        .strip_prefix("impl ")
+        .and_then(|rest| rest.split_once(" for "))
+        .map(|(trait_name, target_type)| format!("impl `{trait_name}` for `{target_type}`"))
+        .unwrap_or_else(|| label.to_string())
 }
 
 fn span_from_report(report: &Value) -> Option<Span> {
@@ -569,6 +686,7 @@ mod tests {
         collect_atom as collect_atom_results, sarif_uri, AtomFindings, SarifCollector,
         VerifyOutcome,
     };
+    use mumei_core::cross_spec::session_types::SessionProtocolViolation;
     use mumei_core::parser;
     use mumei_core::verification::Diagnostic;
     use serde_json::{json, Value};
@@ -889,15 +1007,142 @@ body: { x + 1 };
                 "kind":"pass",
                 "properties":{"atom":"f","obligation":"cover"}
             }),
+            json!({
+                "ruleId":"trait_law_violated",
+                "properties":{"atom":"f","obligation":"trait_law"}
+            }),
+            json!({
+                "ruleId":"deadlock_no_progress",
+                "properties":{"atom":"f","obligation":"session_protocol"}
+            }),
         ];
         let before_start = collector.results[0].clone();
 
         collector.remove_lean_verified(1, &["f".to_string()]);
 
-        assert_eq!(collector.results.len(), 3);
+        assert_eq!(collector.results.len(), 5);
         assert_eq!(collector.results[0], before_start);
         assert_eq!(collector.results[1]["ruleId"], "assumed_clause");
         assert_eq!(collector.results[2]["ruleId"], "covered");
+        assert_eq!(
+            collector.results[3]["properties"]["obligation"],
+            "trait_law"
+        );
+        assert_eq!(
+            collector.results[4]["properties"]["obligation"],
+            "session_protocol"
+        );
+    }
+
+    #[test]
+    fn maps_trait_law_failures_and_inconclusive_results() {
+        let atom = source_atom();
+        let report = json!({
+            "atom":"impl Add for i64",
+            "status":"failed",
+            "counterexample":{"a":"1"},
+            "counterexample_fidelity":"exact"
+        });
+        let mut collector = SarifCollector::new();
+        collector.push_trait_law_failure(
+            "impl Add for i64",
+            "Trait law 'commutative' not satisfied\nextra details",
+            None,
+            Some(&report),
+            &atom.span,
+        );
+        collector.push_trait_law_failure(
+            "impl Maybe for i64",
+            "Z3 returned unknown\nextra details",
+            Some("unknown"),
+            None,
+            &atom.span,
+        );
+
+        let failure = &collector.results[0];
+        assert_eq!(failure["ruleId"], "trait_law_violated");
+        assert_eq!(failure["level"], "error");
+        assert_eq!(failure["kind"], "fail");
+        assert_eq!(failure["properties"]["atom"], "impl Add for i64");
+        assert_eq!(failure["properties"]["obligation"], "trait_law");
+        assert_eq!(failure["properties"]["failure_type"], "trait_law_violated");
+        assert_eq!(failure["properties"]["outcome"], "failed");
+        assert_eq!(failure["properties"]["counterexample"]["a"], "1");
+        assert_eq!(failure["properties"]["counterexample_fidelity"], "exact");
+        assert_eq!(
+            failure["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            atom.span.file
+        );
+        assert_eq!(
+            failure["message"]["text"],
+            "Trait law 'commutative' not satisfied (impl `Add` for `i64`)"
+        );
+
+        let inconclusive = &collector.results[1];
+        assert_eq!(inconclusive["ruleId"], "unknown");
+        assert_eq!(inconclusive["level"], "warning");
+        assert_eq!(inconclusive["kind"], "review");
+        assert_eq!(inconclusive["properties"]["failure_type"], "unknown");
+        assert_eq!(inconclusive["properties"]["outcome"], "unknown");
+        assert_eq!(inconclusive["properties"]["z3_result"], "unknown");
+        let document = collector.document(VerifyOutcome::Verified);
+        let rules = document["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .unwrap();
+        assert_eq!(rules[0]["defaultConfiguration"]["level"], "error");
+        assert_eq!(rules[1]["defaultConfiguration"]["level"], "warning");
+    }
+
+    #[test]
+    fn maps_session_protocol_violations_with_span_or_file_location() {
+        let atom = source_atom();
+        let violation = SessionProtocolViolation {
+            effect: "PaymentChannel".to_string(),
+            kind: "deadlock_no_progress".to_string(),
+            caller_atom: "payment_client_retry".to_string(),
+            caller_file: "/tmp/payment_client.mm".to_string(),
+            callee_atom: Some("payment_server_respond".to_string()),
+            callee_file: Some("/tmp/payment_server.mm".to_string()),
+            protocol_state: "ClientWait".to_string(),
+            protocol_path: vec!["ServerWait".to_string(), "ClientWait".to_string()],
+            message: "No role can make progress".to_string(),
+            suggested_fix: "Add a transition to finish the protocol".to_string(),
+        };
+        let mut collector = SarifCollector::new();
+        collector.push_session_protocol_violation(&violation, Some(&atom.span));
+        collector.push_session_protocol_violation(&violation, None);
+
+        let finding = &collector.results[0];
+        assert_eq!(finding["ruleId"], "deadlock_no_progress");
+        assert_eq!(finding["level"], "error");
+        assert_eq!(finding["kind"], "fail");
+        assert_eq!(finding["properties"]["atom"], "payment_client_retry");
+        assert_eq!(finding["properties"]["obligation"], "session_protocol");
+        assert_eq!(finding["properties"]["effect"], "PaymentChannel");
+        assert_eq!(finding["properties"]["protocol_state"], "ClientWait");
+        assert_eq!(
+            finding["properties"]["protocol_path"],
+            json!(["ServerWait", "ClientWait"])
+        );
+        assert_eq!(
+            finding["properties"]["callee_atom"],
+            "payment_server_respond"
+        );
+        assert_eq!(
+            finding["properties"]["suggested_fix"],
+            "Add a transition to finish the protocol"
+        );
+        assert_eq!(
+            finding["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            atom.span.file
+        );
+
+        let file_only = &collector.results[1]["locations"][0]["physicalLocation"];
+        assert_eq!(
+            file_only["artifactLocation"]["uri"],
+            "file:///tmp/payment_client.mm"
+        );
+        assert!(file_only.get("region").is_none());
     }
 
     #[test]

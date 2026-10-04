@@ -51,6 +51,19 @@ ensures assume "trusted result": result > 100;
 body: 0;
 "#;
 
+const FAILING_TRAIT_LAW_SOURCE: &str = r#"
+trait Zeroer {
+    fn mask2(a: Self, b: Self) -> Self;
+    law zero_mask: mask2(a, a) == 0;
+}
+
+impl Zeroer for i64 {
+    fn mask2(a: i64, b: i64) -> i64 {
+        a & b
+    }
+}
+"#;
+
 fn temp_dir(name: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -81,6 +94,42 @@ fn run_verify(input: &Path, cwd: &Path, report_dir: &Path, extra_args: &[&str]) 
         .current_dir(cwd)
         .output()
         .expect("run mumei verify")
+}
+
+fn run_session_protocol_verify(root: &Path, tag: &str, emit_sarif: bool) -> (Output, PathBuf) {
+    let cwd = root.join(tag);
+    let inputs = cwd.join("inputs");
+    let report_dir = cwd.join("reports");
+    std::fs::create_dir_all(&inputs).expect("create session input directory");
+    let fixture_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/session_types");
+    for name in [
+        "payment_client.mm",
+        "payment_server.mm",
+        "payment_protocol.mm",
+    ] {
+        std::fs::copy(fixture_dir.join(name), inputs.join(name)).expect("copy session fixture");
+    }
+    let client = inputs.join("payment_client.mm");
+    let server = inputs.join("payment_server.mm");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+    command
+        .arg("verify")
+        .arg("--json")
+        .arg("--cache-scope")
+        .arg("global")
+        .arg("--report-dir")
+        .arg(&report_dir);
+    if emit_sarif {
+        command.arg("--emit").arg("sarif");
+    }
+    let output = command
+        .arg("--cross-spec-files")
+        .arg(server)
+        .arg(client)
+        .current_dir(&cwd)
+        .output()
+        .expect("run cross-spec verification");
+    (output, report_dir)
 }
 
 fn sarif_result<'a>(results: &'a [Value], atom: &str, rule_id: &str) -> &'a Value {
@@ -187,6 +236,78 @@ fn sarif_preserves_json_and_exit_code_and_maps_verification_findings() {
             .as_str()
             .unwrap()
             .contains("trusted, not proved")
+    );
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
+}
+
+#[test]
+fn sarif_reports_failing_trait_laws_without_changing_exit_code() {
+    let root = temp_dir("trait_law");
+    let fixture = root.join("failing_law.mm");
+    std::fs::write(&fixture, FAILING_TRAIT_LAW_SOURCE).expect("write failing law fixture");
+    let baseline_cwd = root.join("baseline");
+    let sarif_cwd = root.join("with_sarif");
+    let baseline_reports = baseline_cwd.join("reports");
+    let sarif_reports = sarif_cwd.join("reports");
+    std::fs::create_dir_all(&baseline_cwd).expect("create baseline cwd");
+    std::fs::create_dir_all(&sarif_cwd).expect("create SARIF cwd");
+
+    let baseline = run_verify(&fixture, &baseline_cwd, &baseline_reports, &[]);
+    let with_sarif = run_verify(&fixture, &sarif_cwd, &sarif_reports, &["--emit", "sarif"]);
+    assert_eq!(baseline.status.code(), Some(1));
+    assert_eq!(with_sarif.status.code(), Some(1));
+
+    let document = read_sarif(&sarif_reports.join("report.sarif"));
+    let results = document["runs"][0]["results"].as_array().unwrap();
+    let finding = sarif_result(results, "impl Zeroer for i64", "trait_law_violated");
+    assert_eq!(finding["level"], "error");
+    assert_eq!(finding["kind"], "fail");
+    assert_eq!(finding["properties"]["obligation"], "trait_law");
+    assert_eq!(finding["properties"]["failure_type"], "trait_law_violated");
+    assert!(finding["properties"].get("counterexample").is_some());
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
+}
+
+#[test]
+fn sarif_reports_session_protocol_violations_without_changing_exit_code() {
+    let root = temp_dir("session_protocol");
+    let (baseline, _) = run_session_protocol_verify(&root, "baseline", false);
+    let (with_sarif, report_dir) = run_session_protocol_verify(&root, "with_sarif", true);
+    assert_eq!(
+        baseline.status.code(),
+        Some(1),
+        "baseline stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&baseline.stdout),
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    assert_eq!(
+        with_sarif.status.code(),
+        Some(1),
+        "SARIF stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&with_sarif.stdout),
+        String::from_utf8_lossy(&with_sarif.stderr)
+    );
+
+    let document = read_sarif(&report_dir.join("report.sarif"));
+    let results = document["runs"][0]["results"].as_array().unwrap();
+    let finding = results
+        .iter()
+        .find(|result| result["properties"]["obligation"] == "session_protocol")
+        .expect("SARIF session protocol finding");
+    assert_eq!(finding["ruleId"], "deadlock_no_progress");
+    assert_eq!(finding["level"], "error");
+    assert_eq!(finding["kind"], "fail");
+    assert_eq!(finding["properties"]["effect"], "PaymentChannel");
+    assert!(finding["properties"]["suggested_fix"]
+        .as_str()
+        .unwrap()
+        .contains("effect_post"));
+    assert!(finding["locations"][0]["physicalLocation"]["region"].is_object());
+    assert!(
+        finding["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("/payment_client.mm")
     );
     std::fs::remove_dir_all(root).expect("remove fixture directory");
 }

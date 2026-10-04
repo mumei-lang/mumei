@@ -662,6 +662,20 @@ fn first_error_line(error_text: &str) -> String {
         .to_string()
 }
 
+fn read_fresh_impl_report(
+    output_dir: &Path,
+    label: &str,
+    started_at: std::time::SystemTime,
+) -> Option<serde_json::Value> {
+    let path = output_dir.join("report.json");
+    let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+    if modified < started_at {
+        return None;
+    }
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    (report["atom"].as_str() == Some(label)).then_some(report)
+}
+
 fn read_report_skipped_clauses(output_dir: &Path, atom_name: &str) -> usize {
     std::fs::read_to_string(output_dir.join("report.json"))
         .ok()
@@ -1620,6 +1634,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                         impl_def.trait_name, impl_def.target_type
                     );
                 }
+                let label = format!("impl {} for {}", impl_def.trait_name, impl_def.target_type);
+                let started_at = std::time::SystemTime::now();
                 match verification::verify_impl_with_options(
                     impl_def,
                     &module_env,
@@ -1636,10 +1652,20 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                     Err(e) => {
                         // Same classification as the atom path: a law Z3 could
                         // neither prove nor refute is inconclusive, not a rejection.
-                        if verification::z3_result_from_error_message(&e.to_string())
-                            .is_some_and(is_solver_inconclusive)
-                        {
+                        let error_message = e.to_string();
+                        let z3_result = verification::z3_result_from_error_message(&error_message);
+                        if z3_result.is_some_and(is_solver_inconclusive) {
                             solver_inconclusive += 1;
+                        }
+                        if let Some(sarif) = sarif {
+                            let report = read_fresh_impl_report(output_dir, &label, started_at);
+                            sarif.borrow_mut().push_trait_law_failure(
+                                &label,
+                                &error_message,
+                                z3_result,
+                                report.as_ref(),
+                                &impl_def.span,
+                            );
                         }
                         if !quiet_output {
                             let resolved = resolve_source_for_span(&source, &impl_def.span);
@@ -1800,6 +1826,12 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                         eprintln!(
                             "  ❌ Session protocol violation ({}): {}\n     Suggested fix: {}",
                             violation.kind, violation.message, violation.suggested_fix
+                        );
+                    }
+                    if let Some(sarif) = sarif {
+                        sarif.borrow_mut().push_session_protocol_violation(
+                            violation,
+                            find_atom_span(&items, &violation.caller_atom),
                         );
                     }
                     failed += 1;
