@@ -1,13 +1,36 @@
 use std::fs;
 use std::process::Command;
 
+static REPORT_DIR_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// Unique report dir per verify run: report.json defaults to the shared
+// repo-root cwd, which concurrent `mumei` processes clobber.
+fn unique_report_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "mumei_parser_block_expr_{}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+        REPORT_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+    ));
+    std::fs::create_dir_all(&dir).expect("create report dir");
+    dir
+}
+
 fn verify(file: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_mumei"))
+    let report_dir = unique_report_dir();
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .arg("verify")
+        .arg("--report-dir")
+        .arg(&report_dir)
         .arg(file)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
-        .unwrap_or_else(|err| panic!("failed to run mumei verify {file}: {err}"))
+        .unwrap_or_else(|err| panic!("failed to run mumei verify {file}: {err}"));
+    let _ = fs::remove_dir_all(&report_dir);
+    output
 }
 
 fn run(file: &str) -> std::process::Output {
@@ -54,15 +77,19 @@ fn total_constraints(file: &str) -> usize {
         format!("{source_text}\n// budget probe {}\n", std::process::id()),
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", uncached.display()));
+    let report_dir = unique_report_dir();
     let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .args([
             "verify",
             "--json",
+            "--report-dir",
+            report_dir.to_str().expect("UTF-8 report dir"),
             uncached.to_str().expect("UTF-8 fixture path"),
         ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .unwrap_or_else(|err| panic!("failed to run mumei verify --json {file}: {err}"));
+    let _ = fs::remove_dir_all(&report_dir);
     let _ = fs::remove_file(&uncached);
     let text = combined(&output);
     assert!(output.status.success(), "{text}");
