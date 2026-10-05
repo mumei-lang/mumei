@@ -9,6 +9,7 @@ use crate::verification::raising::{
 };
 use crate::verification::translator::may_write::CalleeRef;
 use serde_json::json;
+use z3::ast::Ast as _;
 use z3::{FuncDecl, Sort};
 
 /// Generations of constant-argument contract instances unfolded below a congruent call (§8 D7).
@@ -212,8 +213,11 @@ fn constant_args<'a>(args: &[Dynamic<'a>]) -> Option<(Vec<Dynamic<'a>>, String)>
     let mut keys = Vec::with_capacity(args.len());
     for arg in args {
         let simplified = arg.simplify();
-        let key = if let Some(value) = simplified.as_int() {
-            format!("int:{}", value.as_i64()?)
+        let key = if simplified.as_int().is_some() {
+            if simplified.kind() != z3::AstKind::Numeral {
+                return None;
+            }
+            format!("int:{simplified}")
         } else if let Some(value) = simplified.as_bv() {
             let numeral = value
                 .as_u64()
@@ -4314,5 +4318,51 @@ mod termination_measure_tests {
             &[bitvector_measure.into()]
         )
         .is_none());
+    }
+}
+
+#[cfg(test)]
+mod constant_args_tests {
+    use super::constant_args;
+    use z3::ast::{Bool, Int};
+    use z3::{Config, Context};
+
+    #[test]
+    fn accepts_int_numeral_beyond_i64_range() {
+        let ctx = Context::new(&Config::new());
+        let max = Int::from_i64(&ctx, i64::MAX);
+        let three = Int::from_i64(&ctx, 3);
+        let large = &max + &three;
+        let result = constant_args(&[large.into()]);
+
+        assert!(result.is_some(), "large Int numeral should be constant");
+        assert_eq!(result.unwrap().1, "int:9223372036854775810");
+    }
+
+    #[test]
+    fn formats_regular_int_numeral() {
+        let ctx = Context::new(&Config::new());
+        let args = [Int::from_i64(&ctx, 3).into()];
+
+        assert_eq!(constant_args(&args).unwrap().1, "int:3");
+    }
+
+    #[test]
+    fn rejects_non_numeral_int() {
+        let ctx = Context::new(&Config::new());
+        let args = [Int::new_const(&ctx, "x").into()];
+
+        assert!(constant_args(&args).is_none());
+    }
+
+    #[test]
+    fn formats_mixed_int_and_bool_args() {
+        let ctx = Context::new(&Config::new());
+        let args = [
+            Int::from_i64(&ctx, 2).into(),
+            Bool::from_bool(&ctx, true).into(),
+        ];
+
+        assert_eq!(constant_args(&args).unwrap().1, "int:2,bool:true");
     }
 }
