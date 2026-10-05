@@ -295,13 +295,15 @@ fn trace_eval_bool_clause(
 fn trace_eval_binary(left: TraceValue, op: &Op, right: TraceValue) -> Option<TraceValue> {
     match (left, right) {
         (TraceValue::Int(left), TraceValue::Int(right)) => match op {
-            Op::Add => Some(TraceValue::Int(left + right)),
-            Op::Sub => Some(TraceValue::Int(left - right)),
-            Op::Mul => Some(TraceValue::Int(left * right)),
-            Op::Pow if right >= 0 => left.checked_pow(right as u32).map(TraceValue::Int),
+            Op::Add => left.checked_add(right).map(TraceValue::Int),
+            Op::Sub => left.checked_sub(right).map(TraceValue::Int),
+            Op::Mul => left.checked_mul(right).map(TraceValue::Int),
+            Op::Pow if right >= 0 => u32::try_from(right)
+                .ok()
+                .and_then(|exponent| left.checked_pow(exponent))
+                .map(TraceValue::Int),
             Op::Pow => None,
-            Op::Div if right != 0 => Some(TraceValue::Int(left / right)),
-            Op::Div => None,
+            Op::Div => left.checked_div(right).map(TraceValue::Int),
             Op::Eq => Some(TraceValue::Bool(left == right)),
             Op::Neq => Some(TraceValue::Bool(left != right)),
             Op::Gt => Some(TraceValue::Bool(left > right)),
@@ -853,4 +855,50 @@ pub fn infer_contracts_json(items: &[Item], module_env: &ModuleEnv) -> serde_jso
         }
     }
     serde_json::json!({ "contracts_analysis": results })
+}
+
+#[cfg(test)]
+mod trace_eval_binary_tests {
+    use super::{trace_eval_binary, TraceValue};
+    use crate::parser::Op;
+
+    #[test]
+    fn integer_arithmetic_overflow_returns_none() {
+        assert_eq!(
+            trace_eval_binary(TraceValue::Int(i64::MAX), &Op::Add, TraceValue::Int(1)),
+            None
+        );
+        assert_eq!(
+            trace_eval_binary(TraceValue::Int(i64::MIN), &Op::Sub, TraceValue::Int(1)),
+            None
+        );
+        assert_eq!(
+            trace_eval_binary(TraceValue::Int(i64::MAX), &Op::Mul, TraceValue::Int(2)),
+            None
+        );
+        assert_eq!(
+            trace_eval_binary(TraceValue::Int(i64::MIN), &Op::Div, TraceValue::Int(-1)),
+            None
+        );
+    }
+
+    #[test]
+    fn integer_arithmetic_without_overflow_returns_value() {
+        assert_eq!(
+            trace_eval_binary(TraceValue::Int(2), &Op::Add, TraceValue::Int(3)),
+            Some(TraceValue::Int(5))
+        );
+    }
+
+    #[test]
+    fn power_exponent_must_fit_in_u32() {
+        assert_eq!(
+            trace_eval_binary(
+                TraceValue::Int(0),
+                &Op::Pow,
+                TraceValue::Int(i64::from(u32::MAX) + 1)
+            ),
+            None
+        );
+    }
 }

@@ -811,7 +811,8 @@ fn eval_string_builtin(
         _ => Err(format!("{name}() expects Str arguments")),
     };
     let result = match name {
-        "len" => string(&values[0]).map(|value| EvalValue::Int(value.chars().count() as i64)),
+        "len" => string(&values[0])
+            .and_then(|value| replay_int_from_usize(value.chars().count()).map(EvalValue::Int)),
         "is_empty" => string(&values[0]).map(|value| EvalValue::Bool(value.is_empty())),
         "starts_with" => string(&values[0]).and_then(|value| {
             string(&values[1]).map(|pat| EvalValue::Bool(value.starts_with(&pat)))
@@ -823,12 +824,13 @@ fn eval_string_builtin(
         "not_contains" => string(&values[0])
             .and_then(|value| string(&values[1]).map(|pat| EvalValue::Bool(!value.contains(&pat)))),
         "index_of" => string(&values[0]).and_then(|value| {
-            string(&values[1]).map(|pat| {
-                let index = value
-                    .find(&pat)
-                    .map(|byte_index| value[..byte_index].chars().count() as i64)
-                    .unwrap_or(-1);
-                EvalValue::Int(index)
+            string(&values[1]).and_then(|pat| {
+                let index = if let Some(byte_index) = value.find(&pat) {
+                    replay_int_from_usize(value[..byte_index].chars().count())?
+                } else {
+                    -1
+                };
+                Ok(EvalValue::Int(index))
             })
         }),
         "substr" => {
@@ -870,22 +872,46 @@ fn eval_string_builtin(
     Some(result)
 }
 
+fn replay_int_from_usize(value: usize) -> Result<i64, String> {
+    i64::try_from(value).map_err(|_| integer_overflow_during_replay())
+}
+
+fn integer_overflow_during_replay() -> String {
+    "integer overflow during counterexample replay".to_string()
+}
+
 fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, String> {
     match (&left, &right) {
         (EvalValue::Int(left), EvalValue::Int(right)) => {
             let (left, right) = (*left, *right);
             match op {
-                Op::Add => Ok(EvalValue::Int(left + right)),
-                Op::Sub => Ok(EvalValue::Int(left - right)),
-                Op::Mul => Ok(EvalValue::Int(left * right)),
+                Op::Add => left
+                    .checked_add(right)
+                    .map(EvalValue::Int)
+                    .ok_or_else(integer_overflow_during_replay),
+                Op::Sub => left
+                    .checked_sub(right)
+                    .map(EvalValue::Int)
+                    .ok_or_else(integer_overflow_during_replay),
+                Op::Mul => left
+                    .checked_mul(right)
+                    .map(EvalValue::Int)
+                    .ok_or_else(integer_overflow_during_replay),
                 Op::Pow if right >= 0 => {
-                    Ok(EvalValue::Int(left.checked_pow(right as u32).ok_or_else(
-                        || "integer overflow during counterexample replay".to_string(),
-                    )?))
+                    let exponent =
+                        u32::try_from(right).map_err(|_| integer_overflow_during_replay())?;
+                    left.checked_pow(exponent)
+                        .map(EvalValue::Int)
+                        .ok_or_else(integer_overflow_during_replay)
                 }
                 Op::Pow => Err("negative exponent during counterexample replay".to_string()),
-                Op::Div if right != 0 => Ok(EvalValue::Int(left / right)),
-                Op::Div => Err("division by zero during counterexample replay".to_string()),
+                Op::Div if right == 0 => {
+                    Err("division by zero during counterexample replay".to_string())
+                }
+                Op::Div => left
+                    .checked_div(right)
+                    .map(EvalValue::Int)
+                    .ok_or_else(integer_overflow_during_replay),
                 Op::Eq => Ok(EvalValue::Bool(left == right)),
                 Op::Neq => Ok(EvalValue::Bool(left != right)),
                 Op::Gt => Ok(EvalValue::Bool(left > right)),
@@ -1284,4 +1310,49 @@ fn normalize_core_label(label: &str) -> String {
 
 fn core_contains_clause(core: &HashSet<String>, exact: &str, prefix: &str) -> bool {
     core.contains(exact) || core.iter().any(|entry| entry.contains(prefix))
+}
+
+#[cfg(test)]
+mod eval_binary_tests {
+    use super::{eval_binary, EvalValue};
+    use crate::parser::Op;
+
+    const INTEGER_OVERFLOW: &str = "integer overflow during counterexample replay";
+
+    fn eval_int(left: i64, op: Op, right: i64) -> Result<EvalValue, String> {
+        eval_binary(EvalValue::Int(left), &op, EvalValue::Int(right))
+    }
+
+    #[test]
+    fn integer_overflow_returns_replay_error() {
+        for (left, op, right) in [
+            (i64::MAX, Op::Add, 1),
+            (i64::MIN, Op::Sub, 1),
+            (i64::MAX, Op::Mul, 2),
+            (i64::MIN, Op::Div, -1),
+        ] {
+            assert_eq!(eval_int(left, op, right).unwrap_err(), INTEGER_OVERFLOW);
+        }
+    }
+
+    #[test]
+    fn integer_addition_without_overflow_returns_value() {
+        assert_eq!(eval_int(2, Op::Add, 3), Ok(EvalValue::Int(5)));
+    }
+
+    #[test]
+    fn division_by_zero_keeps_its_replay_error() {
+        assert_eq!(
+            eval_int(1, Op::Div, 0).unwrap_err(),
+            "division by zero during counterexample replay"
+        );
+    }
+
+    #[test]
+    fn power_exponent_must_fit_in_u32() {
+        assert_eq!(
+            eval_int(0, Op::Pow, i64::from(u32::MAX) + 1).unwrap_err(),
+            INTEGER_OVERFLOW
+        );
+    }
 }
