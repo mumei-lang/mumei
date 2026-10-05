@@ -220,3 +220,29 @@ fn early_exit_on_empty_directory_removes_stale_report() {
     assert_input_error_and_report_gone(&output, &dir);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn directory_run_keeps_report_written_by_an_earlier_file() {
+    let dir = fresh_dir("dir_run");
+    let input = dir.join("input");
+    std::fs::create_dir_all(&input).expect("create input dir");
+    // a_ok.mm verifies and publishes its report.json; b_bad.mm sorts after it
+    // and fails to load, so its early exit must not delete that report.
+    copy_fixture(
+        &input,
+        "tests/positive/infer_invariant_counter.mm",
+        "a_ok.mm",
+    );
+    std::fs::write(input.join("b_bad.mm"), "atom broken(\n").expect("write b_bad.mm");
+    seed_stale_report(&dir);
+    let output = verify(&dir, &[input.to_str().expect("utf8 input dir")]);
+    // The directory run as a whole fails (b_bad is an input error) but the
+    // report a_ok published must survive.
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("report.json")).expect("report.json in cwd"),
+    )
+    .expect("parse report.json");
+    assert_eq!(report["atom"], serde_json::json!("infer_counter"));
+    std::fs::remove_dir_all(&dir).ok();
+}
