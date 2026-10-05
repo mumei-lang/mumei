@@ -100,7 +100,7 @@ replacement" names the fields used or planned for that migration. Types marked
 | Proof book (`proof-book`) | `mumei-emit-proofbook::ProofBookEmitter::emit` | `Atom.name`, `trust_level`, `is_async`, `params`, `return_type`, `requires`, `ensures`, `effects`, `effect_pre`, `effect_post`, `resources`; whole `Atom` for `compute_atom_content_hash_v2` | `ModuleEnv::resolve_base_type` | `HirSignature`, `HirContract`, `HirEffectSet` plus *new* effect-state and resource fields on `HirAtomMeta`; content hash carried in `HirAtomMeta` |
 | Python (`python-wrapper`) | `mumei-emit-python::PythonWrapperEmitter::emit` | `Atom.name`, `params`, `return_type`, `requires`, `ensures`; contracts rewritten textually by `translate_contract_to_python` | — | `HirSignature`, exact `HirContract.requires_text` / `ensures_text`; retain the string translator |
 | Rust (`rust-wrapper`) | `mumei-emit-rust::RustWrapperEmitter::emit` | `Atom.name`, `params`, `return_type`, `requires`, `ensures`; contracts rewritten by `translate_contract_to_rust` | — | `HirSignature`, exact `HirContract.requires_text` / `ensures_text`; retain the string translator |
-| Runtime monitor (`runtime-monitor`) | `mumei-emit-monitor::RuntimeMonitorEmitter::emit`, `generate_monitor` | Whole `Atom` for `trust_boundary::classify_trust_boundaries`; `name`, `params`, `return_type`, `requires`, `ensures`, `trust_level`, `effect_pre`; contract strings filtered by the character whitelist in `monitor_condition` | `ExternBlock` (extern boundary detection), `ModuleEnv` (type resolution) | `HirSignature`, `HirContract` (clauses with mode, so a monitor can target exactly the assumed clauses), `HirAtomMeta.trust_boundaries` (*new*, computed once in core) |
+| Runtime monitor (`runtime-monitor`) | `mumei-emit-monitor::RuntimeMonitorEmitter::emit`, `generate_monitor` | Whole `Atom` for `trust_boundary::classify_trust_boundaries`; `name`, `params`, `return_type`, `requires`, `ensures`, `trust_level`, `effect_pre`; contract strings filtered by the character whitelist in `monitor_condition` | `ExternBlock` (pre-migration extern boundary detection), `ModuleEnv` (type resolution) | `HirSignature`, exact `HirContract.requires_text` / `ensures_text`, `HirAtomMeta.effect_pre`, and `HirAtomMeta.trust_boundaries` (*new*, computed once in core) |
 | LLVM (`llvm-ir`, also `binary`, `run`, REPL JIT) | `mumei-emit-llvm::LlvmEmitter::emit` → `codegen::compile`; `codegen::compile_atom_into_module`; `binary.rs`; `jit.rs::compile_atom` | `Atom.name`, `params` (`driver.rs`), `return_type` and, when it is absent, `mir::infer_atom_return_type(&Atom)`, which re-lowers the AST (`lowering.rs::resolve_return_type`); `parser::Op`, `JoinSemantics`, `Pattern` inside HIR (`expr_emit.rs`, `pattern_emit.rs`); `binary.rs::rename_calls_in_atom` rewrites `body_expr`, `requires`, `ensures` strings | `ModuleEnv` (`EnumDef`, `StructDef`, type resolution), `ExternBlock` (FFI declarations) | `HirAtom.body` (already), `HirSignature` with a resolved return type, HIR-owned operator / join / pattern types (*new*: `HirBinOp`, `HirJoin`, `HirPattern`); renaming only on `HirStmt` |
 | C header (`c-header`, in core) | `mumei-core/src/emitter.rs::CHeaderEmitter::emit` | `Atom.name`, `params`, `return_type`, `requires`, `ensures` | — | `HirSignature`, `HirContract` |
 
@@ -205,12 +205,16 @@ unchanged.
    arguments, `=>` is untranslated, Python `/` is float division, and
    quantified requires are not asserted because they are stripped and leave
    `&& true`.
-4. **Move the runtime monitor.** Read trust boundaries from
-   `meta.trust_boundaries` (computed in core by `classify_trust_boundaries`
-   from `ModuleEnv::extern_blocks`, which the lowering already receives), and clause expressions from `contract`. The
-   character whitelist in `monitor_condition` becomes a check on the HIR
-   expression's node kinds, which must accept exactly the same clauses as
-   today; anything else is not lowered, as now.
+4. **Move the runtime monitor.** Read the name, parameters, and return type
+   from `signature`; exact source contract text from
+   `contract.requires_text` / `ensures_text`; and effect preconditions and
+   trust boundaries from `meta.effect_pre` / `meta.trust_boundaries`.
+   Boundaries are computed during lowering with `ModuleEnv::extern_blocks`,
+   so the emitter ignores its `extern_blocks` argument. Keep the character
+   whitelist in `monitor_condition` on the exact source text. A HIR node-kind
+   check is deferred to a separate behavior-change PR because HIR lowering
+   loses parentheses and rewrites or normalizes expressions, so it cannot be
+   shown to accept exactly the same source text.
 5. **Move LLVM metadata reads.** `driver.rs` and `lowering.rs::resolve_return_type`
    read `signature`; `inferred_return_type` replaces the call to
    `mir::infer_atom_return_type(&Atom)`. `binary.rs` stops calling
@@ -291,7 +295,7 @@ must keep them passing without updating the goldens.
 | 1 | `cargo test -p mumei-core` (HIR lowering, `emitter.rs` unit tests including `test_emitter_abi_version_constant` and `test_emitter_plugin_handle_round_trips_boxed_emitter`), `tests/test_add_emitter.rs` | HIR metadata matches the AST for every field; a plugin built for the previous ABI version is refused by `load_external_emitter_from_path` |
 | 2 | `mumei-emit-json` and `mumei-emit-proofbook` unit tests (including `test_content_hash_matches_proof_cert`), `CHeaderEmitter` unit tests in `emitter.rs` | Goldens for `verified-json`, `c-header`, `proof-book` |
 | 3 | `mumei-emit-python` (`test_contract_translation`) and `mumei-emit-rust` unit tests | Parser-backed byte-exact goldens for both wrappers (quantified requires, qualified names, clause modes, defaults), plus AST-independence checks |
-| 4 | `mumei-emit-monitor` unit tests (`contracts_outside_the_expression_subset_are_not_lowered`, `proven_pure_atom_emits_no_monitor`), `tests/test_runtime_monitor.rs` | Every clause the old whitelist accepted is accepted by the HIR check and no other |
+| 4 | `mumei-emit-monitor` unit tests (`contracts_outside_the_expression_subset_are_not_lowered`, `proven_pure_atom_emits_no_monitor`), `tests/test_runtime_monitor.rs`, `tests/test_hir_runtime_monitor.rs` | Byte-exact goldens pin trust boundaries and clause modes; AST and `extern_blocks` independence |
 | 5 | `mumei-emit-llvm` unit tests, `tests/test_codegen_*.rs`, `tests/test_lambda_codegen.rs`, `tests/test_run.rs`, `tests/test_repl.rs` | IR goldens for atoms without an explicit return type; self-recursive `main` in a binary build |
 | 6 | Same as step 5, plus `tests/test_concurrency.rs`, `tests/test_match_arm_scoping.rs`, `tests/test_pattern_lowercase_qual.rs` | Conversion round-trip from parser `Op` / `JoinSemantics` / `Pattern` to the HIR types for every variant |
 | 7 | Everything above, `tests/test_add_emitter.rs`, the plugin example in `PLUGIN_GUIDE.md` | A compile-time check that no `mumei-emit-*` crate imports `mumei_core::parser` outside tests |

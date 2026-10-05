@@ -39,8 +39,10 @@ ordered declared effects. The JSON, C-header, and proof-book emitters now read
 these HIR fields without changing their output. The Python and Rust wrappers
 also read their signature and exact contract text from HIR while retaining
 their string translators; output is unchanged and this migration does not
-change the ABI. ABI-1 and ABI-2 plugins are rejected at load time with an ABI
-version mismatch and must be rebuilt against ABI 3.
+change the ABI. The runtime monitor also reads HIR, takes trust boundaries
+from `meta.trust_boundaries`, and ignores the `extern_blocks` argument; this
+migration does not change the ABI. ABI-1 and ABI-2 plugins are rejected at
+load time with an ABI version mismatch and must be rebuilt against ABI 3.
 
 ## No-op sample plugin
 

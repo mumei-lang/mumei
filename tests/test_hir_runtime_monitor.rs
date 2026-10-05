@@ -47,6 +47,25 @@ fn parsed_case(case: &MonitorGolden) -> (Atom, ModuleEnv) {
     (atom, module_env)
 }
 
+fn parsed_unrelated_atom() -> Atom {
+    let items = parse_module_checked(
+        r#"
+atom unrelated() -> bool
+requires: false;
+ensures: false;
+body: { false }
+"#,
+    )
+    .expect("unrelated atom should parse");
+    items
+        .into_iter()
+        .find_map(|item| match item {
+            Item::Atom(atom) => Some(atom),
+            _ => None,
+        })
+        .expect("unrelated atom")
+}
+
 fn emit_monitor(
     hir: &HirAtom,
     case: &MonitorGolden,
@@ -272,5 +291,20 @@ body: { x }
             (None, None) => {}
             _ => panic!("{} golden/artifact count mismatch", case.name),
         }
+
+        let mut unrelated = hir.clone();
+        unrelated.atom = parsed_unrelated_atom();
+        let changed = emit_monitor(&unrelated, case, &module_env, &[]);
+        assert_eq!(
+            changed.len(),
+            actual.len(),
+            "{} AST independence artifact count",
+            case.name
+        );
+        assert_eq!(
+            changed, actual,
+            "{} AST/extern-block independence",
+            case.name
+        );
     }
 }
