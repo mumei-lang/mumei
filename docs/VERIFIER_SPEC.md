@@ -371,23 +371,36 @@ Rules:
 
 - **D1 (eligibility).** A recursive SCC is *eligible* exactly when every member
   declares an atom-level measure, either a single expression `decreases: M;` or
-  a tuple `decreases: (M1, ..., Mk);`, whose components are call-free, mention
+  a tuple `decreases: (M1, ..., Mk);`, whose components contain no calls other
+  than `len(a)` for an own array parameter `a`, read no array elements, mention
   only that member's own parameters and contain no nested tuple (commas inside
   parentheses are tuple separators; commas inside `{...}` or `[...]`, such as
-  match-arm separators, are allowed). All members must declare the same number
-  of components. Each member also has no effects, no `ref mut` or `consume`
-  parameters, is not `async`, has no type parameters, is at the default
-  verified trust level, has no `ensures assume` clause, and has only scalar
-  (`Int`- or `Bool`-sorted) parameters and result. A parenthesised single
+  match-arm separators, are allowed). Array and struct parameters may appear
+  only as `len(a)` and `p.field`, respectively. All members must declare the
+  same number of components. Each member also has no effects, no `ref mut` or
+  `consume` parameters, is not `async`, has no type parameters, is at the
+  default verified trust level, has no `ensures assume` clause, and has only
+  scalar (`Int`- or `Bool`-sorted) parameters or one-dimensional arrays of
+  unrefined scalar `Int`/`Bool` elements and structs whose fields are scalar
+  and whose constraints and invariants are call-free; results remain scalar.
+  A parenthesised single
   expression such as `(n)` or `(a + b)` is a one-component measure.
   `recursion.rs::member_unsupported_reason`,
   `recursion.rs::measure_components`.
 - **D2 (congruent calls).** While the main verification of an atom runs
   (`executor.rs::verify_inner`), a call to a member `g` of an eligible SCC, from
   any caller, lowers to the application `rec_fn#g(args)` of one uninterpreted
-  function per atom, instead of a fresh `call_<name>_<n>` constant. Calls with
-  equal arguments therefore have equal results. Auxiliary contexts (spec
-  validation, vacuity, property-based checks) keep fresh constants.
+  function per atom, instead of a fresh `call_<name>_<n>` constant. A scalar
+  parameter contributes its value; an array parameter contributes the pair
+  `(array, len_array)`; and a struct parameter contributes its field values in
+  declaration order. The length is a separate UF argument because Z3 arrays
+  are total maps: equal array values do not imply equal separately modelled
+  lengths. Passing only the array handle would therefore make calls with
+  different lengths spuriously congruent, while passing the opaque struct
+  handle would fail to expose the field values used by measures and contracts.
+  Calls with equal expanded arguments therefore have equal results. Auxiliary
+  contexts (spec validation, vacuity, property-based checks) keep fresh
+  constants. Array and struct arguments are not constant-unfolded.
   `translator/context.rs::VCtx::callee_congruent`, `VCtx::rec_fn`.
   A call whose argument depends on a variable bound by an enclosing
   `forall`/`exists` is rejected first by `VCtx::reject_quantifier_dependent_call`,
@@ -395,14 +408,18 @@ Rules:
   and no `rec_fn#` application or termination obligation is built for it.
 - **D3 (assumed ensures).** At a congruent call the callee's caller-visible
   `ensures` is assumed as the implication
-  `R(args) ⇒ CallerEnsures(args, rec_fn#g(args))`, where `R` is
+  `R(args) ∧ P(args) ⇒ CallerEnsures(args, rec_fn#g(args))`, where `R` is
   `contract_view.rs::caller_requires_obligation(g)`: the caller-view requires
-  plus `g`'s top-level quantified requires conjuncts. For a call
-  between two members of the same SCC, the antecedent also contains the path
-  conditions at the call. A call in a body still checks the same `R`
-  as an obligation, as for any other call. A recursive call reached while the
-  callee's contract is already being instantiated uses the same application
-  and does not instantiate the contract again.
+  plus `g`'s top-level quantified requires conjuncts, and `P` is the callee
+  parameter-domain fact. `P` says every array length is non-negative and
+  includes every struct field constraint and invariant lowered against the
+  call-site field values. For a call between two members of the same SCC, the
+  antecedent also contains the path conditions at the call. The callee's
+  `requires` is checked at the call site as usual; `P` guards only the
+  congruent-ensures assumption, matching the facts assumed for the callee's
+  parameters in its body. A recursive call reached while the callee's contract
+  is already being instantiated uses the same application and does not
+  instantiate the contract again.
   `translator/expr.rs::congruent_ensures_antecedent`.
 - **D4 (termination obligation).** At every call from member `A` to member `B`
   of the same eligible SCC, in `A`'s body and in `A`'s `requires` and
@@ -432,7 +449,8 @@ Rules:
   part of every caller's proof hash.
   `mumei-core/src/resolver/cache.rs`. These rules are enabled by
   `VERIFIER_POLICY_VERSION` 7, tuple measures by version 8, call-arity
-  checking by version 9, and constant-argument unfolding by version 10.
+  checking by version 9, constant-argument unfolding by version 10, and
+  array/struct recursive-contract parameters by version 11.
 - **D7 (constant-argument unfolding).** For congruent calls with arguments
   that simplify to constants, made by a caller outside the callee's SCC, the
   verifier adds instances of
@@ -443,7 +461,9 @@ Rules:
   `CONSTANT_UNFOLD_DEPTH` (32) generations and `CONSTANT_UNFOLD_MAX_INSTANCES`
   (256) instances. If `R(c)` simplifies to false, the instance is neither
   assumed nor expanded. Calls deeper than the bound keep the D3 behavior, and
-  SCC-internal calls are unchanged. See
+  SCC-internal calls are unchanged. Array and struct arguments are not
+  unfolded because constant-argument keys cover scalar Int, bit-vector, and
+  Boolean values only. See
   `mumei-core/src/verification/translator/expr.rs::unfold_constant_calls`.
 
 ## Keeping this document in sync

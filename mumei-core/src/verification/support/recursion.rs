@@ -16,11 +16,13 @@ use std::collections::{HashMap, HashSet};
 // recursive call carries a termination obligation
 // `0 <= M_A && M_B(args) < M_A` where `M_A` is the caller's measure.
 //
-// Eligibility is deliberately narrow: scalar Int/Bool signatures only, no
-// effects, no borrows/consumes, no type parameters, default trust level, and a
-// call-free measure over the atom's own parameters. Atoms on a cycle that fail
-// eligibility keep the legacy unconstrained-call treatment and get an
-// advisory hint instead (see `recursive_contract_hint_diagnostic`).
+// Eligibility is deliberately narrow: scalar Int/Bool returns and parameters,
+// plus one-dimensional arrays of scalar elements and structs with scalar
+// fields, no effects, no borrows/consumes, no type parameters, default trust
+// level, and a measure over the atom's own parameters with no calls except
+// `len` of an array parameter. Atoms on a cycle that fail eligibility keep the
+// legacy unconstrained-call treatment and get an advisory hint instead (see
+// `recursive_contract_hint_diagnostic`).
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecursiveSccEligibility {
@@ -353,8 +355,18 @@ fn collect_variables_stmt(stmt: &Stmt, out: &mut HashSet<String>) {
             collect_variables_expr(index, out);
             collect_variables_expr(value, out);
         }
-        Stmt::While { cond, body, .. } => {
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
             collect_variables_expr(cond, out);
+            collect_variables_expr(invariant, out);
+            if let Some(decreases) = decreases {
+                collect_variables_expr(decreases, out);
+            }
             collect_variables_stmt(body, out);
         }
         Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
@@ -367,6 +379,285 @@ fn collect_variables_stmt(stmt: &Stmt, out: &mut HashSet<String>) {
         }
         Stmt::Expr(e, _) => collect_variables_expr(e, out),
         Stmt::Cancel { .. } => {}
+    }
+}
+
+fn measure_contains_array_access(expr: &Expr) -> bool {
+    match expr {
+        Expr::ArrayAccess(_, _) => true,
+        Expr::Call(_, args) | Expr::Perform { args, .. } | Expr::ArrayLit(args) => {
+            args.iter().any(measure_contains_array_access)
+        }
+        Expr::CallRef { callee, args } => {
+            measure_contains_array_access(callee) || args.iter().any(measure_contains_array_access)
+        }
+        Expr::BinaryOp(left, _, right) => {
+            measure_contains_array_access(left) || measure_contains_array_access(right)
+        }
+        Expr::FieldAccess(inner, _) | Expr::Await { expr: inner } => {
+            measure_contains_array_access(inner)
+        }
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| measure_contains_array_access(value)),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            measure_contains_array_access(cond)
+                || measure_contains_array_access_stmt(then_branch)
+                || measure_contains_array_access_stmt(else_branch)
+        }
+        Expr::Block(stmt) | Expr::Async { body: stmt } | Expr::Lambda { body: stmt, .. } => {
+            measure_contains_array_access_stmt(stmt)
+        }
+        Expr::Match { target, arms } => {
+            measure_contains_array_access(target)
+                || arms.iter().any(|arm| {
+                    measure_contains_array_access_stmt(&arm.body)
+                        || arm
+                            .guard
+                            .as_ref()
+                            .is_some_and(|guard| measure_contains_array_access(guard))
+                })
+        }
+        Expr::ChanSend { channel, value } => {
+            measure_contains_array_access(channel) || measure_contains_array_access(value)
+        }
+        Expr::ChanRecv { channel } => measure_contains_array_access(channel),
+        _ => false,
+    }
+}
+
+fn measure_contains_array_access_stmt(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Block(stmts, _) => stmts.iter().any(measure_contains_array_access_stmt),
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            measure_contains_array_access(value)
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            measure_contains_array_access(index) || measure_contains_array_access(value)
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            measure_contains_array_access(cond)
+                || measure_contains_array_access(invariant)
+                || decreases
+                    .as_ref()
+                    .is_some_and(|measure| measure_contains_array_access(measure))
+                || measure_contains_array_access_stmt(body)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            measure_contains_array_access_stmt(body)
+        }
+        Stmt::TaskGroup { children, .. } => children.iter().any(measure_contains_array_access_stmt),
+        Stmt::Expr(expr, _) => measure_contains_array_access(expr),
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+fn measure_contains_disallowed_call(expr: &Expr, array_params: &HashSet<&str>) -> bool {
+    match expr {
+        Expr::Call(name, args) => {
+            let allowed_len = name == "len"
+                && args.len() == 1
+                && matches!(&args[0], Expr::Variable(param) if array_params.contains(param.as_str()));
+            !allowed_len
+                || args
+                    .iter()
+                    .any(|arg| measure_contains_disallowed_call(arg, array_params))
+        }
+        Expr::CallRef { .. } => true,
+        Expr::Perform { args, .. } | Expr::ArrayLit(args) => args
+            .iter()
+            .any(|arg| measure_contains_disallowed_call(arg, array_params)),
+        Expr::BinaryOp(left, _, right) => {
+            measure_contains_disallowed_call(left, array_params)
+                || measure_contains_disallowed_call(right, array_params)
+        }
+        Expr::FieldAccess(inner, _) | Expr::Await { expr: inner } => {
+            measure_contains_disallowed_call(inner, array_params)
+        }
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| measure_contains_disallowed_call(value, array_params)),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            measure_contains_disallowed_call(cond, array_params)
+                || measure_contains_disallowed_call_stmt(then_branch, array_params)
+                || measure_contains_disallowed_call_stmt(else_branch, array_params)
+        }
+        Expr::Block(stmt) | Expr::Async { body: stmt } | Expr::Lambda { body: stmt, .. } => {
+            measure_contains_disallowed_call_stmt(stmt, array_params)
+        }
+        Expr::Match { target, arms } => {
+            measure_contains_disallowed_call(target, array_params)
+                || arms.iter().any(|arm| {
+                    measure_contains_disallowed_call_stmt(&arm.body, array_params)
+                        || arm.guard.as_ref().is_some_and(|guard| {
+                            measure_contains_disallowed_call(guard, array_params)
+                        })
+                })
+        }
+        Expr::ChanSend { channel, value } => {
+            measure_contains_disallowed_call(channel, array_params)
+                || measure_contains_disallowed_call(value, array_params)
+        }
+        Expr::ChanRecv { channel } => measure_contains_disallowed_call(channel, array_params),
+        _ => false,
+    }
+}
+
+fn measure_contains_disallowed_call_stmt(stmt: &Stmt, array_params: &HashSet<&str>) -> bool {
+    match stmt {
+        Stmt::Block(stmts, _) => stmts
+            .iter()
+            .any(|stmt| measure_contains_disallowed_call_stmt(stmt, array_params)),
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            measure_contains_disallowed_call(value, array_params)
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            measure_contains_disallowed_call(index, array_params)
+                || measure_contains_disallowed_call(value, array_params)
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            measure_contains_disallowed_call(cond, array_params)
+                || measure_contains_disallowed_call(invariant, array_params)
+                || decreases
+                    .as_ref()
+                    .is_some_and(|measure| measure_contains_disallowed_call(measure, array_params))
+                || measure_contains_disallowed_call_stmt(body, array_params)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            measure_contains_disallowed_call_stmt(body, array_params)
+        }
+        Stmt::TaskGroup { children, .. } => children
+            .iter()
+            .any(|child| measure_contains_disallowed_call_stmt(child, array_params)),
+        Stmt::Expr(expr, _) => measure_contains_disallowed_call(expr, array_params),
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+fn measure_non_scalar_param(
+    expr: &Expr,
+    arrays: &HashSet<&str>,
+    structs: &HashSet<&str>,
+) -> Option<String> {
+    match expr {
+        Expr::Variable(name)
+            if arrays.contains(name.as_str()) || structs.contains(name.as_str()) =>
+        {
+            Some(name.clone())
+        }
+        Expr::Call(name, args) => {
+            let allowed_len = name == "len"
+                && args.len() == 1
+                && matches!(&args[0], Expr::Variable(param) if arrays.contains(param.as_str()));
+            args.iter()
+                .filter(|_| !allowed_len)
+                .find_map(|arg| measure_non_scalar_param(arg, arrays, structs))
+        }
+        Expr::CallRef { callee, args } => measure_non_scalar_param(callee, arrays, structs)
+            .or_else(|| {
+                args.iter()
+                    .find_map(|arg| measure_non_scalar_param(arg, arrays, structs))
+            }),
+        Expr::FieldAccess(inner, _) => {
+            if matches!(inner.as_ref(), Expr::Variable(name) if structs.contains(name.as_str())) {
+                None
+            } else {
+                measure_non_scalar_param(inner, arrays, structs)
+            }
+        }
+        Expr::ArrayAccess(_, index) => measure_non_scalar_param(index, arrays, structs),
+        Expr::Perform { args, .. } | Expr::ArrayLit(args) => args
+            .iter()
+            .find_map(|arg| measure_non_scalar_param(arg, arrays, structs)),
+        Expr::BinaryOp(left, _, right) => measure_non_scalar_param(left, arrays, structs)
+            .or_else(|| measure_non_scalar_param(right, arrays, structs)),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .find_map(|(_, value)| measure_non_scalar_param(value, arrays, structs)),
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => measure_non_scalar_param(cond, arrays, structs)
+            .or_else(|| measure_non_scalar_param_stmt(then_branch, arrays, structs))
+            .or_else(|| measure_non_scalar_param_stmt(else_branch, arrays, structs)),
+        Expr::Block(stmt) | Expr::Async { body: stmt } | Expr::Lambda { body: stmt, .. } => {
+            measure_non_scalar_param_stmt(stmt, arrays, structs)
+        }
+        Expr::Match { target, arms } => {
+            measure_non_scalar_param(target, arrays, structs).or_else(|| {
+                arms.iter().find_map(|arm| {
+                    measure_non_scalar_param_stmt(&arm.body, arrays, structs).or_else(|| {
+                        arm.guard
+                            .as_ref()
+                            .and_then(|guard| measure_non_scalar_param(guard, arrays, structs))
+                    })
+                })
+            })
+        }
+        Expr::ChanSend { channel, value } => measure_non_scalar_param(channel, arrays, structs)
+            .or_else(|| measure_non_scalar_param(value, arrays, structs)),
+        Expr::ChanRecv { channel } => measure_non_scalar_param(channel, arrays, structs),
+        _ => None,
+    }
+}
+
+fn measure_non_scalar_param_stmt(
+    stmt: &Stmt,
+    arrays: &HashSet<&str>,
+    structs: &HashSet<&str>,
+) -> Option<String> {
+    match stmt {
+        Stmt::Block(stmts, _) => stmts
+            .iter()
+            .find_map(|stmt| measure_non_scalar_param_stmt(stmt, arrays, structs)),
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            measure_non_scalar_param(value, arrays, structs)
+        }
+        Stmt::ArrayStore { index, value, .. } => measure_non_scalar_param(index, arrays, structs)
+            .or_else(|| measure_non_scalar_param(value, arrays, structs)),
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => measure_non_scalar_param(cond, arrays, structs)
+            .or_else(|| measure_non_scalar_param(invariant, arrays, structs))
+            .or_else(|| {
+                decreases
+                    .as_ref()
+                    .and_then(|measure| measure_non_scalar_param(measure, arrays, structs))
+            })
+            .or_else(|| measure_non_scalar_param_stmt(body, arrays, structs)),
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            measure_non_scalar_param_stmt(body, arrays, structs)
+        }
+        Stmt::TaskGroup { children, .. } => children
+            .iter()
+            .find_map(|child| measure_non_scalar_param_stmt(child, arrays, structs)),
+        Stmt::Expr(expr, _) => measure_non_scalar_param(expr, arrays, structs),
+        Stmt::Cancel { .. } => None,
     }
 }
 
@@ -394,11 +685,40 @@ fn is_scalar_int_or_bool(module_env: &ModuleEnv, type_name: Option<&str>) -> boo
     }
 }
 
-/// Check that `atom`'s `decreases` measure is call-free and only references
-/// the atom's own params (plus literals/arithmetic).
-fn measure_is_valid(atom: &Atom) -> Result<(), String> {
+fn array_element_type(type_name: &str) -> Option<&str> {
+    let trimmed = type_name.trim();
+    trimmed
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .map(str::trim)
+}
+
+/// Check that `atom`'s `decreases` measure uses only the permitted projections
+/// of its own parameters (plus literals/arithmetic).
+fn measure_is_valid(module_env: &ModuleEnv, atom: &Atom) -> Result<(), String> {
     let measures = measure_components(atom.decreases.as_deref().unwrap_or(""));
     let params: HashSet<&str> = atom.params.iter().map(|p| p.name.as_str()).collect();
+    let array_params: HashSet<&str> = atom
+        .params
+        .iter()
+        .filter(|p| {
+            p.type_name
+                .as_deref()
+                .and_then(array_element_type)
+                .is_some()
+        })
+        .map(|p| p.name.as_str())
+        .collect();
+    let struct_params: HashSet<&str> = atom
+        .params
+        .iter()
+        .filter(|p| {
+            p.type_name
+                .as_deref()
+                .is_some_and(|type_name| module_env.get_struct(type_name.trim()).is_some())
+        })
+        .map(|p| p.name.as_str())
+        .collect();
     for measure in measures {
         if measure.is_empty() {
             return Err(format!(
@@ -407,10 +727,22 @@ fn measure_is_valid(atom: &Atom) -> Result<(), String> {
             ));
         }
         let ast = parse_expression(&measure);
-        if !collect_call_edges_expr(&ast).is_empty() {
+        if measure_contains_array_access(&ast) {
+            return Err(format!(
+                "decreases measure of atom '{}' must not read array elements",
+                atom.name
+            ));
+        }
+        if measure_contains_disallowed_call(&ast, &array_params) {
             return Err(format!(
                 "decreases measure of atom '{}' must not contain calls",
                 atom.name
+            ));
+        }
+        if let Some(param) = measure_non_scalar_param(&ast, &array_params, &struct_params) {
+            return Err(format!(
+                "decreases measure of atom '{}' uses non-scalar parameter '{}' directly",
+                atom.name, param
             ));
         }
         if has_tuple_comma(&measure) {
@@ -433,7 +765,7 @@ fn measure_is_valid(atom: &Atom) -> Result<(), String> {
 
 /// First non-decreases eligibility failure for `member`, or None.
 fn member_unsupported_reason(module_env: &ModuleEnv, member: &Atom) -> Option<String> {
-    if let Err(reason) = measure_is_valid(member) {
+    if let Err(reason) = measure_is_valid(module_env, member) {
         return Some(reason);
     }
     if !member.effects.is_empty() {
@@ -474,11 +806,62 @@ fn member_unsupported_reason(module_env: &ModuleEnv, member: &Atom) -> Option<St
             member.return_type.as_deref().unwrap_or("")
         ));
     }
-    if let Some(param) = member
-        .params
-        .iter()
-        .find(|p| !is_scalar_int_or_bool(module_env, p.type_name.as_deref()))
-    {
+    for param in &member.params {
+        let type_name = param.type_name.as_deref().map(str::trim);
+        if is_scalar_int_or_bool(module_env, type_name) {
+            continue;
+        }
+
+        if let Some(element_type) = type_name.and_then(array_element_type) {
+            if crate::verification::translator::atom_stores_to_array(
+                module_env,
+                member,
+                &param.name,
+            ) {
+                return Some(format!(
+                    "atom '{}' may store into array parameter '{}'",
+                    member.name, param.name
+                ));
+            }
+            if element_type.is_empty()
+                || element_type.starts_with('[')
+                || module_env.get_struct(element_type).is_some()
+                || module_env.get_enum(element_type).is_some()
+                || module_env.get_type(element_type).is_some()
+                || !is_scalar_int_or_bool(module_env, Some(element_type))
+            {
+                return Some(format!(
+                    "atom '{}' parameter '{}' has an unsupported array element type '{}'",
+                    member.name, param.name, element_type
+                ));
+            }
+            continue;
+        }
+
+        if let Some(sdef) = type_name.and_then(|name| module_env.get_struct(name)) {
+            let fields_supported = sdef
+                .fields
+                .iter()
+                .all(|field| is_scalar_int_or_bool(module_env, Some(field.type_name.trim())));
+            let constraints_call_free = sdef.fields.iter().all(|field| {
+                field
+                    .constraint
+                    .as_deref()
+                    .is_none_or(|text| collect_call_edges_expr(&parse_expression(text)).is_empty())
+            });
+            let invariants_call_free = sdef
+                .invariants
+                .iter()
+                .all(|text| collect_call_edges_expr(&parse_expression(text)).is_empty());
+            if !fields_supported || !constraints_call_free || !invariants_call_free {
+                return Some(format!(
+                    "atom '{}' parameter '{}' has struct type '{}' with non-scalar fields or call-containing constraints/invariants",
+                    member.name, param.name, sdef.name
+                ));
+            }
+            continue;
+        }
+
         return Some(format!(
             "atom '{}' parameter '{}' has a non-scalar type",
             member.name, param.name
@@ -678,7 +1061,42 @@ pub fn recursive_contract_hint_diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use super::{has_tuple_comma, measure_components};
+    use super::{
+        has_tuple_comma, measure_components, member_unsupported_reason,
+        recursive_contract_hint_diagnostic,
+    };
+    use crate::parser::Item;
+    use crate::verification::module_env::ModuleEnv;
+
+    #[test]
+    fn unsupported_float_array_parameter_has_hint_reason() {
+        let items = crate::parser::parse_module(
+            r#"
+atom bad(a: [f64]) -> i64
+    requires: len(a) >= 0;
+    ensures: result == bad(a) + 1;
+    decreases: len(a);
+    body: 0;
+"#,
+        );
+        let mut module_env = ModuleEnv::new();
+        for item in items {
+            match item {
+                Item::Atom(atom) => module_env.register_atom(&atom),
+                Item::StructDef(sdef) => module_env.register_struct(&sdef),
+                Item::TypeDef(refined) => module_env.register_type(&refined),
+                Item::EnumDef(edef) => module_env.register_enum(&edef),
+                _ => {}
+            }
+        }
+        let atom = module_env.get_atom("bad").unwrap();
+        let reason = "atom 'bad' parameter 'a' has an unsupported array element type 'f64'";
+        assert_eq!(
+            member_unsupported_reason(&module_env, atom).as_deref(),
+            Some(reason)
+        );
+        assert!(recursive_contract_hint_diagnostic(atom, &module_env).is_some());
+    }
 
     #[test]
     fn splits_only_outer_decreases_tuples() {

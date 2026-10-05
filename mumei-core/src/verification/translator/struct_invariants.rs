@@ -198,6 +198,39 @@ pub(crate) fn lower_struct_invariant<'a>(
     })
 }
 
+/// Lower the complete struct contract against `fields`.
+///
+/// Field constraints use `v` as their field value and invariants use the same
+/// `self.<field>`/bare-field bindings as `assume_struct_invariants`. Keeping
+/// both forms in one helper ensures call-site domain facts cannot drift from
+/// the assumptions made for a struct parameter's body.
+pub(crate) fn lower_struct_contract<'a>(
+    vc: &VCtx<'a>,
+    sdef: &StructDef,
+    fields: &[(String, Dynamic<'a>)],
+    env: &Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> MumeiResult<Vec<(String, Bool<'a>)>> {
+    let mut facts = Vec::new();
+    for (field, (_, field_z3)) in sdef.fields.iter().zip(fields) {
+        let Some(constraint_raw) = &field.constraint else {
+            continue;
+        };
+        let mut local_env = env.clone();
+        local_env.insert("v".to_string(), field_z3.clone());
+        let ast = normalize_comparison_chains(parse_expression(constraint_raw));
+        let constraint = expr_to_z3(vc, &ast, &mut local_env, None)?;
+        if let Some(constraint) = constraint.as_bool() {
+            facts.push((format!("field::{}", field.name), constraint));
+        }
+    }
+    for (index, invariant_raw) in sdef.invariants.iter().enumerate() {
+        let invariant = lower_struct_invariant(vc, sdef, invariant_raw, fields, env, solver_opt)?;
+        facts.push((format!("invariant::{index}"), invariant));
+    }
+    Ok(facts)
+}
+
 /// Assume the whole struct contract of `sdef` for the field values of
 /// `binding`: the per-field `where v ...` refinements, then every invariant.
 pub(crate) fn assume_struct_contract<'a>(
@@ -209,22 +242,19 @@ pub(crate) fn assume_struct_contract<'a>(
     env: &Env<'a>,
     span: Option<String>,
 ) -> MumeiResult<()> {
-    for (field, (_, field_z3)) in sdef.fields.iter().zip(fields) {
-        let Some(constraint_raw) = &field.constraint else {
-            continue;
+    for (kind, fact) in lower_struct_contract(vc, sdef, fields, env, Some(solver))? {
+        let track_label = match kind.strip_prefix("field::") {
+            Some(field) => format!("track_struct_field_{}::{}", binding, field),
+            None => {
+                let index = kind.strip_prefix("invariant::").unwrap_or("unknown");
+                format!("track_struct_invariant_{}::{}", binding, index)
+            }
         };
-        let mut local_env = env.clone();
-        local_env.insert("v".to_string(), field_z3.clone());
-        let ast = normalize_comparison_chains(parse_expression(constraint_raw));
-        let constraint = expr_to_z3(vc, &ast, &mut local_env, None)?;
-        if let Some(constraint) = constraint.as_bool() {
-            let track_label = format!("track_struct_field_{}::{}", binding, field.name);
-            let track_bool = Bool::new_const(vc.ctx, track_label.as_str());
-            solver.assert_and_track(&constraint, &track_bool);
-            profile_solver_assertion(vc, &track_label, span.clone());
-        }
+        let track_bool = Bool::new_const(vc.ctx, track_label.as_str());
+        solver.assert_and_track(&fact, &track_bool);
+        profile_solver_assertion(vc, &track_label, span.clone());
     }
-    assume_struct_invariants(vc, solver, sdef, binding, fields, env, span)
+    Ok(())
 }
 
 /// Assume every invariant of `sdef` for the field values of `binding`.
