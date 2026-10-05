@@ -1110,6 +1110,40 @@ fn test_stale_cache_on_callee_effects_change() {
     );
 }
 
+#[test]
+fn test_stale_cache_on_callee_refinement_change() {
+    let changed_refinement = NAT_REFINEMENT_REPRO.replace("v >= 0", "v >= -1");
+    let (first, second) = verify_twice(
+        "cache_refinement",
+        NAT_REFINEMENT_REPRO,
+        &changed_refinement,
+        "bad",
+    );
+    assert_case(first, "verified");
+    let fresh = verify("cache_refinement_fresh", &changed_refinement, "bad");
+    assert_ne!(
+        fresh.verdict().as_deref(),
+        Some("verified"),
+        "fresh verification of the changed refinement unexpectedly succeeded"
+    );
+    assert!(
+        second.did_not_crash(),
+        "cached run crashed; stderr:\n{}",
+        String::from_utf8_lossy(&second.output.stderr)
+    );
+    assert_ne!(
+        second.verdict().as_deref(),
+        Some("verified"),
+        "bad must not verify from a stale cache entry"
+    );
+    assert_eq!(
+        second.output.status.code(),
+        fresh.output.status.code(),
+        "cached run must match a fresh run of the changed refinement; fresh stdout:\n{}",
+        String::from_utf8_lossy(&fresh.output.stdout)
+    );
+}
+
 // The bind-time pass over a lambda body uses arbitrary param constants, so
 // recursive calls there are not congruent; the real invocation through
 // `apply_local_lambda` runs the full congruent path. Callees keep

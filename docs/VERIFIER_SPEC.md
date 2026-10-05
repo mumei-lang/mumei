@@ -428,7 +428,8 @@ Rules:
   `recursive_contract_unsupported` (any other D1 failure) diagnostic. Neither
   changes the verdict. `recursion.rs::recursive_contract_hint_diagnostic`.
 - **D6 (cache).** The `decreases` text is part of the atom hash and the proof
-  hash, and a callee's `decreases` is part of every caller's proof hash.
+  hash, and a callee's `decreases` and parameter refinement predicates are
+  part of every caller's proof hash.
   `mumei-core/src/resolver/cache.rs`. These rules are enabled by
   `VERIFIER_POLICY_VERSION` 7, tuple measures by version 8, call-arity
   checking by version 9, and constant-argument unfolding by version 10.

@@ -522,6 +522,14 @@ pub fn compute_proof_hash_with_flags(
             for p in &callee_atom.params {
                 hasher.update(b",param_type:");
                 hasher.update(p.type_name.as_deref().unwrap_or("").as_bytes());
+                if let Some(refined) = p.type_name.as_deref().and_then(|t| module_env.get_type(t)) {
+                    hasher.update(b",param_refinement:");
+                    hasher.update(refined.operand.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(refined._base_type.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(refined.predicate_raw.as_bytes());
+                }
                 hasher.update(b",param_mode:");
                 let mode = if p.is_ref_mut {
                     "ref mut"
