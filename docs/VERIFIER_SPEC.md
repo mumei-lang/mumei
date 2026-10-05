@@ -428,10 +428,23 @@ Rules:
   `recursive_contract_unsupported` (any other D1 failure) diagnostic. Neither
   changes the verdict. `recursion.rs::recursive_contract_hint_diagnostic`.
 - **D6 (cache).** The `decreases` text is part of the atom hash and the proof
-  hash, and a callee's `decreases` is part of every caller's proof hash.
+  hash, and a callee's `decreases` and parameter refinement predicates are
+  part of every caller's proof hash.
   `mumei-core/src/resolver/cache.rs`. These rules are enabled by
-  `VERIFIER_POLICY_VERSION` 7, tuple measures by version 8, and call-arity
-  checking by version 9.
+  `VERIFIER_POLICY_VERSION` 7, tuple measures by version 8, call-arity
+  checking by version 9, and constant-argument unfolding by version 10.
+- **D7 (constant-argument unfolding).** For congruent calls with arguments
+  that simplify to constants, made by a caller outside the callee's SCC, the
+  verifier adds instances of
+  `R(c) ⇒ CallerEnsures(c, rec_fn#g(c))` for constant-argument applications
+  found while lowering an instantiated `CallerEnsures`, where `R(c)` is the
+  callee's caller-visible `requires` conjoined with its parameter refinement
+  predicates at `c`. These instances are explored breadth-first, up to
+  `CONSTANT_UNFOLD_DEPTH` (32) generations and `CONSTANT_UNFOLD_MAX_INSTANCES`
+  (256) instances. If `R(c)` simplifies to false, the instance is neither
+  assumed nor expanded. Calls deeper than the bound keep the D3 behavior, and
+  SCC-internal calls are unchanged. See
+  `mumei-core/src/verification/translator/expr.rs::unfold_constant_calls`.
 
 ## Keeping this document in sync
 

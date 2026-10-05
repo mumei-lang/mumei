@@ -178,7 +178,33 @@ atom use_tri(n: i64)
 const TRI_CONST: &str = r#"
 atom tri(n: i64)
     requires: n >= 0;
-    ensures: result >= 0 && (n == 0 || result == n + tri(n - 1));
+    ensures: result >= 0 && ((n == 0 && result == 0) || (n > 0 && result == n + tri(n - 1)));
+    decreases: n;
+    body: if n == 0 { 0 } else { n + tri(n - 1) };
+
+atom tri3()
+    ensures: result == 6;
+    body: tri(3);
+"#;
+
+const NAT_REFINEMENT_REPRO: &str = r#"
+type Nat = i64 where v >= 0;
+
+atom f(n: Nat) -> i64
+    ensures: (n == 0 && result == 0) || (n > 0 && result == 1 + f(n - 1));
+    decreases: n;
+    body: if n == 0 { 0 } else { 1 + f(n - 1) };
+
+atom bad() -> i64
+    ensures: result == 0;
+    body: f(0);
+"#;
+
+const NAT_TRI_CONST: &str = r#"
+type Nat = i64 where v >= 0;
+
+atom tri(n: Nat) -> i64
+    ensures: (n == 0 && result == 0) || (n > 0 && result == n + tri(n - 1));
     decreases: n;
     body: if n == 0 { 0 } else { n + tri(n - 1) };
 
@@ -754,15 +780,86 @@ fn test_caller_of_decreased_atom_verifies() {
 }
 
 #[test]
-fn test_constant_unfolding_does_not_crash() {
-    // Only one unfolding is instantiated for a concrete argument, so this is
-    // expected to be unprovable; the meaningful assertion is no crash.
+fn test_constant_argument_call_unfolds_and_verifies() {
     let case = verify("tri3", TRI_CONST, "tri3");
-    assert!(case.did_not_crash());
-    eprintln!(
-        "tri3 observed verdict: {:?}",
-        case.verdict().as_deref().unwrap_or("<none>")
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_constant_argument_call_with_wrong_spec_fails() {
+    let source = TRI_CONST.replace("result == 6;", "result == 7;");
+    let case = verify("tri3_wrong", &source, "tri3");
+    assert_case(case, "failed");
+}
+
+#[test]
+fn test_refined_parameter_predicates_guard_constant_unfolding() {
+    let valid = verify("refined_nat", NAT_REFINEMENT_REPRO, "bad");
+    assert_case(valid, "verified");
+
+    let wrong_source =
+        NAT_REFINEMENT_REPRO.replace("ensures: result == 0;", "ensures: result == 999;");
+    let wrong = verify("refined_nat_wrong", &wrong_source, "bad");
+    assert!(
+        !wrong.diagnostic_message_contains("failed", "Contradiction found"),
+        "wrong refined postcondition must fail without a contradiction diagnostic: {:?}",
+        wrong.verdict()
     );
+    assert_case(wrong, "failed");
+}
+
+#[test]
+fn test_constant_refined_nat_argument_unfolds_without_requires() {
+    let case = verify("nat_tri3", NAT_TRI_CONST, "tri3");
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_constant_argument_unfolding_respects_depth_bound() {
+    let tri32 = TRI_CONST
+        .replace("atom tri3()", "atom tri32()")
+        .replace("result == 6", "result == 528")
+        .replace("tri(3);", "tri(32);");
+    let case = verify("tri32", &tri32, "tri32");
+    assert_case(case, "verified");
+
+    let tri40 = TRI_CONST
+        .replace("atom tri3()", "atom tri40()")
+        .replace("result == 6", "result == 820")
+        .replace("tri(3);", "tri(40);");
+    let case = verify("tri40", &tri40, "tri40");
+    assert_case(case, "failed");
+}
+
+#[test]
+fn test_constant_argument_call_unfolds_in_bitvec_mode() {
+    // Bare `3` lowers as Int, so it misses `tri`'s BV64 parameter sort.
+    let tri_bitvec = TRI_CONST
+        .replace("ensures: result >= 0 && ", "ensures: ")
+        .replace("body: tri(3);", "body: tri(3 + 0);");
+    let case = verify_with_args("tri3_bitvec", &tri_bitvec, "tri3", &["--bitvec-i64"]);
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_constant_argument_call_unfolds_mutual_recursion() {
+    let source =
+        format!("{MUTUAL_DEC}\natom odd3() -> bool\n    ensures: result;\n    body: is_odd(3);\n");
+    let case = verify("odd3", &source, "odd3");
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_nonconstant_argument_call_does_not_unfold() {
+    let tri_definition = TRI_CONST
+        .split("\natom tri3()")
+        .next()
+        .expect("TRI_CONST has tri definition");
+    let source = format!(
+        "{tri_definition}\natom trin(n: i64)\n    requires: n >= 0;\n    ensures: result == n * (n + 1) / 2;\n    body: tri(n);\n"
+    );
+    let case = verify("trin", &source, "trin");
+    assert_case(case, "failed");
 }
 
 #[test]
@@ -1009,6 +1106,40 @@ fn test_stale_cache_on_callee_effects_change() {
         second.output.status.code(),
         fresh.output.status.code(),
         "cached run must match a fresh run of the new source; fresh stdout:\n{}",
+        String::from_utf8_lossy(&fresh.output.stdout)
+    );
+}
+
+#[test]
+fn test_stale_cache_on_callee_refinement_change() {
+    let changed_refinement = NAT_REFINEMENT_REPRO.replace("v >= 0", "v >= -1");
+    let (first, second) = verify_twice(
+        "cache_refinement",
+        NAT_REFINEMENT_REPRO,
+        &changed_refinement,
+        "bad",
+    );
+    assert_case(first, "verified");
+    let fresh = verify("cache_refinement_fresh", &changed_refinement, "bad");
+    assert_ne!(
+        fresh.verdict().as_deref(),
+        Some("verified"),
+        "fresh verification of the changed refinement unexpectedly succeeded"
+    );
+    assert!(
+        second.did_not_crash(),
+        "cached run crashed; stderr:\n{}",
+        String::from_utf8_lossy(&second.output.stderr)
+    );
+    assert_ne!(
+        second.verdict().as_deref(),
+        Some("verified"),
+        "bad must not verify from a stale cache entry"
+    );
+    assert_eq!(
+        second.output.status.code(),
+        fresh.output.status.code(),
+        "cached run must match a fresh run of the changed refinement; fresh stdout:\n{}",
         String::from_utf8_lossy(&fresh.output.stdout)
     );
 }

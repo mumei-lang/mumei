@@ -19,7 +19,10 @@ use std::path::Path;
 /// Version 9 rejects calls whose argument count differs from the callee's
 /// parameter count, so earlier "verified" results for such calls must be
 /// re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 9;
+/// Version 10 unfolds constant-argument calls into eligible recursive SCCs
+/// up to a fixed depth, guarding each instance with the callee's requires
+/// and parameter refinements.
+pub const VERIFIER_POLICY_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -519,6 +522,14 @@ pub fn compute_proof_hash_with_flags(
             for p in &callee_atom.params {
                 hasher.update(b",param_type:");
                 hasher.update(p.type_name.as_deref().unwrap_or("").as_bytes());
+                if let Some(refined) = p.type_name.as_deref().and_then(|t| module_env.get_type(t)) {
+                    hasher.update(b",param_refinement:");
+                    hasher.update(refined.operand.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(refined._base_type.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(refined.predicate_raw.as_bytes());
+                }
                 hasher.update(b",param_mode:");
                 let mode = if p.is_ref_mut {
                     "ref mut"
