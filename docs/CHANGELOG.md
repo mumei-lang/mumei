@@ -6,6 +6,16 @@
 
 ---
 
+### 2026-10-04: verify clears stale report.json on early exit
+
+- `mumei verify` now removes an existing `report.json` from the output
+  directory when it exits before verifying any atom (missing/unreadable
+  input, cross-spec load failure, unavailable Z3, or a directory with no
+  `.mm` files), so a stale report can no longer be read back as the
+  current run's result.
+
+---
+
 ### 2026-10-04: leaf emitters read HIR metadata (emitter ABI 3)
 
 - JSON, C header, and proof book now read signature, contract, and metadata

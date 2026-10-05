@@ -373,6 +373,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     json,
                 );
             }
+            discard_stale_report(report_dir.as_deref());
             warn_phase_artifact_write_failures();
             std::process::exit(EXIT_INPUT_ERROR);
         }
@@ -444,6 +445,10 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     emit_contract_manifest,
                     enable_vacuity_check,
                     detect_loops,
+                    // Only the first file may discard report.json: a later
+                    // file's early exit must not delete a report this run
+                    // already produced.
+                    discard_stale_report_on_early_exit: position == 0,
                     suggest_cegis,
                 })
             })) {
@@ -520,6 +525,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                 emit_contract_manifest,
                 enable_vacuity_check,
                 detect_loops,
+                discard_stale_report_on_early_exit: true,
                 suggest_cegis,
             })
         })) {
@@ -657,6 +663,7 @@ pub(crate) struct VerifyOptions<'a> {
     pub(crate) emit_contract_manifest: bool,
     pub(crate) enable_vacuity_check: bool,
     pub(crate) detect_loops: bool,
+    pub(crate) discard_stale_report_on_early_exit: bool,
     suggest_cegis: bool,
 }
 
@@ -1452,6 +1459,13 @@ impl Drop for ReportStaging {
     }
 }
 
+/// An early exit verified no atom, so a report.json from an earlier run must
+/// not survive as this run's result.
+fn discard_stale_report(report_dir: Option<&str>) {
+    let dir = report_dir.map_or(Path::new("."), Path::new);
+    let _ = std::fs::remove_file(dir.join("report.json"));
+}
+
 /// Creates a fresh, process-private staging dir under temp_dir. The name is
 /// unpredictable enough for collisions to be rare, but creation is still
 /// exclusive (non-recursive `DirBuilder`, mode 0o700 on unix) so a pre-created
@@ -1526,6 +1540,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         emit_contract_manifest,
         enable_vacuity_check,
         detect_loops,
+        discard_stale_report_on_early_exit,
         suggest_cegis,
     } = options;
     let sarif_result_start = sarif.map_or(0, |collector| collector.borrow().results.len());
@@ -1537,6 +1552,9 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
     let quiet_output = json_output || structured_feedback_stdout || loss_vector_stdout;
     if let Err(message) = z3_availability() {
         eprintln!("{message}");
+        if discard_stale_report_on_early_exit {
+            discard_stale_report(report_dir);
+        }
         return early_outcome(VerifyOutcome::InternalError, &message, json_output);
     }
     let manifest_config = manifest::find_and_load();
@@ -1574,6 +1592,9 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
             Ok(result) => result,
             Err(e) => {
                 eprintln!("  ❌ {e}");
+                if discard_stale_report_on_early_exit {
+                    discard_stale_report(report_dir);
+                }
                 return early_outcome(VerifyOutcome::InputError, &e, json_output);
             }
         };
@@ -1587,6 +1608,9 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         !quiet_output,
     ) {
         eprintln!("  ❌ {e}");
+        if discard_stale_report_on_early_exit {
+            discard_stale_report(report_dir);
+        }
         return early_outcome(VerifyOutcome::InputError, &e, json_output);
     }
 

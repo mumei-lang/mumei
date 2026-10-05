@@ -137,3 +137,112 @@ fn stale_report_json_is_removed_when_run_writes_none() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+const EXIT_INPUT_ERROR: i32 = 4;
+
+fn seed_stale_report(dir: &Path) {
+    std::fs::write(dir.join("report.json"), "{\"atom\":\"stale_atom\"}").expect("seed report.json");
+}
+
+fn verify(dir: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("verify")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("run mumei verify")
+}
+
+fn assert_input_error_and_report_gone(output: &Output, report_dir: &Path) {
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_INPUT_ERROR),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !report_dir.join("report.json").exists(),
+        "an early exit must remove a stale report.json"
+    );
+}
+
+#[test]
+fn early_exit_on_missing_input_removes_stale_report_in_cwd() {
+    let dir = fresh_dir("early_missing");
+    seed_stale_report(&dir);
+    let output = verify(&dir, &["does_not_exist.mm"]);
+    assert_input_error_and_report_gone(&output, &dir);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn early_exit_on_missing_input_removes_stale_report_in_report_dir() {
+    let dir = fresh_dir("early_missing_rd");
+    let report_dir = fresh_dir("early_missing_rd_out");
+    seed_stale_report(&report_dir);
+    let output = verify(
+        &dir,
+        &[
+            "--report-dir",
+            report_dir.to_str().expect("utf8 report dir"),
+            "does_not_exist.mm",
+        ],
+    );
+    assert_input_error_and_report_gone(&output, &report_dir);
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&report_dir).ok();
+}
+
+#[test]
+fn early_exit_on_missing_cross_spec_removes_stale_report() {
+    let dir = fresh_dir("early_xspec");
+    copy_fixture(
+        &dir,
+        "tests/positive/infer_invariant_counter.mm",
+        "counter.mm",
+    );
+    seed_stale_report(&dir);
+    let output = verify(
+        &dir,
+        &["--cross-spec-files", "does_not_exist.mm", "counter.mm"],
+    );
+    assert_input_error_and_report_gone(&output, &dir);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn early_exit_on_empty_directory_removes_stale_report() {
+    let dir = fresh_dir("early_emptydir");
+    let empty = dir.join("empty");
+    std::fs::create_dir_all(&empty).expect("create empty dir");
+    seed_stale_report(&dir);
+    let output = verify(&dir, &["empty"]);
+    assert_input_error_and_report_gone(&output, &dir);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn directory_run_keeps_report_written_by_an_earlier_file() {
+    let dir = fresh_dir("dir_run");
+    let input = dir.join("input");
+    std::fs::create_dir_all(&input).expect("create input dir");
+    // a_ok.mm verifies and publishes its report.json; b_bad.mm sorts after it
+    // and fails to load, so its early exit must not delete that report.
+    copy_fixture(
+        &input,
+        "tests/positive/infer_invariant_counter.mm",
+        "a_ok.mm",
+    );
+    std::fs::write(input.join("b_bad.mm"), "atom broken(\n").expect("write b_bad.mm");
+    seed_stale_report(&dir);
+    let output = verify(&dir, &[input.to_str().expect("utf8 input dir")]);
+    // The directory run as a whole fails (b_bad is an input error) but the
+    // report a_ok published must survive.
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("report.json")).expect("report.json in cwd"),
+    )
+    .expect("parse report.json");
+    assert_eq!(report["atom"], serde_json::json!("infer_counter"));
+    std::fs::remove_dir_all(&dir).ok();
+}

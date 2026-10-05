@@ -12,6 +12,9 @@ Without `--report-dir`, per-atom reports are staged in a private temp dir and
 the final `report.json` is published to the current directory when the run
 ends, so concurrent runs in the same directory each print their own result;
 the copy left in the directory is from whichever run finished last.
+An early exit before any atom is verified — an input error, a cross-spec load
+failure, or unavailable Z3 — removes any `report.json` already present in the
+output directory so it cannot be mistaken for this run's result.
 
 ## Rich Diagnostics
 
