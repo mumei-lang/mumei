@@ -3,6 +3,10 @@
 - Python and Rust wrappers now read their signatures and exact contract text
   from HIR while retaining their string translators; emitted output is
   unchanged, and there is no emitter ABI change.
+- The runtime monitor now reads signature, exact contract text,
+  `effect_pre`, and trust boundaries from HIR metadata computed with
+  `ModuleEnv::extern_blocks`; its output is unchanged and the emitter ABI
+  remains 3.
 
 ---
 

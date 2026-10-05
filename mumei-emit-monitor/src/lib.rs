@@ -18,8 +18,7 @@
 use mumei_core::emitter::{Artifact, ArtifactKind, Emitter};
 use mumei_core::hir::HirAtom;
 use mumei_core::lowering::{lower, LoweredType};
-use mumei_core::parser::{Atom, ExternBlock};
-use mumei_core::trust_boundary::{classify_trust_boundaries, TrustBoundaryKind};
+use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiResult};
 use std::path::Path;
 
@@ -244,21 +243,24 @@ fn monitor_condition(contract: &str) -> Option<&str> {
 }
 
 /// Generate the monitor module for a trust-boundary atom.
-pub fn generate_monitor(
-    atom: &Atom,
-    module_env: &ModuleEnv,
-    boundaries: &[TrustBoundaryKind],
-) -> String {
-    let fn_name = atom.name.replace("::", "_");
-    let params: Vec<(String, String)> = atom
+pub fn generate_monitor(hir_atom: &HirAtom, module_env: &ModuleEnv) -> String {
+    let signature = &hir_atom.signature;
+    let contract = &hir_atom.contract;
+    let meta = &hir_atom.meta;
+    let boundaries = &meta.trust_boundaries;
+    let fn_name = signature.name.replace("::", "_");
+    let params: Vec<(String, String)> = signature
         .params
         .iter()
         .map(|p| {
-            let type_name = p.type_name.as_deref().unwrap_or("i64");
-            (p.name.clone(), rust_type(type_name, module_env))
+            let type_name = p.ty.as_deref().unwrap_or("i64");
+            (p.declared_name(), rust_type(type_name, module_env))
         })
         .collect();
-    let return_type = rust_type(atom.return_type.as_deref().unwrap_or("i64"), module_env);
+    let return_type = rust_type(
+        signature.return_type.as_deref().unwrap_or("i64"),
+        module_env,
+    );
     let boundary_tag = boundaries
         .iter()
         .map(|kind| kind.as_str())
@@ -286,7 +288,7 @@ pub fn generate_monitor(
 
     rs.push_str(&format!(
         "/// Monitored trust boundary `{}`.\n///\n",
-        atom.name
+        signature.name
     ));
     for kind in boundaries {
         rs.push_str(&format!("/// - {}: {}\n", kind.as_str(), kind.rationale()));
@@ -307,7 +309,7 @@ pub fn generate_monitor(
     let violation = |contract_kind: &str, contract: &str| {
         format!(
             "mumei_monitor::Violation {{\n            atom: \"{atom}\",\n            boundary: \"{boundary}\",\n            contract: \"{kind}\",\n            expression: \"{expr}\",\n            observed: None,\n        }}",
-            atom = escape(&atom.name),
+            atom = escape(&signature.name),
             boundary = escape(&boundary_tag),
             kind = contract_kind,
             expr = escape(contract),
@@ -337,21 +339,22 @@ pub fn generate_monitor(
     // `effect_pre` is an assumption the proof makes about the caller's state.
     // It is only checkable when the host installs an effect-state probe; with
     // no probe the state is unobservable and nothing is reported.
-    let mut effect_pre: Vec<(&String, &String)> = atom.effect_pre.iter().collect();
+    let mut effect_pre: Vec<(&String, &String)> = meta.effect_pre.iter().collect();
     effect_pre.sort();
     for (effect, state) in effect_pre {
         rs.push_str(&format!(
             "    if mumei_monitor::enabled() {{\n        if let Some(observed) = mumei_monitor::observed_effect_state(\"{effect}\") {{\n            if observed != \"{state}\" {{\n                mumei_monitor::record(mumei_monitor::Violation {{\n                    atom: \"{atom}\",\n                    boundary: \"{boundary}\",\n                    contract: \"effect_pre\",\n                    expression: \"{effect}: {state}\",\n                    observed: Some(observed),\n                }});\n            }}\n        }}\n    }}\n",
             effect = escape(effect),
             state = escape(state),
-            atom = escape(&atom.name),
+            atom = escape(&signature.name),
             boundary = escape(&boundary_tag),
         ));
     }
 
-    match monitor_condition(&atom.requires) {
+    match monitor_condition(&contract.requires_text) {
         Some(condition) => rs.push_str(&check("requires", condition)),
-        None if atom.requires.trim().is_empty() || atom.requires.trim() == "true" => {}
+        None if contract.requires_text.trim().is_empty()
+            || contract.requires_text.trim() == "true" => {}
         None => rs.push_str(&unchecked("requires")),
     }
 
@@ -365,9 +368,10 @@ pub fn generate_monitor(
             .join(", ")
     ));
 
-    match monitor_condition(&atom.ensures) {
+    match monitor_condition(&contract.ensures_text) {
         Some(condition) => rs.push_str(&check("ensures", condition)),
-        None if atom.ensures.trim().is_empty() || atom.ensures.trim() == "true" => {}
+        None if contract.ensures_text.trim().is_empty()
+            || contract.ensures_text.trim() == "true" => {}
         None => rs.push_str(&unchecked("ensures")),
     }
 
@@ -384,16 +388,15 @@ impl Emitter for RuntimeMonitorEmitter {
         hir_atom: &HirAtom,
         output_path: &Path,
         module_env: &ModuleEnv,
-        extern_blocks: &[ExternBlock],
+        _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
-        let atom = &hir_atom.atom;
-        let boundaries = classify_trust_boundaries(atom, extern_blocks);
+        let boundaries = &hir_atom.meta.trust_boundaries;
         if boundaries.is_empty() {
             // Proven, self-contained atom: zero-cost, no artifact.
             return Ok(vec![]);
         }
 
-        let source = generate_monitor(atom, module_env, &boundaries);
+        let source = generate_monitor(hir_atom, module_env);
         Ok(vec![Artifact {
             name: output_path.with_extension("monitor.rs"),
             data: source.into_bytes(),
@@ -406,7 +409,7 @@ impl Emitter for RuntimeMonitorEmitter {
 mod tests {
     use super::*;
     use mumei_core::hir::{lower_atom_metadata, HirEffectSet, HirExpr, HirStmt};
-    use mumei_core::parser::ast::{Expr, Param, Span, Stmt, TrustLevel};
+    use mumei_core::parser::ast::{Atom, Expr, Param, Span, Stmt, TrustLevel};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
