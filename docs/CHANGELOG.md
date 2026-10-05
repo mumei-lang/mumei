@@ -1,3 +1,11 @@
+### Unreleased
+
+- Python and Rust wrappers now read their signatures and exact contract text
+  from HIR while retaining their string translators; emitted output is
+  unchanged, and there is no emitter ABI change.
+
+---
+
 ### 2026-10-04: verify clears stale report.json on early exit
 
 - `mumei verify` now removes an existing `report.json` from the output

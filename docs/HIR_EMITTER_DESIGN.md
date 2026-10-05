@@ -13,18 +13,17 @@ Status: design only. This document does not change any emitter.
 
 Every emitter should read one input, the HIR of a verified atom, and nothing
 from the parser's AST. Today the `Emitter` trait already receives a `HirAtom`,
-but `HirAtom` carries the whole AST `Atom` and its `Stmt` body, and every
-emitter reaches through `hir_atom.atom` for most of what it prints. The result
-is two sources of truth for one atom: a structured body in HIR, and raw
-strings (`requires`, `ensures`, `body_expr`) plus AST metadata in `Atom`.
+but `HirAtom` still carries the whole AST `Atom` and its `Stmt` body, and
+several emitters still reach through `hir_atom.atom` for data not yet migrated.
+The HIR and AST therefore contain overlapping representations of an atom's
+signature, contracts, and body.
 
 Making HIR the single input gives:
 
-- one place that decides what a contract clause *is* (its kind, trust mode,
-  label, and lowered expression), so that wrappers and monitors cannot drift
-  from what the verifier checked ([`VERIFIER_SPEC.md`](VERIFIER_SPEC.md),
-  section 3);
-- emitters that no longer re-parse or textually rewrite contract strings;
+- one place that records what a contract clause *is* (its kind, trust mode,
+  label, and lowered expression), while compatibility-sensitive wrappers can
+  keep reading exact source text until a separate behavior-change PR;
+- emitters that no longer read parser AST data;
 - a plugin interface that does not expose the parser's internal types.
 
 Non-goals: changing what any emitter outputs, changing verification, and
@@ -76,7 +75,7 @@ pub trait Emitter {
 | `body` | `HirStmt` | LLVM only |
 | `requires_hir` | `HirExpr` | No (the whole `requires` string lowered as one expression) |
 | `ensures_hir` | `HirExpr` | No (same, for `ensures`) |
-| `atom` | parser `Atom` | Every emitter |
+| `atom` | parser `Atom` | Remaining AST-backed emitters and verifier/CLI consumers |
 | `body_stmt` | parser `Stmt` | No emitter (verification and MIR use it) |
 | `effect_set` | `HirEffectSet` | LLVM (comment in the generated IR) |
 
@@ -91,16 +90,16 @@ lose clause boundaries, labels, and trust modes; nothing reads them today.
 
 ### Survey of the built-in emitters
 
-"AST reads" lists what each emitter takes from the parser types today; "HIR
-replacement" names the HIR type that would provide it. Types marked *new* do not
-exist yet and are introduced by the migration steps below.
+The "AST reads" column records each emitter's pre-migration inputs; "HIR
+replacement" names the fields used or planned for that migration. Types marked
+*new* were introduced by the migration steps below.
 
 | Emitter (target) | Entry point | AST reads today | Other inputs | HIR replacement |
 |---|---|---|---|---|
 | JSON (`verified-json`) | `mumei-emit-json::VerifiedJsonEmitter::emit` | `Atom.name`, `params` (`name`, `type_name`, `is_ref`, `is_ref_mut`), `requires`, `ensures` (strings), `effects[].name`, `return_type`, `trust_level` | — | `HirSignature` (*new*), `HirContract` (*new*) clause text, `HirEffectSet`, `HirAtomMeta.trust_level` (*new*) |
 | Proof book (`proof-book`) | `mumei-emit-proofbook::ProofBookEmitter::emit` | `Atom.name`, `trust_level`, `is_async`, `params`, `return_type`, `requires`, `ensures`, `effects`, `effect_pre`, `effect_post`, `resources`; whole `Atom` for `compute_atom_content_hash_v2` | `ModuleEnv::resolve_base_type` | `HirSignature`, `HirContract`, `HirEffectSet` plus *new* effect-state and resource fields on `HirAtomMeta`; content hash carried in `HirAtomMeta` |
-| Python (`python-wrapper`) | `mumei-emit-python::PythonWrapperEmitter::emit` | `Atom.name`, `params`, `return_type`, `requires`, `ensures`; contracts rewritten textually by `translate_contract_to_python` | — | `HirSignature`, `HirContract` clause `HirExpr` (print from the tree instead of rewriting strings) |
-| Rust (`rust-wrapper`) | `mumei-emit-rust::RustWrapperEmitter::emit` | `Atom.name`, `params`, `return_type`, `requires`, `ensures`; contracts rewritten by `translate_contract_to_rust` | — | `HirSignature`, `HirContract` clause `HirExpr` |
+| Python (`python-wrapper`) | `mumei-emit-python::PythonWrapperEmitter::emit` | `Atom.name`, `params`, `return_type`, `requires`, `ensures`; contracts rewritten textually by `translate_contract_to_python` | — | `HirSignature`, exact `HirContract.requires_text` / `ensures_text`; retain the string translator |
+| Rust (`rust-wrapper`) | `mumei-emit-rust::RustWrapperEmitter::emit` | `Atom.name`, `params`, `return_type`, `requires`, `ensures`; contracts rewritten by `translate_contract_to_rust` | — | `HirSignature`, exact `HirContract.requires_text` / `ensures_text`; retain the string translator |
 | Runtime monitor (`runtime-monitor`) | `mumei-emit-monitor::RuntimeMonitorEmitter::emit`, `generate_monitor` | Whole `Atom` for `trust_boundary::classify_trust_boundaries`; `name`, `params`, `return_type`, `requires`, `ensures`, `trust_level`, `effect_pre`; contract strings filtered by the character whitelist in `monitor_condition` | `ExternBlock` (extern boundary detection), `ModuleEnv` (type resolution) | `HirSignature`, `HirContract` (clauses with mode, so a monitor can target exactly the assumed clauses), `HirAtomMeta.trust_boundaries` (*new*, computed once in core) |
 | LLVM (`llvm-ir`, also `binary`, `run`, REPL JIT) | `mumei-emit-llvm::LlvmEmitter::emit` → `codegen::compile`; `codegen::compile_atom_into_module`; `binary.rs`; `jit.rs::compile_atom` | `Atom.name`, `params` (`driver.rs`), `return_type` and, when it is absent, `mir::infer_atom_return_type(&Atom)`, which re-lowers the AST (`lowering.rs::resolve_return_type`); `parser::Op`, `JoinSemantics`, `Pattern` inside HIR (`expr_emit.rs`, `pattern_emit.rs`); `binary.rs::rename_calls_in_atom` rewrites `body_expr`, `requires`, `ensures` strings | `ModuleEnv` (`EnumDef`, `StructDef`, type resolution), `ExternBlock` (FFI declarations) | `HirAtom.body` (already), `HirSignature` with a resolved return type, HIR-owned operator / join / pattern types (*new*: `HirBinOp`, `HirJoin`, `HirPattern`); renaming only on `HirStmt` |
 | C header (`c-header`, in core) | `mumei-core/src/emitter.rs::CHeaderEmitter::emit` | `Atom.name`, `params`, `return_type`, `requires`, `ensures` | — | `HirSignature`, `HirContract` |
@@ -172,11 +171,11 @@ Rules the target shape must keep:
   of this atom" is the verifier's. Emitters that need the caller-side
   contract filter clauses by mode exactly as `contract_view` does; the
   filtering helper lives in core next to `contract_view`, not in each emitter.
-- **Fail closed.** A clause that cannot be lowered has `expr: None`. Emitters
-  that need an expression (Python, Rust, monitor) must keep today's behaviour
-  for such a clause — the monitor skips it with its existing "not lowered"
-  path, wrappers print the text as documentation only — and must never treat
-  a missing expression as `true`.
+- **Fail closed.** A clause that cannot be lowered has `expr: None`. The
+  monitor skips it with its existing "not lowered" path. Step 3 keeps the
+  wrappers' exact-text translation and does not print from `expr`; changing
+  how an unlowerable clause is asserted or documented belongs in a separate
+  behavior-change PR.
 - **Same bytes out.** For every atom, each emitter's artifact is byte-identical
   before and after its migration step.
 
@@ -196,10 +195,16 @@ unchanged.
    `consume` marker, exact `requires`/`ensures` text, and ordered declared
    effects. Step 2 adds those fields and bumps the emitter ABI to 3. Proof book
    takes `content_hash` from `meta` instead of hashing the AST.
-3. **Move the wrappers.** Python and Rust print contract expressions from
-   `HirClause::expr` with a small HIR printer instead of
-   `translate_contract_to_python` / `translate_contract_to_rust` string
-   rewriting. Clauses whose `expr` is `None` keep their current handling.
+3. **Move the wrappers.** Python and Rust read `signature` and
+   `contract.requires_text` / `ensures_text` from HIR, retaining their string
+   translators for byte-identical output. Printing `HirClause::expr` is
+   deferred because lowering loses source parentheses, represents `!e` as
+   `IfThenElse`, rewrites `-x` as `0 - x`, and normalizes comparison chains.
+   A separate behavior-change PR can add an HIR expression printer and fix the
+   pre-existing defects: `consume n` appears in wrapper signatures and call
+   arguments, `=>` is untranslated, Python `/` is float division, and
+   quantified requires are not asserted because they are stripped and leave
+   `&& true`.
 4. **Move the runtime monitor.** Read trust boundaries from
    `meta.trust_boundaries` (computed in core by `classify_trust_boundaries`
    from `ModuleEnv::extern_blocks`, which the lowering already receives), and clause expressions from `contract`. The
@@ -265,13 +270,13 @@ any order after step 1.
 
 ### Contract semantics
 
-- Wrappers and monitors currently print `Atom.requires` / `Atom.ensures`, which
-  include `assume` and `check` clauses alike. Moving to `HirContract` makes the
-  mode visible. Whether a wrapper should assert `requires assume` clauses at
-  runtime, or a monitor should check `ensures check` clauses, is a behavioural
-  decision; the migration keeps today's behaviour (all clauses, as printed
-  now) and leaves any change to a separate PR. The policy that PR follows is
-  under "Decisions" below.
+- Wrappers translate the exact `HirContract.requires_text` /
+  `ensures_text`, which include `assume` and `check` clauses alike; the
+  contract also exposes each clause's mode. Whether a wrapper should assert
+  `requires assume` clauses at runtime, or a monitor should check
+  `ensures check` clauses, is a behavioural decision; the migration keeps
+  today's behavior (all clauses, as printed now) and leaves any change to a
+  separate PR. The policy that PR follows is under "Decisions" below.
 
 ## Tests that guard each step
 
@@ -285,7 +290,7 @@ must keep them passing without updating the goldens.
 |---|---|---|
 | 1 | `cargo test -p mumei-core` (HIR lowering, `emitter.rs` unit tests including `test_emitter_abi_version_constant` and `test_emitter_plugin_handle_round_trips_boxed_emitter`), `tests/test_add_emitter.rs` | HIR metadata matches the AST for every field; a plugin built for the previous ABI version is refused by `load_external_emitter_from_path` |
 | 2 | `mumei-emit-json` and `mumei-emit-proofbook` unit tests (including `test_content_hash_matches_proof_cert`), `CHeaderEmitter` unit tests in `emitter.rs` | Goldens for `verified-json`, `c-header`, `proof-book` |
-| 3 | `mumei-emit-python` (`test_contract_translation`) and `mumei-emit-rust` unit tests | Goldens for both wrappers, including a clause that cannot be lowered |
+| 3 | `mumei-emit-python` (`test_contract_translation`) and `mumei-emit-rust` unit tests | Parser-backed byte-exact goldens for both wrappers (quantified requires, qualified names, clause modes, defaults), plus AST-independence checks |
 | 4 | `mumei-emit-monitor` unit tests (`contracts_outside_the_expression_subset_are_not_lowered`, `proven_pure_atom_emits_no_monitor`), `tests/test_runtime_monitor.rs` | Every clause the old whitelist accepted is accepted by the HIR check and no other |
 | 5 | `mumei-emit-llvm` unit tests, `tests/test_codegen_*.rs`, `tests/test_lambda_codegen.rs`, `tests/test_run.rs`, `tests/test_repl.rs` | IR goldens for atoms without an explicit return type; self-recursive `main` in a binary build |
 | 6 | Same as step 5, plus `tests/test_concurrency.rs`, `tests/test_match_arm_scoping.rs`, `tests/test_pattern_lowercase_qual.rs` | Conversion round-trip from parser `Op` / `JoinSemantics` / `Pattern` to the HIR types for every variant |
