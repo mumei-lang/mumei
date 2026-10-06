@@ -50,6 +50,41 @@ atom count(a: [i64], i: i64) -> i64
     body: if i == 0 { 0 } else { count(a, i - 1) };
 "#;
 
+const ARRAY_RECURSIVE_CALL_NO_WRITE: &str = r#"
+atom weak_count(a: [i64], i: i64) -> i64
+    requires: i >= 0;
+    ensures: true;
+    decreases: i;
+    body: if i == 0 { 0 } else { weak_count(a, i - 1) };
+
+atom repeated_call(a: [i64]) -> bool
+    requires: len(a) >= 1;
+    ensures: result == true;
+    body: {
+        let first = weak_count(a, 0);
+        let second = weak_count(a, 0);
+        first == second
+    };
+"#;
+
+const ARRAY_RECURSIVE_CALL_WRITE: &str = r#"
+atom weak_count(a: [i64], i: i64) -> i64
+    requires: i >= 0;
+    ensures: true;
+    decreases: i;
+    body: if i == 0 { 0 } else { weak_count(a, i - 1) };
+
+atom changed_array_call(a: [i64]) -> bool
+    requires: len(a) >= 1;
+    ensures: result == true;
+    body: {
+        let first = weak_count(a, 0);
+        a[0] = a[0] + 1;
+        let second = weak_count(a, 0);
+        first == second
+    };
+"#;
+
 const STRUCT_DOWN: &str = r#"
 struct P {
     n: i64 where v >= 0
@@ -83,6 +118,23 @@ atom use_down_inv(p: P) -> i64
     requires: true;
     ensures: down_inv(p) >= 0;
     body: 0;
+"#;
+
+const STRUCT_CONTRACT_FACT_ORDER: &str = r#"
+atom pos_id(x: i64) -> i64
+    requires: x >= 0;
+    ensures: result == x;
+    body: x;
+
+struct Q {
+    n: i64 where v >= 0,
+    invariant: pos_id(self.n) >= 0
+}
+
+atom use_q(q: Q) -> i64
+    requires: true;
+    ensures: result >= 0;
+    body: q.n;
 "#;
 
 const UNSUPPORTED_REF_MUT_ARRAY: &str = r#"
@@ -1020,6 +1072,29 @@ fn test_array_recursive_contract_carries_length_into_uf_domain() {
 }
 
 #[test]
+fn test_recursive_array_calls_distinguish_a_live_store() {
+    let unchanged = verify(
+        "array_call_without_write",
+        ARRAY_RECURSIVE_CALL_NO_WRITE,
+        "repeated_call",
+    );
+    assert_case(unchanged, "verified");
+
+    let changed = verify(
+        "array_call_after_write",
+        ARRAY_RECURSIVE_CALL_WRITE,
+        "changed_array_call",
+    );
+    assert_case_ref(&changed, "failed");
+    assert_eq!(
+        changed.failure_type().as_deref(),
+        Some("postcondition_violated"),
+        "a write between recursive calls should give an ordinary postcondition failure; report:\n{:?}",
+        changed.report
+    );
+}
+
+#[test]
 fn test_array_length_difference_caller_has_explicit_verified_twin() {
     let explicit_results = ARRAY_COUNT.replace(
         "count(a, 0) == len(a) && count(b, 0) == len(b)",
@@ -1155,6 +1230,16 @@ fn test_struct_recursive_contract_uses_invariant_domain_fact() {
         "wrong invariant-dependent postcondition should fail; report:\n{:?}",
         wrong.report
     );
+}
+
+#[test]
+fn test_struct_contract_fields_are_assumed_before_invariants() {
+    let case = verify(
+        "struct_contract_fact_order",
+        STRUCT_CONTRACT_FACT_ORDER,
+        "use_q",
+    );
+    assert_case(case, "verified");
 }
 
 #[test]

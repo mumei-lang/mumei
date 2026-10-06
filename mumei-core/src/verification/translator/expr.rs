@@ -207,14 +207,16 @@ fn array_element_type_name(type_name: &str) -> Option<&str> {
 /// Expand source parameters into the domain arguments of a congruent
 /// recursive function. Arrays carry their tracked length and structs are
 /// represented by their fields rather than their opaque handles.
-fn expand_rec_fn_args<'a, Length, Field>(
+fn expand_rec_fn_args<'a, Array, Length, Field>(
     kinds: &[RecFnParamKind],
     arg_vals: &[Dynamic<'a>],
     array_len_sort: &Sort<'a>,
+    mut array_for: Array,
     mut length_for: Length,
     mut field_for: Field,
 ) -> Option<Vec<Dynamic<'a>>>
 where
+    Array: FnMut(usize) -> Option<Dynamic<'a>>,
     Length: FnMut(usize) -> Option<Dynamic<'a>>,
     Field: FnMut(usize, usize) -> Option<Dynamic<'a>>,
 {
@@ -226,7 +228,11 @@ where
         match kind {
             RecFnParamKind::Scalar => expanded.push(arg_val.clone()),
             RecFnParamKind::Array => {
-                expanded.push(arg_val.clone());
+                let array = array_for(param_index)?;
+                if array.get_sort() != arg_val.get_sort() {
+                    return None;
+                }
+                expanded.push(array);
                 let length = length_for(param_index)?;
                 if length.get_sort() != array_len_sort.clone() {
                     return None;
@@ -273,6 +279,11 @@ fn rec_fn_args<'a>(
         &array_len_sort,
         |param_index| {
             call_env
+                .get(&format!("__z3_arr_{}", callee.params[param_index].name))
+                .cloned()
+        },
+        |param_index| {
+            call_env
                 .get(&format!("len_{}", callee.params[param_index].name))
                 .cloned()
         },
@@ -288,6 +299,40 @@ fn rec_fn_args<'a>(
                 .cloned()
         },
     )
+}
+
+fn struct_field_values_for_call<'a>(
+    vc: &VCtx<'a>,
+    callee: &Atom,
+    arg_vals: &[Dynamic<'a>],
+    call_env: &Env<'a>,
+    caller_env: &Env<'a>,
+) -> Option<Vec<Dynamic<'a>>> {
+    if callee.params.len() != arg_vals.len() {
+        return None;
+    }
+    let mut field_vals = Vec::new();
+    for (param, arg_val) in callee.params.iter().zip(arg_vals) {
+        let Some(sdef) = param
+            .type_name
+            .as_deref()
+            .and_then(|name| vc.module_env.get_struct(name))
+        else {
+            continue;
+        };
+        if let Some(fields) = struct_fields_of_value(caller_env, arg_val, sdef) {
+            field_vals.extend(fields.into_iter().map(|(_, value)| value));
+        } else {
+            for field in &sdef.fields {
+                field_vals.push(
+                    call_env
+                        .get(&struct_field_key(&param.name, &field.name))?
+                        .clone(),
+                );
+            }
+        }
+    }
+    Some(field_vals)
 }
 
 /// The result sort a `rec_fn#` application for `callee` must produce.
@@ -759,11 +804,10 @@ fn param_domain_facts<'a>(
                         })
                 })
                 .collect::<MumeiResult<_>>()?;
-            facts.extend(
-                lower_struct_contract(vc, sdef, &fields, call_env, None)?
-                    .into_iter()
-                    .map(|(_, fact)| fact),
-            );
+            lower_struct_contract(vc, sdef, &fields, call_env, None, |_, fact| {
+                facts.push(fact);
+                Ok(())
+            })?;
         }
     }
     if facts.is_empty() {
@@ -1725,6 +1769,14 @@ pub(crate) fn expr_to_z3<'a>(
                                         call_env.insert(refined.operand.clone(), val.clone());
                                     }
                                 }
+                            }
+                        }
+
+                        if cong {
+                            if let Some(field_vals) =
+                                struct_field_values_for_call(vc, &callee, &arg_vals, &call_env, env)
+                            {
+                                vc.reject_quantifier_dependent_call(name, &field_vals)?;
                             }
                         }
 
@@ -3695,6 +3747,18 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                     }
 
+                    if cong {
+                        if let Some(field_vals) = struct_field_values_for_call(
+                            vc,
+                            &callee_atom,
+                            &arg_vals,
+                            &call_env,
+                            env,
+                        ) {
+                            vc.reject_quantifier_dependent_call(callee_name, &field_vals)?;
+                        }
+                    }
+
                     if cong && !recursive_instance {
                         termination_obligation_at_call(
                             vc,
@@ -4576,6 +4640,7 @@ mod rec_fn_args_tests {
             &kinds,
             &[array.clone().into()],
             &length_sort,
+            |_| Some(array.clone().into()),
             |_| Some(length_one.clone()),
             |_, _| None,
         )
@@ -4584,6 +4649,7 @@ mod rec_fn_args_tests {
             &kinds,
             &[array.clone().into()],
             &length_sort,
+            |_| Some(array.clone().into()),
             |_| Some(length_two.clone()),
             |_, _| None,
         )

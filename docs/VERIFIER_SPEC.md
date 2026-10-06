@@ -392,8 +392,9 @@ Rules:
   any caller, lowers to the application `rec_fn#g(args)` of one uninterpreted
   function per atom, instead of a fresh `call_<name>_<n>` constant. A scalar
   parameter contributes its value; an array parameter contributes the pair
-  `(array, len_array)`; and a struct parameter contributes its field values in
-  declaration order. The length is a separate UF argument because Z3 arrays
+  `(array, len_array)`, where `array` is the current caller-visible store chain
+  from `__z3_arr_<param>`; and a struct parameter contributes its field values
+  in declaration order. The length is a separate UF argument because Z3 arrays
   are total maps: equal array values do not imply equal separately modelled
   lengths. Passing only the array handle would therefore make calls with
   different lengths spuriously congruent, while passing the opaque struct
@@ -406,6 +407,8 @@ Rules:
   `forall`/`exists` is rejected first by `VCtx::reject_quantifier_dependent_call`,
   recursive calls included, so the enclosing clause is unverifiable (exit `3`)
   and no `rec_fn#` application or termination obligation is built for it.
+  For congruent callees, that check also examines struct field values projected
+  from the caller environment, not only the opaque struct handle.
 - **D3 (assumed ensures).** At a congruent call the callee's caller-visible
   `ensures` is assumed as the implication
   `R(args) ∧ P(args) ⇒ CallerEnsures(args, rec_fn#g(args))`, where `R` is
