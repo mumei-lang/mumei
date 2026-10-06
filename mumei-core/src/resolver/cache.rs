@@ -22,7 +22,9 @@ use std::path::Path;
 /// Version 10 unfolds constant-argument calls into eligible recursive SCCs
 /// up to a fixed depth, guarding each instance with the callee's requires
 /// and parameter refinements.
-pub const VERIFIER_POLICY_VERSION: u32 = 10;
+/// Version 11 admits one-dimensional scalar arrays and scalar-field structs
+/// as recursive-contract parameters, with length/field-valued UF domains.
+pub const VERIFIER_POLICY_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {

@@ -112,6 +112,54 @@ atom all_equal_probe(arr: [i64], n: i64)
 }
 
 #[test]
+fn recursive_struct_call_on_bound_field_is_unverifiable() {
+    let run = verify(
+        "recursive_struct",
+        r#"
+struct P {
+    n: i64
+}
+
+atom down(p: P, fuel: i64) -> i64
+    requires: fuel >= 0;
+    ensures: result == p.n;
+    decreases: fuel;
+    body: if fuel == 0 { p.n } else { down(p, fuel - 1) };
+
+atom struct_q(k: i64) -> i64
+    requires: k >= 0;
+    ensures: forall(i, 0, k, down(P { n: i }, 1) == i);
+    body: 0;
+"#,
+    );
+    assert_unverifiable(&run, "struct_q");
+}
+
+#[test]
+fn recursive_struct_call_ref_on_bound_field_is_unverifiable() {
+    let run = verify(
+        "recursive_struct_call_ref",
+        r#"
+struct P {
+    n: i64
+}
+
+atom down(p: P, fuel: i64) -> i64
+    requires: fuel >= 0;
+    ensures: result == p.n;
+    decreases: fuel;
+    body: if fuel == 0 { p.n } else { down(p, fuel - 1) };
+
+atom struct_q_ref(k: i64) -> i64
+    requires: k >= 0;
+    ensures: forall(i, 0, k, call(atom_ref(down), P { n: i }, 1) == i);
+    body: 0;
+"#,
+    );
+    assert_unverifiable(&run, "struct_q_ref");
+}
+
+#[test]
 fn call_independent_of_bound_variable_still_verifies() {
     // `ident(k)` does not mention `i`, so one shared result is exactly right:
     // every element equals the same value.

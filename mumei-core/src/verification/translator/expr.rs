@@ -189,6 +189,152 @@ fn call_arg_sorts_match<'a>(vc: &VCtx<'a>, callee: &Atom, arg_vals: &[Dynamic<'a
             })
 }
 
+#[derive(Clone, Copy)]
+enum RecFnParamKind {
+    Scalar,
+    Array,
+    Struct(usize),
+}
+
+fn array_element_type_name(type_name: &str) -> Option<&str> {
+    let trimmed = type_name.trim();
+    trimmed
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .map(str::trim)
+}
+
+/// Expand source parameters into the domain arguments of a congruent
+/// recursive function. Arrays carry their tracked length and structs are
+/// represented by their fields rather than their opaque handles.
+fn expand_rec_fn_args<'a, Array, Length, Field>(
+    kinds: &[RecFnParamKind],
+    arg_vals: &[Dynamic<'a>],
+    array_len_sort: &Sort<'a>,
+    mut array_for: Array,
+    mut length_for: Length,
+    mut field_for: Field,
+) -> Option<Vec<Dynamic<'a>>>
+where
+    Array: FnMut(usize) -> Option<Dynamic<'a>>,
+    Length: FnMut(usize) -> Option<Dynamic<'a>>,
+    Field: FnMut(usize, usize) -> Option<Dynamic<'a>>,
+{
+    if kinds.len() != arg_vals.len() {
+        return None;
+    }
+    let mut expanded = Vec::new();
+    for (param_index, (kind, arg_val)) in kinds.iter().zip(arg_vals).enumerate() {
+        match kind {
+            RecFnParamKind::Scalar => expanded.push(arg_val.clone()),
+            RecFnParamKind::Array => {
+                let array = array_for(param_index)?;
+                if array.get_sort() != arg_val.get_sort() {
+                    return None;
+                }
+                expanded.push(array);
+                let length = length_for(param_index)?;
+                if length.get_sort() != array_len_sort.clone() {
+                    return None;
+                }
+                expanded.push(length);
+            }
+            RecFnParamKind::Struct(field_count) => {
+                for field_index in 0..*field_count {
+                    expanded.push(field_for(param_index, field_index)?);
+                }
+            }
+        }
+    }
+    Some(expanded)
+}
+
+fn rec_fn_args<'a>(
+    vc: &VCtx<'a>,
+    callee: &Atom,
+    arg_vals: &[Dynamic<'a>],
+    call_env: &Env<'a>,
+) -> Option<Vec<Dynamic<'a>>> {
+    if callee.params.len() != arg_vals.len() {
+        return None;
+    }
+    let mut kinds = Vec::with_capacity(callee.params.len());
+    for (param, arg_val) in callee.params.iter().zip(arg_vals) {
+        if arg_val.get_sort() != param_sort_probe(vc, &param.name, param.type_name.as_deref()) {
+            return None;
+        }
+        let type_name = param.type_name.as_deref().map(str::trim);
+        if type_name.and_then(array_element_type_name).is_some() {
+            kinds.push(RecFnParamKind::Array);
+        } else if let Some(sdef) = type_name.and_then(|name| vc.module_env.get_struct(name)) {
+            kinds.push(RecFnParamKind::Struct(sdef.fields.len()));
+        } else {
+            kinds.push(RecFnParamKind::Scalar);
+        }
+    }
+    let array_len_sort = array_len_symbol(vc.ctx, "probe", vc.bitvec_i64).get_sort();
+    expand_rec_fn_args(
+        &kinds,
+        arg_vals,
+        &array_len_sort,
+        |param_index| {
+            call_env
+                .get(&format!("__z3_arr_{}", callee.params[param_index].name))
+                .cloned()
+        },
+        |param_index| {
+            call_env
+                .get(&format!("len_{}", callee.params[param_index].name))
+                .cloned()
+        },
+        |param_index, field_index| {
+            let type_name = callee.params[param_index].type_name.as_deref()?.trim();
+            let sdef = vc.module_env.get_struct(type_name)?;
+            let field = sdef.fields.get(field_index)?;
+            call_env
+                .get(&struct_field_key(
+                    &callee.params[param_index].name,
+                    &field.name,
+                ))
+                .cloned()
+        },
+    )
+}
+
+fn struct_field_values_for_call<'a>(
+    vc: &VCtx<'a>,
+    callee: &Atom,
+    arg_vals: &[Dynamic<'a>],
+    call_env: &Env<'a>,
+    caller_env: &Env<'a>,
+) -> Option<Vec<Dynamic<'a>>> {
+    if callee.params.len() != arg_vals.len() {
+        return None;
+    }
+    let mut field_vals = Vec::new();
+    for (param, arg_val) in callee.params.iter().zip(arg_vals) {
+        let Some(sdef) = param
+            .type_name
+            .as_deref()
+            .and_then(|name| vc.module_env.get_struct(name))
+        else {
+            continue;
+        };
+        if let Some(fields) = struct_fields_of_value(caller_env, arg_val, sdef) {
+            field_vals.extend(fields.into_iter().map(|(_, value)| value));
+        } else {
+            for field in &sdef.fields {
+                field_vals.push(
+                    call_env
+                        .get(&struct_field_key(&param.name, &field.name))?
+                        .clone(),
+                );
+            }
+        }
+    }
+    Some(field_vals)
+}
+
 /// The result sort a `rec_fn#` application for `callee` must produce.
 fn call_result_sort<'a>(vc: &VCtx<'a>, callee: &Atom) -> Sort<'a> {
     let has_float = callee.params.iter().any(|p| {
@@ -584,6 +730,7 @@ fn termination_obligation_at_call<'a>(
 /// holds where the decrease was proved).
 fn congruent_ensures_antecedent<'a>(
     vc: &VCtx<'a>,
+    callee: &Atom,
     caller_requires: &str,
     call_env: &mut Env<'a>,
     scc_internal: bool,
@@ -597,14 +744,77 @@ fn congruent_ensures_antecedent<'a>(
             .as_bool()
             .unwrap_or_else(|| Bool::from_bool(ctx, true))
     };
+    let domain_facts = param_domain_facts(vc, callee, call_env)?;
+    let has_domain_facts = domain_facts.simplify().as_bool() != Some(true);
     if scc_internal {
         let mut conds: Vec<Bool<'a>> = vc.path_cond_stack.borrow().clone();
         conds.push(req);
+        if has_domain_facts {
+            conds.push(domain_facts);
+        }
         let refs: Vec<&Bool<'a>> = conds.iter().collect();
         Ok(Bool::and(ctx, &refs))
     } else {
-        Ok(req)
+        if has_domain_facts {
+            Ok(Bool::and(ctx, &[&req, &domain_facts]))
+        } else {
+            Ok(req)
+        }
     }
+}
+
+fn param_domain_facts<'a>(
+    vc: &VCtx<'a>,
+    callee: &Atom,
+    call_env: &Env<'a>,
+) -> MumeiResult<Bool<'a>> {
+    let mut facts = Vec::new();
+    for param in &callee.params {
+        let type_name = param.type_name.as_deref().map(str::trim);
+        if type_name.and_then(array_element_type_name).is_some() {
+            let length = call_env
+                .get(&format!("len_{}", param.name))
+                .ok_or_else(|| {
+                    MumeiError::verification(format!(
+                        "missing array length for recursive parameter '{}'",
+                        param.name
+                    ))
+                })?;
+            let nonnegative = nonneg_constraint(vc.ctx, length).ok_or_else(|| {
+                MumeiError::verification(format!(
+                    "invalid array length sort for recursive parameter '{}'",
+                    param.name
+                ))
+            })?;
+            facts.push(nonnegative);
+        } else if let Some(sdef) = type_name.and_then(|name| vc.module_env.get_struct(name)) {
+            let fields: Vec<(String, Dynamic<'a>)> = sdef
+                .fields
+                .iter()
+                .map(|field| {
+                    call_env
+                        .get(&struct_field_key(&param.name, &field.name))
+                        .cloned()
+                        .map(|value| (field.name.clone(), value))
+                        .ok_or_else(|| {
+                            MumeiError::verification(format!(
+                                "missing field '{}' for recursive struct parameter '{}'",
+                                field.name, param.name
+                            ))
+                        })
+                })
+                .collect::<MumeiResult<_>>()?;
+            lower_struct_contract(vc, sdef, &fields, call_env, None, |_, fact| {
+                facts.push(fact);
+                Ok(())
+            })?;
+        }
+    }
+    if facts.is_empty() {
+        return Ok(Bool::from_bool(vc.ctx, true));
+    }
+    let refs: Vec<&Bool<'a>> = facts.iter().collect();
+    Ok(Bool::and(vc.ctx, &refs))
 }
 
 /// Discharge the shift-range obligations collected while lowering clauses
@@ -1562,6 +1772,14 @@ pub(crate) fn expr_to_z3<'a>(
                             }
                         }
 
+                        if cong {
+                            if let Some(field_vals) =
+                                struct_field_values_for_call(vc, &callee, &arg_vals, &call_env, env)
+                            {
+                                vc.reject_quantifier_dependent_call(name, &field_vals)?;
+                            }
+                        }
+
                         // Wire borrow()/consume() into call-site argument handling.
                         // For each callee parameter, if it is `ref`/`ref mut`, call borrow().
                         // If the callee has `consumed_params`, call consume() for the
@@ -1888,15 +2106,17 @@ pub(crate) fn expr_to_z3<'a>(
                             .return_type
                             .as_deref()
                             .or(if has_float { Some("f64") } else { None });
+                        let rec_args = rec_fn_args(vc, &callee, &arg_vals, &call_env);
                         let use_rec_fn = cong
                             && callee_semantics_match_caller(vc, &callee)
-                            && call_arg_sorts_match(vc, &callee, &arg_vals);
+                            && rec_args.is_some();
                         let result_z3: Dynamic = if use_rec_fn {
-                            let domain: Vec<Sort> = arg_vals.iter().map(|v| v.get_sort()).collect();
+                            let rec_args = rec_args.expect("recursive arguments checked above");
+                            let domain: Vec<Sort> = rec_args.iter().map(|v| v.get_sort()).collect();
                             let range = call_result_sort(vc, &callee);
                             let decl = vc.rec_fn(&callee, &domain, &range);
                             let app_args: Vec<&dyn Ast> =
-                                arg_vals.iter().map(|v| v as &dyn Ast).collect();
+                                rec_args.iter().map(|v| v as &dyn Ast).collect();
                             let application = decl.apply(&app_args);
                             if let Some(sink) = vc.recursion.unfold_sink.borrow_mut().as_mut() {
                                 sink.push((callee.name.clone(), arg_vals.clone()));
@@ -2027,6 +2247,7 @@ pub(crate) fn expr_to_z3<'a>(
                                 {
                                     let ante = congruent_ensures_antecedent(
                                         vc,
+                                        &callee,
                                         &caller_requires,
                                         &mut call_env,
                                         scc_internal,
@@ -3526,6 +3747,18 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                     }
 
+                    if cong {
+                        if let Some(field_vals) = struct_field_values_for_call(
+                            vc,
+                            &callee_atom,
+                            &arg_vals,
+                            &call_env,
+                            env,
+                        ) {
+                            vc.reject_quantifier_dependent_call(callee_name, &field_vals)?;
+                        }
+                    }
+
                     if cong && !recursive_instance {
                         termination_obligation_at_call(
                             vc,
@@ -3571,15 +3804,17 @@ pub(crate) fn expr_to_z3<'a>(
                         CALL_REF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let result_name = format!("call_ref_{}_{}", callee_name, call_id);
                     let result_type = callee_atom.return_type.as_deref();
+                    let rec_args = rec_fn_args(vc, &callee_atom, &arg_vals, &call_env);
                     let use_rec_fn = cong
                         && callee_semantics_match_caller(vc, &callee_atom)
-                        && call_arg_sorts_match(vc, &callee_atom, &arg_vals);
+                        && rec_args.is_some();
                     let result_z3: Dynamic = if use_rec_fn {
-                        let domain: Vec<Sort> = arg_vals.iter().map(|v| v.get_sort()).collect();
+                        let rec_args = rec_args.expect("recursive arguments checked above");
+                        let domain: Vec<Sort> = rec_args.iter().map(|v| v.get_sort()).collect();
                         let range = call_result_sort(vc, &callee_atom);
                         let decl = vc.rec_fn(&callee_atom, &domain, &range);
                         let app_args: Vec<&dyn Ast> =
-                            arg_vals.iter().map(|v| v as &dyn Ast).collect();
+                            rec_args.iter().map(|v| v as &dyn Ast).collect();
                         let application = decl.apply(&app_args);
                         if let Some(sink) = vc.recursion.unfold_sink.borrow_mut().as_mut() {
                             sink.push((callee_atom.name.clone(), arg_vals.clone()));
@@ -3645,6 +3880,7 @@ pub(crate) fn expr_to_z3<'a>(
                             if let (Some(ens_bool), Some(solver)) = (ens_z3.as_bool(), solver_opt) {
                                 let ante = congruent_ensures_antecedent(
                                     vc,
+                                    &callee_atom,
                                     &caller_requires,
                                     &mut call_env,
                                     scc_internal,
@@ -4324,7 +4560,7 @@ mod termination_measure_tests {
 #[cfg(test)]
 mod constant_args_tests {
     use super::constant_args;
-    use z3::ast::{Bool, Int};
+    use z3::ast::{Array, Bool, Int};
     use z3::{Config, Context};
 
     #[test]
@@ -4364,5 +4600,96 @@ mod constant_args_tests {
         ];
 
         assert_eq!(constant_args(&args).unwrap().1, "int:2,bool:true");
+    }
+
+    #[test]
+    fn rejects_array_arguments() {
+        let ctx = Context::new(&Config::new());
+        let int_sort = z3::Sort::int(&ctx);
+        let array = Array::new_const(&ctx, "a", &int_sort, &int_sort);
+
+        assert!(constant_args(&[array.into()]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod rec_fn_args_tests {
+    use super::{expand_rec_fn_args, RecFnParamKind};
+    use z3::ast::{Array, Ast, Dynamic, Int, BV};
+    use z3::{Config, Context, FuncDecl, SatResult, Sort};
+
+    fn assert_length_is_part_of_the_domain(bitvec_i64: bool) {
+        let ctx = Context::new(&Config::new());
+        let int_sort = Sort::int(&ctx);
+        let array = Array::new_const(&ctx, "a", &int_sort, &int_sort);
+        let (length_sort, length_one, length_two): (Sort, Dynamic, Dynamic) = if bitvec_i64 {
+            (
+                Sort::bitvector(&ctx, 64),
+                BV::new_const(&ctx, "l1", 64).into(),
+                BV::new_const(&ctx, "l2", 64).into(),
+            )
+        } else {
+            (
+                int_sort.clone(),
+                Int::new_const(&ctx, "l1").into(),
+                Int::new_const(&ctx, "l2").into(),
+            )
+        };
+        let kinds = [RecFnParamKind::Array];
+        let expanded_one = expand_rec_fn_args(
+            &kinds,
+            &[array.clone().into()],
+            &length_sort,
+            |_| Some(array.clone().into()),
+            |_| Some(length_one.clone()),
+            |_, _| None,
+        )
+        .expect("array length should expand");
+        let expanded_two = expand_rec_fn_args(
+            &kinds,
+            &[array.clone().into()],
+            &length_sort,
+            |_| Some(array.clone().into()),
+            |_| Some(length_two.clone()),
+            |_, _| None,
+        )
+        .expect("array length should expand");
+        let domain: Vec<Sort> = expanded_one.iter().map(|value| value.get_sort()).collect();
+        let domain_refs: Vec<&Sort> = domain.iter().collect();
+        let decl = FuncDecl::new(&ctx, "rec_test", &domain_refs, &int_sort);
+        let first_args: Vec<&dyn Ast> =
+            expanded_one.iter().map(|value| value as &dyn Ast).collect();
+        let second_args: Vec<&dyn Ast> =
+            expanded_two.iter().map(|value| value as &dyn Ast).collect();
+        let first = decl.apply(&first_args);
+        let second = decl.apply(&second_args);
+
+        let solver = z3::Solver::new(&ctx);
+        solver.assert(&length_one._eq(&length_two).not());
+        solver.assert(&first._eq(&second).not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Sat,
+            "different lengths must remain distinguishable UF arguments"
+        );
+
+        let same = decl.apply(&first_args);
+        let solver = z3::Solver::new(&ctx);
+        solver.assert(&same._eq(&same).not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "identical expanded arguments must produce identical UF applications"
+        );
+    }
+
+    #[test]
+    fn array_length_is_a_recursive_uf_argument_in_int_mode() {
+        assert_length_is_part_of_the_domain(false);
+    }
+
+    #[test]
+    fn array_length_is_a_recursive_uf_argument_in_bitvec_mode() {
+        assert_length_is_part_of_the_domain(true);
     }
 }

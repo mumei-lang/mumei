@@ -16,6 +16,269 @@ atom tri(n: i64)
     body: if n == 0 { 0 } else { n + tri(n - 1) };
 "#;
 
+const ARRAY_COUNT: &str = r#"
+atom count(a: [i64], i: i64) -> i64
+    requires: 0 <= i && i <= len(a);
+    ensures: result == len(a) - i;
+    decreases: len(a) - i;
+    body: if i == len(a) { 0 } else { 1 + count(a, i + 1) };
+
+atom count_len_caller(a: [i64], b: [i64]) -> i64
+    requires: len(a) == 3 && len(b) == 4;
+    ensures: count(a, 0) == len(a) && count(b, 0) == len(b);
+    body: 0;
+"#;
+
+const ARRAY_COUNT_EQUAL_LENGTHS: &str = r#"
+atom count(a: [i64], i: i64) -> i64
+    requires: 0 <= i && i <= len(a);
+    ensures: result == len(a) - i;
+    decreases: len(a) - i;
+    body: if i == len(a) { 0 } else { 1 + count(a, i + 1) };
+
+atom count_len_difference(a: [i64], b: [i64]) -> i64
+    requires: len(a) == 3 && len(b) == 4;
+    ensures: count(a, 0) == count(b, 0);
+    body: 0;
+"#;
+
+const ARRAY_COUNT_NONDECREASING: &str = r#"
+atom count(a: [i64], i: i64) -> i64
+    requires: 0 <= i && i <= len(a);
+    ensures: result >= 0;
+    decreases: len(a) - i;
+    body: if i == 0 { 0 } else { count(a, i - 1) };
+"#;
+
+const ARRAY_RECURSIVE_CALL_NO_WRITE: &str = r#"
+atom weak_count(a: [i64], i: i64) -> i64
+    requires: i >= 0;
+    ensures: true;
+    decreases: i;
+    body: if i == 0 { 0 } else { weak_count(a, i - 1) };
+
+atom repeated_call(a: [i64]) -> bool
+    requires: len(a) >= 1;
+    ensures: result == true;
+    body: {
+        let first = weak_count(a, 0);
+        let second = weak_count(a, 0);
+        first == second
+    };
+"#;
+
+const ARRAY_RECURSIVE_CALL_WRITE: &str = r#"
+atom weak_count(a: [i64], i: i64) -> i64
+    requires: i >= 0;
+    ensures: true;
+    decreases: i;
+    body: if i == 0 { 0 } else { weak_count(a, i - 1) };
+
+atom changed_array_call(a: [i64]) -> bool
+    requires: len(a) >= 1;
+    ensures: result == true;
+    body: {
+        let first = weak_count(a, 0);
+        a[0] = a[0] + 1;
+        let second = weak_count(a, 0);
+        first == second
+    };
+"#;
+
+const STRUCT_DOWN: &str = r#"
+struct P {
+    n: i64 where v >= 0
+}
+
+atom down(p: P) -> i64
+    requires: true;
+    ensures: result == p.n;
+    decreases: p.n;
+    body: if p.n == 0 { 0 } else { 1 + down(P { n: p.n - 1 }) };
+
+atom down_caller() -> i64
+    requires: true;
+    ensures: down(P { n: 3 }) == 3;
+    body: 0;
+"#;
+
+const STRUCT_DOWN_INVARIANT: &str = r#"
+struct P {
+    n: i64,
+    invariant: self.n >= 0
+}
+
+atom down_inv(p: P) -> i64
+    requires: true;
+    ensures: result == p.n;
+    decreases: p.n;
+    body: if p.n == 0 { 0 } else { 1 + down_inv(P { n: p.n - 1 }) };
+
+atom use_down_inv(p: P) -> i64
+    requires: true;
+    ensures: down_inv(p) >= 0;
+    body: 0;
+"#;
+
+const STRUCT_CONTRACT_FACT_ORDER: &str = r#"
+atom pos_id(x: i64) -> i64
+    requires: x >= 0;
+    ensures: result == x;
+    body: x;
+
+struct Q {
+    n: i64 where v >= 0,
+    invariant: pos_id(self.n) >= 0
+}
+
+atom use_q(q: Q) -> i64
+    requires: true;
+    ensures: result >= 0;
+    body: q.n;
+"#;
+
+const UNSUPPORTED_REF_MUT_ARRAY: &str = r#"
+atom bad(ref mut a: [i64]) -> i64
+    requires: len(a) >= 0;
+    ensures: result == bad(a) + 1;
+    decreases: len(a);
+    body: if len(a) == 0 { 0 } else { bad(a) };
+"#;
+
+const UNSUPPORTED_REF_MUT_STRUCT: &str = r#"
+struct P { n: i64 }
+
+atom bad(ref mut p: P) -> i64
+    requires: true;
+    ensures: result == bad(p) + 1;
+    decreases: p.n;
+    body: if p.n == 0 { 0 } else { bad(p) };
+"#;
+
+const UNSUPPORTED_CONSUME_ARRAY: &str = r#"
+atom bad(a: [i64]) -> i64
+    requires: bad(a) >= 0;
+    ensures: result == 1;
+    consume a;
+    decreases: 0;
+    body: 0;
+"#;
+
+const UNSUPPORTED_CONSUME_STRUCT: &str = r#"
+struct P { n: i64 }
+
+atom bad(p: P) -> i64
+    requires: bad(p) >= 0;
+    ensures: result == 1;
+    consume p;
+    decreases: 0;
+    body: 0;
+"#;
+
+const UNSUPPORTED_STORED_ARRAY: &str = r#"
+atom bad(a: [i64]) -> i64
+    requires: len(a) >= 1;
+    ensures: result == bad(a) + 1;
+    decreases: len(a);
+    body: {
+        a[0] = 0;
+        bad(a)
+    };
+"#;
+
+const UNSUPPORTED_FLOAT_ARRAY: &str = r#"
+atom bad(a: [f64]) -> i64
+    requires: len(a) >= 0;
+    ensures: result == bad(a) + 1;
+    decreases: len(a);
+    body: 0;
+"#;
+
+const UNSUPPORTED_STRUCT_ARRAY_FIELD: &str = r#"
+struct P { a: [i64] }
+
+atom bad(p: P) -> i64
+    requires: true;
+    ensures: result == bad(p) + 1;
+    decreases: 0;
+    body: bad(p);
+"#;
+
+const UNSUPPORTED_STRUCT_CALL_INVARIANT: &str = r#"
+atom helper() -> i64
+    requires: true;
+    ensures: true;
+    body: 0;
+
+struct P {
+    n: i64,
+    invariant: helper() >= 0
+}
+
+atom bad(p: P) -> i64
+    requires: true;
+    ensures: result == bad(p) + 1;
+    decreases: p.n;
+    body: if p.n == 0 { 0 } else { bad(p) };
+"#;
+
+const UNSUPPORTED_ARRAY_RETURN: &str = r#"
+atom bad() -> [i64]
+    requires: true;
+    ensures: len(bad()) == -1;
+    decreases: 0;
+    body: bad();
+"#;
+
+const UNSUPPORTED_STRUCT_RETURN: &str = r#"
+struct P { n: i64 }
+
+atom read_n(p: P) -> i64
+    requires: true;
+    ensures: result == p.n;
+    body: p.n;
+
+atom bad() -> P
+    requires: true;
+    ensures: result.n == -1 && read_n(bad()) >= 0;
+    decreases: 0;
+    body: P { n: 0 };
+"#;
+
+const UNSUPPORTED_ARRAY_MEASURE_ACCESS: &str = r#"
+atom bad(a: [i64]) -> i64
+    requires: len(a) >= 1;
+    ensures: result == bad(a) + 1;
+    decreases: a[0];
+    body: bad(a);
+"#;
+
+const UNSUPPORTED_ARRAY_DIRECT_MEASURE: &str = r#"
+atom bad(a: [i64]) -> i64
+    requires: len(a) >= 0;
+    ensures: result == bad(a) + 1;
+    decreases: a;
+    body: bad(a);
+"#;
+
+const UNSUPPORTED_STRUCT_DIRECT_MEASURE: &str = r#"
+struct P { n: i64 }
+
+atom bad(p: P) -> i64
+    requires: true;
+    ensures: result == bad(p) + 1;
+    decreases: p;
+    body: bad(p);
+"#;
+
+const UNSUPPORTED_LEN_NON_ARRAY_MEASURE: &str = r#"
+atom bad(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result == bad(n) + 1;
+    decreases: len(n);
+    body: bad(n);
+"#;
+
 const ACKERMANN: &str = r#"
 atom ack(m: i64, n: i64) -> i64
     requires: m >= 0 && n >= 0;
@@ -474,6 +737,16 @@ fn assert_case(case: CaseResult, expected: &str) {
     assert_verdict(&case, expected);
 }
 
+fn assert_case_ref(case: &CaseResult, expected: &str) {
+    assert!(
+        case.did_not_crash(),
+        "{} crashed; stderr:\n{}",
+        case.name,
+        String::from_utf8_lossy(&case.output.stderr)
+    );
+    assert_verdict(case, expected);
+}
+
 fn assert_termination(case: &CaseResult, param: &str) {
     assert!(
         case.did_not_crash(),
@@ -780,6 +1053,306 @@ fn test_caller_of_decreased_atom_verifies() {
 }
 
 #[test]
+fn test_array_recursive_contract_carries_length_into_uf_domain() {
+    let verified = verify("array_count", ARRAY_COUNT, "count_len_caller");
+    assert_case(verified, "verified");
+
+    let wrong_source = ARRAY_COUNT.replace(
+        "count(a, 0) == len(a) && count(b, 0) == len(b)",
+        "count(a, 0) == len(a) + 1 && count(b, 0) == len(b)",
+    );
+    let wrong = verify("array_count_wrong", &wrong_source, "count_len_caller");
+    assert_case_ref(&wrong, "failed");
+    assert_eq!(
+        wrong.failure_type().as_deref(),
+        Some("postcondition_violated"),
+        "wrong array recursive postcondition should be an ordinary failure; report:\n{:?}",
+        wrong.report
+    );
+}
+
+#[test]
+fn test_recursive_array_calls_distinguish_a_live_store() {
+    let unchanged = verify(
+        "array_call_without_write",
+        ARRAY_RECURSIVE_CALL_NO_WRITE,
+        "repeated_call",
+    );
+    assert_case(unchanged, "verified");
+
+    let changed = verify(
+        "array_call_after_write",
+        ARRAY_RECURSIVE_CALL_WRITE,
+        "changed_array_call",
+    );
+    assert_case_ref(&changed, "failed");
+    assert_eq!(
+        changed.failure_type().as_deref(),
+        Some("postcondition_violated"),
+        "a write between recursive calls should give an ordinary postcondition failure; report:\n{:?}",
+        changed.report
+    );
+}
+
+#[test]
+fn test_array_length_difference_caller_has_explicit_verified_twin() {
+    let explicit_results = ARRAY_COUNT.replace(
+        "count(a, 0) == len(a) && count(b, 0) == len(b)",
+        "count(a, 0) == 3 && count(b, 0) == 4",
+    );
+    let verified = verify(
+        "array_count_explicit_results",
+        &explicit_results,
+        "count_len_caller",
+    );
+    assert_case(verified, "verified");
+
+    let wrong_source = explicit_results.replace(
+        "count(a, 0) == 3 && count(b, 0) == 4",
+        "count(a, 0) == count(b, 0)",
+    );
+    let wrong = verify(
+        "array_count_explicit_wrong",
+        &wrong_source,
+        "count_len_caller",
+    );
+    assert_case_ref(&wrong, "failed");
+    assert_eq!(
+        wrong.failure_type().as_deref(),
+        Some("postcondition_violated"),
+        "length-only difference should produce an ordinary postcondition failure; report:\n{:?}",
+        wrong.report
+    );
+}
+
+#[test]
+fn test_array_recursive_contract_distinguishes_lengths() {
+    let case = verify(
+        "array_count_length_difference",
+        ARRAY_COUNT_EQUAL_LENGTHS,
+        "count_len_difference",
+    );
+    assert_case_ref(&case, "failed");
+    assert_eq!(
+        case.failure_type().as_deref(),
+        Some("postcondition_violated"),
+        "different lengths must not become congruent recursive calls; report:\n{:?}",
+        case.report
+    );
+}
+
+#[test]
+fn test_array_recursive_contract_verifies_in_bitvec_mode() {
+    let verified = verify_with_args(
+        "array_count_bv",
+        ARRAY_COUNT,
+        "count_len_caller",
+        &["--bitvec-i64"],
+    );
+    assert_case(verified, "verified");
+
+    let wrong_source = ARRAY_COUNT.replace(
+        "count(a, 0) == len(a) && count(b, 0) == len(b)",
+        "count(a, 0) == len(a) + 1 && count(b, 0) == len(b)",
+    );
+    let wrong = verify_with_args(
+        "array_count_bv_wrong",
+        &wrong_source,
+        "count_len_caller",
+        &["--bitvec-i64"],
+    );
+    assert_case_ref(&wrong, "failed");
+    assert_eq!(
+        wrong.failure_type().as_deref(),
+        Some("postcondition_violated"),
+        "wrong BV array recursive postcondition should fail normally; report:\n{:?}",
+        wrong.report
+    );
+}
+
+#[test]
+fn test_nondecreasing_array_length_measure_fails_termination() {
+    let case = verify(
+        "array_count_nondecreasing",
+        ARRAY_COUNT_NONDECREASING,
+        "count",
+    );
+    assert_termination(&case, "i");
+}
+
+#[test]
+fn test_struct_recursive_contract_verifies_and_wrong_twin_fails() {
+    let verified = verify("struct_down", STRUCT_DOWN, "down_caller");
+    assert_case(verified, "verified");
+
+    let wrong_source = STRUCT_DOWN.replace("down(P { n: 3 }) == 3", "down(P { n: 3 }) == 4");
+    let wrong = verify("struct_down_wrong", &wrong_source, "down_caller");
+    assert_case_ref(&wrong, "failed");
+    assert_eq!(
+        wrong.failure_type().as_deref(),
+        Some("postcondition_violated"),
+        "wrong struct recursive postcondition should be an ordinary failure; report:\n{:?}",
+        wrong.report
+    );
+}
+
+#[test]
+fn test_struct_calls_with_different_fields_are_not_congruent() {
+    let source = STRUCT_DOWN.replace(
+        "down(P { n: 3 }) == 3",
+        "down(P { n: 3 }) == down(P { n: 4 })",
+    );
+    let case = verify("struct_down_different_fields", &source, "down_caller");
+    assert_case_ref(&case, "failed");
+    assert_eq!(
+        case.failure_type().as_deref(),
+        Some("postcondition_violated"),
+        "different struct fields must be independent recursive UF arguments; report:\n{:?}",
+        case.report
+    );
+}
+
+#[test]
+fn test_struct_recursive_contract_uses_invariant_domain_fact() {
+    let verified = verify(
+        "struct_down_invariant",
+        STRUCT_DOWN_INVARIANT,
+        "use_down_inv",
+    );
+    assert_case(verified, "verified");
+
+    let wrong_source = STRUCT_DOWN_INVARIANT.replace("down_inv(p) >= 0", "down_inv(p) >= 1");
+    let wrong = verify("struct_down_invariant_wrong", &wrong_source, "use_down_inv");
+    assert_case_ref(&wrong, "failed");
+    assert_eq!(
+        wrong.failure_type().as_deref(),
+        Some("postcondition_violated"),
+        "wrong invariant-dependent postcondition should fail; report:\n{:?}",
+        wrong.report
+    );
+}
+
+#[test]
+fn test_struct_contract_fields_are_assumed_before_invariants() {
+    let case = verify(
+        "struct_contract_fact_order",
+        STRUCT_CONTRACT_FACT_ORDER,
+        "use_q",
+    );
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_unsupported_array_and_struct_recursive_parameters_keep_fresh_results() {
+    let cases = [
+        (
+            "unsupported_ref_mut_array",
+            UNSUPPORTED_REF_MUT_ARRAY,
+            "atom 'bad' has a `ref mut` parameter",
+        ),
+        (
+            "unsupported_ref_mut_struct",
+            UNSUPPORTED_REF_MUT_STRUCT,
+            "atom 'bad' has a `ref mut` parameter",
+        ),
+        (
+            "unsupported_consume_array",
+            UNSUPPORTED_CONSUME_ARRAY,
+            "atom 'bad' consumes a parameter",
+        ),
+        (
+            "unsupported_consume_struct",
+            UNSUPPORTED_CONSUME_STRUCT,
+            "atom 'bad' consumes a parameter",
+        ),
+        (
+            "unsupported_stored_array",
+            UNSUPPORTED_STORED_ARRAY,
+            "atom 'bad' may store into array parameter 'a'",
+        ),
+        (
+            "unsupported_float_array",
+            UNSUPPORTED_FLOAT_ARRAY,
+            "atom 'bad' parameter 'a' has an unsupported array element type 'f64'",
+        ),
+        (
+            "unsupported_struct_array_field",
+            UNSUPPORTED_STRUCT_ARRAY_FIELD,
+            "atom 'bad' parameter 'p' has struct type 'P' with non-scalar fields or call-containing constraints/invariants",
+        ),
+        (
+            "unsupported_struct_call_invariant",
+            UNSUPPORTED_STRUCT_CALL_INVARIANT,
+            "atom 'bad' parameter 'p' has struct type 'P' with non-scalar fields or call-containing constraints/invariants",
+        ),
+        (
+            "unsupported_array_return",
+            UNSUPPORTED_ARRAY_RETURN,
+            "atom 'bad' returns a non-scalar type",
+        ),
+        (
+            "unsupported_struct_return",
+            UNSUPPORTED_STRUCT_RETURN,
+            "atom 'bad' returns a non-scalar type",
+        ),
+        (
+            "unsupported_array_measure_access",
+            UNSUPPORTED_ARRAY_MEASURE_ACCESS,
+            "decreases measure of atom 'bad' must not read array elements",
+        ),
+        (
+            "unsupported_array_direct_measure",
+            UNSUPPORTED_ARRAY_DIRECT_MEASURE,
+            "decreases measure of atom 'bad' uses non-scalar parameter 'a' directly",
+        ),
+        (
+            "unsupported_struct_direct_measure",
+            UNSUPPORTED_STRUCT_DIRECT_MEASURE,
+            "decreases measure of atom 'bad' uses non-scalar parameter 'p' directly",
+        ),
+        (
+            "unsupported_len_non_array_measure",
+            UNSUPPORTED_LEN_NON_ARRAY_MEASURE,
+            "decreases measure of atom 'bad' must not contain calls",
+        ),
+    ];
+
+    for (name, source, reason) in cases {
+        let case = verify(name, source, "bad");
+        assert!(
+            case.did_not_crash(),
+            "{name} crashed; stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&case.output.stdout),
+            String::from_utf8_lossy(&case.output.stderr)
+        );
+        assert!(
+            case.has_diagnostic_code("recursive_contract_unsupported"),
+            "{name} should emit recursive_contract_unsupported; report:\n{:?}",
+            case.report
+        );
+        assert!(
+            case.diagnostic_message_contains("recursive_contract_unsupported", reason),
+            "{name} should report exact reason {reason:?}; report:\n{:?}",
+            case.report
+        );
+        assert_eq!(
+            case.verdict().as_deref(),
+            Some("failed"),
+            "{name} should retain a fresh recursive-call result rather than prove the contract; report:\n{:?}",
+            case.report
+        );
+        assert_eq!(
+            case.failure_type().as_deref(),
+            Some("postcondition_violated"),
+            "{name} should fail through the postcondition, not termination or contradiction; report:\n{:?}\nstdout:\n{}\nstderr:\n{}",
+            case.report,
+            String::from_utf8_lossy(&case.output.stdout),
+            String::from_utf8_lossy(&case.output.stderr)
+        );
+    }
+}
+
+#[test]
 fn test_constant_argument_call_unfolds_and_verifies() {
     let case = verify("tri3", TRI_CONST, "tri3");
     assert_case(case, "verified");
@@ -1016,6 +1589,42 @@ atom use2(n: i64) -> i64
     body: tri(n) - tri(n);
 "#;
 
+const CACHE_STRUCT_BASE: &str = r#"
+struct P {
+    n: i64,
+    invariant: self.n >= 0
+}
+
+atom down_struct(p: P) -> i64
+    requires: true;
+    ensures: result == p.n;
+    decreases: p.n;
+    body: if p.n == 0 { 0 } else { 1 + down_struct(P { n: p.n - 1 }) };
+
+atom use_struct(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result >= 0;
+    body: down_struct(P { n: n });
+"#;
+
+const CACHE_STRUCT_CHANGED: &str = r#"
+struct P {
+    n: i64,
+    invariant: self.n >= 1
+}
+
+atom down_struct(p: P) -> i64
+    requires: true;
+    ensures: result == p.n;
+    decreases: p.n;
+    body: if p.n == 0 { 0 } else { 1 + down_struct(P { n: p.n - 1 }) };
+
+atom use_struct(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result >= 0;
+    body: down_struct(P { n: n });
+"#;
+
 // Runs `verify` twice in the same directory under the same file name, so the
 // second run exercises the on-disk cache written by the first.
 fn verify_twice(
@@ -1140,6 +1749,34 @@ fn test_stale_cache_on_callee_refinement_change() {
         second.output.status.code(),
         fresh.output.status.code(),
         "cached run must match a fresh run of the changed refinement; fresh stdout:\n{}",
+        String::from_utf8_lossy(&fresh.output.stdout)
+    );
+}
+
+#[test]
+fn test_stale_cache_on_recursive_callee_struct_invariant_change() {
+    let (first, second) = verify_twice(
+        "cache_struct",
+        CACHE_STRUCT_BASE,
+        CACHE_STRUCT_CHANGED,
+        "use_struct",
+    );
+    assert_case(first, "verified");
+    let fresh = verify("cache_struct_fresh", CACHE_STRUCT_CHANGED, "use_struct");
+    assert!(
+        second.did_not_crash(),
+        "cached run crashed; stderr:\n{}",
+        String::from_utf8_lossy(&second.output.stderr)
+    );
+    assert_ne!(
+        second.verdict().as_deref(),
+        Some("verified"),
+        "use_struct must not verify from a stale struct-definition cache entry"
+    );
+    assert_eq!(
+        second.output.status.code(),
+        fresh.output.status.code(),
+        "cached run must match a fresh run of the changed struct source; fresh stdout:\n{}",
         String::from_utf8_lossy(&fresh.output.stdout)
     );
 }
