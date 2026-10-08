@@ -1,58 +1,58 @@
 {
- "atoms": [
-  {
-   "binder_lean_types": [
-    "Int",
-    "Int",
-    "Int"
-   ],
-   "content_hash": "92917b208e7e6bf515a042bf9c02df1d844c438c872418b678e86d856856b55b",
-   "logic_fragment_tag": "linear_arithmetic",
-   "logic_fragment_tags": [],
-   "lowering_rules": [
-    "contract_lowering",
-    "type_system_mapping"
-   ],
-   "name": "bc_add",
-   "proof_hash": "6905cead8f4454a1e82449837cc643db7962c9b7a74ec7892a57426d9f2f17be",
-   "status": "verified",
-   "z3_check_result": "unsat"
-  },
-  {
-   "binder_lean_types": [
-    "Int",
-    "Int"
-   ],
-   "content_hash": "eb61d06032be1a136cc83cfc31ab58867798cb8d78c783c596d02f766d6b6338",
-   "logic_fragment_tag": "linear_arithmetic",
-   "logic_fragment_tags": [],
-   "lowering_rules": [
-    "contract_lowering",
-    "type_system_mapping"
-   ],
-   "name": "bc_double",
-   "proof_hash": "ef810590475fdbcdef8108362b9df81609875f0c2186ef6fa880679e10d2d236",
-   "status": "verified",
-   "z3_check_result": "unsat"
-  },
-  {
-   "binder_lean_types": [
-    "Int",
-    "Int",
-    "Int",
-    "Int"
-   ],
-   "content_hash": "fc9319795a229cd32a95bc9b8606ebd20189a5abcfdf15bad29d7dc29b1a3262",
-   "logic_fragment_tag": "linear_arithmetic",
-   "logic_fragment_tags": [],
-   "lowering_rules": [
-    "contract_lowering",
-    "type_system_mapping"
-   ],
-   "name": "bc_clamp",
-   "proof_hash": "cfd477dfa1ac1ebd93831b85c3d482aeae01ee5cec0ddc6afb25839aa3a91044",
-   "status": "verified",
-   "z3_check_result": "unsat"
-  }
- ]
+  "atoms": [
+    {
+      "name": "bc_add",
+      "status": "verified",
+      "z3_check_result": "unsat",
+      "content_hash": "92917b208e7e6bf515a042bf9c02df1d844c438c872418b678e86d856856b55b",
+      "proof_hash": "8a771b4845e9898485d888d8870e9031f75eb9ed4116f89eaee34e352a88c501",
+      "logic_fragment_tag": "linear_arithmetic",
+      "logic_fragment_tags": [],
+      "lowering_rules": [
+        "contract_lowering",
+        "type_system_mapping"
+      ],
+      "binder_lean_types": [
+        "Int",
+        "Int",
+        "Int"
+      ]
+    },
+    {
+      "name": "bc_double",
+      "status": "verified",
+      "z3_check_result": "unsat",
+      "content_hash": "eb61d06032be1a136cc83cfc31ab58867798cb8d78c783c596d02f766d6b6338",
+      "proof_hash": "f40f01a10ce09bab2914a1077486c6dcad6b6b1c009a8d46c234097bc7d4872d",
+      "logic_fragment_tag": "linear_arithmetic",
+      "logic_fragment_tags": [],
+      "lowering_rules": [
+        "contract_lowering",
+        "type_system_mapping"
+      ],
+      "binder_lean_types": [
+        "Int",
+        "Int"
+      ]
+    },
+    {
+      "name": "bc_clamp",
+      "status": "verified",
+      "z3_check_result": "unsat",
+      "content_hash": "fc9319795a229cd32a95bc9b8606ebd20189a5abcfdf15bad29d7dc29b1a3262",
+      "proof_hash": "c3825bad0a54aa813e3d8a7b7e0736a1268daeb168fcb7531b131762a0f1b2eb",
+      "logic_fragment_tag": "linear_arithmetic",
+      "logic_fragment_tags": [],
+      "lowering_rules": [
+        "contract_lowering",
+        "type_system_mapping"
+      ],
+      "binder_lean_types": [
+        "Int",
+        "Int",
+        "Int",
+        "Int"
+      ]
+    }
+  ]
 }
