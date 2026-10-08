@@ -540,8 +540,12 @@ mod tests {
             tr("a > 0 => b > 0 => c > 0").as_deref(),
             Some("not (not (a > 0) or (b > 0)) or (c > 0)")
         );
-        // `/` between ints → floor division, matching the verifier's Z3 Int div
-        assert_eq!(tr("a / b >= 0").as_deref(), Some("a // b >= 0"));
+        // `/` between ints → Euclidean division matching Z3 `Int` semantics
+        // (remainder ≥ 0): `a // b + (a % b < 0)`.
+        assert_eq!(
+            tr("a / b >= 0").as_deref(),
+            Some("(a // b + (a % b < 0)) >= 0")
+        );
         // Quantifiers nested inside an expression still translate
         assert_eq!(
             tr("n <= 0 || forall(i, 0, n, i >= 0)").as_deref(),
@@ -563,19 +567,28 @@ mod tests {
 
     #[test]
     fn test_contract_translation_negative_division() {
-        // Negative operands: Python `//` floors, matching Z3 Int division
-        // (`(-3) // 2 == -2`, not the truncating `-1`).
+        // Z3 `Int` division is EUCLIDEAN (remainder ≥ 0), not floor: verified
+        // `div(7,-2) = -3`, `div(-7,-2) = 4`, `div(-7,2) = -4`. The emitted
+        // `a // b + (a % b < 0)` adds 1 exactly when the floored remainder
+        // went negative — only possible under a negative divisor — matching
+        // Z3 for all sign combinations.
         let vars = ContractVars::new();
         assert_eq!(
             translate_contract_to_python("0 - a / b <= result", &vars).as_deref(),
-            Some("0 - a // b <= result")
+            Some("0 - (a // b + (a % b < 0)) <= result")
         );
-        // `(-7) / 2` — the numerator parses as `0 - 7` and must stay
-        // parenthesized so `//` floors the negative: `(0 - 7) // 2 == -4`,
-        // not `0 - 7 // 2 == -3`.
+        // `(-7) / 2`: `(0 - 7) // 2 == -4`, `%` gives `1` (≥ 0), so the
+        // correction is 0 and the result stays -4 — Z3 `div(-7, 2) == -4`.
         assert_eq!(
             translate_contract_to_python("(0 - 7) / 2 == 0 - 4", &vars).as_deref(),
-            Some("(0 - 7) // 2 == 0 - 4")
+            Some("((0 - 7) // 2 + ((0 - 7) % 2 < 0)) == 0 - 4")
+        );
+        // Negative divisor: `7 / (0 - 2)` → `7 // (0-2) == -4`, `7 % (0-2)
+        // == -1 < 0` → `-4 + 1 == -3` — Z3 `div(7, -2) == -3` (plain `//`
+        // would mischeck a verified clause here).
+        assert_eq!(
+            translate_contract_to_python("7 / (0 - 2) == 0 - 3", &vars).as_deref(),
+            Some("(7 // (0 - 2) + (7 % (0 - 2) < 0)) == 0 - 3")
         );
         // Float operands keep `/`.
         let mut fvars = ContractVars::new();

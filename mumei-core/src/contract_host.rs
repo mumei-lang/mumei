@@ -21,9 +21,11 @@
 //! - `=>` prints as `not a or b` (Python) / `!a || b` (Rust). `=>` is
 //!   left-associative and binds looser than `||`/`&&`, so both operands are
 //!   always parenthesized.
-//! - `/` on integer operands prints as `//` in Python, matching the verifier's
-//!   Z3 Int (floor) division. When either operand is provably float-typed the
-//!   Python output keeps `/`. Rust keeps `/` (matches `sdiv` in LLVM codegen).
+//! - `/` on integer operands prints EUCLIDEAN division matching the verifier's
+//!   Z3 `Int` semantics (remainder ≥ 0: `div(7,-2) = -3`, `div(-7,2) = -4`) —
+//!   `a // b + (a % b < 0)` in Python, `a.div_euclid(b)` in Rust. Plain `//`
+//!   floors and `/` truncates, so both plain forms can mischeck a verified
+//!   clause on negative divisors. Float-typed operands keep `/`.
 //! - `forall(v, s, e, c)`/`exists(v, s, e, c)` calls print as
 //!   `all(c for v in range(s, e))`/`any(...)` (Python) and
 //!   `(s..e).all(|v| c)`/`.any(...)` (Rust); the verifier's quantifier range is
@@ -44,12 +46,12 @@ pub enum HostTarget {
 }
 
 /// Static knowledge about a contract variable, used to pick the right host
-/// operator (`/` vs `//`) and indexing form.
+/// operator (Euclidean vs float `/`) and indexing form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContractVarKind {
     /// Integer — the default; mumei `/` between ints is integer division.
     Int,
-    /// `f32`/`f64` — Python `/` stays float division.
+    /// `f32`/`f64` — `/` stays float division.
     Float,
     /// `bool` — at the FFI boundary bools ride as i64, so Rust output coerces
     /// the variable to `(name != 0)`.
@@ -453,6 +455,32 @@ fn emit_binop(
         // negative exponents — degrade instead of emitting wrong code.
         return None;
     }
+    if *op == Op::Div && !expr_is_floaty(whole, vars) {
+        // Z3 `Int` division — what `verify` proves `Op::Div` against — is
+        // EUCLIDEAN: `mod` is always ≥ 0, so the quotient floors for positive
+        // divisors and ceils for negative ones (verified against Z3 4.14.1:
+        // `div(7,-2) = -3`, `div(-7,-2) = 4`, `div(-7,2) = -4`). Neither
+        // Python `//` (always floors: `7 // -2 == -4`) nor Rust `/`
+        // (truncates: `-7 / 2 == -3`) matches it for all sign combinations.
+        // Emit Euclidean division so a clause proven by `verify` can never
+        // mischeck in the host:
+        //   Python `a // b + (a % b < 0)` — adds 1 exactly when the floored
+        //   remainder went negative (only possible for a negative divisor);
+        //   Rust `a.div_euclid(b)` — the stdlib Euclidean primitive.
+        // Operand context: `//`/`%` bind at multiply level in Python (11 is
+        // always safe); Rust operands sit inside `(...)`/`div_euclid(...)`.
+        let operand_ctx = if t == HostTarget::Python { 11 } else { 0 };
+        let l = emit(l_expr, vars, t, operand_ctx)?;
+        let r = emit(r_expr, vars, t, operand_ctx)?;
+        return Some(if t == HostTarget::Python {
+            format!("({l} // {r} + ({l} % {r} < 0))")
+        } else {
+            // `as i64` pins the receiver type: a literal like `100` is an
+            // ambiguous `{integer}` that cannot receive a method call, and
+            // every integer at the FFI boundary is i64 anyway.
+            format!("(({l}) as i64).div_euclid({r})")
+        });
+    }
     // `x == true` on an FFI bool/int param: the literal normalizes to `1`/`0`
     // when the other operand does not itself emit a bool, keeping the
     // comparison type-correct (`i64 == bool` does not compile).
@@ -469,15 +497,7 @@ fn emit_binop(
         Op::Add => "+",
         Op::Sub => "-",
         Op::Mul => "*",
-        Op::Div => {
-            if t == HostTarget::Python && !expr_is_floaty(whole, vars) {
-                // Integer division: the verifier lowers `Op::Div` to Z3 Int
-                // division (floor), so the host check must floor too.
-                "//"
-            } else {
-                "/"
-            }
-        }
+        Op::Div => "/",
         Op::Pow => "**",
         Op::Eq => "==",
         Op::Neq => "!=",

@@ -8,12 +8,15 @@
   `!(a) || (b)` in Rust, honoring `=>`'s precedence (looser than `||`,
   tighter than `|>`) and left associativity, so nested and chained
   implications and `=>` inside larger expressions print unambiguously.
-- **Python contracts use `//` for integer division**: the verifier lowers
-  `/` to Z3 `Int` division (floor semantics), and Python `/` is float
-  division, so integer clauses now emit `//`. Clauses over `f32`/`f64`
-  keep `/`. Rust keeps `/`, matching LLVM's `sdiv` (truncation); the BV
-  (`-z`) proof mode lowers `/` to `bvsdiv` (also truncation) — see the
-  behavior-change PR notes.
+- **Contracts emit Euclidean integer division**: the verifier lowers
+  `/` to Z3 `Int` division, which keeps the remainder ≥ 0 (Euclidean —
+  `div(7,-2) = -3`, `div(-7,2) = -4`). Integer clauses now emit
+  `a // b + (a % b < 0)` in Python and `a.div_euclid(b)` in Rust/monitor
+  so a clause proven by `verify` cannot mischeck in the host on negative
+  divisors (plain `//` floors, `/` truncates — both diverge). Clauses
+  over `f32`/`f64` keep `/`. The BV (`-z`) proof mode lowers `/` to
+  `bvsdiv` (truncation), which still diverges from Euclidean on negative
+  dividends — see the behavior-change PR notes.
 - **Quantified requires are asserted**: top-level `forall`/`exists`
   conjuncts (hoisted into `contract.quantifiers`) now emit their own
   runtime checks — `all(... for i in range(start, end))`/`any(...)` in
@@ -46,6 +49,11 @@
   FFI pointers inside a safe wrapper; `::`-qualified names print with the
   FFI `::`→`_` symbol mangling (`Vec2::dot` → `Vec2_dot`) so contract
   text like `std::process::exit(0)` can never become a real host call.
+- **Integer `/` is Euclidean, not floored** (from review): Z3 `Int`
+  division keeps `mod` ≥ 0 (`div(7,-2) = -3`, `div(-7,2) = -4`), so plain
+  `//`/`/` can mischeck a verified clause on negative divisors. Python
+  emits `a // b + (a % b < 0)`; Rust/monitor emit `a.div_euclid(b)` —
+  verified against Z3 4.14.1 for all sign combinations.
 
 ---
 
