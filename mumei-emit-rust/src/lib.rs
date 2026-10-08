@@ -498,6 +498,12 @@ mod tests {
             translate_contract_to_rust("forall(i, 0, n, arr[i] >= 0)", &vars),
             None
         );
+        // ...but a translatable conjunct alongside them is still enforced:
+        // only the untranslatable conjunct drops.
+        assert_eq!(
+            translate_contract_to_rust("n > 0 && arr[i] > 0 && result >= 0", &vars).as_deref(),
+            Some("n > 0 && result >= 0")
+        );
     }
 
     #[test]

@@ -23,9 +23,11 @@
 //!   always parenthesized.
 //! - `/` on integer operands prints EUCLIDEAN division matching the verifier's
 //!   Z3 `Int` semantics (remainder ≥ 0: `div(7,-2) = -3`, `div(-7,2) = -4`) —
-//!   `a // b + (a % b < 0)` in Python, `a.div_euclid(b)` in Rust. Plain `//`
-//!   floors and `/` truncates, so both plain forms can mischeck a verified
-//!   clause on negative divisors. Float-typed operands keep `/`.
+//!   `(_mumei_d := divmod(a, b))[0] + (_mumei_d[1] < 0)` in Python (divmod
+//!   evaluates each operand once — chained divisions stay linear),
+//!   `a.div_euclid(b)` in Rust. Plain `//` floors and `/` truncates, so
+//!   both plain forms can mischeck a verified clause on negative divisors.
+//!   Float-typed operands keep `/`.
 //! - `forall(v, s, e, c)`/`exists(v, s, e, c)` calls print as
 //!   `all(c for v in range(s, e))`/`any(...)` (Python) and
 //!   `(s..e).all(|v| c)`/`.any(...)` (Rust); the verifier's quantifier range is
@@ -135,7 +137,45 @@ pub fn contract_text_to_host(
     target: HostTarget,
 ) -> Option<String> {
     let expr = parse_expression_checked(text).ok()?;
-    emit(&simplify(expr), vars, target, 0)
+    let expr = simplify(expr);
+    emit(&expr, vars, target, 0).or_else(|| emit_translatable_conjuncts(&expr, vars, target))
+}
+
+/// Partial-clause fallback: when the whole conjunction cannot print (one
+/// conjunct uses an unsupported form like `arr[i]`), emit each translatable
+/// top-level conjunct instead of dropping the entire clause — a requires of
+/// `n > 0 && arr[i] > 0` still enforces `n > 0` at runtime. Conjuncts that
+/// cannot print are skipped (the assert message keeps the full clause text,
+/// so the skipped part remains documented); when nothing prints, or the
+/// expression is not a top-level conjunction, the caller degrades as before.
+fn emit_translatable_conjuncts(e: &Expr, vars: &ContractVars, t: HostTarget) -> Option<String> {
+    let mut conjuncts = Vec::new();
+    flatten_and(e, &mut conjuncts);
+    if conjuncts.len() < 2 {
+        return None;
+    }
+    let emitted: Vec<String> = conjuncts
+        .iter()
+        .filter_map(|c| emit(c, vars, t, 0))
+        .collect();
+    if emitted.is_empty() {
+        return None;
+    }
+    let sep = if t == HostTarget::Python {
+        " and "
+    } else {
+        " && "
+    };
+    Some(emitted.join(sep))
+}
+
+fn flatten_and<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    if let Expr::BinaryOp(l, Op::And, r) = e {
+        flatten_and(l, out);
+        flatten_and(r, out);
+    } else {
+        out.push(e);
+    }
 }
 
 /// Escape a decoded string literal for embedding in a `"..."` literal in either
@@ -464,16 +504,18 @@ fn emit_binop(
         // (truncates: `-7 / 2 == -3`) matches it for all sign combinations.
         // Emit Euclidean division so a clause proven by `verify` can never
         // mischeck in the host:
-        //   Python `a // b + (a % b < 0)` — adds 1 exactly when the floored
-        //   remainder went negative (only possible for a negative divisor);
-        //   Rust `a.div_euclid(b)` — the stdlib Euclidean primitive.
-        // Operand context: `//`/`%` bind at multiply level in Python (11 is
-        // always safe); Rust operands sit inside `(...)`/`div_euclid(...)`.
-        let operand_ctx = if t == HostTarget::Python { 11 } else { 0 };
-        let l = emit(l_expr, vars, t, operand_ctx)?;
-        let r = emit(r_expr, vars, t, operand_ctx)?;
+        //   Python `divmod(l, r)[0] + (divmod(l, r)[1] < 0)` — adds 1 exactly
+        //   when the floored remainder went negative (only possible for a
+        //   negative divisor); Rust `a.div_euclid(b)` — the stdlib Euclidean
+        //   primitive. Operands emit inside call parens (ctx 0).
+        let l = emit(l_expr, vars, t, 0)?;
+        let r = emit(r_expr, vars, t, 0)?;
         return Some(if t == HostTarget::Python {
-            format!("({l} // {r} + ({l} % {r} < 0))")
+            // `divmod` evaluates the operands ONCE — plain `//`/`%` would
+            // duplicate each printed operand, doubling text and evaluations
+            // per chained division. The walrus reads quotient and remainder
+            // from a single divmod call.
+            format!("((_mumei_d := divmod({l}, {r}))[0] + (_mumei_d[1] < 0))")
         } else {
             // `as i64` pins the receiver type: a literal like `100` is an
             // ambiguous `{integer}` that cannot receive a method call, and
