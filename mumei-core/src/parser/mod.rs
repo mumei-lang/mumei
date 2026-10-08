@@ -212,6 +212,30 @@ pub fn parse_body_expr(input: &str) -> Stmt {
     expr::parse_block_or_stmt(&mut ctx)
 }
 
+/// Fail-closed variant of `parse_expression`: returns the recorded
+/// `expect`/`syntax_failure` diagnostics as `Err`, and also rejects input that
+/// leaves trailing tokens after the expression (e.g. `x > 0 -> y` keeps `-> y`
+/// unconsumed). Use this when the parsed AST feeds code generation rather than
+/// a tolerant path.
+pub fn parse_expression_checked(input: &str) -> Result<Expr, Vec<String>> {
+    let mut lexer = lexer::Lexer::new(input);
+    let tokens = lexer.tokenize();
+    let mut ctx = ParseContext::new(tokens);
+    let expr = expr::normalize_comparison_chains(expr::parse_expr(&mut ctx, 0));
+    let mut failures = ctx.expect_failures().to_vec();
+    if ctx.peek() != &Token::Eof {
+        failures.push(format!(
+            "unexpected trailing input starting at token `{:?}`",
+            ctx.peek()
+        ));
+    }
+    if failures.is_empty() {
+        Ok(expr)
+    } else {
+        Err(failures)
+    }
+}
+
 /// Fail-closed variant of `parse_body_expr`: returns the recorded
 /// `expect`/`syntax_failure` diagnostics as `Err` so callers can reject a
 /// malformed atom body instead of running verification on a recovered AST.

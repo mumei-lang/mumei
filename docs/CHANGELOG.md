@@ -1,3 +1,48 @@
+### 2026-10-08: wrapper emitters and runtime monitor fix output bugs
+
+- **`consume` no longer leaks into generated code**: Python signatures/call
+  sites, Rust signatures/call sites, and runtime-monitor extern decls,
+  monitored signatures, and calls now use the bare parameter name instead of
+  `consume n`.
+- **`=>` is translated**: `a => b` becomes `not (a) or (b)` in Python and
+  `!(a) || (b)` in Rust, honoring `=>`'s precedence (looser than `||`,
+  tighter than `|>`) and left associativity, so nested and chained
+  implications and `=>` inside larger expressions print unambiguously.
+- **Python contracts use `//` for integer division**: the verifier lowers
+  `/` to Z3 `Int` division (floor semantics), and Python `/` is float
+  division, so integer clauses now emit `//`. Clauses over `f32`/`f64`
+  keep `/`. Rust keeps `/`, matching LLVM's `sdiv` (truncation); the BV
+  (`-z`) proof mode lowers `/` to `bvsdiv` (also truncation) — see the
+  behavior-change PR notes.
+- **Quantified requires are asserted**: top-level `forall`/`exists`
+  conjuncts (hoisted into `contract.quantifiers`) now emit their own
+  runtime checks — `all(... for i in range(start, end))`/`any(...)` in
+  Python, `(start..end).all(|i| ...)`/`.any(...)` in Rust, and the same
+  `check` records in the runtime monitor. The range is end-exclusive,
+  matching verifier semantics. Quantifiers that cannot be translated
+  degrade to a comment instead of emitting broken host code. Quantifiers
+  nested inside larger expressions (under `||`, `!`, `=>`, `if`, `match`)
+  stay in the clause text and are translated there when possible;
+  otherwise the whole clause degrades safely.
+- **Runtime monitor checkability is decided on HIR**: the character
+  whitelist in `monitor_condition` is replaced by a node-kind check over
+  each `HirClause.expr` — `Number`, `Variable`, `BinaryOp` over
+  arithmetic/comparison/boolean ops, `IfThenElse` encoding `!e`, and
+  `Call` with checkable arguments are accepted; `Implies`, `StringLit`,
+  `Match`, `Lambda`, `Float`, `FieldAccess`, `ArrayAccess`, `VariantInit`,
+  `StructInit`, `AtomRef`, `CallRef`, `Async`, `Await`, `Perform`,
+  `ChanSend`, `ChanRecv`, and any clause with `expr: None` route to the
+  existing `unchecked` violation record. Every requires/ensures clause is
+  still checked regardless of `mode`; `Cover` clauses are never asserted.
+  The check payload is printed by the shared `mumei_core::contract_host`
+  AST printer instead of interpolating source text, so `!e`, `=>`, `-x`,
+  and comparison chains no longer produce invalid or wrong Rust.
+- **Untranslatable clauses degrade to comments**: `contract_text_to_*`
+  returning `None` now emits `# mumei: ...` / `// mumei: ...` comments
+  rather than interpolating raw contract text into host code.
+
+---
+
 ### 2026-10-08: v0.6.21 release version bump
 
 - **Workspace and member crate versions**: bumped versions from `0.6.20` to

@@ -151,9 +151,16 @@ pub fn assumed_requires_monitored(x: i64) -> i64 {
             atom: "assumed_requires",
             boundary: "assumed_clause",
             contract: "requires",
-            expression: "(x > 0) && (x < 100)",
+            expression: "x > 0",
             observed: None,
-        }, || (x > 0) && (x < 100));
+        }, || x > 0);
+    mumei_monitor::check(mumei_monitor::Violation {
+            atom: "assumed_requires",
+            boundary: "assumed_clause",
+            contract: "requires",
+            expression: "x < 100",
+            observed: None,
+        }, || x < 100);
     let result = unsafe { assumed_requires(x) };
     mumei_monitor::check(mumei_monitor::Violation {
             atom: "assumed_requires",

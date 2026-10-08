@@ -144,7 +144,7 @@ _lib = ctypes.CDLL(_LIB_PATH)
 _lib.rich_wrapper.argtypes = [c_int64, c_int64, c_int64, c_int64, c_int64]
 _lib.rich_wrapper.restype = c_int64
 
-def rich_wrapper(consume a: int, b: int, c: bool, plain: int, enabled: bool) -> int:
+def rich_wrapper(a: int, b: int, c: bool, plain: int, enabled: bool) -> int:
     """Safe wrapper for verified atom `rich_wrapper`.
 
     Calls into a compiled mumei binary via ctypes FFI.
@@ -153,8 +153,9 @@ def rich_wrapper(consume a: int, b: int, c: bool, plain: int, enabled: bool) -> 
     Precondition: (a >= 0 && b >= 0) && true
     Postcondition: result >= a && enabled == true
     """
-    assert (a >= 0 and b >= 0) and True, "precondition violated: (a >= 0 && b >= 0) && true"
-    result = _lib.rich_wrapper(consume a, b, c, plain, enabled)
+    assert a >= 0 and b >= 0, "precondition violated: (a >= 0 && b >= 0) && true"
+    assert all(i >= 0 for i in range(0, a)), "precondition violated: forall(i, 0, a, i >= 0)"
+    result = _lib.rich_wrapper(a, b, c, plain, enabled)
     assert result >= a and enabled == True, "postcondition violated: result >= a && enabled == true"
     return result
 "###,
@@ -164,7 +165,7 @@ def rich_wrapper(consume a: int, b: int, c: bool, plain: int, enabled: bool) -> 
 
 extern "C" {
     fn rich_wrapper(
-    consume a: i64,
+    a: i64,
     b: i64,
     c: i64,
     plain: i64,
@@ -184,10 +185,11 @@ extern "C" {
 ///
 /// # Postcondition
 /// `result >= a && enabled == true`
-pub fn rich_wrapper_safe(consume a: i64, b: i64, c: i64, plain: i64, enabled: i64) -> i64 {
-    assert!((a >= 0 && b >= 0) && true, "precondition violated: (a >= 0 && b >= 0) && true");
-    let result = unsafe { rich_wrapper(consume a, b, c, plain, enabled) };
-    debug_assert!(result >= a && enabled == true, "postcondition violated: result >= a && enabled == true");
+pub fn rich_wrapper_safe(a: i64, b: i64, c: i64, plain: i64, enabled: i64) -> i64 {
+    assert!(a >= 0 && b >= 0, "precondition violated: (a >= 0 && b >= 0) && true");
+    assert!(((0)..(a)).all(|i| i >= 0), "precondition violated: forall(i, 0, a, i >= 0)");
+    let result = unsafe { rich_wrapper(a, b, c, plain, enabled) };
+    debug_assert!(result >= a && (enabled != 0) == true, "postcondition violated: result >= a && enabled == true");
     result
 }
 "###,
@@ -235,7 +237,7 @@ def Vec2_dot(x: int, text: int) -> int:
     Precondition: !(x < 0) || true && false => text == "say \"hi\""
     Postcondition: result >= 0
     """
-    assert not (x < 0) or True and False => text == "say \"hi\"", "precondition violated: !(x < 0) || true && false => text == \"say \\"hi\\"\""
+    # mumei: requires not expressible as a Python runtime check; left to verification: !(x < 0) || true && false => text == "say \"hi\""
     result = _lib.Vec2_dot(x, text)
     assert result >= 0, "postcondition violated: result >= 0"
     return result
@@ -264,7 +266,7 @@ extern "C" {
 /// # Postcondition
 /// `result >= 0`
 pub fn Vec2_dot_safe(x: i64, text: i64) -> i64 {
-    assert!(!(x < 0) || true && false => text == "say \"hi\"", "precondition violated: !(x < 0) || true && false => text == \"say \\"hi\\"\"");
+    // mumei: requires not expressible as a Rust runtime check; left to verification: !(x < 0) || true && false => text == "say \"hi\""
     let result = unsafe { Vec2_dot(x, text) };
     debug_assert!(result >= 0, "postcondition violated: result >= 0");
     result
@@ -314,7 +316,7 @@ def mode_wrapper(x: int) -> int:
     Precondition: (((x >= 0)) && ((x < 10))) && (x != 0)
     Postcondition: result >= 0
     """
-    assert (((x >= 0)) and ((x < 10))) and (x != 0), "precondition violated: (((x >= 0)) && ((x < 10))) && (x != 0)"
+    assert x >= 0 and x < 10 and x != 0, "precondition violated: (((x >= 0)) && ((x < 10))) && (x != 0)"
     result = _lib.mode_wrapper(x)
     assert result >= 0, "postcondition violated: result >= 0"
     return result
@@ -342,7 +344,7 @@ extern "C" {
 /// # Postcondition
 /// `result >= 0`
 pub fn mode_wrapper_safe(x: i64) -> i64 {
-    assert!((((x >= 0)) && ((x < 10))) && (x != 0), "precondition violated: (((x >= 0)) && ((x < 10))) && (x != 0)");
+    assert!(x >= 0 && x < 10 && x != 0, "precondition violated: (((x >= 0)) && ((x < 10))) && (x != 0)");
     let result = unsafe { mode_wrapper(x) };
     debug_assert!(result >= 0, "postcondition violated: result >= 0");
     result

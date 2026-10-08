@@ -10,6 +10,9 @@
 //! - `ctypes` imports and library loading boilerplate
 //! - Type-annotated Python functions with `assert` for requires
 
+use mumei_core::contract_host::{
+    contract_text_to_host, quantifier_source_text, quantifier_to_host, ContractVars, HostTarget,
+};
 use mumei_core::emitter::{Artifact, ArtifactKind, Emitter};
 use mumei_core::hir::HirAtom;
 use mumei_core::lowering::{lower, LoweredType};
@@ -146,7 +149,9 @@ impl Emitter for PythonWrapperEmitter {
                 let resolved = module_env.resolve_base_type(type_name);
                 let ctype = mumei_type_to_ctypes(&resolved).to_string();
                 let annotation = mumei_type_to_python_annotation(&resolved).to_string();
-                (p.declared_name(), ctype, annotation)
+                // `consume`/`ref` are mumei ownership markers — emit the bare
+                // name in host code.
+                (p.name.clone(), ctype, annotation)
             })
             .collect();
 
@@ -186,13 +191,38 @@ impl Emitter for PythonWrapperEmitter {
         }
         py.push_str("    \"\"\"\n");
 
+        // Variable kinds for contract translation (`/` vs `//`, etc.).
+        let vars = ContractVars::from_signature(signature, Some(module_env));
+
         // Runtime precondition check
         if contract.requires_text != "true" {
-            py.push_str(&format!(
-                "    assert {}, \"precondition violated: {}\"\n",
-                translate_contract_to_python(&contract.requires_text),
-                contract.requires_text.replace('"', "\\\"")
-            ));
+            match translate_contract_to_python(&contract.requires_text, &vars) {
+                Some(cond) => py.push_str(&format!(
+                    "    assert {}, \"precondition violated: {}\"\n",
+                    cond,
+                    escape_message(&contract.requires_text)
+                )),
+                None => py.push_str(&format!(
+                    "    # mumei: requires not expressible as a Python runtime check; left to verification: {}\n",
+                    contract.requires_text
+                )),
+            }
+        }
+        // Hoisted `forall`/`exists` requires conjuncts: assert each as its own
+        // line (`all(cond for v in range(start, end))` / `any(...)`).
+        for quantifier in &contract.quantifiers {
+            let source = quantifier_source_text(quantifier);
+            match quantifier_to_host(quantifier, &vars, HostTarget::Python) {
+                Some(cond) => py.push_str(&format!(
+                    "    assert {}, \"precondition violated: {}\"\n",
+                    cond,
+                    escape_message(&source)
+                )),
+                None => py.push_str(&format!(
+                    "    # mumei: quantified requires not expressible as a Python runtime check; left to verification: {}\n",
+                    source
+                )),
+            }
         }
 
         // FFI call
@@ -205,11 +235,17 @@ impl Emitter for PythonWrapperEmitter {
 
         // Runtime postcondition check
         if contract.ensures_text != "true" {
-            py.push_str(&format!(
-                "    assert {}, \"postcondition violated: {}\"\n",
-                translate_contract_to_python(&contract.ensures_text),
-                contract.ensures_text.replace('"', "\\\"")
-            ));
+            match translate_contract_to_python(&contract.ensures_text, &vars) {
+                Some(cond) => py.push_str(&format!(
+                    "    assert {}, \"postcondition violated: {}\"\n",
+                    cond,
+                    escape_message(&contract.ensures_text)
+                )),
+                None => py.push_str(&format!(
+                    "    # mumei: ensures not expressible as a Python runtime check; left to verification: {}\n",
+                    contract.ensures_text
+                )),
+            }
         }
 
         py.push_str("    return result\n");
@@ -224,42 +260,32 @@ impl Emitter for PythonWrapperEmitter {
     }
 }
 
-/// Translate a mumei contract expression to valid Python syntax.
+/// Escape a contract source string for use inside a `"..."` assert message.
+/// Backslashes must be escaped before quotes — quoting first would turn an
+/// already-escaped `\"` into `\\\"` and break the string literal.
+fn escape_message(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Translate a mumei contract expression to a Python expression.
 ///
-/// Handles common patterns:
-/// - `&&` → `and`
-/// - `||` → `or`
-/// - `!` (prefix negation) → `not `
-/// - `!=` is preserved (not affected by `!` replacement)
-/// - `true` / `false` → `True` / `False` (standalone tokens only)
-/// - `result` → kept as-is (local variable in wrapper)
-///
-/// NOTE: `=>` (implication) is not yet handled and will produce invalid Python.
-fn translate_contract_to_python(contract: &str) -> String {
-    // First replace multi-char operators to avoid partial matches
-    let result = contract.replace("&&", " and ").replace("||", " or ");
-    // Replace `!=` with a placeholder, then `!` with `not `, then restore `!=`
-    let result = result
-        .replace("!=", "\x00NEQ\x00")
-        .replace('!', "not ")
-        .replace("\x00NEQ\x00", "!=");
-    // Normalize whitespace and translate boolean literals
-    result
-        .split_whitespace()
-        .map(|t| match t {
-            "true" => "True",
-            "false" => "False",
-            other => other,
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+/// This is now AST-based (`mumei_core::contract_host`): `=>` prints as
+/// `not a or b`, `/` between integers prints as `//` (floor division, matching
+/// the verifier's Z3 Int lowering), `!`/`!=`/`&&`/`||`/`forall`/`exists` and
+/// literals are all handled structurally. Returns `None` for clauses with no
+/// runtime-checkable Python form — the caller emits a degrade comment instead
+/// of invalid code.
+fn translate_contract_to_python(contract: &str, vars: &ContractVars) -> Option<String> {
+    contract_text_to_host(contract, vars, HostTarget::Python)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mumei_core::hir::{lower_atom_metadata, HirEffectSet, HirExpr, HirStmt};
-    use mumei_core::parser::ast::{Atom, Expr, Param, Span, Stmt, TrustLevel};
+    use mumei_core::parser::ast::{
+        Atom, Expr, Param, Quantifier, QuantifierType, Span, Stmt, TrustLevel,
+    };
     use mumei_core::verification::ModuleEnv;
 
     fn make_param(name: &str, type_name: &str) -> Param {
@@ -321,6 +347,114 @@ mod tests {
         }
     }
 
+    fn make_hir_atom_with_quantifiers(
+        name: &str,
+        params: Vec<Param>,
+        requires: &str,
+        quantifiers: Vec<Quantifier>,
+        ensures: &str,
+        return_type: Option<&str>,
+    ) -> HirAtom {
+        let mut hir = make_hir_atom(name, params, requires, ensures, return_type);
+        hir.atom.forall_constraints = quantifiers.clone();
+        hir.contract.quantifiers = quantifiers
+            .iter()
+            .map(|q| {
+                let condition_expr = mumei_core::parser::parse_expression_checked(&q.condition)
+                    .ok()
+                    .map(|e| mumei_core::hir::lower_expr_with_env(&e, None));
+                mumei_core::hir::HirQuantifier {
+                    kind: if q.q_type == QuantifierType::Exists {
+                        mumei_core::hir::HirQuantifierKind::Exists
+                    } else {
+                        mumei_core::hir::HirQuantifierKind::ForAll
+                    },
+                    var: q.var.clone(),
+                    start: q.start.clone(),
+                    end: q.end.clone(),
+                    condition: q.condition.clone(),
+                    condition_expr,
+                }
+            })
+            .collect();
+        hir
+    }
+
+    #[test]
+    fn test_python_wrapper_quantified_requires_become_runtime_checks() {
+        // The parser hoists top-level `forall(`/`exists(` conjuncts out of the
+        // requires text into `contract.quantifiers`; each must still become its
+        // own assert line ([start, end) — end exclusive, matching `range`).
+        let hir = make_hir_atom_with_quantifiers(
+            "bounded",
+            vec![make_param("x", "i64"), make_param("n", "i64")],
+            "x >= 0 && true",
+            vec![
+                Quantifier {
+                    q_type: QuantifierType::ForAll,
+                    var: "i".to_string(),
+                    start: "0".to_string(),
+                    end: "n".to_string(),
+                    condition: "i >= 0 && i < x".to_string(),
+                },
+                Quantifier {
+                    q_type: QuantifierType::Exists,
+                    var: "j".to_string(),
+                    start: "0".to_string(),
+                    end: "n".to_string(),
+                    condition: "j == 0".to_string(),
+                },
+            ],
+            "result >= 0",
+            Some("i64"),
+        );
+        let module_env = ModuleEnv::new();
+        let artifacts = PythonWrapperEmitter
+            .emit(&hir, Path::new("/tmp/bounded"), &module_env, &[])
+            .unwrap();
+        let py = String::from_utf8(artifacts[0].data.clone()).unwrap();
+        assert!(
+            py.contains(
+                "assert all(i >= 0 and i < x for i in range(0, n)), \"precondition violated: forall(i, 0, n, i >= 0 && i < x)\""
+            ),
+            "forall should be an all(...) runtime check:\n{py}"
+        );
+        assert!(
+            py.contains(
+                "assert any(j == 0 for j in range(0, n)), \"precondition violated: exists(j, 0, n, j == 0)\""
+            ),
+            "exists should be an any(...) runtime check:\n{py}"
+        );
+    }
+
+    #[test]
+    fn test_python_wrapper_untranslatable_quantifier_degrades_to_comment() {
+        let hir = make_hir_atom_with_quantifiers(
+            "weird",
+            vec![make_param("x", "i64")],
+            "x >= 0 && true",
+            vec![Quantifier {
+                q_type: QuantifierType::ForAll,
+                var: "i".to_string(),
+                start: "0".to_string(),
+                end: "x".to_string(),
+                condition: "match i { _ => true }".to_string(),
+            }],
+            "result >= 0",
+            Some("i64"),
+        );
+        let module_env = ModuleEnv::new();
+        let artifacts = PythonWrapperEmitter
+            .emit(&hir, Path::new("/tmp/weird"), &module_env, &[])
+            .unwrap();
+        let py = String::from_utf8(artifacts[0].data.clone()).unwrap();
+        assert!(
+            py.contains("# mumei: quantified requires not expressible as a Python runtime check"),
+            "untranslatable quantifier should degrade to a comment:\n{py}"
+        );
+        assert!(py.contains("def weird("), "wrapper still emitted:\n{py}");
+    }
+
     #[test]
     fn test_python_wrapper_basic() {
         let hir = make_hir_atom(
@@ -374,29 +508,72 @@ mod tests {
 
     #[test]
     fn test_contract_translation() {
-        assert_eq!(
-            translate_contract_to_python("a >= 0 && b >= 0"),
-            "a >= 0 and b >= 0"
-        );
-        assert_eq!(
-            translate_contract_to_python("x > 0 || y > 0"),
-            "x > 0 or y > 0"
-        );
-        assert_eq!(translate_contract_to_python("result == 42"), "result == 42");
-        // Negation: ! → not
-        assert_eq!(translate_contract_to_python("!(x < 0)"), "not (x < 0)");
+        let vars = ContractVars::new();
+        let tr = |s: &str| translate_contract_to_python(s, &vars);
+        assert_eq!(tr("a >= 0 && b >= 0").as_deref(), Some("a >= 0 and b >= 0"));
+        assert_eq!(tr("x > 0 || y > 0").as_deref(), Some("x > 0 or y > 0"));
+        assert_eq!(tr("result == 42").as_deref(), Some("result == 42"));
+        // Negation: ! → not (Python `not` binds looser than comparisons)
+        assert_eq!(tr("!(x < 0)").as_deref(), Some("not x < 0"));
         // != must be preserved
-        assert_eq!(translate_contract_to_python("x != 0"), "x != 0");
+        assert_eq!(tr("x != 0").as_deref(), Some("x != 0"));
         // Combined: negation + !=
-        assert_eq!(translate_contract_to_python("!(x != 0)"), "not (x != 0)");
+        assert_eq!(tr("!(x != 0)").as_deref(), Some("not x != 0"));
         // Boolean literals: true/false → True/False
+        assert_eq!(tr("result == true").as_deref(), Some("result == True"));
         assert_eq!(
-            translate_contract_to_python("result == true"),
-            "result == True"
+            tr("result == false || x > 0").as_deref(),
+            Some("result == False or x > 0")
         );
+        // `=>` implication → `not a or b`, operands parenthesized
         assert_eq!(
-            translate_contract_to_python("result == false || x > 0"),
-            "result == False or x > 0"
+            tr("x > 0 => result > 0").as_deref(),
+            Some("not (x > 0) or (result > 0)")
+        );
+        // `=>` inside a larger expression (`=>` binds looser than `||`)
+        assert_eq!(
+            tr("x > 0 || y > 0 => z > 0").as_deref(),
+            Some("not (x > 0 or y > 0) or (z > 0)")
+        );
+        // Chained `=>` is left-associative: (a => b) => c
+        assert_eq!(
+            tr("a > 0 => b > 0 => c > 0").as_deref(),
+            Some("not (not (a > 0) or (b > 0)) or (c > 0)")
+        );
+        // `/` between ints → floor division, matching the verifier's Z3 Int div
+        assert_eq!(tr("a / b >= 0").as_deref(), Some("a // b >= 0"));
+        // Quantifiers nested inside an expression still translate
+        assert_eq!(
+            tr("n <= 0 || forall(i, 0, n, i >= 0)").as_deref(),
+            Some("n <= 0 or all(i >= 0 for i in range(0, n))")
+        );
+        // Unparseable tail degrades to None instead of emitting broken Python
+        assert_eq!(tr("result >= 0 -> result < 10"), None);
+    }
+
+    #[test]
+    fn test_contract_translation_negative_division() {
+        // Negative operands: Python `//` floors, matching Z3 Int division
+        // (`(-3) // 2 == -2`, not the truncating `-1`).
+        let vars = ContractVars::new();
+        assert_eq!(
+            translate_contract_to_python("0 - a / b <= result", &vars).as_deref(),
+            Some("0 - a // b <= result")
+        );
+        // `(-7) / 2` — the numerator parses as `0 - 7` and must stay
+        // parenthesized so `//` floors the negative: `(0 - 7) // 2 == -4`,
+        // not `0 - 7 // 2 == -3`.
+        assert_eq!(
+            translate_contract_to_python("(0 - 7) / 2 == 0 - 4", &vars).as_deref(),
+            Some("(0 - 7) // 2 == 0 - 4")
+        );
+        // Float operands keep `/`.
+        let mut fvars = ContractVars::new();
+        fvars.insert("fa", mumei_core::contract_host::ContractVarKind::Float);
+        fvars.insert("fb", mumei_core::contract_host::ContractVarKind::Float);
+        assert_eq!(
+            translate_contract_to_python("fa / fb > 0.5", &fvars).as_deref(),
+            Some("fa / fb > 0.5")
         );
     }
 

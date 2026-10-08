@@ -138,7 +138,7 @@ pub mod mumei_monitor {
 }
 
 extern "C" {
-    fn Vec2_dot(consume a: i64, b: i64, c: i64, plain: i64) -> i64;
+    fn Vec2_dot(a: i64, b: i64, c: i64, plain: i64) -> i64;
 }
 
 /// Monitored trust boundary `Vec2::dot`.
@@ -146,7 +146,7 @@ extern "C" {
 /// - trusted_atom: atom is declared `trusted`, so its contract is assumed rather than proven
 ///
 /// Contract violations are reported as OTel events, never panics.
-pub fn Vec2_dot_monitored(consume a: i64, b: i64, c: i64, plain: i64) -> i64 {
+pub fn Vec2_dot_monitored(a: i64, b: i64, c: i64, plain: i64) -> i64 {
     mumei_monitor::check(mumei_monitor::Violation {
             atom: "Vec2::dot",
             boundary: "trusted_atom",
@@ -154,7 +154,7 @@ pub fn Vec2_dot_monitored(consume a: i64, b: i64, c: i64, plain: i64) -> i64 {
             expression: "a >= 0",
             observed: None,
         }, || a >= 0);
-    let result = unsafe { Vec2_dot(consume a, b, c, plain) };
+    let result = unsafe { Vec2_dot(a, b, c, plain) };
     mumei_monitor::check(mumei_monitor::Violation {
             atom: "Vec2::dot",
             boundary: "trusted_atom",

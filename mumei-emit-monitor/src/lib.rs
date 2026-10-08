@@ -15,10 +15,13 @@
 //! existing OTel SDK). Without `OTEL_ENABLED` the monitor is a no-op, and the
 //! default hook targets `OTEL_EXPORTER_OTLP_ENDPOINT`.
 
+use mumei_core::contract_host::{
+    contract_text_to_host, quantifier_source_text, quantifier_to_host, ContractVars, HostTarget,
+};
 use mumei_core::emitter::{Artifact, ArtifactKind, Emitter};
-use mumei_core::hir::HirAtom;
+use mumei_core::hir::{HirAtom, HirClauseKind, HirExpr, HirStmt};
 use mumei_core::lowering::{lower, LoweredType};
-use mumei_core::parser::ExternBlock;
+use mumei_core::parser::{ExternBlock, Op};
 use mumei_core::verification::{ModuleEnv, MumeiResult};
 use std::path::Path;
 
@@ -185,61 +188,102 @@ fn escape(contract: &str) -> String {
     contract.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Rust keywords that would turn an interpolated contract into a statement or
-/// item rather than a boolean expression.
-const REJECTED_CONTRACT_WORDS: &[&str] = &[
-    "unsafe", "fn", "let", "return", "static", "const", "mod", "impl", "use", "loop", "while",
-    "for", "match", "extern", "macro", "crate", "super", "std", "move", "async", "await", "if",
-    "else", "break", "continue", "struct", "enum", "trait", "type", "where", "dyn", "ref", "box",
-];
+/// Whether a clause's lowered `HirExpr` is a runtime-checkable monitor
+/// condition: a subtree built only of `Number`, `Variable`, `BinaryOp` over
+/// arithmetic/comparison/boolean `Op`s, the `IfThenElse` encoding of `!e`, or
+/// `Call` (parity with the previous behaviour, which let `f(x)` through).
+///
+/// This replaces the old character whitelist on source text, which could not
+/// see structure: it let `a => b` through (the characters pass, but the
+/// interpolated text is not valid Rust) and accepted `a < b < c`, which the
+/// parser normalizes into an `&&`-joined chain that raw text interpolation
+/// rendered as invalid Rust. Rejected nodes — `Implies`, `Pow`, `StringLit`,
+/// `Float`, `Match`, `Lambda`, `StructInit`, `FieldAccess`, `ArrayAccess`,
+/// `VariantInit`, `ArrayLit`, `AtomRef`, `CallRef`, `Async`, `Await`,
+/// `Perform`, `Task`, `TaskGroup`, `ChanSend`, `ChanRecv`, and any other
+/// variant — route the clause through the `unchecked` path.
+fn hir_expr_is_monitor_checkable(expr: &HirExpr) -> bool {
+    match expr {
+        HirExpr::Number(_) => true,
+        // `::`-qualified names could resolve to *host* paths in generated Rust
+        // (`std::process::exit`) — the monitor cannot vet them the way the
+        // verifier vets wrapper contracts, so they stay `unchecked` (parity
+        // with the old whitelist, which rejected `:`).
+        HirExpr::Variable(name) => {
+            !name.contains("::") && !matches!(name.as_str(), "forall" | "exists")
+        }
+        HirExpr::BinaryOp(l, op, r) => {
+            matches!(
+                op,
+                Op::Add
+                    | Op::Sub
+                    | Op::Mul
+                    | Op::Div
+                    | Op::Eq
+                    | Op::Neq
+                    | Op::Gt
+                    | Op::Lt
+                    | Op::Ge
+                    | Op::Le
+                    | Op::And
+                    | Op::Or
+                    | Op::BitAnd
+                    | Op::BitOr
+                    | Op::BitXor
+                    | Op::Shl
+                    | Op::Shr
+            ) && hir_expr_is_monitor_checkable(l)
+                && hir_expr_is_monitor_checkable(r)
+        }
+        // `!e` lowers to `if e { false } else { true }` in the parser — accept
+        // exactly that shape; any other if-expression is not a monitor
+        // condition.
+        HirExpr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            hir_stmt_bool_literal(then_branch) == Some(false)
+                && hir_stmt_bool_literal(else_branch) == Some(true)
+                && hir_expr_is_monitor_checkable(cond)
+        }
+        HirExpr::Call { name, args, .. } => {
+            !name.contains("::")
+                && !matches!(name.as_str(), "forall" | "exists")
+                && args.iter().all(hir_expr_is_monitor_checkable)
+        }
+        _ => false,
+    }
+}
 
-/// A contract is interpolated into the generated `if` condition, so only a
-/// closed subset of expressions may be emitted: identifiers, integer literals,
-/// comparison/arithmetic/boolean operators and parentheses. Anything else
-/// (blocks, statements, macros, paths, string literals, comments, mumei-only
-/// syntax such as `forall`) is not lowered, so a contract can never contribute
-/// arbitrary Rust to the monitor.
-fn monitor_condition(contract: &str) -> Option<&str> {
-    let contract = contract.trim();
-    if contract.is_empty() || contract == "true" {
-        return None;
-    }
-    let allowed = |c: char| {
-        c.is_ascii_alphanumeric()
-            || c == '_'
-            || c.is_ascii_whitespace()
-            || matches!(
-                c,
-                '+' | '-' | '*' | '/' | '%' | '(' | ')' | '<' | '>' | '=' | '!' | '&' | '|' | ','
-            )
-    };
-    if !contract.chars().all(allowed) {
-        return None;
-    }
-    if contract.contains("//") || contract.contains("/*") || contract.contains("->") {
-        return None;
-    }
-    let mut depth: i32 = 0;
-    for c in contract.chars() {
-        match c {
-            '(' => depth += 1,
-            ')' => depth -= 1,
-            _ => {}
+fn hir_stmt_bool_literal(stmt: &HirStmt) -> Option<bool> {
+    if let HirStmt::Expr(HirExpr::Variable(v)) = stmt {
+        match v.as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
         }
-        if depth < 0 {
-            return None;
-        }
+    } else {
+        None
     }
-    if depth != 0 {
+}
+
+/// Checkability for one clause: the HIR node-kind check must pass *and* the
+/// clause text must print into Rust. Both can fail independently (e.g. a
+/// recovery placeholder `expr` parses but never prints).
+fn clause_monitor_condition(
+    clause: &mumei_core::hir::HirClause,
+    vars: &ContractVars,
+) -> Option<String> {
+    let text = clause.text.trim();
+    if text.is_empty() || text == "true" {
         return None;
     }
-    if contract
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .any(|word| REJECTED_CONTRACT_WORDS.contains(&word))
-    {
-        return None;
-    }
-    Some(contract)
+    let checkable = clause
+        .expr
+        .as_ref()
+        .is_some_and(hir_expr_is_monitor_checkable);
+    checkable.then(|| contract_text_to_host(text, vars, HostTarget::Rust))?
 }
 
 /// Generate the monitor module for a trust-boundary atom.
@@ -254,7 +298,8 @@ pub fn generate_monitor(hir_atom: &HirAtom, module_env: &ModuleEnv) -> String {
         .iter()
         .map(|p| {
             let type_name = p.ty.as_deref().unwrap_or("i64");
-            (p.declared_name(), rust_type(type_name, module_env))
+            // `consume`/`ref` are mumei ownership markers — emit the bare name.
+            (p.name.clone(), rust_type(type_name, module_env))
         })
         .collect();
     let return_type = rust_type(
@@ -317,15 +362,19 @@ pub fn generate_monitor(hir_atom: &HirAtom, module_env: &ModuleEnv) -> String {
     };
     // Contract evaluation goes through `check`, so an arithmetic panic inside a
     // contract is reported rather than propagated into the monitored call.
-    let check = |contract_kind: &str, condition: &str| {
+    // `source_text` is the clause as written (kept for telemetry); `condition`
+    // is the printed Rust expression that actually runs.
+    let check = |contract_kind: &str, source_text: &str, condition: &str| {
         format!(
             "    mumei_monitor::check({}, || {});\n",
-            violation(contract_kind, condition),
+            violation(contract_kind, source_text),
             condition
         )
     };
     // An unsupported contract is left to verification, but the gap is reported
-    // rather than only commented, so telemetry shows what is unchecked.
+    // rather than only commented, so telemetry shows what is unchecked. The
+    // expression stays a fixed literal: arbitrary source text (which failed
+    // validation) is never embedded into generated code.
     let unchecked = |contract_kind: &str| {
         format!(
             "    // {contract_kind}: not expressible as a runtime condition, left to verification.\n    mumei_monitor::record({});\n",
@@ -334,6 +383,28 @@ pub fn generate_monitor(hir_atom: &HirAtom, module_env: &ModuleEnv) -> String {
                 "not a runtime-checkable expression"
             ),
         )
+    };
+
+    let vars = ContractVars::from_signature(signature, Some(module_env));
+
+    // Emit one `check` (or `unchecked` record) per clause of the given kind.
+    // Every requires/ensures clause is checked regardless of `mode`
+    // (Plain/Assume/Check), per the design doc's Decisions; `Cover` clauses
+    // are reachability queries and never become runtime assertions.
+    let emit_clauses = |kind: HirClauseKind, label: &str| -> String {
+        let mut out = String::new();
+        for clause in &contract.clauses {
+            if clause.kind != kind {
+                continue;
+            }
+            let text = clause.text.trim();
+            match clause_monitor_condition(clause, &vars) {
+                Some(condition) => out.push_str(&check(label, text, &condition)),
+                None if text.is_empty() || text == "true" => {}
+                None => out.push_str(&unchecked(label)),
+            }
+        }
+        out
     };
 
     // `effect_pre` is an assumption the proof makes about the caller's state.
@@ -351,11 +422,20 @@ pub fn generate_monitor(hir_atom: &HirAtom, module_env: &ModuleEnv) -> String {
         ));
     }
 
-    match monitor_condition(&contract.requires_text) {
-        Some(condition) => rs.push_str(&check("requires", condition)),
-        None if contract.requires_text.trim().is_empty()
-            || contract.requires_text.trim() == "true" => {}
-        None => rs.push_str(&unchecked("requires")),
+    rs.push_str(&emit_clauses(HirClauseKind::Requires, "requires"));
+
+    // Quantified requires conjuncts get their own `check` lines: a hoisted
+    // `forall(v, s, e, c)` becomes `(s..e).all(|v| c)`. Unlike clause payloads
+    // (which keep the strict node check for parity), these are emitted from
+    // the shared AST printer so bounds like `min(0, n)` and array indexing
+    // `arr[i]` (`unsafe { *arr.add(i) }`) stay expressible; untranslatable
+    // parts still degrade to `requires_unchecked`.
+    for quantifier in &contract.quantifiers {
+        let source = quantifier_source_text(quantifier);
+        match quantifier_to_host(quantifier, &vars, HostTarget::Rust) {
+            Some(condition) => rs.push_str(&check("requires", &source, &condition)),
+            None => rs.push_str(&unchecked("requires")),
+        }
     }
 
     rs.push_str(&format!(
@@ -368,12 +448,7 @@ pub fn generate_monitor(hir_atom: &HirAtom, module_env: &ModuleEnv) -> String {
             .join(", ")
     ));
 
-    match monitor_condition(&contract.ensures_text) {
-        Some(condition) => rs.push_str(&check("ensures", condition)),
-        None if contract.ensures_text.trim().is_empty()
-            || contract.ensures_text.trim() == "true" => {}
-        None => rs.push_str(&unchecked("ensures")),
-    }
+    rs.push_str(&emit_clauses(HirClauseKind::Ensures, "ensures"));
 
     rs.push_str("    result\n}\n");
     rs
