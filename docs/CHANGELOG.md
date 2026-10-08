@@ -56,7 +56,9 @@
   emits `(_mumei_d := divmod(a, b))[0] + (_mumei_d[1] < 0)` — `divmod`
   evaluates each operand once, keeping chained divisions linear;
   Rust/monitor emit `((a) as i64).div_euclid(b)` — verified against Z3
-  4.14.1 for all sign combinations.
+  4.14.1 for all sign combinations. `u64`/`u32` operands instead emit
+  `as u64` (a signed cast would flip large dividends); mixed-sign
+  divisions degrade because the host cannot represent them faithfully.
 - **Partial-clause checks**: when a conjunction cannot fully print (one
   conjunct uses an unsupported form like `arr[i]`), each translatable
   top-level conjunct is still emitted instead of dropping the whole

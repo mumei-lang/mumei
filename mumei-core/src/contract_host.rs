@@ -53,6 +53,9 @@ pub enum HostTarget {
 pub enum ContractVarKind {
     /// Integer — the default; mumei `/` between ints is integer division.
     Int,
+    /// `u64`/`u32` — emitted as `u64`/`u32` in Rust; integer division must
+    /// not cast the dividend to `i64` (values > `i64::MAX` would flip sign).
+    UInt,
     /// `f32`/`f64` — `/` stays float division.
     Float,
     /// `bool` — at the FFI boundary bools ride as i64, so Rust output coerces
@@ -117,9 +120,8 @@ impl ContractVars {
 
 fn kind_of(ty: &LoweredType) -> ContractVarKind {
     match ty {
-        LoweredType::I64 | LoweredType::I32 | LoweredType::U64 | LoweredType::U32 => {
-            ContractVarKind::Int
-        }
+        LoweredType::I64 | LoweredType::I32 => ContractVarKind::Int,
+        LoweredType::U64 | LoweredType::U32 => ContractVarKind::UInt,
         LoweredType::Bool => ContractVarKind::Bool,
         LoweredType::F64 | LoweredType::F32 => ContractVarKind::Float,
         LoweredType::Array(_) => ContractVarKind::Ptr,
@@ -517,10 +519,26 @@ fn emit_binop(
             // from a single divmod call.
             format!("((_mumei_d := divmod({l}, {r}))[0] + (_mumei_d[1] < 0))")
         } else {
-            // `as i64` pins the receiver type: a literal like `100` is an
-            // ambiguous `{integer}` that cannot receive a method call, and
-            // every integer at the FFI boundary is i64 anyway.
-            format!("(({l}) as i64).div_euclid({r})")
+            // The cast pins the receiver type: a literal like `100` is an
+            // ambiguous `{integer}` that cannot receive a method call. The
+            // cast must match operand signedness — `as i64` on a `u64`
+            // dividend above `i64::MAX` would flip its sign, so unsigned
+            // operands divide as `u64` (where Euclidean = trunc = Z3
+            // semantics for nonnegative values). Mixed signedness cannot be
+            // represented faithfully in the host — degrade.
+            // Only an unsigned VARIABLE forces u64 — a nonnegative literal is
+            // polymorphic and adopts either cast; a signed expression can
+            // never be u64.
+            let is_uint_var = |e: &Expr| matches!(e, Expr::Variable(n) if vars.get(&n.replace("::", "_")) == ContractVarKind::UInt);
+            let nonneg = |e: &Expr| is_uint_var(e) || matches!(e, Expr::Number(n) if *n >= 0);
+            match (
+                is_uint_var(l_expr) || is_uint_var(r_expr),
+                nonneg(l_expr) && nonneg(r_expr),
+            ) {
+                (true, true) => format!("(({l}) as u64).div_euclid({r})"),
+                (true, false) => return None,
+                (false, _) => format!("(({l}) as i64).div_euclid({r})"),
+            }
         });
     }
     // `x == true` on an FFI bool/int param: the literal normalizes to `1`/`0`

@@ -484,6 +484,21 @@ mod tests {
             translate_contract_to_rust("7 / (0 - 2) == 0 - 3", &vars).as_deref(),
             Some("((7) as i64).div_euclid(0 - 2) == 0 - 3")
         );
+        // `u64` operands divide as u64 — `as i64` would flip the sign of a
+        // dividend above `i64::MAX`; nonnegative literals adopt u64 too.
+        let mut uvars = ContractVars::new();
+        uvars.insert("ua", mumei_core::contract_host::ContractVarKind::UInt);
+        uvars.insert("ub", mumei_core::contract_host::ContractVarKind::UInt);
+        assert_eq!(
+            translate_contract_to_rust("ua / ub >= 0", &uvars).as_deref(),
+            Some("((ua) as u64).div_euclid(ub) >= 0")
+        );
+        assert_eq!(
+            translate_contract_to_rust("ua / 2 >= 0", &uvars).as_deref(),
+            Some("((ua) as u64).div_euclid(2) >= 0")
+        );
+        // Mixed signedness cannot be represented faithfully — degrade.
+        assert_eq!(translate_contract_to_rust("a / ub >= 0", &uvars), None);
         // `::`-qualified names mangle to FFI symbols, never host paths —
         // `std::process::exit(0)` can never become a real host call.
         assert_eq!(
