@@ -9,9 +9,13 @@
 //!
 //! Coverage is intentionally small — the expression forms a contract clause can
 //! contain after the parser has normalized `!e` (into `IfThenElse`), unary `-x`
-//! (into `0 - x`), and comparison chains (into `&&`-joined comparisons). Any
-//! node outside that set returns `None` so callers can degrade to a comment or
-//! an `unchecked` record instead of emitting invalid host code.
+//! (into `0 - x` or a negative literal), and comparison chains (into
+//! `&&`-joined comparisons). `ArrayAccess`/`FieldAccess` are rejected: pointer
+//! indexing and field reads would dereference unvalidated FFI data inside a
+//! nominally safe wrapper. `::`-qualified names print with the FFI `::`→`_`
+//! symbol mangling (`Vec2::dot` → `Vec2_dot`), never as a host path. Any node
+//! outside that set returns `None` so callers can degrade to a comment or an
+//! `unchecked` record instead of emitting invalid host code.
 //!
 //! Notable semantics baked in here:
 //! - `=>` prints as `not a or b` (Python) / `!a || b` (Rust). `=>` is
@@ -317,12 +321,25 @@ fn stmt_tail_expr(stmt: &Stmt) -> Option<&Expr> {
 
 fn emit_raw(e: &Expr, vars: &ContractVars, t: HostTarget) -> Option<String> {
     Some(match e {
-        Expr::Number(n) => n.to_string(),
+        // Negative literals always print parenthesized: bare `-2` binds
+        // wrongly in Python (`-2 ** 2` is `-(2 ** 2)`) and in Rust method
+        // calls (`-2.abs()` is `-(2.abs())`).
+        Expr::Number(n) => {
+            if *n < 0 {
+                format!("({n})")
+            } else {
+                n.to_string()
+            }
+        }
         Expr::Float(f) => {
             if !f.is_finite() {
                 return None;
             }
-            format!("{f:?}")
+            if *f < 0.0 {
+                format!("({f:?})")
+            } else {
+                format!("{f:?}")
+            }
         }
         Expr::StringLit(s) => format!("\"{}\"", escape_str(s)),
         Expr::Variable(name) => match name.as_str() {
@@ -345,11 +362,16 @@ fn emit_raw(e: &Expr, vars: &ContractVars, t: HostTarget) -> Option<String> {
             "forall" | "exists" => return None,
             _ if name.starts_with("__mumei_") => return None,
             _ => {
-                if t == HostTarget::Rust && vars.get(name) == ContractVarKind::Bool {
+                // `::`-qualified names are mumei module paths, not host
+                // paths — print them with the same `::`→`_` mangling the FFI
+                // symbol uses (`Vec2::dot` → `Vec2_dot`) instead of emitting a
+                // Rust path expression like `std::process::exit`.
+                let name = name.replace("::", "_");
+                if t == HostTarget::Rust && vars.get(&name) == ContractVarKind::Bool {
                     // FFI bools are i64; coerce to a real Rust bool.
                     format!("({name} != 0)")
                 } else {
-                    name.clone()
+                    name
                 }
             }
         },
@@ -357,19 +379,12 @@ fn emit_raw(e: &Expr, vars: &ContractVars, t: HostTarget) -> Option<String> {
             let parts: Option<Vec<String>> = elems.iter().map(|e| emit(e, vars, t, 0)).collect();
             format!("[{}]", parts?.join(", "))
         }
-        Expr::ArrayAccess(name, idx) => {
-            let idx = emit(idx, vars, t, 0)?;
-            match t {
-                // ctypes pointer params support `p[i]` directly.
-                HostTarget::Python => format!("{name}[{idx}]"),
-                HostTarget::Rust => match vars.get(name) {
-                    ContractVarKind::Ptr => {
-                        format!("unsafe {{ *{name}.add(({idx}) as usize) }}")
-                    }
-                    _ => return None,
-                },
-            }
-        }
+        // Pointer indexing is not a safe runtime check: `arr[i]` on a ctypes
+        // pointer or `unsafe { *arr.add(i) }` dereferences a caller-controlled
+        // raw pointer with no bounds validation inside a nominally safe
+        // wrapper, and `FieldAccess` on an FFI-typed param (i64/c_void_p) is
+        // never valid host code. Degrade rather than emit unsound/broken code.
+        Expr::ArrayAccess(..) | Expr::FieldAccess(..) => return None,
         Expr::BinaryOp(l, op, r) => return emit_binop(l, op, r, e, vars, t),
         Expr::IfThenElse {
             cond,
@@ -397,10 +412,6 @@ fn emit_raw(e: &Expr, vars: &ContractVars, t: HostTarget) -> Option<String> {
                     format!("(if {cond} {{ {then_e} }} else {{ {else_e} }})")
                 }
             }
-        }
-        Expr::FieldAccess(base, field) => {
-            let base = emit(base, vars, t, 100)?;
-            format!("{base}.{field}")
         }
         Expr::Call(name, args) => return emit_call(name, args, vars, t),
         // Match, StructInit, Block, Lambda, AtomRef, CallRef, Async/Await,
@@ -576,9 +587,12 @@ fn emit_call(name: &str, args: &[Expr], vars: &ContractVars, t: HostTarget) -> O
         return Some(format!("({}).{}({})", parts[0], name, parts[1]));
     }
     let args = parts.join(", ");
+    // Same `::`→`_` mangling as variables: `std::process::exit` becomes the
+    // (nonexistent) symbol `std_process_exit`, never a host path call.
     Some(match t {
-        HostTarget::Python => format!("{}({})", name.replace("::", "_"), args),
-        HostTarget::Rust => format!("{name}({args})"),
+        HostTarget::Python | HostTarget::Rust => {
+            format!("{}({})", name.replace("::", "_"), args)
+        }
     })
 }
 

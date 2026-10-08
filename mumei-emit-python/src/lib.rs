@@ -549,6 +549,16 @@ mod tests {
         );
         // Unparseable tail degrades to None instead of emitting broken Python
         assert_eq!(tr("result >= 0 -> result < 10"), None);
+        // Negative literals stay parenthesized under `**`
+        // (`-2 ** 2` would evaluate to -4 in Python).
+        assert_eq!(tr("-2 ** 2 == 4").as_deref(), Some("(-2) ** 2 == 4"));
+        // `::`-qualified names mangle to FFI symbols, never host paths
+        assert_eq!(tr("Vec2::dot(x) >= 0").as_deref(), Some("Vec2_dot(x) >= 0"));
+        // Pointer indexing / field reads degrade: they would dereference
+        // unvalidated FFI data inside a nominally safe wrapper.
+        assert_eq!(tr("arr[i] >= 0"), None);
+        assert_eq!(tr("v.x >= 0"), None);
+        assert_eq!(tr("forall(i, 0, n, arr[i] >= 0)"), None);
     }
 
     #[test]

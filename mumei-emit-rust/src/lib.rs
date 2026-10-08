@@ -475,6 +475,20 @@ mod tests {
             translate_contract_to_rust("(0 - 7) / 2 == 0 - 3", &vars).as_deref(),
             Some("(0 - 7) / 2 == 0 - 3")
         );
+        // `::`-qualified names mangle to FFI symbols, never host paths —
+        // `std::process::exit(0)` can never become a real host call.
+        assert_eq!(
+            translate_contract_to_rust("std::process::exit(0) == 0", &vars).as_deref(),
+            Some("std_process_exit(0) == 0")
+        );
+        // Pointer indexing / field reads degrade rather than dereference an
+        // unvalidated FFI pointer inside a safe wrapper.
+        assert_eq!(translate_contract_to_rust("arr[i] >= 0", &vars), None);
+        assert_eq!(translate_contract_to_rust("v.x >= 0", &vars), None);
+        assert_eq!(
+            translate_contract_to_rust("forall(i, 0, n, arr[i] >= 0)", &vars),
+            None
+        );
     }
 
     #[test]

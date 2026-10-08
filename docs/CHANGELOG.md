@@ -40,6 +40,12 @@
 - **Untranslatable clauses degrade to comments**: `contract_text_to_*`
   returning `None` now emits `# mumei: ...` / `// mumei: ...` comments
   rather than interpolating raw contract text into host code.
+- **Printer hardening** (from review): negative literals always print
+  parenthesized (`(-2) ** 2`, not `-2 ** 2` which Python mis-evaluates);
+  `arr[i]`/`v.field` degrade because they would dereference unvalidated
+  FFI pointers inside a safe wrapper; `::`-qualified names print with the
+  FFI `::`→`_` symbol mangling (`Vec2::dot` → `Vec2_dot`) so contract
+  text like `std::process::exit(0)` can never become a real host call.
 
 ---
 
