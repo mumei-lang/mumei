@@ -1216,6 +1216,144 @@ fn record_cover_obligation<'a>(vc: &VCtx<'a>, obligation: Bool<'a>) {
     obligations.borrow_mut().push(obligation);
 }
 
+/// The contents array for one `==`/`!=` operand. A `Variable` resolves
+/// through `z3_dynamic_array` so the live `__z3_arr_<name>` chain (which
+/// `a[i] = v` stores rewrite) is compared, not the stale base const still
+/// in `env[name]`. Returns `None` for operands that did not lower to an
+/// array — the caller turns that into a type error.
+fn array_eq_operand<'a>(
+    vc: &VCtx<'a>,
+    env: &Env<'a>,
+    operand: &Expr,
+    val: &Dynamic<'a>,
+    live: Option<Array<'a>>,
+) -> Option<Array<'a>> {
+    if let Expr::Variable(name) = operand {
+        // Only a name that actually lowered to an array counts — a variable
+        // rebound to a non-array must still hit the type error even when a
+        // stale `__z3_arr_<name>` slot survives from before the rebind.
+        return val
+            .as_array()
+            .map(|_| live.unwrap_or_else(|| z3_dynamic_array(vc, name, env)));
+    }
+    val.as_array()
+}
+
+/// The `len` of one `==`/`!=` operand. Named arrays use their tracked
+/// `len_<name>` symbol (asserting `>= 0` for a freshly minted one, like
+/// `len(x)`); anything else — literals, call results, `if`/`match`/`block`
+/// tails — goes through `tail_len_expr`, which models them structurally.
+fn array_eq_operand_len<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    operand: &Expr,
+    val: &Dynamic<'a>,
+    solver_opt: Option<&Solver<'a>>,
+    live_len: Option<Dynamic<'a>>,
+) -> Dynamic<'a> {
+    if let Expr::Variable(name) = operand {
+        if let Some(len) = live_len {
+            return len;
+        }
+        return array_len_value(vc.ctx, env, name, vc.bitvec_i64, solver_opt);
+    }
+    tail_len_expr(vc, env, "eq_operand", "v", None, operand, val, 0)
+}
+
+/// `l_sel == r_sel` on array elements. `fp.eq` keeps the IEEE reading for
+/// `f64` elements (matching scalar `==`); every other element sort — `Int`,
+/// `Bool`, `Real`, `BV`, `Str`, enum datatypes — uses Z3 `_eq`.
+fn array_eq_element<'a>(ctx: &'a Context, l: &Dynamic<'a>, r: &Dynamic<'a>) -> Option<Bool<'a>> {
+    if let (Some(lf), Some(rf)) = (l.as_float(), r.as_float()) {
+        return Some(float_eq(ctx, &lf, &rf));
+    }
+    (l.get_sort() == r.get_sort()).then(|| l._eq(r))
+}
+
+/// `a == b` on `[T]` values.
+///
+/// An array value is its (contents, len) pair: contents live in the Z3
+/// `Array(Int, Elem)` sort while the length is a separate `len_*` symbol in
+/// the active `i64` sort (Int, or BV(64) under `--bitvec-i64`). Z3's
+/// extensional `=` on the Array sort is *not* the right reading — it says
+/// nothing about the separate length, and it also constrains `select` on
+/// every out-of-range index, where array literals store over an
+/// unconstrained base const and comparison is arbitrary. Two arrays are
+/// therefore equal iff `len_a == len_b` and
+/// `forall k in [0, len_a): a[k] == b[k]`; `!=` is its negation.
+#[allow(clippy::too_many_arguments)]
+fn array_value_equality<'a>(
+    vc: &VCtx<'a>,
+    left: &Expr,
+    right: &Expr,
+    l: &Dynamic<'a>,
+    r: &Dynamic<'a>,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+    left_live: Option<(Array<'a>, Dynamic<'a>)>,
+) -> MumeiResult<Bool<'a>> {
+    let ctx = vc.ctx;
+    let (left_arr_live, left_len_live) = left_live
+        .map(|(arr, len)| (Some(arr), Some(len)))
+        .unwrap_or((None, None));
+    let (Some(l_arr), Some(r_arr)) = (
+        array_eq_operand(vc, env, left, l, left_arr_live),
+        array_eq_operand(vc, env, right, r, None),
+    ) else {
+        return Err(MumeiError::type_error(
+            "Cannot compare an array to a non-array value with ==".to_string(),
+        ));
+    };
+    if l_arr.get_sort() != r_arr.get_sort() {
+        return Err(MumeiError::type_error(
+            "Cannot compare arrays of different element types".to_string(),
+        ));
+    }
+    if l_arr.get_sort().array_range().map(|s| s.kind()) == Some(z3::SortKind::Array) {
+        return Err(MumeiError::type_error(
+            "Cannot compare nested arrays with ==; `[[T]]` elements carry no length".to_string(),
+        ));
+    }
+    let len_l = array_eq_operand_len(vc, env, left, l, solver_opt, left_len_live);
+    let len_r = array_eq_operand_len(vc, env, right, r, solver_opt, None);
+    let len_eq = if len_l.get_sort() == len_r.get_sort() {
+        len_l._eq(&len_r)
+    } else if let (Some(li), Some(ri)) = (as_int_like(&len_l), as_int_like(&len_r)) {
+        li._eq(&ri)
+    } else {
+        return Err(MumeiError::verification(
+            "Array lengths are not comparable i64 values".to_string(),
+        ));
+    };
+    // `forall k. 0 <= k < len_l => a[k] == b[k]`. The bound is built in
+    // the `Int` theory: the select index is always `Int`, and for a
+    // *bound* variable `int2bv(k) <bv len` (what `index_in_bounds` would
+    // produce under `--bitvec-i64`) is not the same condition — `int2bv`
+    // wraps mod 2^64, so e.g. `k = 2^64` would satisfy `int2bv(k) <bv 2`.
+    // Signed `bv2int` on the length is exact (lengths are `>= 0`), and
+    // keeps the quantifier inside one theory.
+    let k = Int::fresh_const(ctx, "k");
+    let len_l_int = as_int_like(&len_l)
+        .ok_or_else(|| MumeiError::verification("Array length is not an i64 value".to_string()))?;
+    let in_bounds = Bool::and(ctx, &[&k.ge(&Int::from_i64(ctx, 0)), &k.lt(&len_l_int)]);
+    let sel_l = l_arr.select(&k);
+    let sel_r = r_arr.select(&k);
+    let elem_eq = array_eq_element(ctx, &sel_l, &sel_r).ok_or_else(|| {
+        MumeiError::type_error(format!(
+            "Array equality is not supported for `[{}]` elements",
+            z3_range_type_name(&l_arr.get_sort())
+        ))
+    })?;
+    let body = in_bounds.implies(&elem_eq);
+    // No explicit pattern: a select over an `ite` array (e.g. comparing an
+    // if-bound `[T]`) makes `Z3_mk_forall_const` reject the pattern and
+    // return null — the same fallback the `forall` builtin uses when it has
+    // no admissible trigger. Z3's default trigger selection picks up the
+    // `select(a,k)`/`select(b,k)` terms itself.
+    let contents_eq = z3::ast::forall_const(ctx, &[&k], &[], &body);
+    Ok(Bool::and(ctx, &[&len_eq, &contents_eq]))
+}
+
 pub(crate) fn expr_to_z3<'a>(
     vc: &VCtx<'a>,
     expr: &Expr,
@@ -2644,7 +2782,51 @@ pub(crate) fn expr_to_z3<'a>(
             }
 
             let l = expr_to_z3(vc, left, env, solver_opt)?;
+
+            // For `==`/`!=` on an array `Variable`, the operand's value is
+            // the live `__z3_arr_<name>`/`len_<name>` slots (the base const
+            // `l` never reflects `a[i] = v` stores) — and for the LEFT
+            // operand those slots must be sampled before `right` is
+            // lowered: a shadowing `let a = …` or a rebind inside the right
+            // operand rewrites the same tracked slots, so reading them at
+            // dispatch time would compare the post-right `a` on both sides.
+            let array_eq_left_live = if matches!(op, Op::Eq | Op::Neq) && l.as_array().is_some() {
+                match &**left {
+                    Expr::Variable(name) => Some((
+                        z3_dynamic_array(vc, name, env),
+                        array_len_value(vc.ctx, env, name, vc.bitvec_i64, solver_opt),
+                    )),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
             let r = expr_to_z3(vc, right, env, solver_opt)?;
+
+            // Whole-array `==`/`!=`: an array value is its (contents, len)
+            // pair. Checked before every numeric/String branch because a
+            // mixed operand like `a == 0.0` would otherwise reach the Real
+            // arm, which substitutes a zero literal for the array side and
+            // silently proves `0.0 == 0.0`.
+            if matches!(op, Op::Eq | Op::Neq) && (l.as_array().is_some() || r.as_array().is_some())
+            {
+                let eq = array_value_equality(
+                    vc,
+                    left,
+                    right,
+                    &l,
+                    &r,
+                    env,
+                    solver_opt,
+                    array_eq_left_live,
+                )?;
+                return Ok(if matches!(op, Op::Neq) {
+                    eq.not().into()
+                } else {
+                    eq.into()
+                });
+            }
 
             // Plan 9-8: String concatenation — if both operands are Z3 String Sort
             if l.get_sort() == z3::Sort::string(ctx) && r.get_sort() == z3::Sort::string(ctx) {
