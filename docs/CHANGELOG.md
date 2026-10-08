@@ -1,5 +1,11 @@
-### Unreleased
+### 2026-10-08: v0.6.21 release version bump
 
+- **Workspace and member crate versions**: bumped versions from `0.6.20` to
+  `0.6.21` so `mumei --version`, `mumei inspect`, and proof-certificate
+  `mumei_version` match the release tag before tagging.
+- **Install references**: synced the README and README_JA pinned install
+  examples on `v0.6.21`, along with the Homebrew formula template and
+  `install.sh` help examples.
 - Python and Rust wrappers now read their signatures and exact contract text
   from HIR while retaining their string translators; emitted output is
   unchanged, and there is no emitter ABI change.
