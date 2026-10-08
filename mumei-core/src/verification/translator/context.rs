@@ -8,6 +8,11 @@ pub const DEFAULT_CONSTRAINT_BUDGET: usize = 1000;
 
 pub(crate) type UnfoldCall<'a> = (String, Vec<Dynamic<'a>>);
 
+/// Field values of a struct-returning call's result plus the result
+/// handle ast they were keyed under (kept alive so the `usize` key can
+/// never alias a newer const).
+pub(crate) type CallResultFields<'a> = (Vec<(String, Dynamic<'a>)>, Dynamic<'a>);
+
 /// A lambda-shaped name in `VCtx::local_lambdas`, so an indirect call
 /// `f(args)` / `call(f, args)` can resolve instead of failing as an
 /// unknown function.
@@ -205,6 +210,17 @@ pub(crate) struct VCtx<'a> {
     /// alive (Z3 refcount) so a freed pointer can never alias a new const.
     pub(crate) call_result_lens:
         std::cell::RefCell<std::collections::HashMap<usize, (Dynamic<'a>, Dynamic<'a>)>>,
+    /// Field values of a struct-returning call's result, keyed by the
+    /// result handle's raw `Z3_ast` pointer — the struct analogue of
+    /// `call_result_lens`. A direct read `f(1).x` cannot rebuild the
+    /// per-call `call_<name>_<id>` binding name from the expression, so
+    /// `FieldAccess` looks the result ast up here and returns the stored
+    /// field value (the `rec_fn#<f>#field.<x>` projection on congruent
+    /// calls) instead of minting a `field_x` const shared across calls —
+    /// which would make `f(1).x == f(2).x` spuriously verify. The second
+    /// `Dynamic` keeps the key ast alive (Z3 refcount).
+    pub(crate) call_result_fields:
+        std::cell::RefCell<std::collections::HashMap<usize, CallResultFields<'a>>>,
     /// Callee atoms whose caller-side contract (`requires`/`ensures`) is being
     /// lowered at a call site right now. A call to one of these while its own
     /// contract is being lowered is a recursive instance: it gets a fresh,

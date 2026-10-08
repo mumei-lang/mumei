@@ -566,6 +566,10 @@ fn unfold_constant_calls<'a>(
                     .collect();
                 bind_struct_fields(&mut call_env, &handle_name, &result_fields);
                 bind_struct_fields(&mut call_env, "result", &result_fields);
+                vc.call_result_fields.borrow_mut().insert(
+                    handle.get_z3_ast() as usize,
+                    (result_fields.clone(), handle.clone()),
+                );
                 handle
             } else {
                 let range = call_result_sort(vc, atom);
@@ -2449,6 +2453,14 @@ pub(crate) fn expr_to_z3<'a>(
                             }
                             bind_struct_fields(&mut call_env, &result_name, &result_fields);
                             bind_struct_fields(&mut call_env, "result", &result_fields);
+                            // A direct read `f(1).x` cannot rebuild
+                            // `call_<name>_<id>` — key the fields by the
+                            // result ast so `FieldAccess` returns the
+                            // projection instead of a shared `field_x`.
+                            vc.call_result_fields.borrow_mut().insert(
+                                result_z3.get_z3_ast() as usize,
+                                (result_fields.clone(), result_z3.clone()),
+                            );
                             if let (Some(solver), true) = (
                                 solver_opt,
                                 !recursive_instance && callee_semantics_match_caller(vc, &callee),
@@ -4259,6 +4271,10 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                         bind_struct_fields(&mut call_env, &result_name, &result_fields);
                         bind_struct_fields(&mut call_env, "result", &result_fields);
+                        vc.call_result_fields.borrow_mut().insert(
+                            result_z3.get_z3_ast() as usize,
+                            (result_fields.clone(), result_z3.clone()),
+                        );
                         if let (Some(solver), true) = (
                             solver_opt,
                             !recursive_instance && callee_semantics_match_caller(vc, &callee_atom),
@@ -4662,8 +4678,21 @@ pub(crate) fn expr_to_z3<'a>(
                 };
                 Ok(sym.into())
             } else {
-                // パスが構築できない場合: 式を評価してシンボリック変数を生成
-                let _base = expr_to_z3(vc, inner_expr, env, solver_opt)?;
+                // パスが構築できない場合: 式を評価してシンボリック変数を生成。
+                // 構造体を返す呼び出し (`f(1).x`) なら、結果ハンドルの ast を
+                // キーに `call_result_fields` を引く — さもなければ
+                // `field_<x>` が全呼び出しで共有され、`f(1).x == f(2).x`
+                // が偽の等式として通ってしまう。
+                let base = expr_to_z3(vc, inner_expr, env, solver_opt)?;
+                if let Some((fields, _keep)) = vc
+                    .call_result_fields
+                    .borrow()
+                    .get(&(base.get_z3_ast() as usize))
+                {
+                    if let Some((_, value)) = fields.iter().find(|(name, _)| name == field_name) {
+                        return Ok(value.clone());
+                    }
+                }
                 let sym = Int::new_const(ctx, format!("field_{}", field_name));
                 Ok(sym.into())
             }

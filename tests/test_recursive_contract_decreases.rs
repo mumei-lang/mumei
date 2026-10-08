@@ -1560,6 +1560,47 @@ fn test_struct_return_unfold_wires_field_projections() {
     assert_case(case, "verified");
 }
 
+// Direct field reads on call results (`mk(1).v`) cannot rebuild the
+// per-call `call_<name>_<id>` binding from the expression — the call
+// lowering registers the result's fields keyed by the result ast, and
+// `FieldAccess` resolves through them. Without that lookup every
+// `f(_).v` lowered to one shared `field_v` constant, so `f(1).v ==
+// f(2).v` spuriously verified.
+const STRUCT_RETURN_DIRECT_READ: &str = r#"
+struct P { v: i64 }
+
+atom mk(n: i64) -> P
+    requires: n >= 0;
+    ensures: result.v == n;
+    decreases: n;
+    body: if n == 0 { P { v: 0 } } else { let r = mk(n - 1); P { v: r.v + 1 } };
+
+atom direct_reads() -> i64
+    requires: true;
+    ensures: result == 1;
+    body: if mk(1).v == mk(1).v { 1 } else { 0 };
+"#;
+
+#[test]
+fn test_struct_return_direct_field_reads_use_projections() {
+    let case = verify(
+        "struct_return_direct_read",
+        STRUCT_RETURN_DIRECT_READ,
+        "direct_reads",
+    );
+    assert_case(case, "verified");
+
+    // Distinct argument tuples mint distinct `#field.*` projections —
+    // the two reads are not conflated, so the ensures is NOT provable.
+    let shared = STRUCT_RETURN_DIRECT_READ.replace("mk(1).v == mk(1).v", "mk(1).v == mk(2).v");
+    let case = verify(
+        "struct_return_direct_read_distinct",
+        &shared,
+        "direct_reads",
+    );
+    assert_case_ref(&case, "failed");
+}
+
 #[test]
 fn test_unsupported_array_and_struct_recursive_parameters_keep_fresh_results() {
     let cases = [
