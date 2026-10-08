@@ -46,8 +46,8 @@ pub(crate) use z3_types::{
     merge_branch_envs, nonneg_constraint, param_z3_value, raw_z3_context, real_from_f64,
     round_nearest_even, seed_tuple_result_components, stmt_stores_to_var, tail_len_expr,
     tuple_component_types, tuple_result_arity_key, tuple_result_component_key, unify_branch_sorts,
-    wire_array_slots, z3_array_for_name, z3_array_for_sort, z3_dynamic_array, ArrayElementSort,
-    F64_EBITS, F64_SBITS, I64_BITS, UNSUPPORTED_TUPLE_RESULT_INDEXING,
+    wire_array_slots, z3_array_for_name, z3_array_for_sort, z3_dynamic_array, z3_range_type_name,
+    ArrayElementSort, F64_EBITS, F64_SBITS, I64_BITS, UNSUPPORTED_TUPLE_RESULT_INDEXING,
 };
 
 #[cfg(test)]

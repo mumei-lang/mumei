@@ -1082,7 +1082,7 @@ pub(crate) fn havoc_array_name<'a>(vc: &VCtx<'a>, name: &str, env: &mut Env<'a>)
 /// `z3_sort_for_lowered`. Recursive so a nested `Array(Int, Int)` range comes
 /// back as `"[i64]"` rather than collapsing to `"i64"`; `Seq` comes back as
 /// `"Str"`.
-fn z3_range_type_name(sort: &z3::Sort<'_>) -> String {
+pub(crate) fn z3_range_type_name(sort: &z3::Sort<'_>) -> String {
     match sort.array_range().map(|range| range.kind()) {
         Some(z3::SortKind::Real) | Some(z3::SortKind::FloatingPoint) => "f64".to_string(),
         Some(z3::SortKind::Bool) => "bool".to_string(),

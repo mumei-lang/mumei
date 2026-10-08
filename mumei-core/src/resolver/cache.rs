@@ -24,7 +24,11 @@ use std::path::Path;
 /// and parameter refinements.
 /// Version 11 admits one-dimensional scalar arrays and scalar-field structs
 /// as recursive-contract parameters, with length/field-valued UF domains.
-pub const VERIFIER_POLICY_VERSION: u32 = 11;
+/// Version 12 lowers whole-array `==`/`!=` to length equality plus a bounded
+/// `forall` over `select`, so specs that compare arrays must be re-derived.
+/// Version 13 is reserved for array/struct return values in recursive
+/// contracts (planned follow-up; do not reuse).
+pub const VERIFIER_POLICY_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
