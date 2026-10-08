@@ -138,39 +138,43 @@ pub mod mumei_monitor {
 }
 
 extern "C" {
-    fn unsupported(x: i64, text: i64) -> i64;
+    fn guarded(x: i64, n: i64) -> i64;
 }
 
-/// Monitored trust boundary `unsupported`.
+/// Monitored trust boundary `guarded`.
 ///
 /// - trusted_atom: atom is declared `trusted`, so its contract is assumed rather than proven
 ///
 /// Contract violations are reported as OTel events, never panics.
-pub fn unsupported_monitored(x: i64, text: i64) -> i64 {
-    // requires: not expressible as a runtime condition, left to verification.
-    mumei_monitor::record(mumei_monitor::Violation {
-            atom: "unsupported",
+pub fn guarded_monitored(x: i64, n: i64) -> i64 {
+    mumei_monitor::check(mumei_monitor::Violation {
+            atom: "guarded",
             boundary: "trusted_atom",
-            contract: "requires_unchecked",
-            expression: "not a runtime-checkable expression",
+            contract: "requires",
+            expression: "x >= 0",
             observed: None,
-        });
-    // requires: not expressible as a runtime condition, left to verification.
-    mumei_monitor::record(mumei_monitor::Violation {
-            atom: "unsupported",
+        }, || x >= 0);
+    mumei_monitor::check(mumei_monitor::Violation {
+            atom: "guarded",
             boundary: "trusted_atom",
-            contract: "requires_unchecked",
-            expression: "not a runtime-checkable expression",
+            contract: "requires",
+            expression: "forall(i, 0, n, i >= 0)",
             observed: None,
-        });
-    let result = unsafe { unsupported(x, text) };
-    // ensures: not expressible as a runtime condition, left to verification.
-    mumei_monitor::record(mumei_monitor::Violation {
-            atom: "unsupported",
+        }, || ((0)..(n)).all(|i| i >= 0));
+    mumei_monitor::check(mumei_monitor::Violation {
+            atom: "guarded",
             boundary: "trusted_atom",
-            contract: "ensures_unchecked",
-            expression: "not a runtime-checkable expression",
+            contract: "requires",
+            expression: "exists(j, 0, n, j == 0)",
             observed: None,
-        });
+        }, || ((0)..(n)).any(|j| j == 0));
+    let result = unsafe { guarded(x, n) };
+    mumei_monitor::check(mumei_monitor::Violation {
+            atom: "guarded",
+            boundary: "trusted_atom",
+            contract: "ensures",
+            expression: "result >= 0",
+            observed: None,
+        }, || result >= 0);
     result
 }

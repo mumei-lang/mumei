@@ -1,3 +1,71 @@
+### 2026-10-08: wrapper emitters and runtime monitor fix output bugs
+
+- **`consume` no longer leaks into generated code**: Python signatures/call
+  sites, Rust signatures/call sites, and runtime-monitor extern decls,
+  monitored signatures, and calls now use the bare parameter name instead of
+  `consume n`.
+- **`=>` is translated**: `a => b` becomes `not (a) or (b)` in Python and
+  `!(a) || (b)` in Rust, honoring `=>`'s precedence (looser than `||`,
+  tighter than `|>`) and left associativity, so nested and chained
+  implications and `=>` inside larger expressions print unambiguously.
+- **Contracts emit Euclidean integer division**: the verifier lowers
+  `/` to Z3 `Int` division, which keeps the remainder ≥ 0 (Euclidean —
+  `div(7,-2) = -3`, `div(-7,2) = -4`). Integer clauses now emit
+  `divmod`-based Euclidean division in Python and `a.div_euclid(b)` in
+  Rust/monitor so a clause proven by `verify` cannot mischeck in the host
+  on negative divisors (plain `//` floors, `/` truncates — both diverge).
+  Clauses
+  over `f32`/`f64` keep `/`. The BV (`-z`) proof mode lowers `/` to
+  `bvsdiv` (truncation), which still diverges from Euclidean on negative
+  dividends — see the behavior-change PR notes.
+- **Quantified requires are asserted**: top-level `forall`/`exists`
+  conjuncts (hoisted into `contract.quantifiers`) now emit their own
+  runtime checks — `all(... for i in range(start, end))`/`any(...)` in
+  Python, `(start..end).all(|i| ...)`/`.any(...)` in Rust, and the same
+  `check` records in the runtime monitor. The range is end-exclusive,
+  matching verifier semantics. Quantifiers that cannot be translated
+  degrade to a comment instead of emitting broken host code. Quantifiers
+  nested inside larger expressions (under `||`, `!`, `=>`, `if`, `match`)
+  stay in the clause text and are translated there when possible;
+  otherwise the whole clause degrades safely.
+- **Runtime monitor checkability is decided on HIR**: the character
+  whitelist in `monitor_condition` is replaced by a node-kind check over
+  each `HirClause.expr` — `Number`, `Variable`, `BinaryOp` over
+  arithmetic/comparison/boolean ops, `IfThenElse` encoding `!e`, and
+  `Call` with checkable arguments are accepted; `Implies`, `StringLit`,
+  `Match`, `Lambda`, `Float`, `FieldAccess`, `ArrayAccess`, `VariantInit`,
+  `StructInit`, `AtomRef`, `CallRef`, `Async`, `Await`, `Perform`,
+  `ChanSend`, `ChanRecv`, and any clause with `expr: None` route to the
+  existing `unchecked` violation record. Every requires/ensures clause is
+  still checked regardless of `mode`; `Cover` clauses are never asserted.
+  The check payload is printed by the shared `mumei_core::contract_host`
+  AST printer instead of interpolating source text, so `!e`, `=>`, `-x`,
+  and comparison chains no longer produce invalid or wrong Rust.
+- **Untranslatable clauses degrade to comments**: `contract_text_to_*`
+  returning `None` now emits `# mumei: ...` / `// mumei: ...` comments
+  rather than interpolating raw contract text into host code.
+- **Printer hardening** (from review): negative literals always print
+  parenthesized (`(-2) ** 2`, not `-2 ** 2` which Python mis-evaluates);
+  `arr[i]`/`v.field` degrade because they would dereference unvalidated
+  FFI pointers inside a safe wrapper; `::`-qualified names print with the
+  FFI `::`→`_` symbol mangling (`Vec2::dot` → `Vec2_dot`) so contract
+  text like `std::process::exit(0)` can never become a real host call.
+- **Integer `/` is Euclidean, not floored** (from review): Z3 `Int`
+  division keeps `mod` ≥ 0 (`div(7,-2) = -3`, `div(-7,2) = -4`), so plain
+  `//`/`/` can mischeck a verified clause on negative divisors. Python
+  emits `(_mumei_d := divmod(a, b))[0] + (_mumei_d[1] < 0)` — `divmod`
+  evaluates each operand once, keeping chained divisions linear;
+  Rust/monitor emit `((a) as i64).div_euclid(b)` — verified against Z3
+  4.14.1 for all sign combinations. `u64`/`u32` operands instead emit
+  `as u64` (a signed cast would flip large dividends); mixed-sign
+  divisions degrade because the host cannot represent them faithfully.
+- **Partial-clause checks**: when a conjunction cannot fully print (one
+  conjunct uses an unsupported form like `arr[i]`), each translatable
+  top-level conjunct is still emitted instead of dropping the whole
+  clause — `n > 0 && arr[i] > 0` enforces `n > 0`.
+
+---
+
 ### 2026-10-08: v0.6.21 release version bump
 
 - **Workspace and member crate versions**: bumped versions from `0.6.20` to

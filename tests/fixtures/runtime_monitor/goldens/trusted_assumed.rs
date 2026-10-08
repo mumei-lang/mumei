@@ -152,9 +152,16 @@ pub fn trusted_assumed_monitored(x: i64) -> i64 {
             atom: "trusted_assumed",
             boundary: "trusted_atom+assumed_clause",
             contract: "requires",
-            expression: "(x > 0) && (x < 100)",
+            expression: "x > 0",
             observed: None,
-        }, || (x > 0) && (x < 100));
+        }, || x > 0);
+    mumei_monitor::check(mumei_monitor::Violation {
+            atom: "trusted_assumed",
+            boundary: "trusted_atom+assumed_clause",
+            contract: "requires",
+            expression: "x < 100",
+            observed: None,
+        }, || x < 100);
     let result = unsafe { trusted_assumed(x) };
     mumei_monitor::check(mumei_monitor::Violation {
             atom: "trusted_assumed",

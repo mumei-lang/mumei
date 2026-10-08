@@ -159,8 +159,15 @@ pub fn assumed_ensures_monitored(x: i64) -> i64 {
             atom: "assumed_ensures",
             boundary: "assumed_clause",
             contract: "ensures",
-            expression: "(result > 0) && (result < 100)",
+            expression: "result > 0",
             observed: None,
-        }, || (result > 0) && (result < 100));
+        }, || result > 0);
+    mumei_monitor::check(mumei_monitor::Violation {
+            atom: "assumed_ensures",
+            boundary: "assumed_clause",
+            contract: "ensures",
+            expression: "result < 100",
+            observed: None,
+        }, || result < 100);
     result
 }

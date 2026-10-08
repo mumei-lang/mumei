@@ -243,6 +243,23 @@ body: { a }
             )),
         },
         MonitorGolden {
+            name: "quantified_requires",
+            source: r#"
+trusted atom guarded(x: i64, n: i64) -> i64
+requires: x >= 0 && forall(i, 0, n, i >= 0);
+requires: exists(j, 0, n, j == 0);
+ensures: result >= 0;
+body: { x }
+"#,
+            qualified_name: None,
+            extern_fn: false,
+            expected_boundaries: &[TrustBoundaryKind::TrustedAtom],
+            expected_artifact_count: 1,
+            golden: Some(include_bytes!(
+                "fixtures/runtime_monitor/goldens/quantified_requires.rs"
+            )),
+        },
+        MonitorGolden {
             name: "unsupported_contracts",
             source: r##"
 trusted atom unsupported(x: i64, text: i64) -> i64

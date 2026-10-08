@@ -52,8 +52,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::parser::{
-    parse_body_expr, parse_expression, Atom, ClauseKind, ClauseTrustMode, Expr, JoinSemantics, Op,
-    Pattern, Stmt, TrustLevel,
+    parse_body_expr, parse_expression, parse_expression_checked, Atom, ClauseKind, ClauseTrustMode,
+    Expr, JoinSemantics, Op, Pattern, Stmt, TrustLevel,
 };
 
 /// Effect set attached to HIR nodes.
@@ -517,10 +517,9 @@ pub fn lower_atom_metadata(
             start: quantifier.start.clone(),
             end: quantifier.end.clone(),
             condition: quantifier.condition.clone(),
-            condition_expr: Some(lower_expr_with_env(
-                &parse_expression(&quantifier.condition),
-                module_env,
-            )),
+            condition_expr: parse_expression_checked(&quantifier.condition)
+                .ok()
+                .map(|expr| lower_expr_with_env(&expr, module_env)),
         })
         .collect();
     let contract = HirContract {
@@ -568,13 +567,18 @@ fn lower_contract_clause(
     label: Option<String>,
     module_env: Option<&crate::verification::ModuleEnv>,
 ) -> HirClause {
-    let expr = parse_expression(&text);
+    // Fail-closed: a clause that does not parse cleanly keeps `expr: None` so
+    // consumers (e.g. the runtime monitor's node-kind check) treat it as
+    // unlowerable instead of inspecting a recovery placeholder AST.
+    let expr = parse_expression_checked(&text)
+        .ok()
+        .map(|expr| lower_expr_with_env(&expr, module_env));
     HirClause {
         kind,
         mode,
         label,
         text,
-        expr: Some(lower_expr_with_env(&expr, module_env)),
+        expr,
     }
 }
 
