@@ -148,7 +148,7 @@ impl<'ctx> JitEngine<'ctx> {
         module_env: &ModuleEnv,
         extern_blocks: &[mumei_core::parser::ExternBlock],
     ) -> MumeiResult<()> {
-        let atom_name = hir_atom.atom.name.clone();
+        let atom_name = hir_atom.signature.name.clone();
         if self.compiled_functions.borrow().contains(&atom_name) {
             self.remove_function(&atom_name);
         }

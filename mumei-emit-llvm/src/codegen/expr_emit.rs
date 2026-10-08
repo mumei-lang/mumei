@@ -1661,38 +1661,63 @@ pub(crate) fn compile_hir_expr<'a>(
                 let resolved_callee = module_env
                     .get_atom(name)
                     .or_else(|| module_env.get_atom(&fqn_name));
-                if let Some(callee) = resolved_callee {
-                    let callee_symbol = callee.name.as_str();
-                    let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee
+                // ModuleEnv stores callees as ASTs — lower to HIR so name,
+                // params and return type all resolve through the signature.
+                let callee_sig =
+                    resolved_callee.map(|c| mumei_core::hir::lower_atom_to_hir(c).signature);
+                let callee_fn = if let Some(sig) = &callee_sig {
+                    let callee_symbol = sig.name.as_str();
+                    let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = sig
                         .params
                         .iter()
-                        .map(|p| {
-                            resolve_param_type(context, p.type_name.as_deref(), module_env).into()
-                        })
+                        .map(|p| resolve_param_type(context, p.ty.as_deref(), module_env).into())
                         .collect();
 
                     // Plan 18: Resolve callee return type from its return_type annotation
-                    let callee_ret_type = resolve_return_type(context, callee, module_env);
-                    let callee_fn = {
-                        let fn_type = callee_ret_type.fn_type(&callee_param_types, false);
-                        module.get_function(callee_symbol).unwrap_or_else(|| {
-                            module.add_function(
-                                callee_symbol,
-                                fn_type,
-                                Some(inkwell::module::Linkage::External),
-                            )
+                    let callee_ret_type = resolve_return_type(context, sig, module_env);
+                    let fn_type = callee_ret_type.fn_type(&callee_param_types, false);
+                    Some(module.get_function(callee_symbol).unwrap_or_else(|| {
+                        module.add_function(
+                            callee_symbol,
+                            fn_type,
+                            Some(inkwell::module::Linkage::External),
+                        )
+                    }))
+                } else {
+                    // A callee absent from module_env may already be declared
+                    // in this module — e.g. `__mumei_user_main`, the renamed
+                    // `main` in binary builds (self-recursive main must call
+                    // it, not the C wrapper `main`). When it is not declared
+                    // yet (a caller compiled before `main` itself), declare it
+                    // from `main`'s own signature so the call still resolves.
+                    module.get_function(name).or_else(|| {
+                        if name != "__mumei_user_main" {
+                            return None;
+                        }
+                        module_env.get_atom("main").map(|main_atom| {
+                            let sig = mumei_core::hir::lower_atom_to_hir(main_atom).signature;
+                            let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = sig
+                                .params
+                                .iter()
+                                .map(|p| {
+                                    resolve_param_type(context, p.ty.as_deref(), module_env).into()
+                                })
+                                .collect();
+                            let ret = resolve_return_type(context, &sig, module_env);
+                            module.add_function(name, ret.fn_type(&param_types, false), None)
                         })
-                    };
-
+                    })
+                };
+                if let Some(callee_fn) = callee_fn {
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                     for (i, arg) in args.iter().enumerate() {
                         // `[T]` params take the `{i64, ptr}` fat pointer —
                         // a bare `compile_hir_expr` on an array var yields
                         // only the len i64 and emits malformed call IR.
-                        let param_is_array = callee
-                            .params
-                            .get(i)
-                            .and_then(|p| p.type_name.as_deref())
+                        let param_is_array = callee_sig
+                            .as_ref()
+                            .and_then(|sig| sig.params.get(i))
+                            .and_then(|p| p.ty.as_deref())
                             .is_some_and(|tn| {
                                 matches!(
                                     mumei_core::lowering::lower(&module_env.resolve_base_type(tn)),
@@ -1711,7 +1736,7 @@ pub(crate) fn compile_hir_expr<'a>(
                             let Some((len_val, _elem_ty, data_ptr)) = slots else {
                                 return Err(MumeiError::codegen(format!(
                                     "array argument to '{}' (param {}) must be an array                                      binding or literal (got {:?})",
-                                    callee_symbol, i, arg
+                                    name, i, arg
                                 )));
                             };
                             let struct_ty = array_struct_type(context);
@@ -1734,10 +1759,7 @@ pub(crate) fn compile_hir_expr<'a>(
                         arg_vals.push(val.into());
                     }
 
-                    let call_name = format!(
-                        "call_{}",
-                        callee_symbol.replace("::", "_").replace('.', "_")
-                    );
+                    let call_name = format!("call_{}", name.replace("::", "_").replace('.', "_"));
                     let call_result = llvm!(builder.build_call(callee_fn, &arg_vals, &call_name));
                     let result = call_result.as_any_value_enum();
                     if result.is_float_value() {
@@ -2667,13 +2689,14 @@ pub(crate) fn compile_hir_expr<'a>(
             let func = if let Some(f) = module.get_function(name) {
                 f
             } else if let Some(callee_atom) = module_env.get_atom(name) {
-                let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee_atom
+                let callee_sig = mumei_core::hir::lower_atom_to_hir(callee_atom).signature;
+                let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee_sig
                     .params
                     .iter()
-                    .map(|p| resolve_param_type(context, p.type_name.as_deref(), module_env).into())
+                    .map(|p| resolve_param_type(context, p.ty.as_deref(), module_env).into())
                     .collect();
                 // Plan 18: Use resolve_return_type for consistent type resolution
-                let callee_ret = resolve_return_type(context, callee_atom, module_env);
+                let callee_ret = resolve_return_type(context, &callee_sig, module_env);
                 let fn_type = callee_ret.fn_type(&callee_param_types, false);
                 module.add_function(name, fn_type, Some(inkwell::module::Linkage::External))
             } else {
@@ -2780,9 +2803,10 @@ pub(crate) fn compile_hir_expr<'a>(
             // Plan 18: Try to resolve return type from callee atom definition.
             // For indirect calls via AtomRef, look up the atom name in module_env.
             let indirect_ret_type = if let HirExpr::AtomRef { name } = callee.as_ref() {
-                module_env
-                    .get_atom(name)
-                    .map(|a| resolve_return_type(context, a, module_env))
+                module_env.get_atom(name).map(|a| {
+                    let callee_sig = mumei_core::hir::lower_atom_to_hir(a).signature;
+                    resolve_return_type(context, &callee_sig, module_env)
+                })
             } else {
                 None
             };

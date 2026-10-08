@@ -384,7 +384,17 @@ pub fn lower_atom_to_hir_with_env(
 ) -> HirAtom {
     let body_stmt = parse_body_expr(&atom.body_expr);
     let body = lower_stmt_with_env(&body_stmt, module_env);
-    let (signature, contract, meta) = lower_atom_metadata(atom, &body, module_env);
+    let (mut signature, contract, meta) = lower_atom_metadata(atom, &body, module_env);
+    // `signature.inferred_return_type` must equal `mir::infer_atom_return_type`,
+    // which infers on a body lowered WITHOUT a ModuleEnv. The stored `body`
+    // above is env-lowered, so `let` annotations on it can carry types that
+    // no-env inference never sees (call results, variant constructors) —
+    // inference over it could disagree with the AST-path result. Redo the
+    // inference on a no-env lowering so the field is identical either way.
+    if module_env.is_some() && atom.return_type.is_none() {
+        signature.inferred_return_type =
+            crate::mir::infer_return_type_from_hir(&atom.params, &lower_stmt(&body_stmt));
+    }
 
     // Build effect set from atom.effects
     let effect_set = HirEffectSet {

@@ -31,56 +31,21 @@ use lowering::{array_struct_type, resolve_param_type, resolve_return_type};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mumei_core::hir::HirSignature;
     use mumei_core::parser::ast::Span;
-    use mumei_core::parser::{parse_type_ref, Atom, EnumDef, EnumVariant, Param};
+    use mumei_core::parser::{parse_type_ref, EnumDef, EnumVariant};
 
-    fn atom_with_return_type(return_type: Option<&str>) -> Atom {
-        Atom {
+    fn signature_with_return_type(
+        return_type: Option<&str>,
+        inferred_return_type: Option<&str>,
+    ) -> HirSignature {
+        HirSignature {
             name: "test".to_string(),
-            type_params: vec![],
-            where_bounds: vec![],
             params: vec![],
-            trace_id: None,
-            spec_metadata: Default::default(),
-            clause_labels: Vec::new(),
-            clause_modes: Vec::new(),
-            covers: Vec::new(),
-            requires: "true".to_string(),
-            forall_constraints: vec![],
-            ensures: "true".to_string(),
-            body_expr: "true".to_string(),
-            consumed_params: vec![],
-            resources: vec![],
-            is_async: false,
-            trust_level: mumei_core::parser::TrustLevel::Verified,
-            max_unroll: None,
-            invariant: None,
             effects: vec![],
             return_type: return_type.map(str::to_string),
-            decreases: None,
-            span: Span::default(),
-            effect_pre: Default::default(),
-            effect_post: Default::default(),
-        }
-    }
-
-    fn make_param(name: &str, ty: &str) -> Param {
-        Param {
-            name: name.to_string(),
-            type_name: Some(ty.to_string()),
-            type_ref: Some(parse_type_ref(ty)),
-            is_ref: false,
-            is_ref_mut: false,
-            fn_contract_requires: None,
-            fn_contract_ensures: None,
-        }
-    }
-
-    fn atom_with_body_and_params(body_expr: &str, params: Vec<Param>) -> Atom {
-        Atom {
-            params,
-            body_expr: body_expr.to_string(),
-            ..atom_with_return_type(None)
+            inferred_return_type: inferred_return_type.map(str::to_string),
+            is_async: false,
         }
     }
 
@@ -112,58 +77,59 @@ mod tests {
         let context = Context::create();
         let module_env = ModuleEnv::new();
 
-        let f64_atom = atom_with_return_type(Some("f64"));
+        let f64_sig = signature_with_return_type(Some("f64"), None);
         assert_eq!(
-            resolve_return_type(&context, &f64_atom, &module_env),
+            resolve_return_type(&context, &f64_sig, &module_env),
             context.f64_type().into()
         );
 
-        let str_atom = atom_with_return_type(Some("Str"));
+        let str_sig = signature_with_return_type(Some("Str"), None);
         assert_eq!(
-            resolve_return_type(&context, &str_atom, &module_env),
+            resolve_return_type(&context, &str_sig, &module_env),
             context.ptr_type(AddressSpace::default()).into()
         );
 
-        let array_atom = atom_with_return_type(Some("[i64]"));
+        let array_sig = signature_with_return_type(Some("[i64]"), None);
         assert_eq!(
-            resolve_return_type(&context, &array_atom, &module_env),
+            resolve_return_type(&context, &array_sig, &module_env),
             array_struct_type(&context).into()
         );
 
-        let string_atom = atom_with_return_type(Some("String"));
+        let string_sig = signature_with_return_type(Some("String"), None);
         assert_eq!(
-            resolve_return_type(&context, &string_atom, &module_env),
+            resolve_return_type(&context, &string_sig, &module_env),
             context.ptr_type(AddressSpace::default()).into()
         );
     }
 
     #[test]
-    fn test_resolve_return_type_infers_bool_body_conservatively_defaults_to_i64() {
+    fn test_resolve_return_type_uses_inferred_type() {
         let context = Context::create();
         let module_env = ModuleEnv::new();
-        let atom = atom_with_body_and_params(
-            "a < b",
-            vec![make_param("a", "f64"), make_param("b", "f64")],
+
+        let f64_sig = signature_with_return_type(None, Some("f64"));
+        assert_eq!(
+            resolve_return_type(&context, &f64_sig, &module_env),
+            context.f64_type().into()
         );
 
+        // An inferred `bool` resolves through the bool-as-i64 convention.
+        let bool_sig = signature_with_return_type(None, Some("bool"));
         assert_eq!(
-            resolve_return_type(&context, &atom, &module_env),
+            resolve_return_type(&context, &bool_sig, &module_env),
             context.i64_type().into()
         );
     }
 
     #[test]
-    fn test_resolve_return_type_infers_f64_body() {
+    fn test_resolve_return_type_defaults_to_i64_without_inference() {
         let context = Context::create();
         let module_env = ModuleEnv::new();
-        let atom = atom_with_body_and_params(
-            "a + b",
-            vec![make_param("a", "f64"), make_param("b", "f64")],
-        );
+        let sig = signature_with_return_type(None, None);
 
         assert_eq!(
-            resolve_return_type(&context, &atom, &module_env),
-            context.f64_type().into()
+            resolve_return_type(&context, &sig, &module_env),
+            context.i64_type().into()
         );
     }
 
