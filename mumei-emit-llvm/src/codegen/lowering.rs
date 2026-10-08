@@ -513,12 +513,16 @@ pub fn declare_extern_functions<'ctx>(
     }
 }
 
+/// Resolve the LLVM return type from the HIR signature: the declared
+/// `return_type` when present, else the return type inferred during HIR
+/// lowering (`signature.inferred_return_type`, which reproduces the old
+/// `mir::infer_atom_return_type` result), else a conservative i64 fallback.
 pub(crate) fn resolve_return_type<'a>(
     context: &'a Context,
-    atom: &mumei_core::parser::Atom,
+    signature: &mumei_core::hir::HirSignature,
     module_env: &ModuleEnv,
 ) -> inkwell::types::BasicTypeEnum<'a> {
-    if let Some(ref ret_type) = atom.return_type {
+    if let Some(ref ret_type) = signature.return_type {
         let base = module_env.resolve_base_type(ret_type);
         match lower(&base) {
             LoweredType::F64 => context.f64_type().into(),
@@ -534,13 +538,9 @@ pub(crate) fn resolve_return_type<'a>(
                 context.i64_type().into()
             }
         }
+    } else if let Some(ref ret_type) = signature.inferred_return_type {
+        resolve_param_type(context, Some(ret_type), module_env)
     } else {
-        // Infer the return type from the body when possible; otherwise fall
-        // back to a conservative i64 default.
-        if let Some(ret_type) = mumei_core::mir::infer_atom_return_type(atom) {
-            resolve_param_type(context, Some(&ret_type), module_env)
-        } else {
-            context.i64_type().into()
-        }
+        context.i64_type().into()
     }
 }

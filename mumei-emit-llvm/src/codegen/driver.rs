@@ -21,7 +21,7 @@ pub fn compile_atom_into_module<'ctx>(
     module_env: &ModuleEnv,
     extern_blocks: &[mumei_core::parser::ExternBlock],
 ) -> MumeiResult<()> {
-    let atom = &hir_atom.atom;
+    let signature = &hir_atom.signature;
     let builder = context.create_builder();
 
     for resource in module_env.resources.values() {
@@ -45,24 +45,24 @@ pub fn compile_atom_into_module<'ctx>(
     declare_extern_functions(context, module, extern_blocks, module_env);
 
     // パラメータ型を精緻型から解決
-    let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = atom
+    let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = signature
         .params
         .iter()
-        .map(|p| resolve_param_type(context, p.type_name.as_deref(), module_env).into())
+        .map(|p| resolve_param_type(context, p.ty.as_deref(), module_env).into())
         .collect();
     // Plan 18: Use resolved return type instead of hardcoded i64
-    let ret_type = resolve_return_type(context, atom, module_env);
+    let ret_type = resolve_return_type(context, signature, module_env);
     let fn_type = ret_type.fn_type(&param_types, false);
-    let function = if let Some(existing) = module.get_function(&atom.name) {
+    let function = if let Some(existing) = module.get_function(&signature.name) {
         if existing.get_first_basic_block().is_some() {
             return Err(MumeiError::codegen(format!(
                 "Duplicate function definition: {}",
-                atom.name
+                signature.name
             )));
         }
         existing
     } else {
-        module.add_function(&atom.name, fn_type, None)
+        module.add_function(&signature.name, fn_type, None)
     };
 
     let entry_block = context.append_basic_block(function, "entry");
@@ -72,9 +72,9 @@ pub fn compile_atom_into_module<'ctx>(
     let mut var_types: HashMap<String, String> = HashMap::new();
     let mut array_ptrs: HashMap<String, crate::codegen::lowering::ArrayPtr> = HashMap::new();
 
-    for (i, param) in atom.params.iter().enumerate() {
+    for (i, param) in signature.params.iter().enumerate() {
         let val = function.get_nth_param(i as u32).unwrap();
-        if let Some(type_name) = &param.type_name {
+        if let Some(type_name) = &param.ty {
             let base = super::expr_emit::resolve_named_type(module_env, type_name);
             // Struct AND enum declared types — match arms on an enum-typed
             // parameter resolve the owning enum from this hint.
@@ -92,12 +92,12 @@ pub fn compile_atom_into_module<'ctx>(
         // 区別する（struct/enum はそのまま束縛 — enum は tag+slot 全体が
         // match の payload 抽出・ctor 等価性・callee 受け渡しに必要）。
         let declares_struct = param
-            .type_name
+            .ty
             .as_deref()
             .map(|name| module_env.resolve_base_type(name))
             .is_some_and(|base| module_env.get_struct(&base).is_some());
         let declares_enum = param
-            .type_name
+            .ty
             .as_deref()
             .map(|name| super::expr_emit::resolve_named_type(module_env, name))
             .is_some_and(|base| module_env.get_enum(&base).is_some());
@@ -108,7 +108,7 @@ pub fn compile_atom_into_module<'ctx>(
             let data_ptr =
                 llvm!(builder.build_extract_value(struct_val, 1, &format!("{}_data", param.name)));
             let elem_ty = param
-                .type_name
+                .ty
                 .as_deref()
                 .and_then(|name| super::lowering::array_elem_llvm_type(context, name, module_env))
                 .unwrap_or_else(|| context.i64_type().into());
@@ -137,7 +137,7 @@ pub fn compile_atom_into_module<'ctx>(
     // other tail shape can't supply an array value, so fail with a clean
     // error instead of emitting a `ret i64` under a struct signature
     // (previously this produced invalid IR, or a len-only i64 on `[i64]`).
-    let ret_is_array = atom
+    let ret_is_array = signature
         .return_type
         .as_deref()
         .map(|name| module_env.resolve_base_type(name))
@@ -182,7 +182,7 @@ pub fn compile_atom_into_module<'ctx>(
             return Err(MumeiError::codegen(format!(
                 "array return of '{}' requires the body tail to be an array \
                  parameter or binding (got {:?})",
-                atom.name, tail_expr
+                signature.name, tail_expr
             )));
         };
         let struct_ty = super::lowering::array_struct_type(context);
@@ -214,9 +214,8 @@ pub fn compile_to_module(
     module_env: &ModuleEnv,
     extern_blocks: &[mumei_core::parser::ExternBlock],
 ) -> MumeiResult<String> {
-    let atom = &hir_atom.atom;
     let context = Context::create();
-    let module = context.create_module(&atom.name);
+    let module = context.create_module(&hir_atom.signature.name);
 
     compile_atom_into_module(&context, &module, hir_atom, module_env, extern_blocks)?;
 
@@ -292,13 +291,18 @@ pub fn compile(
     module_env: &ModuleEnv,
     extern_blocks: &[mumei_core::parser::ExternBlock],
 ) -> MumeiResult<()> {
-    let atom = &hir_atom.atom;
     let context = Context::create();
-    let module = context.create_module(&atom.name);
+    let module = context.create_module(&hir_atom.signature.name);
 
     compile_atom_into_module(&context, &module, hir_atom, module_env, extern_blocks)?;
 
     // エフェクト情報を .ll ファイル先頭にコメントとして追記する（後処理）
+    // NOTE(step 5): the comment needs each declared effect's argument values,
+    // which HIR does not carry (`HirDeclaredEffect` has name+negated only and
+    // `effect_set.parameterized` drops empty-arg declarations), so this is the
+    // one remaining `hir_atom.atom` read in the crate — the name itself comes
+    // from `signature`/`effect_set`.
+    let atom = &hir_atom.atom;
     let effects_comment = if !hir_atom.effect_set.effects.is_empty() {
         let effects_str: Vec<String> = hir_atom
             .effect_set
