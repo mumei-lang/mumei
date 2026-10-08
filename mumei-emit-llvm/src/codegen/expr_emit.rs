@@ -1661,22 +1661,25 @@ pub(crate) fn compile_hir_expr<'a>(
                 let resolved_callee = module_env
                     .get_atom(name)
                     .or_else(|| module_env.get_atom(&fqn_name));
-                // ModuleEnv stores callees as ASTs — lower to HIR so name,
-                // params and return type all resolve through the signature.
-                let callee_sig =
-                    resolved_callee.map(|c| mumei_core::hir::lower_atom_to_hir(c).signature);
-                let callee_fn = if let Some(sig) = &callee_sig {
-                    let callee_symbol = sig.name.as_str();
-                    let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = sig
-                        .params
-                        .iter()
-                        .map(|p| resolve_param_type(context, p.ty.as_deref(), module_env).into())
-                        .collect();
-
-                    // Plan 18: Resolve callee return type from its return_type annotation
-                    let callee_ret_type = resolve_return_type(context, sig, module_env);
-                    let fn_type = callee_ret_type.fn_type(&callee_param_types, false);
+                // Lower the callee's signature only when a fresh function
+                // declaration is needed — a callee already declared in this
+                // module (the common case in multi-atom files) is reused
+                // directly, so each callee lowers at most once per module.
+                let callee_fn = if let Some(callee) = resolved_callee {
+                    let callee_symbol = callee.name.as_str();
                     Some(module.get_function(callee_symbol).unwrap_or_else(|| {
+                        let sig = mumei_core::hir::lower_atom_to_hir(callee).signature;
+                        let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = sig
+                            .params
+                            .iter()
+                            .map(|p| {
+                                resolve_param_type(context, p.ty.as_deref(), module_env).into()
+                            })
+                            .collect();
+
+                        // Plan 18: Resolve callee return type from its return_type annotation
+                        let callee_ret_type = resolve_return_type(context, &sig, module_env);
+                        let fn_type = callee_ret_type.fn_type(&callee_param_types, false);
                         module.add_function(
                             callee_symbol,
                             fn_type,
@@ -1714,10 +1717,11 @@ pub(crate) fn compile_hir_expr<'a>(
                         // `[T]` params take the `{i64, ptr}` fat pointer —
                         // a bare `compile_hir_expr` on an array var yields
                         // only the len i64 and emits malformed call IR.
-                        let param_is_array = callee_sig
-                            .as_ref()
-                            .and_then(|sig| sig.params.get(i))
-                            .and_then(|p| p.ty.as_deref())
+                        // `param.type_name` is identical to `HirParam.ty`
+                        // (`ty: param.type_name.clone()` in HIR lowering).
+                        let param_is_array = resolved_callee
+                            .and_then(|c| c.params.get(i))
+                            .and_then(|p| p.type_name.as_deref())
                             .is_some_and(|tn| {
                                 matches!(
                                     mumei_core::lowering::lower(&module_env.resolve_base_type(tn)),
@@ -2801,12 +2805,19 @@ pub(crate) fn compile_hir_expr<'a>(
                 })
                 .collect();
             // Plan 18: Try to resolve return type from callee atom definition.
-            // For indirect calls via AtomRef, look up the atom name in module_env.
+            // For indirect calls via AtomRef, prefer the function's declared
+            // return type when it already exists in this module (it was built
+            // via resolve_return_type); only lower the signature to declare
+            // or resolve a callee not yet present.
             let indirect_ret_type = if let HirExpr::AtomRef { name } = callee.as_ref() {
-                module_env.get_atom(name).map(|a| {
-                    let callee_sig = mumei_core::hir::lower_atom_to_hir(a).signature;
-                    resolve_return_type(context, &callee_sig, module_env)
-                })
+                if let Some(f) = module.get_function(name) {
+                    f.get_type().get_return_type()
+                } else {
+                    module_env.get_atom(name).map(|a| {
+                        let callee_sig = mumei_core::hir::lower_atom_to_hir(a).signature;
+                        resolve_return_type(context, &callee_sig, module_env)
+                    })
+                }
             } else {
                 None
             };
