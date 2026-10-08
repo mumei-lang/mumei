@@ -26,9 +26,10 @@ use std::path::Path;
 /// as recursive-contract parameters, with length/field-valued UF domains.
 /// Version 12 lowers whole-array `==`/`!=` to length equality plus a bounded
 /// `forall` over `select`, so specs that compare arrays must be re-derived.
-/// Version 13 is reserved for array/struct return values in recursive
-/// contracts (planned follow-up; do not reuse).
-pub const VERIFIER_POLICY_VERSION: u32 = 12;
+/// Version 13 admits `[i64]`/`[bool]` arrays and scalar-field structs as
+/// recursive-contract RETURN values, modeling array results as (contents,
+/// len) UF pairs and struct results field-wise.
+pub const VERIFIER_POLICY_VERSION: u32 = 13;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {

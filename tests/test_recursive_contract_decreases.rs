@@ -222,16 +222,38 @@ atom bad(p: P) -> i64
     body: if p.n == 0 { 0 } else { bad(p) };
 "#;
 
+// `[i64]`/`[bool]` array returns and scalar-field struct returns became
+// eligible with the (contents, len) / field-wise result modeling. `f64`
+// elements and nested arrays stay unsupported.
 const UNSUPPORTED_ARRAY_RETURN: &str = r#"
-atom bad() -> [i64]
+atom bad() -> [f64]
     requires: true;
     ensures: len(bad()) == -1;
     decreases: 0;
     body: bad();
 "#;
 
+const UNSUPPORTED_NESTED_ARRAY_RETURN: &str = r#"
+atom bad() -> [[i64]]
+    requires: true;
+    ensures: len(bad()) == -1;
+    decreases: 0;
+    body: bad();
+"#;
+
+// Scalar-field `struct P` returns became eligible; the remaining exclusions
+// are structs with non-scalar fields and structs whose `where`/invariant
+// clauses contain calls.
 const UNSUPPORTED_STRUCT_RETURN: &str = r#"
-struct P { n: i64 }
+atom helper() -> i64
+    requires: true;
+    ensures: true;
+    body: 0;
+
+struct P {
+    n: i64,
+    invariant: helper() >= 0
+}
 
 atom read_n(p: P) -> i64
     requires: true;
@@ -240,9 +262,24 @@ atom read_n(p: P) -> i64
 
 atom bad() -> P
     requires: true;
-    ensures: result.n == -1 && read_n(bad()) >= 0;
+    ensures: read_n(bad()) == -1;
     decreases: 0;
-    body: P { n: 0 };
+    body: bad();
+"#;
+
+const UNSUPPORTED_STRUCT_ARRAY_FIELD_RETURN: &str = r#"
+struct Wrap { a: [i64] }
+
+atom read_a(w: Wrap) -> i64
+    requires: true;
+    ensures: true;
+    body: 0;
+
+atom bad() -> Wrap
+    requires: true;
+    ensures: read_a(bad()) == -1;
+    decreases: 0;
+    body: bad();
 "#;
 
 const UNSUPPORTED_ARRAY_MEASURE_ACCESS: &str = r#"
@@ -1242,6 +1279,287 @@ fn test_struct_contract_fields_are_assumed_before_invariants() {
     assert_case(case, "verified");
 }
 
+// Recursive atoms may now RETURN a `[i64]`/`[bool]` array: the congruent
+// `rec_fn#` value is the (contents, len) pair — contents via the primary UF
+// over the expanded argument domain, len via the `rec_fn#<callee>#len`
+// projection over the same domain. Here `len(result) == len(a)` is provable
+// only because the inner call's ensures instantiate the IH on the len
+// projection.
+const ARRAY_RETURN_CHAIN: &str = r#"
+atom use_chain(a: [i64]) -> bool
+    requires: len(a) == 2;
+    ensures: result == true;
+    body: chain(a, 3) == chain(a, 3);
+
+atom chain(a: [i64], n: i64) -> [i64]
+    requires: n >= 0;
+    ensures: len(result) == len(a);
+    decreases: n;
+    body: if n == 0 { a } else { chain(a, n - 1) };
+"#;
+
+// Caller-side view: `chain` declared first so `use_chain` is the report atom.
+const ARRAY_RETURN_CHAIN_CALLER: &str = r#"
+atom chain(a: [i64], n: i64) -> [i64]
+    requires: n >= 0;
+    ensures: len(result) == len(a);
+    decreases: n;
+    body: if n == 0 { a } else { chain(a, n - 1) };
+
+atom use_chain(a: [i64]) -> bool
+    requires: len(a) == 2;
+    ensures: result == true;
+    body: chain(a, 3) == chain(a, 3);
+"#;
+
+// Element-level property through the contents UF: `result[0] == a[0]` holds
+// via the induction hypothesis `select(rec_fn#chain0(a,n-1), 0) == a[0]`.
+const ARRAY_RETURN_ELEMENT: &str = r#"
+atom chain0(a: [i64], n: i64) -> [i64]
+    requires: n >= 0 && len(a) >= 1;
+    ensures: len(result) >= 1 && result[0] == a[0];
+    decreases: n;
+    body: if n == 0 { a } else { chain0(a, n - 1) };
+"#;
+
+// A call result fed back as the array argument: `len_`/`__z3_arr_` wiring
+// must chain the inner `rec_fn` application into the outer one's domain.
+const ARRAY_RETURN_NESTED: &str = r#"
+atom chain(a: [i64], n: i64) -> [i64]
+    requires: n >= 0;
+    ensures: len(result) == len(a);
+    decreases: n;
+    body: if n == 0 { a } else { chain(a, n - 1) };
+
+atom nested(a: [i64]) -> i64
+    requires: len(a) == 1;
+    ensures: result == 1;
+    body: len(chain(chain(a, 0), 0));
+"#;
+
+// The `call(atom_ref(f), ..)` surface mints the same (contents, len)
+// congruent result — equal argument tuples compare equal.
+const ARRAY_RETURN_ATOM_REF: &str = r#"
+atom chain(a: [i64], n: i64) -> [i64]
+    requires: n >= 0;
+    ensures: len(result) == len(a);
+    decreases: n;
+    body: if n == 0 { a } else { chain(a, n - 1) };
+
+atom use_ref(a: [i64]) -> bool
+    requires: len(a) == 1;
+    ensures: result == true;
+    body: call(atom_ref(chain), a, 2) == call(atom_ref(chain), a, 2);
+"#;
+
+#[test]
+fn test_array_returning_recursion_uses_len_projection() {
+    let verified = verify("array_return_chain", ARRAY_RETURN_CHAIN, "chain");
+    assert_case(verified, "verified");
+
+    // Wrong postcondition on the result's length must fail.
+    let wrong_source =
+        ARRAY_RETURN_CHAIN.replace("len(result) == len(a)", "len(result) == len(a) + 1");
+    let wrong = verify("array_return_chain_wrong", &wrong_source, "chain");
+    assert_case_ref(&wrong, "failed");
+}
+
+#[test]
+fn test_array_return_congruent_calls_compare_equal() {
+    let case = verify(
+        "array_return_use_chain",
+        ARRAY_RETURN_CHAIN_CALLER,
+        "use_chain",
+    );
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_array_results_with_different_args_are_not_congruent() {
+    // `chain(a, 3) == chain(a, 4)` must NOT verify: array equality compares
+    // the (contents, len) pair and the differing argument yields different
+    // projection applications — a contents-only comparison would be unsound.
+    let source = ARRAY_RETURN_CHAIN_CALLER
+        .replace("chain(a, 3) == chain(a, 3)", "chain(a, 3) == chain(a, 4)");
+    let case = verify("array_return_different_args", &source, "use_chain");
+    assert_case_ref(&case, "failed");
+    assert_eq!(
+        case.failure_type().as_deref(),
+        Some("postcondition_violated"),
+        "differing recursive array results must not compare equal; report:\n{:?}",
+        case.report
+    );
+}
+
+#[test]
+fn test_array_return_element_property_via_induction() {
+    let case = verify("array_return_element", ARRAY_RETURN_ELEMENT, "chain0");
+    assert_case(case, "verified");
+
+    let wrong_source = ARRAY_RETURN_ELEMENT.replace("result[0] == a[0]", "result[0] == a[0] + 1");
+    let wrong = verify("array_return_element_wrong", &wrong_source, "chain0");
+    assert_case_ref(&wrong, "failed");
+}
+
+#[test]
+fn test_array_return_nested_call_expands_result_pair() {
+    let case = verify("array_return_nested", ARRAY_RETURN_NESTED, "nested");
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_array_return_atom_ref_congruence() {
+    let case = verify("array_return_atom_ref", ARRAY_RETURN_ATOM_REF, "use_ref");
+    assert_case(case, "verified");
+
+    let wrong_source = ARRAY_RETURN_ATOM_REF.replace(
+        "a, 2) == call(atom_ref(chain), a, 2)",
+        "a, 2) == call(atom_ref(chain), a, 3)",
+    );
+    let wrong = verify("array_return_atom_ref_wrong", &wrong_source, "use_ref");
+    assert_case_ref(&wrong, "failed");
+}
+
+// Recursive atoms may now RETURN a struct with scalar fields: the result is
+// modeled field-wise — the handle stays a per-call constant and each field
+// is a `rec_fn#<callee>#field.<name>` projection over the expanded domain,
+// so the IH lands on `result.x` exactly. `step` is declared last so it is
+// the report atom.
+const STRUCT_RETURN_STEP: &str = r#"
+struct Point { x: i64, y: i64 }
+
+atom use_step() -> i64
+    requires: true;
+    ensures: result == 7;
+    body: read_x(step(Point { x: 7, y: 9 }, 2));
+
+atom read_x(p: Point) -> i64
+    requires: true;
+    ensures: result == p.x;
+    body: p.x;
+
+atom step(p: Point, n: i64) -> Point
+    requires: n >= 0;
+    ensures: result.x == p.x;
+    decreases: n;
+    body: if n == 0 { p } else { step(p, n - 1) };
+"#;
+
+// Caller view: `use_step` last.
+const STRUCT_RETURN_CALLER: &str = r#"
+struct Point { x: i64, y: i64 }
+
+atom read_x(p: Point) -> i64
+    requires: true;
+    ensures: result == p.x;
+    body: p.x;
+
+atom step(p: Point, n: i64) -> Point
+    requires: n >= 0;
+    ensures: result.x == p.x;
+    decreases: n;
+    body: if n == 0 { p } else { step(p, n - 1) };
+
+atom use_step() -> i64
+    requires: true;
+    ensures: result == 7;
+    body: read_x(step(Point { x: 7, y: 9 }, 2));
+"#;
+
+// Struct-returning recursion where the callee's own result invariant is the
+// fact callers consume (`assume_struct_contract` on the `#field.*`
+// projections is the same builder the callee-body proof discharges).
+const STRUCT_RETURN_INVARIANT: &str = r#"
+struct Ordered {
+    lo: i64,
+    hi: i64,
+    invariant: lo <= hi
+}
+
+atom mk(n: i64) -> Ordered
+    requires: n >= 0;
+    ensures: result.lo <= result.hi;
+    decreases: n;
+    body: if n == 0 { Ordered { lo: 0, hi: 0 } } else { mk(n - 1) };
+"#;
+
+#[test]
+fn test_struct_returning_recursion_compares_field_wise() {
+    let verified = verify("struct_return_step", STRUCT_RETURN_STEP, "step");
+    assert_case(verified, "verified");
+
+    let wrong_source = STRUCT_RETURN_STEP.replace("result.x == p.x", "result.x == p.x + 1");
+    let wrong = verify("struct_return_step_wrong", &wrong_source, "step");
+    assert_case_ref(&wrong, "failed");
+}
+
+#[test]
+fn test_struct_return_congruent_call_result_fields() {
+    let caller = verify("struct_return_use_step", STRUCT_RETURN_CALLER, "use_step");
+    assert_case(caller, "verified");
+}
+
+#[test]
+fn test_struct_return_invariant_is_assumed_field_wise() {
+    let case = verify("struct_return_invariant", STRUCT_RETURN_INVARIANT, "mk");
+    assert_case(case, "verified");
+}
+
+// Constant-argument calls feed `unfold_constant_calls`: a scalar-parameter
+// callee returning an array mints `len_result`/`__z3_arr_result` against
+// the `#len` projection so `len(mk_list(2))` facts unfold soundly.
+const ARRAY_RETURN_UNFOLD: &str = r#"
+atom mk_list(n: i64) -> [i64]
+    requires: n >= 1;
+    ensures: len(result) >= 1;
+    decreases: n;
+    body: if n == 1 { [0] } else { mk_list(n - 1) };
+
+atom use_unfold() -> i64
+    requires: true;
+    ensures: result >= 1;
+    body: len(mk_list(2));
+"#;
+
+// Struct-returning callees with scalar parameters unfold with a fresh
+// handle plus `#field.*` projections — `mk_struct(2)`'s unfolded instance
+// carries `v == 2`.
+const STRUCT_RETURN_UNFOLD: &str = r#"
+struct Pair { v: i64 }
+
+atom mk_struct(n: i64) -> Pair
+    requires: n >= 0;
+    ensures: result.v == n;
+    decreases: n;
+    body: if n == 0 { Pair { v: 0 } } else { let r = mk_struct(n - 1); Pair { v: r.v + 1 } };
+
+atom read_v(p: Pair) -> i64
+    requires: true;
+    ensures: result == p.v;
+    body: p.v;
+
+atom use_unfold_struct() -> i64
+    requires: true;
+    ensures: result == 2;
+    body: read_v(mk_struct(2));
+"#;
+
+#[test]
+fn test_array_return_unfold_wires_len_projection() {
+    let case = verify("array_return_unfold", ARRAY_RETURN_UNFOLD, "use_unfold");
+    assert_case(case, "verified");
+}
+
+#[test]
+fn test_struct_return_unfold_wires_field_projections() {
+    let case = verify(
+        "struct_return_unfold",
+        STRUCT_RETURN_UNFOLD,
+        "use_unfold_struct",
+    );
+    assert_case(case, "verified");
+}
+
 #[test]
 fn test_unsupported_array_and_struct_recursive_parameters_keep_fresh_results() {
     let cases = [
@@ -1288,12 +1606,12 @@ fn test_unsupported_array_and_struct_recursive_parameters_keep_fresh_results() {
         (
             "unsupported_array_return",
             UNSUPPORTED_ARRAY_RETURN,
-            "atom 'bad' returns a non-scalar type",
+            "atom 'bad' returns an array with unsupported element type 'f64'",
         ),
         (
-            "unsupported_struct_return",
-            UNSUPPORTED_STRUCT_RETURN,
-            "atom 'bad' returns a non-scalar type",
+            "unsupported_struct_array_field_return",
+            UNSUPPORTED_STRUCT_ARRAY_FIELD_RETURN,
+            "atom 'bad' returns struct type 'Wrap' with non-scalar fields or call-containing constraints/invariants",
         ),
         (
             "unsupported_array_measure_access",
@@ -1348,6 +1666,51 @@ fn test_unsupported_array_and_struct_recursive_parameters_keep_fresh_results() {
             case.report,
             String::from_utf8_lossy(&case.output.stdout),
             String::from_utf8_lossy(&case.output.stderr)
+        );
+    }
+}
+
+// Return-type exclusions that cannot reach the postcondition phase still
+// emit the ineligibility hint and fail: `[[i64]]` is unrepresentable, and a
+// call-containing struct invariant is unverifiable as the callee's own
+// result obligation.
+#[test]
+fn test_unsupported_nested_array_and_invariant_struct_returns() {
+    let cases = [
+        (
+            "unsupported_nested_array_return",
+            UNSUPPORTED_NESTED_ARRAY_RETURN,
+            "atom 'bad' returns an array with unsupported element type '[i64]'",
+        ),
+        (
+            "unsupported_struct_call_invariant_return",
+            UNSUPPORTED_STRUCT_RETURN,
+            "atom 'bad' returns struct type 'P' with non-scalar fields or call-containing constraints/invariants",
+        ),
+    ];
+
+    for (name, source, reason) in cases {
+        let case = verify(name, source, "bad");
+        assert!(
+            case.did_not_crash(),
+            "{name} crashed; stderr:\n{}",
+            String::from_utf8_lossy(&case.output.stderr)
+        );
+        assert!(
+            case.has_diagnostic_code("recursive_contract_unsupported"),
+            "{name} should emit recursive_contract_unsupported; report:\n{:?}",
+            case.report
+        );
+        assert!(
+            case.diagnostic_message_contains("recursive_contract_unsupported", reason),
+            "{name} should report exact reason {reason:?}; report:\n{:?}",
+            case.report
+        );
+        assert_eq!(
+            case.verdict().as_deref(),
+            Some("failed"),
+            "{name} should fail, not verify; report:\n{:?}",
+            case.report
         );
     }
 }

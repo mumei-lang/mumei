@@ -16,12 +16,14 @@ use std::collections::{HashMap, HashSet};
 // recursive call carries a termination obligation
 // `0 <= M_A && M_B(args) < M_A` where `M_A` is the caller's measure.
 //
-// Eligibility is deliberately narrow: scalar Int/Bool returns and parameters,
-// plus one-dimensional arrays of scalar elements and structs with scalar
-// fields, no effects, no borrows/consumes, no type parameters, default trust
-// level, and a measure over the atom's own parameters with no calls except
-// `len` of an array parameter. Atoms on a cycle that fail eligibility keep the
-// legacy unconstrained-call treatment and get an advisory hint instead (see
+// Eligibility is deliberately narrow: scalar Int/Bool parameters and
+// returns, one-dimensional arrays of scalar elements (as parameters or the
+// return), structs with scalar fields (as parameters or the return), no
+// effects, no borrows/consumes, no type parameters, default trust level, and
+// a measure over the atom's own parameters with no calls except `len` of an
+// array parameter. Array parameters additionally forbid stores through the
+// parameter itself. Atoms on a cycle that fail eligibility keep the legacy
+// unconstrained-call treatment and get an advisory hint instead (see
 // `recursive_contract_hint_diagnostic`).
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -693,6 +695,73 @@ fn array_element_type(type_name: &str) -> Option<&str> {
         .map(str::trim)
 }
 
+/// True when `element_type` names a supported one-dimensional array element:
+/// a scalar Int/Bool base type — no nested arrays, struct/enum elements, or
+/// named (refined) element types. Shared by the parameter and return-type
+/// checks so both sides accept the same shapes.
+fn eligible_array_element(module_env: &ModuleEnv, element_type: &str) -> bool {
+    !element_type.is_empty()
+        && !element_type.starts_with('[')
+        && module_env.get_struct(element_type).is_none()
+        && module_env.get_enum(element_type).is_none()
+        && module_env.get_type(element_type).is_none()
+        && is_scalar_int_or_bool(module_env, Some(element_type))
+}
+
+/// True when `sdef` has only scalar Int/Bool fields and neither its field
+/// `where` constraints nor its invariants contain calls. Shared by the
+/// parameter and return-type checks.
+fn eligible_struct_shape(module_env: &ModuleEnv, sdef: &StructDef) -> bool {
+    sdef.fields
+        .iter()
+        .all(|field| is_scalar_int_or_bool(module_env, Some(field.type_name.trim())))
+        && sdef.fields.iter().all(|field| {
+            field
+                .constraint
+                .as_deref()
+                .is_none_or(|text| collect_call_edges_expr(&parse_expression(text)).is_empty())
+        })
+        && sdef
+            .invariants
+            .iter()
+            .all(|text| collect_call_edges_expr(&parse_expression(text)).is_empty())
+}
+
+/// The recursive-contract eligibility of `member`'s return type: scalar
+/// Int/Bool as before, a `[T]` whose element satisfies the same rule as
+/// array parameters, or a struct satisfying the same shape rule as struct
+/// parameters. A missing return type defaults to i64.
+fn rec_result_unsupported_reason(module_env: &ModuleEnv, member: &Atom) -> Option<String> {
+    let type_name = member.return_type.as_deref().map(str::trim)?;
+    if is_scalar_int_or_bool(module_env, Some(type_name)) {
+        return None;
+    }
+    if let Some(element_type) = array_element_type(type_name) {
+        return if eligible_array_element(module_env, element_type) {
+            None
+        } else {
+            Some(format!(
+                "atom '{}' returns an array with unsupported element type '{}'",
+                member.name, element_type
+            ))
+        };
+    }
+    if let Some(sdef) = module_env.get_struct(type_name) {
+        return if eligible_struct_shape(module_env, sdef) {
+            None
+        } else {
+            Some(format!(
+                "atom '{}' returns struct type '{}' with non-scalar fields or call-containing constraints/invariants",
+                member.name, sdef.name
+            ))
+        };
+    }
+    Some(format!(
+        "atom '{}' returns a non-scalar type '{}'",
+        member.name, type_name
+    ))
+}
+
 /// Check that `atom`'s `decreases` measure uses only the permitted projections
 /// of its own parameters (plus literals/arithmetic).
 fn measure_is_valid(module_env: &ModuleEnv, atom: &Atom) -> Result<(), String> {
@@ -799,12 +868,8 @@ fn member_unsupported_reason(module_env: &ModuleEnv, member: &Atom) -> Option<St
             member.name
         ));
     }
-    if !is_scalar_int_or_bool(module_env, member.return_type.as_deref()) {
-        return Some(format!(
-            "atom '{}' returns a non-scalar type '{}'",
-            member.name,
-            member.return_type.as_deref().unwrap_or("")
-        ));
+    if let Some(reason) = rec_result_unsupported_reason(module_env, member) {
+        return Some(reason);
     }
     for param in &member.params {
         let type_name = param.type_name.as_deref().map(str::trim);
@@ -823,13 +888,7 @@ fn member_unsupported_reason(module_env: &ModuleEnv, member: &Atom) -> Option<St
                     member.name, param.name
                 ));
             }
-            if element_type.is_empty()
-                || element_type.starts_with('[')
-                || module_env.get_struct(element_type).is_some()
-                || module_env.get_enum(element_type).is_some()
-                || module_env.get_type(element_type).is_some()
-                || !is_scalar_int_or_bool(module_env, Some(element_type))
-            {
+            if !eligible_array_element(module_env, element_type) {
                 return Some(format!(
                     "atom '{}' parameter '{}' has an unsupported array element type '{}'",
                     member.name, param.name, element_type
@@ -839,21 +898,7 @@ fn member_unsupported_reason(module_env: &ModuleEnv, member: &Atom) -> Option<St
         }
 
         if let Some(sdef) = type_name.and_then(|name| module_env.get_struct(name)) {
-            let fields_supported = sdef
-                .fields
-                .iter()
-                .all(|field| is_scalar_int_or_bool(module_env, Some(field.type_name.trim())));
-            let constraints_call_free = sdef.fields.iter().all(|field| {
-                field
-                    .constraint
-                    .as_deref()
-                    .is_none_or(|text| collect_call_edges_expr(&parse_expression(text)).is_empty())
-            });
-            let invariants_call_free = sdef
-                .invariants
-                .iter()
-                .all(|text| collect_call_edges_expr(&parse_expression(text)).is_empty());
-            if !fields_supported || !constraints_call_free || !invariants_call_free {
+            if !eligible_struct_shape(module_env, sdef) {
                 return Some(format!(
                     "atom '{}' parameter '{}' has struct type '{}' with non-scalar fields or call-containing constraints/invariants",
                     member.name, param.name, sdef.name
@@ -1096,6 +1141,130 @@ atom bad(a: [f64]) -> i64
             Some(reason)
         );
         assert!(recursive_contract_hint_diagnostic(atom, &module_env).is_some());
+    }
+
+    fn env_with(items: Vec<Item>) -> ModuleEnv {
+        let mut module_env = ModuleEnv::new();
+        for item in items {
+            match item {
+                Item::Atom(atom) => module_env.register_atom(&atom),
+                Item::StructDef(sdef) => module_env.register_struct(&sdef),
+                Item::TypeDef(refined) => module_env.register_type(&refined),
+                Item::EnumDef(edef) => module_env.register_enum(&edef),
+                _ => {}
+            }
+        }
+        module_env
+    }
+
+    #[test]
+    fn unsupported_return_types_have_hint_reasons() {
+        for (source, expected) in [
+            (
+                r#"atom bad() -> [f64]
+    requires: true;
+    ensures: len(bad()) == -1;
+    decreases: 0;
+    body: bad();
+"#,
+                Some("atom 'bad' returns an array with unsupported element type 'f64'"),
+            ),
+            (
+                r#"atom bad() -> [[i64]]
+    requires: true;
+    ensures: len(bad()) == -1;
+    decreases: 0;
+    body: bad();
+"#,
+                Some("atom 'bad' returns an array with unsupported element type '[i64]'"),
+            ),
+            (
+                r#"struct Wrap { a: [i64] }
+
+atom read_a(w: Wrap) -> i64
+    requires: true;
+    ensures: true;
+    body: 0;
+
+atom bad() -> Wrap
+    requires: true;
+    ensures: read_a(bad()) == -1;
+    decreases: 0;
+    body: bad();
+"#,
+                Some(
+                    "atom 'bad' returns struct type 'Wrap' with non-scalar fields or call-containing constraints/invariants",
+                ),
+            ),
+            (
+                r#"atom helper() -> i64
+    requires: true;
+    ensures: true;
+    body: 0;
+
+struct P {
+    n: i64,
+    invariant: helper() >= 0
+}
+
+atom read_n(p: P) -> i64
+    requires: true;
+    ensures: true;
+    body: 0;
+
+atom bad() -> P
+    requires: true;
+    ensures: read_n(bad()) == -1;
+    decreases: 0;
+    body: bad();
+"#,
+                Some(
+                    "atom 'bad' returns struct type 'P' with non-scalar fields or call-containing constraints/invariants",
+                ),
+            ),
+        ] {
+            let module_env = env_with(crate::parser::parse_module(source));
+            let atom = module_env.get_atom("bad").unwrap();
+            assert_eq!(
+                member_unsupported_reason(&module_env, atom).as_deref(),
+                expected,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn array_and_scalar_struct_returns_are_eligible() {
+        for source in [
+            r#"atom ok(a: [i64], n: i64) -> [i64]
+    requires: n >= 0;
+    ensures: len(result) == len(a);
+    decreases: n;
+    body: if n == 0 { a } else { ok(a, n - 1) };
+"#,
+            r#"atom ok(a: [bool], n: i64) -> [bool]
+    requires: n >= 0;
+    ensures: len(result) == len(a);
+    decreases: n;
+    body: if n == 0 { a } else { ok(a, n - 1) };
+"#,
+            r#"struct Point { x: i64, y: i64 }
+
+atom ok(p: Point, n: i64) -> Point
+    requires: n >= 0;
+    ensures: result.x == p.x;
+    decreases: n;
+    body: if n == 0 { p } else { ok(p, n - 1) };
+"#,
+        ] {
+            let module_env = env_with(crate::parser::parse_module(source));
+            let atom = module_env.get_atom("ok").unwrap();
+            assert_eq!(
+                member_unsupported_reason(&module_env, atom),
+                None,
+                "{source}"
+            );
+        }
     }
 
     #[test]

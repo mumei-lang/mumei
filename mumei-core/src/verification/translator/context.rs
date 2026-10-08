@@ -321,20 +321,33 @@ impl<'a> VCtx<'a> {
         domain: &[z3::Sort<'a>],
         range: &z3::Sort<'a>,
     ) -> std::rc::Rc<z3::FuncDecl<'a>> {
-        if let Some(decl) = self.recursion.rec_fns.borrow().get(&callee.name) {
+        self.rec_fn_named(&format!("rec_fn#{}", callee.name), domain, range)
+    }
+
+    /// A `rec_fn#…` uninterpreted function cached per UF name: the callee's
+    /// primary result plus the projections a non-scalar result needs
+    /// (`#len` for arrays, `#field.<name>` per struct field), all declared
+    /// over the same expanded domain.
+    pub(crate) fn rec_fn_named(
+        &self,
+        uf_name: &str,
+        domain: &[z3::Sort<'a>],
+        range: &z3::Sort<'a>,
+    ) -> std::rc::Rc<z3::FuncDecl<'a>> {
+        if let Some(decl) = self.recursion.rec_fns.borrow().get(uf_name) {
             return decl.clone();
         }
         let domain_refs: Vec<&z3::Sort<'a>> = domain.iter().collect();
         let decl = std::rc::Rc::new(z3::FuncDecl::new(
             self.ctx,
-            format!("rec_fn#{}", callee.name),
+            uf_name.to_string(),
             &domain_refs,
             range,
         ));
         self.recursion
             .rec_fns
             .borrow_mut()
-            .insert(callee.name.clone(), decl.clone());
+            .insert(uf_name.to_string(), decl.clone());
         decl
     }
 

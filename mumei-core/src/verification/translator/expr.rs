@@ -335,6 +335,24 @@ fn struct_field_values_for_call<'a>(
     Some(field_vals)
 }
 
+/// `rec_fn#<callee>#<suffix>` application over the callee's expanded
+/// domain: the projection UF a non-scalar recursive result needs — `len`
+/// for `[T]` results, `field.<name>` per struct field. Sharing the domain
+/// makes equal argument tuples produce equal projections, which is what
+/// makes a (contents, len) pair or a struct result congruent.
+fn rec_fn_result_projection<'a>(
+    vc: &VCtx<'a>,
+    callee: &Atom,
+    suffix: &str,
+    domain: &[Sort<'a>],
+    range: &Sort<'a>,
+    args: &[Dynamic<'a>],
+) -> Dynamic<'a> {
+    let decl = vc.rec_fn_named(&format!("rec_fn#{}#{}", callee.name, suffix), domain, range);
+    let app_args: Vec<&dyn Ast> = args.iter().map(|v| v as &dyn Ast).collect();
+    decl.apply(&app_args)
+}
+
 /// The result sort a `rec_fn#` application for `callee` must produce.
 fn call_result_sort<'a>(vc: &VCtx<'a>, callee: &Atom) -> Sort<'a> {
     let has_float = callee.params.iter().any(|p| {
@@ -510,11 +528,61 @@ fn unfold_constant_calls<'a>(
             }
 
             let domain: Vec<Sort> = args.iter().map(|arg| arg.get_sort()).collect();
-            let range = call_result_sort(vc, atom);
-            let decl = vc.rec_fn(atom, &domain, &range);
-            let app_args: Vec<&dyn Ast> = args.iter().map(|arg| arg as &dyn Ast).collect();
-            let result = decl.apply(&app_args);
-            call_env.insert("result".to_string(), result);
+            let struct_ret = atom
+                .return_type
+                .as_deref()
+                .and_then(|t| vc.module_env.get_struct(t));
+            let result = if let Some(sdef) = struct_ret {
+                // Struct results are field-wise congruent: a fresh handle
+                // plus a `#field.*` projection UF per field — the same
+                // shape the call sites mint.
+                static UNFOLD_RESULT_COUNTER: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(0);
+                let id = UNFOLD_RESULT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let handle_name = format!("unfold_{}_{}", atom.name, id);
+                let handle =
+                    datatype::param_z3_value_for_vc(vc, &handle_name, atom.return_type.as_deref());
+                let result_fields: Vec<(String, Dynamic)> = sdef
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        let field_range = param_sort_probe(
+                            vc,
+                            &format!("__unfold_field_{}_{}", atom.name, field.name),
+                            Some(field.type_name.trim()),
+                        );
+                        (
+                            field.name.clone(),
+                            rec_fn_result_projection(
+                                vc,
+                                atom,
+                                &format!("field.{}", field.name),
+                                &domain,
+                                &field_range,
+                                &args,
+                            ),
+                        )
+                    })
+                    .collect();
+                bind_struct_fields(&mut call_env, &handle_name, &result_fields);
+                bind_struct_fields(&mut call_env, "result", &result_fields);
+                handle
+            } else {
+                let range = call_result_sort(vc, atom);
+                let decl = vc.rec_fn(atom, &domain, &range);
+                let app_args: Vec<&dyn Ast> = args.iter().map(|arg| arg as &dyn Ast).collect();
+                decl.apply(&app_args)
+            };
+            call_env.insert("result".to_string(), result.clone());
+            // Array results: `len(result)` / `result[i]` inside the unfolded
+            // ensures resolve to the same `#len` projection the call sites
+            // mint.
+            if result.as_array().is_some() {
+                let len_sort = array_len_symbol(vc.ctx, "probe", vc.bitvec_i64).get_sort();
+                let len_sym = rec_fn_result_projection(vc, atom, "len", &domain, &len_sort, &args);
+                call_env.insert("__z3_arr_result".to_string(), result.clone());
+                call_env.insert("len_result".to_string(), len_sym);
+            }
 
             let ensures = crate::verification::contract_view(
                 atom,
@@ -2248,18 +2316,41 @@ pub(crate) fn expr_to_z3<'a>(
                         let use_rec_fn = cong
                             && callee_semantics_match_caller(vc, &callee)
                             && rec_args.is_some();
-                        let result_z3: Dynamic = if use_rec_fn {
+                        // Keep the expanded signature alive past the primary
+                        // application: the projections a non-scalar result
+                        // needs (`#len` for `[T]`, `#field.*` for structs)
+                        // are declared over the same domain.
+                        let rec_signature: Option<(Vec<Dynamic>, Vec<Sort>)> = if use_rec_fn {
                             let rec_args = rec_args.expect("recursive arguments checked above");
-                            let domain: Vec<Sort> = rec_args.iter().map(|v| v.get_sort()).collect();
-                            let range = call_result_sort(vc, &callee);
-                            let decl = vc.rec_fn(&callee, &domain, &range);
-                            let app_args: Vec<&dyn Ast> =
-                                rec_args.iter().map(|v| v as &dyn Ast).collect();
-                            let application = decl.apply(&app_args);
-                            if let Some(sink) = vc.recursion.unfold_sink.borrow_mut().as_mut() {
-                                sink.push((callee.name.clone(), arg_vals.clone()));
+                            let domain = rec_args.iter().map(|v| v.get_sort()).collect();
+                            Some((rec_args, domain))
+                        } else {
+                            None
+                        };
+                        let struct_return = result_type.and_then(|t| vc.module_env.get_struct(t));
+                        let result_z3: Dynamic = if let Some((rec_args, domain)) = &rec_signature {
+                            if struct_return.is_some() {
+                                // A congruent struct result is carried
+                                // field-wise: the opaque handle stays a
+                                // per-call const (it is only ever observed
+                                // through its fields) and each field is a
+                                // projection UF bound below.
+                                datatype::param_z3_value_for_vc(
+                                    vc,
+                                    result_name.as_str(),
+                                    result_type,
+                                )
+                            } else {
+                                let range = call_result_sort(vc, &callee);
+                                let decl = vc.rec_fn(&callee, domain, &range);
+                                let app_args: Vec<&dyn Ast> =
+                                    rec_args.iter().map(|v| v as &dyn Ast).collect();
+                                let application = decl.apply(&app_args);
+                                if let Some(sink) = vc.recursion.unfold_sink.borrow_mut().as_mut() {
+                                    sink.push((callee.name.clone(), arg_vals.clone()));
+                                }
+                                application
                             }
-                            application
                         } else {
                             datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type)
                         };
@@ -2271,11 +2362,25 @@ pub(crate) fn expr_to_z3<'a>(
                         // same symbol for `let t = f(..)` so the guarantee
                         // reaches the caller instead of a fresh `len_t`.
                         let result_len: Option<Dynamic> = result_z3.as_array().map(|_| {
-                            let len_sym = array_len_symbol(
-                                ctx,
-                                &format!("len_{}", result_name),
-                                vc.bitvec_i64,
-                            );
+                            let len_sym: Dynamic = if let Some((rec_args, domain)) = &rec_signature
+                            {
+                                // Congruent call: an array value is its
+                                // (contents, len) pair, so the result's
+                                // length is a projection UF over the same
+                                // domain — equal argument tuples yield
+                                // equal contents AND equal lengths.
+                                let len_sort =
+                                    array_len_symbol(vc.ctx, "probe", vc.bitvec_i64).get_sort();
+                                rec_fn_result_projection(
+                                    vc, &callee, "len", domain, &len_sort, rec_args,
+                                )
+                            } else {
+                                array_len_symbol(
+                                    ctx,
+                                    &format!("len_{}", result_name),
+                                    vc.bitvec_i64,
+                                )
+                            };
                             // Array lengths are nonneg regardless of the
                             // callee's ensures — `array_len_value` asserts
                             // the same when a solver is in scope.
@@ -2294,16 +2399,54 @@ pub(crate) fn expr_to_z3<'a>(
                         // 構造体を返す呼び出し: 結果のフィールドをシンボル化し、
                         // 呼び出し先が保証する跨フィールド不変量を事実として仮定する
                         // （呼び出し先自身の検証で Invariant(result) は義務として課される）。
-                        if let Some(sdef) = result_type.and_then(|t| vc.module_env.get_struct(t)) {
-                            let result_fields = seed_struct_fields(
-                                ctx,
-                                env,
-                                &result_name,
-                                sdef,
-                                vc.module_env,
-                                vc.ieee754_f64,
-                                vc.bitvec_i64,
-                            );
+                        if let Some(sdef) = struct_return {
+                            let result_fields: Vec<(String, Dynamic)> =
+                                if let Some((rec_args, domain)) = &rec_signature {
+                                    // Congruent call: each field is a projection
+                                    // UF over the callee's expanded domain — the
+                                    // result is compared field-wise, never by the
+                                    // opaque handle.
+                                    sdef.fields
+                                        .iter()
+                                        .map(|field| {
+                                            let range = param_sort_probe(
+                                                vc,
+                                                &format!(
+                                                    "__recfn_field_{}_{}",
+                                                    callee.name, field.name
+                                                ),
+                                                Some(field.type_name.trim()),
+                                            );
+                                            (
+                                                field.name.clone(),
+                                                rec_fn_result_projection(
+                                                    vc,
+                                                    &callee,
+                                                    &format!("field.{}", field.name),
+                                                    domain,
+                                                    &range,
+                                                    rec_args,
+                                                ),
+                                            )
+                                        })
+                                        .collect()
+                                } else {
+                                    seed_struct_fields(
+                                        ctx,
+                                        env,
+                                        &result_name,
+                                        sdef,
+                                        vc.module_env,
+                                        vc.ieee754_f64,
+                                        vc.bitvec_i64,
+                                    )
+                                };
+                            // The UF-path fields live under the per-call
+                            // handle in `env` too, so `let t = f(..); t.x`
+                            // projects to the shared congruent values.
+                            if rec_signature.is_some() {
+                                bind_struct_fields(env, &result_name, &result_fields);
+                            }
                             bind_struct_fields(&mut call_env, &result_name, &result_fields);
                             bind_struct_fields(&mut call_env, "result", &result_fields);
                             if let (Some(solver), true) = (
@@ -2311,15 +2454,32 @@ pub(crate) fn expr_to_z3<'a>(
                                 !recursive_instance && callee_semantics_match_caller(vc, &callee),
                             ) {
                                 let _contract_guard = vc.enter_contract_instantiation(&callee.name);
-                                assume_struct_invariants(
-                                    vc,
-                                    solver,
-                                    sdef,
-                                    &result_name,
-                                    &result_fields,
-                                    &call_env,
-                                    None,
-                                )?;
+                                if rec_signature.is_some() {
+                                    // Result assumptions come from the same
+                                    // builder the callee's body side uses
+                                    // (`assume_struct_contract`, which lowers
+                                    // field `where` constraints then
+                                    // invariants) — never an ad-hoc subset.
+                                    assume_struct_contract(
+                                        vc,
+                                        solver,
+                                        sdef,
+                                        &result_name,
+                                        &result_fields,
+                                        &call_env,
+                                        None,
+                                    )?;
+                                } else {
+                                    assume_struct_invariants(
+                                        vc,
+                                        solver,
+                                        sdef,
+                                        &result_name,
+                                        &result_fields,
+                                        &call_env,
+                                        None,
+                                    )?;
+                                }
                             }
                         }
 
@@ -3990,34 +4150,113 @@ pub(crate) fn expr_to_z3<'a>(
                     let use_rec_fn = cong
                         && callee_semantics_match_caller(vc, &callee_atom)
                         && rec_args.is_some();
-                    let result_z3: Dynamic = if use_rec_fn {
+                    // Same expanded-signature retention as the `Expr::Call`
+                    // arm: the result's `#len`/`#field.*` projections share
+                    // the callee's domain.
+                    let rec_signature: Option<(Vec<Dynamic>, Vec<Sort>)> = if use_rec_fn {
                         let rec_args = rec_args.expect("recursive arguments checked above");
-                        let domain: Vec<Sort> = rec_args.iter().map(|v| v.get_sort()).collect();
-                        let range = call_result_sort(vc, &callee_atom);
-                        let decl = vc.rec_fn(&callee_atom, &domain, &range);
-                        let app_args: Vec<&dyn Ast> =
-                            rec_args.iter().map(|v| v as &dyn Ast).collect();
-                        let application = decl.apply(&app_args);
-                        if let Some(sink) = vc.recursion.unfold_sink.borrow_mut().as_mut() {
-                            sink.push((callee_atom.name.clone(), arg_vals.clone()));
+                        let domain = rec_args.iter().map(|v| v.get_sort()).collect();
+                        Some((rec_args, domain))
+                    } else {
+                        None
+                    };
+                    let struct_return = result_type.and_then(|t| vc.module_env.get_struct(t));
+                    let result_z3: Dynamic = if let Some((rec_args, domain)) = &rec_signature {
+                        if struct_return.is_some() {
+                            // Field-wise congruent struct result: the handle
+                            // stays a per-call const; fields are projection
+                            // UFs bound below.
+                            datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type)
+                        } else {
+                            let range = call_result_sort(vc, &callee_atom);
+                            let decl = vc.rec_fn(&callee_atom, domain, &range);
+                            let app_args: Vec<&dyn Ast> =
+                                rec_args.iter().map(|v| v as &dyn Ast).collect();
+                            let application = decl.apply(&app_args);
+                            if let Some(sink) = vc.recursion.unfold_sink.borrow_mut().as_mut() {
+                                sink.push((callee_atom.name.clone(), arg_vals.clone()));
+                            }
+                            application
                         }
-                        application
                     } else {
                         datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type)
                     };
 
+                    // Array results on the congruent path mint their `len`
+                    // through the `#len` projection UF (the (contents, len)
+                    // pair). The non-congruent reference-call path keeps its
+                    // historical shape: no tracked result length.
+                    let result_len: Option<Dynamic> =
+                        if let Some((rec_args, domain)) = &rec_signature {
+                            result_z3.as_array().map(|_| {
+                                let len_sort =
+                                    array_len_symbol(vc.ctx, "probe", vc.bitvec_i64).get_sort();
+                                let len_sym = rec_fn_result_projection(
+                                    vc,
+                                    &callee_atom,
+                                    "len",
+                                    domain,
+                                    &len_sort,
+                                    rec_args,
+                                );
+                                if let (Some(solver), Some(nn)) =
+                                    (solver_opt, nonneg_constraint(ctx, &len_sym))
+                                {
+                                    solver.assert(&nn);
+                                }
+                                vc.call_result_lens.borrow_mut().insert(
+                                    result_z3.get_z3_ast() as usize,
+                                    (len_sym.clone(), result_z3.clone()),
+                                );
+                                len_sym
+                            })
+                        } else {
+                            None
+                        };
+
                     // 構造体を返す参照呼び出し: 通常呼び出しと同様に結果のフィールドを
                     // シンボル化し、呼び出し先が保証する不変量を仮定する。
-                    if let Some(sdef) = result_type.and_then(|t| vc.module_env.get_struct(t)) {
-                        let result_fields = seed_struct_fields(
-                            ctx,
-                            env,
-                            &result_name,
-                            sdef,
-                            vc.module_env,
-                            vc.ieee754_f64,
-                            vc.bitvec_i64,
-                        );
+                    if let Some(sdef) = struct_return {
+                        let result_fields: Vec<(String, Dynamic)> =
+                            if let Some((rec_args, domain)) = &rec_signature {
+                                sdef.fields
+                                    .iter()
+                                    .map(|field| {
+                                        let range = param_sort_probe(
+                                            vc,
+                                            &format!(
+                                                "__recfn_field_{}_{}",
+                                                callee_atom.name, field.name
+                                            ),
+                                            Some(field.type_name.trim()),
+                                        );
+                                        (
+                                            field.name.clone(),
+                                            rec_fn_result_projection(
+                                                vc,
+                                                &callee_atom,
+                                                &format!("field.{}", field.name),
+                                                domain,
+                                                &range,
+                                                rec_args,
+                                            ),
+                                        )
+                                    })
+                                    .collect()
+                            } else {
+                                seed_struct_fields(
+                                    ctx,
+                                    env,
+                                    &result_name,
+                                    sdef,
+                                    vc.module_env,
+                                    vc.ieee754_f64,
+                                    vc.bitvec_i64,
+                                )
+                            };
+                        if rec_signature.is_some() {
+                            bind_struct_fields(env, &result_name, &result_fields);
+                        }
                         bind_struct_fields(&mut call_env, &result_name, &result_fields);
                         bind_struct_fields(&mut call_env, "result", &result_fields);
                         if let (Some(solver), true) = (
@@ -4026,15 +4265,27 @@ pub(crate) fn expr_to_z3<'a>(
                         ) {
                             let _contract_guard =
                                 vc.enter_contract_instantiation(&callee_atom.name);
-                            assume_struct_invariants(
-                                vc,
-                                solver,
-                                sdef,
-                                &result_name,
-                                &result_fields,
-                                &call_env,
-                                None,
-                            )?;
+                            if rec_signature.is_some() {
+                                assume_struct_contract(
+                                    vc,
+                                    solver,
+                                    sdef,
+                                    &result_name,
+                                    &result_fields,
+                                    &call_env,
+                                    None,
+                                )?;
+                            } else {
+                                assume_struct_invariants(
+                                    vc,
+                                    solver,
+                                    sdef,
+                                    &result_name,
+                                    &result_fields,
+                                    &call_env,
+                                    None,
+                                )?;
+                            }
                         }
                     }
 
@@ -4045,6 +4296,10 @@ pub(crate) fn expr_to_z3<'a>(
                     if caller_ensures.trim() != "true" && !recursive_instance {
                         let _contract_guard = vc.enter_contract_instantiation(&callee_atom.name);
                         call_env.insert("result".to_string(), result_z3.clone());
+                        if let Some(len_sym) = &result_len {
+                            call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
+                            call_env.insert("len_result".to_string(), len_sym.clone());
+                        }
                         let ens_ast = parse_expression(&caller_ensures);
                         if use_rec_fn {
                             let unfold_key = if solver_opt.is_some()
