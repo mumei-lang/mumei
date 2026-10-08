@@ -96,6 +96,51 @@ atom store_breaks_eq(a: [i64]) -> bool
     };
 "#;
 
+// The left operand is evaluated before the right: a shadowing `let a`
+// inside the right operand must not replace the left's value — outer
+// `[0, 0]` vs inner `[0, 1]` is false (contents), outer `len == 2` vs
+// inner `len == 3` is false (length), and outer `[0, 0]` vs inner
+// `[0, 0]` is true.
+const EQ_SHADOWED_OPERAND: &str = r#"
+atom shadow_rhs_contents(a: [i64]) -> bool
+    requires: len(a) == 2 && a[0] == 0 && a[1] == 0;
+    ensures: result == false;
+    body: a == ({ let a = [0, 1]; a });
+
+atom shadow_rhs_len(a: [i64]) -> bool
+    requires: len(a) == 2;
+    ensures: result == false;
+    body: a == ({ let a = [1, 2, 3]; a });
+
+atom shadow_rhs_true(a: [i64]) -> bool
+    requires: len(a) == 2 && a[0] == 0 && a[1] == 0;
+    ensures: result == true;
+    body: a == ({ let a = [0, 0]; a });
+"#;
+
+// Conditional arrays: `if`/`else` branches with different literal lengths
+// resolve through `tail_len_expr`'s `ite` — `select(ite(..), k)` is not a
+// legal Z3 pattern, so the quantifier must carry no explicit trigger.
+const EQ_CONDITIONAL: &str = r#"
+atom if_bound_eq(n: i64) -> bool
+    requires: n > 0;
+    ensures: result == true;
+    body: {
+        let a = if n > 0 { [1, 2] } else { [1, 2, 3] };
+        a == [1, 2]
+    };
+
+atom if_expr_eq(n: i64) -> bool
+    requires: n > 0;
+    ensures: result == true;
+    body: (if n > 0 { [1, 2] } else { [1, 2, 3] }) == [1, 2];
+
+atom if_expr_neq(n: i64) -> bool
+    requires: n > 0;
+    ensures: result == true;
+    body: (if n > 0 { [1, 2] } else { [1, 2, 3] }) != [1, 2, 3];
+"#;
+
 // `a == b` nested inside a user `forall` condition, and [bool] elements.
 const EQ_NESTED_BOOL: &str = r#"
 atom eq_in_forall(a: [i64], b: [i64], n: i64) -> bool
@@ -172,6 +217,16 @@ atom nonarr(a: [i64]) -> bool
     requires: true;
     ensures: a == 5;
     body: true;
+
+atom nonarr_real(a: [i64]) -> bool
+    requires: true;
+    ensures: a == 0.0;
+    body: true;
+
+atom nonarr_f64(a: [i64], x: f64) -> bool
+    requires: true;
+    ensures: a == x;
+    body: true;
 "#;
 
 // A false equality goal must fail — `[1, 2]` and `[1, 9]` are not equal.
@@ -180,6 +235,20 @@ atom bad_eq() -> bool
     requires: true;
     ensures: result == true;
     body: [1, 2] == [1, 9];
+"#;
+
+// IEEE `NaN` is not `fp.eq`-equal to itself, so `[NaN] == [NaN]` is false
+// under `--ieee754-f64` (a `0.0/0.0` literal element is concrete `NaN`).
+const EQ_NAN: &str = r#"
+atom nan_ne() -> bool
+    requires: true;
+    ensures: result == false;
+    body: [0.0 / 0.0] == [0.0 / 0.0];
+
+atom nan_neq() -> bool
+    requires: true;
+    ensures: result == true;
+    body: [0.0 / 0.0] != [0.0 / 0.0];
 "#;
 
 struct CaseResult {
@@ -408,8 +477,30 @@ fn array_eq_rejects_mismatched_element_types() {
 }
 
 #[test]
+fn array_eq_shadowed_left_operand() {
+    let case = verify(
+        "eq_shadowed_operand",
+        EQ_SHADOWED_OPERAND,
+        "shadow_rhs_true",
+    );
+    assert_all_verified(&case);
+}
+
+#[test]
+fn array_eq_conditional_arrays() {
+    let case = verify("eq_conditional", EQ_CONDITIONAL, "if_expr_neq");
+    assert_all_verified(&case);
+}
+
+#[test]
+fn array_eq_ieee754_nan_is_not_equal() {
+    let case = verify_with_args("eq_nan", EQ_NAN, "nan_neq", &["--ieee754-f64"]);
+    assert_all_verified(&case);
+}
+
+#[test]
 fn array_eq_rejects_non_array_operand() {
-    let case = verify("eq_non_array_operand", EQ_NON_ARRAY_OPERAND, "nonarr");
+    let case = verify("eq_non_array_operand", EQ_NON_ARRAY_OPERAND, "nonarr_f64");
     assert!(
         case.did_not_crash(),
         "crashed; stderr:\n{}",

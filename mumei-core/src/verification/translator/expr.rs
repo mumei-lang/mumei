@@ -1226,9 +1226,15 @@ fn array_eq_operand<'a>(
     env: &Env<'a>,
     operand: &Expr,
     val: &Dynamic<'a>,
+    live: Option<Array<'a>>,
 ) -> Option<Array<'a>> {
     if let Expr::Variable(name) = operand {
-        return val.as_array().map(|_| z3_dynamic_array(vc, name, env));
+        // Only a name that actually lowered to an array counts — a variable
+        // rebound to a non-array must still hit the type error even when a
+        // stale `__z3_arr_<name>` slot survives from before the rebind.
+        return val
+            .as_array()
+            .map(|_| live.unwrap_or_else(|| z3_dynamic_array(vc, name, env)));
     }
     val.as_array()
 }
@@ -1243,8 +1249,12 @@ fn array_eq_operand_len<'a>(
     operand: &Expr,
     val: &Dynamic<'a>,
     solver_opt: Option<&Solver<'a>>,
+    live_len: Option<Dynamic<'a>>,
 ) -> Dynamic<'a> {
     if let Expr::Variable(name) = operand {
+        if let Some(len) = live_len {
+            return len;
+        }
         return array_len_value(vc.ctx, env, name, vc.bitvec_i64, solver_opt);
     }
     tail_len_expr(vc, env, "eq_operand", "v", None, operand, val, 0)
@@ -1271,6 +1281,7 @@ fn array_eq_element<'a>(ctx: &'a Context, l: &Dynamic<'a>, r: &Dynamic<'a>) -> O
 /// unconstrained base const and comparison is arbitrary. Two arrays are
 /// therefore equal iff `len_a == len_b` and
 /// `forall k in [0, len_a): a[k] == b[k]`; `!=` is its negation.
+#[allow(clippy::too_many_arguments)]
 fn array_value_equality<'a>(
     vc: &VCtx<'a>,
     left: &Expr,
@@ -1279,11 +1290,15 @@ fn array_value_equality<'a>(
     r: &Dynamic<'a>,
     env: &mut Env<'a>,
     solver_opt: Option<&Solver<'a>>,
+    left_live: Option<(Array<'a>, Dynamic<'a>)>,
 ) -> MumeiResult<Bool<'a>> {
     let ctx = vc.ctx;
+    let (left_arr_live, left_len_live) = left_live
+        .map(|(arr, len)| (Some(arr), Some(len)))
+        .unwrap_or((None, None));
     let (Some(l_arr), Some(r_arr)) = (
-        array_eq_operand(vc, env, left, l),
-        array_eq_operand(vc, env, right, r),
+        array_eq_operand(vc, env, left, l, left_arr_live),
+        array_eq_operand(vc, env, right, r, None),
     ) else {
         return Err(MumeiError::type_error(
             "Cannot compare an array to a non-array value with ==".to_string(),
@@ -1299,8 +1314,8 @@ fn array_value_equality<'a>(
             "Cannot compare nested arrays with ==; `[[T]]` elements carry no length".to_string(),
         ));
     }
-    let len_l = array_eq_operand_len(vc, env, left, l, solver_opt);
-    let len_r = array_eq_operand_len(vc, env, right, r, solver_opt);
+    let len_l = array_eq_operand_len(vc, env, left, l, solver_opt, left_len_live);
+    let len_r = array_eq_operand_len(vc, env, right, r, solver_opt, None);
     let len_eq = if len_l.get_sort() == len_r.get_sort() {
         len_l._eq(&len_r)
     } else if let (Some(li), Some(ri)) = (as_int_like(&len_l), as_int_like(&len_r)) {
@@ -1330,9 +1345,12 @@ fn array_value_equality<'a>(
         ))
     })?;
     let body = in_bounds.implies(&elem_eq);
-    let pat_l = z3::Pattern::new(ctx, &[&sel_l]);
-    let pat_r = z3::Pattern::new(ctx, &[&sel_r]);
-    let contents_eq = z3::ast::forall_const(ctx, &[&k], &[&pat_l, &pat_r], &body);
+    // No explicit pattern: a select over an `ite` array (e.g. comparing an
+    // if-bound `[T]`) makes `Z3_mk_forall_const` reject the pattern and
+    // return null — the same fallback the `forall` builtin uses when it has
+    // no admissible trigger. Z3's default trigger selection picks up the
+    // `select(a,k)`/`select(b,k)` terms itself.
+    let contents_eq = z3::ast::forall_const(ctx, &[&k], &[], &body);
     Ok(Bool::and(ctx, &[&len_eq, &contents_eq]))
 }
 
@@ -2764,7 +2782,51 @@ pub(crate) fn expr_to_z3<'a>(
             }
 
             let l = expr_to_z3(vc, left, env, solver_opt)?;
+
+            // For `==`/`!=` on an array `Variable`, the operand's value is
+            // the live `__z3_arr_<name>`/`len_<name>` slots (the base const
+            // `l` never reflects `a[i] = v` stores) — and for the LEFT
+            // operand those slots must be sampled before `right` is
+            // lowered: a shadowing `let a = …` or a rebind inside the right
+            // operand rewrites the same tracked slots, so reading them at
+            // dispatch time would compare the post-right `a` on both sides.
+            let array_eq_left_live = if matches!(op, Op::Eq | Op::Neq) && l.as_array().is_some() {
+                match &**left {
+                    Expr::Variable(name) => Some((
+                        z3_dynamic_array(vc, name, env),
+                        array_len_value(vc.ctx, env, name, vc.bitvec_i64, solver_opt),
+                    )),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
             let r = expr_to_z3(vc, right, env, solver_opt)?;
+
+            // Whole-array `==`/`!=`: an array value is its (contents, len)
+            // pair. Checked before every numeric/String branch because a
+            // mixed operand like `a == 0.0` would otherwise reach the Real
+            // arm, which substitutes a zero literal for the array side and
+            // silently proves `0.0 == 0.0`.
+            if matches!(op, Op::Eq | Op::Neq) && (l.as_array().is_some() || r.as_array().is_some())
+            {
+                let eq = array_value_equality(
+                    vc,
+                    left,
+                    right,
+                    &l,
+                    &r,
+                    env,
+                    solver_opt,
+                    array_eq_left_live,
+                )?;
+                return Ok(if matches!(op, Op::Neq) {
+                    eq.not().into()
+                } else {
+                    eq.into()
+                });
+            }
 
             // Plan 9-8: String concatenation — if both operands are Z3 String Sort
             if l.get_sort() == z3::Sort::string(ctx) && r.get_sort() == z3::Sort::string(ctx) {
@@ -2909,14 +2971,6 @@ pub(crate) fn expr_to_z3<'a>(
                         return Err(MumeiError::verification(
                             "Cannot compare enum values of different types".to_string(),
                         ));
-                    }
-                    Op::Eq | Op::Neq if l.as_array().is_some() || r.as_array().is_some() => {
-                        let eq = array_value_equality(vc, left, right, &l, &r, env, solver_opt)?;
-                        return Ok(if matches!(op, Op::Neq) {
-                            eq.not().into()
-                        } else {
-                            eq.into()
-                        });
                     }
                     _ => {}
                 }
