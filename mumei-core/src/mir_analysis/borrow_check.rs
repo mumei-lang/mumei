@@ -29,7 +29,7 @@ pub struct BorrowViolation {
 fn atom_has_borrowing_params(atom: &crate::parser::Atom) -> bool {
     atom.params
         .iter()
-        .any(|param| param.is_ref || param.is_ref_mut)
+        .any(|param| param.is_ref || param.is_ref_mut || param.consume)
         || atom
             .consumed_params
             .iter()

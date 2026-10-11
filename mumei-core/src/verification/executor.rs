@@ -3402,10 +3402,7 @@ fn clause_unbound_names(
     use std::collections::BTreeSet;
     let mut allowed: BTreeSet<String> = BTreeSet::new();
     for p in &atom.params {
-        // `consume x` params keep the keyword in `name` (parser quirk).
-        if let Some(last) = p.name.rsplit(' ').next() {
-            allowed.insert(last.to_string());
-        }
+        allowed.insert(p.name.clone());
     }
     allowed.extend(atom.consumed_params.iter().cloned());
     allowed.extend(atom.type_params.iter().cloned());

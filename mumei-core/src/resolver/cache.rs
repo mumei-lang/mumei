@@ -554,10 +554,11 @@ pub fn compute_proof_hash_with_flags(
                     "ref mut"
                 } else if p.is_ref {
                     "ref"
-                } else if callee_atom
-                    .consumed_params
-                    .iter()
-                    .any(|consumed| consumed == &p.name)
+                } else if p.consume
+                    || callee_atom
+                        .consumed_params
+                        .iter()
+                        .any(|consumed| consumed == &p.name)
                 {
                     "consume"
                 } else {
