@@ -1014,7 +1014,7 @@ pub(crate) fn array_root_ast(arr: &z3::ast::Array) -> z3_sys::Z3_ast {
 /// The len symbol a `Call` arm minted for an array-typed result — keyed by
 /// the result array's root ast, so `store` chains layered by caller writes
 /// still find it. Returns `None` for arrays that didn't come from a call.
-fn call_result_len<'a>(vc: &VCtx<'a>, arr: &z3::ast::Array<'a>) -> Option<Dynamic<'a>> {
+pub(crate) fn call_result_len<'a>(vc: &VCtx<'a>, arr: &z3::ast::Array<'a>) -> Option<Dynamic<'a>> {
     vc.call_result_lens
         .borrow()
         .get(&(array_root_ast(arr) as usize))
