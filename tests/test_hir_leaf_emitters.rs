@@ -8,10 +8,17 @@ use std::collections::HashMap;
 use std::path::Path;
 
 fn param(name: &str, type_name: Option<&str>, is_ref: bool, is_ref_mut: bool) -> Param {
+    // Mirror the parser: `Param.name` is the bare identifier and the
+    // `consume` marker lives on `Param::consume` (issue #717).
+    let (consume, name) = match name.strip_prefix("consume ") {
+        Some(rest) => (true, rest),
+        None => (false, name),
+    };
     Param {
         name: name.to_string(),
         type_name: type_name.map(str::to_string),
         type_ref: None,
+        consume,
         is_ref,
         is_ref_mut,
         fn_contract_requires: None,
@@ -209,7 +216,7 @@ fn proof_book_emitter_reads_hir_and_matches_develop_golden() {
 | **Atom** | `rich_atom` |
 | **Trust Level** | `Trusted` |
 | **Mumei Version** | `<MUMEI_VERSION>` |
-| **Content Hash** | `8567d01de94d94ae` |
+| **Content Hash** | `2615e818d4dc58e7` |
 | **Async** | Yes |
 
 ## Signature

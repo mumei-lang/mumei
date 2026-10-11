@@ -143,6 +143,7 @@ pub fn extern_fn_as_trusted_atom(ext_fn: &ExternFn) -> Atom {
             type_ref: Some(crate::parser::parse_type_ref(ty)),
             is_ref: false,
             is_ref_mut: false,
+            consume: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
         })

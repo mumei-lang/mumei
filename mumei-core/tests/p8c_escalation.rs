@@ -43,6 +43,7 @@ fn param(name: &str) -> Param {
         type_ref: None,
         is_ref: false,
         is_ref_mut: false,
+        consume: false,
         fn_contract_requires: None,
         fn_contract_ensures: None,
     }

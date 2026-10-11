@@ -29,7 +29,11 @@ use std::path::Path;
 /// Version 13 admits `[i64]`/`[bool]` arrays and scalar-field structs as
 /// recursive-contract RETURN values, modeling array results as (contents,
 /// len) UF pairs and struct results field-wise.
-pub const VERIFIER_POLICY_VERSION: u32 = 13;
+/// Version 14 normalizes `Param.name` to the bare identifier and moves the
+/// `consume` signature marker to `Param::consume`, so spec references such as
+/// `len(xs)` resolve on `consume xs: [i64]` and prior verifications recorded
+/// against prefixed names must be re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 14;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -114,6 +118,10 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
         }
         if p.is_ref_mut {
             hasher.update(b"|ref_mut:");
+            hasher.update(p.name.as_bytes());
+        }
+        if p.consume {
+            hasher.update(b"|consume_param:");
             hasher.update(p.name.as_bytes());
         }
         // fn_contract_requires / fn_contract_ensures も含める（契約変更を検出）
@@ -271,6 +279,10 @@ pub fn compute_proof_hash_with_flags(
         }
         if p.is_ref_mut {
             hasher.update(b"|ref_mut:");
+            hasher.update(p.name.as_bytes());
+        }
+        if p.consume {
+            hasher.update(b"|consume_param:");
             hasher.update(p.name.as_bytes());
         }
         // fn_contract_requires / fn_contract_ensures も含める（契約変更を検出）
@@ -542,10 +554,11 @@ pub fn compute_proof_hash_with_flags(
                     "ref mut"
                 } else if p.is_ref {
                     "ref"
-                } else if callee_atom
-                    .consumed_params
-                    .iter()
-                    .any(|consumed| consumed == &p.name)
+                } else if p.consume
+                    || callee_atom
+                        .consumed_params
+                        .iter()
+                        .any(|consumed| consumed == &p.name)
                 {
                     "consume"
                 } else {
@@ -932,6 +945,31 @@ body: { getx(Pair { a: 1, b: 2 }) };
              requires: true;\n\
              ensures: true;\n\
              body: getx(ref mut x);\n",
+        );
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn callee_signature_consume_invalidates_the_proof_hash() {
+        let before = env_and_hash(
+            "trusted atom getx(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: x;\n\
+             trusted atom main(y: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: getx(y);\n",
+        );
+        let after = env_and_hash(
+            "trusted atom getx(consume x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: x;\n\
+             trusted atom main(y: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: getx(y);\n",
         );
         assert_ne!(before, after);
     }

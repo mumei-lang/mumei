@@ -1621,6 +1621,35 @@ atom take(x: i64)
     }
 
     #[test]
+    fn test_param_name_strips_ownership_prefixes() {
+        // Issue #717: `Param.name` must be the bare identifier; ownership
+        // markers live on `consume` / `is_ref` / `is_ref_mut` so spec-side
+        // name lookups (`len(xs)`, param equality) resolve.
+        let source = r#"
+atom f(consume xs: [i64], ref ys: [i64], ref mut zs: [i64], n: i64)
+    requires: n >= 0;
+    ensures: result >= 0;
+    body: 0;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        let params = &atoms[0].params;
+        assert_eq!(params[0].name, "xs");
+        assert!(params[0].consume);
+        assert!(!params[0].is_ref && !params[0].is_ref_mut);
+        assert_eq!(params[1].name, "ys");
+        assert!(params[1].is_ref && !params[1].is_ref_mut && !params[1].consume);
+        assert_eq!(params[2].name, "zs");
+        assert!(params[2].is_ref_mut && !params[2].is_ref && !params[2].consume);
+        assert_eq!(params[3].name, "n");
+        assert!(!params[3].consume && !params[3].is_ref && !params[3].is_ref_mut);
+    }
+
+    #[test]
     fn test_parse_atom_with_resources() {
         let source = r#"
 atom transfer(x: i64)

@@ -433,13 +433,8 @@ pub fn lower_atom_metadata(
             .params
             .iter()
             .map(|param| HirParam {
-                name: param
-                    .name
-                    .rsplit(' ')
-                    .next()
-                    .unwrap_or(&param.name)
-                    .to_string(),
-                consume: param.name.starts_with("consume "),
+                name: param.name.clone(),
+                consume: param.consume,
                 ty: param.type_name.clone(),
                 by_ref: if param.is_ref_mut {
                     HirRefKind::RefMut

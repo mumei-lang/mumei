@@ -774,6 +774,7 @@ mod tests {
                 type_ref: Some(crate::parser::parse_type_ref("i64")),
                 is_ref: false,
                 is_ref_mut: false,
+                consume: false,
                 fn_contract_requires: None,
                 fn_contract_ensures: None,
             }],

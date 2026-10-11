@@ -342,7 +342,9 @@ impl LowerCtx {
                                     MirParamMode::Mut
                                 } else if param.is_ref {
                                     MirParamMode::Shared
-                                } else if atom.consumed_params.iter().any(|p| p == &param.name) {
+                                } else if param.consume
+                                    || atom.consumed_params.iter().any(|p| p == &param.name)
+                                {
                                     MirParamMode::Consume
                                 } else {
                                     MirParamMode::Owned
@@ -744,9 +746,7 @@ pub fn lower_hir_to_mir_with_env(
     // Allocate locals for atom parameters.
     for param in &hir_atom.atom.params {
         let capability = param.type_ref.as_ref().and_then(|ty| ty.capability.clone());
-        // `consume x` / `ref x` params keep the keyword in `name` (parser
-        // quirk) — bind under the bare identifier so `x` resolves in the body.
-        let pname = param.name.rsplit(' ').next().unwrap_or(param.name.as_str());
+        let pname = param.name.as_str();
         let local = ctx.alloc_local_with_capability(
             Some(pname.to_string()),
             param.type_name.clone(),
@@ -756,11 +756,12 @@ pub fn lower_hir_to_mir_with_env(
             MirParamMode::Mut
         } else if param.is_ref {
             MirParamMode::Shared
-        } else if hir_atom
-            .atom
-            .consumed_params
-            .iter()
-            .any(|name| name == &param.name)
+        } else if param.consume
+            || hir_atom
+                .atom
+                .consumed_params
+                .iter()
+                .any(|name| name == &param.name)
         {
             MirParamMode::Consume
         } else {
@@ -797,7 +798,7 @@ pub fn infer_atom_return_type(atom: &crate::parser::Atom) -> Option<String> {
 pub fn infer_return_type_from_hir(params: &[Param], body: &HirStmt) -> Option<String> {
     let mut ctx = LowerCtx::new();
     for param in params {
-        let pname = param.name.rsplit(' ').next().unwrap_or(param.name.as_str());
+        let pname = param.name.as_str();
         ctx.alloc_local(Some(pname.to_string()), param.type_name.clone());
     }
     match body {
@@ -1572,6 +1573,7 @@ mod tests {
             type_ref: Some(parser::parse_type_ref(ty)),
             is_ref: false,
             is_ref_mut: false,
+            consume: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
         }
