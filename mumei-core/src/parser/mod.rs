@@ -1650,6 +1650,33 @@ atom f(consume xs: [i64], ref ys: [i64], ref mut zs: [i64], n: i64)
     }
 
     #[test]
+    fn test_consumed_names_unifies_both_spellings() {
+        // `consume:` clause targets and signature `consume` markers describe
+        // the same concept; `consumed_names()`/`consumes_param()` give the
+        // canonical union, deduplicated across spellings.
+        let source = r#"
+atom f(consume xs: [i64], ys: i64, zs: i64)
+    requires: ys >= 0;
+    consume ys;
+    ensures: result >= 0;
+    body: 0;
+"#;
+        let items = parse_module(source);
+        let atom = items
+            .iter()
+            .find_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .expect("atom");
+        assert!(atom.has_consumed_params());
+        assert!(atom.consumes_param("xs"));
+        assert!(atom.consumes_param("ys"));
+        assert!(!atom.consumes_param("zs"));
+        assert_eq!(
+            atom.consumed_names(),
+            vec!["ys".to_string(), "xs".to_string()]
+        );
+    }
+
+    #[test]
     fn test_parse_atom_with_resources() {
         let source = r#"
 atom transfer(x: i64)

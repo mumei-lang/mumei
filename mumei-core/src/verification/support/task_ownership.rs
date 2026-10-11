@@ -111,11 +111,7 @@ fn consumed_positions(callee: &str, module_env: &ModuleEnv) -> Vec<usize> {
     atom.params
         .iter()
         .enumerate()
-        .filter(|(_, p)| {
-            // `consume x;` clause form, or the `consume x: T` parameter-prefix
-            // form (recorded on `Param::consume`).
-            atom.consumed_params.contains(&p.name) || p.consume
-        })
+        .filter(|(_, p)| atom.consumes_param(&p.name))
         .map(|(i, _)| i)
         .collect()
 }

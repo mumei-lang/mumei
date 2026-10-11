@@ -2048,8 +2048,8 @@ pub(crate) fn expr_to_z3<'a>(
                                     }
                                 }
                             }
-                            // Handle consumed_params → consume
-                            for consumed_name in &callee.consumed_params {
+                            // Handle consumed params (either spelling) → consume
+                            for consumed_name in &callee.consumed_names() {
                                 if let Some(idx) =
                                     callee.params.iter().position(|p| p.name == *consumed_name)
                                 {
