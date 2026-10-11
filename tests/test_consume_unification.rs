@@ -127,3 +127,62 @@ atom consumer(consume x: i64)
         "expected the double-declaration error, got:\n{text}"
     );
 }
+
+#[test]
+fn trusted_atom_double_consume_declaration_is_rejected() {
+    // Trusted atoms return before the executor's linearity registration, so
+    // the double-declaration check must run before the trust-level early
+    // return — a `consume x` written twice must be rejected there too.
+    let (output, text) = verify_source(
+        "trusted_double",
+        r#"
+trusted atom consumer(consume x: i64) -> i64
+requires: x >= 0;
+ensures: result >= 0;
+consume x;
+body: x;
+"#,
+    );
+    assert!(
+        !output.status.success(),
+        "a trusted atom declaring consume twice must fail, got:\n{text}"
+    );
+    assert!(
+        text.contains("declared consume twice"),
+        "expected the double-declaration error, got:\n{text}"
+    );
+}
+
+#[test]
+fn signature_consume_param_forwarded_to_consumer_verifies() {
+    // Ownership transfer chains: `forward` takes ownership of `y` and moves it
+    // into `consumer` — a legitimate transfer, not a double-free. The
+    // post-body marking must not re-consume a parameter the body already
+    // handed off.
+    let (output, text) = verify_source(
+        "sig_forward",
+        &format!(
+            "{CALLEE_SIGNATURE_CONSUME}\n\
+             atom forward(consume y: i64)\n    requires: y >= 0;\n    ensures: result >= 0;\n    body: {{\n        let z = consumer(y);\n        z\n    }};\n"
+        ),
+    );
+    assert!(
+        output.status.success(),
+        "forwarding a signature-consume parameter to a consuming callee must verify, got:\n{text}"
+    );
+}
+
+#[test]
+fn clause_consume_param_forwarded_to_consumer_verifies() {
+    let (output, text) = verify_source(
+        "clause_forward",
+        &format!(
+            "{CALLEE_CLAUSE_CONSUME}\n\
+             atom forward(y: i64)\n    requires: y >= 0;\n    ensures: result >= 0;\n    consume y;\n    body: {{\n        let z = consumer(y);\n        z\n    }};\n"
+        ),
+    );
+    assert!(
+        output.status.success(),
+        "forwarding a clause-consume parameter to a consuming callee must verify, got:\n{text}"
+    );
+}

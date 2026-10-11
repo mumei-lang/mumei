@@ -758,6 +758,23 @@ fn verify_inner_impl(
     }
     metrics.record_phase("Phase 0a: spec validation", phase_start.elapsed());
 
+    // consume が signature (`consume x: T`) と `consume x;` 句の両方で宣言
+    // されている二重宣言は、信頼レベルに関わらず型エラーとする。
+    // trusted atom は下の Phase 0 で早期 return するため、ここで先に検査する。
+    if atom.has_consumed_params() {
+        for param in &atom.params {
+            if param.consume && atom.consumed_params.iter().any(|n| n == &param.name) {
+                return Err(MumeiError::type_error_at(
+                    format!(
+                        "parameter '{}' is declared consume twice in atom '{}': both in the signature and in a `consume:` clause",
+                        param.name, atom.name
+                    ),
+                    atom.span.clone(),
+                ));
+            }
+        }
+    }
+
     // Phase 0: 信頼レベルチェック（Trust Boundary）
     match &atom.trust_level {
         TrustLevel::Trusted => {
@@ -1955,18 +1972,6 @@ fn verify_inner_impl(
 
     // consume 対象パラメータの登録
     if atom.has_consumed_params() {
-        // signature `consume x` と `consume x;` 句の二重宣言はエラー
-        for param in &atom.params {
-            if param.consume && atom.consumed_params.iter().any(|n| n == &param.name) {
-                return Err(MumeiError::type_error_at(
-                    format!(
-                        "parameter '{}' is declared consume twice in atom '{}': both in the signature and in a `consume:` clause",
-                        param.name, atom.name
-                    ),
-                    atom.span.clone(),
-                ));
-            }
-        }
         for param_name in &atom.consumed_names() {
             // パラメータが実際に存在するか検証
             if !atom.params.iter().any(|p| p.name == *param_name) {
@@ -2859,11 +2864,17 @@ fn verify_inner_impl(
     if atom.has_consumed_params() {
         // consume 対象パラメータを消費済みとしてマーク
         for param_name in &atom.consumed_names() {
-            if let Err(e) = linearity_ctx_cell.borrow_mut().consume(param_name) {
-                return Err(MumeiError::verification_at(
-                    format!("Linearity violation in atom '{}': {}", atom.name, e),
-                    atom.span.clone(),
-                ));
+            // body が既に所有権を移転済みの場合（例: 別の消費 callee への転送）は
+            // 再マークすると正当な移転を二重解放と誤判定するためスキップする。
+            // 借用中のまま残ったパラメータは依然として consume() が違反を記録する。
+            let already_consumed = linearity_ctx_cell.borrow().is_consumed(param_name);
+            if !already_consumed {
+                if let Err(e) = linearity_ctx_cell.borrow_mut().consume(param_name) {
+                    return Err(MumeiError::verification_at(
+                        format!("Linearity violation in atom '{}': {}", atom.name, e),
+                        atom.span.clone(),
+                    ));
+                }
             }
 
             // Z3 上で is_alive を false に更新（消費後のアクセスを禁止）
