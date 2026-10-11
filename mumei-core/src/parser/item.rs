@@ -1785,13 +1785,16 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| {
-            let (is_ref, is_ref_mut, s_stripped) = if let Some(rest) = s.strip_prefix("ref mut ") {
-                (false, true, rest.trim())
-            } else if let Some(rest) = s.strip_prefix("ref ") {
-                (true, false, rest.trim())
-            } else {
-                (false, false, s)
-            };
+            let (is_ref, is_ref_mut, consume, s_stripped) =
+                if let Some(rest) = s.strip_prefix("ref mut ") {
+                    (false, true, false, rest.trim())
+                } else if let Some(rest) = s.strip_prefix("ref ") {
+                    (true, false, false, rest.trim())
+                } else if let Some(rest) = s.strip_prefix("consume ") {
+                    (false, false, true, rest.trim())
+                } else {
+                    (false, false, false, s)
+                };
             if let Some((param_name, type_name)) = s_stripped.split_once(':') {
                 let type_name_str = type_name.trim().to_string();
                 let type_ref = parse_type_ref(&type_name_str);
@@ -1799,6 +1802,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                     name: param_name.trim().to_string(),
                     type_name: Some(type_name_str),
                     type_ref: Some(type_ref),
+                    consume,
                     is_ref,
                     is_ref_mut,
                     fn_contract_requires: None,
@@ -1809,6 +1813,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                     name: s_stripped.to_string(),
                     type_name: None,
                     type_ref: None,
+                    consume,
                     is_ref,
                     is_ref_mut,
                     fn_contract_requires: None,

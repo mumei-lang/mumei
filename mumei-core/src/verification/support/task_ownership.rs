@@ -113,8 +113,8 @@ fn consumed_positions(callee: &str, module_env: &ModuleEnv) -> Vec<usize> {
         .enumerate()
         .filter(|(_, p)| {
             // `consume x;` clause form, or the `consume x: T` parameter-prefix
-            // form (which the parser keeps in the parameter name).
-            atom.consumed_params.contains(&p.name) || p.name.starts_with("consume ")
+            // form (recorded on `Param::consume`).
+            atom.consumed_params.contains(&p.name) || p.consume
         })
         .map(|(i, _)| i)
         .collect()

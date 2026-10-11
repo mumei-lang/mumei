@@ -93,6 +93,9 @@ pub fn compute_atom_content_hash_v2(atom: &crate::parser::Atom) -> String {
     }
     for p in &atom.params {
         let mut param = format!("{}:{}", p.name, p.type_name.as_deref().unwrap_or(""));
+        if p.consume {
+            param.push_str("|consume");
+        }
         if p.is_ref {
             param.push_str("|ref");
         }

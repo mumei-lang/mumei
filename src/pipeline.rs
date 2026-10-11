@@ -255,6 +255,7 @@ pub(crate) fn try_load_and_prepare_with_full_options(
                             is_ref_mut: false,
                             fn_contract_requires: None,
                             fn_contract_ensures: None,
+                            consume: false,
                         })
                         .collect();
 
