@@ -751,4 +751,22 @@ mod tests {
         let moves = super::super::analyze_moves(&body);
         assert!(check_borrows(&body, &moves).is_empty());
     }
+
+    #[test]
+    fn signature_consume_param_counts_as_borrowing() {
+        let items = crate::parser::parse_module(
+            "atom take(consume x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: x;\n",
+        );
+        let atom = items
+            .iter()
+            .find_map(|item| match item {
+                crate::parser::Item::Atom(atom) => Some(atom),
+                _ => None,
+            })
+            .expect("atom should parse");
+        assert!(atom_has_borrowing_params(atom));
+    }
 }

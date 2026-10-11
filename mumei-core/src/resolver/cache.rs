@@ -950,6 +950,31 @@ body: { getx(Pair { a: 1, b: 2 }) };
     }
 
     #[test]
+    fn callee_signature_consume_invalidates_the_proof_hash() {
+        let before = env_and_hash(
+            "trusted atom getx(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: x;\n\
+             trusted atom main(y: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: getx(y);\n",
+        );
+        let after = env_and_hash(
+            "trusted atom getx(consume x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: x;\n\
+             trusted atom main(y: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: getx(y);\n",
+        );
+        assert_ne!(before, after);
+    }
+
+    #[test]
     fn struct_field_type_change_invalidates_the_proof_hash() {
         let getx =
             "trusted atom getx(p: Pair) -> i64\nrequires: true;\nensures: true;\nbody: { p.a };\n";
