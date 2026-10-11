@@ -364,6 +364,15 @@ impl<'env> CrossSpecVerifier<'env> {
             let Some(atom) = self.module_env.atoms.get(atom_name) else {
                 continue;
             };
+            // Prelude atoms are auto-injected infrastructure, not part of
+            // the user's spec surface — their `result` bounds would
+            // conflict with any user file's own `result` postconditions.
+            if atom
+                .spec_metadata
+                .contains_key(crate::resolver::PRELUDE_METADATA_KEY)
+            {
+                continue;
+            }
             let source_file = atom_source_file(atom);
             if source_file == "<unknown>" {
                 continue;
@@ -879,5 +888,48 @@ mod tests {
             .collect();
         assert!(invariant_names.contains("balance >= 0"));
         assert!(invariant_names.contains("total >= 0"));
+    }
+
+    fn atom_in_file(name: &str, ensures: &str, file: &str) -> Atom {
+        let mut atom = test_atom(name, "true", ensures, "x");
+        atom.spec_metadata
+            .insert("source_file".to_string(), file.to_string());
+        atom
+    }
+
+    #[test]
+    fn test_global_invariant_conflicts_skip_prelude_atoms() {
+        // Auto-injected prelude atoms carry `result` bounds (e.g. the
+        // option/result helpers' `result <= 1`) that would contradict any
+        // user file's own `result` postcondition — they are
+        // infrastructure, not part of the user's spec surface.
+        let mut prelude = atom_in_file("prelude_helper", "result <= 1", "std/prelude.mm");
+        prelude.spec_metadata.insert(
+            crate::resolver::PRELUDE_METADATA_KEY.to_string(),
+            "true".to_string(),
+        );
+        let env = test_env(vec![
+            prelude,
+            atom_in_file("user_bound", "result == 7", "user.mm"),
+        ]);
+
+        assert!(CrossSpecVerifier::new(&env)
+            .detect_global_invariant_conflicts()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_global_invariant_conflicts_still_flag_user_atoms() {
+        // Conflicting `result` bounds between two user-authored modules
+        // must still be reported — the prelude exclusion must not weaken
+        // the actual check.
+        let env = test_env(vec![
+            atom_in_file("high_bound", "result >= 10", "a.mm"),
+            atom_in_file("low_bound", "result < 0", "b.mm"),
+        ]);
+
+        assert!(!CrossSpecVerifier::new(&env)
+            .detect_global_invariant_conflicts()
+            .is_empty());
     }
 }
