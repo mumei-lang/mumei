@@ -505,6 +505,40 @@ pub struct Atom {
     pub effect_post: HashMap<String, String>,
 }
 
+impl Atom {
+    /// Canonical view of the parameters this atom consumes. Mumei has two
+    /// spellings for the same concept — the `consume` marker on a signature
+    /// parameter (`atom f(consume x: T)`) and the `consume x;` clause — and
+    /// both mean "the atom takes ownership of this parameter and it may not
+    /// be used afterwards". Consumers deciding whether a parameter is
+    /// consumed (linearity tracking, move lowering, hashing) must go through
+    /// this instead of reading `consumed_params` or `Param::consume` alone.
+    ///
+    /// Clause targets come first (preserving declaration order), then
+    /// signature-`consume` params not already covered. Names are
+    /// deduplicated so a name declared through both spellings appears once.
+    pub fn consumed_names(&self) -> Vec<String> {
+        let mut names = self.consumed_params.clone();
+        for param in &self.params {
+            if param.consume && !names.iter().any(|name| name == &param.name) {
+                names.push(param.name.clone());
+            }
+        }
+        names
+    }
+
+    /// Whether this atom consumes the named parameter via either spelling.
+    pub fn consumes_param(&self, name: &str) -> bool {
+        self.consumed_params.iter().any(|p| p == name)
+            || self.params.iter().any(|p| p.name == name && p.consume)
+    }
+
+    /// Whether the atom declares any consumed parameter at all.
+    pub fn has_consumed_params(&self) -> bool {
+        !self.consumed_params.is_empty() || self.params.iter().any(|p| p.consume)
+    }
+}
+
 // =============================================================================
 // Trust Boundary
 // =============================================================================

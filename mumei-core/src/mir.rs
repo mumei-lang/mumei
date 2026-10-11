@@ -342,9 +342,7 @@ impl LowerCtx {
                                     MirParamMode::Mut
                                 } else if param.is_ref {
                                     MirParamMode::Shared
-                                } else if param.consume
-                                    || atom.consumed_params.iter().any(|p| p == &param.name)
-                                {
+                                } else if atom.consumes_param(&param.name) {
                                     MirParamMode::Consume
                                 } else {
                                     MirParamMode::Owned
@@ -756,13 +754,7 @@ pub fn lower_hir_to_mir_with_env(
             MirParamMode::Mut
         } else if param.is_ref {
             MirParamMode::Shared
-        } else if param.consume
-            || hir_atom
-                .atom
-                .consumed_params
-                .iter()
-                .any(|name| name == &param.name)
-        {
+        } else if hir_atom.atom.consumes_param(&param.name) {
             MirParamMode::Consume
         } else {
             MirParamMode::Owned

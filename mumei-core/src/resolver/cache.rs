@@ -39,7 +39,13 @@ use std::path::Path;
 /// Version 16 excludes auto-injected std/prelude atoms from the global
 /// invariant conflict comparison — their `result` bounds are implicit
 /// infrastructure, not part of the user's spec surface.
-pub const VERIFIER_POLICY_VERSION: u32 = 16;
+/// Version 17 unifies the two `consume` spellings: the signature marker
+/// `consume x: T` now goes through the same linearity machinery as the
+/// `consume x;` clause (arg consumption at call sites, is_alive tracking,
+/// double-declaration rejected), so previously-verifying programs that
+/// reuse an argument after calling a signature-`consume` callee may now
+/// fail verification and cached results must be re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 17;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {

@@ -1,3 +1,25 @@
+### 2026-10-11: signature `consume` and the `consume:` clause are unified
+
+- **The two `consume` spellings now mean the same thing** (follow-up to
+  #717): the signature marker `atom f(consume x: T)` and the
+  `consume x;` clause both declare that the atom takes ownership of the
+  parameter. `Atom::consumed_names()`/`consumes_param()` is the canonical
+  union and all consumers — the executor's linearity machinery
+  (`is_alive` tracking, double-consume/use-after-free detection), the
+  call-site argument `consume()` in the translator, MIR `MirParamMode`
+  tables, the `atom_ref` borrow guard, and recursion-shape guards — read
+  it instead of the clause list alone.
+- **Verifier behavior change**: calling a signature-`consume` callee now
+  consumes the argument at the call site — reusing the variable
+  afterwards fails verification (`use of moved value` / linearity
+  violation), matching what the clause spelling already enforced.
+  Previously signature-`consume` silently skipped that path.
+- **Double declaration rejected**: writing `consume x` in the signature
+  and `consume x;` in the contract of the same atom is a type error
+  ("parameter 'x' is declared consume twice").
+- `VERIFIER_POLICY_VERSION` bumped 16 → 17: cached verifications are
+  re-derived.
+
 ### 2026-10-08: lambda type references are HIR-owned (emitter ABI 5)
 
 - `HirLambdaParam::type_ref` now stores `HirTypeRef` — a 1:1 mirror of

@@ -843,7 +843,7 @@ fn member_unsupported_reason(module_env: &ModuleEnv, member: &Atom) -> Option<St
     if member.params.iter().any(|p| p.is_ref_mut) {
         return Some(format!("atom '{}' has a `ref mut` parameter", member.name));
     }
-    if !member.consumed_params.is_empty() {
+    if member.has_consumed_params() {
         return Some(format!("atom '{}' consumes a parameter", member.name));
     }
     if member.is_async {

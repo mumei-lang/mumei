@@ -758,6 +758,23 @@ fn verify_inner_impl(
     }
     metrics.record_phase("Phase 0a: spec validation", phase_start.elapsed());
 
+    // consume が signature (`consume x: T`) と `consume x;` 句の両方で宣言
+    // されている二重宣言は、信頼レベルに関わらず型エラーとする。
+    // trusted atom は下の Phase 0 で早期 return するため、ここで先に検査する。
+    if atom.has_consumed_params() {
+        for param in &atom.params {
+            if param.consume && atom.consumed_params.iter().any(|n| n == &param.name) {
+                return Err(MumeiError::type_error_at(
+                    format!(
+                        "parameter '{}' is declared consume twice in atom '{}': both in the signature and in a `consume:` clause",
+                        param.name, atom.name
+                    ),
+                    atom.span.clone(),
+                ));
+            }
+        }
+    }
+
     // Phase 0: 信頼レベルチェック（Trust Boundary）
     match &atom.trust_level {
         TrustLevel::Trusted => {
@@ -1083,11 +1100,7 @@ fn verify_inner_impl(
                             crate::mir::MirParamMode::Mut
                         } else if param.is_ref {
                             crate::mir::MirParamMode::Shared
-                        } else if callee
-                            .consumed_params
-                            .iter()
-                            .any(|consumed| consumed == &param.name)
-                        {
+                        } else if callee.consumes_param(&param.name) {
                             crate::mir::MirParamMode::Consume
                         } else {
                             crate::mir::MirParamMode::Owned
@@ -1958,8 +1971,8 @@ fn verify_inner_impl(
     // linearity_ctx_cell is shared with VCtx (created above) via RefCell.
 
     // consume 対象パラメータの登録
-    if !atom.consumed_params.is_empty() {
-        for param_name in &atom.consumed_params {
+    if atom.has_consumed_params() {
+        for param_name in &atom.consumed_names() {
             // パラメータが実際に存在するか検証
             if !atom.params.iter().any(|p| p.name == *param_name) {
                 return Err(MumeiError::type_error_at(
@@ -2848,14 +2861,20 @@ fn verify_inner_impl(
     // 5b. 線形性チェック: consume 対象パラメータの検証
     // body 実行後、consume 宣言されたパラメータが正しく消費されていることを確認。
     // LinearityCtx に蓄積された違反（二重解放・Use-After-Free）があればエラー。
-    if !atom.consumed_params.is_empty() {
+    if atom.has_consumed_params() {
         // consume 対象パラメータを消費済みとしてマーク
-        for param_name in &atom.consumed_params {
-            if let Err(e) = linearity_ctx_cell.borrow_mut().consume(param_name) {
-                return Err(MumeiError::verification_at(
-                    format!("Linearity violation in atom '{}': {}", atom.name, e),
-                    atom.span.clone(),
-                ));
+        for param_name in &atom.consumed_names() {
+            // body が既に所有権を移転済みの場合（例: 別の消費 callee への転送）は
+            // 再マークすると正当な移転を二重解放と誤判定するためスキップする。
+            // 借用中のまま残ったパラメータは依然として consume() が違反を記録する。
+            let already_consumed = linearity_ctx_cell.borrow().is_consumed(param_name);
+            if !already_consumed {
+                if let Err(e) = linearity_ctx_cell.borrow_mut().consume(param_name) {
+                    return Err(MumeiError::verification_at(
+                        format!("Linearity violation in atom '{}': {}", atom.name, e),
+                        atom.span.clone(),
+                    ));
+                }
             }
 
             // Z3 上で is_alive を false に更新（消費後のアクセスを禁止）
@@ -3404,7 +3423,7 @@ fn clause_unbound_names(
     for p in &atom.params {
         allowed.insert(p.name.clone());
     }
-    allowed.extend(atom.consumed_params.iter().cloned());
+    allowed.extend(atom.consumed_names());
     allowed.extend(atom.type_params.iter().cloned());
     allowed.insert("true".to_string());
     allowed.insert("false".to_string());

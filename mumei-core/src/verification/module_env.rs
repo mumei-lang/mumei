@@ -123,6 +123,12 @@ impl LinearityCtx {
         self.borrow_count.get(name).is_some_and(|&c| c > 0)
     }
 
+    /// 登録済みかつ消費済みの変数かどうかを返す。
+    /// `check_alive` とは違い、違反を記録しない純粋なクエリ。
+    pub fn is_consumed(&self, name: &str) -> bool {
+        matches!(self.alive.get(name), Some(false))
+    }
+
     /// 蓄積された違反リストを返す
     pub fn get_violations(&self) -> &[String] {
         &self.violations

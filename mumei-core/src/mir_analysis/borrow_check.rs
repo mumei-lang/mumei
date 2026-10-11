@@ -29,11 +29,7 @@ pub struct BorrowViolation {
 fn atom_has_borrowing_params(atom: &crate::parser::Atom) -> bool {
     atom.params
         .iter()
-        .any(|param| param.is_ref || param.is_ref_mut || param.consume)
-        || atom
-            .consumed_params
-            .iter()
-            .any(|name| atom.params.iter().any(|param| &param.name == name))
+        .any(|param| param.is_ref || param.is_ref_mut || atom.consumes_param(&param.name))
 }
 
 fn known_atom<'a>(module_env: &'a ModuleEnv, name: &str) -> Option<&'a crate::parser::Atom> {
