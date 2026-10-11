@@ -3,9 +3,9 @@
 //! `mumei-emit-*` production source file may read `HirAtom.atom` /
 //! `HirAtom.body_stmt` — under any binding name (`renamed.atom`,
 //! `x.body_stmt`) — or reference the parser types that HIR now owns (`Op`,
-//! `Pattern`, `JoinSemantics`). `parser::ExternBlock`/`EnumDef`/`StructDef`
-//! remain allowed — they arrive via `ModuleEnv` and the emit signature, not
-//! via the atom.
+//! `Pattern`, `JoinSemantics`, `TypeRef`). `parser::ExternBlock`/`EnumDef`/
+//! `StructDef` remain allowed — they arrive via `ModuleEnv` and the emit
+//! signature, not via the atom.
 //!
 //! Test modules are excluded: `#[cfg(test)]` fixtures legitimately build
 //! `Atom`/`HirAtom` values to feed the emitters. The one production-side
@@ -34,6 +34,14 @@ const FORBIDDEN: &[&str] = &[
     "parser::ast::JoinSemantics",
 ];
 
+/// AST type names that must not appear as standalone tokens in production
+/// emitter code — emitters use the `Hir`-prefixed mirror instead. Checked as
+/// whole tokens so grouped imports (`use mumei_core::ast::{TypeRef}`) and
+/// any qualified spelling (`parser::TypeRef`, `ast::TypeRef`,
+/// `mumei_core::ast::TypeRef`) are all caught, while `HirTypeRef` and
+/// unrelated `*TypeRef`/`TypeRef*` identifiers stay allowed.
+const FORBIDDEN_TYPE_TOKENS: &[&str] = &["TypeRef"];
+
 /// `.atom` / `.body_stmt` field access is checked per occurrence so a read
 /// through a renamed binding (`let x = hir_atom; x.atom`) is still caught.
 const FORBIDDEN_FIELDS: &[&str] = &[".atom", ".body_stmt"];
@@ -58,6 +66,26 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// part of each file (everything before `#[cfg(test)]`) is scanned.
 fn production_part(text: &str) -> &str {
     text.split("#[cfg(test)]").next().unwrap_or(text)
+}
+
+fn offending_token_occurrences(text: &str) -> Vec<String> {
+    let mut hits = Vec::new();
+    for token in FORBIDDEN_TYPE_TOKENS {
+        for (idx, _) in text.match_indices(token) {
+            let boundary_before = text[..idx]
+                .chars()
+                .last()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+            let boundary_after = text[idx + token.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+            if boundary_before && boundary_after {
+                hits.push(format!("`{token}` token (offset {idx})"));
+            }
+        }
+    }
+    hits
 }
 
 fn offending_field_accesses(text: &str) -> Vec<String> {
@@ -95,6 +123,9 @@ fn emit_crates_do_not_reference_atom_ast() {
                 if prod.contains(needle) {
                     offenders.push(format!("{} contains `{needle}`", file.display()));
                 }
+            }
+            for hit in offending_token_occurrences(prod) {
+                offenders.push(format!("{} contains {hit}", file.display()));
             }
             for hit in offending_field_accesses(prod) {
                 offenders.push(format!("{} accesses `{hit}`", file.display()));
