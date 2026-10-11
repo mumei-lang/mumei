@@ -236,6 +236,112 @@ impl From<HirPattern> for Pattern {
     }
 }
 
+/// HIR-owned capability type info — a 1:1 mirror of `ast::CapabilityType`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirCapabilityType {
+    pub effect: String,
+    pub constraint: Option<String>,
+}
+
+impl From<crate::ast::CapabilityType> for HirCapabilityType {
+    fn from(cap: crate::ast::CapabilityType) -> Self {
+        HirCapabilityType {
+            effect: cap.effect,
+            constraint: cap.constraint,
+        }
+    }
+}
+
+impl From<HirCapabilityType> for crate::ast::CapabilityType {
+    fn from(cap: HirCapabilityType) -> Self {
+        crate::ast::CapabilityType {
+            effect: cap.effect,
+            constraint: cap.constraint,
+        }
+    }
+}
+
+/// HIR-owned type reference — a 1:1 mirror of `ast::TypeRef`.
+/// Emitter-facing HIR must not depend on AST types (design doc step 7
+/// follow-up): `HirLambdaParam::type_ref` is the last embedded AST type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirTypeRef {
+    pub name: String,
+    pub type_args: Vec<HirTypeRef>,
+    pub effect_set: Option<Vec<String>>,
+    pub capability: Option<HirCapabilityType>,
+}
+
+impl HirTypeRef {
+    /// 関数型 `atom_ref(params...) -> ret` かどうか。
+    pub fn is_fn_type(&self) -> bool {
+        self.name == "atom_ref" && !self.type_args.is_empty()
+    }
+
+    /// `ast::TypeRef::display_name` と同一のレンダリング。
+    pub fn display_name(&self) -> String {
+        let base = if self.name == "[]" && self.type_args.len() == 1 {
+            format!("[{}]", self.type_args[0].display_name())
+        } else if self.is_fn_type() {
+            let param_types: Vec<String> = self.type_args[..self.type_args.len() - 1]
+                .iter()
+                .map(|a| a.display_name())
+                .collect();
+            let return_type = self.type_args.last().unwrap().display_name();
+            format!("atom_ref({}) -> {}", param_types.join(", "), return_type)
+        } else if self.name == "tuple" {
+            let args: Vec<String> = self.type_args.iter().map(|a| a.display_name()).collect();
+            format!("({})", args.join(", "))
+        } else if self.type_args.is_empty() {
+            self.name.clone()
+        } else {
+            let args: Vec<String> = self.type_args.iter().map(|a| a.display_name()).collect();
+            format!("{}<{}>", self.name, args.join(", "))
+        };
+        if let Some(ref effects) = self.effect_set {
+            if effects.len() == 1 {
+                format!("{} with {}", base, effects[0])
+            } else {
+                format!("{} with [{}]", base, effects.join(", "))
+            }
+        } else {
+            base
+        }
+    }
+}
+
+impl std::fmt::Display for HirTypeRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display_name())
+    }
+}
+
+impl From<crate::ast::TypeRef> for HirTypeRef {
+    fn from(ty: crate::ast::TypeRef) -> Self {
+        HirTypeRef {
+            name: ty.name,
+            type_args: ty.type_args.into_iter().map(HirTypeRef::from).collect(),
+            effect_set: ty.effect_set,
+            capability: ty.capability.map(HirCapabilityType::from),
+        }
+    }
+}
+
+impl From<HirTypeRef> for crate::ast::TypeRef {
+    fn from(ty: HirTypeRef) -> Self {
+        crate::ast::TypeRef {
+            name: ty.name,
+            type_args: ty
+                .type_args
+                .into_iter()
+                .map(crate::ast::TypeRef::from)
+                .collect(),
+            effect_set: ty.effect_set,
+            capability: ty.capability.map(crate::ast::CapabilityType::from),
+        }
+    }
+}
+
 /// HIR 式: 純粋な式を表す
 #[derive(Debug, Clone)]
 pub enum HirExpr {
@@ -385,11 +491,10 @@ pub enum HirStmt {
 
 #[derive(Debug, Clone)]
 // NOTE: HirLambdaParam is constructed via lower_expr(Expr::Lambda) → HirExpr::Lambda.
-// Fields are used by Lambda variant but not yet consumed by codegen passes.
 #[allow(dead_code)]
 pub struct HirLambdaParam {
     pub name: String,
-    pub type_ref: Option<crate::ast::TypeRef>,
+    pub type_ref: Option<HirTypeRef>,
 }
 
 /// Match 式のアーム
@@ -897,7 +1002,7 @@ pub fn lower_expr_with_env(
                     .iter()
                     .map(|p| HirLambdaParam {
                         name: p.name.clone(),
-                        type_ref: p.type_ref.clone(),
+                        type_ref: p.type_ref.clone().map(HirTypeRef::from),
                     })
                     .collect(),
                 return_type: return_type.clone(),

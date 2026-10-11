@@ -84,3 +84,37 @@ fn hir_pattern_round_trip_covers_every_variant() {
         );
     }
 }
+
+#[test]
+fn hir_type_ref_round_trip_and_display_parity() {
+    use mumei_core::ast::{CapabilityType, TypeRef};
+    use mumei_core::hir::HirTypeRef;
+    let leaf = |n: &str| TypeRef {
+        name: n.to_string(),
+        type_args: vec![],
+        effect_set: None,
+        capability: None,
+    };
+    let mut generic = leaf("Stack");
+    generic.type_args = vec![leaf("i64"), leaf("T")];
+    let mut arr = leaf("[]");
+    arr.type_args = vec![generic.clone()];
+    let mut fnty = leaf("atom_ref");
+    fnty.type_args = vec![leaf("i64"), leaf("f64")];
+    let mut effed = leaf("i64");
+    effed.effect_set = Some(vec!["FileWrite".to_string(), "Net".to_string()]);
+    let mut capped = leaf("FileCap");
+    capped.capability = Some(CapabilityType {
+        effect: "SafeFileRead".to_string(),
+        constraint: Some("starts_with(path, \"/tmp/\")".to_string()),
+    });
+    let mut tup = leaf("tuple");
+    tup.type_args = vec![leaf("i64"), leaf("Str")];
+
+    for ty in [leaf("i64"), generic, arr, fnty, effed, capped, tup] {
+        let hir: HirTypeRef = ty.clone().into();
+        assert_eq!(hir.to_string(), ty.to_string(), "display mismatch");
+        let back: TypeRef = hir.into();
+        assert_eq!(back, ty, "round-trip failed for {ty:?}");
+    }
+}

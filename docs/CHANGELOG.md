@@ -1,3 +1,13 @@
+### 2026-10-08: lambda type references are HIR-owned (emitter ABI 5)
+
+- `HirLambdaParam::type_ref` now stores `HirTypeRef` — a 1:1 mirror of
+  `ast::TypeRef` (`name`, `type_args`, `effect_set`, `capability` via
+  `HirCapabilityType`) with identical `Display`/`display_name` rendering —
+  instead of the AST type. No `ast::TypeRef` remains reachable through
+  `EmitAtom`; emitted output is unchanged.
+- Emitter plugins must use ABI 5; ABI-1/2/3/4 plugins fail loading with an
+  ABI version mismatch and must be rebuilt.
+
 ### 2026-10-10: `Param.name` no longer carries `consume`/`ref` prefixes
 
 - **`Param.name` is now the bare identifier** (issue #717): signature
