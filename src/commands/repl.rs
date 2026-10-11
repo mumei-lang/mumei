@@ -238,6 +238,7 @@ pub(crate) fn repl_register_extern_fn(
             is_ref_mut: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
+            consume: false,
         })
         .collect();
     let atom = parser::Atom {

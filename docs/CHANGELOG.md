@@ -1,3 +1,19 @@
+### 2026-10-10: `Param.name` no longer carries `consume`/`ref` prefixes
+
+- **`Param.name` is now the bare identifier** (issue #717): signature
+  markers `consume`/`ref`/`ref mut` are stored on `Param::consume`,
+  `is_ref`, and `is_ref_mut` instead of being kept inside `name`.
+  Spec-side lookups comparing `p.name` against the written identifier —
+  e.g. `len(xs)` on `atom takes(consume xs: [i64])` — now resolve instead
+  of failing type-checking with "`xs` is neither an array nor a string".
+- **Ownership info preserved**: `HirParam.consume` now reads the flag
+  directly, MIR `MirParamMode::Consume` covers signature-`consume`
+  params, and `consume` joins `ref`/`ref_mut` in the atom cache hash and
+  the v2 content hash (`param` section). `ParamReport` (inspect JSON)
+  gains a `consume` field; printed param names are now bare.
+- `VERIFIER_POLICY_VERSION` bumped 13 → 14: prior verifications recorded
+  against prefixed names are re-derived.
+
 ### 2026-10-08: wrapper emitters and runtime monitor fix output bugs
 
 - **`consume` no longer leaks into generated code**: Python signatures/call

@@ -29,7 +29,11 @@ use std::path::Path;
 /// Version 13 admits `[i64]`/`[bool]` arrays and scalar-field structs as
 /// recursive-contract RETURN values, modeling array results as (contents,
 /// len) UF pairs and struct results field-wise.
-pub const VERIFIER_POLICY_VERSION: u32 = 13;
+/// Version 14 normalizes `Param.name` to the bare identifier and moves the
+/// `consume` signature marker to `Param::consume`, so spec references such as
+/// `len(xs)` resolve on `consume xs: [i64]` and prior verifications recorded
+/// against prefixed names must be re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 14;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -114,6 +118,10 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
         }
         if p.is_ref_mut {
             hasher.update(b"|ref_mut:");
+            hasher.update(p.name.as_bytes());
+        }
+        if p.consume {
+            hasher.update(b"|consume_param:");
             hasher.update(p.name.as_bytes());
         }
         // fn_contract_requires / fn_contract_ensures も含める（契約変更を検出）
@@ -271,6 +279,10 @@ pub fn compute_proof_hash_with_flags(
         }
         if p.is_ref_mut {
             hasher.update(b"|ref_mut:");
+            hasher.update(p.name.as_bytes());
+        }
+        if p.consume {
+            hasher.update(b"|consume_param:");
             hasher.update(p.name.as_bytes());
         }
         // fn_contract_requires / fn_contract_ensures も含める（契約変更を検出）

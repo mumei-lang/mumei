@@ -416,9 +416,15 @@ pub struct RefinedType {
 
 #[derive(Debug, Clone)]
 pub struct Param {
+    /// Bare parameter name with ownership markers (`consume `/`ref `/`ref mut `)
+    /// stripped. Consumption is recorded in `consume`, borrows in `is_ref` /
+    /// `is_ref_mut`.
     pub name: String,
     pub type_name: Option<String>,
     pub type_ref: Option<TypeRef>,
+    /// `consume` ownership marker in the `atom`/`fn` signature
+    /// (e.g. `atom f(consume xs: [i64])`).
+    pub consume: bool,
     pub is_ref: bool,
     pub is_ref_mut: bool,
     /// Higher-Order Function contract: requires clause for function parameter.
