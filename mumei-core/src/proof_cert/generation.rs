@@ -57,8 +57,11 @@ fn hash_sorted_entries(hasher: &mut Sha256, label: &str, mut entries: Vec<(&Stri
 /// atom was loaded from rather than *what* it proves. They differ between the
 /// certifying run and an importing run of the same source, so they are
 /// excluded from the content hash.
-pub const CONTENT_HASH_EXCLUDED_METADATA_KEYS: &[&str] =
-    &["source_file", crate::resolver::IMPORT_ALIAS_METADATA_KEY];
+pub const CONTENT_HASH_EXCLUDED_METADATA_KEYS: &[&str] = &[
+    "source_file",
+    crate::resolver::IMPORT_ALIAS_METADATA_KEY,
+    crate::resolver::PRELUDE_METADATA_KEY,
+];
 
 fn hash_spec_metadata(hasher: &mut Sha256, map: &HashMap<String, String>) {
     let proof_relevant: Vec<(&String, &String)> = map
