@@ -73,7 +73,12 @@ fn emit_monitor(
     extern_blocks: &[mumei_core::parser::ExternBlock],
 ) -> Vec<Vec<u8>> {
     RuntimeMonitorEmitter
-        .emit(hir, Path::new(case.name), module_env, extern_blocks)
+        .emit(
+            &hir.emit_view(),
+            Path::new(case.name),
+            module_env,
+            extern_blocks,
+        )
         .unwrap_or_else(|error| panic!("{} should emit: {error}", case.name))
         .into_iter()
         .map(|artifact| artifact.data)

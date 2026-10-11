@@ -22,10 +22,9 @@ use inkwell::values::{
 use inkwell::AddressSpace;
 use inkwell::{FloatPredicate, IntPredicate};
 use mumei_core::hir::{
-    collect_assigned_outer_variables_match_arm, collect_assigned_outer_variables_stmt, HirExpr,
-    HirStmt,
+    collect_assigned_outer_variables_match_arm, collect_assigned_outer_variables_stmt, HirBinOp,
+    HirExpr, HirJoin, HirPattern, HirStmt,
 };
-use mumei_core::parser::{JoinSemantics, Op};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -649,9 +648,8 @@ pub(crate) fn collect_lambda_branches<'e, 'a>(
                 }
                 let mut leaf_conds = conds.clone();
                 match &arm.pattern {
-                    mumei_core::parser::Pattern::Wildcard
-                    | mumei_core::parser::Pattern::Variable(_) => {}
-                    mumei_core::parser::Pattern::Literal(n) => {
+                    HirPattern::Wildcard | HirPattern::Variable(_) => {}
+                    HirPattern::Literal(n) => {
                         leaf_conds.push(SelCond::MatchEq(target.as_ref(), *n, scope.clone()));
                     }
                     _ => return Ok(None),
@@ -1838,7 +1836,7 @@ pub(crate) fn compile_hir_expr<'a>(
             // `&&` / `||` short-circuit: the RHS is only evaluated when the
             // LHS does not decide the result (e.g. `i > 0 && arr[i] == x`
             // must not run the bounds check on a non-positive index).
-            if matches!(op, Op::And | Op::Or) {
+            if matches!(op, HirBinOp::And | HirBinOp::Or) {
                 let lhs = compile_hir_expr(
                     context, builder, module, function, left, variables, var_types, array_ptrs,
                     module_env,
@@ -1856,7 +1854,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 let rhs_block = context.append_basic_block(*function, "logic.rhs");
                 let merge_block = context.append_basic_block(*function, "logic.merge");
                 let lhs_block = builder.get_insert_block().unwrap();
-                if matches!(op, Op::And) {
+                if matches!(op, HirBinOp::And) {
                     llvm!(builder.build_conditional_branch(l_bool, rhs_block, merge_block));
                 } else {
                     llvm!(builder.build_conditional_branch(l_bool, merge_block, rhs_block));
@@ -1884,7 +1882,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 let phi = llvm!(builder.build_phi(context.bool_type(), "logic_result"));
                 let short_val = context
                     .bool_type()
-                    .const_int(matches!(op, Op::Or) as u64, false);
+                    .const_int(matches!(op, HirBinOp::Or) as u64, false);
                 phi.add_incoming(&[(&short_val, lhs_block), (&r_bool, rhs_end)]);
                 return Ok(llvm!(builder.build_int_z_extend(
                     phi.as_basic_value().into_int_value(),
@@ -1906,7 +1904,7 @@ pub(crate) fn compile_hir_expr<'a>(
             if lhs.is_pointer_value() && rhs.is_pointer_value() {
                 let ptr_type = context.ptr_type(inkwell::AddressSpace::default());
                 match op {
-                    Op::Add => {
+                    HirBinOp::Add => {
                         // Call runtime helper mumei_str_concat(a, b) -> *const c_char
                         let str_concat_fn =
                             module.get_function("mumei_str_concat").unwrap_or_else(|| {
@@ -1924,7 +1922,7 @@ pub(crate) fn compile_hir_expr<'a>(
                             .left()
                             .ok_or(MumeiError::codegen("str_concat returned void".to_string()));
                     }
-                    Op::Eq | Op::Neq => {
+                    HirBinOp::Eq | HirBinOp::Neq => {
                         // Call runtime helper mumei_str_eq(a, b) -> i64 (0 or 1)
                         let str_eq_fn = module.get_function("mumei_str_eq").unwrap_or_else(|| {
                             let fn_type = context
@@ -1942,7 +1940,7 @@ pub(crate) fn compile_hir_expr<'a>(
                             .left()
                             .ok_or(MumeiError::codegen("str_eq returned void".to_string()))?
                             .into_int_value();
-                        if matches!(op, Op::Neq) {
+                        if matches!(op, HirBinOp::Neq) {
                             // Negate: result == 0 means not equal → flip
                             let negated = llvm!(builder.build_int_compare(
                                 IntPredicate::EQ,
@@ -1959,7 +1957,7 @@ pub(crate) fn compile_hir_expr<'a>(
                         }
                         return Ok(eq_val.into());
                     }
-                    Op::Pow => {
+                    HirBinOp::Pow => {
                         return Err(MumeiError::codegen(
                             "Unsupported operator Pow for Str type in codegen".to_string(),
                         ));
@@ -1993,14 +1991,14 @@ pub(crate) fn compile_hir_expr<'a>(
                     ))
                 };
                 match op {
-                    Op::Add => Ok(llvm!(builder.build_float_add(l, r, "fadd_tmp")).into()),
-                    Op::Sub => Ok(llvm!(builder.build_float_sub(l, r, "fsub_tmp")).into()),
-                    Op::Mul => Ok(llvm!(builder.build_float_mul(l, r, "fmul_tmp")).into()),
-                    Op::Div => Ok(llvm!(builder.build_float_div(l, r, "fdiv_tmp")).into()),
-                    Op::Pow => Err(MumeiError::codegen(
+                    HirBinOp::Add => Ok(llvm!(builder.build_float_add(l, r, "fadd_tmp")).into()),
+                    HirBinOp::Sub => Ok(llvm!(builder.build_float_sub(l, r, "fsub_tmp")).into()),
+                    HirBinOp::Mul => Ok(llvm!(builder.build_float_mul(l, r, "fmul_tmp")).into()),
+                    HirBinOp::Div => Ok(llvm!(builder.build_float_div(l, r, "fdiv_tmp")).into()),
+                    HirBinOp::Pow => Err(MumeiError::codegen(
                         "Unsupported float operator Pow".to_string(),
                     )),
-                    Op::Eq => {
+                    HirBinOp::Eq => {
                         let cmp = llvm!(builder.build_float_compare(
                             FloatPredicate::OEQ,
                             l,
@@ -2022,7 +2020,7 @@ pub(crate) fn compile_hir_expr<'a>(
                     // Enum equality compares tag + every payload slot —
                     // matching the verifier's deep datatype equality (P10-C).
                     // Pointer slots are `Str` payloads → mumei_str_eq.
-                    if matches!(op, Op::Eq | Op::Neq)
+                    if matches!(op, HirBinOp::Eq | HirBinOp::Neq)
                         && lhs.is_struct_value()
                         && rhs.is_struct_value()
                     {
@@ -2100,7 +2098,7 @@ pub(crate) fn compile_hir_expr<'a>(
                                 };
                                 acc = llvm!(builder.build_and(acc, cmp, "enum_eq_and"));
                             }
-                            if matches!(op, Op::Neq) {
+                            if matches!(op, HirBinOp::Neq) {
                                 acc = llvm!(builder.build_not(acc, "enum_neq_not"));
                             }
                             return Ok(llvm!(builder.build_int_z_extend(
@@ -2119,29 +2117,38 @@ pub(crate) fn compile_hir_expr<'a>(
                 let l = lhs.into_int_value();
                 let r = rhs.into_int_value();
                 match op {
-                    Op::Add => Ok(llvm!(builder.build_int_add(l, r, "add_tmp")).into()),
-                    Op::Sub => Ok(llvm!(builder.build_int_sub(l, r, "sub_tmp")).into()),
-                    Op::Mul => Ok(llvm!(builder.build_int_mul(l, r, "mul_tmp")).into()),
-                    Op::Div => Ok(llvm!(builder.build_int_signed_div(l, r, "div_tmp")).into()),
-                    Op::Pow => Err(MumeiError::codegen(
+                    HirBinOp::Add => Ok(llvm!(builder.build_int_add(l, r, "add_tmp")).into()),
+                    HirBinOp::Sub => Ok(llvm!(builder.build_int_sub(l, r, "sub_tmp")).into()),
+                    HirBinOp::Mul => Ok(llvm!(builder.build_int_mul(l, r, "mul_tmp")).into()),
+                    HirBinOp::Div => {
+                        Ok(llvm!(builder.build_int_signed_div(l, r, "div_tmp")).into())
+                    }
+                    HirBinOp::Pow => Err(MumeiError::codegen(
                         "Unsupported int operator Pow".to_string(),
                     )),
                     // Bit operations on the machine `i64` bit pattern, matching
                     // the `BV(64)` semantics verified under `--bitvec-i64`.
                     // `>>` is an arithmetic (sign-propagating) shift.
-                    Op::BitAnd => Ok(llvm!(builder.build_and(l, r, "and_tmp")).into()),
-                    Op::BitOr => Ok(llvm!(builder.build_or(l, r, "or_tmp")).into()),
-                    Op::BitXor => Ok(llvm!(builder.build_xor(l, r, "xor_tmp")).into()),
-                    Op::Shl => Ok(llvm!(builder.build_left_shift(l, r, "shl_tmp")).into()),
-                    Op::Shr => Ok(llvm!(builder.build_right_shift(l, r, true, "ashr_tmp")).into()),
-                    Op::Eq | Op::Neq | Op::Lt | Op::Gt | Op::Ge | Op::Le => {
+                    HirBinOp::BitAnd => Ok(llvm!(builder.build_and(l, r, "and_tmp")).into()),
+                    HirBinOp::BitOr => Ok(llvm!(builder.build_or(l, r, "or_tmp")).into()),
+                    HirBinOp::BitXor => Ok(llvm!(builder.build_xor(l, r, "xor_tmp")).into()),
+                    HirBinOp::Shl => Ok(llvm!(builder.build_left_shift(l, r, "shl_tmp")).into()),
+                    HirBinOp::Shr => {
+                        Ok(llvm!(builder.build_right_shift(l, r, true, "ashr_tmp")).into())
+                    }
+                    HirBinOp::Eq
+                    | HirBinOp::Neq
+                    | HirBinOp::Lt
+                    | HirBinOp::Gt
+                    | HirBinOp::Ge
+                    | HirBinOp::Le => {
                         let pred = match op {
-                            Op::Eq => IntPredicate::EQ,
-                            Op::Neq => IntPredicate::NE,
-                            Op::Lt => IntPredicate::SLT,
-                            Op::Gt => IntPredicate::SGT,
-                            Op::Ge => IntPredicate::SGE,
-                            Op::Le => IntPredicate::SLE,
+                            HirBinOp::Eq => IntPredicate::EQ,
+                            HirBinOp::Neq => IntPredicate::NE,
+                            HirBinOp::Lt => IntPredicate::SLT,
+                            HirBinOp::Gt => IntPredicate::SGT,
+                            HirBinOp::Ge => IntPredicate::SGE,
+                            HirBinOp::Le => IntPredicate::SLE,
                             _ => unreachable!(),
                         };
                         let cmp = llvm!(builder.build_int_compare(pred, l, r, "cmp_tmp"));
@@ -2587,7 +2594,7 @@ pub(crate) fn compile_hir_expr<'a>(
             // `HirStmt::Expr(HirExpr::Task { body, … })`. We unwrap
             // that here so `emit_task_spawn_only` operates on the
             // *task body*, not the surrounding `Task` expression.
-            let any_ctx = if matches!(join_semantics, JoinSemantics::Any) && !children.is_empty() {
+            let any_ctx = if matches!(join_semantics, HirJoin::Any) && !children.is_empty() {
                 let i64_type = context.i64_type();
                 let group_id = static_next_task_group_id()
                     .ok_or_else(|| MumeiError::codegen("task_group id overflow".to_string()))?;

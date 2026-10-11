@@ -35,7 +35,7 @@ fn parsed_atom(source: &str, qualified_name: Option<&str>) -> Atom {
 
 fn emit_python(hir: &mumei_core::hir::HirAtom, module_env: &ModuleEnv) -> Vec<u8> {
     PythonWrapperEmitter
-        .emit(hir, Path::new("wrapper"), module_env, &[])
+        .emit(&hir.emit_view(), Path::new("wrapper"), module_env, &[])
         .expect("Python wrapper should emit")[0]
         .data
         .clone()
@@ -43,7 +43,7 @@ fn emit_python(hir: &mumei_core::hir::HirAtom, module_env: &ModuleEnv) -> Vec<u8
 
 fn emit_rust(hir: &mumei_core::hir::HirAtom, module_env: &ModuleEnv) -> Vec<u8> {
     RustWrapperEmitter
-        .emit(hir, Path::new("wrapper"), module_env, &[])
+        .emit(&hir.emit_view(), Path::new("wrapper"), module_env, &[])
         .expect("Rust wrapper should emit")[0]
         .data
         .clone()

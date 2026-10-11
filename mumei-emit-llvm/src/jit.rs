@@ -184,7 +184,7 @@ impl<'ctx> JitEngine<'ctx> {
         if let Err(err) = codegen::compile_atom_into_module(
             &context,
             &module,
-            hir_atom,
+            &hir_atom.emit_view(),
             module_env,
             extern_blocks,
         ) {
@@ -620,7 +620,7 @@ mod tests {
                 ],
                 tail_expr: Some(Box::new(HirExpr::BinaryOp(
                     Box::new(HirExpr::Variable("x".to_string())),
-                    mumei_core::parser::Op::Add,
+                    mumei_core::hir::HirBinOp::Add,
                     Box::new(HirExpr::Variable("y".to_string())),
                 ))),
             },

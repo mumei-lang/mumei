@@ -541,23 +541,23 @@ impl LowerCtx {
     fn pattern_binding_ty(
         &self,
         scrutinee_ty: Option<&str>,
-        pattern: &crate::parser::Pattern,
+        pattern: &crate::hir::HirPattern,
         name: &str,
     ) -> Option<String> {
         match pattern {
-            crate::parser::Pattern::Variable(bound) if bound == name => {
+            crate::hir::HirPattern::Variable(bound) if bound == name => {
                 scrutinee_ty.map(std::string::ToString::to_string)
             }
-            crate::parser::Pattern::Variant {
+            crate::hir::HirPattern::Variant {
                 variant_name,
                 fields,
             } => {
                 let enum_name = self.pattern_enum_name(variant_name, scrutinee_ty);
                 fields.iter().enumerate().find_map(|(idx, fp)| match fp {
-                    crate::parser::Pattern::Variable(bound) if bound == name => {
+                    crate::hir::HirPattern::Variable(bound) if bound == name => {
                         self.variant_field_ty(enum_name.as_deref(), variant_name, idx)
                     }
-                    crate::parser::Pattern::Variant { .. } => {
+                    crate::hir::HirPattern::Variant { .. } => {
                         let nested_ty =
                             self.variant_field_ty(enum_name.as_deref(), variant_name, idx);
                         self.pattern_binding_ty(nested_ty.as_deref(), fp, name)
@@ -604,16 +604,16 @@ impl LowerCtx {
                 }
             }
             HirExpr::BinaryOp(lhs, op, rhs) => match op {
-                crate::parser::Op::Eq
-                | crate::parser::Op::Neq
-                | crate::parser::Op::Lt
-                | crate::parser::Op::Le
-                | crate::parser::Op::Gt
-                | crate::parser::Op::Ge
-                | crate::parser::Op::And
-                | crate::parser::Op::Or
-                | crate::parser::Op::Implies => Some("bool".to_string()),
-                crate::parser::Op::Pow => {
+                crate::hir::HirBinOp::Eq
+                | crate::hir::HirBinOp::Neq
+                | crate::hir::HirBinOp::Lt
+                | crate::hir::HirBinOp::Le
+                | crate::hir::HirBinOp::Gt
+                | crate::hir::HirBinOp::Ge
+                | crate::hir::HirBinOp::And
+                | crate::hir::HirBinOp::Or
+                | crate::hir::HirBinOp::Implies => Some("bool".to_string()),
+                crate::hir::HirBinOp::Pow => {
                     if self.infer_hir_ty_in(lhs, locals).as_deref() == Some("f64")
                         || self.infer_hir_ty_in(rhs, locals).as_deref() == Some("f64")
                     {
@@ -826,12 +826,12 @@ fn hir_stmt_tail_expr(stmt: &HirStmt) -> Option<&HirExpr> {
 /// Copy instead of defaulting to Move.
 fn lower_pattern_bindings(
     ctx: &mut LowerCtx,
-    pattern: &crate::parser::Pattern,
+    pattern: &crate::hir::HirPattern,
     discr: &Operand,
     scrutinee_ty: Option<&str>,
 ) {
     match pattern {
-        crate::parser::Pattern::Variable(name) => {
+        crate::hir::HirPattern::Variable(name) => {
             let local = ctx.alloc_local(
                 Some(name.clone()),
                 scrutinee_ty.map(std::string::ToString::to_string),
@@ -842,7 +842,7 @@ fn lower_pattern_bindings(
                 Rvalue::Use(discr.clone()),
             ));
         }
-        crate::parser::Pattern::Variant {
+        crate::hir::HirPattern::Variant {
             variant_name,
             fields,
         } => {
@@ -852,19 +852,19 @@ fn lower_pattern_bindings(
                 lower_variant_field_binding(ctx, field_pattern, discr, idx, field_ty);
             }
         }
-        crate::parser::Pattern::Wildcard | crate::parser::Pattern::Literal(_) => {}
+        crate::hir::HirPattern::Wildcard | crate::hir::HirPattern::Literal(_) => {}
     }
 }
 
 fn lower_variant_field_binding(
     ctx: &mut LowerCtx,
-    pattern: &crate::parser::Pattern,
+    pattern: &crate::hir::HirPattern,
     discr: &Operand,
     idx: usize,
     field_ty: Option<String>,
 ) {
     match pattern {
-        crate::parser::Pattern::Variable(name) => {
+        crate::hir::HirPattern::Variable(name) => {
             let local = ctx.alloc_local(Some(name.clone()), field_ty);
             ctx.emit(MirStatement::StorageLive(local.clone()));
             ctx.emit(MirStatement::Assign(
@@ -872,7 +872,7 @@ fn lower_variant_field_binding(
                 Rvalue::FieldAccess(discr.clone(), idx.to_string()),
             ));
         }
-        crate::parser::Pattern::Variant {
+        crate::hir::HirPattern::Variant {
             variant_name,
             fields,
         } => {
@@ -893,7 +893,7 @@ fn lower_variant_field_binding(
                 lower_variant_field_binding(ctx, sub_pattern, &tmp_op, sub_idx, sub_ty);
             }
         }
-        crate::parser::Pattern::Wildcard | crate::parser::Pattern::Literal(_) => {}
+        crate::hir::HirPattern::Wildcard | crate::hir::HirPattern::Literal(_) => {}
     }
 }
 
@@ -1130,7 +1130,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             ctx.emit(MirStatement::StorageLive(tmp.clone()));
             ctx.emit(MirStatement::Assign(
                 Place::Local(tmp.clone()),
-                Rvalue::BinaryOp(op.clone(), l, r),
+                Rvalue::BinaryOp((*op).into(), l, r),
             ));
             Operand::Place(Place::Local(tmp))
         }
@@ -1337,17 +1337,17 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
 
                 // Map pattern to integer target.
                 match &arm.pattern {
-                    crate::parser::Pattern::Literal(n) => {
+                    crate::hir::HirPattern::Literal(n) => {
                         arm_targets.push((*n, arm_start));
                     }
-                    crate::parser::Pattern::Wildcard => {
+                    crate::hir::HirPattern::Wildcard => {
                         otherwise_id = Some(arm_start);
                     }
-                    crate::parser::Pattern::Variable(_) => {
+                    crate::hir::HirPattern::Variable(_) => {
                         // Variable pattern binds the value — treat as otherwise.
                         otherwise_id = Some(arm_start);
                     }
-                    crate::parser::Pattern::Variant { .. } => {
+                    crate::hir::HirPattern::Variant { .. } => {
                         // Variant pattern — use variant index if available.
                         // For now, treat as otherwise fallback.
                         otherwise_id = Some(arm_start);
