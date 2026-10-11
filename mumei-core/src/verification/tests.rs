@@ -106,6 +106,31 @@ fn test_subsumption_vc<'a>(ctx: &'a Context, module_env: &'a ModuleEnv) -> VCtx<
 }
 
 #[test]
+fn test_rec_fn_reregistration_returns_cached_decl() {
+    let ctx = Context::new(&z3::Config::new());
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let int_sort = z3::Sort::int(&ctx);
+    let decl = vc.rec_fn_named("rec_fn#f", std::slice::from_ref(&int_sort), &int_sort);
+    let again = vc.rec_fn_named("rec_fn#f", std::slice::from_ref(&int_sort), &int_sort);
+    assert!(std::rc::Rc::ptr_eq(&decl, &again));
+}
+
+#[test]
+#[should_panic(expected = "re-registered with a different signature")]
+fn test_rec_fn_reregistration_with_different_signature_panics() {
+    let ctx = Context::new(&z3::Config::new());
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let int_sort = z3::Sort::int(&ctx);
+    let _ = vc.rec_fn_named("rec_fn#f", std::slice::from_ref(&int_sort), &int_sort);
+    // A raw-domain re-registration after the expanded-domain
+    // declaration is exactly the call-site-vs-unfold mismatch the
+    // signature check guards against.
+    let _ = vc.rec_fn_named("rec_fn#f", &[int_sort.clone(), int_sort.clone()], &int_sort);
+}
+
+#[test]
 fn test_contract_hash_computation_is_deterministic() {
     let mut atom = test_atom(
         "bounded_add",

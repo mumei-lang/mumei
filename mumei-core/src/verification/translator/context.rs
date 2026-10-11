@@ -13,6 +13,14 @@ pub(crate) type UnfoldCall<'a> = (String, Vec<Dynamic<'a>>);
 /// never alias a newer const).
 pub(crate) type CallResultFields<'a> = (Vec<(String, Dynamic<'a>)>, Dynamic<'a>);
 
+/// Cached `rec_fn#` UF plus the signature it was declared with, so a
+/// re-registration with a different domain/range can be caught.
+pub(crate) type RecFnEntry<'a> = (
+    std::rc::Rc<z3::FuncDecl<'a>>,
+    Vec<z3::Sort<'a>>,
+    z3::Sort<'a>,
+);
+
 /// A lambda-shaped name in `VCtx::local_lambdas`, so an indirect call
 /// `f(args)` / `call(f, args)` can resolve instead of failing as an
 /// unknown function.
@@ -59,9 +67,11 @@ pub(crate) struct RecursionCtx<'a> {
     pub(crate) scc_cache: std::cell::RefCell<
         std::collections::HashMap<String, Option<std::rc::Rc<super::super::support::RecursiveScc>>>,
     >,
-    /// `rec_fn#<callee>` uninterpreted functions, keyed by callee atom name.
-    pub(crate) rec_fns:
-        std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<z3::FuncDecl<'a>>>>,
+    /// `rec_fn#<callee>` uninterpreted functions, keyed by UF name and
+    /// cached with the signature they were declared under, so a
+    /// re-registration with a different domain/range is caught loudly
+    /// instead of applying the cached decl over a wrong-arity tuple.
+    pub(crate) rec_fns: std::cell::RefCell<std::collections::HashMap<String, RecFnEntry<'a>>>,
     /// The current atom's lowered `decreases` measure, when it is verified
     /// inside an eligible SCC.
     pub(crate) current_measure: std::cell::RefCell<Option<Vec<Dynamic<'a>>>>,
@@ -350,7 +360,18 @@ impl<'a> VCtx<'a> {
         domain: &[z3::Sort<'a>],
         range: &z3::Sort<'a>,
     ) -> std::rc::Rc<z3::FuncDecl<'a>> {
-        if let Some(decl) = self.recursion.rec_fns.borrow().get(uf_name) {
+        if let Some((decl, cached_domain, cached_range)) =
+            self.recursion.rec_fns.borrow().get(uf_name)
+        {
+            // Call sites and `unfold_constant_calls` must declare every
+            // `rec_fn#` over the SAME expanded domain (`rec_fn_args`). A
+            // mismatch means a declaration snuck in over a different
+            // domain — applying the cached decl would build a wrong-arity
+            // application, which is an encoding bug, not a model issue.
+            debug_assert!(
+                cached_domain.as_slice() == domain && cached_range == range,
+                "rec_fn {uf_name} re-registered with a different signature"
+            );
             return decl.clone();
         }
         let domain_refs: Vec<&z3::Sort<'a>> = domain.iter().collect();
@@ -360,10 +381,10 @@ impl<'a> VCtx<'a> {
             &domain_refs,
             range,
         ));
-        self.recursion
-            .rec_fns
-            .borrow_mut()
-            .insert(uf_name.to_string(), decl.clone());
+        self.recursion.rec_fns.borrow_mut().insert(
+            uf_name.to_string(),
+            (decl.clone(), domain.to_vec(), range.clone()),
+        );
         decl
     }
 

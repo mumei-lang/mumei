@@ -33,7 +33,12 @@ use std::path::Path;
 /// `consume` signature marker to `Param::consume`, so spec references such as
 /// `len(xs)` resolve on `consume xs: [i64]` and prior verifications recorded
 /// against prefixed names must be re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 14;
+/// Version 15 declares `rec_fn#<atom>` in `unfold_constant_calls` over the
+/// same expanded domain the call sites use, and catches UF
+/// re-registration under a different signature.
+/// (Reserved: 16 is earmarked for the global-invariant-conflict warning
+/// fix on the same issue #719.)
+pub const VERIFIER_POLICY_VERSION: u32 = 15;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {

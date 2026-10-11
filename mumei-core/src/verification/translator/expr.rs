@@ -527,7 +527,51 @@ fn unfold_constant_calls<'a>(
                 continue;
             }
 
-            let domain: Vec<Sort> = args.iter().map(|arg| arg.get_sort()).collect();
+            // Declare `rec_fn#<atom>` over the SAME expanded domain the
+            // call sites use: `rec_fn_args` widens array params to
+            // (contents, len) pairs and struct params to field
+            // projections, so seed the `__z3_arr_`/`len_`/`__struct_`
+            // slots it looks up — recoverable from the call-result maps
+            // when the arg came from a call, otherwise the unfold skips
+            // rather than colliding in the UF cache with a raw-domain
+            // declaration for the same UF name.
+            for (param, arg) in atom.params.iter().zip(args.iter()) {
+                let type_name = param.type_name.as_deref().map(str::trim);
+                if type_name.and_then(array_element_type_name).is_some() {
+                    call_env.insert(format!("__z3_arr_{}", param.name), arg.clone());
+                    if let Some(len) = arg.as_array().and_then(|arr| call_result_len(vc, &arr)) {
+                        call_env.insert(format!("len_{}", param.name), len);
+                    } else {
+                        // A caller-env slot of the same name must not
+                        // leak in as this argument's length.
+                        call_env.remove(&format!("len_{}", param.name));
+                    }
+                } else if let Some(sdef) = type_name.and_then(|name| vc.module_env.get_struct(name))
+                {
+                    let fields = vc
+                        .call_result_fields
+                        .borrow()
+                        .get(&(arg.get_z3_ast() as usize))
+                        .map(|(fields, _)| fields.clone());
+                    for field in sdef.fields.iter() {
+                        let key = struct_field_key(&param.name, &field.name);
+                        let value = fields.as_ref().and_then(|fs| {
+                            fs.iter()
+                                .find(|(n, _)| n == &field.name)
+                                .map(|(_, v)| v.clone())
+                        });
+                        if let Some(value) = value {
+                            call_env.insert(key, value);
+                        } else {
+                            call_env.remove(&key);
+                        }
+                    }
+                }
+            }
+            let Some(rec_args) = rec_fn_args(vc, atom, &args, &call_env) else {
+                continue;
+            };
+            let domain: Vec<Sort> = rec_args.iter().map(|arg| arg.get_sort()).collect();
             let struct_ret = atom
                 .return_type
                 .as_deref()
@@ -559,7 +603,7 @@ fn unfold_constant_calls<'a>(
                                 &format!("field.{}", field.name),
                                 &domain,
                                 &field_range,
-                                &args,
+                                &rec_args,
                             ),
                         )
                     })
@@ -574,7 +618,7 @@ fn unfold_constant_calls<'a>(
             } else {
                 let range = call_result_sort(vc, atom);
                 let decl = vc.rec_fn(atom, &domain, &range);
-                let app_args: Vec<&dyn Ast> = args.iter().map(|arg| arg as &dyn Ast).collect();
+                let app_args: Vec<&dyn Ast> = rec_args.iter().map(|arg| arg as &dyn Ast).collect();
                 decl.apply(&app_args)
             };
             call_env.insert("result".to_string(), result.clone());
@@ -583,7 +627,8 @@ fn unfold_constant_calls<'a>(
             // mint.
             if result.as_array().is_some() {
                 let len_sort = array_len_symbol(vc.ctx, "probe", vc.bitvec_i64).get_sort();
-                let len_sym = rec_fn_result_projection(vc, atom, "len", &domain, &len_sort, &args);
+                let len_sym =
+                    rec_fn_result_projection(vc, atom, "len", &domain, &len_sort, &rec_args);
                 call_env.insert("__z3_arr_result".to_string(), result.clone());
                 call_env.insert("len_result".to_string(), len_sym);
             }
