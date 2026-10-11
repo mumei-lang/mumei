@@ -32,6 +32,10 @@ const FORBIDDEN: &[&str] = &[
     "parser::ast::Op",
     "parser::ast::Pattern",
     "parser::ast::JoinSemantics",
+    // `ast::TypeRef` also covers `parser::ast::TypeRef` and
+    // `mumei_core::ast::TypeRef` spellings; emitters must use `HirTypeRef`.
+    "parser::TypeRef",
+    "ast::TypeRef",
 ];
 
 /// `.atom` / `.body_stmt` field access is checked per occurrence so a read
