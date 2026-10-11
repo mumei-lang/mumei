@@ -52,12 +52,10 @@ pub struct Artifact {
 /// emitter interface no longer exposes either. This borrowed view carries
 /// only the HIR fields an emitter may read.
 ///
-/// One embedded AST type remains transitively reachable: `HirLambdaParam`
-/// inside `body` still stores `type_ref: Option<ast::TypeRef>` (mir.rs reads
-/// its `capability`; LLVM codegen renders it via `Display`). Like the AST
-/// types in `ModuleEnv` (`EnumDef`/`StructDef`/`ExternBlock`), the design
-/// doc keeps type descriptors in place — a `HirTypeRef` mirror is a
-/// follow-up outside steps 6–7.
+/// The AST types in `ModuleEnv` (`EnumDef`/`StructDef`/`ExternBlock`) remain
+/// shared with verification; the design doc keeps them in place. `HirExpr`
+/// nodes themselves hold only HIR types (`HirBinOp`/`HirJoin`/`HirPattern`/
+/// `HirTypeRef`).
 #[derive(Debug, Clone, Copy)]
 pub struct EmitAtom<'a> {
     pub body: &'a HirStmt,
@@ -263,7 +261,7 @@ impl EmitTarget {
 
 /// Current emitter plugin ABI version. Bump when the Emitter trait
 /// signature or HirAtom/ModuleEnv layout changes in a breaking way.
-pub const EMITTER_ABI_VERSION: u32 = 4;
+pub const EMITTER_ABI_VERSION: u32 = 5;
 
 /// Trait-object wrapper for an emitter loaded out-of-process. Plugins
 /// must be `Send + Sync` so they can be shared across threads in the
@@ -956,7 +954,7 @@ mod tests {
 
     #[test]
     fn test_emitter_abi_version_constant() {
-        assert_eq!(EMITTER_ABI_VERSION, 4);
+        assert_eq!(EMITTER_ABI_VERSION, 5);
     }
 
     /// Phase 3: `mumei add --emitter` installs into exactly the location the

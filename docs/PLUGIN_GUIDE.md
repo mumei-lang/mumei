@@ -49,6 +49,10 @@ instead of `&HirAtom`. The AST fields (`atom`, `body_stmt`) are no longer
 reachable from emitters, and HIR uses its own `HirBinOp`/`HirJoin`/
 `HirPattern` types. ABI-1/2/3 plugins are rejected at load time and must be
 rebuilt against ABI 4.
+ABI 5 replaces `ast::TypeRef` inside `HirLambdaParam::type_ref` (reachable
+through `EmitAtom.body`) with the HIR-owned `HirTypeRef`/`HirCapabilityType`
+mirrors, changing an emit-reachable layout. ABI-1/2/3/4 plugins are rejected
+at load time and must be rebuilt against ABI 5.
 
 ## No-op sample plugin
 

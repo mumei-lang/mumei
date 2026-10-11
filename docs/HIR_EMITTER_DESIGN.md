@@ -79,9 +79,10 @@ pub trait Emitter {
 | `body_stmt` | parser `Stmt` | No emitter (verification and MIR use it) |
 | `effect_set` | `HirEffectSet` | LLVM (comment in the generated IR) |
 
-HIR nodes also embed parser types: `HirExpr::BinaryOp` uses `parser::Op`,
-task groups use `parser::JoinSemantics`, `HirMatchArm::pattern` is a
-`parser::Pattern`, and `HirLambdaParam::type_ref` is an AST `TypeRef`. Type
+HIR nodes use HIR-owned mirrors of the parser types: `HirExpr::BinaryOp`
+uses `HirBinOp`, task groups use `HirJoin`, `HirMatchArm::pattern` is a
+`HirPattern`, and `HirLambdaParam::type_ref` is a `HirTypeRef` (a 1:1 mirror
+of `TypeRef`, including `capability` via `HirCapabilityType`). Type
 names (`ty`, `type_name`, `return_type`) are strings resolved through
 `ModuleEnv`.
 
