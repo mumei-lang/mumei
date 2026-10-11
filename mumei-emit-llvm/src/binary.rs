@@ -201,7 +201,7 @@ pub fn compile_atoms_to_binary_ll(
             compile_atom_into_module(
                 &context,
                 &merged_module,
-                &renamed,
+                &renamed.emit_view(),
                 module_env,
                 extern_blocks,
             )?;
@@ -213,7 +213,7 @@ pub fn compile_atoms_to_binary_ll(
             compile_atom_into_module(
                 &context,
                 &merged_module,
-                &patched,
+                &patched.emit_view(),
                 module_env,
                 extern_blocks,
             )?;
@@ -361,7 +361,7 @@ mod tests {
         };
         let bin = HirExpr::BinaryOp(
             Box::new(inner_call),
-            mumei_core::parser::Op::Add,
+            mumei_core::hir::HirBinOp::Add,
             Box::new(HirExpr::Number(2)),
         );
         let mut outer = HirExpr::Call {
@@ -442,7 +442,7 @@ mod tests {
         let body = HirStmt::Expr(HirExpr::IfThenElse {
             cond: Box::new(HirExpr::BinaryOp(
                 Box::new(HirExpr::Number(0)),
-                mumei_core::parser::Op::Eq,
+                mumei_core::hir::HirBinOp::Eq,
                 Box::new(HirExpr::Number(0)),
             )),
             then_branch: Box::new(HirStmt::Expr(HirExpr::Call {

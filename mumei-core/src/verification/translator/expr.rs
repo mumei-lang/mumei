@@ -3561,7 +3561,7 @@ pub(crate) fn expr_to_z3<'a>(
                 // env like assignments.
                 let mut arm_bound: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
-                crate::hir::collect_pattern_bindings(&arm.pattern, &mut arm_bound);
+                crate::hir::collect_pattern_bindings(&arm.pattern.clone().into(), &mut arm_bound);
                 collect_arm_local_lets(&arm.body, &mut arm_bound);
 
                 // B. ネストパターンの再帰解体:

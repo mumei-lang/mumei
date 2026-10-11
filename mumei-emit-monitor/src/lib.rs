@@ -18,10 +18,10 @@
 use mumei_core::contract_host::{
     contract_text_to_host, quantifier_source_text, quantifier_to_host, ContractVars, HostTarget,
 };
-use mumei_core::emitter::{Artifact, ArtifactKind, Emitter};
-use mumei_core::hir::{HirAtom, HirClauseKind, HirExpr, HirStmt};
+use mumei_core::emitter::{Artifact, ArtifactKind, EmitAtom, Emitter};
+use mumei_core::hir::{HirBinOp, HirClauseKind, HirExpr, HirStmt};
 use mumei_core::lowering::{lower, LoweredType};
-use mumei_core::parser::{ExternBlock, Op};
+use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiResult};
 use std::path::Path;
 
@@ -215,23 +215,23 @@ fn hir_expr_is_monitor_checkable(expr: &HirExpr) -> bool {
         HirExpr::BinaryOp(l, op, r) => {
             matches!(
                 op,
-                Op::Add
-                    | Op::Sub
-                    | Op::Mul
-                    | Op::Div
-                    | Op::Eq
-                    | Op::Neq
-                    | Op::Gt
-                    | Op::Lt
-                    | Op::Ge
-                    | Op::Le
-                    | Op::And
-                    | Op::Or
-                    | Op::BitAnd
-                    | Op::BitOr
-                    | Op::BitXor
-                    | Op::Shl
-                    | Op::Shr
+                HirBinOp::Add
+                    | HirBinOp::Sub
+                    | HirBinOp::Mul
+                    | HirBinOp::Div
+                    | HirBinOp::Eq
+                    | HirBinOp::Neq
+                    | HirBinOp::Gt
+                    | HirBinOp::Lt
+                    | HirBinOp::Ge
+                    | HirBinOp::Le
+                    | HirBinOp::And
+                    | HirBinOp::Or
+                    | HirBinOp::BitAnd
+                    | HirBinOp::BitOr
+                    | HirBinOp::BitXor
+                    | HirBinOp::Shl
+                    | HirBinOp::Shr
             ) && hir_expr_is_monitor_checkable(l)
                 && hir_expr_is_monitor_checkable(r)
         }
@@ -287,10 +287,10 @@ fn clause_monitor_condition(
 }
 
 /// Generate the monitor module for a trust-boundary atom.
-pub fn generate_monitor(hir_atom: &HirAtom, module_env: &ModuleEnv) -> String {
-    let signature = &hir_atom.signature;
-    let contract = &hir_atom.contract;
-    let meta = &hir_atom.meta;
+pub fn generate_monitor(emit_atom: &EmitAtom<'_>, module_env: &ModuleEnv) -> String {
+    let signature = emit_atom.signature;
+    let contract = emit_atom.contract;
+    let meta = emit_atom.meta;
     let boundaries = &meta.trust_boundaries;
     let fn_name = signature.name.replace("::", "_");
     let params: Vec<(String, String)> = signature
@@ -460,18 +460,18 @@ pub struct RuntimeMonitorEmitter;
 impl Emitter for RuntimeMonitorEmitter {
     fn emit(
         &self,
-        hir_atom: &HirAtom,
+        emit_atom: &EmitAtom<'_>,
         output_path: &Path,
         module_env: &ModuleEnv,
         _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
-        let boundaries = &hir_atom.meta.trust_boundaries;
+        let boundaries = &emit_atom.meta.trust_boundaries;
         if boundaries.is_empty() {
             // Proven, self-contained atom: zero-cost, no artifact.
             return Ok(vec![]);
         }
 
-        let source = generate_monitor(hir_atom, module_env);
+        let source = generate_monitor(emit_atom, module_env);
         Ok(vec![Artifact {
             name: output_path.with_extension("monitor.rs"),
             data: source.into_bytes(),
@@ -483,7 +483,7 @@ impl Emitter for RuntimeMonitorEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mumei_core::hir::{lower_atom_metadata, HirEffectSet, HirExpr, HirStmt};
+    use mumei_core::hir::{lower_atom_metadata, HirAtom, HirEffectSet, HirExpr, HirStmt};
     use mumei_core::parser::ast::{Atom, Expr, Param, Span, Stmt, TrustLevel};
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -543,7 +543,7 @@ mod tests {
     fn emit(atom: Atom) -> Vec<Artifact> {
         RuntimeMonitorEmitter
             .emit(
-                &hir(atom),
+                &hir(atom).emit_view(),
                 &PathBuf::from("out/atom"),
                 &ModuleEnv::new(),
                 &[],

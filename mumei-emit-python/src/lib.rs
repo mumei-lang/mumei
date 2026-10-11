@@ -13,8 +13,7 @@
 use mumei_core::contract_host::{
     contract_text_to_host, quantifier_source_text, quantifier_to_host, ContractVars, HostTarget,
 };
-use mumei_core::emitter::{Artifact, ArtifactKind, Emitter};
-use mumei_core::hir::HirAtom;
+use mumei_core::emitter::{Artifact, ArtifactKind, EmitAtom, Emitter};
 use mumei_core::lowering::{lower, LoweredType};
 use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiResult};
@@ -65,13 +64,13 @@ pub struct PythonWrapperEmitter;
 impl Emitter for PythonWrapperEmitter {
     fn emit(
         &self,
-        hir_atom: &HirAtom,
+        emit_atom: &EmitAtom<'_>,
         output_path: &Path,
         module_env: &ModuleEnv,
         _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
-        let signature = &hir_atom.signature;
-        let contract = &hir_atom.contract;
+        let signature = emit_atom.signature;
+        let contract = emit_atom.contract;
         // Sanitize qualified names (e.g., "MyStruct::my_method" → "MyStruct_my_method")
         // to produce valid Python identifiers, matching CHeaderEmitter behavior.
         let fn_name = signature.name.replace("::", "_");
@@ -282,7 +281,7 @@ fn translate_contract_to_python(contract: &str, vars: &ContractVars) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mumei_core::hir::{lower_atom_metadata, HirEffectSet, HirExpr, HirStmt};
+    use mumei_core::hir::{lower_atom_metadata, HirAtom, HirEffectSet, HirExpr, HirStmt};
     use mumei_core::parser::ast::{
         Atom, Expr, Param, Quantifier, QuantifierType, Span, Stmt, TrustLevel,
     };
@@ -410,7 +409,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = PythonWrapperEmitter
-            .emit(&hir, Path::new("/tmp/bounded"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/bounded"),
+                &module_env,
+                &[],
+            )
             .unwrap();
         let py = String::from_utf8(artifacts[0].data.clone()).unwrap();
         assert!(
@@ -445,7 +449,7 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = PythonWrapperEmitter
-            .emit(&hir, Path::new("/tmp/weird"), &module_env, &[])
+            .emit(&hir.emit_view(), Path::new("/tmp/weird"), &module_env, &[])
             .unwrap();
         let py = String::from_utf8(artifacts[0].data.clone()).unwrap();
         assert!(
@@ -466,7 +470,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = PythonWrapperEmitter
-            .emit(&hir, Path::new("/tmp/safe_add"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/safe_add"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         assert_eq!(artifacts.len(), 1);
@@ -498,7 +507,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = PythonWrapperEmitter
-            .emit(&hir, Path::new("/tmp/identity"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/identity"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let py = String::from_utf8(artifacts[0].data.clone()).unwrap();

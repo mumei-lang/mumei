@@ -158,13 +158,23 @@ fn verified_json_emitter_reads_hir_and_matches_develop_golden() {
 }"#;
     let (mut hir, module_env) = rich_hir();
     let before = VerifiedJsonEmitter
-        .emit(&hir, Path::new("/tmp/rich_atom"), &module_env, &[])
+        .emit(
+            &hir.emit_view(),
+            Path::new("/tmp/rich_atom"),
+            &module_env,
+            &[],
+        )
         .unwrap();
     assert_eq!(before[0].data, expected.as_bytes());
 
     hir.atom = unrelated_atom();
     let after = VerifiedJsonEmitter
-        .emit(&hir, Path::new("/tmp/rich_atom"), &module_env, &[])
+        .emit(
+            &hir.emit_view(),
+            Path::new("/tmp/rich_atom"),
+            &module_env,
+            &[],
+        )
         .unwrap();
     assert_eq!(after[0].data, before[0].data);
 }
@@ -187,13 +197,23 @@ extern int64_t rich_atom(int64_t consume a, int64_t b, int64_t c, int64_t plain,
 "#;
     let (mut hir, module_env) = rich_hir();
     let before = CHeaderEmitter
-        .emit(&hir, Path::new("/tmp/rich_atom"), &module_env, &[])
+        .emit(
+            &hir.emit_view(),
+            Path::new("/tmp/rich_atom"),
+            &module_env,
+            &[],
+        )
         .unwrap();
     assert_eq!(before[0].data, expected.as_bytes());
 
     hir.atom = unrelated_atom();
     let after = CHeaderEmitter
-        .emit(&hir, Path::new("/tmp/rich_atom"), &module_env, &[])
+        .emit(
+            &hir.emit_view(),
+            Path::new("/tmp/rich_atom"),
+            &module_env,
+            &[],
+        )
         .unwrap();
     assert_eq!(after[0].data, before[0].data);
 }
@@ -265,7 +285,12 @@ result >= a && result >= amount
 "#;
     let (mut hir, module_env) = rich_hir();
     let before = ProofBookEmitter
-        .emit(&hir, Path::new("/tmp/rich_atom"), &module_env, &[])
+        .emit(
+            &hir.emit_view(),
+            Path::new("/tmp/rich_atom"),
+            &module_env,
+            &[],
+        )
         .unwrap();
     let actual = String::from_utf8(before[0].data.clone()).unwrap();
     assert!(actual.lines().any(|line| {
@@ -286,7 +311,12 @@ result >= a && result >= amount
 
     hir.atom = unrelated_atom();
     let after = ProofBookEmitter
-        .emit(&hir, Path::new("/tmp/rich_atom"), &module_env, &[])
+        .emit(
+            &hir.emit_view(),
+            Path::new("/tmp/rich_atom"),
+            &module_env,
+            &[],
+        )
         .unwrap();
     assert_eq!(after[0].data, before[0].data);
 }

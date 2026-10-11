@@ -1,3 +1,17 @@
+### 2026-10-08: emitters consume a HIR-only view (emitter ABI 4)
+
+- `Emitter::emit` now takes `&EmitAtom<'_>` — a borrowed HIR-only view
+  (`body`, `signature`, `contract`, `meta`, `effect_set`) — instead of
+  `&HirAtom`. The AST fields (`atom`, `body_stmt`) stay on `HirAtom` for
+  verification and the CLI but are no longer reachable from emitters.
+- `Op`/`JoinSemantics`/`Pattern` moved to HIR-owned types (`HirBinOp`,
+  `HirJoin`, `HirPattern`) with 1:1 conversions both ways; the `.ll`
+  effects comment now reads declared-effect argument values from
+  `signature.effects` (`HirDeclaredEffect::param_values`) — emitted output
+  is unchanged.
+- Emitter plugins must use ABI 4; ABI-1/2/3 plugins fail loading with an
+  ABI version mismatch and must be rebuilt.
+
 ### 2026-10-08: wrapper emitters and runtime monitor fix output bugs
 
 - **`consume` no longer leaks into generated code**: Python signatures/call

@@ -1,4 +1,4 @@
-use crate::hir::{HirAtom, HirExpr, HirStmt};
+use crate::hir::{HirAtom, HirBinOp, HirExpr, HirStmt};
 use crate::mir::MirBody;
 use crate::parser::{Atom, Expr, Op, Stmt};
 use crate::verification::module_env::{LinearityCtx, ModuleEnv};
@@ -582,13 +582,13 @@ fn mutate_hir_expr(expr: &mut HirExpr, mutation: &MutationOperator) -> bool {
                 **idx = if *offset >= 0 {
                     HirExpr::BinaryOp(
                         Box::new(original),
-                        Op::Add,
+                        HirBinOp::Add,
                         Box::new(HirExpr::Number(*offset)),
                     )
                 } else {
                     HirExpr::BinaryOp(
                         Box::new(original),
-                        Op::Sub,
+                        HirBinOp::Sub,
                         Box::new(HirExpr::Number(offset.abs())),
                     )
                 };
@@ -602,9 +602,9 @@ fn mutate_hir_expr(expr: &mut HirExpr, mutation: &MutationOperator) -> bool {
             match mutation {
                 MutationOperator::BinaryOpFlip(original_op)
                 | MutationOperator::ConditionFlip(original_op)
-                    if op == original_op =>
+                    if Op::from(*op) == *original_op =>
                 {
-                    *op = flip_binary_op(op);
+                    *op = HirBinOp::from(flip_binary_op(&Op::from(*op)));
                     changed = true;
                 }
                 _ => {}

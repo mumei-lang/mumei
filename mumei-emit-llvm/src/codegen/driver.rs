@@ -9,6 +9,7 @@ use inkwell::targets::{
 };
 use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::OptimizationLevel;
+use mumei_core::emitter::EmitAtom;
 use mumei_core::hir::HirAtom;
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
@@ -17,11 +18,11 @@ use std::path::Path;
 pub fn compile_atom_into_module<'ctx>(
     context: &'ctx Context,
     module: &Module<'ctx>,
-    hir_atom: &HirAtom,
+    emit_atom: &EmitAtom<'_>,
     module_env: &ModuleEnv,
     extern_blocks: &[mumei_core::parser::ExternBlock],
 ) -> MumeiResult<()> {
-    let signature = &hir_atom.signature;
+    let signature = emit_atom.signature;
     let builder = context.create_builder();
 
     for resource in module_env.resources.values() {
@@ -124,7 +125,7 @@ pub fn compile_atom_into_module<'ctx>(
         &builder,
         module,
         &function,
-        &hir_atom.body,
+        emit_atom.body,
         &mut variables,
         &mut var_types,
         &mut array_ptrs,
@@ -148,7 +149,7 @@ pub fn compile_atom_into_module<'ctx>(
             )
         });
     if ret_is_array {
-        let tail_expr = match &hir_atom.body {
+        let tail_expr = match emit_atom.body {
             mumei_core::hir::HirStmt::Expr(e) => Some(e),
             mumei_core::hir::HirStmt::Block { tail_expr, .. } => tail_expr.as_deref(),
             _ => None,
@@ -210,14 +211,14 @@ pub fn compile_atom_into_module<'ctx>(
 /// Creates its own Context and Module, compiles the atom, and returns
 /// the LLVM IR as a string (detached from Context lifetime).
 pub fn compile_to_module(
-    hir_atom: &HirAtom,
+    emit_atom: &EmitAtom<'_>,
     module_env: &ModuleEnv,
     extern_blocks: &[mumei_core::parser::ExternBlock],
 ) -> MumeiResult<String> {
     let context = Context::create();
-    let module = context.create_module(&hir_atom.signature.name);
+    let module = context.create_module(&emit_atom.signature.name);
 
-    compile_atom_into_module(&context, &module, hir_atom, module_env, extern_blocks)?;
+    compile_atom_into_module(&context, &module, emit_atom, module_env, extern_blocks)?;
 
     // Return the module IR as a string (detached from Context lifetime)
     Ok(module.print_to_string().to_string())
@@ -233,7 +234,13 @@ pub fn compile_atoms_into_module<'ctx>(
     extern_blocks: &[mumei_core::parser::ExternBlock],
 ) -> MumeiResult<()> {
     for hir_atom in hir_atoms {
-        compile_atom_into_module(context, module, hir_atom, module_env, extern_blocks)?;
+        compile_atom_into_module(
+            context,
+            module,
+            &hir_atom.emit_view(),
+            module_env,
+            extern_blocks,
+        )?;
     }
     Ok(())
 }
@@ -286,37 +293,33 @@ pub fn compile_llvm_ir_to_object(ir_path: &Path, object_path: &Path) -> MumeiRes
 }
 
 pub fn compile(
-    hir_atom: &HirAtom,
+    emit_atom: &EmitAtom<'_>,
     output_path: &Path,
     module_env: &ModuleEnv,
     extern_blocks: &[mumei_core::parser::ExternBlock],
 ) -> MumeiResult<()> {
     let context = Context::create();
-    let module = context.create_module(&hir_atom.signature.name);
+    let module = context.create_module(&emit_atom.signature.name);
 
-    compile_atom_into_module(&context, &module, hir_atom, module_env, extern_blocks)?;
+    compile_atom_into_module(&context, &module, emit_atom, module_env, extern_blocks)?;
 
     // エフェクト情報を .ll ファイル先頭にコメントとして追記する（後処理）
-    // NOTE(step 5): the comment needs each declared effect's argument values,
-    // which HIR does not carry (`HirDeclaredEffect` has name+negated only and
-    // `effect_set.parameterized` drops empty-arg declarations), so this is the
-    // one remaining `hir_atom.atom` read in the crate — the name itself comes
-    // from `signature`/`effect_set`.
-    let atom = &hir_atom.atom;
-    let effects_comment = if !hir_atom.effect_set.effects.is_empty() {
-        let effects_str: Vec<String> = hir_atom
+    // Names come from `effect_set` (sorted, deduplicated); argument values are
+    // looked up in `signature.effects` — HIR carries them via `param_values`.
+    let effects_comment = if !emit_atom.effect_set.effects.is_empty() {
+        let effects_str: Vec<String> = emit_atom
             .effect_set
             .effects
             .iter()
             .map(|name| {
-                if let Some(e) = atom.effects.iter().find(|e| &e.name == name) {
-                    if e.params.is_empty() {
+                if let Some(e) = emit_atom.signature.effects.iter().find(|e| &e.name == name) {
+                    if e.param_values.is_empty() {
                         name.clone()
                     } else {
                         let params: Vec<String> = e
-                            .params
+                            .param_values
                             .iter()
-                            .map(|p| format!("\"{}\"", p.value))
+                            .map(|v| format!("\"{}\"", v))
                             .collect();
                         format!("{}({})", name, params.join(", "))
                     }

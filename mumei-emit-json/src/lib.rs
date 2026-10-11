@@ -1,5 +1,5 @@
-use mumei_core::emitter::{Artifact, ArtifactKind, Emitter};
-use mumei_core::hir::{HirAtom, HirRefKind};
+use mumei_core::emitter::{Artifact, ArtifactKind, EmitAtom, Emitter};
+use mumei_core::hir::HirRefKind;
 use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiResult};
 use serde::Serialize;
@@ -33,14 +33,14 @@ pub struct VerifiedJsonEmitter;
 impl Emitter for VerifiedJsonEmitter {
     fn emit(
         &self,
-        hir_atom: &HirAtom,
+        emit_atom: &EmitAtom<'_>,
         output_path: &Path,
         _module_env: &ModuleEnv,
         _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
-        let signature = &hir_atom.signature;
-        let contract = &hir_atom.contract;
-        let meta = &hir_atom.meta;
+        let signature = emit_atom.signature;
+        let contract = emit_atom.contract;
+        let meta = emit_atom.meta;
 
         let params: Vec<VerifiedParam> = signature
             .params
@@ -97,7 +97,7 @@ impl Emitter for VerifiedJsonEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mumei_core::hir::{lower_atom_metadata, HirEffectSet, HirExpr, HirStmt};
+    use mumei_core::hir::{lower_atom_metadata, HirAtom, HirEffectSet, HirExpr, HirStmt};
     use mumei_core::parser::ast::{Atom, Expr, Param, Span, Stmt, TrustLevel};
     use mumei_core::verification::ModuleEnv;
 
@@ -164,7 +164,7 @@ mod tests {
         let module_env = ModuleEnv::new();
         let artifacts = VerifiedJsonEmitter
             .emit(
-                &hir_atom,
+                &hir_atom.emit_view(),
                 std::path::Path::new("/tmp/safe_divide"),
                 &module_env,
                 &[],

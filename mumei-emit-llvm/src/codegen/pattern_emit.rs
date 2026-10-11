@@ -4,7 +4,7 @@ use inkwell::context::Context;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::BasicValueEnum;
 use inkwell::IntPredicate;
-use mumei_core::parser::Pattern;
+use mumei_core::hir::HirPattern;
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
 
@@ -111,22 +111,24 @@ fn extract_variant_field_value<'a>(
 pub(crate) fn compile_pattern_test<'a>(
     context: &'a Context,
     builder: &Builder<'a>,
-    pattern: &Pattern,
+    pattern: &HirPattern,
     target: BasicValueEnum<'a>,
     _variables: &HashMap<String, BasicValueEnum<'a>>,
     module_env: &ModuleEnv,
     enum_hint: Option<&str>,
 ) -> MumeiResult<inkwell::values::IntValue<'a>> {
     match pattern {
-        Pattern::Wildcard | Pattern::Variable(_) => Ok(context.bool_type().const_int(1, false)),
-        Pattern::Literal(n) => {
+        HirPattern::Wildcard | HirPattern::Variable(_) => {
+            Ok(context.bool_type().const_int(1, false))
+        }
+        HirPattern::Literal(n) => {
             let target_int = target.into_int_value();
             let lit = context.i64_type().const_int(*n as u64, true);
             let cmp =
                 llvm!(builder.build_int_compare(IntPredicate::EQ, target_int, lit, "pat_lit_eq"));
             Ok(cmp)
         }
-        Pattern::Variant {
+        HirPattern::Variant {
             variant_name,
             fields,
         } => {
@@ -165,7 +167,7 @@ pub(crate) fn compile_pattern_test<'a>(
             let mut result = tag_match;
             for (field_idx, field_pat) in fields.iter().enumerate() {
                 match field_pat {
-                    Pattern::Wildcard | Pattern::Variable(_) => {}
+                    HirPattern::Wildcard | HirPattern::Variable(_) => {}
                     _ => {
                         // Nested Variant field patterns resolve against the
                         // field's declared type (`Self` -> the owner enum).
@@ -205,18 +207,18 @@ pub(crate) fn compile_pattern_test<'a>(
 pub(crate) fn bind_pattern_variables<'a>(
     context: &'a Context,
     builder: &Builder<'a>,
-    pattern: &Pattern,
+    pattern: &HirPattern,
     target: BasicValueEnum<'a>,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     module_env: &ModuleEnv,
     enum_hint: Option<&str>,
 ) -> MumeiResult<()> {
     match pattern {
-        Pattern::Variable(name) => {
+        HirPattern::Variable(name) => {
             variables.insert(name.clone(), target);
             Ok(())
         }
-        Pattern::Variant {
+        HirPattern::Variant {
             variant_name,
             fields,
         } => {
@@ -226,7 +228,7 @@ pub(crate) fn bind_pattern_variables<'a>(
                 let nested_hint = resolved_enum
                     .and_then(|e| variant_field_hint(e, variant_name, field_idx, module_env));
                 match field_pat {
-                    Pattern::Variable(fname) => {
+                    HirPattern::Variable(fname) => {
                         let field_val = extract_variant_field_value(
                             context,
                             builder,
@@ -238,7 +240,7 @@ pub(crate) fn bind_pattern_variables<'a>(
                         )?;
                         variables.insert(fname.clone(), field_val);
                     }
-                    Pattern::Variant { .. } => {
+                    HirPattern::Variant { .. } => {
                         let nested_val = extract_variant_field_value(
                             context,
                             builder,
@@ -263,7 +265,7 @@ pub(crate) fn bind_pattern_variables<'a>(
             }
             Ok(())
         }
-        Pattern::Wildcard | Pattern::Literal(_) => Ok(()),
+        HirPattern::Wildcard | HirPattern::Literal(_) => Ok(()),
     }
 }
 

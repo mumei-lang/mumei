@@ -1,5 +1,5 @@
-use mumei_core::emitter::{Artifact, ArtifactKind, Emitter};
-use mumei_core::hir::{HirAtom, HirTrustLevel};
+use mumei_core::emitter::{Artifact, ArtifactKind, EmitAtom, Emitter};
+use mumei_core::hir::HirTrustLevel;
 use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiResult};
 use std::path::Path;
@@ -9,14 +9,14 @@ pub struct ProofBookEmitter;
 impl Emitter for ProofBookEmitter {
     fn emit(
         &self,
-        hir_atom: &HirAtom,
+        emit_atom: &EmitAtom<'_>,
         output_path: &Path,
         module_env: &ModuleEnv,
         _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
-        let signature = &hir_atom.signature;
-        let contract = &hir_atom.contract;
-        let meta = &hir_atom.meta;
+        let signature = emit_atom.signature;
+        let contract = emit_atom.contract;
+        let meta = emit_atom.meta;
         let mut md = String::new();
 
         // Title
@@ -156,7 +156,7 @@ impl Emitter for ProofBookEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mumei_core::hir::{lower_atom_metadata, HirEffectSet, HirExpr, HirStmt};
+    use mumei_core::hir::{lower_atom_metadata, HirAtom, HirEffectSet, HirExpr, HirStmt};
     use mumei_core::parser::ast::{Atom, Effect, Expr, Param, Span, Stmt, TrustLevel};
     use mumei_core::verification::ModuleEnv;
     use std::collections::HashMap;
@@ -250,7 +250,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/safe_divide"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/safe_divide"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         assert_eq!(artifacts.len(), 1);
@@ -285,7 +290,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/write_log"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/write_log"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -317,7 +327,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/close_file"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/close_file"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -346,7 +361,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/ffi_call"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/ffi_call"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -372,7 +392,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/simple_add"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/simple_add"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -397,7 +422,7 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/foo"), &module_env, &[])
+            .emit(&hir.emit_view(), Path::new("/tmp/foo"), &module_env, &[])
             .unwrap();
 
         assert_eq!(
@@ -425,7 +450,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/hash_test"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/hash_test"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -455,7 +485,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/guarded"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/guarded"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -482,7 +517,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/fetch_data"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/fetch_data"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -508,7 +548,12 @@ mod tests {
         let expected = mumei_core::proof_cert::compute_atom_content_hash_v2(&hir.atom);
         assert_eq!(hir.meta.content_hash, expected);
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/hash_test"), &ModuleEnv::new(), &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/hash_test"),
+                &ModuleEnv::new(),
+                &[],
+            )
             .unwrap();
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
         assert!(md.contains(&format!(

@@ -17,22 +17,23 @@ pub(crate) fn dispatch_emit(
     module_env: &verification::ModuleEnv,
     extern_blocks: &[parser::ExternBlock],
 ) -> verification::MumeiResult<Vec<emitter::Artifact>> {
+    let emit_atom = hir_atom.emit_view();
     match target {
         emitter::EmitTarget::LlvmIr => {
-            mumei_emit_llvm::LlvmEmitter.emit(hir_atom, output_path, module_env, extern_blocks)
+            mumei_emit_llvm::LlvmEmitter.emit(&emit_atom, output_path, module_env, extern_blocks)
         }
         emitter::EmitTarget::CHeader => {
-            emitter::CHeaderEmitter.emit(hir_atom, output_path, module_env, extern_blocks)
+            emitter::CHeaderEmitter.emit(&emit_atom, output_path, module_env, extern_blocks)
         }
         emitter::EmitTarget::VerifiedJson => mumei_emit_json::VerifiedJsonEmitter.emit(
-            hir_atom,
+            &emit_atom,
             output_path,
             module_env,
             extern_blocks,
         ),
         emitter::EmitTarget::DecidableMetrics => Ok(vec![]),
         emitter::EmitTarget::ProofBook => mumei_emit_proofbook::ProofBookEmitter.emit(
-            hir_atom,
+            &emit_atom,
             output_path,
             module_env,
             extern_blocks,
@@ -47,19 +48,19 @@ pub(crate) fn dispatch_emit(
             Ok(vec![])
         }
         emitter::EmitTarget::RustWrapper => mumei_emit_rust::RustWrapperEmitter.emit(
-            hir_atom,
+            &emit_atom,
             output_path,
             module_env,
             extern_blocks,
         ),
         emitter::EmitTarget::RuntimeMonitor => mumei_emit_monitor::RuntimeMonitorEmitter.emit(
-            hir_atom,
+            &emit_atom,
             output_path,
             module_env,
             extern_blocks,
         ),
         emitter::EmitTarget::PythonWrapper => mumei_emit_python::PythonWrapperEmitter.emit(
-            hir_atom,
+            &emit_atom,
             output_path,
             module_env,
             extern_blocks,
@@ -70,7 +71,7 @@ pub(crate) fn dispatch_emit(
                     "External emitter '{name}' was not loaded"
                 ))
             })?;
-            external_emitter.emit(hir_atom, output_path, module_env, extern_blocks)
+            external_emitter.emit(&emit_atom, output_path, module_env, extern_blocks)
         }
     }
 }

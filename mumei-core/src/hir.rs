@@ -78,6 +78,164 @@ pub struct HirEffectUsage {
     pub param_values: Vec<String>,
 }
 
+/// HIR-owned binary operator — a 1:1 mirror of `parser::Op`.
+/// Emitter-facing HIR must not depend on AST types (design doc step 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HirBinOp {
+    Add,
+    Sub,
+    Mul,
+    Pow,
+    Div,
+    Eq,
+    Neq,
+    Gt,
+    Lt,
+    Ge,
+    Le,
+    And,
+    Or,
+    Implies,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+}
+
+impl From<Op> for HirBinOp {
+    fn from(op: Op) -> Self {
+        match op {
+            Op::Add => HirBinOp::Add,
+            Op::Sub => HirBinOp::Sub,
+            Op::Mul => HirBinOp::Mul,
+            Op::Pow => HirBinOp::Pow,
+            Op::Div => HirBinOp::Div,
+            Op::Eq => HirBinOp::Eq,
+            Op::Neq => HirBinOp::Neq,
+            Op::Gt => HirBinOp::Gt,
+            Op::Lt => HirBinOp::Lt,
+            Op::Ge => HirBinOp::Ge,
+            Op::Le => HirBinOp::Le,
+            Op::And => HirBinOp::And,
+            Op::Or => HirBinOp::Or,
+            Op::Implies => HirBinOp::Implies,
+            Op::BitAnd => HirBinOp::BitAnd,
+            Op::BitOr => HirBinOp::BitOr,
+            Op::BitXor => HirBinOp::BitXor,
+            Op::Shl => HirBinOp::Shl,
+            Op::Shr => HirBinOp::Shr,
+        }
+    }
+}
+
+impl From<HirBinOp> for Op {
+    fn from(op: HirBinOp) -> Self {
+        match op {
+            HirBinOp::Add => Op::Add,
+            HirBinOp::Sub => Op::Sub,
+            HirBinOp::Mul => Op::Mul,
+            HirBinOp::Pow => Op::Pow,
+            HirBinOp::Div => Op::Div,
+            HirBinOp::Eq => Op::Eq,
+            HirBinOp::Neq => Op::Neq,
+            HirBinOp::Gt => Op::Gt,
+            HirBinOp::Lt => Op::Lt,
+            HirBinOp::Ge => Op::Ge,
+            HirBinOp::Le => Op::Le,
+            HirBinOp::And => Op::And,
+            HirBinOp::Or => Op::Or,
+            HirBinOp::Implies => Op::Implies,
+            HirBinOp::BitAnd => Op::BitAnd,
+            HirBinOp::BitOr => Op::BitOr,
+            HirBinOp::BitXor => Op::BitXor,
+            HirBinOp::Shl => Op::Shl,
+            HirBinOp::Shr => Op::Shr,
+        }
+    }
+}
+
+/// HIR-owned task-group join semantics — a 1:1 mirror of `parser::JoinSemantics`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HirJoin {
+    All,
+    Any,
+}
+
+impl HirJoin {
+    pub fn completes_after_first_child(&self) -> bool {
+        matches!(self, HirJoin::Any)
+    }
+
+    pub fn cancels_remaining_children(&self) -> bool {
+        matches!(self, HirJoin::Any)
+    }
+}
+
+impl From<JoinSemantics> for HirJoin {
+    fn from(join: JoinSemantics) -> Self {
+        match join {
+            JoinSemantics::All => HirJoin::All,
+            JoinSemantics::Any => HirJoin::Any,
+        }
+    }
+}
+
+impl From<HirJoin> for JoinSemantics {
+    fn from(join: HirJoin) -> Self {
+        match join {
+            HirJoin::All => JoinSemantics::All,
+            HirJoin::Any => JoinSemantics::Any,
+        }
+    }
+}
+
+/// HIR-owned match pattern — a 1:1 mirror of `parser::Pattern`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HirPattern {
+    Wildcard,
+    Literal(i64),
+    Variable(String),
+    Variant {
+        variant_name: String,
+        fields: Vec<HirPattern>,
+    },
+}
+
+impl From<Pattern> for HirPattern {
+    fn from(pattern: Pattern) -> Self {
+        match pattern {
+            Pattern::Wildcard => HirPattern::Wildcard,
+            Pattern::Literal(n) => HirPattern::Literal(n),
+            Pattern::Variable(name) => HirPattern::Variable(name),
+            Pattern::Variant {
+                variant_name,
+                fields,
+            } => HirPattern::Variant {
+                variant_name,
+                fields: fields.into_iter().map(HirPattern::from).collect(),
+            },
+        }
+    }
+}
+
+impl From<HirPattern> for Pattern {
+    fn from(pattern: HirPattern) -> Self {
+        match pattern {
+            HirPattern::Wildcard => Pattern::Wildcard,
+            HirPattern::Literal(n) => Pattern::Literal(n),
+            HirPattern::Variable(name) => Pattern::Variable(name),
+            HirPattern::Variant {
+                variant_name,
+                fields,
+            } => Pattern::Variant {
+                variant_name,
+                fields: fields.into_iter().map(Pattern::from).collect(),
+            },
+        }
+    }
+}
+
 /// HIR 式: 純粋な式を表す
 #[derive(Debug, Clone)]
 pub enum HirExpr {
@@ -89,7 +247,7 @@ pub enum HirExpr {
     /// Array literal `[e0, e1, …]` — element type inferred from elements.
     ArrayLit(Vec<HirExpr>),
     ArrayAccess(String, Box<HirExpr>),
-    BinaryOp(Box<HirExpr>, Op, Box<HirExpr>),
+    BinaryOp(Box<HirExpr>, HirBinOp, Box<HirExpr>),
     IfThenElse {
         cond: Box<HirExpr>,
         then_branch: Box<HirStmt>,
@@ -150,7 +308,7 @@ pub enum HirExpr {
     #[allow(dead_code)]
     TaskGroup {
         children: Vec<HirStmt>,
-        join_semantics: JoinSemantics,
+        join_semantics: HirJoin,
     },
     /// Lambda 式（クロージャ変換前）
     // NOTE: Lambda is constructed via lower_expr(Expr::Lambda) → HirExpr::Lambda.
@@ -237,7 +395,7 @@ pub struct HirLambdaParam {
 /// Match 式のアーム
 #[derive(Debug, Clone)]
 pub struct HirMatchArm {
-    pub pattern: Pattern,
+    pub pattern: HirPattern,
     pub guard: Option<Box<HirExpr>>,
     pub body: Box<HirStmt>,
 }
@@ -272,6 +430,9 @@ impl HirParam {
 pub struct HirDeclaredEffect {
     pub name: String,
     pub negated: bool,
+    /// Argument values as written in the declaration, e.g. `"v"` for
+    /// `effects: [MyEffect("v")]`. Emitters render these verbatim.
+    pub param_values: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,6 +617,7 @@ pub fn lower_atom_metadata(
             .map(|effect| HirDeclaredEffect {
                 name: effect.name.clone(),
                 negated: effect.negated,
+                param_values: effect.params.iter().map(|p| p.value.clone()).collect(),
             })
             .collect(),
         return_type: atom.return_type.clone(),
@@ -609,7 +771,7 @@ pub fn lower_expr_with_env(
         }
         Expr::BinaryOp(l, op, r) => HirExpr::BinaryOp(
             Box::new(lower_expr_with_env(l, module_env)),
-            op.clone(),
+            op.clone().into(),
             Box::new(lower_expr_with_env(r, module_env)),
         ),
         Expr::IfThenElse {
@@ -678,7 +840,7 @@ pub fn lower_expr_with_env(
             arms: arms
                 .iter()
                 .map(|arm| HirMatchArm {
-                    pattern: arm.pattern.clone(),
+                    pattern: arm.pattern.clone().into(),
                     guard: arm
                         .guard
                         .as_ref()
@@ -830,22 +992,26 @@ fn infer_hir_expr_type(
             let left_ty = infer_hir_expr_type(left, module_env);
             let right_ty = infer_hir_expr_type(right, module_env);
             match op {
-                Op::Eq
-                | Op::Neq
-                | Op::Gt
-                | Op::Lt
-                | Op::Ge
-                | Op::Le
-                | Op::And
-                | Op::Or
-                | Op::Implies => Some("bool".to_string()),
-                Op::Add
+                HirBinOp::Eq
+                | HirBinOp::Neq
+                | HirBinOp::Gt
+                | HirBinOp::Lt
+                | HirBinOp::Ge
+                | HirBinOp::Le
+                | HirBinOp::And
+                | HirBinOp::Or
+                | HirBinOp::Implies => Some("bool".to_string()),
+                HirBinOp::Add
                     if left_ty.as_deref() == Some("Str") && right_ty.as_deref() == Some("Str") =>
                 {
                     Some("Str".to_string())
                 }
-                Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => Some("i64".to_string()),
-                Op::Add | Op::Sub | Op::Mul | Op::Pow | Op::Div => {
+                HirBinOp::BitAnd
+                | HirBinOp::BitOr
+                | HirBinOp::BitXor
+                | HirBinOp::Shl
+                | HirBinOp::Shr => Some("i64".to_string()),
+                HirBinOp::Add | HirBinOp::Sub | HirBinOp::Mul | HirBinOp::Pow | HirBinOp::Div => {
                     if left_ty.as_deref() == Some("f64") || right_ty.as_deref() == Some("f64") {
                         Some("f64".to_string())
                     } else {
@@ -981,7 +1147,7 @@ pub fn lower_stmt_with_env(
                 .iter()
                 .map(|s| lower_stmt_with_env(s, module_env))
                 .collect(),
-            join_semantics: join_semantics.clone(),
+            join_semantics: join_semantics.clone().into(),
         }),
         // Plan 8: Cancel statement lowering
         Stmt::Cancel { target, .. } => HirStmt::Expr(HirExpr::Call {
@@ -994,20 +1160,17 @@ pub fn lower_stmt_with_env(
 }
 
 /// Collect variable names bound by a pattern (recursive for nested Variant patterns).
-pub(crate) fn collect_pattern_bindings(
-    pattern: &crate::parser::Pattern,
-    bound: &mut HashSet<String>,
-) {
+pub(crate) fn collect_pattern_bindings(pattern: &HirPattern, bound: &mut HashSet<String>) {
     match pattern {
-        crate::parser::Pattern::Variable(name) => {
+        HirPattern::Variable(name) => {
             bound.insert(name.clone());
         }
-        crate::parser::Pattern::Variant { fields, .. } => {
+        HirPattern::Variant { fields, .. } => {
             for field_pattern in fields {
                 collect_pattern_bindings(field_pattern, bound);
             }
         }
-        crate::parser::Pattern::Wildcard | crate::parser::Pattern::Literal(_) => {}
+        HirPattern::Wildcard | HirPattern::Literal(_) => {}
     }
 }
 
@@ -1726,9 +1889,9 @@ atom nested(n: i64)
         let expr = HirExpr::Match {
             target: Box::new(HirExpr::Variable("value".to_string())),
             arms: vec![HirMatchArm {
-                pattern: Pattern::Variant {
+                pattern: HirPattern::Variant {
                     variant_name: "Cons".to_string(),
-                    fields: vec![Pattern::Variable("x".to_string())],
+                    fields: vec![HirPattern::Variable("x".to_string())],
                 },
                 guard: None,
                 body: Box::new(HirStmt::Assign {
@@ -1765,11 +1928,11 @@ atom nested(n: i64)
             var: "acc".to_string(),
             value: Box::new(HirExpr::BinaryOp(
                 Box::new(HirExpr::Variable("acc".to_string())),
-                Op::Add,
+                HirBinOp::Add,
                 Box::new(HirExpr::IfThenElse {
                     cond: Box::new(HirExpr::BinaryOp(
                         Box::new(HirExpr::Variable("i".to_string())),
-                        Op::Eq,
+                        HirBinOp::Eq,
                         Box::new(HirExpr::Number(0)),
                     )),
                     then_branch: Box::new(HirStmt::Block {
