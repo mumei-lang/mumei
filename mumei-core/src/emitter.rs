@@ -48,9 +48,16 @@ pub struct Artifact {
 
 /// HIR-only view of an atom handed to emitters (design doc step 7).
 ///
-/// `HirAtom` keeps `atom`/`body_stmt` for verification and the CLI, but the
-/// emitter interface must not expose AST. This borrowed view carries only
-/// the HIR fields an emitter may read.
+/// `HirAtom` keeps `atom`/`body_stmt` for verification and the CLI; the
+/// emitter interface no longer exposes either. This borrowed view carries
+/// only the HIR fields an emitter may read.
+///
+/// One embedded AST type remains transitively reachable: `HirLambdaParam`
+/// inside `body` still stores `type_ref: Option<ast::TypeRef>` (mir.rs reads
+/// its `capability`; LLVM codegen renders it via `Display`). Like the AST
+/// types in `ModuleEnv` (`EnumDef`/`StructDef`/`ExternBlock`), the design
+/// doc keeps type descriptors in place — a `HirTypeRef` mirror is a
+/// follow-up outside steps 6–7.
 #[derive(Debug, Clone, Copy)]
 pub struct EmitAtom<'a> {
     pub body: &'a HirStmt,
