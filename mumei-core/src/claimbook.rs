@@ -288,7 +288,10 @@ pub fn compute_effective_grades(claims: &BTreeMap<String, Claim>) -> BTreeMap<St
     effective_grades
 }
 
-fn apply_effective_grades(claims: &mut BTreeMap<String, Claim>) {
+fn apply_effective_grades(
+    claims: &mut BTreeMap<String, Claim>,
+    method_name_matches: &BTreeMap<String, BTreeMap<String, String>>,
+) {
     let effective_grades = compute_effective_grades(claims);
     let claim_names = claims.keys().cloned().collect::<BTreeSet<_>>();
     let mut completeness = claims
@@ -299,7 +302,8 @@ fn apply_effective_grades(claims: &mut BTreeMap<String, Claim>) {
                 claim
                     .dependencies
                     .iter()
-                    .all(|dependency| claim_names.contains(dependency)),
+                    .all(|dependency| claim_names.contains(dependency))
+                    && !method_name_matches.contains_key(name),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -334,13 +338,22 @@ fn apply_effective_grades(claims: &mut BTreeMap<String, Claim>) {
             .into_iter()
             .collect();
         claim.effective_grade_complete = completeness[name];
-        claim.limiting_premises = limiting_premises(claim, effective_grade, &effective_grades);
+        claim.limiting_premises = limiting_premises(
+            claim,
+            effective_grade,
+            &effective_grades,
+            method_name_matches.get(name),
+        );
     }
 }
 
-fn resolve_claim_dependencies(claims: &mut BTreeMap<String, Claim>) {
+fn resolve_claim_dependencies(
+    claims: &mut BTreeMap<String, Claim>,
+) -> BTreeMap<String, BTreeMap<String, String>> {
     let claim_names = claims.keys().cloned().collect::<BTreeSet<_>>();
-    for claim in claims.values_mut() {
+    let mut method_name_matches = BTreeMap::new();
+    for (claim_name, claim) in claims.iter_mut() {
+        let mut claim_method_name_matches = BTreeMap::new();
         claim.dependencies = claim
             .dependencies
             .iter()
@@ -353,20 +366,28 @@ fn resolve_claim_dependencies(claims: &mut BTreeMap<String, Claim>) {
                 let mut qualified_matches =
                     claim_names.iter().filter(|name| name.ends_with(&suffix));
                 match (qualified_matches.next(), qualified_matches.next()) {
-                    (Some(match_name), None) => match_name.clone(),
+                    (Some(match_name), None) => {
+                        claim_method_name_matches.insert(match_name.clone(), dependency.clone());
+                        match_name.clone()
+                    }
                     _ => dependency.clone(),
                 }
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        if !claim_method_name_matches.is_empty() {
+            method_name_matches.insert(claim_name.clone(), claim_method_name_matches);
+        }
     }
+    method_name_matches
 }
 
 fn limiting_premises(
     claim: &Claim,
     effective_grade: SealGrade,
     effective_grades: &BTreeMap<String, SealGrade>,
+    method_name_matches: Option<&BTreeMap<String, String>>,
 ) -> Vec<LimitingPremise> {
     if effective_grade == claim.grade {
         return Vec::new();
@@ -401,7 +422,12 @@ fn limiting_premises(
             if *dependency_grade < claim.grade {
                 premises.insert(LimitingPremise {
                     kind: "dependency".to_string(),
-                    name: dependency.clone(),
+                    name: method_name_matches
+                        .and_then(|matches| matches.get(dependency))
+                        .map(|matched_name| {
+                            format!("matched `{matched_name}` to `{dependency}` by method name")
+                        })
+                        .unwrap_or_else(|| dependency.clone()),
                     grade: *dependency_grade,
                 });
             }
@@ -627,8 +653,8 @@ pub fn create_claimbook(
         claims.insert((*name).to_string(), claim);
     }
 
-    resolve_claim_dependencies(&mut claims);
-    apply_effective_grades(&mut claims);
+    let method_name_matches = resolve_claim_dependencies(&mut claims);
+    apply_effective_grades(&mut claims, &method_name_matches);
 
     let mut by_effective_grade = SealGrade::all()
         .into_iter()
@@ -987,7 +1013,8 @@ mod tests {
             .into_iter()
             .map(|claim| (claim.atom.clone(), claim))
             .collect();
-        apply_effective_grades(&mut claims);
+        let method_name_matches = resolve_claim_dependencies(&mut claims);
+        apply_effective_grades(&mut claims, &method_name_matches);
         claims
     }
 
@@ -1387,7 +1414,8 @@ mod tests {
         let caller = source_atom("caller");
         let mut point_get = source_atom("Point::get");
         point_get.trust_level = TrustLevel::Trusted;
-        let atoms = [&caller, &point_get];
+        let outer = source_atom("outer");
+        let atoms = [&caller, &point_get, &outer];
         let results = std::collections::HashMap::from([
             (
                 caller.name.clone(),
@@ -1395,6 +1423,10 @@ mod tests {
             ),
             (
                 point_get.name.clone(),
+                (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+            ),
+            (
+                outer.name.clone(),
                 (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
             ),
         ]);
@@ -1412,6 +1444,11 @@ mod tests {
             .find(|entry| entry.name == "caller")
             .expect("caller certificate")
             .dependencies = vec!["get".to_string()];
+        cert.atoms
+            .iter_mut()
+            .find(|entry| entry.name == "outer")
+            .expect("outer certificate")
+            .dependencies = vec!["caller".to_string()];
         proof_cert::refresh_certificate_integrity(&mut cert);
 
         let report = create_claimbook("sample.mm", "sample.proof.json", Some(&cert), &atoms, false);
@@ -1422,14 +1459,21 @@ mod tests {
             .expect("caller claim");
         assert_eq!(caller_claim.dependencies, vec!["Point::get".to_string()]);
         assert_eq!(caller_claim.effective_grade, SealGrade::G1);
+        assert!(!caller_claim.effective_grade_complete);
+        assert_eq!(caller_claim.limiting_premises.len(), 1);
+        assert_eq!(caller_claim.limiting_premises[0].kind, "dependency");
         assert_eq!(
-            caller_claim.limiting_premises,
-            vec![LimitingPremise {
-                kind: "dependency".to_string(),
-                name: "Point::get".to_string(),
-                grade: SealGrade::G1,
-            }]
+            caller_claim.limiting_premises[0].name,
+            "matched `get` to `Point::get` by method name"
         );
+        assert_eq!(caller_claim.limiting_premises[0].grade, SealGrade::G1);
+        let outer_claim = report
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "outer")
+            .expect("outer claim");
+        assert_eq!(outer_claim.effective_grade, SealGrade::G1);
+        assert!(!outer_claim.effective_grade_complete);
 
         let mut circle_get = source_atom("Circle::get");
         circle_get.trust_level = TrustLevel::Trusted;
@@ -1494,11 +1538,13 @@ mod tests {
                 claim("Point::get", SealGrade::G1, Freshness::Fresh, &[], &[]),
             ),
         ]);
-        resolve_claim_dependencies(&mut exact_name_claims);
+        let exact_method_name_matches = resolve_claim_dependencies(&mut exact_name_claims);
+        apply_effective_grades(&mut exact_name_claims, &exact_method_name_matches);
         assert_eq!(
             exact_name_claims["caller"].dependencies,
             vec!["get".to_string()]
         );
+        assert!(exact_name_claims["caller"].effective_grade_complete);
     }
 
     #[test]
