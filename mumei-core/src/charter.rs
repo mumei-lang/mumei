@@ -216,8 +216,10 @@ pub fn check_charters_with_generics(
     }
 
     let mut implementation_atoms = implementation_atoms(implementation);
-    let mut implementation_names = HashSet::new();
-    implementation_atoms.retain(|candidate| implementation_names.insert(candidate.name.clone()));
+    let mut implementation_names: HashSet<String> = implementation_atoms
+        .iter()
+        .map(|candidate| candidate.name.clone())
+        .collect();
     implementation_atoms.extend(
         generic_implementation_atoms(generic_implementation)
             .into_iter()
@@ -1202,6 +1204,17 @@ mod tests {
             "atom identity<T>(x: T) -> T body: 0;",
         );
         assert_ne!(report_status(&report), "missing");
+    }
+
+    #[test]
+    fn duplicate_non_generic_implementation_atoms_are_ambiguous() {
+        let report = run_check(
+            "trusted atom f(x: i64) -> i64 requires: true; ensures: result >= x + 1; body: 0;",
+            "atom f(x: i64) -> i64 requires: true; ensures: result >= x + 1; body: x + 1;\n\
+             atom f(x: i64) -> i64 requires: true; ensures: result == x; body: x;",
+        );
+        assert_eq!(report_status(&report), "signature_mismatch");
+        assert!(report.atoms[0].detail.contains("ambiguous"));
     }
 
     #[test]
