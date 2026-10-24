@@ -23,6 +23,9 @@ pub(crate) fn cmd_claims(
                 std::process::exit(1);
             }
         }
+    } else if let Some(cert_arg) = cert_arg {
+        eprintln!("❌ Proof certificate not found: {cert_arg}");
+        std::process::exit(1);
     } else {
         None
     };

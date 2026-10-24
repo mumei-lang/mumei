@@ -289,6 +289,7 @@ fn source_edits_new_atoms_removed_atoms_and_certificate_edits_are_reported() {
 fn formats_output_directories_and_missing_certificates_are_handled() {
     let dir = fresh_dir("formats");
     let source = copy_fixture(&dir, "claimbook_atoms.mm", "main.mm");
+    assert!(!source.with_extension("proof.json").exists());
     let json_dir = dir.join("json-output");
     let json_dir_arg = json_dir.to_string_lossy().into_owned();
     let json_output = claims(
@@ -326,6 +327,26 @@ fn formats_output_directories_and_missing_certificates_are_handled() {
     assert!(both_output.status.success());
     assert!(both_dir.join("CLAIMBOOK.md").exists());
     assert!(both_dir.join("claimbook.json").exists());
+}
+
+#[test]
+fn an_explicit_missing_certificate_returns_exit_one() {
+    let dir = fresh_dir("missing_explicit_cert");
+    let source = copy_fixture(&dir, "claimbook_atoms.mm", "main.mm");
+    let missing_cert = dir.join("missing.proof.json");
+    let missing_cert_arg = missing_cert.to_string_lossy().into_owned();
+    let output = claims(&dir, &source, &["--cert", &missing_cert_arg]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "claims should fail for an explicit missing certificate\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains(&format!(
+        "❌ Proof certificate not found: {missing_cert_arg}"
+    )));
 }
 
 #[test]
