@@ -80,6 +80,8 @@ pub struct Claim {
 pub struct LimitingPremise {
     pub kind: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_from: Option<String>,
     pub grade: SealGrade,
 }
 
@@ -399,6 +401,7 @@ fn limiting_premises(
         premises.insert(LimitingPremise {
             kind: "freshness".to_string(),
             name: freshness_name(claim.freshness).to_string(),
+            matched_from: None,
             grade: SealGrade::G0,
         });
     }
@@ -413,6 +416,7 @@ fn limiting_premises(
             premises.insert(LimitingPremise {
                 kind: "assumed_clause".to_string(),
                 name: assumed_clause_text(clause).to_string(),
+                matched_from: None,
                 grade: SealGrade::G1,
             });
         }
@@ -423,12 +427,10 @@ fn limiting_premises(
             if *dependency_grade < claim.grade {
                 premises.insert(LimitingPremise {
                     kind: "dependency".to_string(),
-                    name: method_name_matches
+                    name: dependency.clone(),
+                    matched_from: method_name_matches
                         .and_then(|matches| matches.get(dependency))
-                        .map(|matched_name| {
-                            format!("matched `{matched_name}` to `{dependency}` by method name")
-                        })
-                        .unwrap_or_else(|| dependency.clone()),
+                        .cloned(),
                     grade: *dependency_grade,
                 });
             }
@@ -797,12 +799,15 @@ fn limiting_premises_text(premises: &[LimitingPremise]) -> String {
     premises
         .iter()
         .map(|premise| {
-            format!(
-                "{} {} ({})",
-                premise.kind,
-                premise.name.replace('|', "\\|"),
-                grade_code(premise.grade)
-            )
+            let name = premise.name.replace('|', "\\|");
+            let name = match premise.matched_from.as_deref() {
+                Some(matched_from) => format!(
+                    "`{name}` (matched from `{}` by method name)",
+                    matched_from.replace('|', "\\|")
+                ),
+                None => name,
+            };
+            format!("{} {} ({})", premise.kind, name, grade_code(premise.grade))
         })
         .collect::<Vec<_>>()
         .join("; ")
@@ -1324,6 +1329,7 @@ mod tests {
             vec![LimitingPremise {
                 kind: "dependency".to_string(),
                 name: "callee".to_string(),
+                matched_from: None,
                 grade: SealGrade::G0,
             }]
         );
@@ -1332,6 +1338,7 @@ mod tests {
             vec![LimitingPremise {
                 kind: "freshness".to_string(),
                 name: "drifted".to_string(),
+                matched_from: None,
                 grade: SealGrade::G0,
             }]
         );
@@ -1358,6 +1365,7 @@ mod tests {
             vec![LimitingPremise {
                 kind: "assumed_clause".to_string(),
                 name: "x > 0".to_string(),
+                matched_from: None,
                 grade: SealGrade::G1,
             }]
         );
@@ -1464,9 +1472,10 @@ mod tests {
         assert!(!caller_claim.effective_grade_complete);
         assert_eq!(caller_claim.limiting_premises.len(), 1);
         assert_eq!(caller_claim.limiting_premises[0].kind, "dependency");
+        assert_eq!(caller_claim.limiting_premises[0].name, "Point::get");
         assert_eq!(
-            caller_claim.limiting_premises[0].name,
-            "matched `get` to `Point::get` by method name"
+            caller_claim.limiting_premises[0].matched_from.as_deref(),
+            Some("get")
         );
         assert_eq!(caller_claim.limiting_premises[0].grade, SealGrade::G1);
         let outer_claim = report
@@ -1590,6 +1599,7 @@ mod tests {
             vec![LimitingPremise {
                 kind: "assumed_clause".to_string(),
                 name: "x > 0".to_string(),
+                matched_from: None,
                 grade: SealGrade::G1,
             }]
         );
@@ -1729,6 +1739,7 @@ mod tests {
         claim.limiting_premises = vec![LimitingPremise {
             kind: "assumed_clause".to_string(),
             name: "x | y".to_string(),
+            matched_from: None,
             grade: SealGrade::G1,
         }];
         let mut summary = SealGrade::all()
