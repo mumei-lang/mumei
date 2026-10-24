@@ -286,6 +286,36 @@ pub fn compute_effective_grades(claims: &BTreeMap<String, Claim>) -> BTreeMap<St
 fn apply_effective_grades(claims: &mut BTreeMap<String, Claim>) {
     let effective_grades = compute_effective_grades(claims);
     let claim_names = claims.keys().cloned().collect::<BTreeSet<_>>();
+    let mut completeness = claims
+        .iter()
+        .map(|(name, claim)| {
+            (
+                name.clone(),
+                claim
+                    .dependencies
+                    .iter()
+                    .all(|dependency| claim_names.contains(dependency)),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    loop {
+        let next_completeness = claims
+            .iter()
+            .map(|(name, claim)| {
+                let complete = completeness[name]
+                    && claim
+                        .dependencies
+                        .iter()
+                        .all(|dependency| completeness.get(dependency).copied().unwrap_or(false));
+                (name.clone(), complete)
+            })
+            .collect::<BTreeMap<_, _>>();
+        if next_completeness == completeness {
+            break;
+        }
+        completeness = next_completeness;
+    }
+
     for (name, claim) in claims.iter_mut() {
         let effective_grade = effective_grades[name];
         claim.effective_grade = effective_grade;
@@ -298,8 +328,33 @@ fn apply_effective_grades(claims: &mut BTreeMap<String, Claim>) {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        claim.effective_grade_complete = claim.unresolved_dependencies.is_empty();
+        claim.effective_grade_complete = completeness[name];
         claim.limiting_premises = limiting_premises(claim, effective_grade, &effective_grades);
+    }
+}
+
+fn resolve_claim_dependencies(claims: &mut BTreeMap<String, Claim>) {
+    let claim_names = claims.keys().cloned().collect::<BTreeSet<_>>();
+    for claim in claims.values_mut() {
+        claim.dependencies = claim
+            .dependencies
+            .iter()
+            .map(|dependency| {
+                if claim_names.contains(dependency) {
+                    return dependency.clone();
+                }
+
+                let suffix = format!("::{dependency}");
+                let mut qualified_matches =
+                    claim_names.iter().filter(|name| name.ends_with(&suffix));
+                match (qualified_matches.next(), qualified_matches.next()) {
+                    (Some(match_name), None) => match_name.clone(),
+                    _ => dependency.clone(),
+                }
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
     }
 }
 
@@ -385,7 +440,10 @@ fn trusted_base(cert: Option<&ProofCertificate>, atoms: &[&crate::parser::Atom])
     let mut kernel_axioms = BTreeSet::new();
     if let Some(cert) = cert {
         for entry in &cert.atoms {
-            if source_atoms.contains_key(entry.name.as_str()) && entry.status == status::TRUSTED {
+            if !source_atoms.contains_key(entry.name.as_str()) {
+                continue;
+            }
+            if entry.status == status::TRUSTED {
                 trusted_atoms.insert(entry.name.clone());
             }
             if !entry.translator_version.is_empty() {
@@ -532,9 +590,27 @@ pub fn create_claimbook(
             reason,
             requires: source_atom.requires.clone(),
             ensures: source_atom.ensures.clone(),
-            assumed_clauses: entry
-                .map(|entry| entry.assumed_clauses.clone())
-                .unwrap_or_default(),
+            assumed_clauses: {
+                let mut clauses = entry
+                    .map(|entry| {
+                        entry
+                            .assumed_clauses
+                            .iter()
+                            .cloned()
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                for clause_mode in &source_atom.clause_modes {
+                    if clause_mode.mode == ClauseTrustMode::Assume {
+                        let kind = match &clause_mode.kind {
+                            crate::parser::ClauseKind::Requires => "requires",
+                            crate::parser::ClauseKind::Ensures => "ensures",
+                        };
+                        clauses.insert(format!("{kind}: {}", clause_mode.clause));
+                    }
+                }
+                clauses.into_iter().collect()
+            },
             dependencies: entry
                 .map(|entry| entry.dependencies.clone())
                 .unwrap_or_default(),
@@ -546,6 +622,7 @@ pub fn create_claimbook(
         claims.insert((*name).to_string(), claim);
     }
 
+    resolve_claim_dependencies(&mut claims);
     apply_effective_grades(&mut claims);
 
     let mut by_effective_grade = SealGrade::all()
@@ -1224,6 +1301,205 @@ mod tests {
     }
 
     #[test]
+    fn dependency_completeness_propagates_through_chains_and_cycles() {
+        let chain = propagated_claims(vec![
+            claim("a", SealGrade::G4, Freshness::Fresh, &["b"], &[]),
+            claim("b", SealGrade::G4, Freshness::Fresh, &["missing"], &[]),
+        ]);
+        assert!(chain["a"].unresolved_dependencies.is_empty());
+        assert!(!chain["a"].effective_grade_complete);
+        assert_eq!(
+            chain["b"].unresolved_dependencies,
+            vec!["missing".to_string()]
+        );
+        assert!(!chain["b"].effective_grade_complete);
+
+        let cycle = propagated_claims(vec![
+            claim("a", SealGrade::G4, Freshness::Fresh, &["b"], &[]),
+            claim("b", SealGrade::G4, Freshness::Fresh, &["a", "missing"], &[]),
+        ]);
+        assert!(cycle["a"].unresolved_dependencies.is_empty());
+        assert_eq!(
+            cycle["b"].unresolved_dependencies,
+            vec!["missing".to_string()]
+        );
+        assert!(!cycle["a"].effective_grade_complete);
+        assert!(!cycle["b"].effective_grade_complete);
+    }
+
+    #[test]
+    fn bare_method_dependencies_resolve_only_to_a_unique_qualified_claim() {
+        let caller = source_atom("caller");
+        let mut point_get = source_atom("Point::get");
+        point_get.trust_level = TrustLevel::Trusted;
+        let atoms = [&caller, &point_get];
+        let results = std::collections::HashMap::from([
+            (
+                caller.name.clone(),
+                (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+            ),
+            (
+                point_get.name.clone(),
+                (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+            ),
+        ]);
+        let mut cert = proof_cert::generate_certificate(
+            "sample.mm",
+            &atoms,
+            &results,
+            &verification::ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        cert.atoms
+            .iter_mut()
+            .find(|entry| entry.name == "caller")
+            .expect("caller certificate")
+            .dependencies = vec!["get".to_string()];
+        proof_cert::refresh_certificate_integrity(&mut cert);
+
+        let report = create_claimbook("sample.mm", "sample.proof.json", Some(&cert), &atoms, false);
+        let caller_claim = report
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "caller")
+            .expect("caller claim");
+        assert_eq!(caller_claim.dependencies, vec!["Point::get".to_string()]);
+        assert_eq!(caller_claim.effective_grade, SealGrade::G1);
+        assert_eq!(
+            caller_claim.limiting_premises,
+            vec![LimitingPremise {
+                kind: "dependency".to_string(),
+                name: "Point::get".to_string(),
+                grade: SealGrade::G1,
+            }]
+        );
+
+        let mut circle_get = source_atom("Circle::get");
+        circle_get.trust_level = TrustLevel::Trusted;
+        let ambiguous_atoms = [&caller, &point_get, &circle_get];
+        let ambiguous_results = ambiguous_atoms
+            .iter()
+            .map(|atom| {
+                (
+                    atom.name.clone(),
+                    (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+                )
+            })
+            .collect();
+        let mut ambiguous_cert = proof_cert::generate_certificate(
+            "sample.mm",
+            &ambiguous_atoms,
+            &ambiguous_results,
+            &verification::ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        ambiguous_cert
+            .atoms
+            .iter_mut()
+            .find(|entry| entry.name == "caller")
+            .expect("caller certificate")
+            .dependencies = vec!["get".to_string()];
+        proof_cert::refresh_certificate_integrity(&mut ambiguous_cert);
+
+        let ambiguous_report = create_claimbook(
+            "sample.mm",
+            "sample.proof.json",
+            Some(&ambiguous_cert),
+            &ambiguous_atoms,
+            false,
+        );
+        let ambiguous_caller = ambiguous_report
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "caller")
+            .expect("caller claim");
+        assert_eq!(ambiguous_caller.dependencies, vec!["get".to_string()]);
+        assert_eq!(
+            ambiguous_caller.unresolved_dependencies,
+            vec!["get".to_string()]
+        );
+        assert_eq!(ambiguous_caller.effective_grade, SealGrade::G4);
+        assert!(!ambiguous_caller.effective_grade_complete);
+
+        let mut exact_name_claims = BTreeMap::from([
+            (
+                "caller".to_string(),
+                claim("caller", SealGrade::G4, Freshness::Fresh, &["get"], &[]),
+            ),
+            (
+                "get".to_string(),
+                claim("get", SealGrade::G1, Freshness::Fresh, &[], &[]),
+            ),
+            (
+                "Point::get".to_string(),
+                claim("Point::get", SealGrade::G1, Freshness::Fresh, &[], &[]),
+            ),
+        ]);
+        resolve_claim_dependencies(&mut exact_name_claims);
+        assert_eq!(
+            exact_name_claims["caller"].dependencies,
+            vec!["get".to_string()]
+        );
+    }
+
+    #[test]
+    fn source_assume_clauses_join_legacy_certificate_and_trusted_base() {
+        let mut source = source_atom("assumed");
+        source.requires = "x > 0".to_string();
+        source.clause_modes.push(crate::parser::ClauseMode {
+            kind: crate::parser::ClauseKind::Requires,
+            clause: "x > 0".to_string(),
+            mode: ClauseTrustMode::Assume,
+        });
+        let atoms = [&source];
+        let results = std::collections::HashMap::from([(
+            source.name.clone(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        )]);
+        let mut cert = proof_cert::generate_certificate(
+            "sample.mm",
+            &atoms,
+            &results,
+            &verification::ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        cert.version = "1.0".to_string();
+        cert.atoms[0].content_hash = proof_cert::compute_atom_content_hash(
+            &source.name,
+            &source.requires,
+            &source.ensures,
+            &source.body_expr,
+        );
+        cert.atoms[0].assumed_clauses.clear();
+        proof_cert::refresh_certificate_integrity(&mut cert);
+
+        let report = create_claimbook("sample.mm", "sample.proof.json", Some(&cert), &atoms, false);
+        assert_eq!(report.claims[0].assumed_clauses, vec!["requires: x > 0"]);
+        assert_eq!(report.claims[0].effective_grade, SealGrade::G1);
+        assert_eq!(
+            report.claims[0].limiting_premises,
+            vec![LimitingPremise {
+                kind: "assumed_clause".to_string(),
+                name: "x > 0".to_string(),
+                grade: SealGrade::G1,
+            }]
+        );
+        assert_eq!(
+            report.trusted_base.assumed_clauses,
+            vec![TrustedBaseAssumedClause {
+                atom: "assumed".to_string(),
+                clause: "x > 0".to_string(),
+            }]
+        );
+    }
+
+    #[test]
     fn trusted_base_unions_certificate_and_source_data_deterministically() {
         let mut alpha = source_atom("alpha");
         alpha.trust_level = TrustLevel::Trusted;
@@ -1260,8 +1536,12 @@ mod tests {
 
         let mut orphan = atom_certificate(status::Z3_UNSAT, status::TRUSTED);
         orphan.name = "orphan".to_string();
-        orphan.translator_version = "translator-z".to_string();
-        orphan.bridge_lemma_hash = "bridge-z".to_string();
+        orphan.translator_version = "orphan-only-translator".to_string();
+        orphan.bridge_lemma_hash = "orphan-only-bridge".to_string();
+        orphan.lean_metadata = Some(crate::proof_cert::LeanResultMetadata {
+            kernel_axioms: Some(vec!["Orphan.kernel_axiom".to_string()]),
+            ..Default::default()
+        });
 
         let mut cert = proof_certificate();
         cert.atoms = vec![orphan, beta_cert, alpha_cert];
