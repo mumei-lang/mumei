@@ -115,6 +115,20 @@ pub(crate) fn try_load_and_prepare_with_full_options(
     strict_imports: bool,
     allow_lean_verified: bool,
 ) -> Result<(Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String), String> {
+    try_load_and_prepare_with_full_options_and_persistence(
+        input,
+        strict_imports,
+        allow_lean_verified,
+        true,
+    )
+}
+
+pub(crate) fn try_load_and_prepare_with_full_options_and_persistence(
+    input: &str,
+    strict_imports: bool,
+    allow_lean_verified: bool,
+    persist_cache: bool,
+) -> Result<(Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String), String> {
     let source =
         read_source_file(input).map_err(|e| format!("Could not read '{}': {}", input, e))?;
     let items = parser::parse_module_checked(&source).map_err(|failures| {
@@ -131,45 +145,65 @@ pub(crate) fn try_load_and_prepare_with_full_options(
     let input_path = Path::new(input);
     let base_dir = input_path.parent().unwrap_or(Path::new("."));
 
-    if let Err(e) = resolver::resolve_prelude(base_dir, &mut module_env) {
+    if let Err(e) =
+        resolver::resolve_prelude_with_persistence(base_dir, &mut module_env, persist_cache)
+    {
         eprintln!("  ⚠️  Prelude load warning: {}", e);
     }
 
     if let Some((proj_dir, m)) = manifest::find_and_load() {
         if strict_imports || allow_lean_verified {
-            if let Err(e) = resolver::resolve_manifest_dependencies_with_full_options(
-                &m,
-                &proj_dir,
-                &mut module_env,
-                strict_imports,
-                allow_lean_verified,
-            ) {
+            if let Err(e) =
+                resolver::resolve_manifest_dependencies_with_full_options_and_persistence(
+                    &m,
+                    &proj_dir,
+                    &mut module_env,
+                    strict_imports,
+                    allow_lean_verified,
+                    persist_cache,
+                )
+            {
                 if strict_imports {
                     return Err(format!("Dependency resolution failed (strict mode): {}", e));
                 }
                 eprintln!("  ⚠️  Dependency resolution warning: {}", e);
             }
         } else if let Err(e) =
-            resolver::resolve_manifest_dependencies(&m, &proj_dir, &mut module_env)
+            resolver::resolve_manifest_dependencies_with_full_options_and_persistence(
+                &m,
+                &proj_dir,
+                &mut module_env,
+                false,
+                false,
+                persist_cache,
+            )
         {
             eprintln!("  ⚠️  Dependency resolution warning: {}", e);
         }
     }
 
     if strict_imports || allow_lean_verified {
-        if let Err(e) = resolver::resolve_imports_with_full_options(
+        if let Err(e) = resolver::resolve_imports_with_full_options_and_persistence(
             &items,
             base_dir,
             &mut module_env,
             strict_imports,
             allow_lean_verified,
+            persist_cache,
         ) {
             if strict_imports {
                 return Err(format!("Import resolution failed (strict mode): {}", e));
             }
             return Err(format!("Import resolution failed: {}", e));
         }
-    } else if let Err(e) = resolver::resolve_imports(&items, base_dir, &mut module_env) {
+    } else if let Err(e) = resolver::resolve_imports_with_full_options_and_persistence(
+        &items,
+        base_dir,
+        &mut module_env,
+        false,
+        false,
+        persist_cache,
+    ) {
         return Err(format!("Import resolution failed: {}", e));
     }
 
