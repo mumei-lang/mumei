@@ -48,6 +48,8 @@ rejected.
 ```bash
 mumei charter check src/main.mm
 mumei charter check src/main.mm --charter specs/core.charter.mm --lock charter.lock --json
+mumei charter check src/main.mm --cert src/main.proof.json
+mumei charter check src/main.mm --cert src/main.proof.json --require-grade G5
 ```
 
 The check applies these gates in order:
@@ -67,6 +69,12 @@ The check applies these gates in order:
 4. Top-level quantified constraints must be identical after whitespace
    normalization. A difference is reported as `inconclusive`; clauses marked
    `ensures check` are not used as caller-visible guarantees.
+5. With `--cert`, each otherwise-passing atom must meet the effective Seal
+   Grade requirement. The default is `G4`; `--require-grade` accepts `G0` to
+   `G5`. The check builds a Claim Book from the implementation and certificate.
+   A missing claim or a lower grade is reported as `grade_below`. Incomplete
+   dependency coverage is recorded but does not independently fail the gate.
+   `--allow-lean-verified` accepts current Lean-verified certificate evidence.
 
 Failed implications include a counterexample mapping parameter names to the
 values returned by the solver when available. The check writes
@@ -76,7 +84,9 @@ contains a top-level `status` (`pass` or `fail`), per-atom results, and a
 separate lock result. Each atom result includes its relative `charter` path;
 results are sorted by Charter path and atom name. If the lock does not match,
 otherwise-passing atoms are reported as `unpinned` with detail
-`checked against an unpinned charter text`.
+`checked against an unpinned charter text`. When a certificate is supplied,
+atom results also include `effective_grade` and `effective_grade_complete`
+when a matching claim exists; these fields are omitted otherwise.
 
 ## Exit codes
 
@@ -84,7 +94,8 @@ otherwise-passing atoms are reported as `unpinned` with detail
 |---|---|
 | `0` | The lock, signature, and refinement checks passed. |
 | `1` | A lock, coverage, refinement, or solver-certainty gate failed. |
-| `4` | An input file, manifest, lock, or report could not be read or written. |
+| `4` | An input file, manifest, lock, certificate, or report could not be read or written, or a grade was requested without a certificate. |
 
 Charter checking is read-only with respect to the implementation and does not
-run verification or modify its contracts.
+run verification or modify its contracts. The grade gate evaluates existing
+certificate evidence and does not write a cache.

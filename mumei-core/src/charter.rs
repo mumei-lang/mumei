@@ -47,6 +47,10 @@ pub struct CharterAtomReport {
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub counterexample: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_grade: Option<crate::claimbook::SealGrade>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_grade_complete: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -142,6 +146,26 @@ pub fn check_charters_with_generics(
     generic_implementation: &[Item],
     module_env: &ModuleEnv,
 ) -> Result<CharterReport, String> {
+    let (mut report, _) = check_charters_with_generics_and_matches(
+        root,
+        charter_paths,
+        lock_path,
+        implementation,
+        generic_implementation,
+        module_env,
+    )?;
+    finalize_charter_report(&mut report);
+    Ok(report)
+}
+
+pub fn check_charters_with_generics_and_matches(
+    root: &Path,
+    charter_paths: &[String],
+    lock_path: &Path,
+    implementation: &[Item],
+    generic_implementation: &[Item],
+    module_env: &ModuleEnv,
+) -> Result<(CharterReport, Vec<Option<String>>), String> {
     if charter_paths.is_empty() {
         return Err("at least one charter file is required".to_string());
     }
@@ -225,19 +249,13 @@ pub fn check_charters_with_generics(
             .into_iter()
             .filter(|candidate| implementation_names.insert(candidate.name.clone())),
     );
-    let mut atoms: Vec<_> = charter_atoms
-        .iter()
-        .map(|(path, charter_atom)| {
-            check_atom(path, charter_atom, &implementation_atoms, module_env)
-        })
-        .collect();
-    if lock_report.status != "ok" {
-        for atom in &mut atoms {
-            if atom.status == "ok" {
-                atom.status = "unpinned".to_string();
-                atom.detail = "checked against an unpinned charter text".to_string();
-            }
-        }
+    let mut matched_implementations = Vec::with_capacity(charter_atoms.len());
+    let mut atoms = Vec::with_capacity(charter_atoms.len());
+    for (path, charter_atom) in &charter_atoms {
+        let (atom, matched_implementation) =
+            check_atom(path, charter_atom, &implementation_atoms, module_env);
+        atoms.push(atom);
+        matched_implementations.push(matched_implementation);
     }
     let status = if lock_report.status == "ok" && atoms.iter().all(|atom| atom.status == "ok") {
         "pass"
@@ -245,12 +263,32 @@ pub fn check_charters_with_generics(
         "fail"
     };
 
-    Ok(CharterReport {
-        schema: REPORT_SCHEMA.to_string(),
-        status: status.to_string(),
-        atoms,
-        lock: lock_report,
-    })
+    Ok((
+        CharterReport {
+            schema: REPORT_SCHEMA.to_string(),
+            status: status.to_string(),
+            atoms,
+            lock: lock_report,
+        },
+        matched_implementations,
+    ))
+}
+
+pub fn finalize_charter_report(report: &mut CharterReport) {
+    if report.lock.status != "ok" {
+        for atom in &mut report.atoms {
+            if atom.status == "ok" {
+                atom.status = "unpinned".to_string();
+                atom.detail = "checked against an unpinned charter text".to_string();
+            }
+        }
+    }
+    report.status =
+        if report.lock.status == "ok" && report.atoms.iter().all(|atom| atom.status == "ok") {
+            "pass".to_string()
+        } else {
+            "fail".to_string()
+        };
 }
 
 fn check_lock(
@@ -534,7 +572,7 @@ fn check_atom(
     charter: &Atom,
     implementation: &[NamedAtom<'_>],
     module_env: &ModuleEnv,
-) -> CharterAtomReport {
+) -> (CharterAtomReport, Option<String>) {
     let exact: Vec<_> = implementation
         .iter()
         .filter(|candidate| candidate.name == charter.name)
@@ -553,11 +591,14 @@ fn check_atom(
 
     let candidate = match matches.as_slice() {
         [] => {
-            return atom_report(
-                charter_path,
-                &charter.name,
-                "missing",
-                "no matching implementation atom",
+            return (
+                atom_report(
+                    charter_path,
+                    &charter.name,
+                    "missing",
+                    "no matching implementation atom",
+                    None,
+                ),
                 None,
             )
         }
@@ -568,27 +609,34 @@ fn check_atom(
                 .map(|candidate| candidate.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
-            return atom_report(
-                charter_path,
-                &charter.name,
-                "signature_mismatch",
-                &format!("method name is ambiguous: {names}"),
+            return (
+                atom_report(
+                    charter_path,
+                    &charter.name,
+                    "signature_mismatch",
+                    &format!("method name is ambiguous: {names}"),
+                    None,
+                ),
                 None,
             );
         }
     };
 
+    let matched_implementation = Some(candidate.name.clone());
     if let Some(detail) = signature_mismatch(charter, candidate.atom) {
-        return atom_report(
-            charter_path,
-            &charter.name,
-            "signature_mismatch",
-            &detail,
-            None,
+        return (
+            atom_report(
+                charter_path,
+                &charter.name,
+                "signature_mismatch",
+                &detail,
+                None,
+            ),
+            matched_implementation,
         );
     }
 
-    match check_refinement(charter, candidate.atom, module_env) {
+    let report = match check_refinement(charter, candidate.atom, module_env) {
         Ok(()) => atom_report(
             charter_path,
             &charter.name,
@@ -603,7 +651,8 @@ fn check_atom(
             &detail,
             counterexample,
         ),
-    }
+    };
+    (report, matched_implementation)
 }
 
 fn atom_report(
@@ -619,6 +668,8 @@ fn atom_report(
         status: status.to_string(),
         detail: detail.to_string(),
         counterexample,
+        effective_grade: None,
+        effective_grade_complete: None,
     }
 }
 
