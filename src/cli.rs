@@ -284,6 +284,9 @@ pub(crate) enum Command {
         /// Directory for claimbook.json and CLAIMBOOK.md (default: current directory)
         #[arg(long, default_value = ".")]
         out_dir: String,
+        /// Require every claim to meet this Seal Grade
+        #[arg(long, value_parser = ["G0", "G1", "G2", "G3", "G4", "G5"])]
+        require_grade: Option<String>,
     },
     /// P7-B: Build and run a mumei program as a native binary
     Run {

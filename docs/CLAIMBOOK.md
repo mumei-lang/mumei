@@ -8,9 +8,10 @@ The Claim Book is a read-only report of which atom contracts are machine-checked
 mumei claims src/main.mm
 mumei claims src/main.mm --cert src/main.proof.json --format json
 mumei claims src/main.mm --allow-lean-verified --out-dir build/claims
+mumei claims src/main.mm --require-grade G1
 ```
 
-The default format is `both`, writing `claimbook.json` and `CLAIMBOOK.md` in the current directory. `--format` accepts `json`, `md`, or `both`; `--out-dir` selects the output directory. The default certificate path is the same path used by `mumei verify --proof-cert`. Without a certificate, every current atom is `uncertified`. The command prints a short grade and freshness summary.
+The default format is `both`, writing `claimbook.json` and `CLAIMBOOK.md` in the current directory. `--format` accepts `json`, `md`, or `both`; `--out-dir` selects the output directory. The default certificate path is the same path used by `mumei verify --proof-cert`. If that derived path is absent, every current atom is `uncertified`; an explicitly supplied but missing `--cert` path is an input error. The command prints a short grade and freshness summary.
 
 ## Seal Grade
 
@@ -31,7 +32,29 @@ Z3-discharged obligations are G4. Lean evidence is G4 only when explicitly enabl
 - `drifted`: the atom content changed, Lean translator metadata is stale, or a comparable certificate integrity mismatch was found.
 - `uncertified`: the source atom has no certificate entry.
 
-An integrity mismatch marks every claim as drifted. An integrity mismatch from a different generator version is shown as `incomparable_version` without changing grades on that basis. Certificate atoms absent from the source are listed in `orphaned_entries`. In this version, `effective_grade` is the own grade for fresh evidence and G0 otherwise.
+An integrity mismatch marks every claim as drifted. An integrity mismatch from a different generator version is shown as `incomparable_version` without changing grades on that basis. Certificate atoms absent from the source are listed in `orphaned_entries`.
+
+## Effective grade and limiting premises
+
+The base grade is the own grade for fresh evidence and G0 otherwise. If the certificate lists assumed clauses, the base grade is capped at G1. The effective grade is the minimum of that base grade and the effective grades of dependencies present in the Claim Book. Grades are lowered by monotone fixpoint iteration, so mutually recursive dependencies settle at their minimum grade.
+
+Dependencies not present in the claim set do not lower the grade. They are listed in sorted `unresolved_dependencies`, and `effective_grade_complete` is false when any are missing. `limiting_premises` lists the freshness state, assumed clauses, and direct dependencies that lower the effective grade below the own grade. Each entry includes its kind, name, and grade; the list is empty when the effective grade equals the own grade. Markdown presents examples as `dependency b (G1); assumed_clause x > 0 (G1)`, with `-` when there are no limiting premises.
+
+## Trusted base
+
+The `trusted_base` section lists the solver and generator versions, translator versions, bridge lemma hashes, kernel axioms, trusted atoms, and assumed clauses represented by the report. Lists are sorted and unique. Without a certificate, versions are null and the trusted atoms and assumed clauses are read from the source declarations.
+
+## Grade gate and exit codes
+
+`--require-grade G0` through `--require-grade G5` requires every claim to meet the requested effective grade. The report files are written before the gate is evaluated. A failing claim is printed to standard error with its limiting premises.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Reports written; every claim meets the requested grade, or no gate was requested. |
+| 1 | At least one claim is below `--require-grade`. |
+| 2 | Command-line arguments are invalid, including an unsupported grade. |
+| 4 | Input or certificate could not be loaded. |
+| 5 | An output artifact could not be written. |
 
 ## JSON
 
@@ -47,6 +70,15 @@ The deterministic JSON schema is `mumei.claimbook/v1`. A compact example:
     "mumei_version": "0.6.22",
     "z3_version": "4.14.1"
   },
+  "trusted_base": {
+    "solver_version": "4.14.1",
+    "mumei_version": "0.6.22",
+    "translator_versions": [],
+    "bridge_lemma_hashes": [],
+    "kernel_axioms": [],
+    "trusted_atoms": [],
+    "assumed_clauses": []
+  },
   "summary": {
     "by_effective_grade": {"G0": 0, "G1": 0, "G2": 0, "G3": 0, "G4": 1, "G5": 0},
     "by_freshness": {"fresh": 1, "drifted": 0, "uncertified": 0},
@@ -58,6 +90,7 @@ The deterministic JSON schema is `mumei.claimbook/v1`. A compact example:
     "grade_label": "machine-sealed",
     "effective_grade": "G4",
     "effective_grade_label": "machine-sealed",
+    "effective_grade_complete": true,
     "evidence_kind": "z3",
     "freshness": "fresh",
     "reason": "Z3 discharged the obligation",
@@ -65,6 +98,8 @@ The deterministic JSON schema is `mumei.claimbook/v1`. A compact example:
     "ensures": "result == x + 1",
     "assumed_clauses": [],
     "dependencies": [],
+    "unresolved_dependencies": [],
+    "limiting_premises": [],
     "content_hash": "...",
     "proof_hash": "..."
   }],

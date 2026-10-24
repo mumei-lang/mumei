@@ -1,5 +1,5 @@
 use crate::pipeline::try_load_and_prepare_with_full_options;
-use mumei_core::claimbook::{create_claimbook, render_markdown};
+use mumei_core::claimbook::{create_claimbook, render_markdown, Claim, SealGrade};
 use mumei_core::parser::Item;
 use mumei_core::{parser, proof_cert};
 use std::fs;
@@ -11,6 +11,7 @@ pub(crate) fn cmd_claims(
     allow_lean_verified: bool,
     format: &str,
     out_dir: &str,
+    require_grade: Option<&str>,
 ) {
     let cert_path = cert_arg
         .map(PathBuf::from)
@@ -20,12 +21,12 @@ pub(crate) fn cmd_claims(
             Ok(cert) => Some(cert),
             Err(error) => {
                 eprintln!("❌ {error}");
-                std::process::exit(1);
+                std::process::exit(super::verify::EXIT_INPUT_ERROR);
             }
         }
     } else if let Some(cert_arg) = cert_arg {
         eprintln!("❌ Proof certificate not found: {cert_arg}");
-        std::process::exit(1);
+        std::process::exit(super::verify::EXIT_INPUT_ERROR);
     } else {
         None
     };
@@ -35,7 +36,7 @@ pub(crate) fn cmd_claims(
             Ok(loaded) => loaded,
             Err(error) => {
                 eprintln!("❌ {error}");
-                std::process::exit(1);
+                std::process::exit(super::verify::EXIT_INPUT_ERROR);
             }
         };
     let mut atoms: Vec<&parser::Atom> = items
@@ -116,4 +117,65 @@ pub(crate) fn cmd_claims(
         "Claim Book: {} atoms; effective grades: {}; freshness: {}",
         book.summary.total, grades, freshness
     );
+
+    if let Some(required_grade) = require_grade {
+        let required_grade = match required_grade {
+            "G0" => SealGrade::G0,
+            "G1" => SealGrade::G1,
+            "G2" => SealGrade::G2,
+            "G3" => SealGrade::G3,
+            "G4" => SealGrade::G4,
+            "G5" => SealGrade::G5,
+            _ => unreachable!("clap restricts required grade values"),
+        };
+        let mut rejected = false;
+        for claim in book
+            .claims
+            .iter()
+            .filter(|claim| claim.effective_grade < required_grade)
+        {
+            rejected = true;
+            eprintln!(
+                "{}: effective {} ({}), required {}; limiting: {}",
+                claim.atom,
+                grade_code(claim.effective_grade),
+                claim.effective_grade.label(),
+                grade_code(required_grade),
+                limiting_premises_text(claim)
+            );
+        }
+        if rejected {
+            std::process::exit(super::verify::EXIT_REJECTED);
+        }
+    }
+}
+
+fn grade_code(grade: SealGrade) -> &'static str {
+    match grade {
+        SealGrade::G0 => "G0",
+        SealGrade::G1 => "G1",
+        SealGrade::G2 => "G2",
+        SealGrade::G3 => "G3",
+        SealGrade::G4 => "G4",
+        SealGrade::G5 => "G5",
+    }
+}
+
+fn limiting_premises_text(claim: &Claim) -> String {
+    if claim.limiting_premises.is_empty() {
+        return "-".to_string();
+    }
+    claim
+        .limiting_premises
+        .iter()
+        .map(|premise| {
+            format!(
+                "{} {} ({})",
+                premise.kind,
+                premise.name,
+                grade_code(premise.grade)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
