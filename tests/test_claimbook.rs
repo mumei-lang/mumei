@@ -3,6 +3,7 @@ use mumei_core::proof_cert::{
 };
 use mumei_core::verification;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -78,6 +79,27 @@ fn claims(dir: &Path, source: &Path, args: &[&str]) -> Output {
 fn json_report(path: &Path) -> Value {
     serde_json::from_slice(&std::fs::read(path).expect("read claimbook JSON"))
         .expect("parse claimbook JSON")
+}
+
+fn files_under(root: &Path) -> BTreeSet<PathBuf> {
+    fn collect(root: &Path, current: &Path, files: &mut BTreeSet<PathBuf>) {
+        for entry in std::fs::read_dir(current).expect("read directory") {
+            let path = entry.expect("read directory entry").path();
+            if path.is_dir() {
+                collect(root, &path, files);
+            } else {
+                files.insert(
+                    path.strip_prefix(root)
+                        .expect("path under root")
+                        .to_path_buf(),
+                );
+            }
+        }
+    }
+
+    let mut files = BTreeSet::new();
+    collect(root, root, &mut files);
+    files
 }
 
 fn atom<'a>(report: &'a Value, name: &str) -> &'a Value {
@@ -563,6 +585,106 @@ fn lean_verified_evidence_requires_opt_in_and_current_audit() {
     let claim = atom(&report, "verified_value");
     assert_eq!(claim["grade"], "G4");
     assert_eq!(claim["evidence_kind"], "lean");
+}
+
+#[test]
+fn claims_with_import_does_not_persist_resolver_cache_or_create_unrequested_files() {
+    let dir = fresh_dir("read_only_import");
+    let source = dir.join("main.mm");
+    std::fs::write(
+        &source,
+        r#"
+import "dependency" as dependency;
+
+atom main_value(x: i64) -> i64 {
+    requires: true;
+    ensures: result == x;
+    body: x
+}
+"#,
+    )
+    .expect("write source with import");
+    std::fs::write(
+        dir.join("dependency.mm"),
+        r#"
+atom dependency_value(x: i64) -> i64 {
+    requires: true;
+    ensures: result == x;
+    body: x
+}
+"#,
+    )
+    .expect("write imported fixture");
+    certify(&dir, &source);
+
+    let cache_path = dir.join(".mumei_cache");
+    assert!(
+        cache_path.exists(),
+        "verify should exercise resolver caching"
+    );
+    std::fs::remove_file(&cache_path).expect("remove resolver cache before claims");
+
+    let out_dir = dir.join("report");
+    let out_dir_arg = out_dir.to_string_lossy().into_owned();
+    let before = files_under(&dir);
+    let first = claims(
+        &dir,
+        &source,
+        &["--format", "both", "--out-dir", &out_dir_arg],
+    );
+    assert!(
+        first.status.success(),
+        "claims failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        !cache_path.exists(),
+        "claims must not recreate .mumei_cache"
+    );
+
+    let json_path = PathBuf::from("report/claimbook.json");
+    let markdown_path = PathBuf::from("report/CLAIMBOOK.md");
+    let expected_new_files = BTreeSet::from([json_path.clone(), markdown_path.clone()]);
+    let created = files_under(&dir)
+        .difference(&before)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(created, expected_new_files);
+    let first_json = std::fs::read(dir.join(&json_path)).expect("read first JSON report");
+    let first_markdown =
+        std::fs::read(dir.join(&markdown_path)).expect("read first Markdown report");
+
+    let second = claims(
+        &dir,
+        &source,
+        &["--format", "both", "--out-dir", &out_dir_arg],
+    );
+    assert!(
+        second.status.success(),
+        "second claims run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        std::fs::read(dir.join(&json_path)).expect("read second JSON report"),
+        first_json
+    );
+    assert_eq!(
+        std::fs::read(dir.join(&markdown_path)).expect("read second Markdown report"),
+        first_markdown
+    );
+    assert!(
+        !cache_path.exists(),
+        "claims must remain read-only on rerun"
+    );
+    assert_eq!(
+        files_under(&dir)
+            .difference(&before)
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        expected_new_files
+    );
 }
 
 #[test]

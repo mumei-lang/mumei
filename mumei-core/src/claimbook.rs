@@ -460,13 +460,46 @@ pub fn create_claimbook(
     let mut claims = BTreeMap::new();
     for (name, source_atom) in &source_atoms {
         let entry = certified.get(name).copied();
-        let mut freshness = entry
+        let verification_result = entry
             .and_then(|_| verification_results.get(*name))
-            .map(|result| freshness_from_verification_status(result))
-            .unwrap_or(Freshness::Uncertified);
-        if integrity == CertificateIntegrity::Mismatch {
-            freshness = Freshness::Drifted;
-        }
+            .map(String::as_str);
+        let stale_lean_metadata = entry.is_some_and(|entry| {
+            entry.z3_check_result == status::Z3_LEAN_VERIFIED
+                && !proof_cert::lean_certificate_metadata_is_current(entry)
+        });
+        let (freshness, freshness_reason) = if integrity == CertificateIntegrity::Mismatch {
+            (
+                Freshness::Drifted,
+                Some("certificate integrity hash does not match"),
+            )
+        } else if verification_result == Some(status::CERTIFICATE_CHANGED) {
+            (
+                Freshness::Drifted,
+                Some("source content differs from its certificate"),
+            )
+        } else if stale_lean_metadata
+            || verification_result == Some(status::CERTIFICATE_STALE_TRANSLATOR)
+        {
+            (
+                Freshness::Drifted,
+                Some("Lean translator metadata is stale; regenerate the Lean certificate"),
+            )
+        } else {
+            match verification_result
+                .map(freshness_from_verification_status)
+                .unwrap_or(Freshness::Uncertified)
+            {
+                Freshness::Fresh => (Freshness::Fresh, None),
+                Freshness::Drifted => (
+                    Freshness::Drifted,
+                    Some("source content differs from its certificate"),
+                ),
+                Freshness::Uncertified => (
+                    Freshness::Uncertified,
+                    Some("no current certificate entry exists"),
+                ),
+            }
+        };
 
         let (grade, evidence_kind, own_reason) = entry
             .map(|entry| own_grade(entry, &source_atom.trust_level, allow_lean_verified))
@@ -475,19 +508,15 @@ pub fn create_claimbook(
                 "none".to_string(),
                 "no certificate entry exists for this atom".to_string(),
             ));
-        let freshness_reason = match freshness {
-            Freshness::Fresh => None,
-            Freshness::Drifted if integrity == CertificateIntegrity::Mismatch => {
-                Some("certificate integrity hash does not match")
-            }
-            Freshness::Drifted => Some("source content differs from its certificate"),
-            Freshness::Uncertified => Some("no current certificate entry exists"),
-        };
         let reason = match freshness_reason {
-            Some(freshness_reason) if entry.is_some() => {
-                format!("{freshness_reason}; {own_reason}")
+            Some(reason)
+                if reason
+                    == "Lean translator metadata is stale; regenerate the Lean certificate" =>
+            {
+                reason.to_string()
             }
-            Some(freshness_reason) => freshness_reason.to_string(),
+            Some(reason) if entry.is_some() => format!("{reason}; {own_reason}"),
+            Some(reason) => reason.to_string(),
             None => own_reason,
         };
 
@@ -782,6 +811,31 @@ mod tests {
         .expect("construct proof certificate")
     }
 
+    fn stale_lean_certificate(source: &crate::parser::Atom) -> ProofCertificate {
+        let results = std::collections::HashMap::from([(
+            source.name.clone(),
+            (
+                status::Z3_LEAN_VERIFIED.to_string(),
+                status::VERIFIED.to_string(),
+            ),
+        )]);
+        let mut cert = proof_cert::generate_certificate(
+            "sample.mm",
+            &[source],
+            &results,
+            &verification::ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        let current_metadata = lean_atom(Some("passed"), Some(vec!["propext"]));
+        cert.atoms[0].translator_version = "old-translator".to_string();
+        cert.atoms[0].bridge_lemma_hash = verification::LEAN_BRIDGE_LEMMA_HASH.to_string();
+        cert.atoms[0].lean_result_metadata = current_metadata.lean_result_metadata;
+        proof_cert::refresh_certificate_integrity(&mut cert);
+        cert
+    }
+
     fn source_atom(name: &str) -> crate::parser::Atom {
         crate::parser::Atom {
             name: name.to_string(),
@@ -968,6 +1022,43 @@ mod tests {
         ] {
             assert_eq!(freshness_from_verification_status(value), expected);
         }
+    }
+
+    #[test]
+    fn stale_lean_metadata_drifts_without_opt_in_and_keeps_its_cause() {
+        let source = source_atom("sample");
+        let cert = stale_lean_certificate(&source);
+        let atoms = [&source];
+
+        let without_opt_in =
+            create_claimbook("sample.mm", "sample.proof.json", Some(&cert), &atoms, false);
+        let without_claim = &without_opt_in.claims[0];
+        assert_eq!(without_claim.freshness, Freshness::Drifted);
+        assert_eq!(
+            without_claim.reason,
+            "Lean translator metadata is stale; regenerate the Lean certificate"
+        );
+
+        let with_opt_in =
+            create_claimbook("sample.mm", "sample.proof.json", Some(&cert), &atoms, true);
+        let with_claim = &with_opt_in.claims[0];
+        assert_eq!(with_claim.freshness, Freshness::Drifted);
+        assert_eq!(with_claim.reason, without_claim.reason);
+
+        let mut changed_source = source.clone();
+        changed_source.body_expr.push_str(" + 1");
+        let changed_atoms = [&changed_source];
+        let changed = create_claimbook(
+            "sample.mm",
+            "sample.proof.json",
+            Some(&cert),
+            &changed_atoms,
+            false,
+        );
+        assert_eq!(changed.claims[0].freshness, Freshness::Drifted);
+        assert!(changed.claims[0]
+            .reason
+            .starts_with("source content differs from its certificate"));
     }
 
     #[test]
