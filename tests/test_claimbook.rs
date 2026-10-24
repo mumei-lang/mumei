@@ -352,7 +352,7 @@ fn formats_output_directories_and_missing_certificates_are_handled() {
 }
 
 #[test]
-fn an_explicit_missing_certificate_returns_exit_one() {
+fn an_explicit_missing_certificate_returns_exit_four() {
     let dir = fresh_dir("missing_explicit_cert");
     let source = copy_fixture(&dir, "claimbook_atoms.mm", "main.mm");
     let missing_cert = dir.join("missing.proof.json");
@@ -361,7 +361,7 @@ fn an_explicit_missing_certificate_returns_exit_one() {
 
     assert_eq!(
         output.status.code(),
-        Some(1),
+        Some(4),
         "claims should fail for an explicit missing certificate\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
@@ -369,6 +369,111 @@ fn an_explicit_missing_certificate_returns_exit_one() {
     assert!(String::from_utf8_lossy(&output.stderr).contains(&format!(
         "❌ Proof certificate not found: {missing_cert_arg}"
     )));
+}
+
+#[test]
+fn dependency_and_assumption_evidence_propagate_and_grade_gate_writes_reports() {
+    let dir = fresh_dir("propagation");
+    let source = copy_fixture(&dir, "claimbook_propagation.mm", "main.mm");
+    let cert_path = certify(&dir, &source);
+    let cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&cert_path).expect("read generated certificate"))
+            .expect("parse generated certificate");
+    let caller_certificate = cert
+        .atoms
+        .iter()
+        .find(|entry| entry.name == "trusted_caller")
+        .expect("caller certificate");
+    assert_eq!(
+        caller_certificate.dependencies,
+        vec!["trusted_leaf".to_string()]
+    );
+
+    let gate_g4_dir = dir.join("gate-g4");
+    let gate_g4_dir_arg = gate_g4_dir.to_string_lossy().into_owned();
+    let gate_g4 = claims(
+        &dir,
+        &source,
+        &[
+            "--require-grade",
+            "G4",
+            "--format",
+            "both",
+            "--out-dir",
+            &gate_g4_dir_arg,
+        ],
+    );
+    assert_eq!(gate_g4.status.code(), Some(1));
+    assert!(gate_g4_dir.join("claimbook.json").exists());
+    assert!(gate_g4_dir.join("CLAIMBOOK.md").exists());
+    let report = json_report(&gate_g4_dir.join("claimbook.json"));
+    assert_eq!(atom(&report, "trusted_caller")["effective_grade"], "G1");
+    assert_eq!(
+        atom(&report, "trusted_caller")["limiting_premises"],
+        serde_json::json!([{
+            "kind": "dependency",
+            "name": "trusted_leaf",
+            "grade": "G1"
+        }])
+    );
+    assert!(atom(&report, "trusted_caller")["limiting_premises"][0]
+        .get("matched_from")
+        .is_none());
+    assert_eq!(atom(&report, "assumed_contract")["effective_grade"], "G1");
+    assert_eq!(
+        atom(&report, "assumed_contract")["limiting_premises"],
+        serde_json::json!([{
+            "kind": "assumed_clause",
+            "name": "x > 0",
+            "grade": "G1"
+        }])
+    );
+    assert_eq!(
+        report["trusted_base"]["trusted_atoms"],
+        serde_json::json!(["trusted_leaf"])
+    );
+    assert_eq!(
+        report["trusted_base"]["assumed_clauses"],
+        serde_json::json!([{
+            "atom": "assumed_contract",
+            "clause": "requires: x > 0"
+        }])
+    );
+    let gate_error = String::from_utf8_lossy(&gate_g4.stderr);
+    assert!(gate_error.contains("trusted_leaf: effective G1 (vouched), required G4; limiting: -"));
+    assert!(gate_error.contains(
+        "trusted_caller: effective G1 (vouched), required G4; limiting: dependency trusted_leaf (G1)"
+    ));
+    assert!(gate_error.contains(
+        "assumed_contract: effective G1 (vouched), required G4; limiting: assumed_clause x > 0 (G1)"
+    ));
+
+    for required_grade in ["G1", "G0"] {
+        let out_dir = dir.join(format!("gate-{required_grade}"));
+        let out_dir_arg = out_dir.to_string_lossy().into_owned();
+        let output = claims(
+            &dir,
+            &source,
+            &[
+                "--require-grade",
+                required_grade,
+                "--format",
+                "json",
+                "--out-dir",
+                &out_dir_arg,
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "grade gate {required_grade} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(out_dir.join("claimbook.json").exists());
+    }
+
+    let invalid_grade = claims(&dir, &source, &["--require-grade", "G6"]);
+    assert_eq!(invalid_grade.status.code(), Some(2));
 }
 
 #[test]
@@ -416,6 +521,83 @@ fn impl_methods_use_qualified_atom_names() {
     let report = json_report(&out_dir.join("claimbook.json"));
     assert_eq!(report["claims"].as_array().expect("claims array").len(), 1);
     assert_eq!(report["claims"][0]["atom"], "Point::get");
+}
+
+#[test]
+fn method_name_dependency_keeps_qualified_premise_name() {
+    let dir = fresh_dir("method-name-premise");
+    let source = copy_fixture(&dir, "claimbook_impl.mm", "impl.mm");
+    let contents = std::fs::read_to_string(&source)
+        .expect("read fixture")
+        .replace("    atom get(", "    trusted atom get(");
+    std::fs::write(
+        &source,
+        format!(
+            "{contents}\natom caller() -> i64\n  requires: true;\n  ensures: result == 7;\n  body: 7;\n"
+        ),
+    )
+    .expect("write method dependency source");
+    let cert_path = certify(&dir, &source);
+    let mut cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&cert_path).expect("read generated certificate"))
+            .expect("parse generated certificate");
+    cert.atoms
+        .iter_mut()
+        .find(|entry| entry.name == "caller")
+        .expect("caller certificate")
+        .dependencies = vec!["get".to_string()];
+    refresh_certificate_integrity(&mut cert);
+    std::fs::write(
+        &cert_path,
+        serde_json::to_vec_pretty(&cert).expect("serialize method dependency certificate"),
+    )
+    .expect("write method dependency certificate");
+
+    let out_dir = dir.join("report");
+    let out_dir_arg = out_dir.to_string_lossy().into_owned();
+    let output = claims(
+        &dir,
+        &source,
+        &["--format", "both", "--out-dir", &out_dir_arg],
+    );
+    assert!(
+        output.status.success(),
+        "claims failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = json_report(&out_dir.join("claimbook.json"));
+    let caller = atom(&report, "caller");
+    assert_eq!(caller["dependencies"], serde_json::json!(["Point::get"]));
+    assert_eq!(
+        caller["limiting_premises"],
+        serde_json::json!([{
+            "kind": "dependency",
+            "name": "Point::get",
+            "matched_from": "get",
+            "grade": "G1"
+        }])
+    );
+    assert_eq!(caller["effective_grade_complete"], false);
+    let markdown =
+        std::fs::read_to_string(out_dir.join("CLAIMBOOK.md")).expect("read Claim Book markdown");
+    assert!(markdown.contains("dependency `Point::get` (matched from `get` by method name) (G1)"));
+
+    let gate = claims(
+        &dir,
+        &source,
+        &[
+            "--require-grade",
+            "G4",
+            "--format",
+            "json",
+            "--out-dir",
+            &out_dir_arg,
+        ],
+    );
+    assert_eq!(gate.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&gate.stderr)
+        .contains("dependency `Point::get` (matched from `get` by method name) (G1)"));
 }
 
 #[test]
@@ -586,14 +768,14 @@ atom dependency_value(x: i64) -> i64 {
 }
 
 #[test]
-fn unparsable_certificate_returns_exit_one() {
+fn unparsable_certificate_and_input_return_exit_four() {
     let dir = fresh_dir("bad-cert");
     let source = copy_fixture(&dir, "claimbook_atoms.mm", "main.mm");
     let cert = dir.join("invalid.json");
     std::fs::write(&cert, "{").expect("write invalid certificate");
     let cert_arg = cert.to_string_lossy().into_owned();
     let output = claims(&dir, &source, &["--cert", &cert_arg]);
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(4));
 
     let invalid_source = dir.join("invalid.mm");
     std::fs::write(&invalid_source, "atom").expect("write invalid source");
@@ -607,5 +789,5 @@ fn unparsable_certificate_returns_exit_one() {
             dir.to_str().expect("UTF-8 path"),
         ],
     );
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(4));
 }

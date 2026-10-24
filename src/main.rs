@@ -90,12 +90,14 @@ fn main() {
             allow_lean_verified,
             format,
             out_dir,
+            require_grade,
         }) => commands::claims::cmd_claims(
             &input,
             cert.as_deref(),
             allow_lean_verified,
             &format,
             &out_dir,
+            require_grade.as_deref(),
         ),
         Some(Command::Run {
             input,
