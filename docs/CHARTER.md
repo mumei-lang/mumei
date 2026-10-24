@@ -37,8 +37,11 @@ lock = "charter.lock"
 ```
 
 The `lock` value defaults to `charter.lock`. Repeated `--charter` arguments
-select the Charter files for a command; with no such arguments, the configured
-files are used.
+select additional Charter files for a command; with no such arguments, the
+configured files are used. A check always covers every Charter listed in the
+lock as well as any explicitly selected files. Charter paths are resolved
+within the canonical project directory; a symlink that resolves outside it is
+rejected.
 
 ## Check
 
@@ -49,22 +52,31 @@ mumei charter check src/main.mm --charter specs/core.charter.mm --lock charter.l
 
 The check applies these gates in order:
 
-1. Every selected Charter must be present in the lock and its file hash must
-   match. Missing or changed files require a new lock.
+1. Every Charter listed in the lock and every explicitly selected Charter is
+   covered. Each locked file hash must match. Missing or changed files require
+   a new lock.
 2. Every Charter atom must have an implementation atom with the same name,
-   parameter names and types, and return type. A bare method name can resolve
-   to a uniquely matching `Type::method`.
+   generic parameters, parameter names, types, ownership/borrow modes,
+   consumed parameters, and return type. A bare method name can resolve to a
+   uniquely matching `Type::method`.
 3. The implementation must not require more than the Charter and must ensure
    the Charter's postcondition. These implications are checked with the
    implementation's parameter refinements. Empty `requires` and `ensures`
    clauses are treated as `true`. Unsupported clauses or solver uncertainty
    fail closed as `inconclusive`.
+4. Top-level quantified constraints must be identical after whitespace
+   normalization. A difference is reported as `inconclusive`; clauses marked
+   `ensures check` are not used as caller-visible guarantees.
 
 Failed implications include a counterexample mapping parameter names to the
 values returned by the solver when available. The check writes
 `charter_report.json` in the project directory. `--json` also prints that
 report to standard output. The report schema is `mumei.charter-report/v1` and
-contains per-atom results and a separate lock result.
+contains a top-level `status` (`pass` or `fail`), per-atom results, and a
+separate lock result. Each atom result includes its relative `charter` path;
+results are sorted by Charter path and atom name. If the lock does not match,
+otherwise-passing atoms are reported as `unpinned` with detail
+`checked against an unpinned charter text`.
 
 ## Exit codes
 

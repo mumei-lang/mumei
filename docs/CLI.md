@@ -108,12 +108,16 @@ mumei charter check <impl.mm> [--charter <file>]... [--lock <path>] [--json]
 same signatures as the Charter atoms, and proves that their contracts refine
 the Charter contracts. When `mumei.toml` has a `[charter]` section, its
 `files` and `lock` values supply defaults; the lock path defaults to
-`charter.lock`.
+`charter.lock`. A check covers every Charter in the lock plus any files passed
+with `--charter`. A Charter symlink that resolves outside the project is
+rejected.
 
 The check writes `charter_report.json`; `--json` also prints the report to
-standard output. A passing check exits `0`, a failed gate exits `1`, and an
-input or report I/O error exits `4`. See [Charter](CHARTER.md) for the file
-format, lock behavior, and check semantics.
+standard output. Its top-level `status` is `pass` or `fail`, and every atom
+result identifies its relative Charter path. If the lock is mismatched,
+otherwise-passing atoms are marked `unpinned`. A passing check exits `0`, a
+failed gate exits `1`, and an input or report I/O error exits `4`. See
+[Charter](CHARTER.md) for the file format, lock behavior, and check semantics.
 
 ### SARIF output
 

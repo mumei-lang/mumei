@@ -1,6 +1,6 @@
 use crate::cli::CharterCommand;
 use crate::pipeline::try_load_and_prepare_with_full_options_and_persistence;
-use mumei_core::{charter, manifest};
+use mumei_core::{charter, manifest, parser};
 use std::fs;
 use std::path::PathBuf;
 
@@ -44,11 +44,23 @@ fn cmd_check(input: &str, charter_args: &[String], lock_arg: Option<&str>, json:
             Ok(loaded) => loaded,
             Err(error) => return input_error(&error),
         };
-    let report = match charter::check_charters(
+    let generic_implementation =
+        match parser::parse_module_checked(&crate::pipeline::load_source(input)) {
+            Ok(items) => items,
+            Err(errors) => {
+                return input_error(&format!(
+                    "could not parse implementation '{}': {}",
+                    input,
+                    errors.join("\n")
+                ))
+            }
+        };
+    let report = match charter::check_charters_with_generics(
         &root,
         &charter_paths,
         &lock_path,
         &implementation,
+        &generic_implementation,
         &module_env,
     ) {
         Ok(report) => report,
@@ -71,8 +83,7 @@ fn cmd_check(input: &str, charter_args: &[String], lock_arg: Option<&str>, json:
     if json {
         println!("{}", String::from_utf8_lossy(&report_bytes));
     } else {
-        let passed =
-            report.lock.status == "ok" && report.atoms.iter().all(|atom| atom.status == "ok");
+        let passed = report.status == "pass";
         println!(
             "Charter check {}: {} atom(s); report: {}",
             if passed { "passed" } else { "failed" },
@@ -92,7 +103,7 @@ fn cmd_check(input: &str, charter_args: &[String], lock_arg: Option<&str>, json:
         }
     }
 
-    if report.lock.status == "ok" && report.atoms.iter().all(|atom| atom.status == "ok") {
+    if report.status == "pass" {
         0
     } else {
         1
@@ -103,7 +114,7 @@ fn charter_paths_and_lock(
     charter_args: &[String],
     lock_arg: Option<&str>,
 ) -> Result<(PathBuf, Vec<String>, PathBuf), String> {
-    let (root, config) = match manifest::find_and_load() {
+    let (root, config) = match find_manifest_for_charter()? {
         Some((root, manifest)) => (root, manifest.charter),
         None => (
             std::env::current_dir()
@@ -111,6 +122,12 @@ fn charter_paths_and_lock(
             None,
         ),
     };
+    let root = root.canonicalize().map_err(|error| {
+        format!(
+            "could not resolve project root '{}': {error}",
+            root.display()
+        )
+    })?;
     let charter_paths = if charter_args.is_empty() {
         config
             .as_ref()
@@ -129,6 +146,23 @@ fn charter_paths_and_lock(
         .or_else(|| config.map(|config| PathBuf::from(config.lock)))
         .unwrap_or_else(|| PathBuf::from("charter.lock"));
     Ok((root, charter_paths, lock_path))
+}
+
+fn find_manifest_for_charter() -> Result<Option<(PathBuf, manifest::Manifest)>, String> {
+    let mut dir = std::env::current_dir()
+        .map_err(|error| format!("could not read current directory: {error}"))?;
+    loop {
+        let path = dir.join("mumei.toml");
+        if path.exists() {
+            return manifest::load(&path)
+                .map(|manifest| Some((dir, manifest)))
+                .map_err(|error| format!("could not load manifest: {error}"));
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    Ok(None)
 }
 
 fn input_error(message: &str) -> i32 {

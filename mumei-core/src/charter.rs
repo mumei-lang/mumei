@@ -1,4 +1,5 @@
 use crate::parser::{self, Atom, Item, TrustLevel};
+use crate::verification::contract_view::{contract_view, ContractView};
 use crate::verification::spec_validation::{
     assert_clause, assert_negated_clause, assert_parameter_refinements, check_with_deadline,
     seed_env, validation_ctx, ClauseLoweringOutcome, DEFAULT_SPEC_VALIDATION_TIMEOUT_MS,
@@ -40,6 +41,7 @@ pub struct LockReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CharterAtomReport {
+    pub charter: String,
     pub name: String,
     pub status: String,
     pub detail: String,
@@ -50,6 +52,7 @@ pub struct CharterAtomReport {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CharterReport {
     pub schema: String,
+    pub status: String,
     pub atoms: Vec<CharterAtomReport>,
     pub lock: LockReport,
 }
@@ -58,6 +61,12 @@ pub struct CharterReport {
 struct NamedAtom<'a> {
     name: String,
     atom: &'a Atom,
+}
+
+#[derive(Debug)]
+struct LockEvaluation {
+    report: LockReport,
+    charter_paths: Vec<String>,
 }
 
 enum ImplicationResult {
@@ -72,11 +81,14 @@ pub fn write_lock(root: &Path, charter_paths: &[String], lock_path: &Path) -> Re
     if charter_paths.is_empty() {
         return Err("at least one charter file is required".to_string());
     }
+    let root = canonical_root(root)?;
 
     let mut hashes = BTreeMap::new();
     for path in charter_paths {
         validate_charter_path(path)?;
-        let bytes = fs::read(root.join(path))
+        let charter_path = canonical_charter_path(&root, path)
+            .map_err(|error| format!("could not read charter '{path}': {error}"))?;
+        let bytes = fs::read(&charter_path)
             .map_err(|error| format!("could not read charter '{path}': {error}"))?;
         hashes.insert(path.clone(), format!("{:x}", Sha256::digest(bytes)));
     }
@@ -92,7 +104,7 @@ pub fn write_lock(root: &Path, charter_paths: &[String], lock_path: &Path) -> Re
         .map_err(|error| format!("could not serialize charter lock: {error}"))?;
     bytes.push(b'\n');
 
-    let path = rooted_path(root, lock_path);
+    let path = canonical_lock_path(&root, lock_path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!(
@@ -112,6 +124,24 @@ pub fn check_charters(
     implementation: &[Item],
     module_env: &ModuleEnv,
 ) -> Result<CharterReport, String> {
+    check_charters_with_generics(
+        root,
+        charter_paths,
+        lock_path,
+        implementation,
+        &[],
+        module_env,
+    )
+}
+
+pub fn check_charters_with_generics(
+    root: &Path,
+    charter_paths: &[String],
+    lock_path: &Path,
+    implementation: &[Item],
+    generic_implementation: &[Item],
+    module_env: &ModuleEnv,
+) -> Result<CharterReport, String> {
     if charter_paths.is_empty() {
         return Err("at least one charter file is required".to_string());
     }
@@ -119,13 +149,31 @@ pub fn check_charters(
         validate_charter_path(path)?;
     }
 
-    let lock_report = check_lock(root, charter_paths, lock_path)?;
+    let root = canonical_root(root)?;
+    let LockEvaluation {
+        report: lock_report,
+        charter_paths: pinned_charter_paths,
+    } = check_lock(&root, charter_paths, lock_path)?;
     let mut charter_atoms = Vec::new();
     let mut paths = charter_paths.to_vec();
+    paths.extend(pinned_charter_paths);
     paths.sort();
     paths.dedup();
     for relative_path in paths {
-        let path = root.join(&relative_path);
+        if validate_charter_path(&relative_path).is_err() {
+            continue;
+        }
+        let path = match root.join(&relative_path).canonicalize() {
+            Ok(path) if path.starts_with(&root) => path,
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "could not resolve charter '{}': {error}",
+                    relative_path
+                ))
+            }
+        };
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -153,24 +201,45 @@ pub fn check_charters(
                         atom.name, relative_path
                     ));
                 }
-                charter_atoms.push(atom);
+                charter_atoms.push((relative_path.clone(), atom));
             }
         }
     }
 
-    charter_atoms.sort_by(|left, right| left.name.cmp(&right.name));
+    charter_atoms.sort_by(|(left_path, left), (right_path, right)| {
+        left_path
+            .cmp(right_path)
+            .then_with(|| left.name.cmp(&right.name))
+    });
     if charter_atoms.is_empty() && lock_report.status == "ok" {
         return Err("no charter atoms were found".to_string());
     }
 
-    let implementation_atoms = implementation_atoms(implementation);
-    let atoms = charter_atoms
+    let mut implementation_atoms = implementation_atoms(implementation);
+    implementation_atoms.extend(generic_implementation_atoms(generic_implementation));
+    let mut atoms: Vec<_> = charter_atoms
         .iter()
-        .map(|charter_atom| check_atom(charter_atom, &implementation_atoms, module_env))
+        .map(|(path, charter_atom)| {
+            check_atom(path, charter_atom, &implementation_atoms, module_env)
+        })
         .collect();
+    if lock_report.status != "ok" {
+        for atom in &mut atoms {
+            if atom.status == "ok" {
+                atom.status = "unpinned".to_string();
+                atom.detail = "checked against an unpinned charter text".to_string();
+            }
+        }
+    }
+    let status = if lock_report.status == "ok" && atoms.iter().all(|atom| atom.status == "ok") {
+        "pass"
+    } else {
+        "fail"
+    };
 
     Ok(CharterReport {
         schema: REPORT_SCHEMA.to_string(),
+        status: status.to_string(),
         atoms,
         lock: lock_report,
     })
@@ -180,18 +249,32 @@ fn check_lock(
     root: &Path,
     charter_paths: &[String],
     lock_path: &Path,
-) -> Result<LockReport, String> {
-    let path = rooted_path(root, lock_path);
+) -> Result<LockEvaluation, String> {
+    let root = canonical_root(root)?;
+    let path = canonical_lock_path(&root, lock_path)?;
+    let mut requested = charter_paths.to_vec();
+    requested.sort();
+    requested.dedup();
+    let mut mismatches = requested_charter_mismatches(&root, &requested)?;
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(LockReport {
-                status: "mismatch".to_string(),
-                mismatches: vec![LockMismatch {
-                    path: lock_path.display().to_string(),
-                    detail: "lock file is missing".to_string(),
-                }],
-            })
+            mismatches.push(LockMismatch {
+                path: lock_path.display().to_string(),
+                detail: "lock file is missing".to_string(),
+            });
+            mismatches.sort_by(|left, right| {
+                left.path
+                    .cmp(&right.path)
+                    .then_with(|| left.detail.cmp(&right.detail))
+            });
+            return Ok(LockEvaluation {
+                report: LockReport {
+                    status: "mismatch".to_string(),
+                    mismatches,
+                },
+                charter_paths: Vec::new(),
+            });
         }
         Err(error) => {
             return Err(format!(
@@ -210,7 +293,6 @@ fn check_lock(
         ));
     }
 
-    let mut mismatches = Vec::new();
     let mut lock_entries = HashMap::new();
     for entry in &lock.charters {
         if lock_entries
@@ -224,13 +306,10 @@ fn check_lock(
         }
     }
 
-    let mut requested = charter_paths.to_vec();
-    requested.sort();
-    requested.dedup();
-    for relative_path in requested {
-        if !lock_entries.contains_key(&relative_path) {
+    for relative_path in &requested {
+        if !lock_entries.contains_key(relative_path) {
             mismatches.push(LockMismatch {
-                path: relative_path,
+                path: relative_path.clone(),
                 detail: "charter is not listed in lock".to_string(),
             });
         }
@@ -244,7 +323,29 @@ fn check_lock(
             });
             continue;
         }
-        let charter_path = root.join(&entry.path);
+        let charter_path = match root.join(&entry.path).canonicalize() {
+            Ok(path) if !path.starts_with(&root) => {
+                mismatches.push(LockMismatch {
+                    path: entry.path.clone(),
+                    detail: "charter resolves outside the project".to_string(),
+                });
+                continue;
+            }
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                mismatches.push(LockMismatch {
+                    path: entry.path.clone(),
+                    detail: "changed without relock: charter is missing".to_string(),
+                });
+                continue;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "could not resolve charter '{}': {error}",
+                    entry.path
+                ))
+            }
+        };
         let charter_bytes = match fs::read(&charter_path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -276,14 +377,48 @@ fn check_lock(
             .then_with(|| left.detail.cmp(&right.detail))
     });
     mismatches.dedup();
-    Ok(LockReport {
-        status: if mismatches.is_empty() {
-            "ok".to_string()
-        } else {
-            "mismatch".to_string()
+    Ok(LockEvaluation {
+        report: LockReport {
+            status: if mismatches.is_empty() {
+                "ok".to_string()
+            } else {
+                "mismatch".to_string()
+            },
+            mismatches,
         },
-        mismatches,
+        charter_paths: lock.charters.into_iter().map(|entry| entry.path).collect(),
     })
+}
+
+fn requested_charter_mismatches(
+    root: &Path,
+    charter_paths: &[String],
+) -> Result<Vec<LockMismatch>, String> {
+    let mut mismatches = Vec::new();
+    for relative_path in charter_paths {
+        if let Err(detail) = validate_charter_path(relative_path) {
+            mismatches.push(LockMismatch {
+                path: relative_path.clone(),
+                detail,
+            });
+            continue;
+        }
+        match root.join(relative_path).canonicalize() {
+            Ok(path) if !path.starts_with(root) => mismatches.push(LockMismatch {
+                path: relative_path.clone(),
+                detail: "charter resolves outside the project".to_string(),
+            }),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "could not resolve charter '{}': {error}",
+                    relative_path
+                ))
+            }
+        }
+    }
+    Ok(mismatches)
 }
 
 fn validate_charter_path(path: &str) -> Result<(), String> {
@@ -304,11 +439,58 @@ fn validate_charter_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn rooted_path(root: &Path, path: &Path) -> PathBuf {
+fn canonical_root(root: &Path) -> Result<PathBuf, String> {
+    root.canonicalize().map_err(|error| {
+        format!(
+            "could not resolve project root '{}': {error}",
+            root.display()
+        )
+    })
+}
+
+fn canonical_charter_path(root: &Path, path: &str) -> Result<PathBuf, String> {
+    let canonical = root
+        .join(path)
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    if !canonical.starts_with(root) {
+        return Err(format!("charter resolves outside the project: '{path}'"));
+    }
+    Ok(canonical)
+}
+
+fn canonical_lock_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
     if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        root.join(path)
+        return Ok(path.to_path_buf());
+    }
+
+    let path = root.join(path);
+    let mut missing = Vec::new();
+    let mut ancestor = path.as_path();
+    loop {
+        match ancestor.canonicalize() {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = ancestor.file_name().ok_or_else(|| {
+                    format!("could not resolve charter lock path '{}'", path.display())
+                })?;
+                missing.push(name.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    format!("could not resolve charter lock path '{}'", path.display())
+                })?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "could not resolve charter lock path '{}': {error}",
+                    path.display()
+                ))
+            }
+        }
     }
 }
 
@@ -332,7 +514,15 @@ fn implementation_atoms(items: &[Item]) -> Vec<NamedAtom<'_>> {
     atoms
 }
 
+fn generic_implementation_atoms(items: &[Item]) -> Vec<NamedAtom<'_>> {
+    implementation_atoms(items)
+        .into_iter()
+        .filter(|candidate| !candidate.atom.type_params.is_empty())
+        .collect()
+}
+
 fn check_atom(
+    charter_path: &str,
     charter: &Atom,
     implementation: &[NamedAtom<'_>],
     module_env: &ModuleEnv,
@@ -356,6 +546,7 @@ fn check_atom(
     let candidate = match matches.as_slice() {
         [] => {
             return atom_report(
+                charter_path,
                 &charter.name,
                 "missing",
                 "no matching implementation atom",
@@ -370,6 +561,7 @@ fn check_atom(
                 .collect::<Vec<_>>()
                 .join(", ");
             return atom_report(
+                charter_path,
                 &charter.name,
                 "signature_mismatch",
                 &format!("method name is ambiguous: {names}"),
@@ -379,29 +571,42 @@ fn check_atom(
     };
 
     if let Some(detail) = signature_mismatch(charter, candidate.atom) {
-        return atom_report(&charter.name, "signature_mismatch", &detail, None);
+        return atom_report(
+            charter_path,
+            &charter.name,
+            "signature_mismatch",
+            &detail,
+            None,
+        );
     }
 
     match check_refinement(charter, candidate.atom, module_env) {
         Ok(()) => atom_report(
+            charter_path,
             &charter.name,
             "ok",
             "implementation refines the charter contract",
             None,
         ),
-        Err((status, detail, counterexample)) => {
-            atom_report(&charter.name, &status, &detail, counterexample)
-        }
+        Err((status, detail, counterexample)) => atom_report(
+            charter_path,
+            &charter.name,
+            &status,
+            &detail,
+            counterexample,
+        ),
     }
 }
 
 fn atom_report(
+    charter: &str,
     name: &str,
     status: &str,
     detail: &str,
     counterexample: Option<BTreeMap<String, String>>,
 ) -> CharterAtomReport {
     CharterAtomReport {
+        charter: charter.to_string(),
         name: name.to_string(),
         status: status.to_string(),
         detail: detail.to_string(),
@@ -410,6 +615,12 @@ fn atom_report(
 }
 
 fn signature_mismatch(charter: &Atom, implementation: &Atom) -> Option<String> {
+    if charter.type_params != implementation.type_params {
+        return Some(format!(
+            "type parameter mismatch: expected {:?}, found {:?}",
+            charter.type_params, implementation.type_params
+        ));
+    }
     if charter.params.len() != implementation.params.len() {
         return Some(format!(
             "expected {} parameter(s), found {}",
@@ -439,6 +650,23 @@ fn signature_mismatch(charter: &Atom, implementation: &Atom) -> Option<String> {
                 found.type_name.as_deref().unwrap_or("<inferred>")
             ));
         }
+        if (expected.consume, expected.is_ref, expected.is_ref_mut)
+            != (found.consume, found.is_ref, found.is_ref_mut)
+        {
+            return Some(format!("parameter '{}' ownership mismatch", expected.name));
+        }
+    }
+    let mut charter_consumed = charter.consumed_params.clone();
+    let mut implementation_consumed = implementation.consumed_params.clone();
+    charter_consumed.sort();
+    implementation_consumed.sort();
+    charter_consumed.dedup();
+    implementation_consumed.dedup();
+    if charter_consumed != implementation_consumed {
+        return Some(format!(
+            "consumed parameters mismatch: expected {:?}, found {:?}",
+            charter_consumed, implementation_consumed
+        ));
     }
     let charter_return = charter.return_type.as_deref().unwrap_or("i64");
     let implementation_return = implementation.return_type.as_deref().unwrap_or("i64");
@@ -455,6 +683,16 @@ fn check_refinement(
     implementation: &Atom,
     module_env: &ModuleEnv,
 ) -> Result<(), RefinementFailure> {
+    if (!charter.forall_constraints.is_empty() || !implementation.forall_constraints.is_empty())
+        && normalized_forall_constraints(charter) != normalized_forall_constraints(implementation)
+    {
+        return Err((
+            "inconclusive".to_string(),
+            "quantified clauses differ".to_string(),
+            None,
+        ));
+    }
+
     match check_implication(
         charter,
         implementation,
@@ -476,12 +714,13 @@ fn check_refinement(
         }
     }
 
+    let public_ensures = contract_view(implementation, ContractView::CallerEnsures);
     let post_antecedent = if charter.requires.trim().is_empty() {
-        implementation.ensures.clone()
-    } else if implementation.ensures.trim().is_empty() {
+        public_ensures
+    } else if public_ensures.trim().is_empty() {
         charter.requires.clone()
     } else {
-        format!("({}) && ({})", charter.requires, implementation.ensures)
+        format!("({}) && ({})", charter.requires, public_ensures)
     };
     match check_implication(
         charter,
@@ -499,6 +738,17 @@ fn check_refinement(
         )),
         ImplicationResult::Inconclusive(detail) => Err(("inconclusive".to_string(), detail, None)),
     }
+}
+
+fn normalized_forall_constraints(atom: &Atom) -> Vec<String> {
+    atom.forall_constraints
+        .iter()
+        .map(|constraint| {
+            format!("{constraint:?}")
+                .split_whitespace()
+                .collect::<String>()
+        })
+        .collect()
 }
 
 fn check_implication(
@@ -661,8 +911,8 @@ mod tests {
         )
         .expect("check lock");
 
-        assert_eq!(report.status, "mismatch");
-        assert!(report.mismatches[0]
+        assert_eq!(report.report.status, "mismatch");
+        assert!(report.report.mismatches[0]
             .detail
             .contains("changed without relock"));
     }
@@ -687,8 +937,10 @@ mod tests {
             Path::new("charter.lock"),
         )
         .expect("check lock");
-        assert_eq!(report.status, "mismatch");
-        assert!(report.mismatches[0].detail.contains("not listed in lock"));
+        assert_eq!(report.report.status, "mismatch");
+        assert!(report.report.mismatches[0]
+            .detail
+            .contains("not listed in lock"));
     }
 
     #[test]
@@ -709,10 +961,57 @@ mod tests {
             Path::new("charter.lock"),
         )
         .expect("check lock");
-        assert_eq!(report.status, "mismatch");
-        assert!(report.mismatches[0]
+        assert_eq!(report.report.status, "mismatch");
+        assert!(report.report.mismatches[0]
             .detail
             .contains("changed without relock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn charter_symlink_outside_project_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestDir::new();
+        let outside = TestDir::new();
+        let outside_path = outside.0.join("outside.charter.mm");
+        fs::write(&outside_path, b"trusted atom outside() -> i64 body: 0;")
+            .expect("write outside charter");
+        symlink(&outside_path, root.0.join("linked.charter.mm")).expect("create symlink");
+        let paths = vec!["linked.charter.mm".to_string()];
+
+        let error = write_lock(&root.0, &paths, Path::new("charter.lock")).unwrap_err();
+        assert!(error.contains("outside the project"));
+
+        let lock = CharterLock {
+            schema: LOCK_SCHEMA.to_string(),
+            charters: vec![CharterLockEntry {
+                path: paths[0].clone(),
+                sha256: format!(
+                    "{:x}",
+                    Sha256::digest(fs::read(&outside_path).expect("read outside charter"))
+                ),
+            }],
+        };
+        fs::write(
+            root.0.join("charter.lock"),
+            serde_json::to_vec(&lock).expect("serialize lock"),
+        )
+        .expect("write lock");
+        let report = check_charters(
+            &root.0,
+            &paths,
+            Path::new("charter.lock"),
+            &[],
+            &ModuleEnv::new(),
+        )
+        .expect("check outside symlink");
+        assert!(report
+            .lock
+            .mismatches
+            .iter()
+            .any(|mismatch| mismatch.detail.contains("outside the project")));
+        assert!(report.atoms.is_empty());
     }
 
     #[test]
@@ -759,6 +1058,14 @@ mod tests {
             (
                 "trusted atom f(x: i64) -> i64 body: 0;",
                 "atom f(x: i64, y: i64) -> i64 body: 0;",
+            ),
+            (
+                "trusted atom f(ref x: i64) -> i64 body: 0;",
+                "atom f(consume x: i64) -> i64 body: 0;",
+            ),
+            (
+                "trusted atom f(x: i64) -> i64 body: 0;",
+                "atom f(x: i64) -> i64 consume: x; body: 0;",
             ),
             (
                 "trusted atom f(x: i64) -> i64 body: 0;",
@@ -823,6 +1130,34 @@ mod tests {
             .counterexample
             .as_ref()
             .is_some_and(|values| values.contains_key("x")));
+    }
+
+    #[test]
+    fn ensures_check_does_not_establish_a_caller_postcondition() {
+        let report = run_check(
+            "trusted atom f(x: i64) -> i64 ensures: result >= x + 1; body: 0;",
+            "atom f(x: i64) -> i64 ensures check: result >= x + 1; body: 0;",
+        );
+        assert_eq!(report_status(&report), "post_weakened");
+    }
+
+    #[test]
+    fn differing_top_level_forall_constraints_are_inconclusive() {
+        let report = run_check(
+            "trusted atom f(n: i64) -> i64 requires: forall(i, 0, n, i >= 0); body: 0;",
+            "atom f(n: i64) -> i64 requires: forall(i, 0, n, i >= 0) && forall(j, 0, n, j >= 0); body: 0;",
+        );
+        assert_eq!(report_status(&report), "inconclusive");
+        assert_eq!(report.atoms[0].detail, "quantified clauses differ");
+    }
+
+    #[test]
+    fn generic_implementation_is_not_reported_missing() {
+        let report = run_check(
+            "trusted atom identity<T>(x: T) -> T body: 0;",
+            "atom identity<T>(x: T) -> T body: 0;",
+        );
+        assert_ne!(report_status(&report), "missing");
     }
 
     #[test]

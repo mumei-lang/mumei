@@ -120,7 +120,9 @@ fn lock_check_json_and_gate_exit_codes() {
     );
     let report: Value = serde_json::from_slice(&check.stdout).expect("parse stdout report");
     assert_eq!(report["schema"], "mumei.charter-report/v1");
+    assert_eq!(report["status"], "pass");
     assert_eq!(report["lock"]["status"], "ok");
+    assert_eq!(report["atoms"][0]["charter"], "specs/core.charter.mm");
     assert_eq!(report["atoms"][0]["name"], "increase");
     assert_eq!(report["atoms"][0]["status"], "ok");
     assert!(dir.path().join("charter_report.json").exists());
@@ -151,6 +153,12 @@ fn lock_check_json_and_gate_exit_codes() {
         serde_json::from_slice(&std::fs::read(dir.path().join("charter_report.json")).unwrap())
             .expect("parse failed report");
     assert_eq!(report["lock"]["status"], "mismatch");
+    assert_eq!(report["status"], "fail");
+    assert_eq!(report["atoms"][0]["status"], "unpinned");
+    assert_eq!(
+        report["atoms"][0]["detail"],
+        "checked against an unpinned charter text"
+    );
 
     let missing_input = run(
         dir.path(),
@@ -264,4 +272,169 @@ fn precondition_and_postcondition_failures_exit_one_with_counterexamples() {
     let report: Value = serde_json::from_slice(&check.stdout).expect("parse report");
     assert_eq!(report["atoms"][0]["status"], "post_weakened");
     assert!(report["atoms"][0]["counterexample"]["x"].is_string());
+}
+
+#[test]
+fn broken_manifest_is_an_input_error_with_explicit_charters() {
+    let dir = TestDir::new("broken-manifest");
+    setup_explicit_files(dir.path());
+    std::fs::write(dir.path().join("mumei.toml"), "[package").expect("write broken manifest");
+
+    let check = run(
+        dir.path(),
+        &[
+            "charter",
+            "check",
+            "impl.mm",
+            "--charter",
+            "specs/core.charter.mm",
+        ],
+    );
+    assert_eq!(check.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&check.stderr).contains("manifest"));
+}
+
+#[test]
+fn explicit_charter_does_not_skip_other_pinned_charters() {
+    let dir = TestDir::new("all-pinned");
+    std::fs::write(
+        dir.path().join("first.charter.mm"),
+        "trusted atom first(x: i64) -> i64 ensures: result >= x; body: 0;",
+    )
+    .expect("write first charter");
+    std::fs::write(
+        dir.path().join("second.charter.mm"),
+        "trusted atom second(x: i64) -> i64 ensures: result >= x + 1; body: 0;",
+    )
+    .expect("write second charter");
+    std::fs::write(
+        dir.path().join("impl.mm"),
+        "atom first(x: i64) -> i64 ensures: result >= x; body: 0;\n\
+         atom second(x: i64) -> i64 ensures: result >= x; body: 0;",
+    )
+    .expect("write implementation");
+    let lock = run(
+        dir.path(),
+        &[
+            "charter",
+            "lock",
+            "--charter",
+            "first.charter.mm",
+            "--charter",
+            "second.charter.mm",
+        ],
+    );
+    assert_eq!(lock.status.code(), Some(0));
+
+    let check = run(
+        dir.path(),
+        &[
+            "charter",
+            "check",
+            "impl.mm",
+            "--charter",
+            "first.charter.mm",
+            "--json",
+        ],
+    );
+    assert_eq!(check.status.code(), Some(1));
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("charter_report.json")).unwrap())
+            .expect("parse report");
+    assert_eq!(report["atoms"].as_array().unwrap().len(), 2);
+    assert_eq!(report["atoms"][1]["name"], "second");
+    assert_eq!(report["atoms"][0]["charter"], "first.charter.mm");
+    assert_eq!(report["atoms"][1]["charter"], "second.charter.mm");
+    assert_eq!(report["atoms"][1]["status"], "post_weakened");
+}
+
+#[test]
+fn generic_charter_atom_matches_pre_monomorphized_implementation() {
+    let dir = TestDir::new("generic");
+    std::fs::write(
+        dir.path().join("generic.charter.mm"),
+        "trusted atom identity<T>(x: T) -> T body: 0;",
+    )
+    .expect("write generic charter");
+    std::fs::write(
+        dir.path().join("impl.mm"),
+        "atom identity<T>(x: T) -> T body: 0;",
+    )
+    .expect("write generic implementation");
+    let lock = run(
+        dir.path(),
+        &["charter", "lock", "--charter", "generic.charter.mm"],
+    );
+    assert_eq!(lock.status.code(), Some(0));
+
+    let check = run(
+        dir.path(),
+        &[
+            "charter",
+            "check",
+            "impl.mm",
+            "--charter",
+            "generic.charter.mm",
+            "--json",
+        ],
+    );
+    assert!(matches!(check.status.code(), Some(0 | 1)));
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("charter_report.json")).unwrap())
+            .expect("parse generic report");
+    assert_ne!(report["atoms"][0]["status"], "missing");
+}
+
+#[test]
+fn duplicate_atom_names_are_attributed_to_charter_paths() {
+    let dir = TestDir::new("duplicate-names");
+    std::fs::write(
+        dir.path().join("a.charter.mm"),
+        "trusted atom f(x: i64) -> i64 ensures: result >= x; body: 0;",
+    )
+    .expect("write first charter");
+    std::fs::write(
+        dir.path().join("b.charter.mm"),
+        "trusted atom f(x: i64) -> i64 ensures: result >= x + 1; body: 0;",
+    )
+    .expect("write second charter");
+    std::fs::write(
+        dir.path().join("impl.mm"),
+        "atom f(x: i64) -> i64 ensures: result >= x; body: 0;",
+    )
+    .expect("write implementation");
+    let lock = run(
+        dir.path(),
+        &[
+            "charter",
+            "lock",
+            "--charter",
+            "b.charter.mm",
+            "--charter",
+            "a.charter.mm",
+        ],
+    );
+    assert_eq!(lock.status.code(), Some(0));
+
+    let _ = run(
+        dir.path(),
+        &[
+            "charter",
+            "check",
+            "impl.mm",
+            "--charter",
+            "b.charter.mm",
+            "--charter",
+            "a.charter.mm",
+            "--json",
+        ],
+    );
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("charter_report.json")).unwrap())
+            .expect("parse duplicate-name report");
+    assert_eq!(report["atoms"].as_array().unwrap().len(), 2);
+    assert_eq!(report["atoms"][0]["charter"], "a.charter.mm");
+    assert_eq!(report["atoms"][1]["charter"], "b.charter.mm");
+    assert_eq!(report["atoms"][0]["name"], "f");
+    assert_eq!(report["atoms"][1]["name"], "f");
 }
