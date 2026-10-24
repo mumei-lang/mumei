@@ -87,7 +87,7 @@ The complete top-level layout also includes `runtime/`, `visualizer/`,
 
 Type annotations include primitive scalar types (`i64`, `f64`, `bool`, `Str`), refined types registered in `ModuleEnv`, generic type references such as `Stack<i64>`, higher-order `atom_ref(...) -> ...` types, and polymorphic array types written as `[T]`. Array annotations preserve their element type through parsing and MIR inference: `[i64]` accesses produce `i64`, `[f64]` accesses produce `f64`, and `[bool]` accesses produce `bool`. Untyped legacy array accesses such as `arr[i]` still default to `i64` for backward compatibility with existing `std/list.mm` contracts and `forall(i, 0, n, arr[i] >= 0)` patterns.
 
-During Z3 verification, array indices use `Int` sort and the array element sort is selected from the declared element type: `Int` for `[i64]`, `Real` for `[f64]` (or IEEE 754 `Float(11,53)` under the opt-in `--ieee754-f64` mode, see below), and `Bool` for `[bool]`.
+During Z3 verification, array indices use `Int` sort and the array element sort is selected from the declared element type: `Int` for `[i64]`, `Real` for `[f64]` (or IEEE 754 `Float(11,53)` under the opt-in `--ieee754-f64` mode, see below), `Bool` for `[bool]`, and the `Seq`/`String` sort for `[Str]` (so `a[i] == "s"` and `a[i] = "s"` use the string theory). Nested arrays `[[T]]` are unsupported and fail closed: `verify_inner` rejects `[[T]]` in param/return types up front, the parser flags expression-level indexing leftovers (`a[i][j]`, `f()[0]`) as a syntax error, and `coerce_to_array_elem_sort` rejects stores into array-valued elements — the previous phantom-`Int` element encoding could wrong-verify, so no `[[T]]` is silently lowered.
 
 #### Untyped array access diagnostics (`--warn-untyped-arrays` / `--strict-array-types`)
 
@@ -137,6 +137,32 @@ The differential fixture `tests/test_ieee754_f64.mm` (and integration test `test
 The flag is threaded through atom contract verification (`requires`/`ensures`/`body`), inductive atom-invariant checking (`support/call_graph.rs::verify_atom_invariant`), trait law verification (`support/law_verification.rs::verify_impl_with_options`), refinement-type constraints (`translator/constraints.rs::apply_refinement_constraint`), and call-site symbolic results. Call-site return sorts are selected from the callee's declared `-> T` return type (falling back to the legacy "any `f64` parameter implies an `f64` return" heuristic only when the annotation is absent), so an `f64`-returning callee binds a `Real` result by default and a `Float(11,53)` result under `--ieee754-f64` — never an `Int` placeholder that silently drops `ensures` equalities.
 
 **Known limitation**: the opt-in vacuity check (`verification/vacuity.rs`) and property-based concrete validation (`verification/property_based.rs`) still construct their `VCtx` with `ieee754_f64: false` and evaluate under the `Real` encoding regardless of the flag.
+
+### `Str` Verification Sort: Z3 `String`/`Seq` theory
+
+`Str` parameters and literals are represented with Z3's native `String`/`Seq`
+sort during verification. The translator uses interpreted operations for
+`len`, prefix/suffix checks, `contains`, `index_of`, `substr`, and `char_at`.
+
+- **Pro**: Z3 decides native `str.len`, `prefixof`, `suffixof`, `contains`,
+  `indexof`, `extract`, and `at` constraints directly. Content is not opaque:
+  facts such as `len(a + b) == len(a) + len(b)` and prefix relationships need
+  no user axioms.
+- **Con**: Z3's string theory is not decidable in general. Unbounded length,
+  concatenation, `indexof`, and `extract` can return `unknown`; such atoms
+  become Lean escalation candidates rather than false passes. Keep contracts
+  within length, prefix/suffix, contains, and bounded extract properties.
+  Under `--bitvec-i64`, integer-valued string results (`len`, `index_of`) stay
+  `Int`-sorted and are bridged to `BV(64)` at comparison time; mixed goals such
+  as `len(substr(..)) == n` can return `unknown` and fail closed (see
+  `tests/negative/test_str_builtins_bitvec_unknown.mm`). Neither `int2bv` on
+  the length nor a fresh `BV(64)` tied by signed `bv2int` makes this decidable
+  in Z3 4.14.
+
+We deliberately do not encode strings as uninterpreted functions with
+hand-written axioms or bounded-length bit-vectors. The former adds an axiom
+soundness burden, while Z3's native string theory already covers the
+standard-library needs.
 
 ---
 
@@ -705,6 +731,52 @@ Sort solving is significantly slower than Int Sort.
 
 **Constraint Budget**: Each Z3 String constraint creation is tracked against the
 per-atom constraint budget (default: 1000) to prevent solver explosion.
+
+### Non-deterministic Effects and Replayability
+
+`Random`, `Clock` and `ExternalInput` (`std/effects.mm`) mark atoms whose behaviour
+depends on a source outside the program. `verification/support/replay.rs` isolates
+those sources so that agent / distributed logic is replayable:
+
+1. **Phase 1f-1 (replayability, after effect containment)** — for each declared
+   non-deterministic leaf effect (composites and `parent:` children are resolved
+   through `ModuleEnv::is_subeffect`), the atom must have a *witness* parameter
+   (`seed` / `timestamp` / `input`, or `<witness>_suffix`) and every
+   `perform <Effect>.<op>(args)` must receive the witness or a local
+   transitively derived from it (`let s2 = seed + 1`, or the result of an earlier
+   witnessed `perform`) in `args` (`support/replay.rs::verify_replayability`).
+   Derivation is a *must* analysis: through operators, calls and aggregates any
+   witness-carrying operand taints the result, but a value chosen by `if`/`match`
+   is derived only from witnesses common to every branch (the condition /
+   scrutinee contributes nothing), state after a branch or loop is the meet of
+   all paths (loops iterate to a fixpoint), and a body that may run zero times,
+   later or concurrently (lambda, async, task) is joined with the state before
+   it: assignments inside it can drop a witness but never establish one
+   (lambda parameters shadow the witness). An element store `a[i] = v` keeps
+   only the witnesses common to the array and `v`. The
+   walk covers nested expression forms (array/struct literals, indexing, field
+   access, lambdas, match, async).
+   The resolved roots and witness names are part of the proof-cache hash, so
+   cached proofs from before this rule are invalidated for affected atoms. Violations produce a `Replayability violation`
+   diagnostic and a `report.json` with `violation_type: "replayability"` and
+   `failure_type: effect_not_allowed`.
+2. **Z3 modelling** — `translator/expr.rs::nondeterministic_perform_result` encodes
+   the perform result as an uninterpreted function `__nd___perform_<Effect>_<op>`
+   of *all* its arguments (any Z3 sort; range `Int` or `BV(64)` under
+   `bitvec_i64`), instead of a fresh constant; a zero-argument perform is a
+   zero-arity function. The witness parameter is therefore universally quantified in
+   `ensures` verification while equal arguments denote equal results, so the
+   generation path is statically deterministic.
+3. **Property-based testing** — `property_based.rs::bind_nondeterministic_sources`
+   walks the translated body for every `__nd___perform_<Effect>_<op>(args)`
+   application and pins each one to `replay_source_value(effect, op, args)`, a
+   `DeterministicRng` value derived only from the effect/operation name and the
+   model's concrete argument tuple (so two performs with different arguments are
+   pinned independently). With a fixed `PropertyBasedTestConfig::seed`, generated inputs,
+   source values and shrunk counterexamples are bit-for-bit reproducible.
+
+Pure atoms never reach phase 1f-1: performing a non-deterministic source without
+declaring it is rejected by effect containment (`__effect_allowed_*`).
 
 ### Stateful Effects (Temporal Effect Verification)
 

@@ -13,6 +13,10 @@ pub(crate) fn array_struct_type(context: &Context) -> inkwell::types::StructType
     context.struct_type(&[i64_type.into(), ptr_type.into()], false)
 }
 
+/// An array fat pointer unpacked for codegen: `(len, element_type, data)`.
+/// `element_type` is the LLVM type used for GEP/load/store on `data`.
+pub(crate) type ArrayPtr<'a> = (BasicValueEnum<'a>, BasicTypeEnum<'a>, BasicValueEnum<'a>);
+
 fn basic_type_rank<'a>(ty: BasicTypeEnum<'a>) -> (u32, bool, bool) {
     match ty {
         BasicTypeEnum::FloatType(float_ty) => {
@@ -411,6 +415,27 @@ pub(crate) fn struct_llvm_type<'a>(
     context.struct_type(&field_types, false)
 }
 
+/// LLVM element type for an array parameter's declared `inner` type.
+/// The fat pointer layout is `{ i64 len, T* data }` regardless of `T`;
+/// this resolves `T` so element loads/stores GEP at the right type.
+/// Bool elements keep the codebase's bool-as-i64 convention.
+pub(crate) fn array_elem_llvm_type<'a>(
+    context: &'a Context,
+    type_name: &str,
+    module_env: &ModuleEnv,
+) -> Option<inkwell::types::BasicTypeEnum<'a>> {
+    let base = module_env.resolve_base_type(type_name);
+    let inner = match lower(&base) {
+        LoweredType::Array(inner) => *inner,
+        _ => return None,
+    };
+    Some(match inner {
+        LoweredType::F64 => context.f64_type().into(),
+        LoweredType::Str => context.ptr_type(inkwell::AddressSpace::default()).into(),
+        _ => context.i64_type().into(),
+    })
+}
+
 /// パラメータの LLVM 型を解決する
 pub(crate) fn resolve_param_type<'a>(
     context: &'a Context,
@@ -432,9 +457,7 @@ pub(crate) fn resolve_param_type<'a>(
             match lower(&base) {
                 LoweredType::F64 => context.f64_type().into(),
                 LoweredType::Str => context.ptr_type(inkwell::AddressSpace::default()).into(),
-                LoweredType::Array(inner) if matches!(inner.as_ref(), LoweredType::I64) => {
-                    array_struct_type(context).into()
-                }
+                LoweredType::Array(_) => array_struct_type(context).into(),
                 _ => {
                     // Plan 14: Check if type is an enum
                     if let Some(enum_def) = module_env.get_enum(name) {
@@ -490,19 +513,21 @@ pub fn declare_extern_functions<'ctx>(
     }
 }
 
+/// Resolve the LLVM return type from the HIR signature: the declared
+/// `return_type` when present, else the return type inferred during HIR
+/// lowering (`signature.inferred_return_type`, which reproduces the old
+/// `mir::infer_atom_return_type` result), else a conservative i64 fallback.
 pub(crate) fn resolve_return_type<'a>(
     context: &'a Context,
-    atom: &mumei_core::parser::Atom,
+    signature: &mumei_core::hir::HirSignature,
     module_env: &ModuleEnv,
 ) -> inkwell::types::BasicTypeEnum<'a> {
-    if let Some(ref ret_type) = atom.return_type {
+    if let Some(ref ret_type) = signature.return_type {
         let base = module_env.resolve_base_type(ret_type);
         match lower(&base) {
             LoweredType::F64 => context.f64_type().into(),
             LoweredType::Str => context.ptr_type(AddressSpace::default()).into(),
-            LoweredType::Array(inner) if matches!(inner.as_ref(), LoweredType::I64) => {
-                array_struct_type(context).into()
-            }
+            LoweredType::Array(_) => array_struct_type(context).into(),
             _ => {
                 if let Some(enum_def) = module_env.get_enum(&base) {
                     return enum_llvm_type(context, enum_def, Some(module_env)).into();
@@ -513,13 +538,9 @@ pub(crate) fn resolve_return_type<'a>(
                 context.i64_type().into()
             }
         }
+    } else if let Some(ref ret_type) = signature.inferred_return_type {
+        resolve_param_type(context, Some(ret_type), module_env)
     } else {
-        // Infer the return type from the body when possible; otherwise fall
-        // back to a conservative i64 default.
-        if let Some(ret_type) = mumei_core::mir::infer_atom_return_type(atom) {
-            resolve_param_type(context, Some(&ret_type), module_env)
-        } else {
-            context.i64_type().into()
-        }
+        context.i64_type().into()
     }
 }

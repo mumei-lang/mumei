@@ -14,7 +14,7 @@ effect SafeFileRead(path: Str) where starts_with(path, "/tmp/") && not_contains(
 // user_id is required to not contain "..", so the concatenated path
 // satisfies both starts_with("/tmp/") and not_contains("..").
 atom test_safe_read(user_id: Str)
-    effects: [SafeFileRead(path)]
+    effects: [SafeFileRead(path)];
     requires: not_contains(user_id, "..") && not_contains(user_id, "\0");
     ensures: result >= 0;
     body: {
@@ -26,7 +26,7 @@ atom test_safe_read(user_id: Str)
 // --- Test 2: Safe read with literal path ---
 // A fully literal path trivially satisfies the constraint.
 atom test_literal_path()
-    effects: [SafeFileRead(path)]
+    effects: [SafeFileRead(path)];
     requires: true;
     ensures: result >= 0;
     body: {
@@ -38,7 +38,7 @@ atom test_literal_path()
 // --- Test 3: Safe read with constrained prefix ---
 // Demonstrates that concat preserves the /tmp/ prefix.
 atom test_concat_prefix(filename: Str)
-    effects: [SafeFileRead(path)]
+    effects: [SafeFileRead(path)];
     requires: not_contains(filename, "..") && not_contains(filename, "/");
     ensures: result >= 0;
     body: {

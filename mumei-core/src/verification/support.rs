@@ -1,9 +1,13 @@
 #![allow(unused_imports)]
 mod call_graph;
 mod dataflow_inference;
+pub(crate) mod datatype;
 mod effects;
 mod law_verification;
 mod nominal_types;
+pub(crate) mod recursion;
+pub(crate) mod reglan;
+mod replay;
 mod resource_safety;
 mod task_ownership;
 mod units;
@@ -20,6 +24,10 @@ pub(crate) use effects::{
 };
 pub use effects::{AllowedEffect, SecurityPolicy};
 
+pub(crate) use replay::{
+    declared_nondeterministic_effects, nondeterministic_root, verify_replayability, witness_params,
+};
+
 pub(crate) use resource_safety::{
     collect_acquire_resources_expr, collect_acquire_resources_stmt, verify_async_recursion_depth,
     verify_bmc_resource_safety, verify_resource_hierarchy, ResourceCtx, BMC_DEFAULT_UNROLL_DEPTH,
@@ -33,7 +41,12 @@ pub(crate) use call_graph::{
     expr_mentions_var, expr_to_source_string, verify_atom_invariant, verify_call_graph_cycles,
 };
 
-pub(crate) use nominal_types::verify_nominal_struct_types;
+pub(crate) use nominal_types::{tail_expr, verify_nominal_struct_types};
+
+pub(crate) use recursion::{
+    collect_call_edges_expr, collect_call_edges_stmt, measure_components, recursive_scc,
+    RecursiveScc, RecursiveSccEligibility,
+};
 
 pub(crate) use task_ownership::{
     analyze_task_ownership, verify_task_ownership, TaskOwnershipViolation,

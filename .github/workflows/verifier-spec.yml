@@ -1,0 +1,48 @@
+name: Verifier Spec
+
+on:
+  pull_request:
+    paths:
+      - 'docs/VERIFIER_SPEC.md'
+      - 'mumei-core/src/verification/phase_contract.rs'
+      - 'mumei-core/tests/verifier_spec_doc.rs'
+      - '.github/workflows/verifier-spec.yml'
+  push:
+    branches:
+      - develop
+    paths:
+      - 'docs/VERIFIER_SPEC.md'
+      - 'mumei-core/src/verification/phase_contract.rs'
+      - 'mumei-core/tests/verifier_spec_doc.rs'
+      - '.github/workflows/verifier-spec.yml'
+  workflow_dispatch:
+
+jobs:
+  verifier-spec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Z3 dependencies
+        run: sudo apt-get update && sudo apt-get install -y libz3-dev z3
+
+      - name: Set up modern Z3
+        uses: ./.github/actions/setup-z3
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-verifier-spec-${{ hashFiles('Cargo.toml', '**/Cargo.toml') }}
+          restore-keys: |
+            cargo-verifier-spec-
+
+      - name: Test verifier specification
+        run: cargo test -p mumei-core --test verifier_spec_doc

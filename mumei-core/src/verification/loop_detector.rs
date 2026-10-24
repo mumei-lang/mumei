@@ -59,8 +59,10 @@ fn detect_loops_in_stmt(stmt: &Stmt, loops: &mut Vec<LoopInfo>, atom: &Atom) {
                 }
             }
             variables.sort();
-            let has_invariant =
-                !matches!(invariant.as_ref(), Expr::Variable(value) if value == "true");
+            let has_invariant = !matches!(
+                invariant.as_ref(),
+                Expr::Variable(value) if value == "true" || value == "__mumei_missing_invariant"
+            );
             loops.push(LoopInfo {
                 line: span.line,
                 loop_type: LoopType::While,
@@ -113,9 +115,15 @@ fn detect_loops_in_expr(expr: &Expr, loops: &mut Vec<LoopInfo>, atom: &Atom) {
             detect_loops_in_stmt(then_branch, loops, atom);
             detect_loops_in_stmt(else_branch, loops, atom);
         }
+        Expr::Block(stmt) => detect_loops_in_stmt(stmt, loops, atom),
         Expr::BinaryOp(left, _, right) => {
             detect_loops_in_expr(left, loops, atom);
             detect_loops_in_expr(right, loops, atom);
+        }
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                detect_loops_in_expr(element, loops, atom);
+            }
         }
         Expr::Call(_, args) => {
             for arg in args {
@@ -250,6 +258,11 @@ fn collect_expr_variables(expr: &Expr, variables: &mut HashSet<String>) {
             variables.insert(array.clone());
             collect_expr_variables(index, variables);
         }
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_expr_variables(element, variables);
+            }
+        }
         Expr::BinaryOp(left, _, right) => {
             collect_expr_variables(left, variables);
             collect_expr_variables(right, variables);
@@ -263,6 +276,7 @@ fn collect_expr_variables(expr: &Expr, variables: &mut HashSet<String>) {
             collect_stmt_variables(then_branch, variables);
             collect_stmt_variables(else_branch, variables);
         }
+        Expr::Block(stmt) => collect_stmt_variables(stmt, variables),
         Expr::Call(_, args) => {
             for arg in args {
                 collect_expr_variables(arg, variables);
@@ -303,6 +317,12 @@ fn collect_expr_variables(expr: &Expr, variables: &mut HashSet<String>) {
         Expr::ChanRecv { channel } => collect_expr_variables(channel, variables),
         Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::AtomRef { .. } => {}
     }
+}
+
+pub(crate) fn expression_ast_references_identifier(expr: &Expr, identifier: &str) -> bool {
+    let mut variables = HashSet::new();
+    collect_expr_variables(expr, &mut variables);
+    variables.contains(identifier)
 }
 
 fn collect_stmt_variables(stmt: &Stmt, variables: &mut HashSet<String>) {
@@ -368,8 +388,18 @@ fn expr_to_source(expr: &Expr) -> String {
     match expr {
         Expr::Number(value) => value.to_string(),
         Expr::Float(value) => value.to_string(),
-        Expr::StringLit(value) => format!("{value:?}"),
+        Expr::StringLit(value) => {
+            format!("\"{}\"", crate::parser::token::escape_string_content(value))
+        }
         Expr::Variable(name) => name.clone(),
+        Expr::ArrayLit(elements) => format!(
+            "[{}]",
+            elements
+                .iter()
+                .map(expr_to_source)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Expr::ArrayAccess(array, index) => format!("{}[{}]", array, expr_to_source(index)),
         Expr::BinaryOp(left, op, right) => {
             format!(
@@ -390,6 +420,7 @@ fn expr_to_source(expr: &Expr) -> String {
         Expr::FieldAccess(inner, field) => format!("{}.{}", expr_to_source(inner), field),
         Expr::AtomRef { name } => format!("atom_ref({name})"),
         Expr::IfThenElse { .. }
+        | Expr::Block(_)
         | Expr::StructInit { .. }
         | Expr::Match { .. }
         | Expr::Async { .. }

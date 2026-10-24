@@ -12,7 +12,7 @@
 // --- Test 1: 単純な定数インデックス store ---
 // len(arr) >= 1 を requires で仮定する代わりに、forall 前提で
 // len_arr >= n >= 1 を導出する。
-atom test_array_store_basic(n: i64)
+atom test_array_store_basic(arr: [i64], n: i64)
 requires: n >= 1 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == 0;
 body: {
@@ -26,7 +26,7 @@ body: {
 //       false-positive (insertion_sort と同じ原因) を引き起こしていたが、
 //       `let i = 0` から `i64`/`Copy` を推論する mir.rs の修正により
 //       `trusted` 不要で要素数保存契約が証明できるようになった。
-atom test_array_store_loop(n: i64)
+atom test_array_store_loop(arr: [i64], n: i64)
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n;
 body: {
@@ -43,7 +43,7 @@ body: {
 
 // --- Test 3: swap パターン ---
 // 一時変数を介して arr[0] と arr[1] を入れ替える。
-atom test_array_swap(n: i64)
+atom test_array_swap(arr: [i64], n: i64)
 requires: n >= 2 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == 0;
 body: {
@@ -56,7 +56,7 @@ body: {
 // --- Test 4: 可変インデックスでの store ---
 // 外部から渡された k を使って arr[k] を書き換える。k の境界は
 // requires で明示する。
-atom test_array_store_dyn(n: i64, k: i64)
+atom test_array_store_dyn(arr: [i64], n: i64, k: i64)
 requires: n >= 1 && k >= 0 && k < n && forall(i, 0, n, arr[i] >= 0);
 ensures: result == k;
 body: {

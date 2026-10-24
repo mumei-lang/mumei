@@ -16,6 +16,7 @@
 // hard errors. LinearityCtx is retained only for Z3-level borrow tracking.
 // =============================================================================
 
+pub mod borrow_check;
 mod gen_kill;
 mod liveness;
 mod move_analysis;
@@ -26,6 +27,10 @@ use crate::mir::{Local, MirBody, MirStatement, Movability, Operand, Place, Rvalu
 #[cfg(test)]
 use std::collections::HashMap;
 
+pub use borrow_check::{
+    check_borrows, check_borrows_with_callees, find_dynamic_borrowing_atom_ref, BorrowViolation,
+    BorrowViolationKind,
+};
 pub use gen_kill::{compute_gen_kill, GenKill};
 pub use liveness::{compute_liveness, insert_drops, LivenessResult};
 pub use move_analysis::{
@@ -58,6 +63,9 @@ mod tests {
             params,
             trace_id: None,
             spec_metadata: std::collections::HashMap::new(),
+            clause_labels: Vec::new(),
+            clause_modes: Vec::new(),
+            covers: Vec::new(),
             requires: "true".to_string(),
             forall_constraints: vec![],
             ensures: "true".to_string(),
@@ -70,6 +78,7 @@ mod tests {
             invariant: None,
             effects: vec![],
             return_type: None,
+            decreases: None,
             span: Span::new("", 1, 1, 0),
             effect_pre: std::collections::HashMap::new(),
             effect_post: std::collections::HashMap::new(),
@@ -83,6 +92,7 @@ mod tests {
             type_ref: Some(parser::parse_type_ref(ty)),
             is_ref: false,
             is_ref_mut: false,
+            consume: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
         }
@@ -362,6 +372,8 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let liveness = compute_liveness(&body);
@@ -449,6 +461,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(0)))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -511,6 +525,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(2)))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -526,12 +542,14 @@ mod tests {
 
     #[test]
     fn test_move_analysis_conflicting_merge() {
-        // if/else where one branch moves x and the other doesn't
+        // if/else where one branch moves x, the other doesn't, and x is
+        // used after the merge.
         // Block 0: SwitchInt(cond) → then=1, else=2
         // Block 1: y = move x; goto 3
         // Block 2: goto 3 (x is alive here)
-        // Block 3: return 0
-        // At block 3, x is consumed from path 1 but alive from path 2 → ConflictingMerge
+        // Block 3: return x (x is live at the merge → ConflictingMerge)
+        // (An x that is dead on all paths after the merge is not a violation:
+        // see test_move_analysis_merge_unused_move.)
         let body = MirBody {
             name: "conflicting_merge".to_string(),
             locals: vec![
@@ -587,12 +605,12 @@ mod tests {
                 BasicBlock {
                     id: 3,
                     statements: vec![],
-                    terminator: Terminator::Return(Operand::Constant(
-                        crate::mir::MirConstant::Int(0),
-                    )),
+                    terminator: Terminator::Return(Operand::Place(Place::Local(Local(1)))),
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -606,6 +624,86 @@ mod tests {
         assert!(
             !cm_violations.is_empty(),
             "Should detect conflicting merge for x at join point"
+        );
+    }
+
+    #[test]
+    fn test_move_analysis_merge_unused_move() {
+        // Same CFG as above but x is never used after the merge — the
+        // divergent ownership is unobservable and must not be a violation.
+        // Block 0: SwitchInt(cond) → then=1, else=2
+        // Block 1: y = move x; goto 3
+        // Block 2: goto 3 (x is alive here)
+        // Block 3: return 0
+        let body = MirBody {
+            name: "merge_unused_move".to_string(),
+            locals: vec![
+                LocalDecl {
+                    local: Local(0),
+                    name: Some("cond".to_string()),
+                    ty: Some("Int".to_string()),
+                    movability: Movability::Copy,
+                    capability: None,
+                },
+                LocalDecl {
+                    local: Local(1),
+                    name: Some("x".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
+                    capability: None,
+                },
+                LocalDecl {
+                    local: Local(2),
+                    name: Some("y".to_string()),
+                    ty: Some("MyStruct".to_string()),
+                    movability: Movability::Move,
+                    capability: None,
+                },
+            ],
+            blocks: vec![
+                BasicBlock {
+                    id: 0,
+                    statements: vec![],
+                    terminator: Terminator::SwitchInt {
+                        discr: Operand::Place(Place::Local(Local(0))),
+                        targets: vec![(1, 1)],
+                        otherwise: 2,
+                    },
+                },
+                BasicBlock {
+                    id: 1,
+                    statements: vec![MirStatement::Assign(
+                        Place::Local(Local(2)),
+                        Rvalue::Use(Operand::Place(Place::Local(Local(1)))),
+                    )],
+                    terminator: Terminator::Goto(3),
+                },
+                BasicBlock {
+                    id: 2,
+                    statements: vec![],
+                    terminator: Terminator::Goto(3),
+                },
+                BasicBlock {
+                    id: 3,
+                    statements: vec![],
+                    terminator: Terminator::Return(Operand::Constant(
+                        crate::mir::MirConstant::Int(0),
+                    )),
+                },
+            ],
+            entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
+        };
+
+        let result = analyze_moves(&body);
+        assert!(
+            result
+                .violations
+                .iter()
+                .all(|v| v.kind != MoveViolationKind::ConflictingMerge),
+            "moved-on-one-path but unused-after-merge must not conflict: {:?}",
+            result.violations
         );
     }
 
@@ -678,6 +776,8 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -736,6 +836,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(0)))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -798,6 +900,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(2)))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -845,6 +949,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Place(Place::Local(Local(0)))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_moves(&body);
@@ -1130,6 +1236,8 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1170,6 +1278,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1227,6 +1337,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1317,6 +1429,8 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1420,6 +1534,8 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1510,6 +1626,8 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1605,6 +1723,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1655,6 +1775,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(crate::mir::MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1759,6 +1881,8 @@ mod tests {
                 },
             ],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         let result = analyze_temporal_effects(&body, &sms);
@@ -1819,6 +1943,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -1866,6 +1992,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -1914,6 +2042,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -2084,6 +2214,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -2137,6 +2269,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -2189,6 +2323,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -2259,6 +2395,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -2314,6 +2452,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("File".to_string(), sm);
@@ -2360,6 +2500,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("Ownership".to_string(), sm.clone());
@@ -2394,6 +2536,8 @@ mod tests {
                 terminator: Terminator::Return(Operand::Constant(MirConstant::Int(0))),
             }],
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
         let mut machines = HashMap::new();
         machines.insert("Ownership".to_string(), sm);

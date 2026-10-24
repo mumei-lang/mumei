@@ -16,7 +16,7 @@ use crate::agent;
 use mumei_core::parser;
 use mumei_core::proof_cert;
 use mumei_core::verification;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -265,6 +265,47 @@ pub fn run() {
 // =============================================================================
 // 診断（パースエラー検出）
 // =============================================================================
+/// One `mumei` error per checked-parse failure. Only top-level failures carry a
+/// module-relative `line:col`; the rest are anchored at the start of the file.
+fn parse_failure_diagnostics(source: &str, failures: &[String]) -> Vec<serde_json::Value> {
+    failures
+        .iter()
+        .map(|failure| {
+            let (line, start, end) = top_level_failure_position(failure)
+                .and_then(|(line, char_col)| {
+                    let text = source.lines().nth(line)?;
+                    let start: usize = text.chars().take(char_col).map(char::len_utf16).sum();
+                    let width = text.chars().nth(char_col).map_or(1, char::len_utf16);
+                    Some((line, start, start + width))
+                })
+                .unwrap_or((0, 0, 1));
+            serde_json::json!({
+                "range": {
+                    "start": { "line": line, "character": start },
+                    "end": { "line": line, "character": end }
+                },
+                "severity": 1,
+                "source": "mumei",
+                "message": format!("Parse error: {failure}")
+            })
+        })
+        .collect()
+}
+
+/// 0-based `(line, char column)` of a top-level failure. The parser's
+/// location is the last ` at top level at ` in the message, because the
+/// quoted token before it can contain the same text.
+fn top_level_failure_position(failure: &str) -> Option<(usize, usize)> {
+    let rest = failure.rsplit_once(" at top level at ")?.1;
+    let location = rest
+        .split(|c: char| c != ':' && !c.is_ascii_digit())
+        .next()?;
+    let (line, col) = location.split_once(':')?;
+    let line: usize = line.parse().ok()?;
+    let col: usize = col.parse().ok()?;
+    Some((line.checked_sub(1)?, col.checked_sub(1)?))
+}
+
 /// ソースコードをパースして diagnostics を生成
 fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
     let path = uri_to_path(uri);
@@ -276,8 +317,23 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
         }
     }
 
-    // Phase 1: パースできるか
-    let items = parser::parse_module(source);
+    // Phase 1: パースできるか（`mumei verify` と同じ checked parser）
+    let items = match parser::parse_module_checked(source) {
+        Ok(items) => items,
+        Err(failures) => {
+            // Verification would only repeat the syntax error, but intent
+            // drift and spec health still apply to whatever parses.
+            let mut diagnostics = parse_failure_diagnostics(source, &failures);
+            let items = parser::parse_module(source);
+            append_intent_drift_diagnostics(source, &items, &mut diagnostics);
+            if let Some(path) = path.as_deref() {
+                if path.extension().and_then(|ext| ext.to_str()) == Some("mm") {
+                    append_agent_spec_diagnostics(uri, source, &mut diagnostics);
+                }
+            }
+            return diagnostics;
+        }
+    };
     let mut diagnostics = Vec::new();
 
     // ソースが空でない場合にアイテムが0個 → パースエラーの可能性
@@ -297,11 +353,17 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
 
     // Phase 2: Z3 検証 diagnostics（file:// URI の場合のみ実行）
     if let Some(path) = path.as_deref() {
-        if let Err(failure) = verify_source_for_lsp(path, source) {
+        let mut live_pending_atom: Option<String> = None;
+        let LspLiveVerification {
+            settled: live_settled,
+            failure: live_failure,
+        } = verify_source_for_lsp(path, source);
+        if let Some(failure) = live_failure {
             let LspVerifyFailure {
                 error: e,
                 atom: failed_atom,
                 escalation,
+                inconclusive,
             } = failure;
             let detail = e.to_detail();
             // ErrorDetail の Span から直接位置を取得（substring マッチ不要）
@@ -326,12 +388,20 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
                 }
                 _ => None,
             };
+            let counterexample_provenance = match &e {
+                verification::MumeiError::VerificationError {
+                    counterexample_provenance,
+                    ..
+                } => counterexample_provenance.clone(),
+                _ => None,
+            };
             let mut message = format!("{}", detail);
             // The editor previously reported the Z3 verdict without saying
             // whether the atom is routed to mumei-lean. Escalation state is
             // what tells the reader if a red squiggle is terminal or waiting
             // on the Lean fidelity check.
             let escalation_data = escalation.as_ref().map(|classification| {
+                live_pending_atom = failed_atom.clone();
                 let reason = classification
                     .escalation_reason
                     .as_ref()
@@ -379,17 +449,23 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
                     "start": { "line": line, "character": col },
                     "end": { "line": line, "character": col + 1 }
                 },
-                "severity": 1,
+                "severity": if inconclusive { 2 } else { 1 },
                 "source": "mumei-z3",
                 "message": message
             });
             if !related_info.is_empty() {
                 diag["relatedInformation"] = serde_json::json!(related_info);
             }
-            if counterexample.is_some() || escalation_data.is_some() {
+            if counterexample.is_some()
+                || counterexample_provenance.is_some()
+                || escalation_data.is_some()
+            {
                 let mut data = serde_json::Map::new();
                 if let Some(ce) = counterexample {
                     data.insert("counterexample".to_string(), ce);
+                }
+                if let Some(provenance) = counterexample_provenance {
+                    data.insert("counterexample_provenance".to_string(), provenance);
                 }
                 if let Some(lean) = escalation_data {
                     data.insert("lean_escalation".to_string(), lean);
@@ -398,7 +474,14 @@ fn diagnose(uri: &str, source: &str) -> Vec<serde_json::Value> {
             }
             diagnostics.push(diag);
         }
-        append_lean_verified_diagnostics(path, source, &items, &mut diagnostics);
+        append_certificate_lean_escalation_diagnostics(
+            path,
+            source,
+            &items,
+            live_pending_atom.as_deref(),
+            &live_settled,
+            &mut diagnostics,
+        );
     }
 
     append_intent_drift_diagnostics(source, &items, &mut diagnostics);
@@ -870,6 +953,25 @@ struct LspVerifyFailure {
     error: verification::MumeiError,
     atom: Option<String>,
     escalation: Option<verification::LeanEscalationClassification>,
+    /// Z3 neither proved nor refuted the atom (`mumei verify` exit 3), so the
+    /// diagnostic is a warning rather than an error.
+    inconclusive: bool,
+}
+
+/// Outcome of the in-process verification pass over a buffer.
+struct LspLiveVerification {
+    /// Atoms Z3 proved in this run whose classification does not route them
+    /// to mumei-lean: nothing about them is pending, whatever a sibling
+    /// certificate recorded. An atom Z3 proved but that still escalates
+    /// (outside the decidable fragment, `trusted`) is deliberately absent.
+    settled: BTreeSet<String>,
+    /// The first failing atom, if any; verification stops there.
+    failure: Option<LspVerifyFailure>,
+}
+
+fn settled_without_lean(atom: &parser::Atom, module_env: &verification::ModuleEnv) -> bool {
+    !verification::classify_atom_for_lean_escalation(atom, module_env, "unsat", "verified")
+        .should_escalate
 }
 
 fn classify_lsp_failure(
@@ -897,15 +999,21 @@ fn classify_lsp_failure(
         error,
         atom: Some(atom.name.clone()),
         escalation: classification.should_escalate.then_some(classification),
+        inconclusive: is_unverifiable
+            || crate::commands::verify::is_solver_inconclusive(&z3_result),
     }
 }
 
 /// ソースコードを in-process でパース → Z3 検証し、最初のエラーを返す。
 /// mumei.toml を上方探索してプロジェクトルートを決定し、依存パッケージも解決する。
-fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), LspVerifyFailure> {
+fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> LspLiveVerification {
+    let mut live = LspLiveVerification {
+        settled: BTreeSet::new(),
+        failure: None,
+    };
     let items = parser::parse_module(source);
     if items.is_empty() {
-        return Ok(());
+        return live;
     }
 
     let mut module_env = verification::ModuleEnv::new();
@@ -961,9 +1069,13 @@ fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), Lsp
                 if let Err(e) =
                     verification::verify_with_config(&hir_atom, output_dir, &module_env, 5000, 3)
                 {
-                    return Err(classify_lsp_failure(atom, &module_env, e));
+                    live.failure = Some(classify_lsp_failure(atom, &module_env, e));
+                    return live;
                 }
                 module_env.mark_verified(&atom.name);
+                if settled_without_lean(atom, &module_env) {
+                    live.settled.insert(atom.name.clone());
+                }
             }
             parser::Item::ImplBlock(ib) => {
                 for method in &ib.methods {
@@ -981,16 +1093,21 @@ fn verify_source_for_lsp(path: &std::path::Path, source: &str) -> Result<(), Lsp
                         5000,
                         3,
                     ) {
-                        return Err(classify_lsp_failure(&qualified_method, &module_env, e));
+                        live.failure =
+                            Some(classify_lsp_failure(&qualified_method, &module_env, e));
+                        return live;
                     }
                     module_env.mark_verified(&qualified_name);
+                    if settled_without_lean(&qualified_method, &module_env) {
+                        live.settled.insert(qualified_name);
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    Ok(())
+    live
 }
 
 /// Feature 3f: Extract related diagnostic information from MumeiError for LSP relatedInformation.
@@ -1056,6 +1173,8 @@ fn build_related_information(
 }
 
 /// Convert a byte offset within `source` to a 0-indexed (line, character) pair.
+/// `character` is in UTF-16 code units, as required by the LSP spec —
+/// astral-plane characters (e.g. emoji) count as 2, not 1.
 /// Falls back to (0, 0) when the source is empty or the offset is out of range.
 fn byte_offset_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
     let mut line: usize = 0;
@@ -1068,10 +1187,31 @@ fn byte_offset_to_line_col(source: &str, byte_offset: usize) -> (usize, usize) {
             line += 1;
             col = 0;
         } else {
-            col += 1;
+            col += ch.len_utf16();
         }
     }
     (line, col)
+}
+
+/// Convert an LSP `character` (UTF-16 code units) to a `chars()` index
+/// within `line`. Returns `None` when the position lands mid-surrogate
+/// pair or past the line end.
+fn utf16_col_to_char_idx(line: &str, character: usize) -> Option<usize> {
+    let mut utf16_col = 0;
+    for (char_idx, ch) in line.chars().enumerate() {
+        if utf16_col == character {
+            return Some(char_idx);
+        }
+        if utf16_col > character {
+            return None;
+        }
+        utf16_col += ch.len_utf16();
+    }
+    if utf16_col == character {
+        Some(line.chars().count())
+    } else {
+        None
+    }
 }
 
 /// Hover 用: 指定行付近の atom を探し、requires/ensures を markdown で返す
@@ -1101,6 +1241,13 @@ fn build_hover(source: &str, line: usize) -> Option<String> {
                         a.requires.trim(),
                         a.ensures.trim()
                     );
+                    let clause_labels = format_clause_labels(a);
+                    if !clause_labels.is_empty() {
+                        md.push_str(&format!(
+                            "\n\n**labeled clauses**:\n```\n{}\n```",
+                            clause_labels
+                        ));
+                    }
                     // エフェクト情報を表示
                     if !a.effects.is_empty() {
                         let effects_str: Vec<String> =
@@ -1114,6 +1261,25 @@ fn build_hover(source: &str, line: usize) -> Option<String> {
     }
 
     None
+}
+
+fn format_clause_labels(atom: &parser::Atom) -> String {
+    atom.clause_labels
+        .iter()
+        .map(|clause_label| {
+            let kind = match &clause_label.kind {
+                parser::ClauseKind::Requires => "requires",
+                parser::ClauseKind::Ensures => "ensures",
+            };
+            format!(
+                "{} {}: {};",
+                kind,
+                serde_json::json!(clause_label.label.as_str()),
+                clause_label.clause
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // =============================================================================
@@ -1312,14 +1478,23 @@ fn is_item_start(line: &str) -> bool {
         || trimmed.starts_with("import ")
 }
 
-/// Report atoms that a sibling proof certificate records as discharged by
-/// mumei-lean. Without this the editor shows nothing for an atom Z3 returned
-/// `unknown` for, so a reader cannot tell a still-open escalation from one the
-/// Lean bridge already closed.
-fn append_lean_verified_diagnostics(
+/// Report the Lean escalation state a sibling proof certificate records for
+/// every atom in the file: `lean_verified` atoms the bridge already closed, and
+/// `escalation_candidate` atoms still waiting on mumei-lean. The in-process
+/// verification above stops at the first failing atom, so without the
+/// certificate the editor would show at most one pending escalation per file.
+/// `live_pending_atom` is the atom that failure already reported, which is
+/// skipped here so it is not shown twice. `live_settled` are the atoms the
+/// in-process run proved *and* classified as not needing mumei-lean; their
+/// certificate entries are stale and skipped. A live `unsat` alone is not
+/// enough: an atom outside the decidable fragment or marked `trusted` still
+/// escalates after Z3 proves it, so its pending entry stays visible.
+fn append_certificate_lean_escalation_diagnostics(
     path: &Path,
     source: &str,
     items: &[parser::Item],
+    live_pending_atom: Option<&str>,
+    live_settled: &BTreeSet<String>,
     diagnostics: &mut Vec<serde_json::Value>,
 ) {
     let cert_path = path.with_extension("proof.json");
@@ -1347,12 +1522,135 @@ fn append_lean_verified_diagnostics(
     }
 
     for atom_cert in &cert.atoms {
-        if atom_cert.z3_check_result != "lean_verified" {
-            continue;
-        }
-        let Some((_, atom)) = atoms.iter().find(|(name, _)| name == &atom_cert.name) else {
+        let Some((name, atom)) = atoms.iter().find(|(name, _)| name == &atom_cert.name) else {
             continue;
         };
+        // The certificate describes the source at generation time; an entry
+        // whose atom has since been edited says nothing about the buffer. The
+        // hash is computed the way the certifying run did: for the
+        // certificate's own version, over the qualified atom.
+        let mut qualified = (*atom).clone();
+        qualified.name = name.clone();
+        let current_hash =
+            proof_cert::compute_atom_content_hash_for_version(&cert.version, &qualified);
+        if current_hash.as_deref() != Some(atom_cert.content_hash.as_str()) {
+            continue;
+        }
+        if atom_cert.z3_check_result != "lean_verified" && live_settled.contains(&atom_cert.name) {
+            continue;
+        }
+        // Kernel-axiom audit failures are distinct from stale translator
+        // metadata and pending escalations, so check the audit first.
+        match proof_cert::lean_axiom_audit(atom_cert) {
+            proof_cert::LeanAxiomAudit::Rejected { disallowed } => {
+                diagnostics.push(serde_json::json!({
+                    "range": atom_name_range(source, atom),
+                    "severity": 2,
+                    "source": "mumei-lean",
+                    "message": format!(
+                        "Lean escalation: axiom_rejected (disallowed kernel axioms: {:?}; certificate {})",
+                        disallowed,
+                        cert_path.display()
+                    ),
+                    "data": {
+                        "lean_escalation": {
+                            "status": "axiom_rejected",
+                            "atom": atom_cert.name,
+                            "z3_result_class": atom_cert.z3_result_class,
+                            "certificate": cert_path.to_string_lossy(),
+                            "disallowed": disallowed,
+                        }
+                    }
+                }));
+                continue;
+            }
+            proof_cert::LeanAxiomAudit::Error => {
+                diagnostics.push(serde_json::json!({
+                    "range": atom_name_range(source, atom),
+                    "severity": 2,
+                    "source": "mumei-lean",
+                    "message": format!(
+                        "Lean escalation: axiom_rejected (kernel axiom audit errored; certificate {})",
+                        cert_path.display()
+                    ),
+                    "data": {
+                        "lean_escalation": {
+                            "status": "axiom_rejected",
+                            "atom": atom_cert.name,
+                            "z3_result_class": atom_cert.z3_result_class,
+                            "certificate": cert_path.to_string_lossy(),
+                        }
+                    }
+                }));
+                continue;
+            }
+            proof_cert::LeanAxiomAudit::Passed { .. } | proof_cert::LeanAxiomAudit::Unaudited => {}
+        }
+        // Same membership rule as the escalation bundle: an atom is pending
+        // while it carries an escalation reason and Lean has not closed it.
+        if atom_cert.z3_check_result != "lean_verified" {
+            let Some(reason) = atom_cert.escalation_reason.as_ref() else {
+                continue;
+            };
+            if live_settled.contains(&atom_cert.name)
+                || live_pending_atom == Some(atom_cert.name.as_str())
+            {
+                continue;
+            }
+            let reason = reason.as_str();
+            // `skipped`: the certifying run never got a Z3 verdict for the atom.
+            let check = atom_cert.z3_check_result.as_str();
+            let severity =
+                if crate::commands::verify::is_solver_inconclusive(check) || check == "skipped" {
+                    2
+                } else {
+                    1
+                };
+            diagnostics.push(serde_json::json!({
+                "range": atom_name_range(source, atom),
+                "severity": severity,
+                "source": "mumei-z3",
+                "message": format!(
+                    "Lean escalation: pending (z3 {}, reason {}; certificate {})",
+                    atom_cert.z3_result_class,
+                    reason,
+                    cert_path.display()
+                ),
+                "data": {
+                    "lean_escalation": {
+                        "status": "pending",
+                        "atom": atom_cert.name,
+                        "z3_result_class": atom_cert.z3_result_class,
+                        "escalation_reason": reason,
+                        "certificate": cert_path.to_string_lossy(),
+                    }
+                }
+            }));
+            continue;
+        }
+        // Same acceptance rule as `verify_certificate`: a `lean_verified`
+        // entry counts only when its Lean result metadata is current;
+        // otherwise it is `stale_translator` and must not read as proven.
+        if !proof_cert::lean_certificate_metadata_is_current(atom_cert) {
+            diagnostics.push(serde_json::json!({
+                "range": atom_name_range(source, atom),
+                "severity": 2,
+                "source": "mumei-lean",
+                "message": format!(
+                    "Lean escalation: stale_translator (certificate {} records lean_verified without current Lean result metadata; re-run mumei-lean)",
+                    cert_path.display()
+                ),
+                "data": {
+                    "lean_escalation": {
+                        "status": "stale_translator",
+                        "atom": atom_cert.name,
+                        "z3_result_class": atom_cert.z3_result_class,
+                        "certificate": cert_path.to_string_lossy(),
+                    }
+                }
+            }));
+            continue;
+        }
         diagnostics.push(serde_json::json!({
             "range": atom_name_range(source, atom),
             "severity": 3,
@@ -1501,15 +1799,20 @@ fn build_completion_list(
         for item in doc_items {
             match item {
                 parser::Item::Atom(a) => {
+                    let mut detail = format!(
+                        "atom {}  requires: {}  ensures: {}",
+                        a.name,
+                        a.requires.trim(),
+                        a.ensures.trim()
+                    );
+                    let clause_labels = format_clause_labels(a);
+                    if !clause_labels.is_empty() {
+                        detail.push_str(&format!("  {}", clause_labels.replace('\n', " ")));
+                    }
                     items.push(serde_json::json!({
                         "label": a.name,
                         "kind": 3,
-                        "detail": format!(
-                            "atom {}  requires: {}  ensures: {}",
-                            a.name,
-                            a.requires.trim(),
-                            a.ensures.trim()
-                        )
+                        "detail": detail
                     }));
                 }
                 parser::Item::EffectDef(e) => {
@@ -1567,6 +1870,12 @@ fn extract_word_at(source: &str, line: usize, character: usize) -> String {
         None => return String::new(),
     };
     let chars: Vec<char> = target_line.chars().collect();
+    // LSP `character` is a UTF-16 offset, not a char index — convert it
+    // so positions after astral-plane characters don't drift.
+    let character = match utf16_col_to_char_idx(target_line, character) {
+        Some(idx) => idx,
+        None => return String::new(),
+    };
     if character >= chars.len() {
         return String::new();
     }
@@ -1651,6 +1960,15 @@ fn read_message(reader: &mut impl BufRead) -> Result<String, String> {
             content_length = len_str
                 .parse::<usize>()
                 .map_err(|e| format!("Invalid Content-Length: {}", e))?;
+            // A malicious or corrupt peer can claim a multi-GB length and
+            // make the server allocate it blindly.
+            const MAX_LSP_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+            if content_length > MAX_LSP_MESSAGE_BYTES {
+                return Err(format!(
+                    "Content-Length {} exceeds limit of {} bytes",
+                    content_length, MAX_LSP_MESSAGE_BYTES
+                ));
+            }
         }
         // Content-Type 等は無視
     }
@@ -1776,9 +2094,25 @@ atom inc(n: i64)
     }
 
     #[test]
+    fn test_hover_includes_clause_labels() {
+        let source = r#"atom safe(x: i64) -> i64
+requires "positive \"input\"": x > 0;
+ensures "nonzero result": result != 0;
+body: x;
+"#;
+        let hover = build_hover(source, 0).expect("hover for atom declaration");
+        assert!(hover.contains("requires \"positive \\\"input\\\"\": x > 0;"));
+        assert!(hover.contains("ensures \"nonzero result\": result != 0;"));
+    }
+
+    #[test]
     fn test_completion_includes_atoms_from_cache() {
         let mut parsed_items: HashMap<String, Vec<parser::Item>> = HashMap::new();
-        let source = "atom inc(n: i64) requires: n >= 0; ensures: result == n + 1; body: n + 1;";
+        let source = r#"atom inc(n: i64)
+requires "nonnegative input": n >= 0;
+ensures "increments input": result == n + 1;
+body: n + 1;
+"#;
         let items = parser::parse_module(source);
         assert!(!items.is_empty(), "should parse at least one item");
         parsed_items.insert("file:///test.mm".to_string(), items);
@@ -1796,6 +2130,12 @@ atom inc(n: i64)
             .find(|i| i.get("label").and_then(|l| l.as_str()) == Some("inc"))
             .unwrap();
         assert_eq!(inc_item.get("kind").and_then(|k| k.as_u64()), Some(3));
+        let detail = inc_item
+            .get("detail")
+            .and_then(|value| value.as_str())
+            .expect("atom completion detail");
+        assert!(detail.contains("requires \"nonnegative input\": n >= 0;"));
+        assert!(detail.contains("ensures \"increments input\": result == n + 1;"));
     }
 
     #[test]
@@ -1871,5 +2211,84 @@ atom inc(n: i64)
         for kw in MUMEI_KEYWORDS {
             assert!(seen.insert(kw), "Duplicate keyword: {}", kw);
         }
+    }
+
+    #[test]
+    fn test_diagnose_reports_top_level_junk_next_to_a_valid_atom() {
+        let source = "atom id(x: i64) -> i64 { ensures: result == x; body: { x } }\nnot an item\n";
+        let diagnostics = diagnose("untitled:junk.mm", source);
+        let first = diagnostics.first().expect("a parse error");
+        assert_eq!(first["severity"], 1);
+        assert_eq!(first["range"]["start"]["line"], 1);
+        assert_eq!(first["range"]["start"]["character"], 0);
+        assert!(first["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Parse error: unexpected token not at top level at 2:1"));
+    }
+
+    #[test]
+    fn test_parse_error_ranges_use_utf16_and_the_parser_location() {
+        // `x` is char 4 but UTF-16 unit 5: the emoji is a surrogate pair.
+        let diagnostics = diagnose("untitled:emoji.mm", "\"\u{1F600}\" x\n");
+        let x = diagnostics
+            .iter()
+            .find(|d| {
+                d["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("token x at top level")
+            })
+            .expect("a diagnostic for `x`");
+        assert_eq!(x["range"]["start"]["line"], 0);
+        assert_eq!(x["range"]["start"]["character"], 5);
+        assert_eq!(x["range"]["end"]["character"], 6);
+
+        let quoted = diagnose("untitled:quoted.mm", "\n\"oops at top level at 5:6\"\n");
+        assert_eq!(quoted[0]["range"]["start"]["line"], 1, "{quoted:?}");
+        assert_eq!(quoted[0]["range"]["start"]["character"], 0);
+    }
+
+    #[test]
+    fn test_intent_drift_survives_a_syntax_error_elsewhere() {
+        let atom = "atom complex(a: i64, b: i64) requires: a >= 0 && b >= 0 && a != b && a < 100 && b < 100; ensures: result >= a && result >= b && result == a + b && result < 200; effects: [IO]; body: { if a > b { if a > 50 { a + b } else { b + a } } else { if b > 50 { b + a } else { a + b } } };\n";
+        let drift = |diagnostics: &[serde_json::Value]| {
+            diagnostics
+                .iter()
+                .filter(|d| d["source"] == "mumei-intent")
+                .count()
+        };
+        let clean = drift(&diagnose("untitled:clean.mm", atom));
+        assert!(clean > 0, "fixture should trigger intent drift");
+        let broken = diagnose("untitled:broken.mm", &format!("{atom}not an item\n"));
+        assert!(broken.iter().any(|d| d["severity"] == 1));
+        assert_eq!(drift(&broken), clean, "{broken:?}");
+    }
+
+    #[test]
+    fn test_diagnose_accepts_well_formed_and_comment_only_sources() {
+        let atom = "atom id(x: i64) -> i64 { ensures: result == x; body: { x } };\n";
+        assert!(diagnose("untitled:ok.mm", atom).is_empty());
+        assert!(diagnose("untitled:empty.mm", "// nothing yet\n").is_empty());
+    }
+
+    #[test]
+    fn test_top_level_failure_position_ignores_nested_locations() {
+        assert_eq!(
+            top_level_failure_position("unexpected token } at top level at 3:12; expected"),
+            Some((2, 11))
+        );
+        assert_eq!(
+            top_level_failure_position(
+                "unexpected token \"a at top level at 9:9\" at top level at 2:3; expected"
+            ),
+            Some((1, 2))
+        );
+        assert_eq!(
+            top_level_failure_position(
+                "while loop requires an 'invariant' clause, found { at 1:26"
+            ),
+            None
+        );
     }
 }

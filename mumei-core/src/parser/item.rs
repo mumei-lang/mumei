@@ -4,12 +4,14 @@
 
 use crate::ast::TypeRef;
 use crate::parser::{
-    Atom, CapabilityDef, Effect, EffectDef, EffectDefParam, EffectParam, EnumDef, EnumVariant,
-    ExternBlock, ExternFn, ImplBlock, ImplDef, ImportDecl, Item, Param, Quantifier, QuantifierType,
-    RefinedType, ResourceDef, ResourceMode, Span, StructDef, StructField, TraitDef, TraitMethod,
-    TrustLevel, TypeParamBound,
+    Atom, CapabilityDef, ClauseKind, ClauseLabel, ClauseMode, ClauseTrustMode, CoverClause, Effect,
+    EffectDef, EffectDefParam, EffectParam, EnumDef, EnumVariant, ExternBlock, ExternFn, ImplBlock,
+    ImplDef, ImportDecl, Item, Param, Quantifier, QuantifierType, RefinedType, ResourceDef,
+    ResourceField, ResourceMode, Span, StructDef, StructField, TraitDef, TraitMethod, TrustLevel,
+    TypeParamBound,
 };
 
+use super::expr::parse_expr;
 use super::token::{SpannedToken, Token};
 use super::ParseContext;
 
@@ -522,7 +524,7 @@ fn append_token(text: &mut String, tok: &Token) {
     match tok {
         Token::StringLit(s) => {
             text.push('"');
-            text.push_str(s);
+            text.push_str(&crate::parser::token::escape_string_content(s));
             text.push('"');
         }
         other => text.push_str(&format!("{}", other)),
@@ -1163,6 +1165,35 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
             Token::Resource => {
                 let start_tok = ctx.advance().clone();
                 let name = ctx.expect_ident();
+                let mut state = Vec::new();
+                if ctx.peek() == &Token::LBrace {
+                    ctx.advance();
+                    while ctx.peek() != &Token::RBrace && ctx.peek() != &Token::Eof {
+                        let field_span = ctx.current_span();
+                        let field_name = ctx.expect_ident();
+                        ctx.expect(Token::Colon);
+                        let ty = ctx.expect_ident();
+                        if !matches!(ty.as_str(), "i64" | "bool" | "f64") {
+                            ctx.syntax_failure(format!(
+                                "resource state field '{field_name}' has unsupported type '{ty}'"
+                            ));
+                        }
+                        state.push(ResourceField {
+                            name: field_name,
+                            ty,
+                            span: field_span,
+                        });
+                        if ctx.peek() == &Token::Comma {
+                            ctx.advance();
+                        } else if ctx.peek() != &Token::RBrace {
+                            ctx.syntax_failure(
+                                "expected ',' or '}' in resource state block".to_string(),
+                            );
+                            break;
+                        }
+                    }
+                    ctx.expect(Token::RBrace);
+                }
                 ctx.expect(Token::Priority);
                 ctx.expect(Token::Colon);
                 let priority = parse_integer_literal(ctx);
@@ -1186,11 +1217,25 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                         }
                     }
                 };
+                let invariant = if ctx.peek() == &Token::Invariant {
+                    if state.is_empty() {
+                        ctx.syntax_failure("resource invariant requires a state block".to_string());
+                    }
+                    ctx.advance();
+                    if ctx.peek() == &Token::Colon {
+                        ctx.advance();
+                    }
+                    Some(parse_expr(ctx, 0))
+                } else {
+                    None
+                };
                 ctx.expect(Token::Semicolon);
                 items.push(Item::ResourceDef(ResourceDef {
                     name,
+                    state,
                     priority,
                     mode,
+                    invariant,
                     span: span_from_token(&start_tok),
                 }));
             }
@@ -1391,12 +1436,14 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                             match ctx.peek() {
                                 Token::Requires => {
                                     ctx.advance();
+                                    let _ = take_clause_label(ctx);
                                     ctx.expect(Token::Colon);
                                     ext_requires = Some(collect_until_semicolon(ctx));
                                     ctx.expect(Token::Semicolon);
                                 }
                                 Token::Ensures => {
                                     ctx.advance();
+                                    let _ = take_clause_label(ctx);
                                     ctx.expect(Token::Colon);
                                     ext_ensures = Some(collect_until_semicolon(ctx));
                                     ctx.expect(Token::Semicolon);
@@ -1463,7 +1510,20 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 items.push(Item::Atom(atom));
             }
 
-            _ => {
+            // A `;` after an item (e.g. `body: { ... };`) is accepted.
+            Token::Semicolon => {
+                ctx.advance();
+            }
+
+            other => {
+                let (line, col) = ctx
+                    .tokens_ref()
+                    .get(ctx.pos())
+                    .map(|t| (t.line, t.col))
+                    .unwrap_or((0, 0));
+                ctx.syntax_failure(format!(
+                    "unexpected token {other} at top level at {line}:{col}; expected an item such as `atom`, `type`, `struct` or `import`"
+                ));
                 ctx.advance();
             }
         }
@@ -1669,6 +1729,42 @@ fn string_literal_len(rest: &str) -> usize {
 // Atom body parsing
 // =============================================================================
 
+fn take_clause_label(ctx: &mut ParseContext) -> Option<String> {
+    match ctx.peek().clone() {
+        Token::StringLit(label) => {
+            ctx.advance();
+            Some(label)
+        }
+        _ => None,
+    }
+}
+
+fn take_clause_trust_mode(ctx: &mut ParseContext) -> Option<ClauseTrustMode> {
+    match ctx.peek().clone() {
+        Token::Ident(mode) if mode == "assume" => {
+            ctx.advance();
+            Some(ClauseTrustMode::Assume)
+        }
+        Token::Ident(mode) if mode == "check" => {
+            ctx.advance();
+            Some(ClauseTrustMode::Check)
+        }
+        Token::Ident(mode) => {
+            let (line, col) = ctx
+                .tokens_ref()
+                .get(ctx.pos())
+                .map(|token| (token.line, token.col))
+                .unwrap_or((0, 0));
+            ctx.syntax_failure(format!(
+                "unknown clause trust mode '{mode}' at {line}:{col} — expected assume or check"
+            ));
+            ctx.advance();
+            None
+        }
+        _ => None,
+    }
+}
+
 fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
     let name = ctx.expect_ident();
 
@@ -1689,13 +1785,16 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| {
-            let (is_ref, is_ref_mut, s_stripped) = if let Some(rest) = s.strip_prefix("ref mut ") {
-                (false, true, rest.trim())
-            } else if let Some(rest) = s.strip_prefix("ref ") {
-                (true, false, rest.trim())
-            } else {
-                (false, false, s)
-            };
+            let (is_ref, is_ref_mut, consume, s_stripped) =
+                if let Some(rest) = s.strip_prefix("ref mut ") {
+                    (false, true, false, rest.trim())
+                } else if let Some(rest) = s.strip_prefix("ref ") {
+                    (true, false, false, rest.trim())
+                } else if let Some(rest) = s.strip_prefix("consume ") {
+                    (false, false, true, rest.trim())
+                } else {
+                    (false, false, false, s)
+                };
             if let Some((param_name, type_name)) = s_stripped.split_once(':') {
                 let type_name_str = type_name.trim().to_string();
                 let type_ref = parse_type_ref(&type_name_str);
@@ -1703,6 +1802,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                     name: param_name.trim().to_string(),
                     type_name: Some(type_name_str),
                     type_ref: Some(type_ref),
+                    consume,
                     is_ref,
                     is_ref_mut,
                     fn_contract_requires: None,
@@ -1713,6 +1813,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                     name: s_stripped.to_string(),
                     type_name: None,
                     type_ref: None,
+                    consume,
                     is_ref,
                     is_ref_mut,
                     fn_contract_requires: None,
@@ -1731,8 +1832,17 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         None
     };
 
+    // Clauses may be wrapped in braces: `atom f(x: i64) -> i64 { ... }`.
+    let braced = ctx.peek() == &Token::LBrace;
+    if braced {
+        ctx.advance();
+    }
+
     let mut requires_raw = "true".to_string();
     let mut ensures = "true".to_string();
+    let mut clause_labels = Vec::new();
+    let mut clause_modes = Vec::new();
+    let mut covers = Vec::new();
     let mut body_raw = String::new();
     let mut consumed_params: Vec<String> = Vec::new();
     let mut resources: Vec<String> = Vec::new();
@@ -1740,6 +1850,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
     let mut spec_metadata: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut invariant: Option<String> = None;
+    let mut decreases: Option<String> = None;
     let mut effects: Vec<Effect> = Vec::new();
     let mut contracts: Vec<(String, Option<String>, Option<String>)> = Vec::new();
     let mut effect_pre: std::collections::HashMap<String, String> =
@@ -1751,14 +1862,62 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         match ctx.peek().clone() {
             Token::Requires => {
                 ctx.advance();
+                let mode = take_clause_trust_mode(ctx);
+                let label = take_clause_label(ctx);
                 ctx.expect(Token::Colon);
-                requires_raw = conjoin_clause(&requires_raw, &collect_until_semicolon(ctx));
+                let clause = collect_until_semicolon(ctx);
+                if let Some(label) = label {
+                    clause_labels.push(ClauseLabel {
+                        kind: ClauseKind::Requires,
+                        clause: clause.clone(),
+                        label,
+                    });
+                }
+                if let Some(mode) = mode {
+                    if !quantifier_spans(&clause).is_empty() {
+                        ctx.syntax_failure(
+                            "clause trust modes (assume/check) are not supported on requires clauses containing quantifiers (forall/exists)"
+                                .to_string(),
+                        );
+                    }
+                    clause_modes.push(ClauseMode {
+                        kind: ClauseKind::Requires,
+                        clause: clause.clone(),
+                        mode,
+                    });
+                }
+                requires_raw = conjoin_clause(&requires_raw, &clause);
                 ctx.expect(Token::Semicolon);
             }
             Token::Ensures => {
                 ctx.advance();
+                let mode = take_clause_trust_mode(ctx);
+                let label = take_clause_label(ctx);
                 ctx.expect(Token::Colon);
-                ensures = conjoin_clause(&ensures, &collect_until_semicolon(ctx));
+                let clause = collect_until_semicolon(ctx);
+                if let Some(label) = label {
+                    clause_labels.push(ClauseLabel {
+                        kind: ClauseKind::Ensures,
+                        clause: clause.clone(),
+                        label,
+                    });
+                }
+                if let Some(mode) = mode {
+                    clause_modes.push(ClauseMode {
+                        kind: ClauseKind::Ensures,
+                        clause: clause.clone(),
+                        mode,
+                    });
+                }
+                ensures = conjoin_clause(&ensures, &clause);
+                ctx.expect(Token::Semicolon);
+            }
+            Token::Ident(ref ident) if ident == "cover" => {
+                ctx.advance();
+                let label = take_clause_label(ctx);
+                ctx.expect(Token::Colon);
+                let clause = collect_until_semicolon(ctx);
+                covers.push(CoverClause { clause, label });
                 ctx.expect(Token::Semicolon);
             }
             Token::Body => {
@@ -1819,6 +1978,16 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                 ctx.expect(Token::Colon);
                 invariant = Some(collect_until_semicolon(ctx));
                 ctx.expect(Token::Semicolon);
+            }
+            Token::Decreases => {
+                ctx.advance();
+                ctx.expect(Token::Colon);
+                let clause = collect_until_semicolon(ctx);
+                ctx.expect(Token::Semicolon);
+                if decreases.is_some() {
+                    ctx.syntax_failure(format!("duplicate `decreases` clause in atom '{name}'"));
+                }
+                decreases = Some(clause);
             }
             Token::Effects => {
                 ctx.advance();
@@ -1886,10 +2055,30 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
             | Token::Effect
             | Token::RBrace
             | Token::Eof => break,
+            // An unrecognized `keyword:` line (e.g. `inputs:`) used to be
+            // skipped token-by-token, silently dropping whatever contract
+            // or body text followed — the atom then verified vacuously.
+            // Keep recovering for the LSP-style tolerant path, but record a
+            // syntax failure so `parse_module_checked` (verify/build/check)
+            // rejects the file.
+            ref tok if tok.is_word_like() && ctx.peek_at(1) == Some(&Token::Colon) => {
+                let (line, col) = ctx
+                    .tokens_ref()
+                    .get(ctx.pos())
+                    .map(|t| (t.line, t.col))
+                    .unwrap_or((0, 0));
+                ctx.syntax_failure(format!(
+                    "unknown atom clause keyword '{tok}:' at {line}:{col} — expected requires/ensures/cover/body/invariant/effects/contract/consume/resources/semantics/max_unroll/effect_pre/effect_post"
+                ));
+                ctx.advance();
+            }
             _ => {
                 ctx.advance();
             }
         }
+    }
+    if braced {
+        ctx.expect(Token::RBrace);
     }
 
     let mut params = params;
@@ -1913,6 +2102,9 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         trace_id: None,
         spec_metadata,
         requires: requires_cleaned,
+        clause_labels,
+        clause_modes,
+        covers,
         forall_constraints,
         ensures,
         body_expr: body_raw,
@@ -1924,6 +2116,7 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
         invariant,
         effects,
         return_type,
+        decreases,
         span: span_from_token(start_tok),
         effect_pre,
         effect_post,
@@ -2132,70 +2325,267 @@ fn find_next_trait_item(body: &str, start: usize) -> usize {
     body.len()
 }
 
-fn extract_quantifiers(requires: &str) -> Vec<Quantifier> {
-    let mut quantifiers = Vec::new();
-    for (prefix, q_type) in [
-        ("forall(", QuantifierType::ForAll),
-        ("exists(", QuantifierType::Exists),
-    ] {
-        let mut search_from = 0;
-        while let Some(pos) = requires[search_from..].find(prefix) {
-            let abs_pos = search_from + pos + prefix.len();
-            let mut depth = 1;
-            let mut end_pos = abs_pos;
-            for (i, c) in requires[abs_pos..].char_indices() {
-                match c {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end_pos = abs_pos + i;
-                            break;
-                        }
+/// Spans of `forall(`/`exists(` quantifier expressions in `requires`,
+/// scanned left to right. A match inside an already-found quantifier's
+/// span belongs to that quantifier's condition and is skipped — e.g. in
+/// `exists(i, 0, n, forall(j, 0, m, p))` only the `exists` is extracted;
+/// hoisting the inner `forall` as a separate conjunct would free its
+/// outer bound variable and strengthen the hypothesis unsoundly.
+fn quantifier_spans(requires: &str) -> Vec<(usize, usize, usize, QuantifierType)> {
+    let mut spans = Vec::new();
+    let mut pos = 0;
+    while pos < requires.len() {
+        let forall_at = requires[pos..].find("forall(").map(|p| pos + p);
+        let exists_at = requires[pos..].find("exists(").map(|p| pos + p);
+        let (start, prefix_len, q_type) = match (forall_at, exists_at) {
+            (Some(f), Some(e)) if f <= e => (f, "forall(".len(), QuantifierType::ForAll),
+            (Some(_), Some(e)) => (e, "exists(".len(), QuantifierType::Exists),
+            (Some(f), None) => (f, "forall(".len(), QuantifierType::ForAll),
+            (None, Some(e)) => (e, "exists(".len(), QuantifierType::Exists),
+            (None, None) => break,
+        };
+        let inner_start = start + prefix_len;
+        let mut depth = 1;
+        let mut end_pos = requires.len();
+        for (i, c) in requires[inner_start..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_pos = inner_start + i;
+                        break;
                     }
-                    _ => {}
+                }
+                _ => {}
+            }
+        }
+        spans.push((start, inner_start, end_pos, q_type));
+        pos = end_pos + 1;
+    }
+    spans
+}
+
+/// Byte ranges (into `s`) of the leaf top-level conjuncts of a contract
+/// string. Splits only at depth-0 `&&` (depth over `()[]{}`, skipping the
+/// inside of `"..."` string literals including `\"` escapes), then trims
+/// each piece and strips every enclosing paren pair — but only when the
+/// first `(` matches the final `)` — recursing into a stripped piece that
+/// splits further. A level is kept whole (a single leaf) when its depth 0
+/// contains `||`, `=>`, any `|` (lambda / bit-or / `|>`), or the
+/// whole-word keywords `if`, `then`, `else`, `match`: those bind looser
+/// than `&&` or swallow a trailing `&&`, so a quantifier nested under
+/// them is not a top-level conjunct.
+fn top_level_conjunct_ranges(s: &str) -> Vec<(usize, usize)> {
+    let mut leaves = Vec::new();
+    collect_conjunct_leaves(s, 0, &mut leaves);
+    leaves
+}
+
+fn collect_conjunct_leaves(s: &str, base: usize, out: &mut Vec<(usize, usize)>) {
+    if level_blocks_conjunct_split(s) {
+        let (a, b) = trim_bounds(s, 0, s.len());
+        if a < b {
+            out.push((base + a, base + b));
+        }
+        return;
+    }
+    let bytes = s.as_bytes();
+    let mut piece_start = 0usize;
+    let mut i = 0usize;
+    let mut depth = 0i64;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => i = skip_string_literal(bytes, i),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'&' if depth == 0 && bytes.get(i + 1) == Some(&b'&') => {
+                push_conjunct_piece(s, base, piece_start, i, out);
+                i += 2;
+                piece_start = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    push_conjunct_piece(s, base, piece_start, s.len(), out);
+}
+
+fn push_conjunct_piece(
+    s: &str,
+    base: usize,
+    start: usize,
+    end: usize,
+    out: &mut Vec<(usize, usize)>,
+) {
+    let bytes = s.as_bytes();
+    let (mut a, mut b) = trim_bounds(s, start, end);
+    let mut stripped = false;
+    loop {
+        if b > a + 1 && bytes[a] == b'(' && bytes[b - 1] == b')' {
+            if let Some(close) = matching_paren(s, a) {
+                if close == b - 1 {
+                    a += 1;
+                    b -= 1;
+                    let t = trim_bounds(s, a, b);
+                    a = t.0;
+                    b = t.1;
+                    stripped = true;
+                    continue;
                 }
             }
-            let inner = &requires[abs_pos..end_pos];
-            let parts: Vec<&str> = inner.splitn(4, ',').collect();
-            if parts.len() >= 4 {
-                quantifiers.push(Quantifier {
-                    q_type: q_type.clone(),
-                    var: parts[0].trim().to_string(),
-                    start: parts[1].trim().to_string(),
-                    end: parts[2].trim().to_string(),
-                    condition: parts[3].trim().to_string(),
-                });
+        }
+        break;
+    }
+    if a < b {
+        if stripped {
+            // Removing enclosing parens can expose a deeper `&&` split.
+            collect_conjunct_leaves(&s[a..b], base + a, out);
+        } else {
+            out.push((base + a, base + b));
+        }
+    }
+}
+
+fn trim_bounds(s: &str, mut a: usize, mut b: usize) -> (usize, usize) {
+    let bytes = s.as_bytes();
+    while a < b && bytes[a].is_ascii_whitespace() {
+        a += 1;
+    }
+    while b > a && bytes[b - 1].is_ascii_whitespace() {
+        b -= 1;
+    }
+    (a, b)
+}
+
+fn skip_string_literal(bytes: &[u8], quote: usize) -> usize {
+    let mut i = quote + 1;
+    while i < bytes.len() && bytes[i] != b'"' {
+        if bytes[i] == b'\\' {
+            i += 1;
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Byte index of the `)` matching the `(` at `open`, tracking `()[]{}`
+/// depth and skipping string literals.
+fn matching_paren(s: &str, open: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 0i64;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => i = skip_string_literal(bytes, i),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
             }
-            search_from = end_pos + 1;
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether depth 0 of `s` contains an operator or keyword that must keep
+/// the level from splitting at `&&` (see `top_level_conjunct_ranges`).
+fn level_blocks_conjunct_split(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut depth = 0i64;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => i = skip_string_literal(bytes, i),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'|' if depth == 0 => return true,
+            b'=' if depth == 0 && bytes.get(i + 1) == Some(&b'>') => return true,
+            _ if depth == 0 && (bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') => {
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let preceded = start > 0
+                    && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+                if !preceded && matches!(&s[start..i], "if" | "then" | "else" | "match") {
+                    return true;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Like `quantifier_spans`, but keeps only the spans that cover a whole
+/// leaf top-level conjunct — quantifiers nested under `||`, `!`, `if`,
+/// parens shared with other text, etc. stay in the requires text and are
+/// lowered in place by `expr_to_z3` instead of being hoisted into
+/// `forall_constraints`.
+fn top_level_quantifier_spans(requires: &str) -> Vec<(usize, usize, usize, QuantifierType)> {
+    let leaves = top_level_conjunct_ranges(requires);
+    quantifier_spans(requires)
+        .into_iter()
+        .filter(|(start, _inner_start, end_pos, _q_type)| {
+            let end = (*end_pos + 1).min(requires.len());
+            leaves.contains(&(*start, end))
+        })
+        .collect()
+}
+
+fn extract_quantifiers(requires: &str) -> Vec<Quantifier> {
+    let mut quantifiers = Vec::new();
+    for (_start, inner_start, end_pos, q_type) in top_level_quantifier_spans(requires) {
+        let inner = &requires[inner_start..end_pos];
+        // Split on top-level commas only — bound expressions like
+        // `min(0, n)` contain commas inside parens.
+        let mut parts: Vec<&str> = Vec::new();
+        let mut last = 0;
+        let mut inner_depth = 0;
+        for (i, c) in inner.char_indices() {
+            match c {
+                '(' => inner_depth += 1,
+                ')' => inner_depth -= 1,
+                ',' if inner_depth == 0 && parts.len() < 3 => {
+                    parts.push(&inner[last..i]);
+                    last = i + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(&inner[last..]);
+        if parts.len() >= 4 {
+            quantifiers.push(Quantifier {
+                q_type,
+                var: parts[0].trim().to_string(),
+                start: parts[1].trim().to_string(),
+                end: parts[2].trim().to_string(),
+                condition: parts[3].trim().to_string(),
+            });
         }
     }
     quantifiers
 }
 
 fn strip_quantifiers(requires: &str) -> String {
-    let mut result = requires.to_string();
-    for prefix in ["forall(", "exists("] {
-        while let Some(pos) = result.find(prefix) {
-            let after = pos + prefix.len();
-            let mut depth = 1;
-            let mut end = after;
-            for (i, c) in result[after..].char_indices() {
-                match c {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = after + i + 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            result = format!("{}true{}", &result[..pos], &result[end..]);
-        }
+    let mut result = String::with_capacity(requires.len());
+    let mut last = 0;
+    for (start, _inner_start, end_pos, _q_type) in top_level_quantifier_spans(requires) {
+        result.push_str(&requires[last..start]);
+        result.push_str("true");
+        // Unclosed `forall(` scans to the end of the string — clamp so
+        // the final slice below stays in bounds.
+        last = (end_pos + 1).min(requires.len());
     }
+    result.push_str(&requires[last..]);
     result
 }
 
@@ -2208,6 +2598,23 @@ pub fn parse_module_from_source(source: &str) -> Vec<Item> {
     let tokens = lexer.tokenize();
     let mut ctx = ParseContext::new(tokens);
     parse_module_from_tokens(&mut ctx)
+}
+
+/// Fail-closed variant of `parse_module_from_source`: returns the items
+/// plus surfaces any tokens the grammar expected but did not find, so
+/// callers like `mumei check` can reject malformed input instead of
+/// silently reporting success.
+pub fn parse_module_from_source_checked(source: &str) -> Result<Vec<Item>, Vec<String>> {
+    let mut lexer = super::lexer::Lexer::new(source);
+    let tokens = lexer.tokenize();
+    let mut ctx = ParseContext::new(tokens);
+    let items = parse_module_from_tokens(&mut ctx);
+    let failures = ctx.expect_failures();
+    if failures.is_empty() {
+        Ok(items)
+    } else {
+        Err(failures.to_vec())
+    }
 }
 
 pub fn parse_atom_from_source(source: &str) -> Atom {

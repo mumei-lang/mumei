@@ -7,9 +7,53 @@ use super::types::*;
 use super::*;
 use crate::reconstruction_loss::ReconstructionLoss;
 use crate::structured_feedback::StructuredFeedback;
+use crate::verification::invariant_inference::InferredInvariant;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+fn clause_label_for<'a>(
+    atom: &'a crate::parser::Atom,
+    kind: crate::parser::ClauseKind,
+    conjunct: &str,
+) -> Option<&'a str> {
+    atom.clause_labels
+        .iter()
+        .find(|label| {
+            let conjunct = conjunct.trim();
+            label.kind == kind
+                && (crate::verification::spec_validation::strip_wrapping_parens(&label.clause)
+                    == conjunct
+                    || split_top_level_conjunctions(&label.clause)
+                        .iter()
+                        .any(|part| part.trim() == conjunct))
+        })
+        .map(|label| label.label.as_str())
+}
+
+fn body_identifier_names(body: &str) -> Vec<String> {
+    let mut names = body
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|name| {
+            name.chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        })
+        .map(str::to_string)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+pub fn clause_label_for_atom<'a>(
+    atom: &'a crate::parser::Atom,
+    kind: crate::parser::ClauseKind,
+    conjunct: &str,
+) -> Option<&'a str> {
+    clause_label_for(atom, kind, conjunct)
+}
 
 /// mumei.toml の [proof]/[build] 設定を反映した verify
 /// timeout_ms: Z3 ソルバのタイムアウト（ミリ秒）
@@ -20,7 +64,7 @@ pub fn verify_with_config(
     module_env: &ModuleEnv,
     timeout_ms: u64,
     global_max_unroll: usize,
-) -> MumeiResult<()> {
+) -> MumeiResult<Vec<InferredInvariant>> {
     verify_inner(
         hir_atom,
         output_dir,
@@ -37,6 +81,7 @@ pub fn verify_with_config(
             generation_id: orchestration_generation_id_from_env(),
         },
     )
+    .map(|(inferred_invariants, _)| inferred_invariants)
 }
 
 pub fn verify_with_verification_config(
@@ -44,7 +89,7 @@ pub fn verify_with_verification_config(
     output_dir: &Path,
     module_env: &ModuleEnv,
     config: &VerificationConfig,
-) -> MumeiResult<()> {
+) -> MumeiResult<(Vec<InferredInvariant>, Vec<serde_json::Value>)> {
     verify_inner(
         hir_atom,
         output_dir,
@@ -102,6 +147,7 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
             generation_id: orchestration_generation_id_from_env(),
         },
     )
+    .map(|_| ())
 }
 
 pub(crate) struct VerifyInnerOptions<'a> {
@@ -233,6 +279,7 @@ impl VerificationMetrics {
 
     pub(crate) fn record_phase(&mut self, name: &str, duration: std::time::Duration) {
         self.phase_times.push((name.to_string(), duration));
+        super::phase_artifacts::complete_phase(name);
     }
 
     /// Print metrics to stderr (for --verbose / debug output).
@@ -335,10 +382,173 @@ pub(crate) fn configure_array_quantifier_params(ctx: &Context, solver: &Solver) 
     solver.set_params(&params);
 }
 
+/// P10-D / C-2: nlsat-first tuning for bounded low-degree nonlinear atoms
+/// (see `fragment::bounded_low_degree_nonlinear_profile`).
+///
+/// The smt arithmetic solver only falls back to the bounded `nlsat` check
+/// after `arith.nl.delay` (default 500) final-check rounds of incremental
+/// linearization. For obligations we already know are small polynomials over
+/// bounded variables we invoke `nlsat` immediately and keep Groebner-basis
+/// lemmas enabled, so Z3 decides `sat`/`unsat` inside the normal timeout and
+/// only a genuine `unknown`/timeout demotes the atom to Lean. All names are
+/// recognized `smt.arith.nl.*` module parameters (unrecognized solver params
+/// would silently drop assertions in z3-rs 0.12, see
+/// `configure_array_quantifier_params`).
+pub(crate) fn configure_nlsat_first_params(ctx: &Context, solver: &Solver) {
+    let mut params = z3::Params::new(ctx);
+    params.set_bool("arith.nl", true);
+    params.set_bool("arith.nl.nra", true);
+    params.set_bool("arith.nl.grobner", true);
+    params.set_u32("arith.nl.delay", 0);
+    solver.set_params(&params);
+}
+
+/// Human-readable demotion notice for an nlsat-first atom whose Z3 check ended
+/// `unknown`. The wording keeps the existing `z3_result_from_error_message`
+/// classes: a solver timeout/cancel maps to `timeout` (→ `z3_timeout`),
+/// anything else to `unknown` (→ `nonlinear_arithmetic`).
+pub(crate) fn nlsat_first_unknown_message(solver: &Solver, phase: &str) -> String {
+    let reason = solver.get_reason_unknown().unwrap_or_default();
+    let lowered = reason.to_ascii_lowercase();
+    if lowered.contains("timeout") || lowered.contains("canceled") || lowered.contains("cancelled")
+    {
+        format!(
+            "Z3 nlsat timeout {phase} (bounded low-degree nonlinear arithmetic tried with nlsat first; demoted to Lean escalation, reason: {reason})."
+        )
+    } else {
+        format!(
+            "Z3 returned unknown {phase} (bounded low-degree nonlinear arithmetic tried with nlsat first; demoted to Lean escalation{}).",
+            if reason.is_empty() {
+                String::new()
+            } else {
+                format!(", reason: {reason}")
+            }
+        )
+    }
+}
+
 enum ClauseLoweringOutcome<'a> {
     Trivial,
     Skipped,
     Lowered(Bool<'a>),
+}
+
+/// Check every pending termination obligation against the atom's solver,
+/// which now carries the preconditions. On Sat/Unknown the measure is not
+/// guaranteed to decrease: save the failure report and return the error.
+#[allow(clippy::too_many_arguments)]
+fn drain_pending_termination<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    atom: &Atom,
+    module_env: &ModuleEnv,
+    env: &Env<'a>,
+    output_dir: &Path,
+    diagnostics: &[String],
+) -> MumeiResult<()> {
+    let pending: Vec<(Bool<'a>, String)> = vc
+        .recursion
+        .pending_termination
+        .borrow_mut()
+        .drain(..)
+        .collect();
+    for (obligation, callee_name) in &pending {
+        solver.push();
+        solver.assert(&obligation.not());
+        let check = solver.check();
+        let err = if check != SatResult::Unsat {
+            Some(termination_violation_error(vc, solver, env, callee_name))
+        } else {
+            None
+        };
+        solver.pop(1);
+        if let Some(err) = err {
+            let err_str = format!("{}", err);
+            let counterexample = counterexample_from_error(&err);
+            let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
+            let semantic_fb = build_semantic_feedback(
+                &constraint_mappings,
+                counterexample.as_ref(),
+                atom,
+                FAILURE_TERMINATION_MEASURE_VIOLATED,
+                None,
+            );
+            save_visualizer_report(
+                output_dir,
+                "failed",
+                &atom.name,
+                "N/A",
+                "N/A",
+                &err_str,
+                counterexample.as_ref(),
+                FAILURE_TERMINATION_MEASURE_VIOLATED,
+                semantic_fb.as_ref(),
+                Some(&atom.span),
+                Some(&constraint_mappings),
+                None,
+                None,
+                Some(diagnostics),
+                None,
+            );
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+fn counterexample_from_error(err: &MumeiError) -> Option<serde_json::Value> {
+    if let MumeiError::VerificationError {
+        counterexample: Some(ce),
+        ..
+    } = err
+    {
+        Some(ce.clone())
+    } else {
+        None
+    }
+}
+
+/// Save the termination failure report for errors raised while lowering
+/// clauses (which `?` out of `lower_clause_with_skip` with no report) then
+/// return the error unchanged.
+fn report_termination_error(
+    err: MumeiError,
+    atom: &Atom,
+    module_env: &ModuleEnv,
+    output_dir: &Path,
+    diagnostics: &[String],
+) -> MumeiError {
+    let err_str = format!("{}", err);
+    if !err_str.contains("Termination measure violation") {
+        return err;
+    }
+    let counterexample = counterexample_from_error(&err);
+    let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
+    let semantic_fb = build_semantic_feedback(
+        &constraint_mappings,
+        counterexample.as_ref(),
+        atom,
+        FAILURE_TERMINATION_MEASURE_VIOLATED,
+        None,
+    );
+    save_visualizer_report(
+        output_dir,
+        "failed",
+        &atom.name,
+        "N/A",
+        "N/A",
+        &err_str,
+        counterexample.as_ref(),
+        FAILURE_TERMINATION_MEASURE_VIOLATED,
+        semantic_fb.as_ref(),
+        Some(&atom.span),
+        Some(&constraint_mappings),
+        None,
+        None,
+        Some(diagnostics),
+        None,
+    );
+    err
 }
 
 fn normalize_foreign_boolean_literals(clause: &str) -> String {
@@ -367,12 +577,27 @@ fn lower_clause_with_skip<'a>(
     let clause_ast = parse_expression(trimmed);
     let clause_z3 = match expr_to_z3(vc, &clause_ast, env, solver_opt) {
         Ok(value) => value,
+        // Dropping a requires would quietly weaken the assumptions and could
+        // turn into a plain failure; keep the atom unverifiable instead.
+        Err(err)
+            if label == "requires"
+                && err
+                    .to_string()
+                    .contains(QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED) =>
+        {
+            return Err(err);
+        }
         Err(err) if is_unsupported_clause_error(&err) => {
             push_skip_warning(
                 diagnostics,
                 unsupported_clause_warning(label, trimmed, &err),
             );
             return Ok(ClauseLoweringOutcome::Skipped);
+        }
+        // Termination errors carry a counterexample that the generic
+        // rewrap below would drop; propagate them unchanged.
+        Err(err) if format!("{err}").contains("Termination measure violation") => {
+            return Err(err);
         }
         Err(err) => {
             return Err(MumeiError::verification_at(
@@ -395,7 +620,19 @@ pub(crate) fn verify_inner(
     output_dir: &Path,
     module_env: &ModuleEnv,
     options: VerifyInnerOptions<'_>,
-) -> MumeiResult<()> {
+) -> MumeiResult<(Vec<InferredInvariant>, Vec<serde_json::Value>)> {
+    super::phase_artifacts::begin_atom(&hir_atom.atom.span.file, &hir_atom.atom.name);
+    let result = verify_inner_impl(hir_atom, output_dir, module_env, options);
+    super::phase_artifacts::finish_atom(&result);
+    result
+}
+
+fn verify_inner_impl(
+    hir_atom: &HirAtom,
+    output_dir: &Path,
+    module_env: &ModuleEnv,
+    options: VerifyInnerOptions<'_>,
+) -> MumeiResult<(Vec<InferredInvariant>, Vec<serde_json::Value>)> {
     let VerifyInnerOptions {
         timeout_ms,
         global_max_unroll,
@@ -409,6 +646,7 @@ pub(crate) fn verify_inner(
     } = options;
     let timeout_ms = orchestration_timeout_ms_from_env().unwrap_or(timeout_ms);
     let atom = &hir_atom.atom;
+    reject_resource_state_shadowing(atom, &hir_atom.body_stmt, module_env)?;
     if let Some(value) = unsupported_semantics_value(atom) {
         return Err(MumeiError::verification_at(
             format!(
@@ -437,7 +675,35 @@ pub(crate) fn verify_inner(
     // ジェネリック atom は単相化後に検証される
     // 例: pipe<E: Effect> は検証スキップ、pipe<FileWrite> が検証対象
     if !atom.type_params.is_empty() {
-        return Ok(());
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    // Nested arrays (`[[T]]` params / return types) have no encoding: an
+    // element select yields a Z3 `Array`, which no scalar operation can
+    // consume, so a phantom `Int` element sort would encode a different
+    // program than the one written — a wrong-verify. Reject the signature
+    // before any clause is lowered. `[Str]` and the scalar element sorts are
+    // unaffected (element names like "Str" never start with '[').
+    {
+        let bad_nested = atom
+            .params
+            .iter()
+            .filter_map(|param| param.type_name.as_deref())
+            .chain(atom.return_type.as_deref())
+            .filter(|ty| ty.starts_with('[') && ty.ends_with(']'))
+            .any(|ty| array_element_type_from_annotation(Some(ty), module_env).starts_with('['));
+        if bad_nested {
+            return Err(MumeiError::type_error_at(
+                format!(
+                    "atom '{}' uses a nested array type ('[[T]]'), which verification does not support",
+                    atom.name
+                ),
+                atom.span.clone(),
+            )
+            .with_help(
+                "bind inner arrays to their own names and verify them separately, or flatten the signature to a scalar element type",
+            ));
+        }
     }
 
     // Phase 0-units: 単位型（units of measure）の一致検査。AST 上の純粋な型検査で、
@@ -481,6 +747,7 @@ pub(crate) fn verify_inner(
             None,
             None,
             Some(&[diagnostic]),
+            None,
         );
         return Err(
             MumeiError::verification_at(err.to_string(), err.span.clone()).with_help(format!(
@@ -491,11 +758,34 @@ pub(crate) fn verify_inner(
     }
     metrics.record_phase("Phase 0a: spec validation", phase_start.elapsed());
 
+    // consume が signature (`consume x: T`) と `consume x;` 句の両方で宣言
+    // されている二重宣言は、信頼レベルに関わらず型エラーとする。
+    // trusted atom は下の Phase 0 で早期 return するため、ここで先に検査する。
+    if atom.has_consumed_params() {
+        for param in &atom.params {
+            if param.consume && atom.consumed_params.iter().any(|n| n == &param.name) {
+                return Err(MumeiError::type_error_at(
+                    format!(
+                        "parameter '{}' is declared consume twice in atom '{}': both in the signature and in a `consume:` clause",
+                        param.name, atom.name
+                    ),
+                    atom.span.clone(),
+                ));
+            }
+        }
+    }
+
     // Phase 0: 信頼レベルチェック（Trust Boundary）
     match &atom.trust_level {
         TrustLevel::Trusted => {
             // trusted atom: body の検証をスキップし、契約（requires/ensures）のみ信頼する。
             // 呼び出し元は契約に基づいて Compositional Verification を行う。
+            if !atom.covers.is_empty() {
+                diagnostics.push(format!(
+                    "warning: cover clauses in trusted atom `{}` were not checked because body verification is skipped",
+                    atom.name
+                ));
+            }
             save_visualizer_report(
                 output_dir,
                 "trusted",
@@ -511,8 +801,9 @@ pub(crate) fn verify_inner(
                 None,
                 None,
                 Some(&diagnostics),
+                None,
             );
-            return Ok(());
+            return Ok((Vec::new(), Vec::new()));
         }
         TrustLevel::Unverified => {
             // unverified atom: 警告を出すが、検証は続行する。
@@ -522,7 +813,10 @@ pub(crate) fn verify_inner(
                        Verification results may be incomplete.",
                 atom.name
             );
-            if atom.ensures.trim() == "true" && atom.requires.trim() == "true" {
+            if atom.ensures.trim() == "true"
+                && atom.requires.trim() == "true"
+                && atom.covers.is_empty()
+            {
                 // 契約が trivial な場合、検証する意味がないのでスキップ
                 save_visualizer_report(
                     output_dir,
@@ -539,8 +833,9 @@ pub(crate) fn verify_inner(
                     None,
                     None,
                     Some(&diagnostics),
+                    None,
                 );
-                return Ok(());
+                return Ok((Vec::new(), Vec::new()));
             }
         }
         TrustLevel::Verified => {
@@ -651,6 +946,13 @@ pub(crate) fn verify_inner(
     }
     metrics.record_phase("Phase 1f: effect containment", phase_start.elapsed());
 
+    // Phase 1f-1: Replayability — non-deterministic effects (Random/Clock/ExternalInput)
+    // must be received through an explicit witness parameter and threaded into
+    // every perform, so the same inputs reproduce the same trace.
+    let phase_start = std::time::Instant::now();
+    verify_replayability(atom, &hir_atom.body_stmt, module_env, output_dir)?;
+    metrics.record_phase("Phase 1f-1: replayability", phase_start.elapsed());
+
     // Phase 1b: 有界モデル検査（ループ内 acquire パターン）
     let phase_start = std::time::Instant::now();
     verify_bmc_resource_safety(atom, &hir_atom.body_stmt, module_env, global_max_unroll)?;
@@ -690,6 +992,21 @@ pub(crate) fn verify_inner(
     verify_effect_params(atom, module_env)?;
     metrics.record_phase("Phase 1g: effect params", phase_start.elapsed());
 
+    // Phase 1h-2: structured concurrency ownership analysis.
+    // MIR lowering flattens `task_group` children into a sequential chain, so
+    // it cannot see concurrent interleaving or `task_group:any` cancellation.
+    // This AST-level pass rejects concurrent double moves, moves that race with
+    // a sibling's use, unsynchronised shared writes, and parent uses of values
+    // a child consumed or of writes a cancelled child may never have performed.
+    // It runs before 1h so the task-group-specific diagnostic is not pre-empted
+    // by the generic MIR move error.
+    let phase_start = std::time::Instant::now();
+    verify_task_ownership(atom, &hir_atom.body_stmt, module_env)?;
+    metrics.record_phase(
+        "Phase 1h-2: structured concurrency ownership",
+        phase_start.elapsed(),
+    );
+
     // Phase 1h: MIR-based move analysis (Phase 4c integrated)
     // Lower HIR to MIR and run forward dataflow move analysis.
     // Copy types (Int, Nat, Bool, f64, etc.) are distinguished from Move types
@@ -697,10 +1014,121 @@ pub(crate) fn verify_inner(
     // Rvalue::Use, so violations are only reported for Move types.
     // Move type violations are hard errors; Copy type false positives are eliminated.
     let phase_start = std::time::Instant::now();
-    let mir_body = crate::mir::lower_hir_to_mir_with_env(hir_atom, Some(module_env));
+    let mut mir_body = crate::mir::lower_hir_to_mir_with_env(hir_atom, Some(module_env));
+    if !mir_body.unbound_names.is_empty() {
+        return Err(MumeiError::verification(format!(
+            "unresolved variable(s) in body: {} — every name must be a parameter, \
+             a `let`/`assign` binding, or a match-arm binding",
+            mir_body.unbound_names.join(", ")
+        )));
+    }
+
+    // Clause-scope counterpart of the body check: requires/ensures/invariant
+    // must not reference undeclared names. A phantom name in `requires` makes
+    // the precondition trivially satisfiable (vacuous verify); in `ensures` it
+    // produces a spurious postcondition failure — both hide real typos.
+    for (clause_name, clause_src, allow_result) in [
+        ("requires", hir_atom.atom.requires.as_str(), false),
+        ("ensures", hir_atom.atom.ensures.as_str(), true),
+        (
+            "invariant",
+            hir_atom.atom.invariant.as_deref().unwrap_or(""),
+            false,
+        ),
+    ] {
+        if clause_src.trim().is_empty() || clause_src.trim() == "true" {
+            continue;
+        }
+        let clause_expr = crate::parser::parse_expression(clause_src);
+        let bad = clause_unbound_names(&clause_expr, &hir_atom.atom, module_env, allow_result);
+        if !bad.is_empty() {
+            return Err(MumeiError::verification(format!(
+                "unresolved name(s) in {clause_name}: {} — every name must be a parameter, \
+                 `result`, a quantifier binder, or a match-arm binding",
+                bad.join(", ")
+            )));
+        }
+    }
+    // `forall <var> in [start, end]: <condition>` constraints declared at atom
+    // level — `var` is bound inside condition, everything else resolves against
+    // the same allowed set.
+    for q in &hir_atom.atom.forall_constraints {
+        for src in [&q.start, &q.end] {
+            if src.trim().is_empty() {
+                continue;
+            }
+            let e = crate::parser::parse_expression(src);
+            let bad = clause_unbound_names(&e, &hir_atom.atom, module_env, false);
+            if !bad.is_empty() {
+                return Err(MumeiError::verification(format!(
+                    "unresolved name(s) in forall bound: {} — every name must be a parameter",
+                    bad.join(", ")
+                )));
+            }
+        }
+        let e = crate::parser::parse_expression(&q.condition);
+        let mut bad = clause_unbound_names(&e, &hir_atom.atom, module_env, false);
+        bad.retain(|n| n != &q.var);
+        if !bad.is_empty() {
+            return Err(MumeiError::verification(format!(
+                "unresolved name(s) in forall condition: {} — every name must be a parameter \
+                 or the bound variable '{}'",
+                bad.join(", "),
+                q.var
+            )));
+        }
+    }
     let move_conflict_locals: Vec<(crate::mir::Local, crate::mir::BasicBlockId)> = Vec::new();
     if mir_body.check_analysis_budget().is_ok() {
+        // Insert drops before move analysis so a local consumed on one branch
+        // but merely unused on the other is dead on both paths at the merge —
+        // otherwise `let r = …; if c { r } else { 0 }` is a spurious
+        // ConflictingMerge (r moved into the result on the then-path, still
+        // alive-but-dead on the else-path).
+        let liveness = crate::mir_analysis::compute_liveness(&mir_body);
+        crate::mir_analysis::insert_drops(&mut mir_body, &liveness);
         let move_result = crate::mir_analysis::analyze_moves(&mir_body);
+        let callee_modes = module_env
+            .atoms
+            .iter()
+            .map(|(name, callee)| {
+                let modes = callee
+                    .params
+                    .iter()
+                    .map(|param| {
+                        if param.is_ref_mut {
+                            crate::mir::MirParamMode::Mut
+                        } else if param.is_ref {
+                            crate::mir::MirParamMode::Shared
+                        } else if callee.consumes_param(&param.name) {
+                            crate::mir::MirParamMode::Consume
+                        } else {
+                            crate::mir::MirParamMode::Owned
+                        }
+                    })
+                    .collect();
+                (name.clone(), modes)
+            })
+            .collect();
+        if let Some(violation) =
+            crate::mir_analysis::check_borrows_with_callees(&mir_body, &move_result, &callee_modes)
+                .first()
+        {
+            return Err(MumeiError::verification(format!(
+                "borrow check failed in '{}': {}",
+                atom.name, violation.message
+            )));
+        }
+        if let Some(name) =
+            crate::mir_analysis::find_dynamic_borrowing_atom_ref(&hir_atom.body_stmt, module_env)
+        {
+            return Err(MumeiError::verification(format!(
+                "borrow check failed in '{}': cannot take 'atom_ref({name})' as a value: \
+                 '{name}' has borrowing/consuming parameters (ref/ref mut/consume) and can \
+                 only be invoked directly via call(atom_ref({name}), ...)",
+                atom.name
+            )));
+        }
         if let Some(v) = move_result.violations.first() {
             // Look up the local's name for better error messages
             let local_name = mir_body
@@ -733,19 +1161,6 @@ pub(crate) fn verify_inner(
         }
     }
     metrics.record_phase("Phase 1h: MIR move analysis", phase_start.elapsed());
-
-    // Phase 1h-2: structured concurrency ownership analysis.
-    // MIR lowering flattens `task_group` children into a sequential chain, so
-    // it cannot see concurrent interleaving or `task_group:any` cancellation.
-    // This AST-level pass rejects concurrent double moves, moves that race with
-    // a sibling's use, unsynchronised shared writes, and parent uses of values
-    // a child consumed or of writes a cancelled child may never have performed.
-    let phase_start = std::time::Instant::now();
-    verify_task_ownership(atom, &hir_atom.body_stmt, module_env)?;
-    metrics.record_phase(
-        "Phase 1h-2: structured concurrency ownership",
-        phase_start.elapsed(),
-    );
 
     // Phase 1i: Vacuity checking via mutation testing
     let phase_start = std::time::Instant::now();
@@ -898,7 +1313,7 @@ pub(crate) fn verify_inner(
                                     z3_solver
                                         .assert(&state_var.lt(&Int::from_i64(&z3_ctx, num_states)));
 
-                                    match z3_solver.check() {
+                                    match crate::verification::phase_artifacts::check(&z3_solver) {
                                         SatResult::Unsat => {
                                             // Irreconcilable: the two branches require
                                             // mutually exclusive states → hard error.
@@ -1114,6 +1529,7 @@ pub(crate) fn verify_inner(
                     || body_has_symbolic_perform_args(then_branch, module_env)
                     || body_has_symbolic_perform_args(else_branch, module_env)
             }
+            Expr::Block(stmt) => body_has_symbolic_perform_args(stmt, module_env),
             Expr::BinaryOp(l, _, r) => {
                 expr_has_symbolic_perform_args(l, module_env)
                     || expr_has_symbolic_perform_args(r, module_env)
@@ -1157,9 +1573,18 @@ pub(crate) fn verify_inner(
         has_string_constraints_cell_pre.set(true);
     }
     fn text_has_string_constraint(expr: &str) -> bool {
-        ["starts_with(", "ends_with(", "contains(", "not_contains("]
-            .iter()
-            .any(|needle| expr.contains(needle))
+        [
+            "starts_with(",
+            "ends_with(",
+            "contains(",
+            "not_contains(",
+            "is_empty(",
+            "index_of(",
+            "substr(",
+            "char_at(",
+        ]
+        .iter()
+        .any(|needle| expr.contains(needle))
     }
     if !has_string_constraints_cell_pre.get()
         && (text_has_string_constraint(&atom.requires) || text_has_string_constraint(&atom.ensures))
@@ -1175,7 +1600,8 @@ pub(crate) fn verify_inner(
         // `<name>[` token. Avoids paying parse cost twice and matches the
         // common `arr[i]`, `data[k]` shapes used in the std lib.
         q.condition.contains('[')
-    });
+    }) || (atom.requires.contains('[')
+        && (atom.requires.contains("forall(") || atom.requires.contains("exists(")));
     let timeout_multiplier = match (has_string_constraints_cell_pre.get(), has_array_forall) {
         (true, true) => 3,
         (true, false) => 2,
@@ -1203,10 +1629,15 @@ pub(crate) fn verify_inner(
     if has_array_forall {
         configure_array_quantifier_params(&ctx, &solver);
     }
+    let nlsat_first = is_nlsat_first_candidate(&detect_logic_fragment_tags(atom, module_env));
+    if nlsat_first {
+        configure_nlsat_first_params(&ctx, &solver);
+    }
 
     // linearity_ctx is wrapped in RefCell so expr_to_z3/stmt_to_z3 can mutate it
     // without requiring signature changes to every recursive call site.
     let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
+    let inferred_invariants_cell = std::cell::RefCell::new(Vec::<InferredInvariant>::new());
     // Build EffectCtx from the atom's declared effects (transitively resolved)
     let allowed_effects_set = module_env.resolve_effect_set_from_effects(&atom.effects);
     let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(allowed_effects_set));
@@ -1216,23 +1647,40 @@ pub(crate) fn verify_inner(
     // Set to true when Z3 String constraints are added during expr_to_z3.
     let has_string_constraints_cell = std::cell::Cell::new(has_string_constraints_cell_pre.get());
     let profiler_cell = std::cell::RefCell::new(IncrementalProfiler::new(&solver, &ctx));
-    let vc = VCtx {
+    let mut vc = VCtx {
         ctx: &ctx,
         module_env,
         current_atom: Some(atom),
         linearity_ctx: Some(&linearity_ctx_cell),
+        inferred_invariants: Some(&inferred_invariants_cell),
+        cover_obligations: None,
         effect_ctx: Some(&effect_ctx_cell),
         constraint_count: Some(&constraint_count_cell),
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: Some(&has_string_constraints_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: Some(&profiler_cell),
         ieee754_f64,
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
+        call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global,
     };
-
+    vc.recursion.enabled.set(true);
     let mut env: Env = HashMap::new();
 
     // Plan 9: Pre-register parameters with correct Z3 Sort based on their base type.
@@ -1241,16 +1689,38 @@ pub(crate) fn verify_inner(
     // (concatenation, equality) to silently produce incorrect verification results.
     // This matches the treatment in verify_atom_invariant (line 3206-3218).
     for param in &atom.params {
-        let var = param_z3_value(
-            &ctx,
-            param.name.as_str(),
-            param.type_name.as_deref(),
-            module_env,
-            ieee754_f64,
-            bitvec_i64,
-        );
+        let var =
+            datatype::param_z3_value_for_vc(&vc, param.name.as_str(), param.type_name.as_deref());
         env.insert(param.name.clone(), var);
     }
+
+    // Congruent recursive contracts: when this atom declares `decreases` and
+    // sits on an eligible SCC, lower its measure once; SCC-internal calls then
+    // produce `rec_fn#` applications with a termination obligation each.
+    if atom.decreases.is_some() {
+        if let Some(scc) = vc.recursive_scc_of(&atom.name) {
+            if scc.is_eligible() {
+                let mut measures = Vec::new();
+                for component in measure_components(atom.decreases.as_deref().unwrap_or("0")) {
+                    let measure_ast = parse_expression(&component);
+                    let measure = expr_to_z3(&vc, &measure_ast, &mut env, None)?;
+                    if measure.as_int().is_none() && measure.as_bv().is_none() {
+                        return Err(MumeiError::verification_at(
+                            format!(
+                                "decreases clause of '{}' must be an integer expression",
+                                atom.name
+                            ),
+                            atom.span.clone(),
+                        ));
+                    }
+                    measures.push(measure);
+                }
+                *vc.recursion.current_scc.borrow_mut() = Some(scc);
+                *vc.recursion.current_measure.borrow_mut() = Some(measures);
+            }
+        }
+    }
+
     seed_tuple_result_components(
         &ctx,
         &mut env,
@@ -1300,7 +1770,10 @@ pub(crate) fn verify_inner(
 
     // 1. 量子化制約の処理
     for (q_index, q) in atom.forall_constraints.iter().enumerate() {
-        let i = Int::new_const(&ctx, q.var.as_str());
+        // Fresh const: a same-named atom parameter must not be captured by
+        // the quantifier binder. `q.var` is bound to `i` in env while the
+        // condition and index expressions are lowered (name-based lookup).
+        let i = Int::fresh_const(&ctx, q.var.as_str());
         // Parse start as an expression (supports identifiers, arithmetic, e.g. "n - 1")
         let start = if let Ok(val) = q.start.parse::<i64>() {
             Int::from_i64(&ctx, val)
@@ -1319,13 +1792,17 @@ pub(crate) fn verify_inner(
         };
 
         let range_cond = Bool::and(&ctx, &[&i.ge(&start), &i.lt(&end)]);
+        let old_bound_val = env.insert(q.var.clone(), i.clone().into());
         let expr_ast = parse_expression(&q.condition);
-        let condition_z3 = expr_to_z3(&vc, &expr_ast, &mut env, None)?
-            .as_bool()
-            .ok_or(MumeiError::verification_at(
-                "Condition must be boolean",
-                atom.span.clone(),
-            ))?;
+        vc.quantifier_binders
+            .borrow_mut()
+            .push((q.var.clone(), i.clone().into()));
+        let condition_res = expr_to_z3(&vc, &expr_ast, &mut env, None);
+        vc.quantifier_binders.borrow_mut().pop();
+        let condition_z3 = condition_res?.as_bool().ok_or(MumeiError::verification_at(
+            "Condition must be boolean",
+            atom.span.clone(),
+        ))?;
 
         // Extract `arr[<idx>]` sub-expressions from the forall condition so we
         // can (1) propagate them as explicit Z3 quantifier patterns for
@@ -1424,6 +1901,11 @@ pub(crate) fn verify_inner(
                 }
             }
         }
+        if let Some(old) = old_bound_val {
+            env.insert(q.var.clone(), old);
+        } else {
+            env.remove(&q.var);
+        }
     }
 
     // 2. 引数（params）に対する精緻型制約の自動適用
@@ -1470,7 +1952,17 @@ pub(crate) fn verify_inner(
     // 2c. 全パラメータに対して配列長シンボルを事前生成
     #[allow(clippy::map_entry)]
     for param in &atom.params {
-        array_len_value(&ctx, &mut env, &param.name, bitvec_i64, Some(&solver));
+        let len_name = format!("len_{}", param.name);
+        if env.contains_key(&len_name) {
+            continue;
+        }
+        if let Some(string) = env.get(&param.name).and_then(|value| value.as_string()) {
+            let ast =
+                unsafe { z3_sys::Z3_mk_seq_length(raw_z3_context(&ctx), string.get_z3_ast()) };
+            env.insert(len_name, unsafe { Int::wrap(&ctx, ast) }.into());
+        } else {
+            array_len_value(&ctx, &mut env, &param.name, bitvec_i64, Some(&solver));
+        }
     }
 
     // 2d. 線形性チェック: consumed_params + ref パラメータの Z3 シンボリック Bool 連携
@@ -1479,8 +1971,8 @@ pub(crate) fn verify_inner(
     // linearity_ctx_cell is shared with VCtx (created above) via RefCell.
 
     // consume 対象パラメータの登録
-    if !atom.consumed_params.is_empty() {
-        for param_name in &atom.consumed_params {
+    if atom.has_consumed_params() {
+        for param_name in &atom.consumed_names() {
             // パラメータが実際に存在するか検証
             if !atom.params.iter().any(|p| p.name == *param_name) {
                 return Err(MumeiError::type_error_at(
@@ -1558,8 +2050,9 @@ pub(crate) fn verify_inner(
     // 3. 前提条件 (requires)
     // NOTE: requires は エイリアシング検証より先に assert する必要がある。
     // requires: x != y; のような制約がエイリアシング検証で活用されるため。
-    if atom.requires.trim() != "true" {
-        for (req_idx, req_clause) in split_top_level_conjunctions(&atom.requires)
+    let body_requires = contract_view(atom, ContractView::BodyRequires);
+    if body_requires.trim() != "true" {
+        for (req_idx, req_clause) in split_top_level_conjunctions(&body_requires)
             .into_iter()
             .enumerate()
         {
@@ -1582,6 +2075,21 @@ pub(crate) fn verify_inner(
             }
         }
     }
+
+    // Termination obligations recorded while requires lowered without a
+    // solver: checked now that the preconditions hold.
+    drain_pending_termination(
+        &vc,
+        &solver,
+        atom,
+        module_env,
+        &env,
+        output_dir,
+        &diagnostics,
+    )?;
+
+    // Checked requires use pre-body values inside each cover's solver frame.
+    let pre_body_env = env.clone();
 
     // 3b. エイリアシング検証 (Aliasing Prevention)
     // requires が assert された後に実行する。
@@ -1624,7 +2132,9 @@ pub(crate) fn verify_inner(
                             // ref_mut_val == other_val が SAT ならエイリアシングの可能性あり
                             solver.push();
                             solver.assert(&rm_int._eq(&ot_int));
-                            if solver.check() == SatResult::Sat {
+                            if crate::verification::phase_artifacts::check(&solver)
+                                == SatResult::Sat
+                            {
                                 solver.pop(1);
                                 let other_kind = if other_p.is_ref_mut { "ref mut" } else { "ref" };
                                 return Err(MumeiError::verification_at(
@@ -1651,6 +2161,7 @@ pub(crate) fn verify_inner(
 
     // 4. ボディの検証
     let phase_start = std::time::Instant::now();
+    check_resource_initial_state(&vc, &mut env, &solver)?;
     let body_result = match stmt_to_z3(&vc, &hir_atom.body_stmt, &mut env, Some(&solver)) {
         Ok(val) => val,
         Err(e) => {
@@ -1692,14 +2203,26 @@ pub(crate) fn verify_inner(
             // Determine failure type: division-by-zero and budget exceeded get their own categories
             let body_failure_type = if err_str.contains("division by zero") {
                 FAILURE_DIVISION_BY_ZERO
+            } else if err_str.contains("Termination measure violation") {
+                FAILURE_TERMINATION_MEASURE_VIOLATED
             } else if err_str.contains("Constraint budget exceeded") {
                 "constraint_budget_exceeded"
             } else {
                 FAILURE_PRECONDITION_VIOLATED
             };
+            let counterexample = if body_failure_type == FAILURE_TERMINATION_MEASURE_VIOLATED {
+                counterexample_from_error(&e)
+            } else {
+                None
+            };
             let constraint_mappings = build_constraint_mappings_for_atom(atom, module_env);
-            let semantic_fb =
-                build_semantic_feedback(&constraint_mappings, None, atom, body_failure_type, None);
+            let semantic_fb = build_semantic_feedback(
+                &constraint_mappings,
+                counterexample.as_ref(),
+                atom,
+                body_failure_type,
+                None,
+            );
             save_visualizer_report(
                 output_dir,
                 "failed",
@@ -1707,7 +2230,7 @@ pub(crate) fn verify_inner(
                 "N/A",
                 "N/A",
                 &err_str,
-                None,
+                counterexample.as_ref(),
                 body_failure_type,
                 semantic_fb.as_ref(),
                 Some(&atom.span),
@@ -1715,12 +2238,25 @@ pub(crate) fn verify_inner(
                 None,
                 None,
                 Some(&diagnostics),
+                None,
             );
             return Err(e);
         }
     };
 
     metrics.record_phase("Phase 4: body evaluation", phase_start.elapsed());
+
+    // Termination obligations recorded while the body lowered without a
+    // solver (e.g. recursive calls inside contract texts evaluated offline).
+    drain_pending_termination(
+        &vc,
+        &solver,
+        atom,
+        module_env,
+        &env,
+        output_dir,
+        &diagnostics,
+    )?;
 
     // 4b. Taint Analysis: unverified 関数の呼び出しを検出し警告
     check_taint_propagation(atom, &hir_atom.body_stmt, &env, module_env);
@@ -1778,6 +2314,7 @@ pub(crate) fn verify_inner(
                 None,
                 None,
                 Some(&diagnostics),
+                None,
             );
             return Err(MumeiError::verification_at(err_str, atom.span.clone()).with_help(
                 format!(
@@ -1791,11 +2328,35 @@ pub(crate) fn verify_inner(
     // 5. 事後条件 (ensures)
     let phase_start = std::time::Instant::now();
     let mut skipped_ensures = false;
-    if atom.ensures.trim() != "true" {
+    let mut context_reachability = ContextReachability::Unknown;
+    let mut ensures_outcomes = Vec::new();
+    for clause in dropped_conjuncts(atom, ContractView::BodyEnsures) {
+        let label =
+            clause_label_for(atom, crate::parser::ClauseKind::Ensures, &clause).map(str::to_string);
+        let warning = match &label {
+            Some(label) => format!(
+                "assumed ensures clause `{clause}` with label `{label}` is trusted and was not proved"
+            ),
+            None => format!("assumed ensures clause `{clause}` is trusted and was not proved"),
+        };
+        diagnostics.push(format!("warning: {warning}"));
+        ensures_outcomes.push((clause, ClauseOutcome::Assumed, label));
+    }
+    let body_ensures = contract_view(atom, ContractView::BodyEnsures);
+    if body_ensures.trim() != "true" {
         if tuple_component_types(atom.return_type.as_deref()).is_none() {
-            env.insert("result".to_string(), body_result);
+            // `[e0, …]` tail or `arr` tail: ensures clauses index `result[i]`
+            // through `__z3_arr_result`/`len_result` — wire them like a let.
+            wire_array_slots(
+                &vc,
+                "result",
+                tail_expr(&hir_atom.body_stmt),
+                &body_result,
+                &mut env,
+            );
+            env.insert("result".to_string(), body_result.clone());
         }
-        for ens_clause in split_top_level_conjunctions(&atom.ensures) {
+        for ens_clause in split_top_level_conjunctions(&body_ensures) {
             match lower_clause_with_skip(
                 &vc,
                 &mut env,
@@ -1804,107 +2365,298 @@ pub(crate) fn verify_inner(
                 "ensures",
                 &mut diagnostics,
                 Some(&solver),
-            )? {
+            )
+            .map_err(|err| {
+                report_termination_error(err, atom, module_env, output_dir, &diagnostics)
+            })? {
                 ClauseLoweringOutcome::Trivial => {}
                 ClauseLoweringOutcome::Skipped => {
                     skipped_ensures = true;
+                    ensures_outcomes.push((
+                        ens_clause.trim().to_string(),
+                        ClauseOutcome::Skipped,
+                        None,
+                    ));
                 }
                 ClauseLoweringOutcome::Lowered(ens_bool) => {
+                    // Termination obligations raised while this clause lowered.
+                    drain_pending_termination(
+                        &vc,
+                        &solver,
+                        atom,
+                        module_env,
+                        &env,
+                        output_dir,
+                        &diagnostics,
+                    )?;
                     solver.push();
                     solver.assert(&ens_bool.not());
-                    let ensures_check = solver.check();
-                    if ensures_check == SatResult::Sat {
+                    let ensures_check = crate::verification::phase_artifacts::check(&solver);
+                    let mut spurious_candidate_help = None;
+                    let mut counterexample_provenance = None;
+                    let (
+                        ce_a,
+                        ce_b,
+                        ce_value,
+                        data_flow_trace,
+                        reconstruction_loss,
+                        validation_status,
+                    ) = if ensures_check == SatResult::Sat {
                         // Extract counterexample from Z3 model
-                        let (ce_a, ce_b, ce_value, data_flow_trace, reconstruction_loss) =
-                            if let Some(model) = solver.get_model() {
-                                let mut ce_json = serde_json::Map::new();
-                                let mut model_map = HashMap::new();
-                                for param in &atom.params {
-                                    if let Some(var_z3) = env.get(&param.name) {
-                                        if let Some(val) = model.eval(var_z3, true) {
-                                            let val_str = format!("{}", val);
-                                            ce_json.insert(param.name.clone(), json!(val_str));
+                        if let Some(model) = solver.get_model() {
+                            let mut raised_counterexample = raise_atom_counterexample(
+                                &model,
+                                atom,
+                                &pre_body_env,
+                                module_env,
+                                false,
+                            );
+                            let ce_json = raised_counterexample
+                                .to_counterexample_json()
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default();
+                            let mut model_map = HashMap::new();
+                            let mut model_values: HashMap<String, CexValue> = HashMap::new();
+                            for (name, var_z3) in &env {
+                                let model_value =
+                                    if atom.params.iter().any(|param| param.name == *name) {
+                                        pre_body_env.get(name).unwrap_or(var_z3)
+                                    } else {
+                                        var_z3
+                                    };
+                                if let Some(val) = model.eval(model_value, true) {
+                                    if let Some(int_value) = z3_dynamic_to_i64(&val) {
+                                        model_map.insert(name.clone(), int_value);
+                                    }
+                                    if let Some(cex_value) = z3_dynamic_to_cex_value(&val) {
+                                        model_values.insert(name.clone(), cex_value);
+                                    }
+                                }
+                            }
+                            let mut loss_bindings = Vec::new();
+                            for param in &atom.params {
+                                if let Some(value) = pre_body_env.get(&param.name) {
+                                    loss_bindings.push((
+                                        param.name.clone(),
+                                        param.type_name.clone(),
+                                        value.clone(),
+                                    ));
+                                }
+                            }
+                            let length_companions = atom
+                                .params
+                                .iter()
+                                .filter_map(|param| {
+                                    let type_name = param.type_name.as_deref()?;
+                                    let lowering =
+                                        length_companion_lowering(type_name, module_env)?;
+                                    let value = pre_body_env.get(&format!("len_{}", param.name))?;
+                                    Some(raise_length_companion(
+                                        &model,
+                                        &param.name,
+                                        value,
+                                        lowering,
+                                    ))
+                                })
+                                .collect::<Vec<_>>();
+                            if tuple_component_types(atom.return_type.as_deref()).is_none() {
+                                if let Some(result) = env.get("result") {
+                                    loss_bindings.push((
+                                        "result".to_string(),
+                                        atom.return_type.clone(),
+                                        result.clone(),
+                                    ));
+                                }
+                            }
+                            let params = atom
+                                .params
+                                .iter()
+                                .map(|param| param.name.as_str())
+                                .collect::<HashSet<_>>();
+                            for name in body_identifier_names(&atom.body_expr) {
+                                if name == "result"
+                                    || params.contains(name.as_str())
+                                    || name.starts_with("__")
+                                    || name.starts_with("len_")
+                                {
+                                    continue;
+                                }
+                                if let Some(value) = env.get(&name) {
+                                    loss_bindings.push((name, None, value.clone()));
+                                }
+                            }
+                            let mut loss_env = env.clone();
+                            for param in &atom.params {
+                                if let Some(value) = pre_body_env.get(&param.name) {
+                                    loss_env.insert(param.name.clone(), value.clone());
+                                    for symbol in [
+                                        format!("len_{}", param.name),
+                                        format!("__z3_arr_{}", param.name),
+                                    ] {
+                                        if let Some(value) = pre_body_env.get(&symbol) {
+                                            loss_env.insert(symbol, value.clone());
+                                        }
+                                    }
+                                    let struct_prefix = format!("__struct_{}_", param.name);
+                                    let alias_prefix = format!("{}_", param.name);
+                                    for (symbol, value) in &pre_body_env {
+                                        if symbol.starts_with(&struct_prefix)
+                                            || symbol.starts_with(&alias_prefix)
+                                        {
+                                            loss_env.insert(symbol.clone(), value.clone());
                                         }
                                     }
                                 }
-                                let mut reconstruction_variables = HashMap::new();
-                                let mut model_values: HashMap<String, CexValue> = HashMap::new();
-                                for (name, var_z3) in &env {
-                                    reconstruction_variables.insert(name.clone(), var_z3.clone());
-                                    if let Some(val) = model.eval(var_z3, true) {
-                                        if let Some(int_value) = z3_dynamic_to_i64(&val) {
-                                            model_map.insert(name.clone(), int_value);
-                                        }
-                                        if let Some(cex_value) = z3_dynamic_to_cex_value(&val) {
-                                            model_values.insert(name.clone(), cex_value);
-                                        }
-                                    }
+                            }
+                            let raised_loss = RaisedCounterexample::from_bindings(
+                                &model,
+                                loss_bindings,
+                                &loss_env,
+                                module_env,
+                            );
+                            let length_companion_names = length_companions
+                                .iter()
+                                .map(|value| value.source_name.clone())
+                                .collect::<HashSet<_>>();
+                            let mut raised_loss = raised_loss;
+                            raised_loss.values.extend(length_companions);
+                            raised_loss
+                                .values
+                                .sort_by(|left, right| left.source_name.cmp(&right.source_name));
+                            raised_loss
+                                .omitted_solver_symbols
+                                .retain(|symbol| !length_companion_names.contains(symbol));
+                            for value in &raised_loss.values {
+                                if !raised_counterexample
+                                    .values
+                                    .iter()
+                                    .any(|raised| raised.source_name == value.source_name)
+                                {
+                                    raised_counterexample.values.push(value.clone());
                                 }
-                                let a_str = ce_json
-                                    .get(atom.params.first().map(|p| p.name.as_str()).unwrap_or(""))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("N/A")
-                                    .to_string();
-                                let b_str = ce_json
-                                    .get(atom.params.get(1).map(|p| p.name.as_str()).unwrap_or(""))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("N/A")
-                                    .to_string();
-                                let ce_val = if ce_json.is_empty() {
-                                    None
-                                } else {
-                                    Some(serde_json::Value::Object(ce_json))
-                                };
-                                let data_flow_trace =
-                                    build_data_flow_trace(atom, &model_map, module_env, hir_atom);
-                                let reconstruction_loss = Some(ReconstructionLoss::from_z3_model(
+                            }
+                            raised_counterexample
+                                .omitted_solver_symbols
+                                .extend(raised_loss.omitted_solver_symbols.iter().cloned());
+                            raised_counterexample
+                                .omitted_solver_symbols
+                                .retain(|symbol| !length_companion_names.contains(symbol));
+                            raised_counterexample
+                                .values
+                                .sort_by(|a, b| a.source_name.cmp(&b.source_name));
+                            raised_counterexample.omitted_solver_symbols.sort();
+                            raised_counterexample.omitted_solver_symbols.dedup();
+                            counterexample_provenance =
+                                Some(raised_counterexample.provenance_json());
+                            let loss_values = raised_loss
+                                .to_loss_json()
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect();
+                            let a_str = ce_json
+                                .get(atom.params.first().map(|p| p.name.as_str()).unwrap_or(""))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("N/A")
+                                .to_string();
+                            let b_str = ce_json
+                                .get(atom.params.get(1).map(|p| p.name.as_str()).unwrap_or(""))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("N/A")
+                                .to_string();
+                            let ce_val = if ce_json.is_empty() {
+                                None
+                            } else {
+                                Some(serde_json::Value::Object(ce_json))
+                            };
+                            let data_flow_trace =
+                                build_data_flow_trace(atom, &model_map, module_env, hir_atom);
+                            let reconstruction_loss =
+                                Some(ReconstructionLoss::from_counter_example(
                                     atom.ensures.clone(),
-                                    &model,
-                                    &reconstruction_variables,
+                                    loss_values,
                                 ));
-                                if enable_spurious_detection {
-                                    let validation =
-                                        validate_counterexample(atom, &model_values, module_env);
-                                    if validation.validation_status == "spurious_candidate" {
-                                        solver.pop(1);
-                                        let symbols = validation
-                                            .symbol_provenance
-                                            .iter()
-                                            .map(|symbol| {
-                                                format!(
-                                                    "{} ({})",
-                                                    symbol.symbol_name, symbol.source
-                                                )
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join(", ");
-                                        let help = if symbols.is_empty() {
-                                            format!(
+                            let mut validation_status = None;
+                            if enable_spurious_detection {
+                                let validation =
+                                    validate_counterexample(atom, &model_values, module_env);
+                                validation_status = Some(validation.validation_status.clone());
+                                if validation.validation_status == "spurious_candidate" {
+                                    let symbols = validation
+                                        .symbol_provenance
+                                        .iter()
+                                        .map(|symbol| {
+                                            format!("{} ({})", symbol.symbol_name, symbol.source)
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    let help = if symbols.is_empty() {
+                                        format!(
                                         "Counterexample replay mismatch: {}. Consider escalating to Lean or checking the Z3 translation.",
                                         validation.failed_constraints.join("; ")
                                     )
-                                        } else {
-                                            format!(
+                                    } else {
+                                        format!(
                                         "Counterexample depends on uninterpreted symbols: {}. Consider escalating to Lean or expanding the symbol.",
                                         symbols
                                     )
-                                        };
-                                        return Err(MumeiError::verification_at(
-                                    format!(
-                                        "Spurious counterexample detected for atom '{}'. Spurious counterexample candidate for atom '{}'",
-                                        atom.name, atom.name
-                                    ),
-                                    atom.span.clone(),
-                                )
-                                .with_help(help)
-                                .with_counterexample(ce_val.clone()));
-                                    }
+                                    };
+                                    spurious_candidate_help = Some(help);
                                 }
-                                (a_str, b_str, ce_val, data_flow_trace, reconstruction_loss)
-                            } else {
-                                ("N/A".to_string(), "N/A".to_string(), None, None, None)
-                            };
+                            }
+                            (
+                                a_str,
+                                b_str,
+                                ce_val,
+                                data_flow_trace,
+                                reconstruction_loss,
+                                validation_status,
+                            )
+                        } else {
+                            ("N/A".to_string(), "N/A".to_string(), None, None, None, None)
+                        }
+                    } else {
+                        ("N/A".to_string(), "N/A".to_string(), None, None, None, None)
+                    };
+                    if ensures_check == SatResult::Sat {
+                        context_reachability = ContextReachability::Reachable;
+                    }
+                    let holds_check = if ensures_check == SatResult::Sat {
                         solver.pop(1);
+                        solver.push();
+                        solver.assert(&ens_bool);
+                        let holds_check = crate::verification::phase_artifacts::check(&solver);
+                        solver.pop(1);
+                        Some(holds_check)
+                    } else {
+                        solver.pop(1);
+                        None
+                    };
+                    let mut clause_outcome =
+                        classify_vc_outcome(context_reachability, ensures_check, holds_check);
+                    if spurious_candidate_help.is_some() {
+                        clause_outcome = ClauseOutcome::Unknown;
+                    }
+                    ensures_outcomes.push((ens_clause.trim().to_string(), clause_outcome, None));
+                    let outcome_summary =
+                        ensures_outcome_summary(context_reachability, &ensures_outcomes);
+                    if ensures_check == SatResult::Sat {
+                        if let Some(help) = spurious_candidate_help {
+                            return Err(MumeiError::verification_at(
+                                format!(
+                                    "Spurious counterexample detected for atom '{}'. Spurious counterexample candidate for atom '{}'",
+                                    atom.name, atom.name
+                                ),
+                                atom.span.clone(),
+                            )
+                            .with_help(help)
+                            .with_counterexample_provenance(
+                                ce_value.clone(),
+                                counterexample_provenance.clone(),
+                            ));
+                        }
                         let constraint_mappings =
                             build_constraint_mappings_for_atom(atom, module_env);
                         let mut semantic_fb = build_semantic_feedback(
@@ -1914,10 +2666,13 @@ pub(crate) fn verify_inner(
                             FAILURE_POSTCONDITION_VIOLATED,
                             None,
                         );
-                        if let (Some(feedback), Some(loss)) =
-                            (&mut semantic_fb, reconstruction_loss)
-                        {
-                            feedback["reconstruction_loss"] = json!(loss);
+                        if let Some(feedback) = &mut semantic_fb {
+                            if let Some(loss) = reconstruction_loss {
+                                feedback["reconstruction_loss"] = json!(loss);
+                            }
+                            if let Some(status) = validation_status.as_ref() {
+                                feedback["counterexample_validation_status"] = json!(status);
+                            }
                         }
                         let loss_vector = if reconstruction_loss_output_enabled() {
                             let candidate = build_loss_vector(
@@ -1930,13 +2685,45 @@ pub(crate) fn verify_inner(
                         } else {
                             None
                         };
+                        let failure_reason = match clause_outcome {
+                            ClauseOutcome::AlwaysFalse => "Postcondition violated. The postcondition is false for every input that satisfies requires (the specification or the body is likely wrong).".to_string(),
+                            ClauseOutcome::FailsOnSomeInputs => "Postcondition violated. The postcondition holds for some inputs but not all.".to_string(),
+                            _ => "Postcondition violated.".to_string(),
+                        };
+                        let failed_clause = ens_clause.trim();
+                        let failed_clause_label = clause_label_for(
+                            atom,
+                            crate::parser::ClauseKind::Ensures,
+                            failed_clause,
+                        );
+                        let mut extra_report_fields = outcome_summary.clone();
+                        extra_report_fields["failed_clause"] = json!(failed_clause);
+                        if let Some(label) = failed_clause_label {
+                            extra_report_fields["failed_clause_label"] = json!(label);
+                        }
+                        if ce_value.is_some() {
+                            extra_report_fields["counterexample_fidelity"] =
+                                json!(raised_counterexample_fidelity(
+                                    phase_contract(ENSURES_PHASE)
+                                        .expect("ensures phase is declared"),
+                                    validation_status.as_deref(),
+                                    counterexample_provenance
+                                        .as_ref()
+                                        .and_then(|provenance| provenance.get("complete"))
+                                        .and_then(serde_json::Value::as_bool)
+                                        .unwrap_or(false),
+                                ));
+                            if let Some(provenance) = counterexample_provenance.clone() {
+                                extra_report_fields["counterexample_provenance"] = provenance;
+                            }
+                        }
                         save_visualizer_report(
                             output_dir,
                             "failed",
                             &atom.name,
                             &ce_a,
                             &ce_b,
-                            "Postcondition violated.",
+                            &failure_reason,
                             ce_value.as_ref(),
                             FAILURE_POSTCONDITION_VIOLATED,
                             semantic_fb.as_ref(),
@@ -1945,6 +2732,7 @@ pub(crate) fn verify_inner(
                             data_flow_trace.as_ref(),
                             loss_vector.as_ref(),
                             Some(&diagnostics),
+                            Some(&extra_report_fields),
                         );
                         metrics.record_phase(
                             "Phase 5: ensures verification (failed)",
@@ -1953,12 +2741,36 @@ pub(crate) fn verify_inner(
                         metrics.total_constraints = constraint_count_cell.get();
                         metrics.print_summary();
                         // Feature 3d: Add related spans for constraint definition locations
+                        let mut help =
+                            "ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください"
+                                .to_string();
+                        match clause_outcome {
+                            ClauseOutcome::AlwaysFalse => help.push_str(
+                                "\nThe postcondition is false for every input that satisfies requires (the specification or the body is likely wrong).",
+                            ),
+                            ClauseOutcome::FailsOnSomeInputs => {
+                                help.push_str(
+                                    "\nThe postcondition holds for some inputs but not all.",
+                                );
+                            }
+                            _ => {}
+                        }
+                        if let Some(label) = failed_clause_label {
+                            help.push_str(&format!(
+                                "\nviolated ensures clause {}: {}",
+                                json!(label),
+                                failed_clause
+                            ));
+                        }
                         let mut err = MumeiError::verification_at(
-                        "Postcondition (ensures) is not satisfied.",
-                        atom.span.clone(),
-                    )
-                    .with_help("ensures の条件を確認してください。body の返り値が事後条件を満たすか検討してください")
-                    .with_counterexample(ce_value.clone());
+                            "Postcondition (ensures) is not satisfied.",
+                            atom.span.clone(),
+                        )
+                        .with_help(help)
+                        .with_counterexample_provenance(
+                            ce_value.clone(),
+                            counterexample_provenance.clone(),
+                        );
                         for mapping in &constraint_mappings {
                             if mapping.span.line > 0 {
                                 let related_src_span = span_to_source_span("", &mapping.span);
@@ -1981,7 +2793,6 @@ pub(crate) fn verify_inner(
                         return Err(err);
                     }
                     if ensures_check == SatResult::Unknown {
-                        solver.pop(1);
                         let property_based_help = property_based_config
                             .map(|config| {
                                 run_property_based_test_with_mode(
@@ -1998,16 +2809,17 @@ pub(crate) fn verify_inner(
                         );
                         metrics.total_constraints = constraint_count_cell.get();
                         metrics.print_summary();
-                        let mut err = MumeiError::verification_at(
-                            "Z3 returned unknown while checking the postcondition.",
-                            atom.span.clone(),
-                        );
+                        let message = if nlsat_first {
+                            nlsat_first_unknown_message(&solver, "while checking the postcondition")
+                        } else {
+                            "Z3 returned unknown while checking the postcondition.".to_string()
+                        };
+                        let mut err = MumeiError::verification_at(message, atom.span.clone());
                         if let Some(help) = property_based_help {
                             err = err.with_help(help);
                         }
                         return Err(err);
                     }
-                    solver.pop(1);
                 }
             }
         }
@@ -2033,6 +2845,10 @@ pub(crate) fn verify_inner(
                 None,
                 None,
                 Some(&diagnostics),
+                Some(&ensures_outcome_summary(
+                    context_reachability,
+                    &ensures_outcomes,
+                )),
             );
             return Err(
                 MumeiError::verification_at(UNVERIFIABLE_ERROR_PREFIX, atom.span.clone())
@@ -2045,14 +2861,20 @@ pub(crate) fn verify_inner(
     // 5b. 線形性チェック: consume 対象パラメータの検証
     // body 実行後、consume 宣言されたパラメータが正しく消費されていることを確認。
     // LinearityCtx に蓄積された違反（二重解放・Use-After-Free）があればエラー。
-    if !atom.consumed_params.is_empty() {
+    if atom.has_consumed_params() {
         // consume 対象パラメータを消費済みとしてマーク
-        for param_name in &atom.consumed_params {
-            if let Err(e) = linearity_ctx_cell.borrow_mut().consume(param_name) {
-                return Err(MumeiError::verification_at(
-                    format!("Linearity violation in atom '{}': {}", atom.name, e),
-                    atom.span.clone(),
-                ));
+        for param_name in &atom.consumed_names() {
+            // body が既に所有権を移転済みの場合（例: 別の消費 callee への転送）は
+            // 再マークすると正当な移転を二重解放と誤判定するためスキップする。
+            // 借用中のまま残ったパラメータは依然として consume() が違反を記録する。
+            let already_consumed = linearity_ctx_cell.borrow().is_consumed(param_name);
+            if !already_consumed {
+                if let Err(e) = linearity_ctx_cell.borrow_mut().consume(param_name) {
+                    return Err(MumeiError::verification_at(
+                        format!("Linearity violation in atom '{}': {}", atom.name, e),
+                        atom.span.clone(),
+                    ));
+                }
             }
 
             // Z3 上で is_alive を false に更新（消費後のアクセスを禁止）
@@ -2082,6 +2904,7 @@ pub(crate) fn verify_inner(
                 None,
                 None,
                 Some(&diagnostics),
+                None,
             );
             return Err(MumeiError::verification_at(
                 format!(
@@ -2099,12 +2922,27 @@ pub(crate) fn verify_inner(
     // (`requires`, `ensures`, invariants) are range-checked here, against the
     // solver that already carries the preconditions.
     discharge_bv_shift_obligations(&vc, &solver)?;
+    discharge_bv_div_obligations(&vc, &solver)?;
 
     let z3_check_start = std::time::Instant::now();
     let profiler_final_check_start = profiler_checkpoint(&vc);
-    let final_check = solver.check();
+    let final_check = crate::verification::phase_artifacts::check(&solver);
     profile_solver_check(&vc, profiler_final_check_start);
+    context_reachability = match final_check {
+        SatResult::Sat => ContextReachability::Reachable,
+        SatResult::Unsat => ContextReachability::Unreachable,
+        SatResult::Unknown => ContextReachability::Unknown,
+    };
     if final_check == SatResult::Unsat {
+        for (_, outcome, _) in &mut ensures_outcomes {
+            if *outcome == ClauseOutcome::Proved {
+                *outcome = ClauseOutcome::Vacuous;
+            }
+        }
+        diagnostics.push(format!(
+            "vacuous verification context in atom `{}`: requires and body constraints are unsatisfiable together, so every ensures clause would hold vacuously",
+            atom.name
+        ));
         let unsat_core = solver.get_unsat_core();
         let core_labels: Vec<String> = unsat_core
             .iter()
@@ -2145,6 +2983,10 @@ pub(crate) fn verify_inner(
             None,
             None,
             Some(&diagnostics),
+            Some(&ensures_outcome_summary(
+                context_reachability,
+                &ensures_outcomes,
+            )),
         );
 
         let constraint_summary = if conflicting_constraints.is_empty() {
@@ -2163,10 +3005,13 @@ pub(crate) fn verify_inner(
             z3_check_start.elapsed(),
         );
         metrics.print_summary();
-        return Err(MumeiError::verification_at(
-            constraint_summary,
-            atom.span.clone(),
-        ));
+        let mut err = MumeiError::verification_at(constraint_summary, atom.span.clone());
+        if context_reachability == ContextReachability::Unreachable {
+            err = err.with_help(
+                "The verification context is vacuous: requires and body constraints are unsatisfiable together, so every ensures clause would hold vacuously.",
+            );
+        }
+        return Err(err);
     }
     if final_check == SatResult::Unknown {
         let heatmap = profiler_cell
@@ -2195,10 +3040,12 @@ pub(crate) fn verify_inner(
             z3_check_start.elapsed(),
         );
         metrics.print_summary();
-        let mut err = MumeiError::verification_at(
-            "Z3 returned unknown during the final consistency check.",
-            atom.span.clone(),
-        );
+        let message = if nlsat_first {
+            nlsat_first_unknown_message(&solver, "during the final consistency check")
+        } else {
+            "Z3 returned unknown during the final consistency check.".to_string()
+        };
+        let mut err = MumeiError::verification_at(message, atom.span.clone());
         if let Some(help) = property_based_help {
             err = err.with_help(help);
         }
@@ -2210,9 +3057,239 @@ pub(crate) fn verify_inner(
     metrics.total_constraints = constraint_count_cell.get();
     metrics.record_phase("Phase 6: final Z3 check", z3_check_start.elapsed());
 
+    let cover_phase_start = std::time::Instant::now();
+    let mut cover_results = Vec::with_capacity(atom.covers.len());
+    let mut cover_failure = None;
+    if !atom.covers.is_empty() {
+        if tuple_component_types(atom.return_type.as_deref()).is_none() {
+            wire_array_slots(
+                &vc,
+                "result",
+                tail_expr(&hir_atom.body_stmt),
+                &body_result,
+                &mut env,
+            );
+            env.insert("result".to_string(), body_result.clone());
+        }
+
+        for cover in &atom.covers {
+            let cover_name = cover.label.as_deref().unwrap_or(&cover.clause);
+            if tuple_component_types(atom.return_type.as_deref()).is_some()
+                && super::loop_detector::expression_ast_references_identifier(
+                    &parse_expression(&cover.clause),
+                    "result",
+                )
+            {
+                diagnostics.push(format!(
+                    "warning: reachability of cover clause {cover_name:?} is unknown because tuple result components are not linked to the body"
+                ));
+                cover_results.push(json!({
+                    "clause": cover.clause,
+                    "label": cover.label,
+                    "status": "unknown",
+                    "witness": serde_json::Value::Null,
+                }));
+                continue;
+            }
+
+            if !vc.bitvec_i64 && expr_has_bitwise_op(&parse_expression(&cover.clause)) {
+                diagnostics.push(format!(
+                    "warning: reachability of cover clause {cover_name:?} is unknown because it uses bitwise operators but the atom is verified with the Int encoding; add `semantics: bitvec;` to check it"
+                ));
+                cover_results.push(json!({
+                    "clause": cover.clause,
+                    "label": cover.label,
+                    "status": "unknown",
+                    "witness": serde_json::Value::Null,
+                }));
+                continue;
+            }
+
+            vc.cover_obligations = Some(std::cell::RefCell::new(Vec::new()));
+            solver.push();
+            let mut check_env = pre_body_env.clone();
+            let mut check_requires_skipped = false;
+            for mode in atom.clause_modes.iter().filter(|mode| {
+                mode.kind == crate::parser::ClauseKind::Requires
+                    && mode.mode == crate::parser::ClauseTrustMode::Check
+            }) {
+                match lower_clause_with_skip(
+                    &vc,
+                    &mut check_env,
+                    hir_atom,
+                    &mode.clause,
+                    "requires",
+                    &mut diagnostics,
+                    Some(&solver),
+                ) {
+                    Ok(ClauseLoweringOutcome::Trivial) => {}
+                    Ok(ClauseLoweringOutcome::Lowered(req_bool)) => solver.assert(&req_bool),
+                    Ok(ClauseLoweringOutcome::Skipped) | Err(_) => {
+                        check_requires_skipped = true;
+                        break;
+                    }
+                }
+            }
+            if check_requires_skipped {
+                vc.cover_obligations.take();
+                diagnostics.push(format!(
+                    "warning: reachability of cover clause {cover_name:?} is unknown because a `requires check` clause could not be lowered"
+                ));
+                cover_results.push(json!({
+                    "clause": cover.clause,
+                    "label": cover.label,
+                    "status": "unknown",
+                    "witness": serde_json::Value::Null,
+                }));
+                solver.pop(1);
+                continue;
+            }
+            let lowered_cover = lower_clause_with_skip(
+                &vc,
+                &mut env,
+                hir_atom,
+                &cover.clause,
+                "cover",
+                &mut diagnostics,
+                Some(&solver),
+            );
+            let cover_obligations = vc
+                .cover_obligations
+                .take()
+                .expect("cover obligation collection is active")
+                .into_inner();
+            let lowered_cover = match lowered_cover {
+                Ok(lowered_cover) => lowered_cover,
+                Err(err) => {
+                    solver.pop(1);
+                    return Err(err);
+                }
+            };
+            let cover_bool = match lowered_cover {
+                ClauseLoweringOutcome::Trivial => Bool::from_bool(&ctx, true),
+                ClauseLoweringOutcome::Skipped => {
+                    diagnostics.push(format!(
+                        "warning: reachability of cover clause {cover_name:?} is unknown because it could not be lowered"
+                    ));
+                    cover_results.push(json!({
+                        "clause": cover.clause,
+                        "label": cover.label,
+                        "status": "unknown",
+                        "witness": serde_json::Value::Null,
+                    }));
+                    solver.pop(1);
+                    continue;
+                }
+                ClauseLoweringOutcome::Lowered(cover_bool) => cover_bool,
+            };
+
+            solver.assert(&cover_bool);
+            for obligation in &cover_obligations {
+                solver.assert(obligation);
+            }
+            let cover_check = crate::verification::phase_artifacts::check(&solver);
+            let raised_witness = if cover_check == SatResult::Sat {
+                solver.get_model().map(|model| {
+                    let mut witness_env = pre_body_env.clone();
+                    if tuple_component_types(atom.return_type.as_deref()).is_none() {
+                        if let Some(result) = env.get("result") {
+                            witness_env.insert("result".to_string(), result.clone());
+                            for (name, value) in &env {
+                                if name.starts_with("__struct_result_")
+                                    || name.starts_with("result_")
+                                    || name == "len_result"
+                                    || name.starts_with("__z3_arr_result")
+                                {
+                                    witness_env.insert(name.clone(), value.clone());
+                                }
+                            }
+                        }
+                    }
+                    let raised = raise_atom_counterexample(
+                        &model,
+                        atom,
+                        &witness_env,
+                        module_env,
+                        tuple_component_types(atom.return_type.as_deref()).is_none(),
+                    );
+                    (raised.to_counterexample_json(), raised.provenance_json())
+                })
+            } else {
+                None
+            };
+            solver.pop(1);
+
+            match cover_check {
+                SatResult::Sat => {
+                    let mut result = json!({
+                        "clause": cover.clause,
+                        "label": cover.label,
+                        "status": "covered",
+                        "witness": raised_witness.as_ref().map(|(witness, _)| witness.clone())
+                            .unwrap_or(serde_json::Value::Null),
+                    });
+                    if let Some((_, provenance)) = raised_witness {
+                        result["witness_provenance"] = provenance;
+                    }
+                    cover_results.push(result);
+                }
+                SatResult::Unsat => {
+                    let reason = format!(
+                        "cover \"{cover_name}\" is unreachable: no execution satisfying requires reaches a state where {} holds",
+                        cover.clause
+                    );
+                    cover_failure = Some(reason);
+                    break;
+                }
+                SatResult::Unknown => {
+                    diagnostics.push(format!(
+                        "warning: Z3 returned unknown while checking cover clause {cover_name:?}"
+                    ));
+                    cover_results.push(json!({
+                        "clause": cover.clause,
+                        "label": cover.label,
+                        "status": "unknown",
+                        "witness": serde_json::Value::Null,
+                    }));
+                }
+            }
+        }
+    }
+    metrics.record_phase(COVER_PHASE, cover_phase_start.elapsed());
+    metrics.total_constraints = constraint_count_cell.get();
+
+    if let Some(reason) = cover_failure {
+        metrics.print_summary();
+        save_visualizer_report(
+            output_dir,
+            "failed",
+            &atom.name,
+            "N/A",
+            "N/A",
+            &reason,
+            None,
+            "cover_unreachable",
+            None,
+            Some(&atom.span),
+            None,
+            None,
+            None,
+            Some(&diagnostics),
+            Some(&ensures_outcome_summary(
+                context_reachability,
+                &ensures_outcomes,
+            )),
+        );
+        return Err(MumeiError::verification_at(reason, atom.span.clone()));
+    }
+
     // Print metrics summary (always for now; future: gate behind --verbose)
     metrics.print_summary();
 
+    let mut success_extra_fields = ensures_outcome_summary(context_reachability, &ensures_outcomes);
+    if !atom.covers.is_empty() {
+        success_extra_fields["cover_results"] = json!(cover_results);
+    }
     save_visualizer_report(
         output_dir,
         "success",
@@ -2228,8 +3305,318 @@ pub(crate) fn verify_inner(
         None,
         None,
         Some(&diagnostics),
+        Some(&success_extra_fields),
     );
+    let inferred_invariants = inferred_invariants_cell.borrow().clone();
+    Ok((inferred_invariants, cover_results))
+}
+
+fn reject_resource_state_shadowing(
+    atom: &Atom,
+    body: &Stmt,
+    module_env: &ModuleEnv,
+) -> MumeiResult<()> {
+    let resources: std::collections::HashSet<&str> = module_env
+        .resources
+        .values()
+        .filter(|resource| !resource.state.is_empty())
+        .map(|resource| resource.name.as_str())
+        .collect();
+    let check = |name: &str| {
+        if resources.contains(name) {
+            Err(MumeiError::verification(format!(
+                "identifier '{name}' shadows resource '{name}' with shared state"
+            )))
+        } else {
+            Ok(())
+        }
+    };
+    for param in &atom.params {
+        check(&param.name)?;
+    }
+    fn walk(stmt: &Stmt, check: &impl Fn(&str) -> MumeiResult<()>) -> MumeiResult<()> {
+        match stmt {
+            Stmt::Let { var, .. } => check(var)?,
+            Stmt::Block(items, ..)
+            | Stmt::TaskGroup {
+                children: items, ..
+            } => {
+                for item in items {
+                    walk(item, check)?;
+                }
+            }
+            Stmt::While { body, .. } | Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+                walk(body, check)?
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    walk(body, &check)
+}
+
+fn check_resource_initial_state<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    solver: &Solver<'a>,
+) -> MumeiResult<()> {
+    for (resource_name, resource) in &vc.module_env.resources {
+        let Some(invariant) = resource.invariant.as_ref() else {
+            continue;
+        };
+        let keys: Vec<String> = resource
+            .state
+            .iter()
+            .map(|field| format!("{resource_name}.{}", field.name))
+            .collect();
+        for field in &resource.state {
+            let value: Dynamic = match field.ty.as_str() {
+                "bool" => Bool::from_bool(vc.ctx, false).into(),
+                "i64" if vc.bitvec_i64 => BV::from_i64(vc.ctx, 0, 64).into(),
+                "i64" => Int::from_i64(vc.ctx, 0).into(),
+                "f64" if vc.ieee754_f64 => Float::from_f64(vc.ctx, 0.0).into(),
+                "f64" => Real::from_real(vc.ctx, 0, 1).into(),
+                _ => continue,
+            };
+            env.insert(format!("{resource_name}.{}", field.name), value);
+        }
+        let check = (|| {
+            let inv = expr_to_z3(vc, invariant, env, Some(solver))?
+                .as_bool()
+                .ok_or_else(|| MumeiError::type_error("resource invariant must be boolean"))?;
+            solver.push();
+            solver.assert(&inv.not());
+            let result = match crate::verification::phase_artifacts::check(solver) {
+                SatResult::Unsat => Ok(()),
+                SatResult::Sat => Err(MumeiError::verification(format!(
+                    "resource '{resource_name}' invariant does not hold for the initial state (all fields zero): {}",
+                    crate::verification::support::expr_to_source_string(invariant)
+                ))),
+                SatResult::Unknown => Err(MumeiError::verification(format!(
+                    "resource '{resource_name}' invariant does not hold for the initial state (all fields zero): {}",
+                    crate::verification::support::expr_to_source_string(invariant)
+                ))),
+            };
+            solver.pop(1);
+            result
+        })();
+        for key in keys {
+            env.remove(&key);
+        }
+        check?;
+    }
     Ok(())
+}
+
+/// Collect variable names referenced in a clause expression that are bound
+/// neither by the allowed set (params, `result`, literals, type/atom names)
+/// nor by an inner binder (`forall`/`exists`/`sum`-style quantifier variables,
+/// match-arm patterns, lambda params, clause-local `let`s).
+fn clause_unbound_names(
+    expr: &crate::parser::Expr,
+    atom: &crate::parser::Atom,
+    module_env: &crate::verification::ModuleEnv,
+    allow_result: bool,
+) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut allowed: BTreeSet<String> = BTreeSet::new();
+    for p in &atom.params {
+        allowed.insert(p.name.clone());
+    }
+    allowed.extend(atom.consumed_names());
+    allowed.extend(atom.type_params.iter().cloned());
+    allowed.insert("true".to_string());
+    allowed.insert("false".to_string());
+    if allow_result {
+        allowed.insert("result".to_string());
+    }
+    // Enum/struct/atom names appear as bare leaves in `Shape::Point`-style
+    // field access and `atom_ref(name)` arguments.
+    allowed.extend(module_env.enums.keys().cloned());
+    allowed.extend(module_env.structs.keys().cloned());
+    allowed.extend(module_env.atoms.keys().cloned());
+
+    let mut out = BTreeSet::new();
+    let bound = BTreeSet::new();
+    collect_clause_free(expr, &bound, &allowed, &mut out);
+    out.into_iter().collect()
+}
+
+/// Call names whose first argument is a quantifier-style binder variable
+/// scoped over the remaining body argument: `forall(i, lo, hi, body)`.
+fn is_binder_call(name: &str) -> bool {
+    matches!(
+        name,
+        "forall" | "exists" | "sum" | "all" | "any" | "prod" | "count"
+    )
+}
+
+fn collect_clause_free(
+    expr: &crate::parser::Expr,
+    bound: &std::collections::BTreeSet<String>,
+    allowed: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    use crate::parser::Expr;
+    match expr {
+        Expr::Variable(name) => {
+            if !bound.contains(name) && !allowed.contains(name) {
+                out.insert(name.clone());
+            }
+        }
+        Expr::ArrayAccess(name, index) => {
+            if !bound.contains(name) && !allowed.contains(name) {
+                out.insert(name.clone());
+            }
+            collect_clause_free(index, bound, allowed, out);
+        }
+        Expr::BinaryOp(l, _, r) => {
+            collect_clause_free(l, bound, allowed, out);
+            collect_clause_free(r, bound, allowed, out);
+        }
+        Expr::Call(name, args)
+            if is_binder_call(name) && args.len() >= 3 && matches!(args[0], Expr::Variable(_)) =>
+        {
+            // forall(i, lo, hi, body): lo/hi see the outer scope, body sees `i`.
+            for a in &args[1..args.len() - 1] {
+                collect_clause_free(a, bound, allowed, out);
+            }
+            let mut inner = bound.clone();
+            if let Expr::Variable(binder) = &args[0] {
+                inner.insert(binder.clone());
+            }
+            if let Some(body) = args.last() {
+                collect_clause_free(body, &inner, allowed, out);
+            }
+        }
+        Expr::Call(_, args) => {
+            for a in args {
+                collect_clause_free(a, bound, allowed, out);
+            }
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_clause_free(cond, bound, allowed, out);
+            collect_clause_free_stmt(then_branch, &bound.clone(), allowed, out);
+            collect_clause_free_stmt(else_branch, &bound.clone(), allowed, out);
+        }
+        Expr::Block(stmt) => collect_clause_free_stmt(stmt, bound, allowed, out),
+        Expr::StructInit { fields, .. } => {
+            for (_, v) in fields {
+                collect_clause_free(v, bound, allowed, out);
+            }
+        }
+        Expr::FieldAccess(e, _) => collect_clause_free(e, bound, allowed, out),
+        Expr::Match { target, arms } => {
+            collect_clause_free(target, bound, allowed, out);
+            for arm in arms {
+                let mut inner = bound.clone();
+                collect_pattern_bindings(&arm.pattern, &mut inner);
+                if let Some(g) = &arm.guard {
+                    collect_clause_free(g, &inner, allowed, out);
+                }
+                collect_clause_free_stmt(&arm.body, &inner, allowed, out);
+            }
+        }
+        Expr::Async { body } => collect_clause_free_stmt(body, bound, allowed, out),
+        Expr::Await { expr } => collect_clause_free(expr, bound, allowed, out),
+        Expr::AtomRef { .. } => {}
+        Expr::CallRef { callee, args } => {
+            collect_clause_free(callee, bound, allowed, out);
+            for a in args {
+                collect_clause_free(a, bound, allowed, out);
+            }
+        }
+        Expr::Perform { args, .. } => {
+            for a in args {
+                collect_clause_free(a, bound, allowed, out);
+            }
+        }
+        Expr::Lambda { params, body, .. } => {
+            let mut inner = bound.clone();
+            for p in params {
+                inner.insert(p.name.clone());
+            }
+            collect_clause_free_stmt(body, &inner, allowed, out);
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_clause_free(channel, bound, allowed, out);
+            collect_clause_free(value, bound, allowed, out);
+        }
+        Expr::ChanRecv { channel } => collect_clause_free(channel, bound, allowed, out),
+        _ => {}
+    }
+}
+
+fn collect_clause_free_stmt(
+    stmt: &crate::parser::Stmt,
+    bound: &std::collections::BTreeSet<String>,
+    allowed: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    use crate::parser::Stmt;
+    match stmt {
+        Stmt::Expr(e, _) => collect_clause_free(e, bound, allowed, out),
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            collect_clause_free(value, bound, allowed, out)
+        }
+        Stmt::ArrayStore { index, value, .. } => {
+            collect_clause_free(index, bound, allowed, out);
+            collect_clause_free(value, bound, allowed, out);
+        }
+        Stmt::Block(stmts, _) => {
+            let mut scope = bound.clone();
+            for s in stmts {
+                collect_clause_free_stmt(s, &scope, allowed, out);
+                if let Stmt::Let { var, .. } = s {
+                    scope.insert(var.clone());
+                }
+            }
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            collect_clause_free(cond, bound, allowed, out);
+            collect_clause_free(invariant, bound, allowed, out);
+            if let Some(d) = decreases {
+                collect_clause_free(d, bound, allowed, out);
+            }
+            collect_clause_free_stmt(body, bound, allowed, out);
+        }
+        Stmt::Acquire { body, .. } => collect_clause_free_stmt(body, bound, allowed, out),
+        Stmt::Task { body, .. } => collect_clause_free_stmt(body, bound, allowed, out),
+        Stmt::TaskGroup { children, .. } => {
+            for c in children {
+                collect_clause_free_stmt(c, bound, allowed, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_pattern_bindings(
+    pattern: &crate::parser::Pattern,
+    bound: &mut std::collections::BTreeSet<String>,
+) {
+    use crate::parser::Pattern;
+    match pattern {
+        Pattern::Variable(name) => {
+            bound.insert(name.clone());
+        }
+        Pattern::Variant { fields, .. } => {
+            for f in fields {
+                collect_pattern_bindings(f, bound);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn z3_dynamic_to_i64(value: &Dynamic) -> Option<i64> {
@@ -2239,10 +3626,14 @@ fn z3_dynamic_to_i64(value: &Dynamic) -> Option<i64> {
         .or_else(|| format!("{}", value).parse::<i64>().ok())
 }
 
-/// Extract a concrete counterexample value from a Z3 model term, covering the
+/// Extract a concrete counterexample value from a Z3 model term, including
+/// native `Str` values so replay can validate string builtin bodies.
 /// `f64` encodings used by verification: `Int`, `Bool`, exact-rational `Real`
 /// (default `f64`), and IEEE 754 `Float` (under `--ieee754-f64`).
 fn z3_dynamic_to_cex_value(value: &Dynamic) -> Option<CexValue> {
+    if let Some(string_value) = value.as_string().and_then(|s| s.as_string()) {
+        return Some(CexValue::Str(string_value));
+    }
     if let Some(int_value) = value.as_int().and_then(|v| v.as_i64()) {
         return Some(CexValue::Int(int_value));
     }
@@ -2262,6 +3653,25 @@ fn z3_dynamic_to_cex_value(value: &Dynamic) -> Option<CexValue> {
     parse_z3_numeric_to_f64(&text).map(CexValue::Float)
 }
 
+fn ensures_outcome_summary(
+    context_reachability: ContextReachability,
+    outcomes: &[(String, ClauseOutcome, Option<String>)],
+) -> serde_json::Value {
+    json!({
+        "context_reachability": context_reachability,
+        "ensures_outcomes": outcomes.iter().map(|(clause, outcome, label)| {
+            let mut entry = json!({
+                "clause": clause,
+                "outcome": outcome,
+            });
+            if let Some(label) = label {
+                entry["label"] = json!(label);
+            }
+            entry
+        }).collect::<Vec<_>>(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn save_visualizer_report(
     output_dir: &Path,
@@ -2278,6 +3688,7 @@ pub(crate) fn save_visualizer_report(
     data_flow_trace: Option<&DataFlowTrace>,
     loss_vector: Option<&serde_json::Value>,
     diagnostics: Option<&[String]>,
+    extra_fields: Option<&serde_json::Value>,
 ) {
     let mut report = json!({
         "status": status,
@@ -2305,6 +3716,11 @@ pub(crate) fn save_visualizer_report(
     }
     if let Some(diagnostics) = diagnostics {
         report["diagnostics"] = json!(diagnostics);
+    }
+    if let Some(serde_json::Value::Object(fields)) = extra_fields {
+        for (key, value) in fields {
+            report[key.as_str()] = value.clone();
+        }
     }
     let skipped_clauses = diagnostics
         .map(|entries| {

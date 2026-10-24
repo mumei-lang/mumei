@@ -1,11 +1,23 @@
 // =============================================================
 // std/math/sqrt — verified integer square root
 // =============================================================
-// 非負入力に対し、二乗が入力以下である整数平方根 witness を返す。
+// Binary search for the largest r with r * r <= n.
 
 atom isqrt(n: i64)
     requires: n >= 0;
-    ensures: result >= 0 && result * result <= n;
+    ensures: result >= 0 && result * result <= n && n < (result + 1) * (result + 1);
     body: {
-        0
+        if n < 1 { 0 } else {
+            let lo = 1;
+            let hi = n;
+            let mid = 0;
+            while lo < hi
+            invariant: lo >= 1 && lo <= hi && hi <= n && lo * lo <= n && n < (hi + 1) * (hi + 1)
+            decreases: hi - lo
+            {
+                mid = (lo + hi + 1) / 2;
+                if mid * mid <= n { lo = mid } else { hi = mid - 1 }
+            };
+            lo
+        }
     };

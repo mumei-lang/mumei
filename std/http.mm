@@ -73,7 +73,7 @@ extern "Rust" {
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
 atom get(url: Str)
-    effects: [HttpGet(url)]
+    effects: [HttpGet(url)];
     requires: starts_with(url, "https://");
     ensures: result >= 0;
     body: {
@@ -87,7 +87,7 @@ atom get(url: Str)
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
 atom post(url: Str, body: Str)
-    effects: [HttpPost(url)]
+    effects: [HttpPost(url)];
     requires: starts_with(url, "https://");
     ensures: result >= 0;
     body: {
@@ -101,7 +101,7 @@ atom post(url: Str, body: Str)
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
 atom put(url: Str, body: Str)
-    effects: [HttpPut(url)]
+    effects: [HttpPut(url)];
     requires: starts_with(url, "https://");
     ensures: result >= 0;
     body: {
@@ -115,7 +115,7 @@ atom put(url: Str, body: Str)
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
 atom delete(url: Str)
-    effects: [HttpDelete(url)]
+    effects: [HttpDelete(url)];
     requires: starts_with(url, "https://");
     ensures: result >= 0;
     body: {

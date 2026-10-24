@@ -270,8 +270,8 @@ impl std::fmt::Display for TypeRef {
 // - 実行時の型消去やオーバーヘッドがない
 
 use crate::parser::{
-    parse_body_expr, parse_type_ref, Atom, Effect, EnumDef, EnumVariant, Expr, Item, Param, Stmt,
-    StructDef, StructField,
+    parse_body_expr_checked, parse_expression, parse_type_ref, Atom, Effect, EnumDef, EnumVariant,
+    Expr, Item, Param, Stmt, StructDef, StructField,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -286,6 +286,9 @@ pub struct Monomorphizer {
     generic_atoms: HashMap<String, Atom>,
     /// 使用されている具体的な型インスタンス（例: "Stack<i64>"）
     instances: HashSet<String>,
+    /// atom body の構文エラー（`collect` で検出）。呼び出し元はこれが
+    /// 空でない場合に fail-closed で拒否する。
+    pub body_parse_failures: Vec<String>,
 }
 
 impl Monomorphizer {
@@ -321,9 +324,33 @@ impl Monomorphizer {
                             self.collect_from_type_ref(type_ref);
                         }
                     }
-                    // body 内の文から収集
-                    let body_stmt = parse_body_expr(&atom.body_expr);
-                    self.collect_from_stmt(&body_stmt);
+                    // body 内の文から収集。構文エラーは回復せず呼び出し元に
+                    // 伝える（panics させない fail-closed 経路）。
+                    match parse_body_expr_checked(&atom.body_expr) {
+                        Ok(body_stmt) => self.collect_from_stmt(&body_stmt),
+                        Err(failures) => {
+                            for failure in failures {
+                                self.body_parse_failures
+                                    .push(format!("atom '{}': {failure}", atom.name));
+                            }
+                        }
+                    }
+                    // requires/ensures/invariant/forall 節も `f<T>(...)`
+                    // 呼び出しを含み得る — 節評価時に単相化インスタンスが
+                    // 解決するよう、同じくインスタンス収集の対象にする。
+                    for clause in [&atom.requires, &atom.ensures]
+                        .into_iter()
+                        .chain(atom.invariant.iter())
+                    {
+                        if clause.trim() != "true" {
+                            self.collect_from_expr(&parse_expression(clause));
+                        }
+                    }
+                    for quantifier in &atom.forall_constraints {
+                        for part in [&quantifier.start, &quantifier.end, &quantifier.condition] {
+                            self.collect_from_expr(&parse_expression(part));
+                        }
+                    }
                 }
                 Item::StructDef(sdef) => {
                     for field in &sdef.fields {
@@ -378,6 +405,11 @@ impl Monomorphizer {
                     self.collect_from_expr(arg);
                 }
             }
+            Expr::ArrayLit(elements) => {
+                for element in elements {
+                    self.collect_from_expr(element);
+                }
+            }
             Expr::BinaryOp(l, _, r) => {
                 self.collect_from_expr(l);
                 self.collect_from_expr(r);
@@ -391,6 +423,7 @@ impl Monomorphizer {
                 self.collect_from_stmt(then_branch);
                 self.collect_from_stmt(else_branch);
             }
+            Expr::Block(stmt) => self.collect_from_stmt(stmt),
             Expr::Match { target, arms } => {
                 self.collect_from_expr(target);
                 for arm in arms {
@@ -677,6 +710,7 @@ impl Monomorphizer {
                         type_ref: Some(new_type_ref),
                         is_ref: p.is_ref,
                         is_ref_mut: p.is_ref_mut,
+                        consume: p.consume,
                         fn_contract_requires: p.fn_contract_requires.clone(),
                         fn_contract_ensures: p.fn_contract_ensures.clone(),
                     }
@@ -723,6 +757,7 @@ impl Monomorphizer {
         // 例: param="E" が "Error" 内の "E" にマッチしないようにする
         let mut mono_requires = generic.requires.clone();
         let mut mono_ensures = generic.ensures.clone();
+        let mut mono_clause_modes = generic.clause_modes.clone();
         for bound in &generic.where_bounds {
             if bound.bounds.contains(&"Effect".to_string()) {
                 if let Some(concrete_type_ref) = type_map.get(&bound.param) {
@@ -733,6 +768,11 @@ impl Monomorphizer {
                             .replace_all(&mono_requires, concrete.as_str())
                             .to_string();
                         mono_ensures = re.replace_all(&mono_ensures, concrete.as_str()).to_string();
+                        for clause_mode in &mut mono_clause_modes {
+                            clause_mode.clause = re
+                                .replace_all(&clause_mode.clause, concrete.as_str())
+                                .to_string();
+                        }
                     }
                 }
             }
@@ -746,6 +786,9 @@ impl Monomorphizer {
             trace_id: None,
             spec_metadata: std::collections::HashMap::new(),
             requires: mono_requires,
+            clause_labels: generic.clause_labels.clone(),
+            clause_modes: mono_clause_modes,
+            covers: generic.covers.clone(),
             forall_constraints: generic.forall_constraints.clone(),
             ensures: mono_ensures,
             body_expr: mono_body,
@@ -757,6 +800,7 @@ impl Monomorphizer {
             invariant: generic.invariant.clone(),
             effects: mono_effects,
             return_type: generic.return_type.clone(),
+            decreases: generic.decreases.clone(),
             span: generic.span.clone(),
             effect_pre: generic
                 .effect_pre

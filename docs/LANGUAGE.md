@@ -138,6 +138,42 @@ atom name(param: Type, ...)
     body: expression;
 ```
 
+An atom's `requires` and `ensures` clauses may include an optional quoted label
+before the colon. Labels are diagnostic metadata and do not affect verification.
+For example, `ensures "nonnegative result": result >= 0;` displays the label if
+that postcondition fails.
+
+### Clause trust modes
+
+`requires` and `ensures` may be marked `assume` or `check` before an optional
+label. `assume` creates a trust boundary; `check` is sound and only withholds a
+fact from the other side of the call.
+
+| Clause | Body / implementation | Call sites |
+|---|---|---|
+| `requires: e;` | Assumed | Checked |
+| `requires assume: e;` | Assumed | Not checked |
+| `requires check: e;` | Not assumed | Checked |
+| `ensures: e;` | Proved | Assumed |
+| `ensures assume: e;` | Not proved | Assumed |
+| `ensures check: e;` | Proved | Not assumed |
+
+### Cover Clauses
+
+A `cover` clause asks whether some execution satisfying `requires` reaches a
+state where its expression holds. It may be labeled, and may refer to parameters
+or `result`; a satisfying model is included as a witness in the verification
+report. Covers are checked after the final verification check. Trusted atoms skip
+body verification, so their covers are not checked and produce a warning.
+Covers do not change how an atom is encoded. Under the default Int encoding, a
+cover that uses a bitwise operator is reported as `unknown`; add
+`semantics: bitvec;` to check it.
+
+```mumei
+cover "zero": result == 0;
+cover: x > 0;
+```
+
 ### Explicit Return Type (`-> Type`)
 
 By default, atoms return `i64`. Use `-> Type` to declare a different return type:
@@ -173,6 +209,16 @@ First-class string type. String literals are `Str` values. Supported operations:
 | Concatenation | `a + b` | `Str` |
 | Equality | `a == b` | `i64` (0 or 1) |
 | Inequality | `a != b` | `i64` (0 or 1) |
+| Length | `len(s)` | `i64` |
+| Empty check | `is_empty(s)` | `bool` |
+| Prefix/suffix/substring checks | `starts_with(s, p)`, `ends_with(s, p)`, `contains(s, p)`, `not_contains(s, p)` | `bool` |
+| Search | `index_of(s, p)` | `i64` |
+| Extract | `substr(s, i, n)` | `Str` |
+| Character access | `char_at(s, i)` | `Str` |
+
+These string builtins are verification-side operations backed by Z3's string
+theory. They are available in contracts and verified standard-library helpers;
+native code generation (`mumei build`) does not lower them yet.
 
 ```mumei
 atom is_same(a: Str, b: Str)
@@ -227,6 +273,105 @@ decreases: n - i
     i = i + 1;
 };
 ```
+
+候補テンプレートから不変量を推論する場合は、明示的に `infer` を指定します。
+
+```mumei
+while i < n invariant: infer decreases: n - i {
+    i = i + 1;
+};
+```
+
+### Bounded `for` loops (sugar)
+
+Bounded `for` loops desugar to a `let` plus the existing terminating `while`:
+
+```mumei
+for i in lo..hi invariant: user_inv decreases: user_dec {
+    body
+}
+```
+
+is equivalent to:
+
+```mumei
+{
+    let __for_lo_i = lo;
+    let __for_hi_i = hi;
+    let i = __for_lo_i;
+    while i < __for_hi_i
+    invariant: __for_lo_i <= i && (i <= __for_hi_i || i == __for_lo_i) && user_inv
+    decreases: __for_hi_i - i
+    {
+        body;
+        i = i + 1;
+    }
+}
+```
+
+Without clauses, the automatic invariant is `lo <= i && (i <= hi || i == lo)`
+and the default variant is `hi - i`. A user `invariant:` is conjoined with the
+automatic invariant; a user `decreases:` replaces the default. The loop uses
+the existing termination proof. The bounds `lo` and `hi` are evaluated once
+before the loop and stored in generated temporaries. The loop variable binds
+in the enclosing block like an ordinary `let`; shadowing an outer binding with
+the same name is not restored. Assigning the loop variable in the body is
+rejected.
+
+### Atom-level `decreases:`
+
+An atom may declare a termination measure with a `decreases:` clause in its
+header. The measure is an integer expression over the atom's parameters:
+
+```mumei
+atom tri(n: i64)
+    requires: n >= 0;
+    ensures: result >= 0 && (n == 0 || result == n + tri(n - 1));
+    decreases: n;
+    body: { if n == 0 { 0 } else { n + tri(n - 1) } };
+```
+
+When an atom sits on an **eligible** recursive call cycle (see "Recursive
+contracts" below) and declares `decreases`, every recursive call in its body
+and in its `requires`/`ensures` contract must prove, under the current path
+conditions and the caller's requires:
+
+1. **Bounded below**: `0 <= M` where `M` is the caller's measure, and
+2. **Strict decrease**: `M_callee(args) < M` for the actual arguments.
+
+A call that cannot prove both fails with
+`termination_measure_violation` (exit code 1), e.g.
+`f(n)`, `f(n + 1)`, or a measure that can go negative.
+
+### Recursive contracts
+
+On an **eligible** recursive SCC — every member declares `decreases`, has a
+call-free measure over its own parameters only, uses no effects, no `ref mut`,
+`consume`, `async`, or type parameters, is `Verified` (not
+`trusted`), has no assume-mode ensures, and every parameter and result is a
+scalar `Int`/`Bool` — calls to an SCC member are *congruent* during the
+verified atom's evaluation: the call result is an application of an
+uninterpreted function `rec_fn#<callee>` shared by every member, and the
+callee's ensures is assumed under the implication
+`CallerRequires ⇒ CallerEnsures`. This applies to recursive calls in bodies
+and in `requires`/`ensures` contracts, and also to calls from a caller outside
+the SCC (e.g. `use_tri` above — its own contract may then mention
+`tri(n - 1)`). For calls inside the SCC itself the antecedent additionally
+conjoins the path conditions under which the decrease was proved. This makes
+specifications like the `tri` contract above provable, including the mutual
+`is_even`/`is_odd` pair.
+
+Congruent calls are still checked: the contract instantiation itself must
+satisfy the same `0 <= M` / `M_callee(args) < M` obligations, so a contract
+like `ensures: result == bad(x) + 1;` (a call `bad(x)` with no decrease) is
+rejected as a termination violation rather than silently verified.
+
+Atoms on a recursive cycle whose SCC is ineligible keep the old semantics —
+recursive calls produce fresh, unconstrained results — and the verifier emits
+an advisory `recursive_contract_needs_decreases` or
+`recursive_contract_unsupported` hint diagnostic instead. The hint never
+changes the verdict.
+
 ---
 ## Module System
 ### Import Syntax
@@ -251,9 +396,26 @@ body: {
     increment(x)
 };
 ```
+
+Block expressions `{ stmts; expr }` are allowed anywhere an expression is
+accepted and evaluate to their trailing expression. Unexpected tokens in
+expression position are hard syntax errors.
+
+### Pipeline operator `|>`
+
+The pipeline operator passes its left operand to the right-hand function:
+`x |> f |> g` is `g(f(x))`, and `x |> add(1)` is `add(1, x)`.
+`|>` has the lowest precedence, so parenthesize `(x |> f) == 3` when needed.
+Pipeline lambda right-hand sides must be parenthesized, as in
+`x |> (|y| y + 1)`. Function-valued parameters can be applied with
+`x |> call(f)`.
+It is not parsed inside a match guard or a bare (non-block) match-arm body;
+use parentheses or a block in those positions.
 ---
 ## Quantifiers in Contracts
 Use bounded ranges or finite collections when possible. For Z3-stable quantifier restrictions, see [Quantifiers](SPEC_GUIDE.md#quantifiers).
+
+A `forall`/`exists` written as a top-level conjunct of `requires` is checked at call sites like any other precondition; quantifiers nested under `||`, `!`, `if`, or other operators stay in the requires text and are lowered in place, so they are assumed by the body and checked at call sites as written.
 
 ```mumei
 // Real insertion-sort body with `arr[i] = val` store syntax.
@@ -278,6 +440,8 @@ body: { ... };
 ```
 
 > **Lean escalation for ascending-preservation**: `tests/fixtures/sort_ascending.mm` defines `verified_insertion_sort_ascending` with an ascending ensures (`forall(i, 0, result - 1, arr[i] <= arr[i + 1])`) that Z3 cannot discharge due to Array+forall quantifier timeout. This atom serves as a Lean escalation candidate; the mumei-lean bridge lowers it to `MumeiLean.Sort.insertion_sort_ascending_bridge` backed by mathlib's `List.Sorted`.
+
+> **Calls inside quantifiers**: a call whose arguments depend on the bound variable (`forall(i, 0, n, f(arr[i]) == arr[i])`) is not supported yet. The verifier would otherwise model `f(arr[i])` as a single value shared by every `i`, so it rejects such calls and reports the atom as `unverifiable` (exit 3); an unlowerable `cover` reports `unknown`. Calls whose arguments do not mention the bound variable (`forall(i, 0, n, arr[i] == f(k))`) are unaffected. Sound per-instance encoding is planned with the lemma-export work.
 
 ### Array Element Assignment (`arr[i] = v`)
 Explicit bounds such as `0 <= idx && idx < len` keep array obligations in the decidable fragment. For Z3-stable array access patterns, see [Array and sequence access](SPEC_GUIDE.md#array-and-sequence-access).
@@ -306,6 +470,36 @@ body: {
 | `ref mut` | Exclusive mutable | `__exclusive_` Bool |
 | `consume` | Ownership transfer | `__alive_` set to false |
 ---
+
+Borrow modifiers are checked on MIR at call sites. A `ref` argument creates a
+shared loan for the duration of that call; a `ref mut` argument creates an
+exclusive loan. Multiple shared loans are allowed, but mutable aliasing,
+moving a value while borrowed, writing through a shared borrow, and borrowing
+after a move are rejected. A `ref` parameter is read-only, while a `ref mut`
+parameter may be written but may not be moved. The checker reports errors such
+as `cannot move 'x' while it is borrowed by 't'`, `cannot move out of shared
+parameter 'x'`, `cannot write 'x' while it is shared-borrowed`, `cannot borrow
+'x' mutably while another borrow is live`, `cannot borrow 'x' while it is
+mutably borrowed by 'y'`, `cannot borrow 'x' after it was moved`, and `cannot
+write through shared parameter 'x'`.
+When the live loan is held by an unnamed temporary, the move diagnostic omits
+the temporary name and reports `cannot move 'x' while it is borrowed`.
+
+Static `atom_ref`/`CallRef` targets are borrow-checked like direct calls:
+`ref`, `ref mut`, and `consume` arguments create the same call-scoped loans
+and ownership transfers. A first-class use of an `atom_ref` whose target has
+borrowing or consuming parameters is rejected; such a target can only be
+used directly as the callee of `call(atom_ref(f), ...)`. All-owned atom
+references may still be passed as ordinary first-class values.
+
+The MIR borrow checker follows the same analysis-budget policy as move
+analysis: atoms over the budget skip MIR-level diagnostics, while the
+Z3-level linearity checks still run.
+
+First-class `&T`/`&mut T` types, reborrowing, lifetime parameters, closure or
+dynamic borrow capture, and region-polymorphic contracts are not part of this
+checker-first milestone.
+
 ## Async/Await and Resource Hierarchy
 ```mumei
 resource db_conn priority: 1 mode: exclusive;
@@ -318,6 +512,20 @@ body: {
     acquire db_conn { acquire cache { amount } }
 };
 ```
+
+Resources may declare typed shared state and an invariant:
+
+```mumei
+resource counter { value: i64, ready: bool }
+    priority: 1 mode: exclusive invariant: counter.value >= 0;
+```
+
+State fields are visible only inside `acquire counter { ... }`. Reads and writes use
+`counter.value` syntax. An `exclusive` resource permits writes; a `shared` resource
+permits reads but rejects writes. At unlock, the declared invariant must be re-established;
+both a satisfiable negation and a solver `unknown` are hard verification errors.
+State cells start at their zero value (`0`, `false`, or `0.0` according to the
+declared type), so every invariant must admit that initial state.
 ---
 ## Higher-Order Functions (Phase A)
 
@@ -397,6 +605,62 @@ atom process_json(input: Str)
 | `json::free(handle)` | Release JSON handle (1=success, 0=invalid) |
 | `json::str_free(handle)` | Release string handle |
 | `http::free(handle)` | Release HTTP response handle |
+
+---
+## Non-deterministic Effects and Replayability
+
+`std/effects.mm` declares three built-in effects for sources outside the program:
+
+| Effect | Source | Required witness parameter |
+|---|---|---|
+| `Random` | pseudo-random values | `seed` |
+| `Clock` | wall-clock / monotonic time | `timestamp` (also `now`, `clock`) |
+| `ExternalInput` | user / sensor / network input | `input` (also `external_input`) |
+
+A parameter matches a witness name exactly or with a `_suffix` (`seed_a`, `timestamp_ms`).
+
+An atom that declares one of these effects must **isolate the source at the type
+level**: the non-deterministic value enters only through the witness parameter and
+every `perform` of that effect receives the witness or a local derived from it
+(`let s2 = seed + 1; perform Random.next(s2)` is accepted; a result of such a
+`perform` is itself derived from the witness, so chaining is allowed).
+
+```mumei
+effect Random;
+
+atom roll(seed: i64) -> i64
+effects: [Random];
+ensures: result >= 0;
+body: {
+    let r = perform Random.next(seed);
+    if r >= 0 { r } else { 0 - r }
+};
+```
+
+Rejected at compile time (`Replayability violation`):
+
+- `effects: [Random]` with no `seed` parameter (`atom roll(x: i64)`).
+- `perform Random.next(x)` where `x` is not derived from `seed`.
+
+A pure atom (no `effects:`) that performs `Random`/`Clock`/`ExternalInput` is
+rejected by the ordinary effect containment check, as for any other effect.
+
+**Guarantee.** Because every non-deterministic value is a function of explicit
+parameters, `roll(seed)` is replayable: the same arguments reproduce the same
+trace. In `ensures` verification the witness is universally quantified like any
+other input, and `perform Random.next(seed)` is modelled as an uninterpreted
+function of its arguments — two performs with equal arguments denote the same
+value, but nothing else is assumed about it. Under `--property-based-test` the
+source value is derived deterministically from the generated witness, so a fixed
+`--property-based-test-seed` replays the same inputs and the same counterexample.
+
+**Runtime obligation.** At runtime a `perform Random.next(seed)` lowers to a call
+of the handler symbol `__effect_Random_next(seed)`. The compile-time guarantee
+transfers to the executable only if the linked handler is a pure function of its
+arguments (e.g. a PRNG step keyed by `seed`, a clock *reading* passed in as
+`timestamp`). A handler that ignores its arguments and reads `/dev/urandom` or
+the wall clock breaks replay — the type system isolates the source, it cannot
+inspect foreign code.
 
 ---
 ## Stateful Effects (Temporal Ordering)

@@ -8,8 +8,10 @@ compute:
   are explicit, reviewed contracts (typically wrapping FFI-backed
   runtime calls or quantified predicates Z3 cannot yet discharge), not
   unproven proof holes — see :data:`TRUSTED_CREDIT`.
-* ``verified``      — whether ``mumei verify`` succeeds (``OK`` / ``FAIL``
-  / ``SKIP`` when no mumei binary is available)
+* ``verified``      — whether ``mumei verify`` found no counterexample
+  (``OK`` for exit 0, and for exit 3 where the only open items are Lean
+  escalation candidates — not a verdict; ``FAIL`` for a rejection or an
+  input / internal error; ``SKIP`` when no mumei binary is available)
 * ``todos``         — count of ``TODO`` / ``FIXME`` / ``XXX`` / ``HACK``
   markers in the file
 * ``health_score``  — ``(proven + TRUSTED_CREDIT × trusted) / atoms``
@@ -61,6 +63,11 @@ def _count_metrics(path: Path) -> tuple[int, int, int]:
     return atoms, trusted, todos
 
 
+# ``mumei verify`` exit codes (docs/CLI.md): 0 = verified, 3 = inconclusive
+# (Z3 unknown / open Lean escalation candidates). Neither is a rejection.
+_VERIFY_OK_EXIT_CODES = frozenset({0, 3})
+
+
 def _run_verify(mumei_bin: Path | None, mm_path: Path) -> str:
     """Return ``OK`` / ``FAIL`` / ``SKIP`` for ``mumei verify <mm_path>``."""
     if mumei_bin is None:
@@ -75,7 +82,7 @@ def _run_verify(mumei_bin: Path | None, mm_path: Path) -> str:
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return "SKIP"
-    return "OK" if proc.returncode == 0 else "FAIL"
+    return "OK" if proc.returncode in _VERIFY_OK_EXIT_CODES else "FAIL"
 
 
 #: Credit awarded to ``trusted atom`` declarations. Trusted atoms are
@@ -233,7 +240,9 @@ def _render_scale_trust_surface(surface: dict) -> list[str]:
             f"{ts.get('application_trusted_atoms', 0)} | "
             f"{ts.get('ffi_boundary_declarations', 0)} | "
             f"{ts.get('z3_unknown_to_lean_escalation_atoms', 0)} | "
-            f"{case.get('z3_solver_seconds', 0.0):.3f} |",
+            # verify_wall_seconds replaced the misnamed z3_solver_seconds key;
+            # fall back for reports generated before the rename.
+            f"{case.get('verify_wall_seconds', case.get('z3_solver_seconds', 0.0)):.3f} |",
         )
     lines.extend(
         [
@@ -243,7 +252,7 @@ def _render_scale_trust_surface(surface: dict) -> list[str]:
             f"{totals.get('application_trusted_atoms', 0)} | "
             f"{totals.get('ffi_boundary_declarations', 0)} | "
             f"{totals.get('z3_unknown_to_lean_escalation_atoms', 0)} | "
-            f"{totals.get('z3_solver_seconds', 0.0):.2f} |",
+            f"{totals.get('verify_wall_seconds', totals.get('z3_solver_seconds', 0.0)):.2f} |",
             "",
             f"> `std/` trusted atoms stay at {std.get('std_trusted_atoms', 0)} of the "
             f"{std.get('std_atoms', 0)} atoms present in the pinned scale run while the "

@@ -79,8 +79,17 @@ pub enum Op {
 #[derive(Debug, Clone)]
 pub struct ResourceDef {
     pub name: String,
+    pub state: Vec<ResourceField>,
     pub priority: i64,
     pub mode: ResourceMode,
+    pub invariant: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceField {
+    pub name: String,
+    pub ty: String,
     pub span: Span,
 }
 
@@ -182,8 +191,12 @@ pub enum Expr {
     /// Plan 9: First-class string literal
     StringLit(String),
     Variable(String),
+    /// Array literal: `[e0, e1, …]` — element type is inferred from the first
+    /// element; an empty literal is a parse error (no annotation syntax).
+    ArrayLit(Vec<Expr>),
     ArrayAccess(String, Box<Expr>),
     BinaryOp(Box<Expr>, Op, Box<Expr>),
+    Block(Box<Stmt>),
     IfThenElse {
         cond: Box<Expr>,
         then_branch: Box<Stmt>,
@@ -403,9 +416,15 @@ pub struct RefinedType {
 
 #[derive(Debug, Clone)]
 pub struct Param {
+    /// Bare parameter name with ownership markers (`consume `/`ref `/`ref mut `)
+    /// stripped. Consumption is recorded in `consume`, borrows in `is_ref` /
+    /// `is_ref_mut`.
     pub name: String,
     pub type_name: Option<String>,
     pub type_ref: Option<TypeRef>,
+    /// `consume` ownership marker in the `atom`/`fn` signature
+    /// (e.g. `atom f(consume xs: [i64])`).
+    pub consume: bool,
     pub is_ref: bool,
     pub is_ref_mut: bool,
     /// Higher-Order Function contract: requires clause for function parameter.
@@ -414,6 +433,39 @@ pub struct Param {
     /// Higher-Order Function contract: ensures clause for function parameter.
     /// Used by call_with_contract to constrain the symbolic result of `call(f, args...)` in Z3.
     pub fn_contract_ensures: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClauseKind {
+    Requires,
+    Ensures,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClauseLabel {
+    pub kind: ClauseKind,
+    pub clause: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClauseTrustMode {
+    Assume,
+    Check,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClauseMode {
+    pub kind: ClauseKind,
+    pub clause: String,
+    pub mode: ClauseTrustMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverClause {
+    pub clause: String,
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -427,6 +479,9 @@ pub struct Atom {
     pub trace_id: Option<String>,
     pub spec_metadata: HashMap<String, String>,
     pub requires: String,
+    pub clause_labels: Vec<ClauseLabel>,
+    pub clause_modes: Vec<ClauseMode>,
+    pub covers: Vec<CoverClause>,
     pub forall_constraints: Vec<Quantifier>,
     pub ensures: String,
     pub body_expr: String,
@@ -439,6 +494,8 @@ pub struct Atom {
     pub effects: Vec<Effect>,
     /// Plan 18: Explicit return type annotation (e.g., `-> Str`). Defaults to None (i64).
     pub return_type: Option<String>,
+    /// Termination measure for recursive contracts (`decreases: <expr>;`).
+    pub decreases: Option<String>,
     pub span: Span,
     /// Modular Verification: required effect pre-states
     /// e.g., { "File" => "Open" } means File must be in Open state before this atom
@@ -446,6 +503,40 @@ pub struct Atom {
     /// Modular Verification: guaranteed effect post-states
     /// e.g., { "File" => "Closed" } means File will be in Closed state after this atom
     pub effect_post: HashMap<String, String>,
+}
+
+impl Atom {
+    /// Canonical view of the parameters this atom consumes. Mumei has two
+    /// spellings for the same concept — the `consume` marker on a signature
+    /// parameter (`atom f(consume x: T)`) and the `consume x;` clause — and
+    /// both mean "the atom takes ownership of this parameter and it may not
+    /// be used afterwards". Consumers deciding whether a parameter is
+    /// consumed (linearity tracking, move lowering, hashing) must go through
+    /// this instead of reading `consumed_params` or `Param::consume` alone.
+    ///
+    /// Clause targets come first (preserving declaration order), then
+    /// signature-`consume` params not already covered. Names are
+    /// deduplicated so a name declared through both spellings appears once.
+    pub fn consumed_names(&self) -> Vec<String> {
+        let mut names = self.consumed_params.clone();
+        for param in &self.params {
+            if param.consume && !names.iter().any(|name| name == &param.name) {
+                names.push(param.name.clone());
+            }
+        }
+        names
+    }
+
+    /// Whether this atom consumes the named parameter via either spelling.
+    pub fn consumes_param(&self, name: &str) -> bool {
+        self.consumed_params.iter().any(|p| p == name)
+            || self.params.iter().any(|p| p.name == name && p.consume)
+    }
+
+    /// Whether the atom declares any consumed parameter at all.
+    pub fn has_consumed_params(&self) -> bool {
+        !self.consumed_params.is_empty() || self.params.iter().any(|p| p.consume)
+    }
 }
 
 // =============================================================================

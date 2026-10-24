@@ -48,6 +48,7 @@ pub struct AtomReport {
 pub struct ParamReport {
     pub name: String,
     pub type_name: Option<String>,
+    pub consume: bool,
     pub is_ref: bool,
     pub is_ref_mut: bool,
 }
@@ -213,6 +214,7 @@ fn atom_to_report(atom: &Atom, status: &str) -> AtomReport {
             .map(|p| ParamReport {
                 name: p.name.clone(),
                 type_name: p.type_name.clone(),
+                consume: p.consume,
                 is_ref: p.is_ref,
                 is_ref_mut: p.is_ref_mut,
             })

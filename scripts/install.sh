@@ -4,7 +4,7 @@
 # =============================================================
 # Usage:
 #   curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
-#   curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.19
+#   curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.21
 #   curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --uninstall
 #
 # Environment variables:
@@ -39,13 +39,13 @@ Usage:
   install.sh [OPTIONS]
 
 Options:
-  --version <VERSION>   Install a specific version (e.g. v0.6.19)
+  --version <VERSION>   Install a specific version (e.g. v0.6.21)
   --uninstall           Show uninstall instructions
   --help                Show this help message
 
 Examples:
   curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash
-  curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.19
+  curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- --version v0.6.21
 EOF
     exit 0
 }
@@ -76,7 +76,7 @@ parse_args() {
             --version)
                 shift
                 if [ $# -eq 0 ]; then
-                    err "--version requires an argument (e.g. --version v0.6.19)"
+                    err "--version requires an argument (e.g. --version v0.6.21)"
                 fi
                 REQUESTED_VERSION="$1"
                 ;;
@@ -173,6 +173,29 @@ download() {
     fi
 }
 
+# --- チェックサム検証 ---
+# MUMEI_INSTALL_EXPECTED_SHA256 が設定されていればダウンロード物を検証する
+# (src/setup.rs の MUMEI_SETUP_EXPECTED_SHA256 と同じ契約)。
+verify_checksum() {
+    local file="$1"
+    # setup.rs trims and compares case-insensitively; do the same here.
+    local expected
+    expected="$(printf '%s' "${MUMEI_INSTALL_EXPECTED_SHA256:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+    [ -z "$expected" ] && return 0
+    local actual
+    if command -v sha256sum &>/dev/null; then
+        actual="$(sha256sum "$file" | awk '{print $1}')"
+    elif command -v shasum &>/dev/null; then
+        actual="$(shasum -a 256 "$file" | awk '{print $1}')"
+    else
+        err "sha256sum or shasum is required when MUMEI_INSTALL_EXPECTED_SHA256 is set"
+    fi
+    if [ "$actual" != "$expected" ]; then
+        err "Checksum mismatch for $file: expected $expected, got $actual"
+    fi
+    info "Checksum verified: $actual"
+}
+
 # --- メイン ---
 main() {
     parse_args "$@"
@@ -194,6 +217,8 @@ main() {
 
     info "Downloading ${url}..."
     download "$url" "$archive" || err "Download failed. Check if release exists for $platform at version $version"
+
+    verify_checksum "$archive"
 
     info "Installing to $INSTALL_DIR..."
     mkdir -p "$BIN_DIR" "$STD_DIR"

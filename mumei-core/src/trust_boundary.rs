@@ -16,7 +16,7 @@
 //!   state, so the proof assumes a caller-provided protocol state.
 
 use crate::parser::ast::ExternFn;
-use crate::parser::{Atom, ExternBlock, Param, TrustLevel};
+use crate::parser::{Atom, ClauseTrustMode, ExternBlock, Param, TrustLevel};
 use std::collections::HashMap;
 
 /// Why an atom sits on a trust boundary.
@@ -28,6 +28,8 @@ pub enum TrustBoundaryKind {
     ExternBoundary,
     /// `effect_pre` overrides the declared initial effect state.
     EffectStateAssumption,
+    /// A contract clause is trusted on one side of the call.
+    AssumedClause,
 }
 
 impl TrustBoundaryKind {
@@ -37,6 +39,7 @@ impl TrustBoundaryKind {
             Self::TrustedAtom => "trusted_atom",
             Self::ExternBoundary => "extern_ffi",
             Self::EffectStateAssumption => "effect_pre_override",
+            Self::AssumedClause => "assumed_clause",
         }
     }
 
@@ -51,6 +54,9 @@ impl TrustBoundaryKind {
             }
             Self::EffectStateAssumption => {
                 "atom overrides the effect state machine's initial state via `effect_pre`"
+            }
+            Self::AssumedClause => {
+                "a requires/ensures clause is marked `assume`, so it is trusted rather than checked on one side of the call"
             }
         }
     }
@@ -80,6 +86,14 @@ pub fn classify_trust_boundaries(
 
     if !atom.effect_pre.is_empty() {
         kinds.push(TrustBoundaryKind::EffectStateAssumption);
+    }
+
+    if atom
+        .clause_modes
+        .iter()
+        .any(|mode| mode.mode == ClauseTrustMode::Assume)
+    {
+        kinds.push(TrustBoundaryKind::AssumedClause);
     }
 
     kinds
@@ -129,6 +143,7 @@ pub fn extern_fn_as_trusted_atom(ext_fn: &ExternFn) -> Atom {
             type_ref: Some(crate::parser::parse_type_ref(ty)),
             is_ref: false,
             is_ref_mut: false,
+            consume: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
         })
@@ -141,6 +156,9 @@ pub fn extern_fn_as_trusted_atom(ext_fn: &ExternFn) -> Atom {
         params,
         trace_id: None,
         spec_metadata: HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
         requires: ext_fn
             .requires
             .clone()
@@ -156,6 +174,7 @@ pub fn extern_fn_as_trusted_atom(ext_fn: &ExternFn) -> Atom {
         invariant: None,
         effects: vec![],
         return_type: Some(ext_fn.return_type.clone()),
+        decreases: None,
         span: ext_fn.span.clone(),
         effect_pre: HashMap::new(),
         effect_post: HashMap::new(),
@@ -166,6 +185,7 @@ pub fn extern_fn_as_trusted_atom(ext_fn: &ExternFn) -> Atom {
 mod tests {
     use super::*;
     use crate::parser::ast::{ExternFn, Span};
+    use crate::parser::{ClauseKind, ClauseMode};
     use std::collections::HashMap;
 
     fn atom(name: &str) -> Atom {
@@ -176,6 +196,9 @@ mod tests {
             params: vec![],
             trace_id: None,
             spec_metadata: HashMap::new(),
+            clause_labels: Vec::new(),
+            clause_modes: Vec::new(),
+            covers: Vec::new(),
             requires: "true".to_string(),
             forall_constraints: vec![],
             ensures: "true".to_string(),
@@ -188,10 +211,31 @@ mod tests {
             invariant: None,
             effects: vec![],
             return_type: None,
+            decreases: None,
             span: Span::default(),
             effect_pre: HashMap::new(),
             effect_post: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn assumed_clause_is_a_trust_boundary() {
+        let mut atom = atom("assumed");
+        atom.clause_modes.push(ClauseMode {
+            kind: ClauseKind::Requires,
+            clause: "x > 0".to_string(),
+            mode: ClauseTrustMode::Assume,
+        });
+
+        assert_eq!(
+            classify_trust_boundaries(&atom, &[]),
+            vec![TrustBoundaryKind::AssumedClause]
+        );
+        assert_eq!(TrustBoundaryKind::AssumedClause.as_str(), "assumed_clause");
+        assert_eq!(
+            TrustBoundaryKind::AssumedClause.rationale(),
+            "a requires/ensures clause is marked `assume`, so it is trusted rather than checked on one side of the call"
+        );
     }
 
     fn extern_block(fn_name: &str) -> ExternBlock {

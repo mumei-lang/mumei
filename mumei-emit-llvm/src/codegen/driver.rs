@@ -1,14 +1,15 @@
-use crate::codegen::expr_emit::chan_payload_key;
+use crate::codegen::expr_emit::{chan_payload_key, emit_array_literal};
 use crate::codegen::lowering::{declare_extern_functions, resolve_param_type, resolve_return_type};
 use crate::codegen::stmt_emit::compile_hir_stmt;
 use inkwell::context::Context;
+use inkwell::module::Linkage;
 use inkwell::module::Module;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
-use inkwell::types::BasicType;
-use inkwell::values::BasicValueEnum;
+use inkwell::types::{BasicType, BasicTypeEnum};
 use inkwell::OptimizationLevel;
+use mumei_core::emitter::EmitAtom;
 use mumei_core::hir::HirAtom;
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
@@ -17,35 +18,52 @@ use std::path::Path;
 pub fn compile_atom_into_module<'ctx>(
     context: &'ctx Context,
     module: &Module<'ctx>,
-    hir_atom: &HirAtom,
+    emit_atom: &EmitAtom<'_>,
     module_env: &ModuleEnv,
     extern_blocks: &[mumei_core::parser::ExternBlock],
 ) -> MumeiResult<()> {
-    let atom = &hir_atom.atom;
+    let signature = emit_atom.signature;
     let builder = context.create_builder();
+
+    for resource in module_env.resources.values() {
+        for field in &resource.state {
+            let name = format!("__mumei_res_{}_{}", resource.name, field.name);
+            if module.get_global(&name).is_some() {
+                continue;
+            }
+            let ty: BasicTypeEnum = match field.ty.as_str() {
+                "bool" => context.bool_type().into(),
+                "f64" => context.f64_type().into(),
+                _ => context.i64_type().into(),
+            };
+            let global = module.add_global(ty, None, &name);
+            global.set_linkage(Linkage::Internal);
+            global.set_initializer(&ty.const_zero());
+        }
+    }
 
     // Declare all extern functions before compiling the atom body
     declare_extern_functions(context, module, extern_blocks, module_env);
 
     // パラメータ型を精緻型から解決
-    let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = atom
+    let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = signature
         .params
         .iter()
-        .map(|p| resolve_param_type(context, p.type_name.as_deref(), module_env).into())
+        .map(|p| resolve_param_type(context, p.ty.as_deref(), module_env).into())
         .collect();
     // Plan 18: Use resolved return type instead of hardcoded i64
-    let ret_type = resolve_return_type(context, atom, module_env);
+    let ret_type = resolve_return_type(context, signature, module_env);
     let fn_type = ret_type.fn_type(&param_types, false);
-    let function = if let Some(existing) = module.get_function(&atom.name) {
+    let function = if let Some(existing) = module.get_function(&signature.name) {
         if existing.get_first_basic_block().is_some() {
             return Err(MumeiError::codegen(format!(
                 "Duplicate function definition: {}",
-                atom.name
+                signature.name
             )));
         }
         existing
     } else {
-        module.add_function(&atom.name, fn_type, None)
+        module.add_function(&signature.name, fn_type, None)
     };
 
     let entry_block = context.append_basic_block(function, "entry");
@@ -53,13 +71,15 @@ pub fn compile_atom_into_module<'ctx>(
 
     let mut variables = HashMap::new();
     let mut var_types: HashMap<String, String> = HashMap::new();
-    let mut array_ptrs: HashMap<String, (BasicValueEnum, BasicValueEnum)> = HashMap::new();
+    let mut array_ptrs: HashMap<String, crate::codegen::lowering::ArrayPtr> = HashMap::new();
 
-    for (i, param) in atom.params.iter().enumerate() {
+    for (i, param) in signature.params.iter().enumerate() {
         let val = function.get_nth_param(i as u32).unwrap();
-        if let Some(type_name) = &param.type_name {
-            let base = module_env.resolve_base_type(type_name);
-            if module_env.get_struct(&base).is_some() {
+        if let Some(type_name) = &param.ty {
+            let base = super::expr_emit::resolve_named_type(module_env, type_name);
+            // Struct AND enum declared types — match arms on an enum-typed
+            // parameter resolve the owning enum from this hint.
+            if module_env.get_struct(&base).is_some() || module_env.get_enum(&base).is_some() {
                 var_types.insert(param.name.clone(), base);
             }
             // P25: remember a channel parameter's declared payload type so
@@ -69,20 +89,31 @@ pub fn compile_atom_into_module<'ctx>(
             }
         }
         // Fat Pointer 配列パラメータの場合、len と data_ptr を分解して保持。
-        // ユーザー定義 struct も LLVM では struct 値なので、宣言型で区別する
-        // （struct はそのまま束縛してフィールドアクセスを可能にする）。
+        // ユーザー定義 struct / enum も LLVM では struct 値なので、宣言型で
+        // 区別する（struct/enum はそのまま束縛 — enum は tag+slot 全体が
+        // match の payload 抽出・ctor 等価性・callee 受け渡しに必要）。
         let declares_struct = param
-            .type_name
+            .ty
             .as_deref()
             .map(|name| module_env.resolve_base_type(name))
             .is_some_and(|base| module_env.get_struct(&base).is_some());
-        if val.is_struct_value() && !declares_struct {
+        let declares_enum = param
+            .ty
+            .as_deref()
+            .map(|name| super::expr_emit::resolve_named_type(module_env, name))
+            .is_some_and(|base| module_env.get_enum(&base).is_some());
+        if val.is_struct_value() && !declares_struct && !declares_enum {
             let struct_val = val.into_struct_value();
             let len_val =
                 llvm!(builder.build_extract_value(struct_val, 0, &format!("{}_len", param.name)));
             let data_ptr =
                 llvm!(builder.build_extract_value(struct_val, 1, &format!("{}_data", param.name)));
-            array_ptrs.insert(param.name.clone(), (len_val, data_ptr));
+            let elem_ty = param
+                .ty
+                .as_deref()
+                .and_then(|name| super::lowering::array_elem_llvm_type(context, name, module_env))
+                .unwrap_or_else(|| context.i64_type().into());
+            array_ptrs.insert(param.name.clone(), (len_val, elem_ty, data_ptr));
             variables.insert(param.name.clone(), len_val);
         } else {
             variables.insert(param.name.clone(), val);
@@ -94,12 +125,82 @@ pub fn compile_atom_into_module<'ctx>(
         &builder,
         module,
         &function,
-        &hir_atom.body,
+        emit_atom.body,
         &mut variables,
         &mut var_types,
-        &array_ptrs,
+        &mut array_ptrs,
         module_env,
     )?;
+
+    // Array fat-pointer return: a body tail naming an array resolves through
+    // `variables` to just the `len` scalar, but the declared `{i64, ptr}`
+    // signature needs the whole pair — rebuild it from `array_ptrs`. Any
+    // other tail shape can't supply an array value, so fail with a clean
+    // error instead of emitting a `ret i64` under a struct signature
+    // (previously this produced invalid IR, or a len-only i64 on `[i64]`).
+    let ret_is_array = signature
+        .return_type
+        .as_deref()
+        .map(|name| module_env.resolve_base_type(name))
+        .is_some_and(|base| {
+            matches!(
+                mumei_core::lowering::lower(&base),
+                mumei_core::lowering::LoweredType::Array(_)
+            )
+        });
+    if ret_is_array {
+        let tail_expr = match emit_atom.body {
+            mumei_core::hir::HirStmt::Expr(e) => Some(e),
+            mumei_core::hir::HirStmt::Block { tail_expr, .. } => tail_expr.as_deref(),
+            _ => None,
+        };
+        // `[e0, …]` tail: materialise the backing store inline.
+        let lit_tail = match tail_expr {
+            Some(mumei_core::hir::HirExpr::ArrayLit(elements)) => Some(emit_array_literal(
+                context,
+                &builder,
+                module,
+                &function,
+                elements,
+                &mut variables,
+                &mut var_types,
+                &mut array_ptrs,
+                module_env,
+            )?),
+            _ => None,
+        };
+        let tail_var = match tail_expr {
+            Some(mumei_core::hir::HirExpr::Variable(name)) => Some(name.as_str()),
+            _ => None,
+        };
+        let tail_slots = match lit_tail {
+            Some((len_val, _, data_ptr)) => Some((len_val, data_ptr)),
+            None => tail_var
+                .and_then(|name| array_ptrs.get(name))
+                .map(|&(len_val, _, data_ptr)| (len_val, data_ptr)),
+        };
+        let Some((len_val, data_ptr)) = tail_slots else {
+            return Err(MumeiError::codegen(format!(
+                "array return of '{}' requires the body tail to be an array \
+                 parameter or binding (got {:?})",
+                signature.name, tail_expr
+            )));
+        };
+        let struct_ty = super::lowering::array_struct_type(context);
+        let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
+        agg = llvm!(builder.build_insert_value(agg, len_val, 0, "ret_arr_len"));
+        agg = llvm!(builder.build_insert_value(agg, data_ptr, 1, "ret_arr_data"));
+        let agg_val: inkwell::values::BasicValueEnum = match agg {
+            inkwell::values::AggregateValueEnum::StructValue(s) => s.into(),
+            _ => {
+                return Err(MumeiError::codegen(
+                    "array return value is not a struct aggregate",
+                ))
+            }
+        };
+        llvm!(builder.build_return(Some(&agg_val)));
+        return Ok(());
+    }
 
     llvm!(builder.build_return(Some(&result_val)));
 
@@ -110,15 +211,14 @@ pub fn compile_atom_into_module<'ctx>(
 /// Creates its own Context and Module, compiles the atom, and returns
 /// the LLVM IR as a string (detached from Context lifetime).
 pub fn compile_to_module(
-    hir_atom: &HirAtom,
+    emit_atom: &EmitAtom<'_>,
     module_env: &ModuleEnv,
     extern_blocks: &[mumei_core::parser::ExternBlock],
 ) -> MumeiResult<String> {
-    let atom = &hir_atom.atom;
     let context = Context::create();
-    let module = context.create_module(&atom.name);
+    let module = context.create_module(&emit_atom.signature.name);
 
-    compile_atom_into_module(&context, &module, hir_atom, module_env, extern_blocks)?;
+    compile_atom_into_module(&context, &module, emit_atom, module_env, extern_blocks)?;
 
     // Return the module IR as a string (detached from Context lifetime)
     Ok(module.print_to_string().to_string())
@@ -134,7 +234,13 @@ pub fn compile_atoms_into_module<'ctx>(
     extern_blocks: &[mumei_core::parser::ExternBlock],
 ) -> MumeiResult<()> {
     for hir_atom in hir_atoms {
-        compile_atom_into_module(context, module, hir_atom, module_env, extern_blocks)?;
+        compile_atom_into_module(
+            context,
+            module,
+            &hir_atom.emit_view(),
+            module_env,
+            extern_blocks,
+        )?;
     }
     Ok(())
 }
@@ -187,32 +293,33 @@ pub fn compile_llvm_ir_to_object(ir_path: &Path, object_path: &Path) -> MumeiRes
 }
 
 pub fn compile(
-    hir_atom: &HirAtom,
+    emit_atom: &EmitAtom<'_>,
     output_path: &Path,
     module_env: &ModuleEnv,
     extern_blocks: &[mumei_core::parser::ExternBlock],
 ) -> MumeiResult<()> {
-    let atom = &hir_atom.atom;
     let context = Context::create();
-    let module = context.create_module(&atom.name);
+    let module = context.create_module(&emit_atom.signature.name);
 
-    compile_atom_into_module(&context, &module, hir_atom, module_env, extern_blocks)?;
+    compile_atom_into_module(&context, &module, emit_atom, module_env, extern_blocks)?;
 
     // エフェクト情報を .ll ファイル先頭にコメントとして追記する（後処理）
-    let effects_comment = if !hir_atom.effect_set.effects.is_empty() {
-        let effects_str: Vec<String> = hir_atom
+    // Names come from `effect_set` (sorted, deduplicated); argument values are
+    // looked up in `signature.effects` — HIR carries them via `param_values`.
+    let effects_comment = if !emit_atom.effect_set.effects.is_empty() {
+        let effects_str: Vec<String> = emit_atom
             .effect_set
             .effects
             .iter()
             .map(|name| {
-                if let Some(e) = atom.effects.iter().find(|e| &e.name == name) {
-                    if e.params.is_empty() {
+                if let Some(e) = emit_atom.signature.effects.iter().find(|e| &e.name == name) {
+                    if e.param_values.is_empty() {
                         name.clone()
                     } else {
                         let params: Vec<String> = e
-                            .params
+                            .param_values
                             .iter()
-                            .map(|p| format!("\"{}\"", p.value))
+                            .map(|v| format!("\"{}\"", v))
                             .collect();
                         format!("{}({})", name, params.join(", "))
                     }

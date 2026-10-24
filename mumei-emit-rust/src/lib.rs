@@ -11,8 +11,10 @@
 //!   (`assert!` for requires, `debug_assert!` for ensures)
 //! - Doc comments with `/// # Precondition` / `/// # Postcondition`
 
-use mumei_core::emitter::{Artifact, ArtifactKind, Emitter};
-use mumei_core::hir::HirAtom;
+use mumei_core::contract_host::{
+    contract_text_to_host, quantifier_source_text, quantifier_to_host, ContractVars, HostTarget,
+};
+use mumei_core::emitter::{Artifact, ArtifactKind, EmitAtom, Emitter};
 use mumei_core::lowering::{lower, LoweredType};
 use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiResult};
@@ -47,15 +49,16 @@ pub struct RustWrapperEmitter;
 impl Emitter for RustWrapperEmitter {
     fn emit(
         &self,
-        hir_atom: &HirAtom,
+        emit_atom: &EmitAtom<'_>,
         output_path: &Path,
         module_env: &ModuleEnv,
         _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
-        let atom = &hir_atom.atom;
+        let signature = emit_atom.signature;
+        let contract = emit_atom.contract;
         // Sanitize qualified names (e.g., "MyStruct::my_method" → "MyStruct_my_method")
         // to produce valid Rust identifiers, matching CHeaderEmitter behavior.
-        let fn_name = atom.name.replace("::", "_");
+        let fn_name = signature.name.replace("::", "_");
         let mut rs = String::new();
 
         // File header
@@ -64,19 +67,21 @@ impl Emitter for RustWrapperEmitter {
         rs.push_str("// This file provides safe Rust wrappers around a compiled mumei binary.\n\n");
 
         // Build parameter lists
-        let params: Vec<(String, String)> = atom
+        let params: Vec<(String, String)> = signature
             .params
             .iter()
             .map(|p| {
-                let type_name = p.type_name.as_deref().unwrap_or("i64");
+                let type_name = p.ty.as_deref().unwrap_or("i64");
                 let resolved = module_env.resolve_base_type(type_name);
                 let rust_type = mumei_type_to_rust(&resolved).to_string();
+                // `consume`/`ref` are mumei ownership markers — emit the bare
+                // name in host code.
                 (p.name.clone(), rust_type)
             })
             .collect();
 
         let return_type = {
-            let ret = atom.return_type.as_deref().unwrap_or("i64");
+            let ret = signature.return_type.as_deref().unwrap_or("i64");
             let resolved = module_env.resolve_base_type(ret);
             mumei_type_to_rust(&resolved).to_string()
         };
@@ -98,20 +103,26 @@ impl Emitter for RustWrapperEmitter {
         // Doc comments for the safe wrapper
         rs.push_str(&format!(
             "/// Safe wrapper for the verified `{}` atom.\n",
-            atom.name
+            signature.name
         ));
         rs.push_str("///\n");
         rs.push_str("/// # Safety\n");
         rs.push_str("/// Calls into a compiled mumei binary via FFI.\n");
         rs.push_str("/// Preconditions are checked at runtime via `assert!`.\n");
         rs.push_str("/// Postconditions are checked via `debug_assert!`.\n");
-        if atom.requires != "true" {
+        if contract.requires_text != "true" {
             rs.push_str("///\n");
-            rs.push_str(&format!("/// # Precondition\n/// `{}`\n", atom.requires));
+            rs.push_str(&format!(
+                "/// # Precondition\n/// `{}`\n",
+                contract.requires_text
+            ));
         }
-        if atom.ensures != "true" {
+        if contract.ensures_text != "true" {
             rs.push_str("///\n");
-            rs.push_str(&format!("/// # Postcondition\n/// `{}`\n", atom.ensures));
+            rs.push_str(&format!(
+                "/// # Postcondition\n/// `{}`\n",
+                contract.ensures_text
+            ));
         }
 
         // Safe wrapper function
@@ -126,13 +137,38 @@ impl Emitter for RustWrapperEmitter {
             return_type
         ));
 
+        // Variable kinds for contract translation (pointer indexing, etc.).
+        let vars = ContractVars::from_signature(signature, Some(module_env));
+
         // Runtime precondition check
-        if atom.requires != "true" {
-            rs.push_str(&format!(
-                "    assert!({}, \"precondition violated: {}\");\n",
-                translate_contract_to_rust(&atom.requires, &params),
-                atom.requires.replace('"', "\\\"")
-            ));
+        if contract.requires_text != "true" {
+            match translate_contract_to_rust(&contract.requires_text, &vars) {
+                Some(cond) => rs.push_str(&format!(
+                    "    assert!({}, \"precondition violated: {}\");\n",
+                    cond,
+                    escape_message(&contract.requires_text)
+                )),
+                None => rs.push_str(&format!(
+                    "    // mumei: requires not expressible as a Rust runtime check; left to verification: {}\n",
+                    contract.requires_text
+                )),
+            }
+        }
+        // Hoisted `forall`/`exists` requires conjuncts: assert each as its own
+        // line (`(start..end).all(|v| cond)` / `.any(...)`).
+        for quantifier in &contract.quantifiers {
+            let source = quantifier_source_text(quantifier);
+            match quantifier_to_host(quantifier, &vars, HostTarget::Rust) {
+                Some(cond) => rs.push_str(&format!(
+                    "    assert!({}, \"precondition violated: {}\");\n",
+                    cond,
+                    escape_message(&source)
+                )),
+                None => rs.push_str(&format!(
+                    "    // mumei: quantified requires not expressible as a Rust runtime check; left to verification: {}\n",
+                    source
+                )),
+            }
         }
 
         // Unsafe FFI call
@@ -147,12 +183,18 @@ impl Emitter for RustWrapperEmitter {
         ));
 
         // Runtime postcondition check (debug only)
-        if atom.ensures != "true" {
-            rs.push_str(&format!(
-                "    debug_assert!({}, \"postcondition violated: {}\");\n",
-                translate_contract_to_rust(&atom.ensures, &params),
-                atom.ensures.replace('"', "\\\"")
-            ));
+        if contract.ensures_text != "true" {
+            match translate_contract_to_rust(&contract.ensures_text, &vars) {
+                Some(cond) => rs.push_str(&format!(
+                    "    debug_assert!({}, \"postcondition violated: {}\");\n",
+                    cond,
+                    escape_message(&contract.ensures_text)
+                )),
+                None => rs.push_str(&format!(
+                    "    // mumei: ensures not expressible as a Rust runtime check; left to verification: {}\n",
+                    contract.ensures_text
+                )),
+            }
         }
 
         rs.push_str("    result\n");
@@ -168,25 +210,32 @@ impl Emitter for RustWrapperEmitter {
     }
 }
 
-/// Translate a mumei contract expression to valid Rust syntax.
+/// Escape a contract source string for use inside a `"..."` assert message.
+/// Backslashes must be escaped before quotes — quoting first would turn an
+/// already-escaped `\"` into `\\\"` and break the string literal.
+fn escape_message(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Translate a mumei contract expression to a Rust expression.
 ///
-/// Handles common patterns:
-/// - `&&` / `||` → kept as-is (valid Rust)
-/// - `result` → kept as-is (local variable in wrapper)
-/// - Parameter names → kept as-is
-fn translate_contract_to_rust(contract: &str, _params: &[(String, String)]) -> String {
-    // mumei contract syntax is close to Rust — &&, ||, ==, !=, >=, <= all work.
-    // The main translation needed is `=>` (implication) to `!a || b`.
-    // For now, simple contracts pass through directly.
-    // Complex contracts with `=>` would need transformation.
-    contract.to_string()
+/// This is now AST-based (`mumei_core::contract_host`): `=>` prints as
+/// `!a || b`, comparison chains (`a < b < c`) print as `a < b && b < c`,
+/// `forall`/`exists` calls print as `range.all(..)`/`range.any(..)`, array
+/// indexing on pointer params as `unsafe { *p.add(i) }`, and literals are
+/// normalized. Returns `None` for clauses with no runtime-checkable Rust form
+/// — the caller emits a degrade comment instead of invalid code.
+fn translate_contract_to_rust(contract: &str, vars: &ContractVars) -> Option<String> {
+    contract_text_to_host(contract, vars, HostTarget::Rust)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mumei_core::hir::{HirEffectSet, HirExpr, HirStmt};
-    use mumei_core::parser::ast::{Atom, Expr, Param, Span, Stmt, TrustLevel};
+    use mumei_core::hir::{lower_atom_metadata, HirAtom, HirEffectSet, HirExpr, HirStmt};
+    use mumei_core::parser::ast::{
+        Atom, Expr, Param, Quantifier, QuantifierType, Span, Stmt, TrustLevel,
+    };
     use mumei_core::verification::ModuleEnv;
 
     fn make_param(name: &str, type_name: &str) -> Param {
@@ -196,6 +245,7 @@ mod tests {
             type_ref: None,
             is_ref: false,
             is_ref_mut: false,
+            consume: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
         }
@@ -208,36 +258,128 @@ mod tests {
         ensures: &str,
         return_type: Option<&str>,
     ) -> HirAtom {
+        let body = HirStmt::Expr(HirExpr::Number(0));
+        let atom = Atom {
+            name: name.to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params,
+            trace_id: None,
+            spec_metadata: std::collections::HashMap::new(),
+            clause_labels: Vec::new(),
+            clause_modes: Vec::new(),
+            covers: Vec::new(),
+            requires: requires.to_string(),
+            forall_constraints: vec![],
+            ensures: ensures.to_string(),
+            body_expr: "0".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: return_type.map(|s| s.to_string()),
+            decreases: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let (signature, contract, meta) = lower_atom_metadata(&atom, &body, None);
         HirAtom {
-            body: HirStmt::Expr(HirExpr::Number(0)),
-            requires_hir: HirExpr::Number(1),
-            ensures_hir: HirExpr::Number(1),
-            atom: Atom {
-                name: name.to_string(),
-                type_params: vec![],
-                where_bounds: vec![],
-                params,
-                trace_id: None,
-                spec_metadata: std::collections::HashMap::new(),
-                requires: requires.to_string(),
-                forall_constraints: vec![],
-                ensures: ensures.to_string(),
-                body_expr: "0".to_string(),
-                consumed_params: vec![],
-                resources: vec![],
-                is_async: false,
-                trust_level: TrustLevel::Verified,
-                max_unroll: None,
-                invariant: None,
-                effects: vec![],
-                return_type: return_type.map(|s| s.to_string()),
-                span: Span::default(),
-                effect_pre: std::collections::HashMap::new(),
-                effect_post: std::collections::HashMap::new(),
-            },
+            body,
+            signature,
+            contract,
+            meta,
+            atom,
             body_stmt: Stmt::Expr(Expr::Number(0), Span::default()),
             effect_set: HirEffectSet::default(),
         }
+    }
+
+    fn make_hir_atom_with_quantifiers(
+        name: &str,
+        params: Vec<Param>,
+        requires: &str,
+        quantifiers: Vec<Quantifier>,
+        ensures: &str,
+        return_type: Option<&str>,
+    ) -> HirAtom {
+        let mut hir = make_hir_atom(name, params, requires, ensures, return_type);
+        hir.atom.forall_constraints = quantifiers.clone();
+        hir.contract.quantifiers = quantifiers
+            .iter()
+            .map(|q| {
+                let condition_expr = mumei_core::parser::parse_expression_checked(&q.condition)
+                    .ok()
+                    .map(|e| mumei_core::hir::lower_expr_with_env(&e, None));
+                mumei_core::hir::HirQuantifier {
+                    kind: if q.q_type == QuantifierType::Exists {
+                        mumei_core::hir::HirQuantifierKind::Exists
+                    } else {
+                        mumei_core::hir::HirQuantifierKind::ForAll
+                    },
+                    var: q.var.clone(),
+                    start: q.start.clone(),
+                    end: q.end.clone(),
+                    condition: q.condition.clone(),
+                    condition_expr,
+                }
+            })
+            .collect();
+        hir
+    }
+
+    #[test]
+    fn test_rust_wrapper_quantified_requires_become_runtime_checks() {
+        // Hoisted forall/exists become their own `assert!` lines, using the
+        // end-exclusive `[start, end)` range that matches mumei semantics.
+        let hir = make_hir_atom_with_quantifiers(
+            "bounded",
+            vec![make_param("x", "i64"), make_param("n", "i64")],
+            "x >= 0 && true",
+            vec![
+                Quantifier {
+                    q_type: QuantifierType::ForAll,
+                    var: "i".to_string(),
+                    start: "0".to_string(),
+                    end: "n".to_string(),
+                    condition: "i >= 0 && i < x".to_string(),
+                },
+                Quantifier {
+                    q_type: QuantifierType::Exists,
+                    var: "j".to_string(),
+                    start: "0".to_string(),
+                    end: "n".to_string(),
+                    condition: "j == 0".to_string(),
+                },
+            ],
+            "result >= 0",
+            Some("i64"),
+        );
+        let module_env = ModuleEnv::new();
+        let artifacts = RustWrapperEmitter
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/bounded"),
+                &module_env,
+                &[],
+            )
+            .unwrap();
+        let rs = String::from_utf8(artifacts[0].data.clone()).unwrap();
+        assert!(
+            rs.contains(
+                "assert!(((0)..(n)).all(|i| i >= 0 && i < x), \"precondition violated: forall(i, 0, n, i >= 0 && i < x)\");"
+            ),
+            "forall should be an .all(...) runtime check:\n{rs}"
+        );
+        assert!(
+            rs.contains(
+                "assert!(((0)..(n)).any(|j| j == 0), \"precondition violated: exists(j, 0, n, j == 0)\");"
+            ),
+            "exists should be an .any(...) runtime check:\n{rs}"
+        );
     }
 
     #[test]
@@ -251,7 +393,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = RustWrapperEmitter
-            .emit(&hir, Path::new("/tmp/safe_add"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/safe_add"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         assert_eq!(artifacts.len(), 1);
@@ -283,7 +430,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = RustWrapperEmitter
-            .emit(&hir, Path::new("/tmp/identity"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/identity"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let rs = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -291,6 +443,97 @@ mod tests {
         assert!(!rs.contains("debug_assert!("));
         assert!(!rs.contains("/// # Precondition"));
         assert!(!rs.contains("/// # Postcondition"));
+    }
+
+    #[test]
+    fn test_contract_translation() {
+        let vars = ContractVars::new();
+        let tr = |s: &str| translate_contract_to_rust(s, &vars);
+        assert_eq!(tr("a >= 0 && b >= 0").as_deref(), Some("a >= 0 && b >= 0"));
+        assert_eq!(tr("x > 0 || y > 0").as_deref(), Some("x > 0 || y > 0"));
+        // `=>` implication → `!a || b`, operands parenthesized
+        assert_eq!(
+            tr("x > 0 => result > 0").as_deref(),
+            Some("!(x > 0) || (result > 0)")
+        );
+        // `=>` inside a larger expression (`=>` binds looser than `||`)
+        assert_eq!(
+            tr("x > 0 || y > 0 => z > 0").as_deref(),
+            Some("!(x > 0 || y > 0) || (z > 0)")
+        );
+        // Chained `=>` is left-associative: (a => b) => c
+        assert_eq!(
+            tr("a > 0 => b > 0 => c > 0").as_deref(),
+            Some("!(!(a > 0) || (b > 0)) || (c > 0)")
+        );
+        // Comparison chains normalize to `&&`-joined comparisons
+        assert_eq!(tr("0 <= i < n").as_deref(), Some("0 <= i && i < n"));
+        // `/` between ints → `div_euclid`, matching Z3 `Int` semantics
+        // (remainder ≥ 0), not plain `/` which truncates. `as i64` pins the
+        // receiver so untyped literals can call the method.
+        assert_eq!(
+            tr("a / b >= 0").as_deref(),
+            Some("((a) as i64).div_euclid(b) >= 0")
+        );
+        // Quantifiers nested inside an expression still translate
+        assert_eq!(
+            tr("n <= 0 || forall(i, 0, n, i >= 0)").as_deref(),
+            Some("n <= 0 || ((0)..(n)).all(|i| i >= 0)")
+        );
+        // Unparseable tail degrades to None instead of emitting broken Rust
+        assert_eq!(tr("result >= 0 -> result < 10"), None);
+    }
+
+    #[test]
+    fn test_contract_translation_negative_division() {
+        // `div_euclid` matches Z3 `Int` division (remainder ≥ 0) exactly:
+        // `(0 - 7).div_euclid(2) == -4` — Z3 `div(-7, 2) == -4`, where plain
+        // `/` would give -3 and mischeck a verified clause. Negative divisors
+        // diverge too: `7.div_euclid(-2) == -3` — Z3 `div(7, -2) == -3`.
+        let vars = ContractVars::new();
+        assert_eq!(
+            translate_contract_to_rust("(0 - 7) / 2 == 0 - 4", &vars).as_deref(),
+            Some("((0 - 7) as i64).div_euclid(2) == 0 - 4")
+        );
+        assert_eq!(
+            translate_contract_to_rust("7 / (0 - 2) == 0 - 3", &vars).as_deref(),
+            Some("((7) as i64).div_euclid(0 - 2) == 0 - 3")
+        );
+        // `u64` operands divide as u64 — `as i64` would flip the sign of a
+        // dividend above `i64::MAX`; nonnegative literals adopt u64 too.
+        let mut uvars = ContractVars::new();
+        uvars.insert("ua", mumei_core::contract_host::ContractVarKind::UInt);
+        uvars.insert("ub", mumei_core::contract_host::ContractVarKind::UInt);
+        assert_eq!(
+            translate_contract_to_rust("ua / ub >= 0", &uvars).as_deref(),
+            Some("((ua) as u64).div_euclid(ub) >= 0")
+        );
+        assert_eq!(
+            translate_contract_to_rust("ua / 2 >= 0", &uvars).as_deref(),
+            Some("((ua) as u64).div_euclid(2) >= 0")
+        );
+        // Mixed signedness cannot be represented faithfully — degrade.
+        assert_eq!(translate_contract_to_rust("a / ub >= 0", &uvars), None);
+        // `::`-qualified names mangle to FFI symbols, never host paths —
+        // `std::process::exit(0)` can never become a real host call.
+        assert_eq!(
+            translate_contract_to_rust("std::process::exit(0) == 0", &vars).as_deref(),
+            Some("std_process_exit(0) == 0")
+        );
+        // Pointer indexing / field reads degrade rather than dereference an
+        // unvalidated FFI pointer inside a safe wrapper.
+        assert_eq!(translate_contract_to_rust("arr[i] >= 0", &vars), None);
+        assert_eq!(translate_contract_to_rust("v.x >= 0", &vars), None);
+        assert_eq!(
+            translate_contract_to_rust("forall(i, 0, n, arr[i] >= 0)", &vars),
+            None
+        );
+        // ...but a translatable conjunct alongside them is still enforced:
+        // only the untranslatable conjunct drops.
+        assert_eq!(
+            translate_contract_to_rust("n > 0 && arr[i] > 0 && result >= 0", &vars).as_deref(),
+            Some("n > 0 && result >= 0")
+        );
     }
 
     #[test]

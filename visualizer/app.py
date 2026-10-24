@@ -166,7 +166,7 @@ def _render_proof_graph_view(report_dir: Path) -> None:
         inconsistent = [
             edge
             for edge in detail["outgoing_edges"] + detail["incoming_edges"]
-            if not edge.get("is_consistent", True)
+            if edge.get("is_consistent") is False
         ]
         if inconsistent:
             st.markdown("**Contract mismatches**")

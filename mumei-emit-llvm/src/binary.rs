@@ -5,19 +5,11 @@
 
 use inkwell::context::Context;
 use mumei_core::hir::{HirAtom, HirExpr, HirStmt};
-use mumei_core::parser::Atom;
 use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::path::Path;
 
 use crate::codegen::{compile_atom_into_module, compile_llvm_ir_to_object};
-
-fn rename_calls_in_atom(atom: &mut Atom, from: &str, to: &str) {
-    let replacement = format!("{to}(");
-    atom.body_expr = atom.body_expr.replace(&format!("{from}("), &replacement);
-    atom.requires = atom.requires.replace(&format!("{from}("), &replacement);
-    atom.ensures = atom.ensures.replace(&format!("{from}("), &replacement);
-}
 
 /// Recursively rename function calls in a HirExpr from `from` to `to`.
 fn rename_calls_in_hir_expr(expr: &mut HirExpr, from: &str, to: &str) {
@@ -177,7 +169,7 @@ pub fn compile_atoms_to_binary_ll(
     let merged_module = context.create_module("mumei_merged");
 
     // Check that a "main" atom exists and takes no parameters
-    let main_atom = hir_atoms.iter().find(|h| h.atom.name == "main");
+    let main_atom = hir_atoms.iter().find(|h| h.signature.name == "main");
     match main_atom {
         None => {
             return Err(MumeiError::codegen(
@@ -185,11 +177,11 @@ pub fn compile_atoms_to_binary_ll(
                     .to_string(),
             ));
         }
-        Some(m) if !m.atom.params.is_empty() => {
+        Some(m) if !m.signature.params.is_empty() => {
             return Err(MumeiError::codegen(format!(
                 "atom main() must take no parameters for binary compilation, but found {} parameter(s). \
                  Define main as: atom main() requires: ...; ensures: ...; body: {{ ... }}",
-                m.atom.params.len()
+                m.signature.params.len()
             )));
         }
         _ => {}
@@ -199,18 +191,17 @@ pub fn compile_atoms_to_binary_ll(
     // For the "main" atom, rename it to "__mumei_user_main" before compilation
     // so it doesn't conflict with the C main wrapper we'll generate.
     for hir_atom in hir_atoms {
-        if hir_atom.atom.name == "main" {
+        if hir_atom.signature.name == "main" {
             // Clone and rename to avoid C main conflict
             let mut renamed = hir_atom.clone();
-            renamed.atom.name = "__mumei_user_main".to_string();
+            renamed.signature.name = "__mumei_user_main".to_string();
             // Rename self-recursive calls inside the body so they target
             // __mumei_user_main instead of the C wrapper main.
             rename_calls_in_hir_stmt(&mut renamed.body, "main", "__mumei_user_main");
-            rename_calls_in_atom(&mut renamed.atom, "main", "__mumei_user_main");
             compile_atom_into_module(
                 &context,
                 &merged_module,
-                &renamed,
+                &renamed.emit_view(),
                 module_env,
                 extern_blocks,
             )?;
@@ -219,11 +210,10 @@ pub fn compile_atoms_to_binary_ll(
             // __mumei_user_main instead of the C wrapper main(argc, argv).
             let mut patched = hir_atom.clone();
             rename_calls_in_hir_stmt(&mut patched.body, "main", "__mumei_user_main");
-            rename_calls_in_atom(&mut patched.atom, "main", "__mumei_user_main");
             compile_atom_into_module(
                 &context,
                 &merged_module,
-                &patched,
+                &patched.emit_view(),
                 module_env,
                 extern_blocks,
             )?;
@@ -299,42 +289,48 @@ pub fn compile_atoms_to_binary_object(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mumei_core::hir::{HirEffectSet, HirExpr, HirStmt};
+    use mumei_core::hir::{lower_atom_metadata, HirEffectSet, HirExpr, HirStmt};
     use mumei_core::parser::{Atom, Span};
 
     /// Helper to build a minimal HirAtom for testing
     fn make_test_hir_atom(name: &str, body: HirStmt, body_expr: &str) -> HirAtom {
+        let atom = Atom {
+            name: name.to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params: vec![],
+            trace_id: None,
+            spec_metadata: std::collections::HashMap::new(),
+            clause_labels: Vec::new(),
+            clause_modes: Vec::new(),
+            covers: Vec::new(),
+            requires: "true".to_string(),
+            forall_constraints: vec![],
+            ensures: "true".to_string(),
+            body_expr: body_expr.to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: mumei_core::parser::TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type: None,
+            decreases: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let body_stmt =
+            mumei_core::parser::Stmt::Expr(mumei_core::parser::Expr::Number(0), Span::default());
+        let (signature, contract, meta) = lower_atom_metadata(&atom, &body, None);
         HirAtom {
             body,
-            requires_hir: HirExpr::Number(1),
-            ensures_hir: HirExpr::Number(1),
-            atom: Atom {
-                name: name.to_string(),
-                type_params: vec![],
-                where_bounds: vec![],
-                params: vec![],
-                trace_id: None,
-                spec_metadata: std::collections::HashMap::new(),
-                requires: "true".to_string(),
-                forall_constraints: vec![],
-                ensures: "true".to_string(),
-                body_expr: body_expr.to_string(),
-                consumed_params: vec![],
-                resources: vec![],
-                is_async: false,
-                trust_level: mumei_core::parser::TrustLevel::Verified,
-                max_unroll: None,
-                invariant: None,
-                effects: vec![],
-                return_type: None,
-                span: Span::default(),
-                effect_pre: std::collections::HashMap::new(),
-                effect_post: std::collections::HashMap::new(),
-            },
-            body_stmt: mumei_core::parser::Stmt::Expr(
-                mumei_core::parser::Expr::Number(0),
-                Span::default(),
-            ),
+            signature,
+            contract,
+            meta,
+            atom,
+            body_stmt,
             effect_set: HirEffectSet::default(),
         }
     }
@@ -365,7 +361,7 @@ mod tests {
         };
         let bin = HirExpr::BinaryOp(
             Box::new(inner_call),
-            mumei_core::parser::Op::Add,
+            mumei_core::hir::HirBinOp::Add,
             Box::new(HirExpr::Number(2)),
         );
         let mut outer = HirExpr::Call {
@@ -435,6 +431,71 @@ mod tests {
             }
             _ => panic!("Expected Call"),
         }
+    }
+
+    #[test]
+    fn test_self_recursive_main_calls_renamed_user_main() {
+        // A self-recursive `main` must call `__mumei_user_main` (the renamed
+        // function), never the C wrapper `main`. The rename happens in HIR;
+        // codegen resolves the synthetic callee via the module's declared
+        // functions since it has no module_env entry.
+        let body = HirStmt::Expr(HirExpr::IfThenElse {
+            cond: Box::new(HirExpr::BinaryOp(
+                Box::new(HirExpr::Number(0)),
+                mumei_core::hir::HirBinOp::Eq,
+                Box::new(HirExpr::Number(0)),
+            )),
+            then_branch: Box::new(HirStmt::Expr(HirExpr::Call {
+                name: "main".to_string(),
+                args: vec![],
+                callee_effects: None,
+            })),
+            else_branch: Box::new(HirStmt::Expr(HirExpr::Number(7))),
+        });
+        let main_atom = make_test_hir_atom("main", body, "if 0 == 0 { main() } else { 7 }");
+        let module_env = ModuleEnv::new();
+        let dir = std::env::temp_dir().join(format!("mumei_self_rec_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ll_path = dir.join("merged.ll");
+        compile_atoms_to_binary_ll(&[main_atom], &module_env, &[], &ll_path)
+            .expect("self-recursive main should compile");
+        let ll = std::fs::read_to_string(&ll_path).unwrap();
+        assert!(
+            ll.contains("define i64 @__mumei_user_main()"),
+            "renamed user main should be defined:\n{ll}"
+        );
+        assert!(
+            ll.contains("call i64 @__mumei_user_main()"),
+            "self-recursive call should target __mumei_user_main:\n{ll}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_caller_of_main_before_main_declares_user_main() {
+        // An atom that calls `main()` and is compiled BEFORE `main` still
+        // resolves `__mumei_user_main` via a lazy declaration from main's
+        // own signature.
+        let caller_body = HirStmt::Expr(HirExpr::Call {
+            name: "main".to_string(),
+            args: vec![],
+            callee_effects: None,
+        });
+        let caller = make_test_hir_atom("pre_main", caller_body, "main()");
+        let main_atom = make_test_hir_atom("main", HirStmt::Expr(HirExpr::Number(41)), "41");
+        let mut module_env = ModuleEnv::new();
+        module_env.register_atom(&main_atom.atom);
+        let dir = std::env::temp_dir().join(format!("mumei_calls_main_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ll_path = dir.join("merged.ll");
+        compile_atoms_to_binary_ll(&[caller, main_atom], &module_env, &[], &ll_path)
+            .expect("caller-before-main should compile");
+        let ll = std::fs::read_to_string(&ll_path).unwrap();
+        assert!(
+            ll.contains("call i64 @__mumei_user_main()"),
+            "caller of main should target __mumei_user_main:\n{ll}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

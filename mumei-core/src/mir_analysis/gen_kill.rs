@@ -16,7 +16,7 @@ pub struct GenKill {
 /// Collect all Local references from an Operand into the given set.
 pub(crate) fn collect_operand_locals(op: &Operand, set: &mut HashSet<Local>) {
     match op {
-        Operand::Place(place) => collect_place_locals(place, set),
+        Operand::Place(place) | Operand::Move(place) => collect_place_locals(place, set),
         Operand::Constant(_) => {}
     }
 }
@@ -46,6 +46,11 @@ fn collect_rvalue_uses(rvalue: &Rvalue, set: &mut HashSet<Local>) {
         Rvalue::Call { args, .. } => {
             for arg in args {
                 collect_operand_locals(arg, set);
+            }
+        }
+        Rvalue::ArrayLit(elements) => {
+            for element in elements {
+                collect_operand_locals(element, set);
             }
         }
         Rvalue::Ref(place) | Rvalue::RefMut(place) => {

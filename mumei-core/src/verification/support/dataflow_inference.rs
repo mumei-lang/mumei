@@ -197,6 +197,7 @@ fn trace_eval_expr(
         Expr::Variable(name) if name == "true" => Some(TraceValue::Bool(true)),
         Expr::Variable(name) if name == "false" => Some(TraceValue::Bool(false)),
         Expr::Variable(name) => env.get(name).copied().map(TraceValue::Int),
+        Expr::ArrayLit(_) => None,
         Expr::BinaryOp(left, op, right) => {
             let left_value = trace_eval_expr(left, env, module_env, depth)?;
             let right_value = trace_eval_expr(right, env, module_env, depth)?;
@@ -214,6 +215,7 @@ fn trace_eval_expr(
                 trace_stmt(else_branch, env, module_env, &mut Vec::new(), depth)
             }
         }
+        Expr::Block(stmt) => trace_stmt(stmt, env, module_env, &mut Vec::new(), depth),
         Expr::Call(name, args) => trace_eval_atom_call(name, args, env, module_env, depth + 1),
         Expr::ArrayAccess(_, _)
         | Expr::StructInit { .. }
@@ -248,7 +250,13 @@ fn trace_eval_atom_call(
         call_env.insert(param.name.clone(), trace_value_as_int(&value)?);
     }
 
-    if !trace_eval_bool_clause(&callee.requires, &mut call_env, module_env)? {
+    // Keep the plain caller view: the scalar i64 env cannot evaluate
+    // forall/exists obligations (they would come back None).
+    let caller_requires = crate::verification::contract_view(
+        callee,
+        crate::verification::ContractView::CallerRequires,
+    );
+    if !trace_eval_bool_clause(&caller_requires, &mut call_env, module_env, depth)? {
         return None;
     }
     let body = parse_body_expr(&callee.body_expr);
@@ -262,7 +270,9 @@ fn trace_eval_atom_call(
         }
         TraceValue::String(_) => {}
     }
-    if !trace_eval_bool_clause(&callee.ensures, &mut call_env, module_env)? {
+    let body_ensures =
+        crate::verification::contract_view(callee, crate::verification::ContractView::BodyEnsures);
+    if !trace_eval_bool_clause(&body_ensures, &mut call_env, module_env, depth)? {
         return None;
     }
     Some(result)
@@ -272,25 +282,28 @@ fn trace_eval_bool_clause(
     clause: &str,
     env: &mut HashMap<String, i64>,
     module_env: &ModuleEnv,
+    depth: usize,
 ) -> Option<bool> {
     if clause.trim().is_empty() || clause.trim() == "true" {
         return Some(true);
     }
     let expr = parse_expression(clause);
-    let value = trace_eval_expr(&expr, env, module_env, 0)?;
+    let value = trace_eval_expr(&expr, env, module_env, depth)?;
     trace_value_as_bool(&value)
 }
 
 fn trace_eval_binary(left: TraceValue, op: &Op, right: TraceValue) -> Option<TraceValue> {
     match (left, right) {
         (TraceValue::Int(left), TraceValue::Int(right)) => match op {
-            Op::Add => Some(TraceValue::Int(left + right)),
-            Op::Sub => Some(TraceValue::Int(left - right)),
-            Op::Mul => Some(TraceValue::Int(left * right)),
-            Op::Pow if right >= 0 => left.checked_pow(right as u32).map(TraceValue::Int),
+            Op::Add => left.checked_add(right).map(TraceValue::Int),
+            Op::Sub => left.checked_sub(right).map(TraceValue::Int),
+            Op::Mul => left.checked_mul(right).map(TraceValue::Int),
+            Op::Pow if right >= 0 => u32::try_from(right)
+                .ok()
+                .and_then(|exponent| left.checked_pow(exponent))
+                .map(TraceValue::Int),
             Op::Pow => None,
-            Op::Div if right != 0 => Some(TraceValue::Int(left / right)),
-            Op::Div => None,
+            Op::Div => left.checked_div(right).map(TraceValue::Int),
             Op::Eq => Some(TraceValue::Bool(left == right)),
             Op::Neq => Some(TraceValue::Bool(left != right)),
             Op::Gt => Some(TraceValue::Bool(left > right)),
@@ -363,7 +376,9 @@ fn trace_evaluated_expression(expr: &Expr, env: &HashMap<String, i64>) -> String
     match expr {
         Expr::Number(value) => value.to_string(),
         Expr::Float(value) => value.to_string(),
-        Expr::StringLit(value) => format!("\"{}\"", value),
+        Expr::StringLit(value) => {
+            format!("\"{}\"", crate::parser::token::escape_string_content(value))
+        }
         Expr::Variable(name) if name == "true" || name == "false" => name.clone(),
         Expr::Variable(name) => env.get(name).map_or_else(|| name.clone(), i64::to_string),
         Expr::BinaryOp(left, op, right) => format!(
@@ -535,6 +550,7 @@ pub(crate) fn collect_divisors_expr(expr: &Expr) -> Vec<String> {
             divisors.extend(collect_divisors_stmt(then_branch));
             divisors.extend(collect_divisors_stmt(else_branch));
         }
+        Expr::Block(stmt) => divisors.extend(collect_divisors_stmt(stmt)),
         Expr::Match { target, arms } => {
             divisors.extend(collect_divisors_expr(target));
             for arm in arms {
@@ -651,8 +667,45 @@ pub(crate) fn infer_requires(atom: &Atom, module_env: &ModuleEnv) -> Vec<String>
     let callees_with_args = collect_callees_with_args_stmt(&body_stmt);
     for (callee_name, call_args) in &callees_with_args {
         if let Some(callee_atom) = module_env.get_atom(callee_name) {
-            if callee_atom.requires != "true" && !callee_atom.requires.is_empty() {
-                let mut substituted_req = callee_atom.requires.clone();
+            // Quantifiers whose bound variable collides with a callee param
+            // name or appears in an argument expression would be captured by
+            // the placeholder substitution below — alpha-rename them so the
+            // quantified obligation still propagates.
+            let mut renamed_callee = callee_atom.clone();
+            for q in renamed_callee.forall_constraints.iter_mut() {
+                let var_re = regex::Regex::new(&format!(r"\b{}\b", regex::escape(&q.var))).unwrap();
+                let collides = callee_atom.params.iter().any(|p| p.name == q.var)
+                    || call_args
+                        .iter()
+                        .any(|arg| var_re.is_match(&expr_to_source_string(arg)));
+                if !collides {
+                    continue;
+                }
+                let mut fresh = format!("{}_q", q.var);
+                loop {
+                    let fresh_re =
+                        regex::Regex::new(&format!(r"\b{}\b", regex::escape(&fresh))).unwrap();
+                    let taken = callee_atom
+                        .params
+                        .iter()
+                        .any(|p| fresh_re.is_match(&p.name))
+                        || call_args
+                            .iter()
+                            .any(|arg| fresh_re.is_match(&expr_to_source_string(arg)))
+                        || fresh_re.is_match(&q.start)
+                        || fresh_re.is_match(&q.end)
+                        || fresh_re.is_match(&q.condition);
+                    if !taken {
+                        break;
+                    }
+                    fresh.push_str("_q");
+                }
+                q.condition = var_re.replace_all(&q.condition, fresh.as_str()).to_string();
+                q.var = fresh;
+            }
+            let caller_requires = crate::verification::caller_requires_obligation(&renamed_callee);
+            if caller_requires != "true" && !caller_requires.is_empty() {
+                let mut substituted_req = caller_requires;
                 // callee の仮引数名と呼び出し引数を zip して置換
                 // 同時置換: まずパラメータ名をユニークなプレースホルダに置換し、
                 // 次にプレースホルダを引数式に置換する。
@@ -802,4 +855,50 @@ pub fn infer_contracts_json(items: &[Item], module_env: &ModuleEnv) -> serde_jso
         }
     }
     serde_json::json!({ "contracts_analysis": results })
+}
+
+#[cfg(test)]
+mod trace_eval_binary_tests {
+    use super::{trace_eval_binary, TraceValue};
+    use crate::parser::Op;
+
+    #[test]
+    fn integer_arithmetic_overflow_returns_none() {
+        assert_eq!(
+            trace_eval_binary(TraceValue::Int(i64::MAX), &Op::Add, TraceValue::Int(1)),
+            None
+        );
+        assert_eq!(
+            trace_eval_binary(TraceValue::Int(i64::MIN), &Op::Sub, TraceValue::Int(1)),
+            None
+        );
+        assert_eq!(
+            trace_eval_binary(TraceValue::Int(i64::MAX), &Op::Mul, TraceValue::Int(2)),
+            None
+        );
+        assert_eq!(
+            trace_eval_binary(TraceValue::Int(i64::MIN), &Op::Div, TraceValue::Int(-1)),
+            None
+        );
+    }
+
+    #[test]
+    fn integer_arithmetic_without_overflow_returns_value() {
+        assert_eq!(
+            trace_eval_binary(TraceValue::Int(2), &Op::Add, TraceValue::Int(3)),
+            Some(TraceValue::Int(5))
+        );
+    }
+
+    #[test]
+    fn power_exponent_must_fit_in_u32() {
+        assert_eq!(
+            trace_eval_binary(
+                TraceValue::Int(0),
+                &Op::Pow,
+                TraceValue::Int(i64::from(u32::MAX) + 1)
+            ),
+            None
+        );
+    }
 }

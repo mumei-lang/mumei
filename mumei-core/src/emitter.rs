@@ -11,7 +11,7 @@
 // the full 3-phase plan.
 // =============================================================================
 
-use crate::hir::HirAtom;
+use crate::hir::{HirAtom, HirAtomMeta, HirContract, HirEffectSet, HirSignature, HirStmt};
 use crate::lowering::{lower, LoweredType};
 use crate::parser::ExternBlock;
 use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
@@ -46,13 +46,46 @@ pub struct Artifact {
     pub kind: ArtifactKind,
 }
 
+/// HIR-only view of an atom handed to emitters (design doc step 7).
+///
+/// `HirAtom` keeps `atom`/`body_stmt` for verification and the CLI; the
+/// emitter interface no longer exposes either. This borrowed view carries
+/// only the HIR fields an emitter may read.
+///
+/// The AST types in `ModuleEnv` (`EnumDef`/`StructDef`/`ExternBlock`) remain
+/// shared with verification; the design doc keeps them in place. `HirExpr`
+/// nodes themselves hold only HIR types (`HirBinOp`/`HirJoin`/`HirPattern`/
+/// `HirTypeRef`).
+#[derive(Debug, Clone, Copy)]
+pub struct EmitAtom<'a> {
+    pub body: &'a HirStmt,
+    pub signature: &'a HirSignature,
+    pub contract: &'a HirContract,
+    pub meta: &'a HirAtomMeta,
+    pub effect_set: &'a HirEffectSet,
+}
+
+impl HirAtom {
+    /// The HIR-only view passed to `Emitter::emit`.
+    pub fn emit_view(&self) -> EmitAtom<'_> {
+        EmitAtom {
+            body: &self.body,
+            signature: &self.signature,
+            contract: &self.contract,
+            meta: &self.meta,
+            effect_set: &self.effect_set,
+        }
+    }
+}
+
 /// Trait for code generation backends (emitter plugins).
-/// Each emitter receives a verified HirAtom and produces output in its target format.
+/// Each emitter receives a verified [`EmitAtom`] (a HIR-only view) and
+/// produces output in its target format.
 /// Returns a list of `Artifact`s; the caller is responsible for persisting them.
 pub trait Emitter {
     fn emit(
         &self,
-        hir_atom: &HirAtom,
+        emit_atom: &EmitAtom<'_>,
         output_path: &Path,
         module_env: &ModuleEnv,
         extern_blocks: &[ExternBlock],
@@ -228,7 +261,7 @@ impl EmitTarget {
 
 /// Current emitter plugin ABI version. Bump when the Emitter trait
 /// signature or HirAtom/ModuleEnv layout changes in a breaking way.
-pub const EMITTER_ABI_VERSION: u32 = 1;
+pub const EMITTER_ABI_VERSION: u32 = 5;
 
 /// Trait-object wrapper for an emitter loaded out-of-process. Plugins
 /// must be `Send + Sync` so they can be shared across threads in the
@@ -288,14 +321,14 @@ struct PanicSafeEmitter {
 impl Emitter for PanicSafeEmitter {
     fn emit(
         &self,
-        hir_atom: &HirAtom,
+        emit_atom: &EmitAtom<'_>,
         output_path: &Path,
         module_env: &ModuleEnv,
         extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.inner
-                .emit(hir_atom, output_path, module_env, extern_blocks)
+                .emit(emit_atom, output_path, module_env, extern_blocks)
         }))
         .unwrap_or_else(|_| {
             Err(MumeiError::verification(
@@ -471,18 +504,20 @@ pub fn mumei_return_type_to_c(type_name: Option<&str>, module_env: &ModuleEnv) -
 impl Emitter for CHeaderEmitter {
     fn emit(
         &self,
-        hir_atom: &HirAtom,
+        emit_atom: &EmitAtom<'_>,
         output_path: &Path,
         module_env: &ModuleEnv,
         _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
-        let atom = &hir_atom.atom;
+        let signature = emit_atom.signature;
+        let contract = emit_atom.contract;
         let header_path = output_path.with_extension("h");
 
         // Generate header guard name from atom name (uppercase + _H)
         let guard_name = format!(
             "{}_H",
-            atom.name
+            signature
+                .name
                 .to_uppercase()
                 .replace("::", "_")
                 .replace('-', "_")
@@ -500,38 +535,38 @@ impl Emitter for CHeaderEmitter {
         content.push('\n');
 
         // Doxygen documentation block
-        let has_pre = atom.requires != "true";
-        let has_post = atom.ensures != "true";
+        let has_pre = contract.requires_text != "true";
+        let has_post = contract.ensures_text != "true";
         if has_pre || has_post {
             content.push_str("/**\n");
-            let c_fn_name = atom.name.replace("::", "_");
+            let c_fn_name = signature.name.replace("::", "_");
             content.push_str(&format!(" * @brief {}\n", c_fn_name));
             if has_pre {
-                content.push_str(&format!(" * @pre {}\n", atom.requires));
+                content.push_str(&format!(" * @pre {}\n", contract.requires_text));
             }
             if has_post {
-                content.push_str(&format!(" * @post {}\n", atom.ensures));
+                content.push_str(&format!(" * @post {}\n", contract.ensures_text));
             }
             content.push_str(" */\n");
         } else {
             // Even without contracts, add @brief
-            let c_fn_name = atom.name.replace("::", "_");
+            let c_fn_name = signature.name.replace("::", "_");
             content.push_str(&format!("/** @brief {} */\n", c_fn_name));
         }
 
         // Build parameter list
-        let params: Vec<String> = atom
+        let params: Vec<String> = signature
             .params
             .iter()
             .map(|p| {
-                let c_type = match &p.type_name {
+                let c_type = match &p.ty {
                     Some(tn) => {
                         let base = module_env.resolve_base_type(tn);
                         mumei_type_to_c(&base).to_string()
                     }
                     None => "int64_t".to_string(),
                 };
-                format!("{} {}", c_type, p.name)
+                format!("{} {}", c_type, p.declared_name())
             })
             .collect();
 
@@ -542,10 +577,10 @@ impl Emitter for CHeaderEmitter {
         };
 
         // Return type
-        let return_type = mumei_return_type_to_c(atom.return_type.as_deref(), module_env);
+        let return_type = mumei_return_type_to_c(signature.return_type.as_deref(), module_env);
 
         // Function name: replace :: with _ for C compatibility
-        let c_fn_name = atom.name.replace("::", "_");
+        let c_fn_name = signature.name.replace("::", "_");
 
         // extern "C" function declaration
         content.push_str(&format!(
@@ -570,7 +605,7 @@ impl Emitter for CHeaderEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir::{HirEffectSet, HirExpr, HirStmt};
+    use crate::hir::{lower_atom_metadata, HirEffectSet, HirExpr, HirStmt};
     use crate::parser::ast::{Expr, Param, Span, Stmt, TrustLevel};
 
     /// Helper: build a minimal HirAtom for testing CHeaderEmitter.
@@ -582,33 +617,41 @@ mod tests {
         return_type: Option<String>,
     ) -> HirAtom {
         use crate::parser::ast::Atom;
+        let body = HirStmt::Expr(HirExpr::Number(0));
+        let atom = Atom {
+            name: name.to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params,
+            trace_id: None,
+            spec_metadata: std::collections::HashMap::new(),
+            clause_labels: Vec::new(),
+            clause_modes: Vec::new(),
+            covers: Vec::new(),
+            requires: requires.to_string(),
+            forall_constraints: vec![],
+            ensures: ensures.to_string(),
+            body_expr: "0".to_string(),
+            consumed_params: vec![],
+            resources: vec![],
+            is_async: false,
+            trust_level: TrustLevel::Verified,
+            max_unroll: None,
+            invariant: None,
+            effects: vec![],
+            return_type,
+            decreases: None,
+            span: Span::default(),
+            effect_pre: std::collections::HashMap::new(),
+            effect_post: std::collections::HashMap::new(),
+        };
+        let (signature, contract, meta) = lower_atom_metadata(&atom, &body, None);
         HirAtom {
-            body: HirStmt::Expr(HirExpr::Number(0)),
-            requires_hir: HirExpr::Number(1),
-            ensures_hir: HirExpr::Number(1),
-            atom: Atom {
-                name: name.to_string(),
-                type_params: vec![],
-                where_bounds: vec![],
-                params,
-                trace_id: None,
-                spec_metadata: std::collections::HashMap::new(),
-                requires: requires.to_string(),
-                forall_constraints: vec![],
-                ensures: ensures.to_string(),
-                body_expr: "0".to_string(),
-                consumed_params: vec![],
-                resources: vec![],
-                is_async: false,
-                trust_level: TrustLevel::Verified,
-                max_unroll: None,
-                invariant: None,
-                effects: vec![],
-                return_type,
-                span: Span::default(),
-                effect_pre: std::collections::HashMap::new(),
-                effect_post: std::collections::HashMap::new(),
-            },
+            body,
+            signature,
+            contract,
+            meta,
+            atom,
             body_stmt: Stmt::Expr(Expr::Number(0), Span::default()),
             effect_set: HirEffectSet::default(),
         }
@@ -621,6 +664,7 @@ mod tests {
             type_ref: None,
             is_ref: false,
             is_ref_mut: false,
+            consume: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
         }
@@ -675,7 +719,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = CHeaderEmitter
-            .emit(&hir, Path::new("/tmp/safe_div"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/safe_div"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         assert_eq!(artifacts.len(), 1);
@@ -700,7 +749,7 @@ mod tests {
         let hir = make_hir_atom("noop", vec![], "true", "true", None);
         let module_env = ModuleEnv::new();
         let artifacts = CHeaderEmitter
-            .emit(&hir, Path::new("/tmp/noop"), &module_env, &[])
+            .emit(&hir.emit_view(), Path::new("/tmp/noop"), &module_env, &[])
             .unwrap();
 
         let content = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -714,7 +763,7 @@ mod tests {
         let hir = make_hir_atom("foo", vec![], "true", "true", None);
         let module_env = ModuleEnv::new();
         let artifacts = CHeaderEmitter
-            .emit(&hir, Path::new("/tmp/foo"), &module_env, &[])
+            .emit(&hir.emit_view(), Path::new("/tmp/foo"), &module_env, &[])
             .unwrap();
 
         assert_eq!(artifacts.len(), 1);
@@ -727,7 +776,12 @@ mod tests {
         let hir = make_hir_atom("safe_div", vec![], "x != 0", "true", None);
         let module_env = ModuleEnv::new();
         let artifacts = CHeaderEmitter
-            .emit(&hir, Path::new("/tmp/safe_div"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/safe_div"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let content = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -751,7 +805,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = CHeaderEmitter
-            .emit(&hir, Path::new("/tmp/typed_fn"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/typed_fn"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let content = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -778,7 +837,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = CHeaderEmitter
-            .emit(&hir, Path::new("/tmp/safe_div"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/safe_div"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let content = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -890,7 +954,7 @@ mod tests {
 
     #[test]
     fn test_emitter_abi_version_constant() {
-        assert_eq!(EMITTER_ABI_VERSION, 1);
+        assert_eq!(EMITTER_ABI_VERSION, 5);
     }
 
     /// Phase 3: `mumei add --emitter` installs into exactly the location the
@@ -914,7 +978,12 @@ mod tests {
         let hir = make_hir_atom("handle_round_trip", vec![], "true", "true", None);
         let module_env = ModuleEnv::new();
         let artifacts = boxed
-            .emit(&hir, Path::new("/tmp/handle_round_trip"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/handle_round_trip"),
+                &module_env,
+                &[],
+            )
             .expect("round-tripped emitter should remain callable");
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].kind, ArtifactKind::Header);
@@ -925,7 +994,7 @@ mod tests {
     impl Emitter for PanickingEmitter {
         fn emit(
             &self,
-            _hir_atom: &HirAtom,
+            _emit_atom: &EmitAtom<'_>,
             _output_path: &Path,
             _module_env: &ModuleEnv,
             _extern_blocks: &[ExternBlock],
@@ -946,7 +1015,12 @@ mod tests {
         let hir = make_hir_atom("panic_plugin", vec![], "true", "true", None);
         let module_env = ModuleEnv::new();
         let err = wrapped
-            .emit(&hir, Path::new("/tmp/panic_plugin"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/panic_plugin"),
+                &module_env,
+                &[],
+            )
             .unwrap_err();
         let msg = format!("{}", err);
         assert!(

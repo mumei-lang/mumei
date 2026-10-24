@@ -1,7 +1,7 @@
 {
   "total_modules": 59,
-  "total_atoms": 345,
-  "proven_atoms": 339,
+  "total_atoms": 356,
+  "proven_atoms": 350,
   "lean_verified_atoms": 0,
   "trusted_atoms": 0,
   "modules": {

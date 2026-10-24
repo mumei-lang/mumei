@@ -9,7 +9,7 @@ does not define a second vocabulary.
 | `source` | Severity | Meaning |
 | --- | ---: | --- |
 | `mumei` | 1 | Mumei parse or language-server diagnostic. |
-| `mumei-z3` | 1 | Z3 verification failure or a pending Lean escalation. |
+| `mumei-z3` | 1 or 2 | Z3 verification failure or a pending Lean escalation. Severity `2` when Z3 neither proved nor refuted the atom (see below), `1` otherwise. |
 | `mumei-lean` | 3 | An atom whose certificate has `z3_check_result == "lean_verified"`. |
 | `mumei-agent` | 2 | Agent-reported specification health or cross-validation issue. |
 | `mumei-intent` | 2 | Intent drift at or above the `0.75` threshold. |
@@ -24,8 +24,19 @@ Z3 diagnostics may carry:
 ```json
 {
   "counterexample": {
-    "a": 1,
-    "b": 2
+    "a": "1",
+    "b": "2"
+  },
+  "counterexample_provenance": {
+    "complete": true,
+    "values": {
+      "a": {
+        "status": "raised",
+        "lowering": "int",
+        "source_type": "i64"
+      }
+    },
+    "omitted_solver_symbols": []
   },
   "lean_escalation": {
     "status": "pending",
@@ -36,11 +47,38 @@ Z3 diagnostics may carry:
 }
 ```
 
-`counterexample` maps variable names to values.  It is also appended to the
+A `mumei-z3` diagnostic is a warning (severity `2`) when the result is
+inconclusive in the same sense as `mumei verify` exit code `3`: Z3 returned
+`unknown` / `timeout` / `resource_limit`, its model was a
+`spurious_candidate`, or the atom is `unverifiable`.  A confirmed
+counterexample or contract violation stays an error (severity `1`).
+
+`counterexample` maps source names to rendered string values. It is also appended to the
 diagnostic message as `Counter-example: a = 1, b = 2`, unless the message
 already contains `Counter-example:`.  A pending escalation is also reflected
 in the message suffix:
 `Lean escalation: pending (z3 <class>, reason <reason>)`.
+`counterexample_provenance` is optional. Its `values` object records each
+reported value's `raised` or `unraisable` status, lowering, optional declared
+source type and solver symbol, and an unraisable reason. `complete` is false
+when any reported value could not be raised. `omitted_solver_symbols` lists
+internal or otherwise unreported solver symbols.
+
+Primitive lowering labels include `int`, signed `bitvec_i64`/`bitvec_i32`,
+unsigned `bitvec_u64`/`bitvec_u32`, exact `real_f64`/`real_f32`, and
+`ieee754_f64`/`ieee754_f32` for matching IEEE floating-point sorts.
+`str_length` and `array_length` identify the solver-side length companions of
+`Str` and array parameters (`len(s)`); they are reported in reconstruction-loss
+values and provenance.
+
+In-process verification stops at the first failing atom.  When a sibling
+`<file>.proof.json` certificate exists, every other atom it records with an
+`escalation_reason` and a `z3_check_result` other than `lean_verified` also
+receives a `mumei-z3` diagnostic with the same `lean_escalation`
+payload plus `"certificate": "<path>"`, so all pending escalations in the file
+are shown, each exactly once.  Its severity is `2` when the recorded
+`z3_check_result` is `unknown` / `timeout` / `resource_limit` /
+`spurious_candidate` / `skipped` (no Z3 verdict), and `1` otherwise.
 
 ## `mumei-lean` data
 
@@ -59,6 +97,25 @@ Each Lean-verified atom produces a severity `3` diagnostic with:
 
 The diagnostic is emitted per atom whose certificate has
 `z3_check_result == "lean_verified"`.
+
+A kernel-axiom audit rejection produces a severity `2` diagnostic:
+
+```json
+{
+  "lean_escalation": {
+    "status": "axiom_rejected",
+    "atom": "...",
+    "z3_result_class": "...",
+    "certificate": "...",
+    "disallowed": ["sorryAx"]
+  }
+}
+```
+
+`disallowed` lists the non-standard kernel axioms reported by the rejected
+`axiom_audit`. An audit error also uses `axiom_rejected` but omits `disallowed`.
+This diagnostic is also emitted for an escalated atom whose certificate still
+records its Z3 result but whose attached Lean result failed the audit.
 
 ## `mumei-intent` data
 
@@ -103,10 +160,10 @@ CodeLens entries use the following literal `kind` values:
 
 ## Renderer rules
 
-Renderers reflect `lean_verified`, `escalation_reason`, and
-`z3_result_class` verbatim.  Do not introduce alternate names.  The only
-`status` values are `pending` and `lean_verified`.  Unknown keys must be
-ignored, not remapped.
+Renderers reflect `lean_verified`, `escalation_reason`, `z3_result_class`, and
+`disallowed` verbatim.  Do not introduce alternate names.  The only `status`
+values are `pending`, `lean_verified`, and `axiom_rejected`.  Unknown keys must
+be ignored, not remapped.
 
 ## Editor reference implementations
 

@@ -333,15 +333,33 @@ pub fn verify_impl_with_options(
             module_env,
             current_atom: None,
             linearity_ctx: None,
+            inferred_invariants: None,
+            cover_obligations: None,
             effect_ctx: None,
             constraint_count: None,
             constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
             has_string_constraints: None,
             path_cond_stack: std::cell::RefCell::new(Vec::new()),
+            held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+            acquire_counter: std::cell::RefCell::new(0),
+            loop_counter: std::cell::RefCell::new(0),
             profiler: None,
             ieee754_f64,
             bitvec_i64,
             bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+            bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+            clause_context: std::cell::RefCell::new(Vec::new()),
+            enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+            local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+            local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+            local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
+            call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
+            call_result_fields: Default::default(),
+            contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
+            recursion: Default::default(),
+            quantifier_binders: Default::default(),
+            call_result_symbols: Default::default(),
+
             bitvec_i64_global: bitvec_i64,
         };
 
@@ -404,22 +422,44 @@ pub fn verify_impl_with_options(
 
                     // シフト量の範囲義務は law の前提のもとで解消する。
                     discharge_bv_shift_obligations(&vc, &solver)?;
+                    discharge_bv_div_obligations(&vc, &solver)?;
 
                     solver.assert(&law_bool.not());
-                    if solver.check() == SatResult::Sat {
+                    let law_check = crate::verification::phase_artifacts::check(&solver);
+                    if law_check == SatResult::Unknown {
+                        solver.pop(1);
+                        return Err(MumeiError::verification_at(
+                            format!(
+                                "impl {} for {}: law '{}' (defined in trait at {}): Z3 returned unknown (solver timeout or resource limit); the law is neither proven nor refuted\n  Law: {}\n  Expanded: {}",
+                                impl_def.trait_name, impl_def.target_type,
+                                law_name, trait_def.span, law_expr, substituted
+                            ),
+                            impl_def.span.clone(),
+                        ));
+                    }
+                    if law_check == SatResult::Sat {
                         // 反例（Counter-example）を Z3 model から取得
                         let counterexample = if let Some(model) = solver.get_model() {
                             let var_names = ["a", "b", "c", "x", "y", "z"];
                             let mut ce_parts = Vec::new();
-                            let mut ce_json = serde_json::Map::new();
+                            let mut raised = RaisedCounterexample::default();
                             for var_name in &var_names {
                                 if let Some(var_z3) = env.get(*var_name) {
                                     if let Some(val) = model.eval(var_z3, true) {
-                                        let val_str = format!("{}", val);
                                         // 変数が law 式に含まれている場合のみ表示
                                         if law_expr.contains(*var_name) {
-                                            ce_parts.push(format!("{} = {}", var_name, val_str));
-                                            ce_json.insert(var_name.to_string(), json!(val_str));
+                                            let raised_value = raise_named_model_value(
+                                                &model,
+                                                *var_name,
+                                                &val,
+                                                Some(&impl_def.target_type),
+                                                module_env,
+                                            );
+                                            ce_parts.push(format!(
+                                                "{} = {}",
+                                                var_name, raised_value.rendering
+                                            ));
+                                            raised.values.push(raised_value);
                                         }
                                     }
                                 }
@@ -427,11 +467,17 @@ pub fn verify_impl_with_options(
                             // Save counterexample to visualizer report
                             // (even when no concrete values are available, still write report.json
                             // so the MCP self-healing flow can detect the failure)
-                            let ce_value = if ce_json.is_empty() {
-                                None
-                            } else {
-                                Some(serde_json::Value::Object(ce_json))
-                            };
+                            let ce_object = raised.to_counterexample_json();
+                            let ce_value =
+                                if ce_object.as_object().is_some_and(serde_json::Map::is_empty) {
+                                    None
+                                } else {
+                                    Some(ce_object)
+                                };
+                            let provenance = raised.provenance_json();
+                            let extra_fields = json!({
+                                "counterexample_provenance": provenance,
+                            });
                             save_visualizer_report(
                                 output_dir,
                                 "failed",
@@ -450,28 +496,34 @@ pub fn verify_impl_with_options(
                                 None,
                                 None,
                                 None,
+                                Some(&extra_fields),
                             );
                             if ce_parts.is_empty() {
-                                ("  (no concrete values available)".to_string(), ce_value)
+                                (
+                                    "  (no concrete values available)".to_string(),
+                                    ce_value,
+                                    Some(provenance),
+                                )
                             } else {
                                 (
                                     format!("  Counter-example: {}", ce_parts.join(", ")),
                                     ce_value,
+                                    Some(provenance),
                                 )
                             }
                         } else {
-                            ("  (could not retrieve model)".to_string(), None)
+                            ("  (could not retrieve model)".to_string(), None, None)
                         };
                         solver.pop(1);
-                        let (ce_text, ce_data) = counterexample;
+                        let (ce_text, ce_data, provenance) = counterexample;
                         return Err(MumeiError::verification_at(
                             format!(
                                 "impl {} for {}: law '{}' (defined in trait at {}) is not satisfied\n  Law: {}\n  Expanded: {}\n{}",
                                 impl_def.trait_name, impl_def.target_type,
                                 law_name, trait_def.span, law_expr, substituted, ce_text
                             ),
-                            impl_def.span.clone()
-                        ).with_counterexample(ce_data));
+                                impl_def.span.clone()
+                        ).with_counterexample_provenance(ce_data, provenance));
                     }
                     solver.pop(1);
                 }

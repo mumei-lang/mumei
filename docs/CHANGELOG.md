@@ -1,4 +1,1363 @@
+### 2026-10-11: signature `consume` and the `consume:` clause are unified
+
+- **The two `consume` spellings now mean the same thing** (follow-up to
+  #717): the signature marker `atom f(consume x: T)` and the
+  `consume x;` clause both declare that the atom takes ownership of the
+  parameter. `Atom::consumed_names()`/`consumes_param()` is the canonical
+  union and all consumers — the executor's linearity machinery
+  (`is_alive` tracking, double-consume/use-after-free detection), the
+  call-site argument `consume()` in the translator, MIR `MirParamMode`
+  tables, the `atom_ref` borrow guard, and recursion-shape guards — read
+  it instead of the clause list alone.
+- **Verifier behavior change**: calling a signature-`consume` callee now
+  consumes the argument at the call site — reusing the variable
+  afterwards fails verification (`use of moved value` / linearity
+  violation), matching what the clause spelling already enforced.
+  Previously signature-`consume` silently skipped that path.
+- **Double declaration rejected**: writing `consume x` in the signature
+  and `consume x;` in the contract of the same atom is a type error
+  ("parameter 'x' is declared consume twice").
+- `VERIFIER_POLICY_VERSION` bumped 16 → 17: cached verifications are
+  re-derived.
+
+### 2026-10-08: lambda type references are HIR-owned (emitter ABI 5)
+
+- `HirLambdaParam::type_ref` now stores `HirTypeRef` — a 1:1 mirror of
+  `ast::TypeRef` (`name`, `type_args`, `effect_set`, `capability` via
+  `HirCapabilityType`) with identical `Display`/`display_name` rendering —
+  instead of the AST type. No `ast::TypeRef` remains reachable through
+  `EmitAtom`; emitted output is unchanged.
+- Emitter plugins must use ABI 5; ABI-1/2/3/4 plugins fail loading with an
+  ABI version mismatch and must be rebuilt.
+
+### 2026-10-10: `Param.name` no longer carries `consume`/`ref` prefixes
+
+- **`Param.name` is now the bare identifier** (issue #717): signature
+  markers `consume`/`ref`/`ref mut` are stored on `Param::consume`,
+  `is_ref`, and `is_ref_mut` instead of being kept inside `name`.
+  Spec-side lookups comparing `p.name` against the written identifier —
+  e.g. `len(xs)` on `atom takes(consume xs: [i64])` — now resolve instead
+  of failing type-checking with "`xs` is neither an array nor a string".
+- **Ownership info preserved**: `HirParam.consume` now reads the flag
+  directly, MIR `MirParamMode::Consume` covers signature-`consume`
+  params, and `consume` joins `ref`/`ref_mut` in the atom cache hash and
+  the v2 content hash (`param` section). `ParamReport` (inspect JSON)
+  gains a `consume` field; printed param names are now bare.
+- `VERIFIER_POLICY_VERSION` bumped 13 → 14: prior verifications recorded
+  against prefixed names are re-derived.
+
+### 2026-10-08: emitters consume a HIR-only view (emitter ABI 4)
+
+- `Emitter::emit` now takes `&EmitAtom<'_>` — a borrowed HIR-only view
+  (`body`, `signature`, `contract`, `meta`, `effect_set`) — instead of
+  `&HirAtom`. The AST fields (`atom`, `body_stmt`) stay on `HirAtom` for
+  verification and the CLI but are no longer reachable from emitters.
+- `Op`/`JoinSemantics`/`Pattern` moved to HIR-owned types (`HirBinOp`,
+  `HirJoin`, `HirPattern`) with 1:1 conversions both ways; the `.ll`
+  effects comment now reads declared-effect argument values from
+  `signature.effects` (`HirDeclaredEffect::param_values`) — emitted output
+  is unchanged.
+- Emitter plugins must use ABI 4; ABI-1/2/3 plugins fail loading with an
+  ABI version mismatch and must be rebuilt.
+
+### 2026-10-08: wrapper emitters and runtime monitor fix output bugs
+
+- **`consume` no longer leaks into generated code**: Python signatures/call
+  sites, Rust signatures/call sites, and runtime-monitor extern decls,
+  monitored signatures, and calls now use the bare parameter name instead of
+  `consume n`.
+- **`=>` is translated**: `a => b` becomes `not (a) or (b)` in Python and
+  `!(a) || (b)` in Rust, honoring `=>`'s precedence (looser than `||`,
+  tighter than `|>`) and left associativity, so nested and chained
+  implications and `=>` inside larger expressions print unambiguously.
+- **Contracts emit Euclidean integer division**: the verifier lowers
+  `/` to Z3 `Int` division, which keeps the remainder ≥ 0 (Euclidean —
+  `div(7,-2) = -3`, `div(-7,2) = -4`). Integer clauses now emit
+  `divmod`-based Euclidean division in Python and `a.div_euclid(b)` in
+  Rust/monitor so a clause proven by `verify` cannot mischeck in the host
+  on negative divisors (plain `//` floors, `/` truncates — both diverge).
+  Clauses
+  over `f32`/`f64` keep `/`. The BV (`-z`) proof mode lowers `/` to
+  `bvsdiv` (truncation), which still diverges from Euclidean on negative
+  dividends — see the behavior-change PR notes.
+- **Quantified requires are asserted**: top-level `forall`/`exists`
+  conjuncts (hoisted into `contract.quantifiers`) now emit their own
+  runtime checks — `all(... for i in range(start, end))`/`any(...)` in
+  Python, `(start..end).all(|i| ...)`/`.any(...)` in Rust, and the same
+  `check` records in the runtime monitor. The range is end-exclusive,
+  matching verifier semantics. Quantifiers that cannot be translated
+  degrade to a comment instead of emitting broken host code. Quantifiers
+  nested inside larger expressions (under `||`, `!`, `=>`, `if`, `match`)
+  stay in the clause text and are translated there when possible;
+  otherwise the whole clause degrades safely.
+- **Runtime monitor checkability is decided on HIR**: the character
+  whitelist in `monitor_condition` is replaced by a node-kind check over
+  each `HirClause.expr` — `Number`, `Variable`, `BinaryOp` over
+  arithmetic/comparison/boolean ops, `IfThenElse` encoding `!e`, and
+  `Call` with checkable arguments are accepted; `Implies`, `StringLit`,
+  `Match`, `Lambda`, `Float`, `FieldAccess`, `ArrayAccess`, `VariantInit`,
+  `StructInit`, `AtomRef`, `CallRef`, `Async`, `Await`, `Perform`,
+  `ChanSend`, `ChanRecv`, and any clause with `expr: None` route to the
+  existing `unchecked` violation record. Every requires/ensures clause is
+  still checked regardless of `mode`; `Cover` clauses are never asserted.
+  The check payload is printed by the shared `mumei_core::contract_host`
+  AST printer instead of interpolating source text, so `!e`, `=>`, `-x`,
+  and comparison chains no longer produce invalid or wrong Rust.
+- **Untranslatable clauses degrade to comments**: `contract_text_to_*`
+  returning `None` now emits `# mumei: ...` / `// mumei: ...` comments
+  rather than interpolating raw contract text into host code.
+- **Printer hardening** (from review): negative literals always print
+  parenthesized (`(-2) ** 2`, not `-2 ** 2` which Python mis-evaluates);
+  `arr[i]`/`v.field` degrade because they would dereference unvalidated
+  FFI pointers inside a safe wrapper; `::`-qualified names print with the
+  FFI `::`→`_` symbol mangling (`Vec2::dot` → `Vec2_dot`) so contract
+  text like `std::process::exit(0)` can never become a real host call.
+- **Integer `/` is Euclidean, not floored** (from review): Z3 `Int`
+  division keeps `mod` ≥ 0 (`div(7,-2) = -3`, `div(-7,2) = -4`), so plain
+  `//`/`/` can mischeck a verified clause on negative divisors. Python
+  emits `(_mumei_d := divmod(a, b))[0] + (_mumei_d[1] < 0)` — `divmod`
+  evaluates each operand once, keeping chained divisions linear;
+  Rust/monitor emit `((a) as i64).div_euclid(b)` — verified against Z3
+  4.14.1 for all sign combinations. `u64`/`u32` operands instead emit
+  `as u64` (a signed cast would flip large dividends); mixed-sign
+  divisions degrade because the host cannot represent them faithfully.
+- **Partial-clause checks**: when a conjunction cannot fully print (one
+  conjunct uses an unsupported form like `arr[i]`), each translatable
+  top-level conjunct is still emitted instead of dropping the whole
+  clause — `n > 0 && arr[i] > 0` enforces `n > 0`.
+
+---
+
+### 2026-10-08: v0.6.21 release version bump
+
+- **Workspace and member crate versions**: bumped versions from `0.6.20` to
+  `0.6.21` so `mumei --version`, `mumei inspect`, and proof-certificate
+  `mumei_version` match the release tag before tagging.
+- **Install references**: synced the README and README_JA pinned install
+  examples on `v0.6.21`, along with the Homebrew formula template and
+  `install.sh` help examples.
+- Python and Rust wrappers now read their signatures and exact contract text
+  from HIR while retaining their string translators; emitted output is
+  unchanged, and there is no emitter ABI change.
+- The runtime monitor now reads signature, exact contract text,
+  `effect_pre`, and trust boundaries from HIR metadata computed with
+  `ModuleEnv::extern_blocks`; its output is unchanged and the emitter ABI
+  remains 3.
+
+---
+
+### 2026-10-04: verify clears stale report.json on early exit
+
+- `mumei verify` now removes an existing `report.json` from the output
+  directory when it exits before verifying any atom (missing/unreadable
+  input, cross-spec load failure, unavailable Z3, or a directory with no
+  `.mm` files), so a stale report can no longer be read back as the
+  current run's result.
+
+---
+
+### 2026-10-04: leaf emitters read HIR metadata (emitter ABI 3)
+
+- JSON, C header, and proof book now read signature, contract, and metadata
+  directly from HIR; emitted output is unchanged.
+- HIR now preserves the declared `consume` marker, exact `requires_text` and
+  `ensures_text`, and ordered declared effects.
+- Emitter plugins must use ABI 3; ABI-1 and ABI-2 plugins must be rebuilt.
+
+---
+
+### 2026-10-04: HIR carries signature, contract and metadata (emitter ABI 2)
+
+- `HirAtom` now carries signature, ordered contract clauses, quantified
+  preconditions, and atom metadata alongside the existing AST-backed fields.
+- Emitter plugins must use ABI 2; ABI-1 plugins fail loading with an ABI
+  mismatch and must be rebuilt.
+
+---
+
+### 2026-10-04: SARIF reports spurious candidates as review findings
+
+- `--emit sarif` now reports atoms whose only failure is an unconfirmed
+  (spurious) counterexample candidate as warnings for review, as it already
+  did for `unknown` results, instead of as failures.
+
+---
+
+### 2026-10-04: atom-level decreases and recursive contracts
+
+- **`decreases:` atom clause**: an atom can declare a termination measure
+  (`decreases: n;`) over its parameters. Recursive calls — in the body or in
+  the atom's `requires`/`ensures` contract — must prove `0 <= M` and
+  `M_callee(args) < M` under the path conditions and the caller's requires;
+  violations fail with `termination_measure_violation` (exit 1).
+- **Congruent recursive contracts**: on an eligible recursive SCC (all members
+  declare `decreases`, call-free measure over params, no effects/`ref
+  mut`/`consume`/`async`/type params, `Verified`, scalar `Int`/`Bool`
+  signatures), recursive contract calls share an uninterpreted `rec_fn#` and
+  assume the callee ensures under `R ⇒ CallerEnsures` where `R` is
+  `caller_requires_obligation` (caller-view requires plus quantified requires
+  conjuncts), with path conditions conjoined to the antecedent for
+  SCC-internal calls, so contracts like `result == n + tri(n - 1)` (including
+  mutual recursion) are provable.
+- **Advisory hints**: atoms on ineligible recursive cycles get a
+  `recursive_contract_needs_decreases` / `recursive_contract_unsupported`
+  hint diagnostic; the call semantics and verdict are unchanged.
+- **Verifier policy version**: bumped to 7 so cached proofs are re-derived.
+### Unreleased: call-arity checking at call sites
+
+- Calls whose argument count differs from the callee's parameter count are
+  rejected with `expected N argument(s), got M` at every call path — direct
+  calls and `call(atom_ref(..))` — instead of silently dropping extra
+  arguments or surfacing as an unrelated `precondition (requires) not
+  satisfied` failure.
+- `VERIFIER_POLICY_VERSION` bumped to 9 so cached proofs are re-derived.
+
+### Unreleased: quantified `requires` checked at call sites
+
+- Quantified `requires` conjuncts (`forall`/`exists` at the top level of
+  the clause) are now part of the callee obligation checked at every call
+  site — direct calls, `call(atom_ref(..))`, contract subsumption, cover
+  obligations, and dataflow requires-inference. Previously they were only
+  assumed inside the callee body, so callers could invoke atoms like
+  `needs_pos` without ever establishing the quantified precondition.
+- Quantifiers nested under `||`, `!`, `if`/`then`/`else`/`match`, `|`
+  (lambda/bit-or/`|>`), `=>`, or non-conjunctive positions are no longer
+  hoisted into top-level facts: they stay in the requires text and are
+  lowered in place. This removes an unsound free hypothesis
+  (`n == 5 || forall(...)` used to assert the forall unconditionally) and
+  a spurious "requires clause is unsatisfiable" on `!forall(...)`.
+- Quantifier binders are fresh constants now: a `forall(i, …)` / `exists(i, …)`
+  no longer captures an outer variable or parameter that happens to share
+  the bound name (previously callers could satisfy quantified preconditions
+  for free, and a requires-side binder over a same-named param bound the
+  parameter instead of the quantified variable).
+- `VERIFIER_POLICY_VERSION` bumped to 6 so cached proofs are re-derived.
+
+---
+
+### 2026-10-04: fail closed on calls under quantifiers
+
+- A call inside `forall` / `exists` whose arguments depend on the bound
+  variable used to lower to one result constant shared by every instance of
+  the binder, so `requires: forall(i, 0, n, ident(arr[i]) == arr[i])` proved
+  that all elements are equal. Such calls (atom calls, `call(atom_ref(..))`,
+  dynamic `call(f, ..)`, let-bound lambdas, `sqrt`, `cast_to_int`, `perform`)
+  are now rejected and the atom is reported `unverifiable` (exit 3); a
+  `cover` clause reports `unknown`. Calls that don't mention the bound
+  variable are unchanged.
+- `VERIFIER_POLICY_VERSION` is bumped to 4 so cached results are re-derived.
+
+---
+
+
+- **Workspace and member crate versions**: bumped versions from `0.6.19` to
+  `0.6.20` so `mumei --version`, `mumei inspect`, and proof-certificate
+  `mumei_version` match the release tag before tagging.
+- **Install references**: synced the README and README_JA pinned install
+  examples on `v0.6.20`, along with the Homebrew formula template and
+  `install.sh` help examples.
+
+---
+
+### 2026-09-21: Lean bridge contract catalog sync
+
+- Added the generated `schema/bridge_lemma_catalog.json` mirror and wired
+  `scripts/check_contract_vocabulary.py` to check or regenerate contract
+  constants from it, matching mumei-lean's single-source catalog workflow.
+
+### 2026-09-20 (review fixes): selector rebinding + match CE replay
+
+- `let m = match …; let m = match u { …, _ => m }` rebinding no longer
+  corrupts dispatch: `__sel#<var>` and the cap list were keyed by the
+  bare variable name, so the second binding clobbered the first
+  selector's frozen index and shifted dispatcher args (verify proved
+  pick(1,0)==105 while the binary returned 205 — real divergence). Sel
+  binding names are now minted per binding (`__sel#<var>#<fn>`), and the
+  union-cap list dedupes against the sel slot. Regression test added.
+- Spurious-counterexample diagnosis: `let h = if … {f} else {g}` and
+  `let m = match …` bindings are now registered as lambda names in
+  `collect_lambda_binding_names` (mirror of `resolve_lambda_expr`'s
+  flatness gate), and the CE replay evaluator handles `Expr::Match`
+  (Literal/Wildcard/Variable patterns, arm-local binding restore).
+  A genuine postcondition violation through a match-bound selector now
+  reports "Postcondition (ensures) is not satisfied" instead of the
+  misleading "Spurious counterexample" hint to escalate to Lean.
+
+### 2026-09-20: match-result lambda propagation (v2)
+
+- `let m = match t { 1 => f, 2 => g, _ => h }; m(args)` now works on
+  both sides, completing the conditional-lambda family started with
+  `if`-bindings. The verifier resolves the match into a nested
+  `LocalLambda::Ite` chain — `ite(t==1, f, ite(t==2, g, h))` in
+  first-match order — and codegen folds the arm conditions into the
+  same `__lamsel_*` dispatcher via a new `SelCond::MatchEq(target, lit)`
+  condition kind evaluated once at the binding site.
+- Scoped to `Literal`/`Wildcard`/`Variable` arm patterns without guards
+  and flat `Variable`/`Lambda` arm tails — `Variant` patterns, guards,
+  nested `if` tails, and non-i64 scrutinees all fall back to the
+  generic path where `m(args)` stays uncallable (fail-closed, identical
+  on both sides). Non-i64 scrutinees bail before IR emission rather
+  than panicking on `into_int_value`.
+
+### 2026-09-20: lambda bindings are Copy in MIR move analysis
+
+- `let f = |params| …` locals now carry the internal type `__lambda`
+  (added to `movability_from_type`'s Copy set): a lambda binding is an
+  immutable closure reference, not an owned resource, so reading it
+  copies rather than moves. Previously `let h = if c {f} else {g}` —
+  or `let h = f` — consumed `f`/`g` at the branch merge, so reusing
+  them (a second selector, `h = g`, calling `f` afterwards) failed
+  with "consumed on another path" / "moved twice". Reuse now works on
+  both sides, matching the verifier's name-based lambda resolution
+  (`local_lambdas` lookup never consumes).
+- `infer_hir_ty` propagates `__lambda` through `Variable`,
+  `IfThenElse`, and `Match` tails, so `let h = if c {f} else {g}`
+  itself binds a Copy local.
+
+### 2026-09-20: conditional lambda propagation (`let h = if c {f} else {g}`)
+
+- The verifier now resolves an if/match-free conditional whose leaf tails
+  are all lambdas into `LocalLambda::Ite{cond, then_lam, else_lam}`:
+  `h(args)` inlines `ite(c, f(args), g(args))`, so `h(5)` proves the
+  branch the let-site condition picked. Arity-mismatched leaves stay
+  fail-closed (`Unknown function h`), as do `match` arms for v1.
+- Codegen lifts a `__lamsel_*` dispatcher function whose leading `i64`
+  selector param picks the branch: the binding site folds the branch
+  conditions into a frozen `select` chain (`__sel#<h>` — a `#`-suffixed internal name users cannot write, so it can never collide with a program variable), and `h`'s
+  `@lam:` marker records `__sel#<h>` + the union of branch captures, so
+  `h(args)` / `call(h, args)` / `let h2 = h` all route through the
+  dispatcher. Captures and the selector index are evaluated once at the
+  binding site — a later rebind of a condition variable can't re-pick
+  the branch, matching the verifier's frozen `ite` condition.
+- Non-lambda leaves and diverging arities/arg types/return types fall
+  back to the generic path and stay uncallable (fail-closed on both
+  sides); nesting depth matches the verifier's uncapped recursion so a
+  deep `if`-chain never diverges between verify and codegen.
+
+### 2026-09-20: indirect lambda calls compile to native code (`f(args)` / `call(f, args)`)
+
+- `let f = |a: i64| …` now lifts the lambda to a module-level private
+  function (`__lam_<caller>_<var>`) instead of storing a `const 0`
+  placeholder: the pointer is bound to `f` and an `@lam:<fn>:<caps>`
+  marker rides `var_types` so `f(3)` / `call(f, 3)` emit a real call.
+  `#615`'s verifier-side semantics already inlined the body; codegen now
+  matches it, so `mumei run`/`--emit binary` produce working binaries.
+- Captures ride as leading extra params: `let k = 10; f = |a| a + k`
+  calls `__lam(k, a)`. Lambda *call targets* (`g = |y| f(y)`) aren't
+  syntactic free vars, so `emit_lambda_function` transitively collects
+  the value captures of every `@lam:` marker in scope and passes them
+  too — call-site values flow in, matching the verifier's env-at-apply.
+- Scope rules mirror the verifier: `let g = f` aliases copy the marker,
+  `f = …` rebinds lift a fresh function, `if`/`match` merges drop
+  divergent/single-side bindings, params shadow outer lambda names, and
+  undeclared-`f64`-returning lambdas compile via a two-attempt
+  signature probe.
+- Tests: `tests/test_lambda_codegen.rs` — 8 `mumei run` fixtures
+  (basic/captures/call()/inline literal/alias/transitive capture/array
+  capture/branch+rebind/param shadow/loop survival) asserting exit codes.
+
+### 2026-09-20: dynamic `call(f, …)` and lambda callees havoc array args (stale-read soundness fix)
+
+- **Soundness fix**: `call(f, a)` whose callee is not statically
+  resolvable — a `let`-bound `atom_ref` variable (`let f = atom_ref(w)`,
+  which binds `__atom_ref_w`, never `__atom_ref_f`), an unbound variable,
+  or a non-atom callee expression — always took the dynamic/contract
+  path, which mints a fresh result but never havoced array args. The
+  concrete `atom_ref` target may still store through its params, so
+  straight-line and post-loop reads claimed pre-call elements and
+  wrong-verified (`a[0] == 7` after `w` wrote `a[0] = 0`). The dynamic
+  path now havoc's every array-bound variable arg via
+  `havoc_array_name` (a no-op for non-array bindings).
+- **Same class, lambda callees**: `apply_local_lambda` ran the body on a
+  cloned `call_env`, so `|x| { x[0] = 0; 0 }`'s store never reached the
+  caller — post-call `a[0]` kept the pre-call element. After a
+  successful body translation the caller's slot is now havoced for each
+  param the body may store through (`stmt_stores_to_var`, the
+  `atom_stores_to_array` walk lifted to bare `Stmt`s), so a storing
+  lambda's arg is fresh while a pure lambda's arg keeps its entry fact.
+- `collect_assigned_vars`/`collect_expr_assigned_vars` now take `&VCtx`
+  and mirror the runtime callee-resolution precedence: a `local_lambdas`
+  hit marks per-param (`mark_lambda_store_args`), `AtomRef`/`Variable`
+  resolved atoms mark per-param (`mark_array_store_args`), and
+  unresolvable `CallRef` callees mark every array-bound variable arg —
+  matching the eval-time havoc exactly.
+- Fixtures: `tests/test_loop_call_array_havoc.mm` gained
+  `call_let_bound_ref_bounded`, `call_lambda_pure_keeps_value`,
+  `call_lambda_store_bounded`, `call_lambda_pure_loop_keeps_value`;
+  `tests/test_loop_call_array_havoc_negative.mm` gained
+  `stale_dyn_call_let_bound_ref`, `stale_dyn_call_straightline`,
+  `stale_call_lambda_straightline`, `stale_call_lambda_in_loop`,
+  `stale_call_let_bound_lambda` (all must fail).
+
+### 2026-09-20: scalar loop-havoc soundness; callee `len(result)` reaches callers
+
+- **Soundness fix**: `havoc_vars`'s catch-all used to rebind a
+  loop-modified `Str`/enum/f64 variable by *cloning the old Z3 const*,
+  so the post-loop environment kept the pre-loop value — `s = "y"`
+  inside a `while` still proved `s == "x"` afterwards. The `_` arm now
+  mints a fresh constant at the same raw sort via `Z3_mk_fresh_const`,
+  so only what the invariant re-establishes survives.
+- `let t = f(..)` now inherits the callee's `ensures: len(result) == k`:
+  the Call arm mints a `len_call_<name>_<id>` symbol, registers it in
+  `VCtx::call_result_lens` keyed by the result array's root ast, and
+  evaluates the callee ensures against it. `wire_array_slots` and
+  `tail_len_expr` recover that symbol for any binding/expression holding
+  the same result (including `if`/`match` merges and `len(f(..))`
+  directly), instead of minting an unconstrained `len_t`. A wrong claim
+  (`len(t) == 4` for a `len == 3` callee) is now rejected for the right
+  reason.
+- Tests: `tests/test_scalar_havoc.mm` +
+  `tests/negative/scalar_havoc_stale.mm` (Str/enum/f64 stale values must
+  not verify) and `tests/test_call_result_len.mm` +
+  `tests/negative/call_result_len.mm`.
+
+### 2026-09-20: `while` loops havoc array args of mutating calls (stale-read soundness fix)
+
+- **Soundness fix**: a `while` body that *calls* an atom storing through
+  an array param (`let t = w(a)` where `w` does `a[i] = v`) mutated the
+  caller's array at eval (`havoc_array_args` on the step env) but the
+  loop-carried `modified` set never marked `__z3_arr_<v>` — the post-loop
+  env kept the entry const, so `a[i]` read pre-loop values and stale
+  `ensures` wrong-verified (e.g. `result == 7` after `w` wrote `a[0]=0`
+  under `requires: a[0] == 7`). `collect_assigned_vars` now resolves each
+  statement-context call's callee with the *same* predicate eval applies
+  (`atom_stores_to_array` per param, `Expr::Variable` args only) and marks
+  the matching `__z3_arr_<arg>` slots. Resolution mirrors the runtime:
+  `Call` names try the FQN form (`mod.f` → `mod::f`) so explicit
+  type-arg calls (`g<i64>(a)` → `g<i64>`) hit the instantiated atom;
+  `call(f, a)`/`CallRef` resolves `AtomRef{name}` callees directly and
+  `Variable` callees bound as `__atom_ref_<var>` under the variable's own
+  name — `get_atom(var)` failing means eval takes the dynamic-call path
+  (fresh result, no arg havoc), so unresolvable callees stay unmarked as
+  a precise mirror. `Expr::ArrayLit` elements are walked too — a call
+  nested in a literal (`let m = [w(a), 1]`) executes at eval and must
+  mark the same way. Calls inside
+  `cond`/`invariant`/`decreases` are not marked — they havoc live on the
+  havoced envs at eval, and marking them would havoc `a` even on envs
+  whose eval never reaches the call (over-havoc → weaker proofs).
+- Precision verified: a loop calling a *pure* callee keeps `a[0] == 7`
+  provable post-loop, and only the param the callee stores through is
+  havoced (a sibling array arg keeps its entry value).
+- Tests: `tests/test_loop_call_array_havoc.mm` (provable claims under
+  havoc, `len` preservation, pure-call precision, per-arg precision) +
+  `tests/test_loop_call_array_havoc_negative.mm` (stale `[i64]`/`[Str]`
+  reads via `Call`, `call(f, …)`, `g<i64>(…)`, an `ArrayLit`-nested call,
+  and moved-alias args) via
+  `tests/test_loop_call_array_havoc.rs`.
+
+### 2026-09-20: `while` loops havoc param arrays' post-state (stale-read soundness fix)
+
+- **Soundness fix**: a `while` body that only *writes* a param array
+  (`a[i] = v` with no prior read) left the array's post-loop state at its
+  *entry* binding. `collect_assigned_vars` marks `__z3_arr_<v>` modified,
+  but a param's slot materializes lazily on first access, so it was absent
+  from `env` when `modified` was filtered — the havoc never ran, and
+  post-loop `a[i]` reads resolved the entry const, still constrained by
+  `requires`. `a[0] = 9` in a loop followed by `ensures: result == 7`
+  (with `requires: a[0] == 7`) wrong-verified. The while translator now
+  materializes `__z3_arr_<v>` (aliased to the entry const) before
+  filtering `modified`, so param arrays are havoced exactly like local
+  literals. `len_<v>` is still not havoced — stores cannot resize.
+- Verified on `[i64]` and `[Str]` params: stale claims (`a[0] == 7` after
+  `a[0] = 9`) and last-write claims (`a[0] == 9`) both fail now; claims
+  that survive a fresh-unconstrained element still prove.
+- `havoc_vars` also rebinds every `env` array sharing the havoced array's
+  backing root (`array_root_ast`), matching postcall alias handling —
+  otherwise `let b = a` + a loop write through `a` left `b[i]` reads on
+  the stale entry const (same wrong-verify through the alias).
+- Tests: `tests/test_loop_array_havoc.mm` (post-loop provable claims,
+  `len` preservation, read-then-write mix, alias read) +
+  `tests/test_loop_array_havoc_negative.mm` (stale `[i64]`/`[Str]` reads,
+  last-write claim, stale reads through aliases) via
+  `tests/test_loop_array_havoc.rs`.
+
+
+### 2026-09-20: `[Str]` element sort; `[[T]]` nested arrays fail closed
+
+- `[Str]` now encodes on a real `Int -> Seq` (Z3 `String`) range sort
+  instead of falling through to `Int`: `array_element_sort_from_type`
+  maps `LoweredType::Str` to a new `ArrayElementSort::Str`, literals probe
+  `SortKind::Seq` elements (`["x", "y"]` builds an `Int -> Seq` store
+  chain; `["x", 1]` is a "mixes string and non-string elements" type
+  error), `coerce_to_array_elem_sort` gained a `Str` arm so
+  `a[i] = "s"` stores work, `wire_array_slots`/`havoc_array_name` carry
+  `Seq` ranges through, and `dynamic_ite` can merge `Seq` values.
+- `z3_dynamic_array` consults `env[name]`'s array value before
+  synthesizing a const from the declared type — this keeps `result[0]`
+  on `atom -> [Str]` (spec-validation `result` binding) on the `Seq`
+  sort, and `param_z3_value`/`z3_array_for_name` now build element sorts
+  through a recursive `z3_sort_for_lowered` instead of the flat tag.
+- `[[T]]` is now fail-closed instead of silently wrong: `a: [[i64]]`
+  previously gave `a[i]` a phantom `Int` element — enough to
+  wrong-verify `requires: a[0] == 7; ensures: result == 7; body: { a[0] }`.
+  `verify_inner` rejects nested array types in params/return types up
+  front, the parser records a syntax failure on `expr [ … ]` leftovers
+  (`a[i][j]`, `f()[0]` — the trailing bracket used to re-lex as an
+  orphan literal statement), `coerce_to_array_elem_sort(Nested)`
+  rejects array stores, and `param_z3_value` builds a genuine
+  `Array(Int, Array(Int, …))` sort for any auxiliary path that still
+  binds one, so an element select yields `Array` and fails scalar use.
+- Loop induction havoc (`havoc_vars` in `stmt.rs`) keeps the `Seq`/
+  nested `Array` range too — a local `[Str]` literal stored inside a
+  `while` previously came back `Int`-elemented and the next `a[i] = "s"`
+  store crashed Z3 (`!ast.is_null()` panic); post-loop `a[i]` now stays
+  a string.
+- Tests: `tests/test_array_str.mm` (15 atoms: param/literal reads,
+  `==`/`!=`, param+local stores, post-state ensures, `len`, `forall`,
+  aliasing, call args, `if`-merge, `-> [Str]` tail, loop-havoc range,
+  `len` on a `Str` element),
+  `tests/test_array_str_negative.mm` (wrong claim, non-string store,
+  mixed literal, wrong return element) and `tests/test_array_nested.mm`
+  + `tests/test_array_nested_index.mm` (signature rejection, nested
+  literal, `a[i][j]` syntax error).
+
+### 2026-09-20: Explicit-type-argument calls `name<T, …>(args)`
+
+- `f<i64>(x)` / `apply<i64, Network>(42, atom_ref(net_fn))` previously
+  misparsed as comparisons — `apply < i64` then `>` — silently
+  producing nonsense expressions or vacuous passes.
+  `tests/effect_polymorphism_mixed.mm` carried such a misparse before
+  its call was worked around; it is restored to the real
+  explicit-type form.
+- The parser now speculatively matches `ident` `<` type-ref-list `>`
+  `(` and, only on that exact shape, produces a `Call` whose callee
+  name carries the instantiation (`apply<i64, Network>`) — matching
+  the monomorphizer's `parse_type_ref(call_name)` collection and the
+  atom registry's `display_name()` keys, so lookup, HIR lowering, and
+  MIR unbound-name checks work unchanged. Every other shape (`a < b`,
+  `a < b > c`, `a < f<c >> d`, `f < i64 > x` with no `(` after `>`)
+  rewinds and stays a comparison; `>>` splits are rolled back via a
+  token-stream snapshot.
+- The monomorphizer also scans `requires`/`ensures`/`invariant`/`forall`
+  clause expressions for instantiated call names, so
+  `ensures: result == id<i64>(3)` resolves instead of skipping the
+  clause as unsupported.
+- Unknown callees or unsatisfied `where` bounds stay fail-closed:
+  `mystery<i64>(x)` reports `Unknown function: mystery<i64>`; a call
+  site violating the monomorphized callee's `requires` fails as a real
+  precondition error.
+- Tests: parser coverage in `parser/mod.rs` (`test_parse_explicit_type_arg_call`,
+  spacing/nesting, comparison regressions, while-cond), CLI harness
+  `tests/test_generic_call.rs` over `tests/test_generic_call.mm` /
+  `tests/test_generic_call_negative.mm` and the effect-polymorphism
+  fixtures.
+
+### 2026-09-20: clause `match` on struct fields resolves the field's type — and must be exhaustive
+
+- `requires:`/`ensures:` clauses lower with `solver_opt = None` so arm-body
+  side effects never leak onto the ambient solver — but that also skipped
+  the exhaustiveness check and the scrutinee's enum-domain assert. A
+  non-exhaustive clause match then fell through the `ite` fold to the
+  **last arm's body on every uncovered input**: `requires: match h.r {
+  Shape::Point => true }` silently lowered to `true`, a vacuous-verify
+  soundness hole.
+- `Expr::Match` now runs domain injection and the exhaustiveness check on
+  a scratch solver (seeded with `vc.clause_context`, the already-lowered
+  clauses of the same spec) whenever no ambient solver is present. A
+  non-exhaustive clause match is a `spec_lowering_failed` error;
+  exhaustive matches lower exactly as before.
+- The `decl_hint` that disambiguates colliding variant names now covers
+  `FieldAccess` chains, calls, and `result`, not just bare variables: a
+  new `declared_type_of_expr` walks `h.r` / `h.a.b` / `f(x).r` /
+  `result.r` through `StructDef.fields` to the field's declared type
+  name (`param h: H → H → field r → Shape`). This complements the
+  const-name walk in `target_param_enum_name`, which dead-ends on
+  scrutinees with no flattened `h_r` const (e.g. `result.r`).
+- `infer_expr_enum_name` uses the same walk, so `let s = h.r` records
+  `s: Shape` and a later `match s` resolves like `match h.r`.
+- Non-enum fields (`match h.n` on `n: i64`) behave exactly like a
+  body-level i64 match: literal patterns + wildcard work, and a
+  non-exhaustive literal-only match fails closed.
+- Tests: `tests/test_clause_match_struct_field.mm` (5 atoms),
+  `tests/test_clause_match_struct_field_negative.mm` (4 atoms).
+
+### 2026-09-20: `len` resolves strings and structural array values; scalar args are type errors
+
+- Previously every non-`Variable` `len(e)` argument collapsed onto one
+  shared uninterpreted `len_arr` symbol, and `len(x)` on an `i64`
+  silently bound a fresh unconstrained constant — so `len("abc") == 3`
+  could fail while `len(5)` was vacuously admissible.
+- `Str` arguments now map to Z3 `str.len` (`Z3_mk_seq_length`), so
+  `len("abc") == 3`, `len(s)` on `Str` params, and `len("ab" + "cde")
+  == 5` all reason about real string length.
+- Non-variable array arguments (literals, `if`/`match` values, call
+  results) resolve through `tail_len_expr`: literals get their concrete
+  length, branch values get the mirrored `ite` length merge. Only an
+  argument that actually produces a tracked array may fall back to a
+  fresh symbol — scalars and untracked variables are a clean type error
+  (`len() expects an array or string argument; \`x\` is neither`).
+- LLVM codegen keeps pace: `len` on `Str` values emits `strlen` (locals
+  and `s + t` results alike), `len` on string/array literals
+  constant-folds, and `len` on `if`/`match`/call array values extracts
+  the fat pointer's `len` field. The old fallthrough that emitted
+  `const 0` for anything it didn't understand is gone — the verify-only
+  `len` would otherwise have compiled to wrong code.
+
+ 9a349ff (verify: len() resolves Str via str.len and array values structurally; scalars are type errors)
+### 2026-09-20: `let`-bound lambdas resolve at indirect call sites
+
+- `let f = |a| a + 1` already bound the lambda, but `f(3)` /
+  `call(f, 3)` fell through `Expr::Call`/`Expr::CallRef` to
+  `Unknown function: f` — so an `ensures` on the call result was
+  unprovable, and a *wrong* `ensures` surfaced as "Counterexample
+  unvalidated" (spurious) instead of a genuine counterexample.
+- `VCtx` gains `local_lambdas` (`RefCell<HashMap<String, Rc<LocalLambda>>>`,
+  next to `local_enum_types`/`local_array_elem_types`), populated by
+  `let`/`assign` and cleared by `havoc_vars`/non-lambda rebinds.
+  `LocalLambda::Closure` stores the `Expr::Lambda` plus the lambda
+  scope captured at binding time, so free lambda names inside the body
+  resolve lexically — `let g = …; let f = |a| g(a); let g = …; f(x)`
+  keeps the `g` live when `f` was defined.
+- `apply_local_lambda` evaluates args in the caller env (call-by-value)
+  and runs the body with `param <- arg` bindings plus the usual
+  struct-field/array-slot wiring — `f(3)` is the let-in
+  `let a = 3 in a + 1`. Higher-order calls work too: `twice(inc, 4)`
+  re-binds param `f` to `inc`'s closure, and `call(|a| a * 5, 2)`
+  applies an inline literal. A lambda param called while its own body
+  is checked at bind time resolves through `LocalLambda::Opaque` to a
+  fresh symbolic int (the check's value is discarded; the real callee
+  is supplied at each call site).
+- Scoping mirrors `local_enum_types`: if/else merges keep a name when
+  both branches leave the *same* binding (`Rc::ptr_eq` — aliases
+  share the allocation, so `f = g` on both sides survives, while
+  textually identical but distinct lambdas drop); one-sided branch
+  bindings leak like `merge_branch_envs`; while/match arms snapshot and
+  restore the map. Divergent branch bindings, `f = 0` rebinds, arity
+  mismatches, and recursive `|a| f(a)` all fail closed.
+- `spurious_detection` replays `EvalValue::Lambda` closures
+  (params bound in the captured `EvalEnv`), and
+  `collect_expr_symbols`/`collect_stmt_symbols` stop flagging
+  lambda-bound names as `uninterpreted_function` — `f(3)` where the
+  postcondition is wrong now reports a *validated* counterexample.
+- Tests: `tests/test_lambda_indirect_call.mm` (12 atoms: direct,
+  multi-arg, capture, shadowed params, `call(f, x)`, alias, inline
+  literal, higher-order, if/while/match scoping) and
+  `tests/test_lambda_indirect_call_negative.mm` (wrong postcondition →
+  validated counterexample; arity, rebinding, recursion, divergent
+  branches → fail closed), run by `tests/test_lambda_indirect_call.rs`;
+  `tests/test_lambda_basic.mm` also verifies now. MIR/codegen for
+  indirect calls is unchanged — a `f(3)` local is still lowered as a
+  direct `Rvalue::Call`, so `mumei build`/`run` on lambda calls is out
+  of scope.
+
+
+### 2026-09-20: `match`-arm array literals merge their lengths
+
+- `let a = match e { A => [1, 2], B => [3, 4, 5] }` already merged the
+  array contents (`ite(c_A, arr_A, ite(c_B, arr_B, …))`), but `len_a`
+  stayed an unconstrained symbol — `a[1]` failed the bounds check even
+  though it is in bounds on every arm.
+- `wire_array_slots` now walks the result's `ite` spine and mirrors the
+  same conditions on lengths: `len_a = ite(c_A, len_A, ite(c_B, len_B,
+  …))`. Arm tails contribute a concrete length for literals, the tracked
+  `len_<src>` for variables, and — since arm-local `let`s never reach
+  the merged env — the rhs of `A => { let t = […]; t }` is resolved via
+  `stmt_let_rhs`. Anything unresolvable gets a fresh `#m<idx>` symbol.
+- The merge is recursive: a nested `if`/`match` in an arm (or `if`
+  branch) tail mirrors the value node's own `ite` children, so
+  `match e { A => if c { [1,2] } else { [9,9,9] }, B => [3,4] }` yields
+  `len_a = ite(c_A, ite(c, 2, 3), 2)` — closing the conservative
+  nested-`if` gap left by the previous entry too. Depth is bounded
+  (`TAIL_LEN_DEPTH`) so `let x = x`-style cycles bail out fresh.
+- Bounds stay per-arm precise: `a[2]` fails closed on any path whose
+  arm/branch has 2 elements.
+- Tests: `match_arm_lit_len` / `match_arm_local_let` /
+  `match_arm_var_len` / `match_arm_three_way` /
+  `match_arm_nested_if` / `match_arm_nested_match` /
+  `if_branch_nested_if` in `tests/test_array_literal.mm`,
+  `match_arm_lit_oob` / `match_arm_nested_if_oob` in
+  `tests/test_array_literal_negative.mm`.
+
+### 2026-09-20: `if`-branch array literals merge their lengths
+
+- `let a = if c { [1, 2] } else { [3, 4, 5] }` already merged the array
+  contents (`ite(c, arr1, arr2)`), but `len_a` stayed an unconstrained
+  symbol — `a[1]` failed the bounds check even though it is in bounds on
+  both branches, and `len(a)` proved nothing.
+- `wire_array_slots` now reuses the ite condition (child 0 of the merged
+  array) to set `len_a = ite(c, len_t, len_e)`: literal tails contribute
+  their concrete length, a `var` tail contributes the tracked `len_<src>`
+  (including `let`-bound block tails like `if c { let t = [1,2]; t }
+  else { … }`), and anything else falls back to a fresh per-side symbol
+  (`len_<name>#then` / `#else`).
+- Bounds are per-branch precise: `a[2]` still fails closed on the short
+  branch. Nested `if` inside a branch tail keeps the conservative fresh
+  length (outer ite merges what it can).
+- Tests: `if_branch_lit_len_read` / `if_branch_lit_len_pred` /
+  `if_branch_block_tail` in `tests/test_array_literal.mm`,
+  `if_branch_lit_oob` in `tests/test_array_literal_negative.mm`.
+
+### 2026-09-20: rebinding an array var to a scalar clears its tracked array state
+
+- `let a = [1, 2]; a = 5; a[0]` **verified** (`a[0] == 1`) even though
+  `a` is the integer `5` — `wire_array_slots` returned early on the
+  non-array value without removing `__z3_arr_a`/`len_a`, so array
+  indexing kept reading the pre-rebind `[1, 2]` chain.
+- Simply removing the slots is not enough: `z3_dynamic_array` falls back
+  to `Array::new_const(ctx, name)` when `__z3_arr_<name>` is absent, and
+  Z3 interns consts by name — for a `[T]` **parameter** that re-derives
+  the original param const, resurrecting requires-side assertions
+  (`arr = 5; arr[0]` still proved `arr[0] == 4`). The non-array arm now
+  installs a `#`-suffixed fresh array + length (`{name}#rebound`,
+  `len_{name}#rebound` — `#` can never appear in a source identifier, so
+  no interning collision): post-rebind `a[i]`/`a[i] = v`/`len(a)` read an
+  unrelated array and fail closed (`Potential Out-of-Bounds`).
+- Rebinding to a scalar keeps the value usable (`a` → `5`), rebinding
+  back to an array re-wires the slots, scalar → array rebinding works,
+  and `let b = a` aliases stay isolated (`a = 5` does not poison `b`).
+- Tests: `tests/test_array_literal_negative.mm` gained
+  `scalar_rebind_stale_read` / `scalar_rebind_stale_store`;
+  `tests/test_array_literal.mm` gained `rebind_scalar_tail` /
+  `rebind_back_to_array` / `scalar_to_array`.
+
+### 2026-09-20: string literals re-escape on body re-lex (`\"`, `\\`, `\n`, `\t`)
+
+- The lexer stores DECODED string content (`\n` → real newline, `\"` →
+  real quote), but three re-serialization sites wrote it back raw:
+  `append_token` (`collect_brace_body` — the atom-body round-trip),
+  `Token::StringLit`'s `Display`, and `legacy_tokenize`'s source
+  reconstruction. Any escaped char corrupted the body: `"a\"b"` closed
+  the literal early and left `b"…` to parse as bare identifiers
+  (`unresolved variable(s) in body`), and `"a\\nb"` (backslash-n, two
+  chars) silently re-lexed as `"a<newline>b"` — a different value, so
+  e.g. comparing the two literals produced a wrong equality result with
+  no error.
+- New `escape_string_content` re-encodes `\`, `"`, newline and tab;
+  all three sites use it. Backslash-n and newline literals stay
+  distinct; embedded quotes round-trip.
+- The same raw-write pattern existed at the `Expr::StringLit` level in
+  `expr_to_source_string` (call_graph.rs — feeds requires-substitution
+  text that is re-lexed), `trace_evaluated_expression`
+  (dataflow_inference.rs) and `expr_to_source` (loop_detector.rs, which
+  used Rust `{:?}` — mostly-correct but diverges on chars the Mumei
+  lexer doesn't decode); all three now use the same helper.
+- Tests: `tests/test_string_literal_escape.mm` (quote / tab /
+  distinct-escape verified) + `tests/negative/string_literal_escape_collapse.mm`
+  (`"a\\nb" == "a\nb"` correctly fails) + `tests/test_string_literal_escape.rs`.
+
+### 2026-09-20: quantifier binders in body `let` are scoped (unbound-check false positive)
+
+- `let ok = forall(i, 0, n, i <= n)` inside an atom body was rejected by
+  the Phase 1h unbound check (`unresolved variable(s) in body: i`):
+  `forall`/`exists`/`sum`/`all`/`any`/`prod`/`count` lex as ordinary
+  `Expr::Call`s and MIR lowering visited every argument, so the binder
+  name was looked up as a free variable (pre-existing since the unbound
+  check landed; clause-side clauses already exempted the binder via
+  `is_binder_call`).
+- `lower_expr`'s `Call` arm now allocates a dedicated i64 local for the
+  binder and registers it in `var_map` **only while lowering the trailing
+  body argument** — `alloc_local` auto-registers named locals, so the
+  prior binding is restored immediately after allocation and again after
+  the body argument lowers. The binder shadows an outer binding of the
+  same name inside the quantifier body, stays OUT of scope in the bound
+  arguments (`forall(i, i, 5, …)` → `unresolved variable(s) in body: i`)
+  and does not leak past the call (`…; i` after the `let` → same error).
+  Any OTHER name inside the body argument still fails closed
+  (`forall(i, 0, 5, j > 0)` → `unresolved variable(s) in body: j`).
+- `forall`/`exists` in a body remain verification-only constructs:
+  codegen rejects them with a clean `Unknown function forall` error
+  (fail-closed, no silent miscompile).
+- Tests: `tests/test_forall_body_binder.mm` (forall/exists in `let`, true
+  and false predicates) + `tests/negative/forall_body_binder_unbound.mm`
+  + `tests/test_forall_body_binder.rs`.
+
+### 2026-09-20: parser body-panics become clean syntax errors; `if`-guard propagated to call-site `requires`
+
+- `verify`/`build` on `tests/test_libc.mm` and `tests/test_libc_contracts.mm`
+  panicked (`internal error (panic)`) at `parse_prefix` — the files used
+  `if cond then … else …`, and the parser's missing-`else` path was a hard
+  `panic!`. `then` is not part of the grammar; the tests now use canonical
+  `if c { … } else { … }`.
+- All three body-level `panic!`s in `mumei-core/src/parser/expr.rs` are now
+  recorded `syntax_failure`s with a poisoned recovery: a missing `else`
+  yields an `__mumei_missing_else_branch` unbound marker (MIR lowering
+  still rejects it if a caller ignores the diagnostics), a `while` without
+  `invariant` binds `__mumei_missing_invariant`, and an unknown
+  `task_group:` join qualifier records the failure and defaults to `all`.
+- New `parse_body_expr_checked` surfaces those diagnostics:
+  `Monomorphizer::collect` accumulates them in `body_parse_failures` and
+  the shared load pipeline returns a clean
+  `Syntax error(s) in atom bodies of '<file>': atom '<name>': <detail>`
+  for verify/check/build — non-zero exit, no panic.
+- Call-site `requires` (and trait `param_constraints`) checks now assert the
+  enclosing `if`/`else` branch guards from `path_cond_stack` before
+  querying the solver — the same pattern the shift-range and
+  div-by-zero checks already used. `libc::safe_free(ptr)` inside
+  `if ptr >= 0` now verifies instead of failing with a spurious
+  `ptr = -1` counterexample.
+- Tests: `tests/test_if_else_required.rs` +
+  `test_if_guard_requires.mm`, `test_if_missing_else_negative.mm`,
+  `test_while_missing_invariant_negative.mm`,
+  `test_task_group_bad_join_negative.mm`.
+### 2026-09-20: array literals `let a = [e0, e1, …]` — parse, verify, codegen
+
+- **`Expr::ArrayLit`** — a `[` at expression position (prefix) now parses an
+  element list instead of falling through to the catch-all that silently
+  produced `Expr::Number(0)`. `[]` alone cannot infer an element type, so it
+  records a `syntax_failure` and emits a `__mumei_empty_array_literal`
+  marker (the checked body-parse path turns it into a clean error, and the
+  marker is unbound downstream if a caller ignores the diagnostics).
+- **Verify** — the literal lowers to a fresh `Int -> Elem` store chain. A
+  `let`/`assign` binding wires the name-keyed slots
+  (`__z3_arr_<var>`, `len_<var>` = concrete `n`, `local_array_elem_types`)
+  via the new shared `wire_array_slots` helper — the same helper now also
+  wires **call arguments** (`head([7,8,9])` satisfies `requires: len(arr)>=1`)
+  and the **`result` tail** (`atom … -> [i64] { [1,2,3] }` answers
+  `ensures: forall(i,0,3, result[i]==i+1)`). Alias `let b = a` copies `len_a`.
+  For `var` sources the wired array is the tracked `__z3_arr_<src>` chain —
+  `env[src]` holds only the base const (stores never rewrite it), so
+  `arr[0] = 9; let a = arr` now sees the post-store array in `a`/`result`/callee.
+  Element sort is the *widest* across elements (Float > Real > Int; bool
+  literals must be uniformly Bool) — a first-element probe mis-sorted
+  `[1.0, 2.5, 4.0]` because Z3 numerals for whole floats report `Int`.
+  Nested `[…[…]…]` and `["x","y"]` fail closed (element sorts Array/Seq
+  unsupported — same frontier as `[Str]` array params).
+- **Callee array stores now reach the caller model (unsoundness fix)** —
+  a `[T]` argument hands the callee the `{len, ptr}` fat pointer, so
+  `arr[i] = v` inside a callee lands in the caller-visible buffer; the
+  verifier previously kept the caller's pre-call store chain and could
+  "verify" stale claims like `a[0] == 1` after `mutate(a)`. Call sites now
+  havoc the tracked chain (and every `let b = a` alias sharing its root) of
+  args whose callee parameter may be stored through — detected by
+  `atom_stores_to_array`, a depth-capped transitive scan over
+  `Stmt::ArrayStore`/call-argument positions (unknown or deeply-nested
+  callees assume mutation, fail closed). The same havoc is applied to the
+  callee param's slot in `call_env` before `ensures` evaluation so
+  `arr[i]` in a mutating callee's postcondition means post-call contents.
+  Pure callees keep full precision — `head(a); a[0]` still knows `a`.
+- **Codegen array call arguments emit the fat pointer** — a `[T]` argument
+  previously emitted only the `len` i64 while the callee's signature took
+  `{i64, ptr}`, producing invalid IR (`call i64 @bump(i64 %p_len)` against
+  `declare i64 @bump({i64, ptr})`). Array args now build the `{i64, ptr}`
+  aggregate via `insertvalue` from `array_ptrs` (or materialise a literal
+  inline) — verified parseable by `llvm-as-17`.
+- **While-loop havoc resets tracked array slots (unsoundness fix)** —
+  `havoc_vars` rebound `env[name]` for loop-modified vars but left
+  `__z3_arr_<name>`/`len_<name>` on the pre-loop store chain, so
+  `let a = [1,2]; while …{ a = [3,4,5] }; a[0]` could "verify" the stale
+  claim `result == 1`. Havoc now swaps in a fresh array const of the same
+  element sort plus a fresh `len_` symbol; post-loop proofs need an
+  `invariant:` pinning `len(a)` and/or elements.
+- **Codegen** — `emit_array_literal` materialises the elements into an
+  `alloca`'d `[n x elem]` with element-typed GEP stores (int→f64 widens via
+  `sitofp`), returning the `(len, elem_ty, data_ptr)` fat pointer that
+  `array_ptrs` already tracks. `let a = […]` registers `a` exactly like an
+  `[T]` parameter; `let a = arr` now aliases the fat pointer too (was
+  "Array 'a' not found as fat pointer parameter"). A `-> [T]` tail of
+  `ArrayLit`/`Variable` rebuilds the `{i64, ptr}` return aggregate.
+- **Pre-existing fix surfaced by this work** — `Token::FloatLit` Display
+  printed `1.0` as `"1"`, and `collect_brace_body` re-lexes the atom body
+  from token text, so every whole-valued float literal in a *body*
+  (`let x = 1.0`) silently became `Expr::Number(1)`. Display now emits
+  `{n:?}` so whole floats round-trip. (Clause text like `result == 1.0`
+  was already collected losslessly.)
+- Tests: `tests/test_array_literal.mm` (10 atoms: read/store/alias/f64/bool/
+  reassign/tail-forall/call-arg/symbolic/…) + `tests/test_array_literal.rs`
+  (+ `test_array_literal_negative.mm` — `a[3]` on a len-3 literal rejected).
+
+- Backlog edges noted: rebinding an array name to a scalar (`a = 5`) leaves
+  `__z3_arr_a`/`len_a` stale (same class as the `#603` alias edge — MIR has
+  no reassign typecheck yet); `StringLit` re-quoting in `collect_brace_body`
+  loses escapes (`"a\nb"`); struct-field scrutinees in `requires`/`ensures`
+  clauses still lack declared-type resolution.
+
+### 2026-09-20: counterexample report no longer flags translated builtins as uninterpreted
+
+- `collect_expr_symbols` (spurious-CE detection) treated every `Expr::Call`
+  to a name absent from `module_env.atoms` as an `uninterpreted_function`
+  dependency — including translator-handled builtins (`len`, `forall`,
+  `exists`, `matches`/`match_regex`/`re_match`, `sqrt`, `cast_to_int`, string
+  predicates). A clause like `requires: len(arr) == 3` made genuine
+  counterexamples get labeled "spurious — escalate to Lean" even though the
+  solver had the real model.
+- `is_translated_builtin` exempts those names, so genuine failures report as
+  counterexamples again. Regression: `tests/negative/builtin_not_spurious.mm`
+  + `tests/test_builtin_cex_label.rs`.
+
+### 2026-09-20: `let a = arr` aliases share the tracked array (len + store history)
+
+- `Stmt::Let`/`Stmt::Assign` with a bare `Variable` value now propagate the
+  source's `__z3_arr_<name>` backing const and `len_<name>` symbol to the
+  alias: `let a = arr` then `a[i]` reads/stores share `arr`'s constraint
+  state. Previously the alias lowered to a fresh unconstrained array, so
+  `a[0]` failed bounds checks even when `forall(i,0,n,arr[i]…)` pinned
+  `len_arr >= n`.
+- Chained aliases (`let b = a` where `a` aliases `arr`) propagate
+  transitively. Arrays are Move types — `arr` is consumed by the alias, so
+  post-move reads/writes go through the alias name.
+- Tests: `tests/test_alias_probe.mm` (alias read/store/chain) +
+  `tests/test_array_alias.rs`.
+
+### 2026-09-20: clause-scope phantom names fail closed; unbound-check exemptions aligned
+
+- `requires` / `ensures` / `invariant` / `forall_constraints` clauses that
+  reference undeclared names now fail verification with
+  `unresolved name(s) in <clause>: <names>` — the clause counterpart of the
+  Phase-1h body check. A phantom name in `requires` made the precondition
+  trivially satisfiable (vacuous verify); in `ensures` it produced spurious
+  postcondition failures. Quantifier binders (`forall(i, ...)`), clause-local
+  `let`s, match-arm bindings, `result` (ensures only), `true`/`false`, and
+  module-level type/atom names are recognised as bound.
+- Body-check follow-up (`unbound_names` exemptions): names of declared
+  module items — enums (`Shape` in `Shape::Point`), structs, atoms
+  (`atom_ref(name)`), type aliases, and effects (`FileWrite` in
+  `perform FileWrite.write`) — no longer count as unbound variables.
+  `consume x`/`ref x` params are bound under their bare identifier so `x`
+  resolves in the body (the parser keeps the keyword in `Param.name`).
+- Generic type-parameter items (`atom pipe<E>` etc.) are dropped from the
+  post-monomorphization item list; their names are now registered in the
+  module env anyway so references from other bodies stay resolvable.
+- Surfaced phantom-name sites fixed honestly: `std/{compliance,settlement,
+  container/verified_vector}.mm` and ten `tests/*.mm` files referenced `arr`
+  (or `brr`) in requires/body without declaring it — they now declare
+  `arr: [i64]` params (**signature changes**, e.g.
+  `verify_all_transactions_compliant(arr, n, limit)`). `negative/*.mm`
+  fixtures declare their arrays so they fail on the intended violation.
+- `tests/test_untyped_array_access.mm::uses_untyped_array` declares
+  `arr: i64` (annotated but non-`[T]`) — the `untyped_array_access`
+  diagnostic still fires; fully-undeclared names are now a hard error.
+- `tests/effect_polymorphism_basic.mm::main` called `pipe<FileWrite>(..)` —
+  generic call-site syntax does not exist (parses as a comparison chain);
+  it now calls `writer(42)` directly.
+- Tests: `tests/negative/clause_unbound_name.mm` +
+  `tests/test_clause_unbound_name.rs`.
+
+### 2026-09-20: unbound-check follow-up — lambda params bound; bogus generic-call syntax surfaced
+
+- `HirExpr::Lambda` lowering now registers the lambda's parameters as MIR
+  locals (with their declared types) before lowering the body and restores
+  outer bindings afterwards. Previously `|a| a` left `a` unbound, so the new
+  unbound check reported the parameter itself. Lambda bodies that call the
+  lambda indirectly (`call(f, x)` on a `let`-bound lambda) still fail closed
+  with a spurious-counterexample report — indirect lambda calls are
+  uninterpreted, a pre-existing verifier limit.
+- `tests/effect_polymorphism_mixed.mm::main` called `apply<i64, Network>(..)`
+  — explicit type-argument call syntax does not exist; it mis-parsed as the
+  comparison `apply < i64` and verified vacuously through the phantom-local
+  path. The atom now calls `net_fn(42)` so the effect-polymorphism path is
+  exercised for real. Generic-atom call sites remain unsupported (both
+  explicit `<T, E>` args and inference-only calls lower to uninterpreted
+  calls).
+
+### 2026-09-20: MIR unbound-variable check fails closed (phantom `Local(0)` fix)
+
+- `LowerCtx::lookup_var` silently aliased every unbound name to `Local(0)`
+  (the atom's first local): a mis-parsed or mistyped name — e.g. a bare
+  `task` used outside a `task`/`task_group` tail — bound to the first
+  parameter and move analysis then reported phantom `use of moved value`
+  / `ConflictingMerge` violations on an innocent local.
+- Unbound names now get a dedicated `__unbound:<name>` local recorded in
+  `MirBody::unbound_names`; Phase 1h fails verification with
+  `unresolved variable(s) in body: <names>` before move analysis runs.
+  `result` (the implicit named return) and bare nullary enum variants
+  (`Red`) are exempt — they are legal unbound idents.
+- Surfaced pre-existing phantom bindings in `std/list.mm`: six fold/sort
+  atoms referenced `arr[i]` without declaring `arr` (vacuous-verified
+  against an unconstrained Z3 array). They now declare `arr: [i64]` —
+  a **signature change**: `fold_sum(n)` is `fold_sum(arr, n)`, etc.
+- Clause-scope references (e.g. `forall(i, 0, n, arr[i] >= 0)` in
+  `requires` without a body/param `arr`) still verify against a fresh
+  unconstrained array — the same pre-existing leniency, unchanged.
+- Tests: `tests/test_mir_unbound_variable{,_negative}.{mm,rs}`.
+
+### 2026-09-20: `[f64]`/`[bool]`/`[str]` arrays lower to fat pointers in codegen
+
+- `resolve_param_type`/`resolve_return_type` only recognized
+  `[i64]` as the `{ i64 len, T* data }` fat pointer; `[f64]`/`[bool]`/
+  `[str]` params fell through to `i64`, so `arr[i]` failed codegen with
+  `Array 'arr' not found as fat pointer parameter` even though the same
+  code verified. Any `LoweredType::Array` now lowers to the fat pointer.
+- `array_ptrs` is now `(len, elem_ty, data)` — the declared element type
+  (`array_elem_llvm_type`: `f64`→double, `str`→ptr, bool/other→i64 —
+  bool keeps the i64 convention) drives the GEP/load/store in
+  `ArrayAccess` and `ArrayStore` instead of a hardcoded `i64`. Storing an
+  integer into a `[f64]` emits `sitofp` (`arr[0] = 42` → `store double
+  4.2e+01`); other mismatches go through `bitpreserve_cast` or a clean
+  codegen error. Task bodies capture arrays with their element type, so
+  the inner fat pointer is rebuilt correctly.
+- Array returns now rebuild the fat pointer: a tail `arr` emits
+  `insertvalue` len+data into `{ i64, ptr }` and `ret`s it. Previously an
+  array-typed return emitted `ret i64 %arr_len` under a `{i64, ptr}`
+  signature — invalid IR (and on `[i64]` even a silently-wrong len-only
+  `i64` return). Non-array tails under an array return type now fail with
+  a clean codegen error (e.g. `let a = arr; a` aliases and array
+  literals are not yet supported in HIR).
+- `test_polymorphic_array.mm`'s `test_i64_array` declared no `arr`
+  parameter at all — the phantom name verified vacuously against an
+  unconstrained Z3 array — now `arr: [i64]` like its siblings; the file
+  builds end-to-end (`mumei build --emit llvm-ir`) for the first time.
+
+### 2026-09-20: lowercase `qual::Variant` patterns parse as qualified paths
+
+- `parse_pattern` folded `::`-separated path segments only for uppercase
+  idents, so `mine::Cons(v)` bound `mine` as a variable pattern and
+  orphaned `::Cons(v)` into the arm tail — the qualifier was silently
+  dropped (and the arm could misbind or mis-verify). `::` folding is now
+  case-independent: any `ident::seg` path parses as a qualified variant
+  reference — lowercase qualifiers resolve by leaf name through the same
+  module-path semantics as before.
+- Tests: `test_pattern_lowercase_qual.mm` — lowercase qualifier binds the
+  payload; unknown module qualifier resolves by leaf.
+
+### 2026-09-20: match arm bindings stay arm-local (verify)
+
+- `merge_arm_env_into` folded every differing key of the arm env into the
+  post-match env, so names introduced by the arm — pattern bindings and
+  `let`s — leaked outward. A pattern variable shadowing an outer `let`
+  (`let x = 99; match p { P(x, b) => … }`) left `x` bound to the payload
+  after the match, and an arm-body `let` shadowing an outer name folded
+  back as if it were an assignment.
+- The merge now skips the arm-local name set: names collected from the
+  arm's pattern (`collect_pattern_bindings`, now `pub(crate)`) plus `let`
+  names anywhere in the arm body whose envs reach the arm env (blocks,
+  `if` branches, `acquire`/`task`/`task_group` bodies — loop bodies and
+  inner match arms run on cloned envs and are excluded deliberately).
+  Real `Assign`s to pre-existing variables still fold under the arm
+  condition, so `match` bodies can update outer state as before.
+- Known edge (pre-existing, unchanged by this fix): an arm that assigns an
+  outer name and *then* declares a same-named `let` (`{ x = 7; let x = 9 }`)
+  reports the pre-match value for `x` after the match — the outer write is
+  dropped instead of surviving as `7`. Before this fix the same program
+  leaked the shadow value `9`, so the pattern was already wrong; the fix
+  changes which wrong answer it produces. Splitting outer writes from
+  shadowed writes for one name needs ordered env tracking — backlog.
+- Tests: `test_match_arm_scoping.mm` (pattern shadow, let shadow,
+  outer-assign fold), `test_match_arm_scoping_negative.mm` (a write to a
+  shadowed name must not reach the post-match env).
+
+### 2026-09-20: fragment classifier resolves match owners via declared enum types
+
+- `detect_logic_fragment_tags` now threads a declared-enum-type
+  environment through `stmt_has_inductive_shape` /
+  `expr_has_inductive_shape`: parameters seed it and `let`/`assign`
+  bindings extend it (`expr_enum_name` resolves `E::V(..)`/`E::V`
+  constructors, enum-typed variables, enum-returning atom calls, and
+  `if`/`match` whose branches agree). The environment is scoped — blocks
+  clone it, arm/branch/loop bodies do not leak their `let`s back out.
+- A `match` arm's variant owner now resolves via
+  `ModuleEnv::resolve_variant_owner_by_hint(variant_name, hint)` where
+  `hint` is the scrutinee's inferred declared type. Previously a bare
+  variant name colliding across enums with different tags (e.g. `Ok`
+  declared by both `R1` and `R2`) was irresolvable and the atom kept the
+  `inductive_data_type` tag even though the finite-ADT datatype path
+  verifies it natively — `match r { Ok(v) => …, Err => … }` on `r: R1`
+  (or on `let r = R1::Ok(..)`) now stays in the decidable fragment.
+  Unresolvable owners still keep the tag (the verifier fails closed).
+- `resolve_variant_owner_deterministic` removed — its only caller was the
+  classifier, now on the hint-aware `resolve_variant_owner_by_hint`.
+- Tests: `test_colliding_variant_uses_declared_param_type`,
+  `test_colliding_variant_uses_let_binding_type`.
+
+### 2026-09-20: MIR match pattern bindings + merge-aware move analysis
+
+- **MIR lowering** (`mumei-core/src/mir.rs`): `match` arm patterns now emit
+  real locals — `Variable` binds the scrutinee (`Rvalue::Use`), `Variant`
+  field patterns bind positional `Rvalue::FieldAccess` projections (nested
+  variants recurse through a temporary). Previously pattern-bound names had
+  no `var_map` entry, so `lookup_var` fell back to `Local(0)` — the first
+  local — making `let q = p; match q { Mk(a,s,f) => a+s+f }` a spurious
+  "use of moved value `p`" UseAfterMove. Bindings are scoped per arm
+  (`var_map` saved/restored) so a pattern variable shadowing an outer name
+  does not leak past the arm or into sibling arms.
+- **MIR binding types** (`mumei-core/src/mir.rs`): pattern-bound locals now
+  carry the variant field's declared type (resolved through `enum_defs`,
+  `Self` → the owning enum), and `infer_hir_ty` resolves a `match` arm's
+  tail variable to that same field type. An `i64` payload binding is
+  therefore Copy — `let r = match p { P(a,b) => a }; let m = r` no longer
+  reports `r` as moved — while `Str` payloads stay Move and still trigger
+  `UseAfterMove`/`ConflictingMerge`.
+- **Move analysis** (`move_analysis.rs`): a `ConflictingMerge` is now only
+  reported when the divergent local is live at the merge block
+  (`liveness.live_in`). A local moved on one branch but never used again
+  (`let r = …; if c { r } else { 0 }`) is dead on every continuation path —
+  the divergent ownership is unobservable — so it is no longer a violation.
+  Conflicts on locals used after the merge are unchanged, and the merged
+  state still marks them dead so later uses fail as UseAfterMove.
+  `analyze_moves` computes liveness internally (no signature change); the
+  executor additionally runs `compute_liveness` + `insert_drops` before
+  analysis so scope-end drops are explicit.
+- **`infer_hir_ty`** gained a `HirExpr::Match` arm (infers the result type
+  from arm tail expressions) so `let r = match …` bindings of scalar
+  results are Copy rather than conservatively Move.
+- Tests: `test_move_analysis_merge_unused_move` (unit),
+  `test_mir_match_bindings{,_negative}.mm` + `test_mir_match_bindings.rs`.
+  `test_move_analysis_conflicting_merge` updated — its merge block now
+  returns the moved local so the conflict is observable.
+- Known adjacent gap (separate layer, pre-existing): the *verifier* (Phase
+  5, HIR executor) also leaks pattern bindings past the match — `let x = 99;
+  match p { P(x,b) => … }; if x > 0 …` sees `x` as the arm payload after the
+  match, not the outer `x`. MIR now scopes correctly; the spec-side
+  environment needs the same treatment.
+
+### 2026-09-20: prefix `!` (logical not) parses in expressions and spec clauses
+
+- `!e` desugars to `if e { false } else { true }` at parse time — the lexer
+  already produced `Token::Bang`, but `parse_prefix` had no arm for it, so
+  `!x` silently fell through the catch-all to `Number(0)` and the operand
+  token was left dangling. A relational desugar (`e == false`) is not used
+  because the comparison-chain normalizer would flatten `!(a < b)` into
+  `a < b && b == false`.
+- Works in bodies (`if !(b == 0)`), `let` initializers, `requires` /
+  `ensures` / `invariant` clauses, and match-arm guards. The operand must
+  lower to Bool — `!n` on an `i64` fails closed with "If condition must be
+  boolean" (same discipline as `&&`/`||`), and codegen emits the 0/1
+  branch identical to `if e { 0 } else { 1 }`.
+- Tests: `tests/test_bang_not{,_negative}.mm` + `test_bang_not.rs`.
+
+### 2026-09-19: `match` on `let`-bound enum values resolves the declared type
+
+- **Verify** (`mumei-core`): a `let`/`assign` binding now records the inferred
+  declared enum type of its value in `VCtx.local_enum_types` —
+  `infer_expr_enum_name` resolves `E::V(..)`/`E::V` constructors, enum-typed
+  variables and params, `if`/block tails whose branches agree, `match`
+  expressions whose arms agree, and calls to atoms declared to return an
+  enum. `match e` after `let e = IntList::Nil` resolves `Cons`/`Nil` to
+  `IntList` deterministically instead of failing "Ambiguous enum variant"
+  against the prelude `List` (whose `Cons` has a different tag). Rebinding
+  to a value with no inferable enum type clears the entry.
+- **Codegen** (`mumei-emit-llvm`): `HirStmt::Let` accepts an inferred type
+  that resolves to an enum (not only a struct), and `infer_struct_type_name`
+  types `if`/`else` expressions whose branches agree — `let e = if c {
+  Mine::Cons(1) } else { Mine::Nil }; match e` now emits the match instead
+  of erroring ambiguously.
+- **Branch scoping**: the inferred-type map is now scoped like the value
+  env — `if`/`else` branches run on snapshots and keep only entries both
+  branches agree on, and `while`-loop step/termination checks restore the
+  map so a loop-body `let` cannot leak a type onto outer bindings.
+- **Qualified arm patterns** (`parser` + resolvers): `match e {
+  Mine::Yes(v) => .. }` folds `E::V` into the arm's variant name; the
+  qualifier pins the owning enum and must agree with the target's declared
+  type — `match e { Other::V => .. }` on `e: Mine` fails closed with a
+  "belongs to enum" error instead of silently matching `Mine`'s `V`.
+  Previously the qualifier was silently dropped (a `Mine::Yes` arm parsed
+  as a dead `Mine` arm plus a bare `Yes` arm), and `variant_owners`
+  lookups only matched the leaf segment.
+- Tests: `test_datatype_enum.mm` gains `let_bound_ctor_match` (recursive
+  `IntList` let-bound through `Nil`, matched against colliding prelude
+  variants), plus `test_enum_qualified_pattern{,_negative}.mm` covering
+  qualified arms on datatype, Int-tag, and let-bound targets.
+
+---
+
+### 2026-09-19: enum parameters bind whole values; `==`/`!=` on enums is deep equality
+
+- **Enum parameters were masquerading as fat-pointer arrays** (`driver.rs`):
+  an atom parameter declared with an enum type used to be split as `{ ptr, len }`,
+  binding only field 0 (the tag) in `variables`. Three latent bugs followed:
+  `match m { Cons(v) => v }` bound `v` to `0` instead of the payload (the
+  verifier proved the payload-selector semantics — a silent verify/codegen
+  divergence), `a == b` compared the tag alone, and forwarding the parameter
+  to a callee passed `i64` where `{ i64, … }` was expected. Parameters now
+  check the declared enum too and bind the whole tagged-union struct.
+- **Deep equality for same-enum operands** (`expr_emit.rs` BinaryOp): `==`/`!=`
+  between two values of the same enum type emit a tag compare AND-ed with a
+  per-payload-slot compare (`icmp`/`fcmp oeq`/`mumei_str_eq` for int, float,
+  and `Str` slots), `zext`ed to `i64` — matching the verifier's deep datatype
+  equality (P10-C). `undef` slots of unit variants are skipped (`and` with
+  `undef` would poison the conjunction). Different enum types or struct
+  operands still fail with a clean codegen error.
+- **`len()` on a non-array binding is now a clean codegen error** instead of a
+  silently emitted `i64 0`: `len(m)` on an enum/struct/`Str` value, or
+  `len(a)` on a `let`-bound array literal, previously compiled to
+  `ret i64 0` — wrong code. Verified before fix that real array parameters
+  (fat pointers) keep working.
+- Tests: `test_codegen_enum_resolution` gains deep-equality,
+  struct-still-errors, payload-binding, and `len`-error cases; SPEC_GUIDE's
+  tagged-union section documents the semantics and the fixed parameter bugs.
+
+---
+
+### 2026-09-19: docs-sync — V1-A〜V1-D sections rewritten to implementation reality
+
+- `CROSS_PROJECT_ROADMAP.md`: the "現状のギャップ / 追加すべき機能 / 実装ファイル"
+  blocks for V1-A〜V1-D still described the planned surface (`verify-spec`,
+  `code_verifier.py`, `verify_spec_soundness`, `check_spec_satisfiability`,
+  `verify_spec_code_conformance`) as unimplemented. Rewritten to the actual
+  implementation: `audit` / `validate-spec` / `validate-code` /
+  `validate-spec-to-code` / `validate-code-to-spec` / `verify-conformance` /
+  `verify-traceability` CLIs and the `check_spec_health` /
+  `check_spec_contradiction` / `validate_nl_spec` / `validate_code` /
+  `validate_spec_to_code` / `validate_code_to_spec` / `verify_conformance` /
+  `verify_code_spec_traceability` / `verify_foreign_code` MCP tools. Remaining
+  honest gaps: V1-A-2 domain-template completeness warnings and V1-B-3 fix-diff
+  auto-generation.
+
+---
+
 # 📝 Changelog
+
+---
+
+### 2026-09-19: enum constructor expressions reach codegen (`E::V(..)` / `E::V`)
+
+- **HIR lowering** (`hir.rs`): qualified constructor calls `E::V(args)` lower
+  to `VariantInit` when the qualifier is a known enum declaring the variant —
+  a known atom name still wins, and module paths (`mod::f(..)`) or method
+  calls (`obj.f(..)`) stay `Call`. The `.`-spelled call form is deliberately
+  not converted: verification rejects `E.V(..)` as an unknown function, so
+  converting it would let codegen accept a program the verifier refused.
+- **Codegen** (`mumei-emit-llvm`): the `VariantInit` emission is extracted to
+  `emit_enum_variant_init` (tag `insertvalue` + per-slot `bitpreserve`
+  payloads) and shared by two sites — the `VariantInit` arm and the
+  `FieldAccess` arm, where an unbound `E::V` / `E.V` unit variant constructs
+  the value (a *bound* variable named like the enum keeps field-access
+  semantics, matching the verifier's `env.contains_key` shadow precedence;
+  `let m = Mine::Nil` also records `m: Mine` in `var_types` so a later
+  `match m` resolves the owner). Two fail-closed guards: constructing a
+  recursive enum errors cleanly (`enum 'IntList' is recursive`) instead of
+  recursing forever in the eager `enum_llvm_type`, and an arity/unknown-
+  variant mismatch is an explicit codegen error rather than silent `undef`
+  payload (verification rejects both before codegen is reached, so the guard
+  is defense-in-depth). Binary operators on aggregate values (`m == Mine::Nil`)
+  are a clean codegen error instead of an inkwell `into_int_value` panic;
+  `a == b` between enum-typed parameters keeps the pre-existing tag-field
+  comparison (payloads are not compared — a documented divergence from the
+  verifier's deep datatype equality).
+- **Tests**: `test_codegen_enum_resolution.rs` +5 — qualified payload/unit
+  ctors emit the owning enum's tag under a prelude `Cons` collision, a
+  `let`-bound unit ctor types the owner for `match`, ctor values flow into
+  match targets and callee params, enum equality errors cleanly, and a
+  recursive ctor fails cleanly.
+- **Docs**: `SPEC_GUIDE.md` documents constructor support and its limits
+  (recursive enums, positional union payload slots, mixed `Str`/`f64` slots).
+
+---
+
+### 2026-09-19: deterministic variant-owner resolution reaches HIR lowering and LLVM codegen
+
+- **`ModuleEnv::resolve_variant_owner_by_hint`** (`module_env.rs`): the
+  verify-side deterministic resolution rule is now available without a Z3
+  context — declared-type hint wins, sole/agreeing owners resolve, truly
+  ambiguous names error listing the owners.
+- **HIR lowering** (`hir.rs`): a bare `Name(args)` call converts to
+  `VariantInit` only when the owner is unambiguous (sole owner or agreeing
+  signatures) — a colliding bare name stays a `Call` and fails closed
+  downstream instead of silently binding to a per-process HashMap pick.
+- **LLVM codegen** (`mumei-emit-llvm`): `compile_pattern_test`,
+  `bind_pattern_variables`, and the payload extractors resolve the owning
+  enum through the match target's declared type — a bare parameter via
+  `var_types` (which now records enum-typed parameters, not just structs),
+  a `th.t` field access via the struct field's declared type, and other
+  scrutinees via `infer_expr_type_name`. Nested variant field patterns
+  propagate the field's declared type (`Self` resolves to the owner).
+  Before this, `mumei build` could emit tag comparisons for a different
+  enum than the one the verifier used when variant names collided
+  (e.g. a user `enum Mine { Cons(i64), Nil }` vs the prelude `List`),
+  silently diverging compiled code from verified semantics.
+- **Tests**: `tests/test_codegen_enum_resolution.rs` pins the emitted tag
+  constants for a prelude-colliding `match` on a declared parameter and on
+  a struct field; 5 `ModuleEnv` unit tests cover hint wins, hint-misses,
+  conflicting-tag ambiguity, agreeing signatures, and sole/unknown owners.
+- **Docs**: `SPEC_GUIDE.md` "Finite enums and tagged unions" notes that
+  codegen applies the same declared-type rule when emitting tag checks.
+
+---
+
+### 2026-09-19: parser — unknown atom-clause keywords are a checked-parse error
+
+- **`mumei-core/src/parser/item.rs`**: the atom clause loop's catch-all
+  silently skipped unrecognized tokens, so a malformed atom written as
+  `atom name\n  inputs: x: i64\n  requires: true; …` parsed with zero
+  params and the `inputs:`/`x:` lines dropped — the atom then **verified
+  vacuously** (even `ensures: result >= 999` passed). The loop now records
+  a `syntax_failure` for any word-like token followed by `:` that isn't a
+  known clause keyword, so `parse_module_from_source_checked`
+  (`verify`/`check`/`build` via `pipeline.rs`) rejects the file with
+  `unknown atom clause keyword 'inputs:'` while the tolerant `parse_module`
+  path (LSP) still recovers.
+- **`mumei-core/src/parser/mod.rs`**: `ParseContext::syntax_failure` —
+  non-`expect` syntax errors join `expect_failures`; `Token::is_word_like`
+  covers `Ident` and alphabetic keyword tokens.
+- Tests: `unknown_atom_clause_keyword_is_a_checked_parse_error` +
+  `known_atom_clauses_do_not_fail_checked_parse`.
+
+---
+
+### 2026-09-18: P10-C — finite enums verify on native Z3 datatype sorts
+
+- **`mumei-core/src/verification/support/datatype.rs` (new)**: a finite,
+  non-recursive, non-generic enum whose payload fields all resolve to
+  `i64`/`f64`/`Str`/`bool` lowers to a real Z3 `DatatypeSort` — variants are
+  constructors with `is-<Variant>` testers and per-field selectors of the
+  payload's true sort. Sorts are cached per context (`VCtx::enum_sorts`) so
+  every use shares one datatype declaration.
+- **Param/result seeding** (`param_z3_value_for_vc`): enum-typed params,
+  `result`, and callee return placeholders in spec_validation, vacuity,
+  call_graph, executor, and call-result seeding become `Datatype` consts.
+  Enums with recursive/generic/enum/struct/array payloads stay on the Int-tag
+  path.
+- **`match` on datatype targets** (`pattern.rs`, `expr.rs`): arm coverage is
+  the tester disjunction — `¬∨is_<V>(target)` UNSAT by the datatype
+  completeness axiom — and a missing arm reports the constructor by name
+  (`value = Blue -- no matching arm`). Field patterns bind to real selector
+  applications, so `s == Named("hi")` proves `n == "hi"` in the `Named(n)`
+  arm. `==`/`!=` between same-sort datatype operands is supported; ctor
+  expressions `E::V(args)`, `E::V`, and bare `V` construct datatype values.
+- **Fragment boundary** (`fragment.rs`): finite-ADT enum params and `match`
+  expressions on finite ADTs no longer tag `inductive_data_type` — they stay
+  in the decidable fragment. Recursive enums, generic enums, non-scalar
+  payloads, and scalar-only `match`es keep the tag (Lean 4 delegation).
+- **Tests**: `tests/test_datatype_enum{,_negative}.mm` + CLI harness (7 atoms
+  incl. Str/f64/bool payload selectors, requires-side ctor equality, and a
+  recursive-enum Int-tag pin); 6 fragment-classification unit tests.
+- **Review hardening (self-review rounds 1–6)**: empty enums keep the
+  Int-tag path (`DatatypeBuilder` panics on zero variants);
+  `variant_selector_apply` indexes accessors safely; ctor misuse (arity
+  mismatch, non-finite ctor, unknown variant on a known enum) is a hard
+  `spec_lowering_failed` instead of a silently-skipped clause; non-finite
+  `E::V` resolves to the tag index; comparing two different enum sorts is a
+  spec error. **Variant-owner resolution is now deterministic** —
+  `module_env.enums` is a `HashMap`, so a bare `Cons` pattern previously
+  picked its tag index from whichever of `IntList`/prelude `List` came first
+  in the hash order (same file verifying or failing per process).
+  `resolve_variant_owner` resolves via the match target's declared type,
+  accepts the unambiguous case, and fails closed when owners disagree;
+  `detect_enum_from_arms`, counterexample decoding, bare-variant ctor
+  errors, and fragment classification follow the same rule. Declared-type
+  hints reach `match result` (the executor rebinds `result` to the body
+  value, so the const name is lost — the hint comes from the scrutinee
+  expression), bound recursive tails (`__proj_{Enum}_{Variant}_{i}`
+  projector names carry the enum), and struct-field targets (`match th.t`
+  resolves `th_t` against `th: Thermo`'s field type, including nested
+  struct paths).
+- **Tests**: `tests/test_datatype_enum{,_negative}.mm` + CLI harness (7 atoms
+  incl. Str/f64/bool payload selectors, requires-side ctor equality, and a
+  recursive-enum Int-tag pin); `test_enum_variant_resolution{,_negative}.mm`
+  pins declared-type disambiguation and the fail-closed ambiguity error;
+  6 fragment-classification unit tests.
+- **Docs**: `SPEC_GUIDE.md` gains "Finite enums and tagged unions";
+  `ROADMAP.md` marks P10-C complete.
+
+---
+
+### 2026-09-19: P10-B — regex contracts compile to Z3 RegLan (`str.in_re`)
+
+- **`mumei-core/src/verification/support/reglan.rs` (new)**: a mini-compiler
+  lowers the Rust `regex` syntax used by `matches` / `match_regex` /
+  `re_match` literal patterns to native Z3 `Regexp` expressions. Substring
+  (`is_match`) semantics are reconstructed as `Σ*·re·Σ*` with the `Σ*` elided
+  on `^`-/`$`-anchored ends. Supported fragment: literals, concat, `|`, `()`,
+  `*`/`+`/`?` (lazy included), `{n}`/`{n,}`/`{n,m}` (bounds ≤ 64), `[…]` /
+  `[^…]` classes, `\d \w \s` (and `\D \W \S` complements), `\n \r \t`,
+  `\xHH`, escaped metacharacters, `.` (any ASCII char except `\n`), and
+  outermost anchors. `re.range` bounds above U+007F collapse in Z3 — range
+  bounds past the ASCII plane are rejected as unsupported instead.
+- **`effects.rs` where-clauses**: `matches(param, "pat")` now compiles to
+  `param.in_re re` first; the previous prefix/suffix/contains approximations
+  remain as a fallback for patterns outside the fragment.
+- **`translator/expr.rs`**: `matches`/`match_regex`/`re_match` calls in
+  atom contracts lower to `str.regex_matches(...)`. Non-literal patterns and
+  uncompilable constructs are hard verification errors — a silently dropped
+  `ensures` clause could otherwise report `verified` unchecked (偽陰性).
+- **Fragment tagging** (`fragment.rs`, `proof_cert/validation.rs`):
+  compilable `matches(`/`match_regex(`/`re_match(` calls no longer produce
+  the `regex_semantics` tag or the `regex_semantics_require_manual_lemma`
+  reason — both are kept only for patterns outside the decidable fragment
+  (lookarounds, backreferences, inline flags, interior anchors, `\b`, …).
+  `detects_regex_semantics` fixture coverage retained via `regex_match`.
+- **Docs**: `docs/SPEC_GUIDE.md` gained a "String and regular-expression
+  constraints" section describing the decidable fragment and the Lean
+  delegation boundary; `docs/ROADMAP.md` marks P10-B complete.
 
 ---
 

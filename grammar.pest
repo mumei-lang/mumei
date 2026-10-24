@@ -2,6 +2,7 @@ WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
 integer = @{ ASCII_DIGIT+ }
 ident = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
 operator = { "+" | "-" | "*" | "/" | "==" | ">" | "<" }
+string = @{ "\"" ~ ("\\" ~ ANY | !("\"") ~ ANY)* ~ "\"" }
 
 expr = { term ~ (operator ~ term)* }
 term = _{ integer | ident }
@@ -9,8 +10,8 @@ term = _{ integer | ident }
 // アトム定義: atom [名] { requires: [論理]; ensures: [論理]; body: [実装]; }
 atom_decl = {
     "atom" ~ ident ~ "(" ~ param_list? ~ ")" ~ "{" ~
-    "requires" ~ ":" ~ expr ~ ";" ~
-    "ensures" ~ ":" ~ expr ~ ";" ~
+    "requires" ~ string? ~ ":" ~ expr ~ ";" ~
+    "ensures" ~ string? ~ ":" ~ expr ~ ";" ~
     "body" ~ ":" ~ expr ~ ";" ~
     "}"
 }

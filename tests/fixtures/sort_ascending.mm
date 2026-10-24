@@ -7,7 +7,7 @@
 //
 // See also: std/list.mm comments, MumeiLean.Sort.insertion_sort_ascending_bridge
 
-atom verified_insertion_sort_ascending(n: i64)
+atom verified_insertion_sort_ascending(arr: [i64], n: i64)
 requires: n >= 0 && forall(i, 0, n, arr[i] >= 0);
 ensures: result == n && forall(i, 0, result - 1, arr[i] <= arr[i + 1]);
 body: {

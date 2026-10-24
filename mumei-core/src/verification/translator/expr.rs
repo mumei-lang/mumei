@@ -1,9 +1,47 @@
 #![allow(unused_imports)]
 use super::super::support::*;
 use super::super::*;
+use super::context::UnfoldCall;
 use super::*;
 use crate::lowering::{lower, LoweredType};
+use crate::verification::raising::{
+    mark_abstract_call_result_unraisable, references_call_result, resolve_source_base_type,
+};
+use crate::verification::translator::may_write::CalleeRef;
 use serde_json::json;
+use z3::ast::Ast as _;
+use z3::{FuncDecl, Sort};
+
+/// Generations of constant-argument contract instances unfolded below a congruent call (§8 D7).
+pub(crate) const CONSTANT_UNFOLD_DEPTH: usize = 32;
+/// Upper bound on the total number of unfolded instances per top-level call.
+pub(crate) const CONSTANT_UNFOLD_MAX_INSTANCES: usize = 256;
+
+/// Z3 value of `perform <NonDeterministic>.<op>(args)`.
+///
+/// The source is modelled as an uninterpreted function of all its arguments: the
+/// witness parameter (seed/timestamp/input) is universally quantified like any
+/// other input, and two performs with equal arguments denote the same value.
+/// That is exactly the replay guarantee — the result may be anything, but it
+/// is a deterministic function of the explicit inputs. An argument-free
+/// perform becomes a zero-arity function (a single unknown constant).
+pub(crate) fn nondeterministic_perform_result<'a>(
+    ctx: &'a Context,
+    result_name: &str,
+    args: &[Dynamic<'a>],
+    bitvec_i64: bool,
+) -> Dynamic<'a> {
+    let domain_args: Vec<&dyn Ast<'a>> = args.iter().map(|arg| arg as &dyn Ast<'a>).collect();
+    let range = if bitvec_i64 {
+        Sort::bitvector(ctx, I64_BITS)
+    } else {
+        Sort::int(ctx)
+    };
+    let domain: Vec<Sort<'a>> = domain_args.iter().map(|arg| arg.get_sort()).collect();
+    let domain_refs: Vec<&Sort<'a>> = domain.iter().collect();
+    let decl = FuncDecl::new(ctx, format!("__nd_{}", result_name), &domain_refs, &range);
+    decl.apply(&domain_args)
+}
 
 fn decimal_mul(lhs: &str, rhs: &str) -> String {
     if lhs == "0" || rhs == "0" {
@@ -130,6 +168,772 @@ fn callee_semantics_match_caller(vc: &VCtx<'_>, callee: &Atom) -> bool {
     callee_bv == vc.bitvec_i64
 }
 
+fn user_defines_callee(vc: &VCtx<'_>, name: &str) -> bool {
+    vc.local_lambdas.borrow().contains_key(name) || vc.module_env.get_atom(name).is_some()
+}
+
+/// The expected Z3 sort of a callee parameter under the caller's encoding.
+fn param_sort_probe<'a>(vc: &VCtx<'a>, tag: &str, type_name: Option<&str>) -> Sort<'a> {
+    datatype::param_z3_value_for_vc(vc, tag, type_name).get_sort()
+}
+
+/// Whether each argument lowers to the sort the callee parameter declares.
+fn call_arg_sorts_match<'a>(vc: &VCtx<'a>, callee: &Atom, arg_vals: &[Dynamic<'a>]) -> bool {
+    callee.params.len() == arg_vals.len()
+        && callee
+            .params
+            .iter()
+            .zip(arg_vals.iter())
+            .all(|(param, val)| {
+                val.get_sort() == param_sort_probe(vc, &param.name, param.type_name.as_deref())
+            })
+}
+
+#[derive(Clone, Copy)]
+enum RecFnParamKind {
+    Scalar,
+    Array,
+    Struct(usize),
+}
+
+fn array_element_type_name(type_name: &str) -> Option<&str> {
+    let trimmed = type_name.trim();
+    trimmed
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .map(str::trim)
+}
+
+/// Expand source parameters into the domain arguments of a congruent
+/// recursive function. Arrays carry their tracked length and structs are
+/// represented by their fields rather than their opaque handles.
+fn expand_rec_fn_args<'a, Array, Length, Field>(
+    kinds: &[RecFnParamKind],
+    arg_vals: &[Dynamic<'a>],
+    array_len_sort: &Sort<'a>,
+    mut array_for: Array,
+    mut length_for: Length,
+    mut field_for: Field,
+) -> Option<Vec<Dynamic<'a>>>
+where
+    Array: FnMut(usize) -> Option<Dynamic<'a>>,
+    Length: FnMut(usize) -> Option<Dynamic<'a>>,
+    Field: FnMut(usize, usize) -> Option<Dynamic<'a>>,
+{
+    if kinds.len() != arg_vals.len() {
+        return None;
+    }
+    let mut expanded = Vec::new();
+    for (param_index, (kind, arg_val)) in kinds.iter().zip(arg_vals).enumerate() {
+        match kind {
+            RecFnParamKind::Scalar => expanded.push(arg_val.clone()),
+            RecFnParamKind::Array => {
+                let array = array_for(param_index)?;
+                if array.get_sort() != arg_val.get_sort() {
+                    return None;
+                }
+                expanded.push(array);
+                let length = length_for(param_index)?;
+                if length.get_sort() != array_len_sort.clone() {
+                    return None;
+                }
+                expanded.push(length);
+            }
+            RecFnParamKind::Struct(field_count) => {
+                for field_index in 0..*field_count {
+                    expanded.push(field_for(param_index, field_index)?);
+                }
+            }
+        }
+    }
+    Some(expanded)
+}
+
+fn rec_fn_args<'a>(
+    vc: &VCtx<'a>,
+    callee: &Atom,
+    arg_vals: &[Dynamic<'a>],
+    call_env: &Env<'a>,
+) -> Option<Vec<Dynamic<'a>>> {
+    if callee.params.len() != arg_vals.len() {
+        return None;
+    }
+    let mut kinds = Vec::with_capacity(callee.params.len());
+    for (param, arg_val) in callee.params.iter().zip(arg_vals) {
+        if arg_val.get_sort() != param_sort_probe(vc, &param.name, param.type_name.as_deref()) {
+            return None;
+        }
+        let type_name = param.type_name.as_deref().map(str::trim);
+        if type_name.and_then(array_element_type_name).is_some() {
+            kinds.push(RecFnParamKind::Array);
+        } else if let Some(sdef) = type_name.and_then(|name| vc.module_env.get_struct(name)) {
+            kinds.push(RecFnParamKind::Struct(sdef.fields.len()));
+        } else {
+            kinds.push(RecFnParamKind::Scalar);
+        }
+    }
+    let array_len_sort = array_len_symbol(vc.ctx, "probe", vc.bitvec_i64).get_sort();
+    expand_rec_fn_args(
+        &kinds,
+        arg_vals,
+        &array_len_sort,
+        |param_index| {
+            call_env
+                .get(&format!("__z3_arr_{}", callee.params[param_index].name))
+                .cloned()
+        },
+        |param_index| {
+            call_env
+                .get(&format!("len_{}", callee.params[param_index].name))
+                .cloned()
+        },
+        |param_index, field_index| {
+            let type_name = callee.params[param_index].type_name.as_deref()?.trim();
+            let sdef = vc.module_env.get_struct(type_name)?;
+            let field = sdef.fields.get(field_index)?;
+            call_env
+                .get(&struct_field_key(
+                    &callee.params[param_index].name,
+                    &field.name,
+                ))
+                .cloned()
+        },
+    )
+}
+
+fn struct_field_values_for_call<'a>(
+    vc: &VCtx<'a>,
+    callee: &Atom,
+    arg_vals: &[Dynamic<'a>],
+    call_env: &Env<'a>,
+    caller_env: &Env<'a>,
+) -> Option<Vec<Dynamic<'a>>> {
+    if callee.params.len() != arg_vals.len() {
+        return None;
+    }
+    let mut field_vals = Vec::new();
+    for (param, arg_val) in callee.params.iter().zip(arg_vals) {
+        let Some(sdef) = param
+            .type_name
+            .as_deref()
+            .and_then(|name| vc.module_env.get_struct(name))
+        else {
+            continue;
+        };
+        if let Some(fields) = struct_fields_of_value(caller_env, arg_val, sdef) {
+            field_vals.extend(fields.into_iter().map(|(_, value)| value));
+        } else {
+            for field in &sdef.fields {
+                field_vals.push(
+                    call_env
+                        .get(&struct_field_key(&param.name, &field.name))?
+                        .clone(),
+                );
+            }
+        }
+    }
+    Some(field_vals)
+}
+
+/// `rec_fn#<callee>#<suffix>` application over the callee's expanded
+/// domain: the projection UF a non-scalar recursive result needs — `len`
+/// for `[T]` results, `field.<name>` per struct field. Sharing the domain
+/// makes equal argument tuples produce equal projections, which is what
+/// makes a (contents, len) pair or a struct result congruent.
+fn rec_fn_result_projection<'a>(
+    vc: &VCtx<'a>,
+    callee: &Atom,
+    suffix: &str,
+    domain: &[Sort<'a>],
+    range: &Sort<'a>,
+    args: &[Dynamic<'a>],
+) -> Dynamic<'a> {
+    let decl = vc.rec_fn_named(&format!("rec_fn#{}#{}", callee.name, suffix), domain, range);
+    let app_args: Vec<&dyn Ast> = args.iter().map(|v| v as &dyn Ast).collect();
+    decl.apply(&app_args)
+}
+
+/// The result sort a `rec_fn#` application for `callee` must produce.
+fn call_result_sort<'a>(vc: &VCtx<'a>, callee: &Atom) -> Sort<'a> {
+    let has_float = callee.params.iter().any(|p| {
+        p.type_name
+            .as_deref()
+            .map(|t| vc.module_env.resolve_base_type(t) == "f64")
+            .unwrap_or(false)
+    });
+    let result_type = callee
+        .return_type
+        .as_deref()
+        .or(if has_float { Some("f64") } else { None });
+    param_sort_probe(
+        vc,
+        &format!("__recsort_result_{}", callee.name),
+        result_type,
+    )
+}
+
+fn constant_args<'a>(args: &[Dynamic<'a>]) -> Option<(Vec<Dynamic<'a>>, String)> {
+    let mut simplified_args = Vec::with_capacity(args.len());
+    let mut keys = Vec::with_capacity(args.len());
+    for arg in args {
+        let simplified = arg.simplify();
+        let key = if simplified.as_int().is_some() {
+            if simplified.kind() != z3::AstKind::Numeral {
+                return None;
+            }
+            format!("int:{simplified}")
+        } else if let Some(value) = simplified.as_bv() {
+            let numeral = value
+                .as_u64()
+                .map(|value| format!("u{value}"))
+                .or_else(|| value.as_i64().map(|value| format!("i{value}")))?;
+            format!("bv{}:{numeral}", value.get_size())
+        } else {
+            let value = simplified.as_bool()?;
+            format!("bool:{}", if value.as_bool()? { "true" } else { "false" })
+        };
+        simplified_args.push(simplified);
+        keys.push(key);
+    }
+    Some((simplified_args, keys.join(",")))
+}
+
+fn constant_call_key(name: &str, args_key: &str) -> String {
+    format!("{name}({args_key})")
+}
+
+fn caller_outside_scc(vc: &VCtx<'_>, callee: &Atom) -> bool {
+    vc.recursion
+        .current_scc
+        .borrow()
+        .as_ref()
+        .map(|scc| !scc.contains(&callee.name))
+        .unwrap_or(true)
+}
+
+struct UnfoldSinkGuard<'v, 'a> {
+    vc: &'v VCtx<'a>,
+}
+
+impl<'v, 'a> UnfoldSinkGuard<'v, 'a> {
+    fn new(vc: &'v VCtx<'a>) -> Self {
+        *vc.recursion.unfold_sink.borrow_mut() = Some(Vec::new());
+        Self { vc }
+    }
+
+    fn take_frontier(&self) -> Vec<UnfoldCall<'a>> {
+        self.vc
+            .recursion
+            .unfold_sink
+            .borrow_mut()
+            .take()
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for UnfoldSinkGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.vc.recursion.unfold_sink.borrow_mut().take();
+    }
+}
+
+fn constant_call_antecedent<'a>(
+    vc: &VCtx<'a>,
+    atom: &Atom,
+    args: &[Dynamic<'a>],
+    call_env: &HashMap<String, Dynamic<'a>>,
+) -> Option<Bool<'a>> {
+    let requires = crate::verification::caller_requires_obligation(atom);
+    let mut terms = Vec::new();
+    if requires.trim() == "true" {
+        terms.push(Bool::from_bool(vc.ctx, true));
+    } else {
+        let req_ast = parse_expression(&requires);
+        let mut req_env = call_env.clone();
+        let req_value = expr_to_z3(vc, &req_ast, &mut req_env, None).ok()?;
+        terms.push(req_value.as_bool()?);
+    }
+
+    for (param, arg) in atom.params.iter().zip(args) {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let Some(refined) = vc.module_env.get_type(type_name) else {
+            continue;
+        };
+
+        if refined._base_type == "u64" {
+            terms.push(nonneg_constraint(vc.ctx, arg)?);
+        }
+
+        let mut refinement_env = call_env.clone();
+        refinement_env.insert(refined.operand.clone(), arg.clone());
+        let predicate_ast = parse_expression(&refined.predicate_raw);
+        let predicate_value = expr_to_z3(vc, &predicate_ast, &mut refinement_env, None).ok()?;
+        terms.push(predicate_value.as_bool()?);
+    }
+
+    let term_refs: Vec<&Bool> = terms.iter().collect();
+    Some(Bool::and(vc.ctx, &term_refs))
+}
+
+fn unfold_constant_calls<'a>(
+    vc: &VCtx<'a>,
+    env: &HashMap<String, Dynamic<'a>>,
+    mut frontier: Vec<UnfoldCall<'a>>,
+    mut seen: std::collections::HashSet<String>,
+    solver: &Solver<'a>,
+) {
+    let mut asserted_instances = 0;
+    for _ in 1..=CONSTANT_UNFOLD_DEPTH {
+        if frontier.is_empty() || asserted_instances >= CONSTANT_UNFOLD_MAX_INSTANCES {
+            break;
+        }
+        let mut next_frontier = Vec::new();
+        for (name, args) in frontier {
+            if asserted_instances >= CONSTANT_UNFOLD_MAX_INSTANCES {
+                break;
+            }
+            let Some((args, args_key)) = constant_args(&args) else {
+                continue;
+            };
+            if !seen.insert(constant_call_key(&name, &args_key)) {
+                continue;
+            }
+            let Some(atom) = vc.module_env.get_atom(&name) else {
+                continue;
+            };
+            if args.len() != atom.params.len() {
+                continue;
+            }
+            if !vc.callee_congruent(atom)
+                || !caller_outside_scc(vc, atom)
+                || !callee_semantics_match_caller(vc, atom)
+                || !call_arg_sorts_match(vc, atom, &args)
+            {
+                continue;
+            }
+
+            let mut call_env = (*env).clone();
+            for (param, arg) in atom.params.iter().zip(args.iter()) {
+                call_env.insert(param.name.clone(), arg.clone());
+            }
+
+            let _contract_guard = vc.enter_contract_instantiation(&atom.name);
+            let Some(antecedent) = constant_call_antecedent(vc, atom, &args, &call_env) else {
+                continue;
+            };
+            if antecedent.simplify().as_bool() == Some(false) {
+                continue;
+            }
+
+            // Declare `rec_fn#<atom>` over the SAME expanded domain the
+            // call sites use: `rec_fn_args` widens array params to
+            // (contents, len) pairs and struct params to field
+            // projections, so seed the `__z3_arr_`/`len_`/`__struct_`
+            // slots it looks up — recoverable from the call-result maps
+            // when the arg came from a call, otherwise the unfold skips
+            // rather than colliding in the UF cache with a raw-domain
+            // declaration for the same UF name.
+            for (param, arg) in atom.params.iter().zip(args.iter()) {
+                let type_name = param.type_name.as_deref().map(str::trim);
+                if type_name.and_then(array_element_type_name).is_some() {
+                    call_env.insert(format!("__z3_arr_{}", param.name), arg.clone());
+                    if let Some(len) = arg.as_array().and_then(|arr| call_result_len(vc, &arr)) {
+                        call_env.insert(format!("len_{}", param.name), len);
+                    } else {
+                        // A caller-env slot of the same name must not
+                        // leak in as this argument's length.
+                        call_env.remove(&format!("len_{}", param.name));
+                    }
+                } else if let Some(sdef) = type_name.and_then(|name| vc.module_env.get_struct(name))
+                {
+                    let fields = vc
+                        .call_result_fields
+                        .borrow()
+                        .get(&(arg.get_z3_ast() as usize))
+                        .map(|(fields, _)| fields.clone());
+                    for field in sdef.fields.iter() {
+                        let key = struct_field_key(&param.name, &field.name);
+                        let value = fields.as_ref().and_then(|fs| {
+                            fs.iter()
+                                .find(|(n, _)| n == &field.name)
+                                .map(|(_, v)| v.clone())
+                        });
+                        if let Some(value) = value {
+                            call_env.insert(key, value);
+                        } else {
+                            call_env.remove(&key);
+                        }
+                    }
+                }
+            }
+            let Some(rec_args) = rec_fn_args(vc, atom, &args, &call_env) else {
+                continue;
+            };
+            let domain: Vec<Sort> = rec_args.iter().map(|arg| arg.get_sort()).collect();
+            let struct_ret = atom
+                .return_type
+                .as_deref()
+                .and_then(|t| vc.module_env.get_struct(t));
+            let result = if let Some(sdef) = struct_ret {
+                // Struct results are field-wise congruent: a fresh handle
+                // plus a `#field.*` projection UF per field — the same
+                // shape the call sites mint.
+                static UNFOLD_RESULT_COUNTER: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(0);
+                let id = UNFOLD_RESULT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let handle_name = format!("unfold_{}_{}", atom.name, id);
+                let handle =
+                    datatype::param_z3_value_for_vc(vc, &handle_name, atom.return_type.as_deref());
+                let result_fields: Vec<(String, Dynamic)> = sdef
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        let field_range = param_sort_probe(
+                            vc,
+                            &format!("__unfold_field_{}_{}", atom.name, field.name),
+                            Some(field.type_name.trim()),
+                        );
+                        (
+                            field.name.clone(),
+                            rec_fn_result_projection(
+                                vc,
+                                atom,
+                                &format!("field.{}", field.name),
+                                &domain,
+                                &field_range,
+                                &rec_args,
+                            ),
+                        )
+                    })
+                    .collect();
+                bind_struct_fields(&mut call_env, &handle_name, &result_fields);
+                bind_struct_fields(&mut call_env, "result", &result_fields);
+                vc.call_result_fields.borrow_mut().insert(
+                    handle.get_z3_ast() as usize,
+                    (result_fields.clone(), handle.clone()),
+                );
+                handle
+            } else {
+                let range = call_result_sort(vc, atom);
+                let decl = vc.rec_fn(atom, &domain, &range);
+                let app_args: Vec<&dyn Ast> = rec_args.iter().map(|arg| arg as &dyn Ast).collect();
+                decl.apply(&app_args)
+            };
+            call_env.insert("result".to_string(), result.clone());
+            // Array results: `len(result)` / `result[i]` inside the unfolded
+            // ensures resolve to the same `#len` projection the call sites
+            // mint.
+            if result.as_array().is_some() {
+                let len_sort = array_len_symbol(vc.ctx, "probe", vc.bitvec_i64).get_sort();
+                let len_sym =
+                    rec_fn_result_projection(vc, atom, "len", &domain, &len_sort, &rec_args);
+                call_env.insert("__z3_arr_result".to_string(), result.clone());
+                call_env.insert("len_result".to_string(), len_sym);
+            }
+
+            let ensures = crate::verification::contract_view(
+                atom,
+                crate::verification::ContractView::CallerEnsures,
+            );
+            if ensures.trim() == "true" {
+                continue;
+            }
+            let ens_ast = parse_expression(&ensures);
+            let sink_guard = UnfoldSinkGuard::new(vc);
+            let Ok(ens_value) = expr_to_z3(vc, &ens_ast, &mut call_env, None) else {
+                continue;
+            };
+            let Some(ens_bool) = ens_value.as_bool() else {
+                continue;
+            };
+            let nested_calls = sink_guard.take_frontier();
+            solver.assert(&antecedent.implies(&ens_bool));
+            asserted_instances += 1;
+            next_frontier.extend(nested_calls);
+        }
+        frontier = next_frontier;
+    }
+}
+
+/// `0 <= A1 ∧ … ∧ 0 <= Ak ∧ lex(B < A)` for Int measures, or the
+/// signed bit-vector equivalent. A one-component measure builds exactly
+/// `0 <= A ∧ B < A`. Returns None when the arities differ or a component
+/// pair lowers to incompatible sorts.
+pub(crate) fn termination_measure_obligation<'a>(
+    ctx: &'a Context,
+    measure_a: &[Dynamic<'a>],
+    measure_b: &[Dynamic<'a>],
+) -> Option<Bool<'a>> {
+    if measure_a.is_empty() || measure_a.len() != measure_b.len() {
+        return None;
+    }
+    if measure_a.len() == 1 {
+        if let (Some(a), Some(b)) = (measure_a[0].as_int(), measure_b[0].as_int()) {
+            let zero = Int::from_i64(ctx, 0);
+            return Some(Bool::and(ctx, &[&zero.le(&a), &b.lt(&a)]));
+        }
+        if let (Some(a), Some(b)) = (measure_a[0].as_bv(), measure_b[0].as_bv()) {
+            if a.get_size() != b.get_size() {
+                return None;
+            }
+            let zero = BV::from_i64(ctx, 0, a.get_size());
+            return Some(Bool::and(ctx, &[&zero.bvsle(&a), &b.bvslt(&a)]));
+        }
+    }
+
+    let mut nonnegative = Vec::with_capacity(measure_a.len());
+    let mut lexicographic = None;
+    for (a, b) in measure_a.iter().zip(measure_b).rev() {
+        let (nonnegative_component, less, equal) =
+            if let (Some(a), Some(b)) = (a.as_int(), b.as_int()) {
+                let zero = Int::from_i64(ctx, 0);
+                (zero.le(&a), b.lt(&a), b._eq(&a))
+            } else if let (Some(a), Some(b)) = (a.as_bv(), b.as_bv()) {
+                if a.get_size() != b.get_size() {
+                    return None;
+                }
+                let zero = BV::from_i64(ctx, 0, a.get_size());
+                (zero.bvsle(&a), b.bvslt(&a), b._eq(&a))
+            } else {
+                return None;
+            };
+        nonnegative.push(nonnegative_component);
+        lexicographic = Some(match lexicographic {
+            Some(tail) => {
+                let equal_and_tail = Bool::and(ctx, &[&equal, &tail]);
+                Bool::or(ctx, &[&less, &equal_and_tail])
+            }
+            None => less,
+        });
+    }
+    nonnegative.reverse();
+    nonnegative.push(lexicographic?);
+    Some(Bool::and(ctx, &nonnegative.iter().collect::<Vec<_>>()))
+}
+
+/// Counterexample object naming the current atom's parameter values from a
+/// solver model, same shape as the call-site requires counterexample.
+pub(crate) fn termination_counterexample<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    env: &Env<'a>,
+) -> Option<serde_json::Value> {
+    let atom = vc.current_atom?;
+    let model = solver.get_model()?;
+    let mut ce_json = serde_json::Map::new();
+    for param in &atom.params {
+        if let Some(var) = env.get(&param.name) {
+            if let Some(val) = model.eval(var, true) {
+                ce_json.insert(param.name.clone(), json!(format!("{}", val)));
+            }
+        }
+    }
+    if ce_json.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(ce_json))
+    }
+}
+
+/// Error for a failed termination check on an SCC-internal call.
+pub(crate) fn termination_violation_error<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    env: &Env<'a>,
+    callee_name: &str,
+) -> MumeiError {
+    let atom_name = vc.current_atom.map(|a| a.name.as_str()).unwrap_or("?");
+    let measure_text = vc
+        .current_atom
+        .and_then(|a| a.decreases.as_deref())
+        .unwrap_or("?");
+    let ce = termination_counterexample(vc, solver, env);
+    MumeiError::verification(format!(
+        "Termination measure violation: call from '{}' to '{}' may not decrease measure '{}'",
+        atom_name, callee_name, measure_text
+    ))
+    .with_counterexample(ce)
+}
+
+/// Whether `callee` is a member of the current atom's SCC and the call sits
+/// lexically in the atom's own body/contract (not inside an instantiated
+/// callee contract).
+fn scc_internal_call<'a>(vc: &VCtx<'a>, callee: &Atom) -> bool {
+    vc.contracts_in_instantiation.borrow().is_empty()
+        && vc
+            .recursion
+            .current_scc
+            .borrow()
+            .as_ref()
+            .map(|scc| scc.contains(&callee.name))
+            .unwrap_or(false)
+}
+
+/// Termination bookkeeping shared by the direct-call and `call(atom_ref(..))`
+/// paths: when `callee` is a congruent SCC member and the call is lexically
+/// in the current atom's own body/contract (not inside an instantiated callee
+/// contract), record or check `0 <= M_A && M_B(args) < M_A`.
+fn termination_obligation_at_call<'a>(
+    vc: &VCtx<'a>,
+    callee: &Atom,
+    call_env: &mut Env<'a>,
+    env: &Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> MumeiResult<()> {
+    if !scc_internal_call(vc, callee) {
+        return Ok(());
+    }
+    let Some(measure_a) = vc.recursion.current_measure.borrow().clone() else {
+        return Ok(());
+    };
+    let Some(measure_text) = callee.decreases.clone() else {
+        return Ok(());
+    };
+    let measure_b = measure_components(&measure_text)
+        .iter()
+        .map(|component| {
+            let measure_ast = parse_expression(component);
+            expr_to_z3(vc, &measure_ast, call_env, None)
+        })
+        .collect::<MumeiResult<Vec<_>>>()?;
+    let Some(obligation) = termination_measure_obligation(vc.ctx, &measure_a, &measure_b) else {
+        // The measures lowered to incompatible sorts (Int vs BV, or BV of
+        // different widths). Skipping the check while still asserting the
+        // congruent ensures assumption would be unsound, so fail instead.
+        let atom_name = vc.current_atom.map(|a| a.name.as_str()).unwrap_or("?");
+        let measure_text = vc
+            .current_atom
+            .and_then(|a| a.decreases.as_deref())
+            .unwrap_or("?");
+        return Err(MumeiError::verification(format!(
+            "Termination measure violation: measures of '{atom_name}' and '{}' have incompatible sorts; cannot check decrease of measure '{measure_text}'",
+            callee.name
+        )));
+    };
+    if let Some(solver) = solver_opt {
+        // Check immediately — before the callee requires check and before any
+        // ensures assumption is asserted (a contradictory assumption would
+        // make a later check vacuous).
+        solver.push();
+        for cond in vc.path_cond_stack.borrow().iter() {
+            solver.assert(cond);
+        }
+        solver.assert(&obligation.not());
+        let check = solver.check();
+        let err = if check != SatResult::Unsat {
+            Some(termination_violation_error(vc, solver, env, &callee.name))
+        } else {
+            None
+        };
+        solver.pop(1);
+        if let Some(err) = err {
+            return Err(err);
+        }
+    } else {
+        let ante = vc.path_cond_conj();
+        vc.recursion
+            .pending_termination
+            .borrow_mut()
+            .push((ante.implies(&obligation), callee.name.clone()));
+    }
+    Ok(())
+}
+
+/// `ante => ens` antecedent for a congruent recursive call's ensures
+/// assumption: the callee's `CallerRequires` (or `true`), conjoined with the
+/// path conditions for SCC-internal calls (the induction hypothesis only
+/// holds where the decrease was proved).
+fn congruent_ensures_antecedent<'a>(
+    vc: &VCtx<'a>,
+    callee: &Atom,
+    caller_requires: &str,
+    call_env: &mut Env<'a>,
+    scc_internal: bool,
+) -> MumeiResult<Bool<'a>> {
+    let ctx = vc.ctx;
+    let req = if caller_requires.trim() == "true" {
+        Bool::from_bool(ctx, true)
+    } else {
+        let req_ast = parse_expression(caller_requires);
+        expr_to_z3(vc, &req_ast, call_env, None)?
+            .as_bool()
+            .unwrap_or_else(|| Bool::from_bool(ctx, true))
+    };
+    let domain_facts = param_domain_facts(vc, callee, call_env)?;
+    let has_domain_facts = domain_facts.simplify().as_bool() != Some(true);
+    if scc_internal {
+        let mut conds: Vec<Bool<'a>> = vc.path_cond_stack.borrow().clone();
+        conds.push(req);
+        if has_domain_facts {
+            conds.push(domain_facts);
+        }
+        let refs: Vec<&Bool<'a>> = conds.iter().collect();
+        Ok(Bool::and(ctx, &refs))
+    } else {
+        if has_domain_facts {
+            Ok(Bool::and(ctx, &[&req, &domain_facts]))
+        } else {
+            Ok(req)
+        }
+    }
+}
+
+fn param_domain_facts<'a>(
+    vc: &VCtx<'a>,
+    callee: &Atom,
+    call_env: &Env<'a>,
+) -> MumeiResult<Bool<'a>> {
+    let mut facts = Vec::new();
+    for param in &callee.params {
+        let type_name = param.type_name.as_deref().map(str::trim);
+        if type_name.and_then(array_element_type_name).is_some() {
+            let length = call_env
+                .get(&format!("len_{}", param.name))
+                .ok_or_else(|| {
+                    MumeiError::verification(format!(
+                        "missing array length for recursive parameter '{}'",
+                        param.name
+                    ))
+                })?;
+            let nonnegative = nonneg_constraint(vc.ctx, length).ok_or_else(|| {
+                MumeiError::verification(format!(
+                    "invalid array length sort for recursive parameter '{}'",
+                    param.name
+                ))
+            })?;
+            facts.push(nonnegative);
+        } else if let Some(sdef) = type_name.and_then(|name| vc.module_env.get_struct(name)) {
+            let fields: Vec<(String, Dynamic<'a>)> = sdef
+                .fields
+                .iter()
+                .map(|field| {
+                    call_env
+                        .get(&struct_field_key(&param.name, &field.name))
+                        .cloned()
+                        .map(|value| (field.name.clone(), value))
+                        .ok_or_else(|| {
+                            MumeiError::verification(format!(
+                                "missing field '{}' for recursive struct parameter '{}'",
+                                field.name, param.name
+                            ))
+                        })
+                })
+                .collect::<MumeiResult<_>>()?;
+            lower_struct_contract(vc, sdef, &fields, call_env, None, |_, fact| {
+                facts.push(fact);
+                Ok(())
+            })?;
+        }
+    }
+    if facts.is_empty() {
+        return Ok(Bool::from_bool(vc.ctx, true));
+    }
+    let refs: Vec<&Bool<'a>> = facts.iter().collect();
+    Ok(Bool::and(vc.ctx, &refs))
+}
+
 /// Discharge the shift-range obligations collected while lowering clauses
 /// without a solver (`requires`, `ensures`, invariants). Called once the
 /// atom's solver holds the preconditions, so a shift amount that a `requires`
@@ -172,7 +976,7 @@ pub(crate) fn shift_range_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> Shif
         solver.push();
         solver.assert(&path_cond);
         solver.assert(&bv_shift_out_of_range(vc.ctx, &amount));
-        let result = solver.check();
+        let result = crate::verification::phase_artifacts::check(solver);
         solver.pop(1);
         match result {
             SatResult::Sat => return ShiftRangeStatus::OutOfRange,
@@ -181,6 +985,116 @@ pub(crate) fn shift_range_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> Shif
         }
     }
     status
+}
+
+/// Outcome of checking deferred `(dividend, divisor)` pairs for division
+/// safety (`divisor != 0` and `!(i64::MIN / -1)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DivSafetyStatus {
+    /// Every deferred division is provably safe under the solver's facts.
+    Safe,
+    /// A reachable path allows a zero divisor.
+    DivisionByZero,
+    /// A reachable path allows `i64::MIN / -1` (UB in the emitted `sdiv`).
+    Overflow,
+    /// The solver could not decide safety, so it is not guaranteed.
+    Undecided,
+}
+
+/// Check deferred division obligations under the facts the solver already
+/// holds, mirroring `shift_range_status`. An `unknown` answer is not a
+/// guarantee: reported as `Undecided` rather than folded into `Safe`.
+pub(crate) fn div_safety_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> DivSafetyStatus {
+    let obligations: Vec<(Bool<'a>, BV<'a>, BV<'a>)> =
+        vc.bv_div_obligations.borrow_mut().drain(..).collect();
+    let ctx = vc.ctx;
+    let zero = BV::from_i64(ctx, 0, I64_BITS);
+    let min = BV::from_i64(ctx, i64::MIN, I64_BITS);
+    let minus_one = BV::from_i64(ctx, -1, I64_BITS);
+    let mut status = DivSafetyStatus::Safe;
+    for (path_cond, lb, rb) in obligations {
+        solver.push();
+        solver.assert(&path_cond);
+        solver.assert(&rb._eq(&zero));
+        let divides_by_zero = crate::verification::phase_artifacts::check(solver);
+        solver.pop(1);
+        match divides_by_zero {
+            SatResult::Sat => return DivSafetyStatus::DivisionByZero,
+            SatResult::Unknown => status = DivSafetyStatus::Undecided,
+            SatResult::Unsat => {}
+        }
+        solver.push();
+        solver.assert(&path_cond);
+        solver.assert(&Bool::and(ctx, &[&lb._eq(&min), &rb._eq(&minus_one)]));
+        let overflows = crate::verification::phase_artifacts::check(solver);
+        solver.pop(1);
+        match overflows {
+            SatResult::Sat => return DivSafetyStatus::Overflow,
+            SatResult::Unknown => status = DivSafetyStatus::Undecided,
+            SatResult::Unsat => {}
+        }
+    }
+    status
+}
+
+/// Discharge the deferred division-safety obligations recorded while
+/// lowering contract clauses without a solver.
+/// Snapshot of deferred shift/division obligation queue lengths, used by
+/// [`rebind_deferred_obligations`] to scope a rebind to one lowering.
+pub(crate) fn obligation_marks(vc: &VCtx<'_>) -> (usize, usize) {
+    (
+        vc.bv_shift_obligations.borrow().len(),
+        vc.bv_div_obligations.borrow().len(),
+    )
+}
+
+/// True when at least one deferred obligation was recorded since `marks`.
+pub(crate) fn has_new_obligations(vc: &VCtx<'_>, marks: (usize, usize)) -> bool {
+    vc.bv_shift_obligations.borrow().len() > marks.0
+        || vc.bv_div_obligations.borrow().len() > marks.1
+}
+
+/// Conjoin `extra` into the path condition of deferred shift/division
+/// obligations recorded since `marks`. Expressions like a loop invariant or
+/// an `ensures` clause are only ever evaluated in states where that clause
+/// itself holds, so their deferred checks may assume it — otherwise
+/// `r <= 62 && (n >> r) == v` could never discharge `n >> r`'s range
+/// obligation, since `r`'s bound lives inside the same clause.
+pub(crate) fn rebind_deferred_obligations<'a>(
+    vc: &VCtx<'a>,
+    marks: (usize, usize),
+    extra: &Bool<'a>,
+) {
+    for (pc, _) in vc.bv_shift_obligations.borrow_mut()[marks.0..].iter_mut() {
+        *pc = Bool::and(vc.ctx, &[pc, extra]);
+    }
+    for (pc, _, _) in vc.bv_div_obligations.borrow_mut()[marks.1..].iter_mut() {
+        *pc = Bool::and(vc.ctx, &[pc, extra]);
+    }
+}
+
+pub(crate) fn discharge_bv_div_obligations<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+) -> MumeiResult<()> {
+    match div_safety_status(vc, solver) {
+        DivSafetyStatus::Safe => Ok(()),
+        DivSafetyStatus::DivisionByZero => Err(MumeiError::verification(
+            "Potential division by zero.".to_string(),
+        )
+        .with_help("Add a condition divisor != 0 to requires")),
+        DivSafetyStatus::Overflow => Err(MumeiError::verification(
+            "Division may overflow (i64::MIN / -1).".to_string(),
+        )
+        .with_help(
+            "Add a condition ruling out the pair, e.g. `divisor != 0 - 1` \
+             or `dividend != 0 - 9223372036854775807 - 1`, to requires",
+        )),
+        DivSafetyStatus::Undecided => Err(MumeiError::verification(
+            "Z3 could not decide division safety (divisor != 0, no overflow).".to_string(),
+        )
+        .with_help("Strengthen requires so the divisor is provably nonzero")),
+    }
 }
 
 fn bv_binary_op<'a>(
@@ -206,7 +1120,7 @@ fn bv_binary_op<'a>(
                     solver.assert(cond);
                 }
                 solver.assert(&bv_shift_out_of_range(ctx, &rb));
-                let result = solver.check();
+                let result = crate::verification::phase_artifacts::check(solver);
                 solver.pop(1);
                 match result {
                     SatResult::Sat => return Err(out_of_range_shift_error()),
@@ -241,7 +1155,8 @@ fn bv_binary_op<'a>(
                     solver.assert(cond);
                 }
                 solver.assert(&rb._eq(&zero));
-                let divides_by_zero = solver.check() == SatResult::Sat;
+                let divides_by_zero =
+                    crate::verification::phase_artifacts::check(solver) == SatResult::Sat;
                 solver.pop(1);
                 if divides_by_zero {
                     return Err(MumeiError::verification(
@@ -259,7 +1174,8 @@ fn bv_binary_op<'a>(
                     solver.assert(cond);
                 }
                 solver.assert(&Bool::and(ctx, &[&lb._eq(&min), &rb._eq(&minus_one)]));
-                let overflows = solver.check() == SatResult::Sat;
+                let overflows =
+                    crate::verification::phase_artifacts::check(solver) == SatResult::Sat;
                 solver.pop(1);
                 if overflows {
                     return Err(MumeiError::verification(
@@ -270,6 +1186,16 @@ fn bv_binary_op<'a>(
                          or `dividend != 0 - 9223372036854775807 - 1`, to requires",
                     ));
                 }
+            } else {
+                // Contract clauses are lowered without a solver; defer the
+                // division-safety checks like the shift-range obligations
+                // above so `divisor != 0` and the MIN/-1 pair are still
+                // discharged under the atom's preconditions.
+                vc.bv_div_obligations.borrow_mut().push((
+                    vc.path_cond_conj(),
+                    lb.clone(),
+                    rb.clone(),
+                ));
             }
             Ok(lb.bvsdiv(&rb).into())
         }
@@ -284,6 +1210,265 @@ fn bv_binary_op<'a>(
             op
         ))),
     }
+}
+
+// Collect `let`-bound names anywhere inside a match arm body — including
+// nested blocks, if/match branches, and loop/task bodies whose envs fold
+// back into the arm env. The post-match merge treats them as arm-local
+// shadows, so an arm-body `let x = …` never rewrites an outer `x`.
+fn collect_arm_local_lets(stmt: &Stmt, local: &mut std::collections::HashSet<String>) {
+    match stmt {
+        Stmt::Let { var, value, .. } => {
+            local.insert(var.clone());
+            collect_expr_local_lets(value, local);
+        }
+        Stmt::Assign { value, .. } => collect_expr_local_lets(value, local),
+        Stmt::Expr(e, _) => collect_expr_local_lets(e, local),
+        Stmt::ArrayStore { index, value, .. } => {
+            collect_expr_local_lets(index, local);
+            collect_expr_local_lets(value, local);
+        }
+        Stmt::Block(stmts, _) => {
+            for s in stmts {
+                collect_arm_local_lets(s, local);
+            }
+        }
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            ..
+        } => {
+            // The loop body runs on a havoced env clone — its `let`s
+            // never reach the enclosing env.
+            collect_expr_local_lets(cond, local);
+            collect_expr_local_lets(invariant, local);
+            if let Some(d) = decreases {
+                collect_expr_local_lets(d, local);
+            }
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            collect_arm_local_lets(body, local);
+        }
+        Stmt::TaskGroup { children, .. } => {
+            for c in children {
+                collect_arm_local_lets(c, local);
+            }
+        }
+        Stmt::Cancel { .. } => {}
+    }
+}
+
+fn collect_expr_local_lets(expr: &Expr, local: &mut std::collections::HashSet<String>) {
+    match expr {
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_expr_local_lets(cond, local);
+            collect_arm_local_lets(then_branch, local);
+            collect_arm_local_lets(else_branch, local);
+        }
+        Expr::Block(stmt) => collect_arm_local_lets(stmt, local),
+        Expr::Match { target, arms } => {
+            // Inner match arms have their own local set via the inner
+            // merge — their `let`s never reach this arm's env, and
+            // collecting them here would wrongly skip real assignments
+            // this arm makes to a same-named outer variable.
+            collect_expr_local_lets(target, local);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    collect_expr_local_lets(g, local);
+                }
+            }
+        }
+        Expr::Async { body } => collect_arm_local_lets(body, local),
+        // Lambda bodies run in their own parameter scope — their `let`s
+        // never reach the enclosing env.
+        Expr::BinaryOp(l, _, r) => {
+            collect_expr_local_lets(l, local);
+            collect_expr_local_lets(r, local);
+        }
+        Expr::FieldAccess(base, _) | Expr::Await { expr: base } => {
+            collect_expr_local_lets(base, local)
+        }
+        Expr::ArrayAccess(_, idx) => collect_expr_local_lets(idx, local),
+        Expr::Call(_, args) | Expr::Perform { args, .. } => {
+            for a in args {
+                collect_expr_local_lets(a, local);
+            }
+        }
+        Expr::CallRef { callee, args } => {
+            collect_expr_local_lets(callee, local);
+            for a in args {
+                collect_expr_local_lets(a, local);
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, v) in fields {
+                collect_expr_local_lets(v, local);
+            }
+        }
+        Expr::ChanSend { channel, value } => {
+            collect_expr_local_lets(channel, local);
+            collect_expr_local_lets(value, local);
+        }
+        Expr::ChanRecv { channel } => collect_expr_local_lets(channel, local),
+        _ => {}
+    }
+}
+
+fn record_cover_obligation<'a>(vc: &VCtx<'a>, obligation: Bool<'a>) {
+    let Some(obligations) = vc.cover_obligations.as_ref() else {
+        return;
+    };
+    let path_conditions = vc.path_cond_stack.borrow();
+    let obligation = if path_conditions.is_empty() {
+        obligation
+    } else {
+        let path_condition = Bool::and(vc.ctx, &path_conditions.iter().collect::<Vec<_>>());
+        path_condition.implies(&obligation)
+    };
+    obligations.borrow_mut().push(obligation);
+}
+
+/// The contents array for one `==`/`!=` operand. A `Variable` resolves
+/// through `z3_dynamic_array` so the live `__z3_arr_<name>` chain (which
+/// `a[i] = v` stores rewrite) is compared, not the stale base const still
+/// in `env[name]`. Returns `None` for operands that did not lower to an
+/// array — the caller turns that into a type error.
+fn array_eq_operand<'a>(
+    vc: &VCtx<'a>,
+    env: &Env<'a>,
+    operand: &Expr,
+    val: &Dynamic<'a>,
+    live: Option<Array<'a>>,
+) -> Option<Array<'a>> {
+    if let Expr::Variable(name) = operand {
+        // Only a name that actually lowered to an array counts — a variable
+        // rebound to a non-array must still hit the type error even when a
+        // stale `__z3_arr_<name>` slot survives from before the rebind.
+        return val
+            .as_array()
+            .map(|_| live.unwrap_or_else(|| z3_dynamic_array(vc, name, env)));
+    }
+    val.as_array()
+}
+
+/// The `len` of one `==`/`!=` operand. Named arrays use their tracked
+/// `len_<name>` symbol (asserting `>= 0` for a freshly minted one, like
+/// `len(x)`); anything else — literals, call results, `if`/`match`/`block`
+/// tails — goes through `tail_len_expr`, which models them structurally.
+fn array_eq_operand_len<'a>(
+    vc: &VCtx<'a>,
+    env: &mut Env<'a>,
+    operand: &Expr,
+    val: &Dynamic<'a>,
+    solver_opt: Option<&Solver<'a>>,
+    live_len: Option<Dynamic<'a>>,
+) -> Dynamic<'a> {
+    if let Expr::Variable(name) = operand {
+        if let Some(len) = live_len {
+            return len;
+        }
+        return array_len_value(vc.ctx, env, name, vc.bitvec_i64, solver_opt);
+    }
+    tail_len_expr(vc, env, "eq_operand", "v", None, operand, val, 0)
+}
+
+/// `l_sel == r_sel` on array elements. `fp.eq` keeps the IEEE reading for
+/// `f64` elements (matching scalar `==`); every other element sort — `Int`,
+/// `Bool`, `Real`, `BV`, `Str`, enum datatypes — uses Z3 `_eq`.
+fn array_eq_element<'a>(ctx: &'a Context, l: &Dynamic<'a>, r: &Dynamic<'a>) -> Option<Bool<'a>> {
+    if let (Some(lf), Some(rf)) = (l.as_float(), r.as_float()) {
+        return Some(float_eq(ctx, &lf, &rf));
+    }
+    (l.get_sort() == r.get_sort()).then(|| l._eq(r))
+}
+
+/// `a == b` on `[T]` values.
+///
+/// An array value is its (contents, len) pair: contents live in the Z3
+/// `Array(Int, Elem)` sort while the length is a separate `len_*` symbol in
+/// the active `i64` sort (Int, or BV(64) under `--bitvec-i64`). Z3's
+/// extensional `=` on the Array sort is *not* the right reading — it says
+/// nothing about the separate length, and it also constrains `select` on
+/// every out-of-range index, where array literals store over an
+/// unconstrained base const and comparison is arbitrary. Two arrays are
+/// therefore equal iff `len_a == len_b` and
+/// `forall k in [0, len_a): a[k] == b[k]`; `!=` is its negation.
+#[allow(clippy::too_many_arguments)]
+fn array_value_equality<'a>(
+    vc: &VCtx<'a>,
+    left: &Expr,
+    right: &Expr,
+    l: &Dynamic<'a>,
+    r: &Dynamic<'a>,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+    left_live: Option<(Array<'a>, Dynamic<'a>)>,
+) -> MumeiResult<Bool<'a>> {
+    let ctx = vc.ctx;
+    let (left_arr_live, left_len_live) = left_live
+        .map(|(arr, len)| (Some(arr), Some(len)))
+        .unwrap_or((None, None));
+    let (Some(l_arr), Some(r_arr)) = (
+        array_eq_operand(vc, env, left, l, left_arr_live),
+        array_eq_operand(vc, env, right, r, None),
+    ) else {
+        return Err(MumeiError::type_error(
+            "Cannot compare an array to a non-array value with ==".to_string(),
+        ));
+    };
+    if l_arr.get_sort() != r_arr.get_sort() {
+        return Err(MumeiError::type_error(
+            "Cannot compare arrays of different element types".to_string(),
+        ));
+    }
+    if l_arr.get_sort().array_range().map(|s| s.kind()) == Some(z3::SortKind::Array) {
+        return Err(MumeiError::type_error(
+            "Cannot compare nested arrays with ==; `[[T]]` elements carry no length".to_string(),
+        ));
+    }
+    let len_l = array_eq_operand_len(vc, env, left, l, solver_opt, left_len_live);
+    let len_r = array_eq_operand_len(vc, env, right, r, solver_opt, None);
+    let len_eq = if len_l.get_sort() == len_r.get_sort() {
+        len_l._eq(&len_r)
+    } else if let (Some(li), Some(ri)) = (as_int_like(&len_l), as_int_like(&len_r)) {
+        li._eq(&ri)
+    } else {
+        return Err(MumeiError::verification(
+            "Array lengths are not comparable i64 values".to_string(),
+        ));
+    };
+    // `forall k. 0 <= k < len_l => a[k] == b[k]`. The bound is built in
+    // the `Int` theory: the select index is always `Int`, and for a
+    // *bound* variable `int2bv(k) <bv len` (what `index_in_bounds` would
+    // produce under `--bitvec-i64`) is not the same condition — `int2bv`
+    // wraps mod 2^64, so e.g. `k = 2^64` would satisfy `int2bv(k) <bv 2`.
+    // Signed `bv2int` on the length is exact (lengths are `>= 0`), and
+    // keeps the quantifier inside one theory.
+    let k = Int::fresh_const(ctx, "k");
+    let len_l_int = as_int_like(&len_l)
+        .ok_or_else(|| MumeiError::verification("Array length is not an i64 value".to_string()))?;
+    let in_bounds = Bool::and(ctx, &[&k.ge(&Int::from_i64(ctx, 0)), &k.lt(&len_l_int)]);
+    let sel_l = l_arr.select(&k);
+    let sel_r = r_arr.select(&k);
+    let elem_eq = array_eq_element(ctx, &sel_l, &sel_r).ok_or_else(|| {
+        MumeiError::type_error(format!(
+            "Array equality is not supported for `[{}]` elements",
+            z3_range_type_name(&l_arr.get_sort())
+        ))
+    })?;
+    let body = in_bounds.implies(&elem_eq);
+    // No explicit pattern: a select over an `ite` array (e.g. comparing an
+    // if-bound `[T]`) makes `Z3_mk_forall_const` reject the pattern and
+    // return null — the same fallback the `forall` builtin uses when it has
+    // no admissible trigger. Z3's default trigger selection picks up the
+    // `select(a,k)`/`select(b,k)` terms itself.
+    let contents_eq = z3::ast::forall_const(ctx, &[&k], &[], &body);
+    Ok(Bool::and(ctx, &[&len_eq, &contents_eq]))
 }
 
 pub(crate) fn expr_to_z3<'a>(
@@ -348,6 +1533,14 @@ pub(crate) fn expr_to_z3<'a>(
             if name == "false" {
                 return Ok(Bool::from_bool(ctx, false).into());
             }
+            // P10-C: a bare uppercase identifier naming a nullary variant of a
+            // finite ADT (e.g. `Red` for `enum Color { Red, Green, Blue }`)
+            // constructs the datatype value.
+            if name.chars().next().is_some_and(|c| c.is_uppercase()) {
+                if let Some(value) = datatype::enum_ctor_apply(vc, name, &[])? {
+                    return Ok(value);
+                }
+            }
             Ok(Int::new_const(ctx, name.as_str()).into())
         }
         Expr::Call(name, args) => {
@@ -394,15 +1587,19 @@ pub(crate) fn expr_to_z3<'a>(
                     )?;
 
                     // 束縛変数を一時的に env に追加して condition を評価
-                    let bound_var = Int::new_const(ctx, var_name.as_str());
+                    // Fresh const: a same-named outer variable must not be
+                    // captured by the quantifier binder.
+                    let bound_var = Int::fresh_const(ctx, var_name.as_str());
                     let old_val = env.insert(var_name.clone(), bound_var.clone().into());
 
                     let range_cond =
                         Bool::and(ctx, &[&bound_var.ge(&start_z3), &bound_var.lt(&end_z3)]);
 
-                    let condition_z3 = expr_to_z3(vc, &args[3], env, None)?.as_bool().ok_or(
-                        MumeiError::type_error(format!("{}(): condition must be boolean", name)),
-                    )?;
+                    vc.quantifier_binders
+                        .borrow_mut()
+                        .push((var_name.clone(), bound_var.clone().into()));
+                    let condition_res = expr_to_z3(vc, &args[3], env, None);
+                    vc.quantifier_binders.borrow_mut().pop();
 
                     // 束縛変数を env から復元
                     if let Some(old) = old_val {
@@ -410,6 +1607,14 @@ pub(crate) fn expr_to_z3<'a>(
                     } else {
                         env.remove(&var_name);
                     }
+
+                    let condition_z3 =
+                        condition_res?
+                            .as_bool()
+                            .ok_or(MumeiError::type_error(format!(
+                                "{}(): condition must be boolean",
+                                name
+                            )))?;
 
                     let quantifier_expr = if name == "forall" {
                         // ∀ var ∈ [start, end). condition
@@ -482,23 +1687,51 @@ pub(crate) fn expr_to_z3<'a>(
                     Ok(quantifier_expr.into())
                 }
                 "len" => {
-                    // len(arr_name) → 配列名に紐づくシンボリック長を返す
-                    // len_<name> >= 0 の制約を自動付与
-                    let arr_name = if !args.is_empty() {
-                        if let Expr::Variable(name) = &args[0] {
-                            name.clone()
-                        } else {
-                            "arr".to_string()
+                    if args.len() != 1 {
+                        return Err(MumeiError::verification("len() takes exactly one argument"));
+                    }
+                    let arg = &args[0];
+                    let val = expr_to_z3(vc, arg, env, solver_opt)?;
+                    if val.as_string().is_some() {
+                        // `len(s)` on a `Str` is the real sequence length —
+                        // `len("abc") == 3` and `requires: len(s) == n` now
+                        // constrain the actual content rather than a
+                        // detached `len_s` symbol.
+                        let ast = unsafe {
+                            z3_sys::Z3_mk_seq_length(raw_z3_context(ctx), val.get_z3_ast())
+                        };
+                        return Ok(unsafe { Int::wrap(ctx, ast) }.into());
+                    }
+                    if let Expr::Variable(name) = arg {
+                        // len(arr_name) → the tracked symbolic length,
+                        // shared with requires clauses and bounds checks
+                        // via `len_<name>`.
+                        let tracked = env.contains_key(&format!("__z3_arr_{name}"))
+                            || val.as_array().is_some()
+                            || vc
+                                .current_atom
+                                .and_then(|atom| {
+                                    atom.params
+                                        .iter()
+                                        .find(|p| p.name == *name)
+                                        .and_then(|p| p.type_name.clone())
+                                })
+                                .map(|t| t.trim_start().starts_with('['))
+                                .unwrap_or(false);
+                        if tracked {
+                            return Ok(array_len_value(ctx, env, name, vc.bitvec_i64, solver_opt));
                         }
-                    } else {
-                        "arr".to_string()
-                    };
-                    Ok(array_len_value(
-                        ctx,
-                        env,
-                        &arr_name,
-                        vc.bitvec_i64,
-                        solver_opt,
+                        return Err(MumeiError::type_error(format!(
+                            "len() expects an array or string argument; `{name}` is neither"
+                        )));
+                    }
+                    if val.as_array().is_some() {
+                        // `len([1, 2, 3])` / `len(if c { … } else { … })` —
+                        // structural length from the expression itself.
+                        return Ok(tail_len_expr(vc, env, "len_arg", "v", None, arg, &val, 0));
+                    }
+                    Err(MumeiError::type_error(
+                        "len() expects an array or string argument",
                     ))
                 }
                 "sqrt" => {
@@ -507,6 +1740,7 @@ pub(crate) fn expr_to_z3<'a>(
                     // ソートは f64 エンコーディング（デフォルト Real、
                     // `--ieee754-f64` で Float）に合わせる。
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    vc.reject_quantifier_dependent_call("sqrt", std::slice::from_ref(&_val))?;
                     // 呼び出しごとに一意な名前を使い、`sqrt(a) + sqrt(b)` の
                     // ような複数呼び出しが同一の Z3 変数に潰れないようにする。
                     static SQRT_COUNTER: std::sync::atomic::AtomicUsize =
@@ -534,6 +1768,10 @@ pub(crate) fn expr_to_z3<'a>(
                 "cast_to_int" => {
                     // Z3 0.12 では Float->Int 直接変換がないため、シンボリック整数を返す
                     let _val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    vc.reject_quantifier_dependent_call(
+                        "cast_to_int",
+                        std::slice::from_ref(&_val),
+                    )?;
                     Ok(Int::new_const(ctx, "cast_result").into())
                 }
                 // =============================================================
@@ -541,6 +1779,53 @@ pub(crate) fn expr_to_z3<'a>(
                 // =============================================================
                 // These are parsed as Expr::Call by the parser but need special
                 // handling in Z3 to produce Bool constraints on Z3 String Sort.
+                // =============================================================
+                // P10-B: regex membership builtins → Z3 RegLan (str.in_re)
+                // `matches(s, "pat")` / `match_regex` / `re_match` lower to
+                // `s ∈ Σ*·re·Σ*` (Rust `is_match` substring semantics).
+                // Patterns outside the supported fragment are a verification
+                // error rather than a silently-dropped constraint: dropping a
+                // requires clause only weakens the assumptions, but dropping
+                // an ensures clause would report `verified` without checking
+                // the postcondition (偽陰性).
+                // =============================================================
+                "matches" | "match_regex" | "re_match" => {
+                    if args.len() != 2 {
+                        return Err(MumeiError::verification(format!(
+                            "{}() requires exactly 2 arguments: (string_var, \"regex\")",
+                            name
+                        )));
+                    }
+                    let str_val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    let Some(str_z3) = str_val.as_string() else {
+                        // Non-string operand: mirror the permissive fallback of
+                        // the other string builtins (type checking is out of
+                        // scope here).
+                        return Ok(Bool::from_bool(ctx, true).into());
+                    };
+                    let crate::parser::Expr::StringLit(pattern) = &args[1] else {
+                        return Err(MumeiError::verification(format!(
+                            "{}(): regex pattern must be a string literal",
+                            name
+                        )));
+                    };
+                    let Some(re) =
+                        crate::verification::support::reglan::compile_search(ctx, pattern)
+                    else {
+                        return Err(MumeiError::verification(format!(
+                            "{}(): regex pattern {:?} uses constructs outside the \
+                             supported fragment (literals, '.', '*', '+', '?', \
+                             '{{n,m}}', '[…]'/'[^…]', '|', '()' groups, outer '^'/'$' \
+                             anchors, and \\d/\\w/\\s (ASCII-only), \\n/\\r/\\t/\
+                             \\f/\\v/\\a, \\xHH escapes). Zero-width assertions, \
+                             backreferences, lookarounds, Unicode escapes, and \
+                             interior anchors must be delegated to Lean 4.",
+                            name, pattern
+                        )));
+                    };
+                    mark_string_constraints(vc);
+                    Ok(str_z3.regex_matches(&re).into())
+                }
                 "starts_with" | "ends_with" | "contains" | "not_contains" => {
                     if args.len() != 2 {
                         return Err(MumeiError::verification(format!(
@@ -580,7 +1865,110 @@ pub(crate) fn expr_to_z3<'a>(
                         Ok(Bool::from_bool(ctx, true).into())
                     }
                 }
+                "is_empty" if !user_defines_callee(vc, name) => {
+                    if args.len() != 1 {
+                        return Err(MumeiError::verification(
+                            "is_empty() requires exactly 1 argument: (string)",
+                        ));
+                    }
+                    let val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    let str_z3 = val.as_string().ok_or_else(|| {
+                        MumeiError::type_error("is_empty() expects a Str argument")
+                    })?;
+                    mark_string_constraints(vc);
+                    let ast = unsafe {
+                        z3_sys::Z3_mk_seq_length(raw_z3_context(ctx), str_z3.get_z3_ast())
+                    };
+                    let length = unsafe { Int::wrap(ctx, ast) };
+                    Ok(length._eq(&Int::from_i64(ctx, 0)).into())
+                }
+                "index_of" if !user_defines_callee(vc, name) => {
+                    if args.len() != 2 {
+                        return Err(MumeiError::verification(
+                            "index_of() requires exactly 2 arguments: (string, pattern)",
+                        ));
+                    }
+                    let str_val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    let pattern_val = expr_to_z3(vc, &args[1], env, solver_opt)?;
+                    let str_z3 = str_val
+                        .as_string()
+                        .ok_or_else(|| MumeiError::type_error("index_of() expects a Str string"))?;
+                    let pattern_z3 = pattern_val.as_string().ok_or_else(|| {
+                        MumeiError::type_error("index_of() expects a Str pattern")
+                    })?;
+                    mark_string_constraints(vc);
+                    let offset = Int::from_i64(ctx, 0);
+                    let ast = unsafe {
+                        z3_sys::Z3_mk_seq_index(
+                            raw_z3_context(ctx),
+                            str_z3.get_z3_ast(),
+                            pattern_z3.get_z3_ast(),
+                            offset.get_z3_ast(),
+                        )
+                    };
+                    Ok(unsafe { Int::wrap(ctx, ast) }.into())
+                }
+                "substr" if !user_defines_callee(vc, name) => {
+                    if args.len() != 3 {
+                        return Err(MumeiError::verification(
+                            "substr() requires exactly 3 arguments: (string, start, count)",
+                        ));
+                    }
+                    let str_val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    let start_val = expr_to_z3(vc, &args[1], env, solver_opt)?;
+                    let count_val = expr_to_z3(vc, &args[2], env, solver_opt)?;
+                    let str_z3 = str_val
+                        .as_string()
+                        .ok_or_else(|| MumeiError::type_error("substr() expects a Str string"))?;
+                    let start = as_int_like(&start_val)
+                        .ok_or_else(|| MumeiError::type_error("substr() expects an Int start"))?;
+                    let count = as_int_like(&count_val)
+                        .ok_or_else(|| MumeiError::type_error("substr() expects an Int count"))?;
+                    mark_string_constraints(vc);
+                    let ast = unsafe {
+                        z3_sys::Z3_mk_seq_extract(
+                            raw_z3_context(ctx),
+                            str_z3.get_z3_ast(),
+                            start.get_z3_ast(),
+                            count.get_z3_ast(),
+                        )
+                    };
+                    Ok(unsafe { Z3String::wrap(ctx, ast) }.into())
+                }
+                "char_at" if !user_defines_callee(vc, name) => {
+                    if args.len() != 2 {
+                        return Err(MumeiError::verification(
+                            "char_at() requires exactly 2 arguments: (string, index)",
+                        ));
+                    }
+                    let str_val = expr_to_z3(vc, &args[0], env, solver_opt)?;
+                    let index_val = expr_to_z3(vc, &args[1], env, solver_opt)?;
+                    let str_z3 = str_val
+                        .as_string()
+                        .ok_or_else(|| MumeiError::type_error("char_at() expects a Str string"))?;
+                    let index = as_int_like(&index_val)
+                        .ok_or_else(|| MumeiError::type_error("char_at() expects an Int index"))?;
+                    mark_string_constraints(vc);
+                    let ast = unsafe {
+                        z3_sys::Z3_mk_seq_at(
+                            raw_z3_context(ctx),
+                            str_z3.get_z3_ast(),
+                            index.get_z3_ast(),
+                        )
+                    };
+                    Ok(unsafe { Z3String::wrap(ctx, ast) }.into())
+                }
                 _ => {
+                    // `let f = |params| body; f(args)` — the callee name
+                    // resolves to a `let`/`assign`-bound lambda: inline the
+                    // body with each formal bound to the evaluated actual
+                    // (call-by-value, a `let p_i = arg_i in body` step). A
+                    // local binding shadows a same-named atom, matching how
+                    // `Expr::Variable` shadows env entries.
+                    let local_lambda = vc.local_lambdas.borrow().get(name).cloned();
+                    if let Some(lambda) = local_lambda {
+                        return apply_local_lambda(vc, name, &lambda, args, env, solver_opt);
+                    }
                     // ユーザー定義関数呼び出し: 契約による検証（Compositional Verification）
                     // 呼び出し先の requires を現在のコンテキストで証明し、
                     // 成功すれば ensures を事実として追加する
@@ -595,11 +1983,24 @@ pub(crate) fn expr_to_z3<'a>(
                         .cloned()
                         .or_else(|| vc.module_env.get_atom(&fqn_name).cloned());
                     if let Some(callee) = resolved_callee {
+                        if callee.params.len() != args.len() {
+                            return Err(MumeiError::verification(format!(
+                                "Call to '{}': expected {} argument(s), got {}",
+                                name,
+                                callee.params.len(),
+                                args.len()
+                            )));
+                        }
                         // 引数を評価
                         let mut arg_vals = Vec::new();
                         for arg in args {
                             arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
                         }
+                        let recursive_instance = vc.is_instantiating_contract(&callee.name);
+                        // The unconstrained recursive result only weakens assumptions.
+                        vc.reject_quantifier_dependent_call(name, &arg_vals)?;
+                        let cong = vc.callee_congruent(&callee);
+                        let scc_internal = cong && scc_internal_call(vc, &callee);
 
                         // 仮引数名と実引数値の対応を構築
                         let mut call_env = env.clone();
@@ -608,6 +2009,9 @@ pub(crate) fn expr_to_z3<'a>(
                                 call_env.insert(param.name.clone(), val.clone());
                                 // 構造体引数: `<param>.<field>` が実引数のフィールドを指すようにする
                                 alias_struct_fields(&mut call_env, &param.name, val);
+                                // 配列引数: `__z3_arr_`/`len_`/要素型スロットを
+                                // callee パラメータ名で配線（リテラルは len 実値）。
+                                wire_array_slots(vc, &param.name, args.get(i), val, &mut call_env);
                             }
                         }
 
@@ -620,6 +2024,14 @@ pub(crate) fn expr_to_z3<'a>(
                                         call_env.insert(refined.operand.clone(), val.clone());
                                     }
                                 }
+                            }
+                        }
+
+                        if cong {
+                            if let Some(field_vals) =
+                                struct_field_values_for_call(vc, &callee, &arg_vals, &call_env, env)
+                            {
+                                vc.reject_quantifier_dependent_call(name, &field_vals)?;
                             }
                         }
 
@@ -636,8 +2048,8 @@ pub(crate) fn expr_to_z3<'a>(
                                     }
                                 }
                             }
-                            // Handle consumed_params → consume
-                            for consumed_name in &callee.consumed_params {
+                            // Handle consumed params (either spelling) → consume
+                            for consumed_name in &callee.consumed_names() {
                                 if let Some(idx) =
                                     callee.params.iter().position(|p| p.name == *consumed_name)
                                 {
@@ -653,45 +2065,189 @@ pub(crate) fn expr_to_z3<'a>(
                             }
                         }
 
+                        // Termination obligation for SCC-internal calls,
+                        // checked before the callee requires check and before
+                        // any ensures assumption is asserted.
+                        if cong && !recursive_instance {
+                            termination_obligation_at_call(
+                                vc,
+                                &callee,
+                                &mut call_env,
+                                env,
+                                solver_opt,
+                            )?;
+                        }
+
                         // requires の検証: 呼び出し元のコンテキストで事前条件が満たされるか
-                        if callee.requires.trim() != "true" {
+                        let caller_requires =
+                            crate::verification::caller_requires_obligation(&callee);
+                        if caller_requires.trim() != "true" && !recursive_instance {
+                            let _contract_guard = vc.enter_contract_instantiation(&callee.name);
                             if let Some(solver) = solver_opt {
-                                let req_ast = parse_expression(&callee.requires);
+                                let req_ast = parse_expression(&caller_requires);
                                 let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
                                 if let Some(req_bool) = req_z3.as_bool() {
-                                    solver.push();
-                                    solver.assert(&req_bool.not());
-                                    if solver.check() == SatResult::Sat {
-                                        // Extract counterexample: concrete argument values
-                                        // that violate the callee's precondition.
-                                        let ce_value = if let Some(model) = solver.get_model() {
-                                            let mut ce_json = serde_json::Map::new();
-                                            for (i, param) in callee.params.iter().enumerate() {
-                                                if let Some(arg_val) = arg_vals.get(i) {
-                                                    if let Some(val) = model.eval(arg_val, true) {
-                                                        let val_str = format!("{}", val);
-                                                        ce_json.insert(
+                                    if vc.cover_obligations.is_some() {
+                                        record_cover_obligation(vc, req_bool);
+                                    } else {
+                                        solver.push();
+                                        // Branch guards are assumptions on this
+                                        // path: a call under `if x >= 0` may rely
+                                        // on `x >= 0` to satisfy the callee's
+                                        // requires. Same pattern as the shift /
+                                        // div-by-zero check sites.
+                                        for cond in vc.path_cond_stack.borrow().iter() {
+                                            solver.assert(cond);
+                                        }
+                                        solver.assert(&req_bool.not());
+                                        if crate::verification::phase_artifacts::check(solver)
+                                            == SatResult::Sat
+                                        {
+                                            // Extract counterexample: concrete argument values
+                                            // that violate the callee's precondition.
+                                            let raised_counterexample = if let Some(model) =
+                                                solver.get_model()
+                                            {
+                                                let mut raised = RaisedCounterexample::default();
+                                                let call_result_handles =
+                                                    vc.call_result_symbols.borrow().clone();
+                                                let source_bindings = callee
+                                                    .params
+                                                    .iter()
+                                                    .map(|param| param.name.clone())
+                                                    .collect::<HashSet<_>>();
+                                                for (i, param) in callee.params.iter().enumerate() {
+                                                    if let Some(arg_val) = arg_vals.get(i) {
+                                                        let mut raised_value = raise_named_binding(
+                                                            &model,
                                                             param.name.clone(),
-                                                            json!(val_str),
+                                                            &param.name,
+                                                            arg_val,
+                                                            param.type_name.as_deref(),
+                                                            &call_env,
+                                                            vc.module_env,
                                                         );
+                                                        let references_abstract_result =
+                                                            references_call_result(
+                                                                arg_val,
+                                                                &call_result_handles,
+                                                            ) || param
+                                                                .type_name
+                                                                .as_deref()
+                                                                .and_then(|type_name| {
+                                                                    let base_type =
+                                                                        resolve_source_base_type(
+                                                                            type_name,
+                                                                            vc.module_env,
+                                                                        );
+                                                                    vc.module_env
+                                                                        .get_struct(&base_type)
+                                                                })
+                                                                .is_some_and(|struct_def| {
+                                                                    struct_def.fields.iter().any(
+                                                                        |field| {
+                                                                            call_env
+                                                                                .get(&struct_field_key(
+                                                                                    &param.name,
+                                                                                    &field.name,
+                                                                                ))
+                                                                                .is_some_and(
+                                                                                    |field_value| {
+                                                                                        references_call_result(
+                                                                                            field_value,
+                                                                                            &call_result_handles,
+                                                                                        )
+                                                                                    },
+                                                                                )
+                                                                        },
+                                                                    )
+                                                                });
+                                                        if references_abstract_result {
+                                                            let raw_rendering = model
+                                                                .eval(arg_val, true)
+                                                                .unwrap_or_else(|| arg_val.clone())
+                                                                .to_string();
+                                                            mark_abstract_call_result_unraisable(
+                                                                &mut raised_value,
+                                                                raw_rendering,
+                                                            );
+                                                        }
+                                                        let argument_rendering =
+                                                            arg_val.to_string();
+                                                        let mut matching_names = env
+                                                            .iter()
+                                                            .filter_map(|(name, value)| {
+                                                                (value.to_string()
+                                                                    == argument_rendering)
+                                                                    .then_some(name.as_str())
+                                                            })
+                                                            .collect::<Vec<_>>();
+                                                        matching_names.sort_by_key(|name| {
+                                                            (
+                                                                !matches!(
+                                                                    classify_solver_symbol(
+                                                                        name,
+                                                                        &source_bindings,
+                                                                        vc.module_env,
+                                                                    ),
+                                                                    SolverSymbolClassification::Source(
+                                                                        _
+                                                                    )
+                                                                ),
+                                                                *name,
+                                                            )
+                                                        });
+                                                        let solver_name = matching_names
+                                                            .first()
+                                                            .map(|name| (*name).to_string());
+                                                        if solver_name
+                                                            .as_deref()
+                                                            .is_some_and(|name| name != param.name)
+                                                        {
+                                                            raised_value.solver_name = solver_name;
+                                                        }
+                                                        raised.values.push(raised_value);
                                                     }
                                                 }
-                                            }
-                                            if ce_json.is_empty() {
-                                                None
+                                                raised.omitted_solver_symbols.extend(
+                                                    env.keys()
+                                                        .filter(|symbol| {
+                                                            matches!(
+                                                        classify_solver_symbol(
+                                                            symbol,
+                                                                &source_bindings,
+                                                                vc.module_env,
+                                                        ),
+                                                        SolverSymbolClassification::Internal
+                                                    )
+                                                        })
+                                                        .cloned(),
+                                                );
+                                                raised.omitted_solver_symbols.sort();
+                                                raised.omitted_solver_symbols.dedup();
+                                                Some(raised)
                                             } else {
-                                                Some(serde_json::Value::Object(ce_json))
-                                            }
-                                        } else {
-                                            None
-                                        };
+                                                None
+                                            };
+                                            let ce_value = raised_counterexample
+                                                .as_ref()
+                                                .map(RaisedCounterexample::to_counterexample_json)
+                                                .filter(|counterexample| {
+                                                    !counterexample
+                                                        .as_object()
+                                                        .is_some_and(serde_json::Map::is_empty)
+                                                });
+                                            let provenance = raised_counterexample
+                                                .as_ref()
+                                                .map(RaisedCounterexample::provenance_json);
+                                            solver.pop(1);
+                                            return Err(MumeiError::verification(
+                                                format!("Call to '{}': precondition (requires) not satisfied at call site", name)
+                                            ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください")
+                                            .with_counterexample_provenance(ce_value, provenance));
+                                        }
                                         solver.pop(1);
-                                        return Err(MumeiError::verification(
-                                            format!("Call to '{}': precondition (requires) not satisfied at call site", name)
-                                        ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください")
-                                        .with_counterexample(ce_value));
                                     }
-                                    solver.pop(1);
                                 }
                             }
                         }
@@ -701,60 +2257,76 @@ pub(crate) fn expr_to_z3<'a>(
                         // 呼び出し元のコンテキストで検証する。
                         // get_traits_for_method で全候補を取得し、find_impl で callee の型に
                         // 対して実際にトレイトが impl されている候補のみ適用する。
-                        if let Some(solver) = solver_opt {
-                            let callee_type = callee
-                                .params
-                                .first()
-                                .and_then(|p| p.type_name.as_deref())
-                                .unwrap_or("i64");
-                            let candidates = vc.module_env.get_traits_for_method(name);
-                            // find_impl で正しいトレイトを絞り込む
-                            let matched = candidates
-                                .iter()
-                                .find(|(tn, _)| vc.module_env.find_impl(tn, callee_type).is_some());
-                            if let Some((_trait_name, trait_method)) = matched {
-                                for (i, constraint_opt) in
-                                    trait_method.param_constraints.iter().enumerate()
-                                {
-                                    if let Some(constraint) = constraint_opt {
-                                        if let Some(arg_val) = arg_vals.get(i) {
-                                            let param_name = callee
-                                                .params
-                                                .get(i)
-                                                .map(|p| p.name.as_str())
-                                                .unwrap_or("v");
-                                            let concrete_constraint: String =
-                                                replace_constraint_placeholder(
-                                                    constraint, param_name,
+                        if !recursive_instance {
+                            if let Some(solver) = solver_opt {
+                                let callee_type = callee
+                                    .params
+                                    .first()
+                                    .and_then(|p| p.type_name.as_deref())
+                                    .unwrap_or("i64");
+                                let candidates = vc.module_env.get_traits_for_method(name);
+                                // find_impl で正しいトレイトを絞り込む
+                                let matched = candidates.iter().find(|(tn, _)| {
+                                    vc.module_env.find_impl(tn, callee_type).is_some()
+                                });
+                                if let Some((_trait_name, trait_method)) = matched {
+                                    for (i, constraint_opt) in
+                                        trait_method.param_constraints.iter().enumerate()
+                                    {
+                                        if let Some(constraint) = constraint_opt {
+                                            if let Some(arg_val) = arg_vals.get(i) {
+                                                let param_name = callee
+                                                    .params
+                                                    .get(i)
+                                                    .map(|p| p.name.as_str())
+                                                    .unwrap_or("v");
+                                                let concrete_constraint: String =
+                                                    replace_constraint_placeholder(
+                                                        constraint, param_name,
+                                                    );
+                                                let mut constraint_env: Env = env.clone();
+                                                constraint_env.insert(
+                                                    param_name.to_string(),
+                                                    arg_val.clone(),
                                                 );
-                                            let mut constraint_env: Env = env.clone();
-                                            constraint_env
-                                                .insert(param_name.to_string(), arg_val.clone());
-                                            let constraint_ast =
-                                                parse_expression(&concrete_constraint);
-                                            if let Ok(constraint_z3) = expr_to_z3(
-                                                vc,
-                                                &constraint_ast,
-                                                &mut constraint_env,
-                                                None,
-                                            ) {
-                                                if let Some(constraint_bool) =
-                                                    constraint_z3.as_bool()
-                                                {
-                                                    solver.push();
-                                                    solver.assert(&constraint_bool.not());
-                                                    if solver.check() == SatResult::Sat {
-                                                        solver.pop(1);
-                                                        return Err(MumeiError::verification(
-                                                            format!(
-                                                                "Call to '{}': trait method parameter constraint '{}' not satisfied for argument {}",
-                                                                name, constraint, i
-                                                            )
-                                                        ).with_help(
-                                                            "トレイトメソッドのパラメータ制約が満たされていません。引数の値を確認してください"
-                                                        ));
+                                                let constraint_ast =
+                                                    parse_expression(&concrete_constraint);
+                                                if let Ok(constraint_z3) = expr_to_z3(
+                                                    vc,
+                                                    &constraint_ast,
+                                                    &mut constraint_env,
+                                                    None,
+                                                ) {
+                                                    if let Some(constraint_bool) =
+                                                        constraint_z3.as_bool()
+                                                    {
+                                                        if vc.cover_obligations.is_some() {
+                                                            record_cover_obligation(
+                                                                vc,
+                                                                constraint_bool,
+                                                            );
+                                                        } else {
+                                                            solver.push();
+                                                            for cond in
+                                                                vc.path_cond_stack.borrow().iter()
+                                                            {
+                                                                solver.assert(cond);
+                                                            }
+                                                            solver.assert(&constraint_bool.not());
+                                                            if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
+                                                            solver.pop(1);
+                                                            return Err(MumeiError::verification(
+                                                                format!(
+                                                                    "Call to '{}': trait method parameter constraint '{}' not satisfied for argument {}",
+                                                                    name, constraint, i
+                                                                )
+                                                            ).with_help(
+                                                                "トレイトメソッドのパラメータ制約が満たされていません。引数の値を確認してください"
+                                                            ));
+                                                        }
+                                                            solver.pop(1);
+                                                        }
                                                     }
-                                                    solver.pop(1);
                                                 }
                                             }
                                         }
@@ -769,6 +2341,9 @@ pub(crate) fn expr_to_z3<'a>(
                         let call_id =
                             CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         let result_name = format!("call_{}_{}", name, call_id);
+                        vc.call_result_symbols
+                            .borrow_mut()
+                            .insert(result_name.clone());
 
                         // 戻り値型から Z3 ソートを選択する。明示的な `-> T` 注釈が
                         // あればそれを使い、なければ従来のヒューリスティック
@@ -786,42 +2361,193 @@ pub(crate) fn expr_to_z3<'a>(
                             .return_type
                             .as_deref()
                             .or(if has_float { Some("f64") } else { None });
-                        let result_z3: Dynamic = param_z3_value(
-                            ctx,
-                            result_name.as_str(),
-                            result_type,
-                            vc.module_env,
-                            vc.ieee754_f64,
-                            vc.bitvec_i64,
-                        );
+                        let rec_args = rec_fn_args(vc, &callee, &arg_vals, &call_env);
+                        let use_rec_fn = cong
+                            && callee_semantics_match_caller(vc, &callee)
+                            && rec_args.is_some();
+                        // Keep the expanded signature alive past the primary
+                        // application: the projections a non-scalar result
+                        // needs (`#len` for `[T]`, `#field.*` for structs)
+                        // are declared over the same domain.
+                        let rec_signature: Option<(Vec<Dynamic>, Vec<Sort>)> = if use_rec_fn {
+                            let rec_args = rec_args.expect("recursive arguments checked above");
+                            let domain = rec_args.iter().map(|v| v.get_sort()).collect();
+                            Some((rec_args, domain))
+                        } else {
+                            None
+                        };
+                        let struct_return = result_type.and_then(|t| vc.module_env.get_struct(t));
+                        let result_z3: Dynamic = if let Some((rec_args, domain)) = &rec_signature {
+                            if struct_return.is_some() {
+                                // A congruent struct result is carried
+                                // field-wise: the opaque handle stays a
+                                // per-call const (it is only ever observed
+                                // through its fields) and each field is a
+                                // projection UF bound below.
+                                datatype::param_z3_value_for_vc(
+                                    vc,
+                                    result_name.as_str(),
+                                    result_type,
+                                )
+                            } else {
+                                let range = call_result_sort(vc, &callee);
+                                let decl = vc.rec_fn(&callee, domain, &range);
+                                let app_args: Vec<&dyn Ast> =
+                                    rec_args.iter().map(|v| v as &dyn Ast).collect();
+                                let application = decl.apply(&app_args);
+                                if let Some(sink) = vc.recursion.unfold_sink.borrow_mut().as_mut() {
+                                    sink.push((callee.name.clone(), arg_vals.clone()));
+                                }
+                                application
+                            }
+                        } else {
+                            datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type)
+                        };
+
+                        // Array results: mint the result's `len` symbol up
+                        // front and key it by the result array's ast — the
+                        // callee's `ensures: len(result) == k` asserts on it,
+                        // and `wire_array_slots`/`tail_len_expr` recover the
+                        // same symbol for `let t = f(..)` so the guarantee
+                        // reaches the caller instead of a fresh `len_t`.
+                        let result_len: Option<Dynamic> = result_z3.as_array().map(|_| {
+                            let len_sym: Dynamic = if let Some((rec_args, domain)) = &rec_signature
+                            {
+                                // Congruent call: an array value is its
+                                // (contents, len) pair, so the result's
+                                // length is a projection UF over the same
+                                // domain — equal argument tuples yield
+                                // equal contents AND equal lengths.
+                                let len_sort =
+                                    array_len_symbol(vc.ctx, "probe", vc.bitvec_i64).get_sort();
+                                rec_fn_result_projection(
+                                    vc, &callee, "len", domain, &len_sort, rec_args,
+                                )
+                            } else {
+                                array_len_symbol(
+                                    ctx,
+                                    &format!("len_{}", result_name),
+                                    vc.bitvec_i64,
+                                )
+                            };
+                            // Array lengths are nonneg regardless of the
+                            // callee's ensures — `array_len_value` asserts
+                            // the same when a solver is in scope.
+                            if let (Some(solver), Some(nn)) =
+                                (solver_opt, nonneg_constraint(ctx, &len_sym))
+                            {
+                                solver.assert(&nn);
+                            }
+                            vc.call_result_lens.borrow_mut().insert(
+                                result_z3.get_z3_ast() as usize,
+                                (len_sym.clone(), result_z3.clone()),
+                            );
+                            len_sym
+                        });
 
                         // 構造体を返す呼び出し: 結果のフィールドをシンボル化し、
                         // 呼び出し先が保証する跨フィールド不変量を事実として仮定する
                         // （呼び出し先自身の検証で Invariant(result) は義務として課される）。
-                        if let Some(sdef) = result_type.and_then(|t| vc.module_env.get_struct(t)) {
-                            let result_fields = seed_struct_fields(
-                                ctx,
-                                env,
-                                &result_name,
-                                sdef,
-                                vc.module_env,
-                                vc.ieee754_f64,
-                                vc.bitvec_i64,
-                            );
+                        if let Some(sdef) = struct_return {
+                            let result_fields: Vec<(String, Dynamic)> =
+                                if let Some((rec_args, domain)) = &rec_signature {
+                                    // Congruent call: each field is a projection
+                                    // UF over the callee's expanded domain — the
+                                    // result is compared field-wise, never by the
+                                    // opaque handle.
+                                    sdef.fields
+                                        .iter()
+                                        .map(|field| {
+                                            let range = param_sort_probe(
+                                                vc,
+                                                &format!(
+                                                    "__recfn_field_{}_{}",
+                                                    callee.name, field.name
+                                                ),
+                                                Some(field.type_name.trim()),
+                                            );
+                                            (
+                                                field.name.clone(),
+                                                rec_fn_result_projection(
+                                                    vc,
+                                                    &callee,
+                                                    &format!("field.{}", field.name),
+                                                    domain,
+                                                    &range,
+                                                    rec_args,
+                                                ),
+                                            )
+                                        })
+                                        .collect()
+                                } else {
+                                    seed_struct_fields(
+                                        ctx,
+                                        env,
+                                        &result_name,
+                                        sdef,
+                                        vc.module_env,
+                                        vc.ieee754_f64,
+                                        vc.bitvec_i64,
+                                    )
+                                };
+                            // The UF-path fields live under the per-call
+                            // handle in `env` too, so `let t = f(..); t.x`
+                            // projects to the shared congruent values.
+                            if rec_signature.is_some() {
+                                bind_struct_fields(env, &result_name, &result_fields);
+                            }
                             bind_struct_fields(&mut call_env, &result_name, &result_fields);
                             bind_struct_fields(&mut call_env, "result", &result_fields);
-                            if let (Some(solver), true) =
-                                (solver_opt, callee_semantics_match_caller(vc, &callee))
-                            {
-                                assume_struct_invariants(
-                                    vc,
-                                    solver,
-                                    sdef,
-                                    &result_name,
-                                    &result_fields,
-                                    &call_env,
-                                    None,
-                                )?;
+                            // A direct read `f(1).x` cannot rebuild
+                            // `call_<name>_<id>` — key the fields by the
+                            // result ast so `FieldAccess` returns the
+                            // projection instead of a shared `field_x`.
+                            vc.call_result_fields.borrow_mut().insert(
+                                result_z3.get_z3_ast() as usize,
+                                (result_fields.clone(), result_z3.clone()),
+                            );
+                            if let (Some(solver), true) = (
+                                solver_opt,
+                                !recursive_instance && callee_semantics_match_caller(vc, &callee),
+                            ) {
+                                let _contract_guard = vc.enter_contract_instantiation(&callee.name);
+                                if rec_signature.is_some() {
+                                    // Result assumptions come from the same
+                                    // builder the callee's body side uses
+                                    // (`assume_struct_contract`, which lowers
+                                    // field `where` constraints then
+                                    // invariants) — never an ad-hoc subset.
+                                    assume_struct_contract(
+                                        vc,
+                                        solver,
+                                        sdef,
+                                        &result_name,
+                                        &result_fields,
+                                        &call_env,
+                                        None,
+                                    )?;
+                                } else {
+                                    assume_struct_invariants(
+                                        vc,
+                                        solver,
+                                        sdef,
+                                        &result_name,
+                                        &result_fields,
+                                        &call_env,
+                                        None,
+                                    )?;
+                                }
+                            }
+                        }
+
+                        // `arr[i]` inside `ensures` means the POST-call
+                        // element — havoc the call_env tracked slot of any
+                        // `[T]` param the callee's body may store through,
+                        // so a mutating callee's ensures can't smuggle in
+                        // the caller's pre-call chain.
+                        for param in callee.params.iter() {
+                            if atom_stores_to_array(vc.module_env, &callee, &param.name) {
+                                havoc_array_name(vc, &param.name, &mut call_env);
                             }
                         }
 
@@ -837,67 +2563,117 @@ pub(crate) fn expr_to_z3<'a>(
                         //   → call_env に result = call_increment_0 を挿入
                         //   → Z3 に call_increment_0 == n + 1 を assert
                         //   → 後続の `increment(x)` で x >= 1 だけでなく x == n + 1 が使える
-                        if callee.ensures.trim() != "true"
+                        let caller_ensures = crate::verification::contract_view(
+                            &callee,
+                            crate::verification::ContractView::CallerEnsures,
+                        );
+                        if caller_ensures.trim() != "true"
+                            && !recursive_instance
                             && callee_semantics_match_caller(vc, &callee)
                         {
+                            let _contract_guard = vc.enter_contract_instantiation(&callee.name);
                             call_env.insert("result".to_string(), result_z3.clone());
-                            let ens_ast = parse_expression(&callee.ensures);
-
-                            // Equality ensures の特別処理:
-                            // ensures が `result == expr` の形式の場合、
-                            // expr を評価して result と等価であることを直接 assert する。
-                            // これにより Z3 が等式を完全に活用できる。
-                            let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
-                            if let Some(ens_bool) = ens_z3.as_bool() {
-                                if let Some(solver) = solver_opt {
-                                    solver.assert(&ens_bool);
-                                }
+                            if let Some(len_sym) = &result_len {
+                                call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
+                                call_env.insert("len_result".to_string(), len_sym.clone());
                             }
+                            let ens_ast = parse_expression(&caller_ensures);
 
-                            // 追加: ensures 式が `result == expr` の形式かチェックし、
-                            // 該当する場合は result のシンボリック値に対して
-                            // 等式制約を明示的に追加する（Z3 の等式推論を強化）
-                            if let Expr::BinaryOp(left, Op::Eq, right) = &ens_ast {
-                                if let Expr::Variable(ref var_name) = left.as_ref() {
-                                    if var_name == "result" {
-                                        // ensures: result == <expr> の場合
-                                        // <expr> を call_env で評価し、result_z3 == eval(<expr>) を assert
-                                        if let Ok(rhs_val) =
-                                            expr_to_z3(vc, right, &mut call_env, None)
-                                        {
-                                            if let Some(solver) = solver_opt {
-                                                assert_result_equality(
-                                                    vc, solver, &result_z3, &rhs_val,
-                                                );
+                            if use_rec_fn {
+                                let unfold_key = if solver_opt.is_some()
+                                    && !recursive_instance
+                                    && vc.recursion.unfold_sink.borrow().is_none()
+                                    && caller_outside_scc(vc, &callee)
+                                {
+                                    constant_args(&arg_vals).map(|(_, key)| key)
+                                } else {
+                                    None
+                                };
+                                let unfold_guard =
+                                    unfold_key.as_ref().map(|_| UnfoldSinkGuard::new(vc));
+                                // Congruent recursive call: assume the callee's
+                                // ensures as the induction hypothesis
+                                // `CallerRequires => CallerEnsures`. SCC-internal
+                                // calls additionally conjoin the path conditions
+                                // under which the decrease was proved.
+                                let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
+                                if let (Some(ens_bool), Some(solver)) =
+                                    (ens_z3.as_bool(), solver_opt)
+                                {
+                                    let ante = congruent_ensures_antecedent(
+                                        vc,
+                                        &callee,
+                                        &caller_requires,
+                                        &mut call_env,
+                                        scc_internal,
+                                    )?;
+                                    solver.assert(&ante.implies(&ens_bool));
+                                    if let (Some(unfold_key), Some(unfold_guard)) =
+                                        (unfold_key.as_ref(), unfold_guard.as_ref())
+                                    {
+                                        let frontier = unfold_guard.take_frontier();
+                                        let mut seen = std::collections::HashSet::new();
+                                        seen.insert(constant_call_key(&callee.name, unfold_key));
+                                        unfold_constant_calls(vc, env, frontier, seen, solver);
+                                    }
+                                }
+                            } else {
+                                // Equality ensures の特別処理:
+                                // ensures が `result == expr` の形式の場合、
+                                // expr を評価して result と等価であることを直接 assert する。
+                                // これにより Z3 が等式を完全に活用できる。
+                                let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
+                                if let Some(ens_bool) = ens_z3.as_bool() {
+                                    if let Some(solver) = solver_opt {
+                                        solver.assert(&ens_bool);
+                                    }
+                                }
+
+                                // 追加: ensures 式が `result == expr` の形式かチェックし、
+                                // 該当する場合は result のシンボリック値に対して
+                                // 等式制約を明示的に追加する（Z3 の等式推論を強化）
+                                if let Expr::BinaryOp(left, Op::Eq, right) = &ens_ast {
+                                    if let Expr::Variable(ref var_name) = left.as_ref() {
+                                        if var_name == "result" {
+                                            // ensures: result == <expr> の場合
+                                            // <expr> を call_env で評価し、result_z3 == eval(<expr>) を assert
+                                            if let Ok(rhs_val) =
+                                                expr_to_z3(vc, right, &mut call_env, None)
+                                            {
+                                                if let Some(solver) = solver_opt {
+                                                    assert_result_equality(
+                                                        vc, solver, &result_z3, &rhs_val,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // ensures: <expr> == result の逆順もサポート
+                                    if let Expr::Variable(ref var_name) = right.as_ref() {
+                                        if var_name == "result" {
+                                            if let Ok(lhs_val) =
+                                                expr_to_z3(vc, left, &mut call_env, None)
+                                            {
+                                                if let Some(solver) = solver_opt {
+                                                    assert_result_equality(
+                                                        vc, solver, &result_z3, &lhs_val,
+                                                    );
+                                                }
                                             }
                                         }
                                     }
                                 }
-                                // ensures: <expr> == result の逆順もサポート
-                                if let Expr::Variable(ref var_name) = right.as_ref() {
-                                    if var_name == "result" {
-                                        if let Ok(lhs_val) =
-                                            expr_to_z3(vc, left, &mut call_env, None)
-                                        {
-                                            if let Some(solver) = solver_opt {
-                                                assert_result_equality(
-                                                    vc, solver, &result_z3, &lhs_val,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
 
-                            // 複合 ensures（&& で結合された複数条件）内の等式も伝播
-                            // ensures: result >= 0 && result == n + 1 のような場合
-                            propagate_equality_from_ensures(
-                                vc,
-                                &ens_ast,
-                                &result_z3,
-                                &mut call_env,
-                                solver_opt,
-                            )?;
+                                // 複合 ensures（&& で結合された複数条件）内の等式も伝播
+                                // ensures: result >= 0 && result == n + 1 のような場合
+                                propagate_equality_from_ensures(
+                                    vc,
+                                    &ens_ast,
+                                    &result_z3,
+                                    &mut call_env,
+                                    solver_opt,
+                                )?;
+                            }
                         }
 
                         if let Some(solver) = solver_opt {
@@ -926,14 +2702,16 @@ pub(crate) fn expr_to_z3<'a>(
                         // =============================================================
                         // Subsumption Check: atom_ref argument vs contract ensures
                         // =============================================================
-                        // When a callee parameter has fn_contract_ensures and the
-                        // corresponding argument is atom_ref(concrete_name), verify
-                        // that the concrete atom's ensures implies the contract's
-                        // ensures.  Emit a warning (not a hard error) to maintain
-                        // backward compatibility.
+                        // When a callee parameter has either callback contract
+                        // clause and the corresponding argument is
+                        // atom_ref(concrete_name), verify both subsumption
+                        // directions. Fail closed when either implication cannot
+                        // be established.
                         if let Some(solver) = solver_opt {
                             for (i, param) in callee.params.iter().enumerate() {
-                                if let Some(ref contract_ensures) = param.fn_contract_ensures {
+                                if param.fn_contract_ensures.is_some()
+                                    || param.fn_contract_requires.is_some()
+                                {
                                     if let Some(Expr::AtomRef {
                                         name: ref concrete_name,
                                     }) = args.get(i)
@@ -944,13 +2722,16 @@ pub(crate) fn expr_to_z3<'a>(
                                             check_contract_subsumption(
                                                 vc,
                                                 &concrete_atom,
-                                                contract_ensures,
+                                                param
+                                                    .fn_contract_ensures
+                                                    .as_deref()
+                                                    .unwrap_or("true"),
                                                 param.fn_contract_requires.as_deref(),
                                                 name,
                                                 &param.name,
                                                 solver,
                                                 ctx,
-                                            );
+                                            )?;
                                         }
                                     }
                                 }
@@ -965,8 +2746,74 @@ pub(crate) fn expr_to_z3<'a>(
                             env.insert(taint_key, taint_marker.into());
                         }
 
+                        // The callee may have stored through a `[T]` arg's
+                        // data pointer — havoc the caller-side tracked chain
+                        // (and its aliases) for args whose callee param is
+                        // mutated, so post-call reads can't claim pre-call
+                        // elements.
+                        havoc_array_args(vc, &callee, args, env);
+
                         Ok(result_z3)
                     } else {
+                        // P10-C: `Enum::Variant(args)` / `Variant(args)`
+                        // constructs a finite-ADT value through the Z3
+                        // datatype constructor.
+                        if name.contains("::") || vc.module_env.find_enum_by_variant(name).is_some()
+                        {
+                            let mut ctor_args = Vec::new();
+                            for arg in args {
+                                ctor_args.push(expr_to_z3(vc, arg, env, solver_opt)?);
+                            }
+                            if let Some(value) = datatype::enum_ctor_apply(vc, name, &ctor_args)? {
+                                return Ok(value);
+                            }
+                            // A resolved enum+variant whose construction still
+                            // failed (arity mismatch, or the enum is not a
+                            // finite ADT) must not degrade to the
+                            // clause-skipping "Unknown function" path — that
+                            // would silently drop the contract clause.
+                            // Resolve `E` directly for qualified `E::V` (the
+                            // prelude's generic `Option`/`Result`/`List`
+                            // variants can shadow a user enum in a
+                            // name-only scan); bare `V` resolved unambiguously
+                            // already inside `enum_ctor_apply`.
+                            let owner = if let Some((qual, _)) = name.split_once("::") {
+                                vc.module_env.get_enum(qual)
+                            } else {
+                                vc.module_env
+                                    .resolve_variant_owner_by_hint(name, None)
+                                    .ok()
+                                    .flatten()
+                            };
+                            if let Some(ed) = owner {
+                                let variant = name.rsplit("::").next().unwrap_or(name);
+                                match ed.variants.iter().find(|v| v.name == variant) {
+                                    Some(vdef) => {
+                                        let arity = vdef.fields.len();
+                                        if arity == args.len() {
+                                            return Err(MumeiError::verification(format!(
+                                                "Enum constructor '{name}' is not constructible in specs: enum '{}' is not a finite ADT (recursive, generic, empty, or non-scalar payload — it keeps the Int-tag encoding; use the tag literal or a `match` discriminant)",
+                                                ed.name
+                                            )));
+                                        }
+                                        return Err(MumeiError::verification(format!(
+                                            "Enum constructor '{name}' takes {arity} payload arg(s), got {}",
+                                            args.len()
+                                        )));
+                                    }
+                                    None if name.contains("::") => {
+                                        // `E` is a known enum but `V` is not
+                                        // one of its variants — a typo must
+                                        // not be silently dropped.
+                                        return Err(MumeiError::verification(format!(
+                                            "Enum '{}' has no variant named '{variant}'",
+                                            ed.name
+                                        )));
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
                         Err(MumeiError::verification(format!(
                             "Unknown function: {}",
                             name
@@ -974,6 +2821,83 @@ pub(crate) fn expr_to_z3<'a>(
                     }
                 }
             }
+        }
+        Expr::ArrayLit(elements) => {
+            // `[e0, e1, …]` lowers to an `Int -> Elem` Z3 array built by a
+            // `store` chain over a fresh constant base. The literal has no
+            // name of its own: the `let`/`assign` binding that receives it
+            // (stmt.rs) records `__z3_arr_<var>`/`len_<var>` and the element
+            // type so reads, stores, and `len()` resolve against this chain.
+            static ARRAY_LIT_UID: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let uid = ARRAY_LIT_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let name = format!("__array_lit_{uid}");
+            let mut elem_dynamics = Vec::with_capacity(elements.len());
+            for element in elements {
+                elem_dynamics.push(expr_to_z3(vc, element, env, solver_opt)?);
+            }
+            // Range sort = the widest element sort across the literal. Z3
+            // numerals built from whole-valued floats (`1.0` → `Int`) make a
+            // first-element-only probe choose the wrong sort, so scan them
+            // all: Float > Real > Int; Bool and Str literals must each be
+            // uniformly of their own sort. `Array` elements (`[[T]]`) stay
+            // unsupported — they would need an `Array` range sort.
+            let mut has_float = false;
+            let mut has_real = false;
+            let mut has_int = false;
+            let mut has_bool = false;
+            let mut has_str = false;
+            for elem in &elem_dynamics {
+                match elem.get_sort().kind() {
+                    z3::SortKind::Int | z3::SortKind::BV => has_int = true,
+                    z3::SortKind::Real => has_real = true,
+                    z3::SortKind::FloatingPoint => has_float = true,
+                    z3::SortKind::Bool => has_bool = true,
+                    z3::SortKind::Seq => has_str = true,
+                    other => {
+                        return Err(MumeiError::type_error(format!(
+                            "array literal element type {other:?} is unsupported \
+                             (only i64/f64/bool/Str elements can be lowered; \
+                             nested arrays are not supported)"
+                        )))
+                    }
+                }
+            }
+            let range_sort = if has_str {
+                if has_float || has_real || has_int || has_bool {
+                    return Err(MumeiError::type_error(
+                        "array literal mixes string and non-string elements",
+                    ));
+                }
+                ArrayElementSort::Str
+            } else if has_float {
+                ArrayElementSort::Float
+            } else if has_real {
+                if has_bool {
+                    return Err(MumeiError::type_error(
+                        "array literal mixes bool and numeric elements",
+                    ));
+                }
+                ArrayElementSort::Real
+            } else if has_int {
+                if has_bool {
+                    return Err(MumeiError::type_error(
+                        "array literal mixes bool and integer elements",
+                    ));
+                }
+                ArrayElementSort::Int
+            } else if has_bool {
+                ArrayElementSort::Bool
+            } else {
+                unreachable!("non-empty array literal has an element sort")
+            };
+            let mut arr = z3_array_for_sort(ctx, &name, range_sort);
+            for (i, elem) in elem_dynamics.iter().enumerate() {
+                let idx = Int::from_i64(ctx, i as i64);
+                let coerced = coerce_to_array_elem_sort(vc, range_sort, elem)?;
+                arr = arr.store(&idx, &coerced);
+            }
+            Ok(arr.into())
         }
         Expr::ArrayAccess(name, index_expr) => {
             if name == "result" {
@@ -1014,7 +2938,7 @@ pub(crate) fn expr_to_z3<'a>(
                     .ok_or(MumeiError::type_error("Index must be integer"))?;
                 solver.push();
                 solver.assert(&safe.not());
-                if solver.check() == SatResult::Sat {
+                if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                     solver.pop(1);
                     return Err(MumeiError::verification(format!(
                         "Potential Out-of-Bounds on '{}' (index may be < 0 or >= len_{})",
@@ -1075,7 +2999,51 @@ pub(crate) fn expr_to_z3<'a>(
             }
 
             let l = expr_to_z3(vc, left, env, solver_opt)?;
+
+            // For `==`/`!=` on an array `Variable`, the operand's value is
+            // the live `__z3_arr_<name>`/`len_<name>` slots (the base const
+            // `l` never reflects `a[i] = v` stores) — and for the LEFT
+            // operand those slots must be sampled before `right` is
+            // lowered: a shadowing `let a = …` or a rebind inside the right
+            // operand rewrites the same tracked slots, so reading them at
+            // dispatch time would compare the post-right `a` on both sides.
+            let array_eq_left_live = if matches!(op, Op::Eq | Op::Neq) && l.as_array().is_some() {
+                match &**left {
+                    Expr::Variable(name) => Some((
+                        z3_dynamic_array(vc, name, env),
+                        array_len_value(vc.ctx, env, name, vc.bitvec_i64, solver_opt),
+                    )),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
             let r = expr_to_z3(vc, right, env, solver_opt)?;
+
+            // Whole-array `==`/`!=`: an array value is its (contents, len)
+            // pair. Checked before every numeric/String branch because a
+            // mixed operand like `a == 0.0` would otherwise reach the Real
+            // arm, which substitutes a zero literal for the array side and
+            // silently proves `0.0 == 0.0`.
+            if matches!(op, Op::Eq | Op::Neq) && (l.as_array().is_some() || r.as_array().is_some())
+            {
+                let eq = array_value_equality(
+                    vc,
+                    left,
+                    right,
+                    &l,
+                    &r,
+                    env,
+                    solver_opt,
+                    array_eq_left_live,
+                )?;
+                return Ok(if matches!(op, Op::Neq) {
+                    eq.not().into()
+                } else {
+                    eq.into()
+                });
+            }
 
             // Plan 9-8: String concatenation — if both operands are Z3 String Sort
             if l.get_sort() == z3::Sort::string(ctx) && r.get_sort() == z3::Sort::string(ctx) {
@@ -1200,6 +3168,27 @@ pub(crate) fn expr_to_z3<'a>(
                             eq.into()
                         });
                     }
+                    // P10-C: finite-ADT equality requires the *same* datatype
+                    // sort — comparing two different enums is a hard error
+                    // (next arm), not a sort mismatch the solver would
+                    // interpret.
+                    Op::Eq | Op::Neq
+                        if l.as_datatype().is_some()
+                            && r.as_datatype().is_some()
+                            && l.get_sort() == r.get_sort() =>
+                    {
+                        let eq = l._eq(&r);
+                        return Ok(if matches!(op, Op::Neq) {
+                            eq.not().into()
+                        } else {
+                            eq.into()
+                        });
+                    }
+                    Op::Eq | Op::Neq if l.as_datatype().is_some() && r.as_datatype().is_some() => {
+                        return Err(MumeiError::verification(
+                            "Cannot compare enum values of different types".to_string(),
+                        ));
+                    }
                     _ => {}
                 }
                 let li = l.as_int().ok_or("Expected int")?;
@@ -1215,18 +3204,45 @@ pub(crate) fn expr_to_z3<'a>(
                                 solver.assert(cond);
                             }
                             solver.assert(&ri._eq(&Int::from_i64(ctx, 0)));
-                            if solver.check() == SatResult::Sat {
-                                // Extract counterexample: find which variables cause divisor == 0
-                                let (ce_hint, div_feedback) =
+                            if crate::verification::phase_artifacts::check(solver) == SatResult::Sat
+                            {
+                                let (ce_hint, div_feedback, raised_counterexample) =
                                     if let Some(model) = solver.get_model() {
-                                        let divisor_val = model
-                                            .eval(&ri, true)
-                                            .map(|v| format!("{}", v))
-                                            .unwrap_or_else(|| "0".to_string());
-                                        let dividend_val = model
-                                            .eval(&li, true)
-                                            .map(|v| format!("{}", v))
+                                        let dividend = model.eval(&li, true);
+                                        let divisor = model.eval(&ri, true);
+                                        let mut raised = RaisedCounterexample::default();
+                                        if let Some(value) = dividend.as_ref() {
+                                            let value = Dynamic::from(value);
+                                            raised.values.push(raise_named_model_value(
+                                                &model,
+                                                "dividend",
+                                                &value,
+                                                None,
+                                                vc.module_env,
+                                            ));
+                                        }
+                                        if let Some(value) = divisor.as_ref() {
+                                            let value = Dynamic::from(value);
+                                            raised.values.push(raise_named_model_value(
+                                                &model,
+                                                "divisor",
+                                                &value,
+                                                None,
+                                                vc.module_env,
+                                            ));
+                                        }
+                                        let dividend_val = raised
+                                            .values
+                                            .iter()
+                                            .find(|value| value.source_name == "dividend")
+                                            .map(|value| value.rendering.clone())
                                             .unwrap_or_else(|| "?".to_string());
+                                        let divisor_val = raised
+                                            .values
+                                            .iter()
+                                            .find(|value| value.source_name == "divisor")
+                                            .map(|value| value.rendering.clone())
+                                            .unwrap_or_else(|| "0".to_string());
                                         let hint = format!(
                                             " Counter-example: dividend = {}, divisor = {}",
                                             dividend_val, divisor_val
@@ -1235,38 +3251,28 @@ pub(crate) fn expr_to_z3<'a>(
                                             &dividend_val,
                                             &divisor_val,
                                         );
-                                        (hint, Some(fb))
+                                        (hint, Some(fb), Some(raised))
                                     } else {
-                                        (String::new(), None)
+                                        (String::new(), None, None)
                                     };
                                 // Attach structured feedback to error message for upstream reporting
                                 let feedback_hint = div_feedback
                                     .as_ref()
                                     .map(|fb| format!(" [semantic_feedback: {}]", fb))
                                     .unwrap_or_default();
-                                let ce_value = if let Some(model) = solver.get_model() {
-                                    let dividend_val = model
-                                        .eval(&li, true)
-                                        .map(|v| format!("{}", v))
-                                        .unwrap_or_else(|| "?".to_string());
-                                    let divisor_val = model
-                                        .eval(&ri, true)
-                                        .map(|v| format!("{}", v))
-                                        .unwrap_or_else(|| "0".to_string());
-                                    Some(serde_json::json!({
-                                        "dividend": dividend_val,
-                                        "divisor": divisor_val,
-                                    }))
-                                } else {
-                                    None
-                                };
+                                let ce_value = raised_counterexample
+                                    .as_ref()
+                                    .map(RaisedCounterexample::to_counterexample_json);
+                                let provenance = raised_counterexample
+                                    .as_ref()
+                                    .map(RaisedCounterexample::provenance_json);
                                 solver.pop(1);
                                 return Err(MumeiError::verification(format!(
                                     "Potential division by zero.{}{}",
                                     ce_hint, feedback_hint
                                 ))
                                 .with_help("Add a condition divisor != 0 to requires")
-                                .with_counterexample(ce_value));
+                                .with_counterexample_provenance(ce_value, provenance));
                             }
                             solver.pop(1);
                         }
@@ -1314,16 +3320,69 @@ pub(crate) fn expr_to_z3<'a>(
             // surrounding else-guard, while still keeping `let left =
             // merge_sort(mid)` ensures-asserts (`left == mid`) live for the
             // outer postcondition check.
+            // Binding types are scoped like the value env: each branch runs
+            // on a fresh snapshot, and afterwards only entries the two
+            // branches agree on survive (an if-local `let` must not leak its
+            // inferred type onto an outer binding).
+            let types_before = vc.local_enum_types.borrow().clone();
+            let lambdas_before = vc.local_lambdas.borrow().clone();
             vc.path_cond_stack.borrow_mut().push(c.clone());
-            let t = stmt_to_z3(vc, then_branch, env, solver_opt);
+            let mut then_env = env.clone();
+            let t = stmt_to_z3(vc, then_branch, &mut then_env, solver_opt);
             vc.path_cond_stack.borrow_mut().pop();
             let t = t?;
+            let then_types = vc.local_enum_types.borrow().clone();
+            let then_lambdas = vc.local_lambdas.borrow().clone();
+            *vc.local_enum_types.borrow_mut() = types_before.clone();
+            *vc.local_lambdas.borrow_mut() = lambdas_before.clone();
             vc.path_cond_stack.borrow_mut().push(c.not());
-            let e = stmt_to_z3(vc, else_branch, env, solver_opt);
+            let mut else_env = env.clone();
+            let e = stmt_to_z3(vc, else_branch, &mut else_env, solver_opt);
             vc.path_cond_stack.borrow_mut().pop();
+            let else_types = vc.local_enum_types.borrow().clone();
+            let else_lambdas = vc.local_lambdas.borrow().clone();
+            let mut merged = types_before;
+            merged.retain(|k, v| then_types.get(k) == Some(v) && else_types.get(k) == Some(v));
+            for (k, v) in then_types.iter() {
+                if else_types.get(k) == Some(v) {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+            *vc.local_enum_types.borrow_mut() = merged;
+            // Same merge rule as the value env: a binding only on one
+            // branch keeps that side's (branch-local bindings leak, like
+            // `merge_branch_envs`), while a name bound on both survives
+            // only when both sides bound it to the *same* lambda — an
+            // `ite` over two different closures has no Z3 encoding, so a
+            // disagreeing rebind must drop the entry (a post-branch call
+            // then fails closed as an unknown function rather than
+            // picking one side's body).
+            let mut merged_lambdas = then_lambdas;
+            let mut conflicting = std::collections::HashSet::new();
+            merged_lambdas.retain(|k, v| match else_lambdas.get(k) {
+                Some(else_lambda) if same_local_lambda(v, else_lambda) => true,
+                Some(_) => {
+                    conflicting.insert(k.clone());
+                    false
+                }
+                None => true,
+            });
+            for (k, v) in else_lambdas.iter() {
+                if !merged_lambdas.contains_key(k) && !conflicting.contains(k) {
+                    merged_lambdas.insert(k.clone(), v.clone());
+                }
+            }
+            *vc.local_lambdas.borrow_mut() = merged_lambdas;
             let (t, e) = unify_branch_sorts(t, e?)?;
+            // Branches ran on isolated env copies — merge their writes with
+            // `ite(c, then, else)` per variable. Running both on the shared
+            // env would apply every assignment unconditionally (the else
+            // branch would even see the then-branch's writes), which is
+            // unsound.
+            merge_branch_envs(env, then_env, else_env, &c);
             Ok(c.ite(&t, &e))
         }
+        Expr::Block(stmt) => stmt_to_z3(vc, stmt, env, solver_opt),
 
         Expr::StructInit { type_name, fields } => {
             // 構造体の各フィールドを検証し、env に登録
@@ -1356,7 +3415,9 @@ pub(crate) fn expr_to_z3<'a>(
                                 if let Some(solver) = solver_opt {
                                     solver.push();
                                     solver.assert(&constraint_bool.not());
-                                    if solver.check() == SatResult::Sat {
+                                    if crate::verification::phase_artifacts::check(solver)
+                                        == SatResult::Sat
+                                    {
                                         solver.pop(1);
                                         return Err(MumeiError::verification(format!(
                                             "Struct '{}' field '{}' constraint violated: {}",
@@ -1386,6 +3447,39 @@ pub(crate) fn expr_to_z3<'a>(
         Expr::Match { target, arms } => {
             let target_z3 = expr_to_z3(vc, target, env, solver_opt)?;
 
+            // Declared enum type of the scrutinee, when it's a bare
+            // parameter/`result` variable or a field chain rooted at a
+            // struct-typed binding (`h.r`, `h.a.b`, `result.r`, `f(x).r`) —
+            // disambiguates Variant arms whose names collide across enums
+            // (prelude List vs user `enum IntList`). The const-name lookup
+            // inside `resolve_variant_owner` covers let-aliases; `result` is
+            // rebound to the evaluated body value, so only the Expr knows.
+            let decl_hint: Option<String> =
+                crate::verification::support::datatype::declared_type_of_expr(vc, target).map(
+                    |t| crate::verification::support::datatype::type_name_base(&t).to_string(),
+                );
+
+            // Clause lowering (`requires`/`ensures`, struct invariants, match
+            // guards) runs with `solver_opt = None` so arm-body side effects
+            // never leak onto the ambient solver — but exhaustiveness is a
+            // language-level obligation. Without a check, a non-exhaustive
+            // clause match silently evaluates to its last arm's body on
+            // uncovered inputs (e.g. a one-arm `requires: match h.r { V =>
+            // e }` would lower to just `e`). Run the check on a scratch
+            // solver seeded with the already-asserted clause context.
+            let scratch_solver;
+            let check_solver = match solver_opt {
+                Some(solver) => solver,
+                None => {
+                    let scratch = Solver::new(ctx);
+                    for clause in vc.clause_context.borrow().iter() {
+                        scratch.assert(clause);
+                    }
+                    scratch_solver = scratch;
+                    &scratch_solver
+                }
+            };
+
             // ========================================================
             // Enum ドメイン制約の自動注入
             // ========================================================
@@ -1393,14 +3487,14 @@ pub(crate) fn expr_to_z3<'a>(
             // target の値域を 0..n_variants に制約する。
             // これにより Z3 が「これら以外のバリアントは存在しない」ことを知り、
             // 網羅性チェックの信頼性が 100% になる。
-            if let Some(solver) = solver_opt {
-                if let Some(enum_def) = detect_enum_from_arms(arms, vc.module_env) {
-                    let n = enum_def.variants.len() as i64;
-                    if let Some(tag_int) = target_z3.as_int() {
-                        // tag ∈ [0, n_variants)
-                        solver.assert(&tag_int.ge(&Int::from_i64(ctx, 0)));
-                        solver.assert(&tag_int.lt(&Int::from_i64(ctx, n)));
-                    }
+            if let Some(enum_def) =
+                detect_enum_from_arms(arms, vc, &target_z3, decl_hint.as_deref())
+            {
+                let n = enum_def.variants.len() as i64;
+                if let Some(tag_int) = target_z3.as_int() {
+                    // tag ∈ [0, n_variants)
+                    check_solver.assert(&tag_int.ge(&Int::from_i64(ctx, 0)));
+                    check_solver.assert(&tag_int.lt(&Int::from_i64(ctx, n)));
                 }
             }
 
@@ -1409,7 +3503,7 @@ pub(crate) fn expr_to_z3<'a>(
             // ========================================================
             // 各アームの条件 P_i を構築し、¬(P_1 ∨ P_2 ∨ ... ∨ P_n) が
             // Unsat であることを証明する。Sat なら網羅性欠如エラー。
-            if let Some(solver) = solver_opt {
+            {
                 let mut arm_conditions: Vec<Bool> = Vec::new();
                 for arm in arms {
                     let cond = pattern_to_z3_condition(
@@ -1418,7 +3512,8 @@ pub(crate) fn expr_to_z3<'a>(
                         &target_z3,
                         env,
                         vc,
-                        solver_opt,
+                        Some(check_solver),
+                        decl_hint.as_deref(),
                     )?;
                     // ガード条件がある場合は AND で結合
                     let full_cond = if let Some(guard) = &arm.guard {
@@ -1435,24 +3530,33 @@ pub(crate) fn expr_to_z3<'a>(
                 // 網羅性: ¬(P_1 ∨ ... ∨ P_n) が Unsat か？
                 let arm_refs: Vec<&Bool> = arm_conditions.iter().collect();
                 let coverage = Bool::or(ctx, &arm_refs);
-                solver.push();
-                solver.assert(&coverage.not());
-                let exhaustive = solver.check() == SatResult::Unsat;
-                solver.pop(1);
+                check_solver.push();
+                check_solver.assert(&coverage.not());
+                let exhaustive =
+                    crate::verification::phase_artifacts::check(check_solver) == SatResult::Unsat;
+                check_solver.pop(1);
 
                 if !exhaustive {
                     // 反例（Counter-example）の取得と表示
                     // solver はまだ Sat 状態なので、再度チェックして model を取得
-                    solver.push();
-                    solver.assert(&coverage.not());
-                    if solver.check() == SatResult::Sat {
-                        let counterexample = if let Some(model) = solver.get_model() {
-                            // ターゲット変数の具体的な値を取得
-                            format_counterexample(&model, &target_z3, arms, vc.module_env)
-                        } else {
-                            "unknown value".to_string()
-                        };
-                        solver.pop(1);
+                    check_solver.push();
+                    check_solver.assert(&coverage.not());
+                    if crate::verification::phase_artifacts::check(check_solver) == SatResult::Sat {
+                        let (counterexample, counterexample_provenance) =
+                            if let Some(model) = check_solver.get_model() {
+                                // ターゲット変数の具体的な値を取得
+                                format_counterexample(
+                                    &model,
+                                    &target_z3,
+                                    arms,
+                                    env,
+                                    vc,
+                                    decl_hint.as_deref(),
+                                )
+                            } else {
+                                ("unknown value".to_string(), None)
+                            };
+                        check_solver.pop(1);
                         let ce_value = serde_json::json!({
                             "target": counterexample,
                         });
@@ -1461,9 +3565,14 @@ pub(crate) fn expr_to_z3<'a>(
                                 "Match is not exhaustive: the following value is not covered by any arm:\n  Counter-example: {}",
                                 counterexample
                             )
-                        ).with_counterexample(Some(ce_value)));
+                        ).with_counterexample_provenance(
+                            Some(ce_value),
+                            counterexample_provenance
+                                .as_ref()
+                                .map(RaisedCounterexample::provenance_json),
+                        ));
                     }
-                    solver.pop(1);
+                    check_solver.pop(1);
                     return Err(MumeiError::verification(
                         "Match is not exhaustive: there exist values not covered by any arm.",
                     ));
@@ -1478,14 +3587,39 @@ pub(crate) fn expr_to_z3<'a>(
             //    env/solver に追加し、デフォルトアーム内の検証精度を向上させる。
             let mut accumulated_negations: Vec<Bool> = Vec::new();
             let mut result: Option<Dynamic> = None;
+            // Assignments to pre-existing vars inside arm bodies must fold
+            // back under each arm's condition — previously they were dropped
+            // with the per-arm env clone, so post-match code saw stale values.
+            let mut merged_arm_env: Option<Env> = None;
+            // Lambda `let`s inside an arm body stay arm-local — restore the
+            // map before each arm and after the match, mirroring the
+            // per-arm `env.clone()` scoping below.
+            let lambdas_before = vc.local_lambdas.borrow().clone();
 
             for arm in arms.iter().rev() {
+                *vc.local_lambdas.borrow_mut() = lambdas_before.clone();
                 let mut arm_env = env.clone();
+
+                // Names bound by the arm's pattern — or by `let`s anywhere
+                // in the arm body — stay arm-local even when they shadow an
+                // outer binding; they must not be folded into the post-match
+                // env like assignments.
+                let mut arm_bound: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                crate::hir::collect_pattern_bindings(&arm.pattern.clone().into(), &mut arm_bound);
+                collect_arm_local_lets(&arm.body, &mut arm_bound);
 
                 // B. ネストパターンの再帰解体:
                 //    pattern_bind_variables が再帰的にパターンを分解し、
                 //    バインド変数を arm_env に登録する。
-                pattern_bind_variables(ctx, &arm.pattern, &target_z3, &mut arm_env, vc.module_env);
+                pattern_bind_variables(
+                    ctx,
+                    &arm.pattern,
+                    &target_z3,
+                    &mut arm_env,
+                    vc,
+                    decl_hint.as_deref(),
+                );
 
                 let arm_cond = pattern_to_z3_condition(
                     ctx,
@@ -1494,6 +3628,7 @@ pub(crate) fn expr_to_z3<'a>(
                     &mut arm_env,
                     vc,
                     solver_opt,
+                    decl_hint.as_deref(),
                 )?;
                 let full_cond = if let Some(guard) = &arm.guard {
                     let guard_z3 = expr_to_z3(vc, guard, &mut arm_env, None)?
@@ -1516,6 +3651,13 @@ pub(crate) fn expr_to_z3<'a>(
                         solver.assert(&prior_negation);
                         let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
                         solver.pop(1);
+                        merge_arm_env_into(
+                            &mut merged_arm_env,
+                            &arm_env,
+                            env,
+                            &full_cond,
+                            &arm_bound,
+                        );
                         result = Some(match result {
                             Some(else_val) => {
                                 let (body_val, else_val) = unify_branch_sorts(body_val, else_val)?;
@@ -1529,6 +3671,7 @@ pub(crate) fn expr_to_z3<'a>(
                 }
 
                 let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
+                merge_arm_env_into(&mut merged_arm_env, &arm_env, env, &full_cond, &arm_bound);
                 result = Some(match result {
                     Some(else_val) => {
                         let (body_val, else_val) = unify_branch_sorts(body_val, else_val)?;
@@ -1538,6 +3681,11 @@ pub(crate) fn expr_to_z3<'a>(
                 });
                 accumulated_negations.push(full_cond.not());
             }
+
+            if let Some(merged_env) = merged_arm_env {
+                *env = merged_env;
+            }
+            *vc.local_lambdas.borrow_mut() = lambdas_before;
 
             result.ok_or_else(|| MumeiError::verification("Match expression has no arms"))
         }
@@ -1606,6 +3754,10 @@ pub(crate) fn expr_to_z3<'a>(
                 let val = expr_to_z3(vc, arg, env, solver_opt)?;
                 arg_z3_values.push(val);
             }
+            vc.reject_quantifier_dependent_call(
+                &format!("perform {effect}.{operation}"),
+                &arg_z3_values,
+            )?;
 
             // Z3 String Sort: verify symbolic parameter constraints
             // Look up the EffectDef to get constraint and param definitions
@@ -1779,6 +3931,16 @@ pub(crate) fn expr_to_z3<'a>(
             // (e.g., `let x = perform HttpGet.request(url); x + 1`) would get
             // a Z3 Sort mismatch error.
             let result_name = format!("__perform_{}_{}", effect, operation);
+            if nondeterministic_root(vc.module_env, effect).is_some() {
+                let result = nondeterministic_perform_result(
+                    ctx,
+                    &result_name,
+                    &arg_z3_values,
+                    vc.bitvec_i64,
+                );
+                env.insert(result_name, result.clone());
+                return Ok(result);
+            }
             let has_str_params = vc
                 .module_env
                 .effect_defs
@@ -1836,7 +3998,9 @@ pub(crate) fn expr_to_z3<'a>(
                             solver.push();
                             // held が true であることを仮定し、矛盾がなければ保持中
                             solver.assert(&held_bool);
-                            if solver.check() != SatResult::Unsat {
+                            if crate::verification::phase_artifacts::check(solver)
+                                != SatResult::Unsat
+                            {
                                 solver.pop(1);
                                 return Err(MumeiError::verification(
                                     format!(
@@ -1873,7 +4037,8 @@ pub(crate) fn expr_to_z3<'a>(
                             // __alive_ が false（消費済み）であることを Z3 で確認
                             solver.push();
                             solver.assert(&alive_bool.not()); // alive = false を仮定
-                            if solver.check() == SatResult::Sat {
+                            if crate::verification::phase_artifacts::check(solver) == SatResult::Sat
+                            {
                                 // 消費済み変数が存在する → await 後のアクセスは use-after-free
                                 // await ポイントでの状態をマーク（後続の検証で参照）
                                 let await_consumed_key = format!("__await_consumed_{}", var_name);
@@ -1917,6 +4082,22 @@ pub(crate) fn expr_to_z3<'a>(
             // - requires を呼び出し元のコンテキストで検証
             // - ensures を事実として solver に追加
 
+            // `call(f, …)` where `f` is a `let`-bound lambda — or an inline
+            // `call(|a| …, …)` — inlines the lambda body the same way a
+            // direct `f(…)` does. A lambda-bound variable shadows the
+            // atom_ref/param-contract resolution below.
+            let lambda_callee = match callee.as_ref() {
+                Expr::Variable(var) => vc.local_lambdas.borrow().get(var).cloned(),
+                Expr::Lambda { .. } => Some(std::rc::Rc::new(LocalLambda::Closure {
+                    expr: callee.as_ref().clone(),
+                    captured: vc.local_lambdas.borrow().clone(),
+                })),
+                _ => None,
+            };
+            if let Some(lambda) = lambda_callee {
+                return apply_local_lambda(vc, "call", &lambda, args, env, solver_opt);
+            }
+
             // callee を評価
             let _callee_val = expr_to_z3(vc, callee, env, solver_opt)?;
 
@@ -1937,11 +4118,23 @@ pub(crate) fn expr_to_z3<'a>(
 
             if let Some(ref callee_name) = atom_name {
                 if let Some(callee_atom) = vc.module_env.get_atom(callee_name).cloned() {
+                    if callee_atom.params.len() != args.len() {
+                        return Err(MumeiError::verification(format!(
+                            "Call to '{}': expected {} argument(s), got {}",
+                            callee_name,
+                            callee_atom.params.len(),
+                            args.len()
+                        )));
+                    }
                     // 引数を Z3 で評価
                     let mut arg_vals = Vec::new();
                     for arg in args {
                         arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
                     }
+                    let recursive_instance = vc.is_instantiating_contract(&callee_atom.name);
+                    vc.reject_quantifier_dependent_call(callee_name, &arg_vals)?;
+                    let cong = vc.callee_congruent(&callee_atom);
+                    let scc_internal = cong && scc_internal_call(vc, &callee_atom);
 
                     // 呼び出し先のパラメータ名に引数をマッピング
                     let mut call_env = env.clone();
@@ -1949,22 +4142,50 @@ pub(crate) fn expr_to_z3<'a>(
                         if let Some(arg_val) = arg_vals.get(i) {
                             call_env.insert(param.name.clone(), arg_val.clone());
                             alias_struct_fields(&mut call_env, &param.name, arg_val);
+                            wire_array_slots(vc, &param.name, args.get(i), arg_val, &mut call_env);
                         }
                     }
 
+                    if cong {
+                        if let Some(field_vals) = struct_field_values_for_call(
+                            vc,
+                            &callee_atom,
+                            &arg_vals,
+                            &call_env,
+                            env,
+                        ) {
+                            vc.reject_quantifier_dependent_call(callee_name, &field_vals)?;
+                        }
+                    }
+
+                    if cong && !recursive_instance {
+                        termination_obligation_at_call(
+                            vc,
+                            &callee_atom,
+                            &mut call_env,
+                            env,
+                            solver_opt,
+                        )?;
+                    }
+
                     // requires を呼び出し元のコンテキストで検証
-                    if callee_atom.requires.trim() != "true" {
-                        let req_ast = parse_expression(&callee_atom.requires);
+                    let caller_requires =
+                        crate::verification::caller_requires_obligation(&callee_atom);
+                    if caller_requires.trim() != "true" && !recursive_instance {
+                        let _contract_guard = vc.enter_contract_instantiation(&callee_atom.name);
+                        let req_ast = parse_expression(&caller_requires);
                         let req_z3 = expr_to_z3(vc, &req_ast, &mut call_env, None)?;
                         if let Some(req_bool) = req_z3.as_bool() {
                             if let Some(solver) = solver_opt {
                                 solver.push();
                                 solver.assert(&req_bool.not());
-                                if solver.check() == SatResult::Sat {
+                                if crate::verification::phase_artifacts::check(solver)
+                                    == SatResult::Sat
+                                {
                                     solver.pop(1);
                                     return Err(MumeiError::verification(format!(
                                         "call(atom_ref({})): precondition '{}' may not hold at call site",
-                                        callee_name, callee_atom.requires
+                                        callee_name, caller_requires
                                     ))
                                     .with_help(
                                         "呼び出し元で事前条件を満たしていません。引数の制約を確認してください",
@@ -1982,65 +4203,217 @@ pub(crate) fn expr_to_z3<'a>(
                         CALL_REF_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let result_name = format!("call_ref_{}_{}", callee_name, call_id);
                     let result_type = callee_atom.return_type.as_deref();
-                    let result_z3: Dynamic = param_z3_value(
-                        ctx,
-                        result_name.as_str(),
-                        result_type,
-                        vc.module_env,
-                        vc.ieee754_f64,
-                        vc.bitvec_i64,
-                    );
+                    let rec_args = rec_fn_args(vc, &callee_atom, &arg_vals, &call_env);
+                    let use_rec_fn = cong
+                        && callee_semantics_match_caller(vc, &callee_atom)
+                        && rec_args.is_some();
+                    // Same expanded-signature retention as the `Expr::Call`
+                    // arm: the result's `#len`/`#field.*` projections share
+                    // the callee's domain.
+                    let rec_signature: Option<(Vec<Dynamic>, Vec<Sort>)> = if use_rec_fn {
+                        let rec_args = rec_args.expect("recursive arguments checked above");
+                        let domain = rec_args.iter().map(|v| v.get_sort()).collect();
+                        Some((rec_args, domain))
+                    } else {
+                        None
+                    };
+                    let struct_return = result_type.and_then(|t| vc.module_env.get_struct(t));
+                    let result_z3: Dynamic = if let Some((rec_args, domain)) = &rec_signature {
+                        if struct_return.is_some() {
+                            // Field-wise congruent struct result: the handle
+                            // stays a per-call const; fields are projection
+                            // UFs bound below.
+                            datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type)
+                        } else {
+                            let range = call_result_sort(vc, &callee_atom);
+                            let decl = vc.rec_fn(&callee_atom, domain, &range);
+                            let app_args: Vec<&dyn Ast> =
+                                rec_args.iter().map(|v| v as &dyn Ast).collect();
+                            let application = decl.apply(&app_args);
+                            if let Some(sink) = vc.recursion.unfold_sink.borrow_mut().as_mut() {
+                                sink.push((callee_atom.name.clone(), arg_vals.clone()));
+                            }
+                            application
+                        }
+                    } else {
+                        datatype::param_z3_value_for_vc(vc, result_name.as_str(), result_type)
+                    };
+
+                    // Array results on the congruent path mint their `len`
+                    // through the `#len` projection UF (the (contents, len)
+                    // pair). The non-congruent reference-call path keeps its
+                    // historical shape: no tracked result length.
+                    let result_len: Option<Dynamic> =
+                        if let Some((rec_args, domain)) = &rec_signature {
+                            result_z3.as_array().map(|_| {
+                                let len_sort =
+                                    array_len_symbol(vc.ctx, "probe", vc.bitvec_i64).get_sort();
+                                let len_sym = rec_fn_result_projection(
+                                    vc,
+                                    &callee_atom,
+                                    "len",
+                                    domain,
+                                    &len_sort,
+                                    rec_args,
+                                );
+                                if let (Some(solver), Some(nn)) =
+                                    (solver_opt, nonneg_constraint(ctx, &len_sym))
+                                {
+                                    solver.assert(&nn);
+                                }
+                                vc.call_result_lens.borrow_mut().insert(
+                                    result_z3.get_z3_ast() as usize,
+                                    (len_sym.clone(), result_z3.clone()),
+                                );
+                                len_sym
+                            })
+                        } else {
+                            None
+                        };
 
                     // 構造体を返す参照呼び出し: 通常呼び出しと同様に結果のフィールドを
                     // シンボル化し、呼び出し先が保証する不変量を仮定する。
-                    if let Some(sdef) = result_type.and_then(|t| vc.module_env.get_struct(t)) {
-                        let result_fields = seed_struct_fields(
-                            ctx,
-                            env,
-                            &result_name,
-                            sdef,
-                            vc.module_env,
-                            vc.ieee754_f64,
-                            vc.bitvec_i64,
-                        );
+                    if let Some(sdef) = struct_return {
+                        let result_fields: Vec<(String, Dynamic)> =
+                            if let Some((rec_args, domain)) = &rec_signature {
+                                sdef.fields
+                                    .iter()
+                                    .map(|field| {
+                                        let range = param_sort_probe(
+                                            vc,
+                                            &format!(
+                                                "__recfn_field_{}_{}",
+                                                callee_atom.name, field.name
+                                            ),
+                                            Some(field.type_name.trim()),
+                                        );
+                                        (
+                                            field.name.clone(),
+                                            rec_fn_result_projection(
+                                                vc,
+                                                &callee_atom,
+                                                &format!("field.{}", field.name),
+                                                domain,
+                                                &range,
+                                                rec_args,
+                                            ),
+                                        )
+                                    })
+                                    .collect()
+                            } else {
+                                seed_struct_fields(
+                                    ctx,
+                                    env,
+                                    &result_name,
+                                    sdef,
+                                    vc.module_env,
+                                    vc.ieee754_f64,
+                                    vc.bitvec_i64,
+                                )
+                            };
+                        if rec_signature.is_some() {
+                            bind_struct_fields(env, &result_name, &result_fields);
+                        }
                         bind_struct_fields(&mut call_env, &result_name, &result_fields);
                         bind_struct_fields(&mut call_env, "result", &result_fields);
-                        if let (Some(solver), true) =
-                            (solver_opt, callee_semantics_match_caller(vc, &callee_atom))
-                        {
-                            assume_struct_invariants(
-                                vc,
-                                solver,
-                                sdef,
-                                &result_name,
-                                &result_fields,
-                                &call_env,
-                                None,
-                            )?;
+                        vc.call_result_fields.borrow_mut().insert(
+                            result_z3.get_z3_ast() as usize,
+                            (result_fields.clone(), result_z3.clone()),
+                        );
+                        if let (Some(solver), true) = (
+                            solver_opt,
+                            !recursive_instance && callee_semantics_match_caller(vc, &callee_atom),
+                        ) {
+                            let _contract_guard =
+                                vc.enter_contract_instantiation(&callee_atom.name);
+                            if rec_signature.is_some() {
+                                assume_struct_contract(
+                                    vc,
+                                    solver,
+                                    sdef,
+                                    &result_name,
+                                    &result_fields,
+                                    &call_env,
+                                    None,
+                                )?;
+                            } else {
+                                assume_struct_invariants(
+                                    vc,
+                                    solver,
+                                    sdef,
+                                    &result_name,
+                                    &result_fields,
+                                    &call_env,
+                                    None,
+                                )?;
+                            }
                         }
                     }
 
-                    if callee_atom.ensures.trim() != "true" {
+                    let caller_ensures = crate::verification::contract_view(
+                        &callee_atom,
+                        crate::verification::ContractView::CallerEnsures,
+                    );
+                    if caller_ensures.trim() != "true" && !recursive_instance {
+                        let _contract_guard = vc.enter_contract_instantiation(&callee_atom.name);
                         call_env.insert("result".to_string(), result_z3.clone());
-                        let ens_ast = parse_expression(&callee_atom.ensures);
-                        let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
-                        if let Some(ens_bool) = ens_z3.as_bool() {
-                            if let Some(solver) = solver_opt {
-                                solver.assert(&ens_bool);
-                            }
+                        if let Some(len_sym) = &result_len {
+                            call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
+                            call_env.insert("len_result".to_string(), len_sym.clone());
                         }
+                        let ens_ast = parse_expression(&caller_ensures);
+                        if use_rec_fn {
+                            let unfold_key = if solver_opt.is_some()
+                                && !recursive_instance
+                                && vc.recursion.unfold_sink.borrow().is_none()
+                                && caller_outside_scc(vc, &callee_atom)
+                            {
+                                constant_args(&arg_vals).map(|(_, key)| key)
+                            } else {
+                                None
+                            };
+                            let unfold_guard =
+                                unfold_key.as_ref().map(|_| UnfoldSinkGuard::new(vc));
+                            let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
+                            if let (Some(ens_bool), Some(solver)) = (ens_z3.as_bool(), solver_opt) {
+                                let ante = congruent_ensures_antecedent(
+                                    vc,
+                                    &callee_atom,
+                                    &caller_requires,
+                                    &mut call_env,
+                                    scc_internal,
+                                )?;
+                                solver.assert(&ante.implies(&ens_bool));
+                                if let (Some(unfold_key), Some(unfold_guard)) =
+                                    (unfold_key.as_ref(), unfold_guard.as_ref())
+                                {
+                                    let frontier = unfold_guard.take_frontier();
+                                    let mut seen = std::collections::HashSet::new();
+                                    seen.insert(constant_call_key(&callee_atom.name, unfold_key));
+                                    unfold_constant_calls(vc, env, frontier, seen, solver);
+                                }
+                            }
+                        } else {
+                            let ens_z3 = expr_to_z3(vc, &ens_ast, &mut call_env, None)?;
+                            if let Some(ens_bool) = ens_z3.as_bool() {
+                                if let Some(solver) = solver_opt {
+                                    solver.assert(&ens_bool);
+                                }
+                            }
 
-                        // Equality ensures の特別処理
-                        if let Expr::BinaryOp(left, Op::Eq, right) = &ens_ast {
-                            if let Expr::Variable(ref var_name) = left.as_ref() {
-                                if var_name == "result" {
-                                    if let Ok(rhs_val) = expr_to_z3(vc, right, &mut call_env, None)
-                                    {
-                                        if let Some(solver) = solver_opt {
-                                            if let (Some(res_int), Some(rhs_int)) =
-                                                (result_z3.as_int(), rhs_val.as_int())
-                                            {
-                                                solver.assert(&res_int._eq(&rhs_int));
+                            // Equality ensures の特別処理
+                            if let Expr::BinaryOp(left, Op::Eq, right) = &ens_ast {
+                                if let Expr::Variable(ref var_name) = left.as_ref() {
+                                    if var_name == "result" {
+                                        if let Ok(rhs_val) =
+                                            expr_to_z3(vc, right, &mut call_env, None)
+                                        {
+                                            if let Some(solver) = solver_opt {
+                                                if let (Some(res_int), Some(rhs_int)) =
+                                                    (result_z3.as_int(), rhs_val.as_int())
+                                                {
+                                                    solver.assert(&res_int._eq(&rhs_int));
+                                                }
                                             }
                                         }
                                     }
@@ -2049,6 +4422,10 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                     }
 
+                    // `[T]` args share the caller's data pointer — havoc
+                    // the tracked chain so post-call reads can't claim
+                    // pre-call elements the callee may have overwritten.
+                    havoc_array_args(vc, &callee_atom, args, env);
                     return Ok(result_z3);
                 }
             }
@@ -2064,6 +4441,19 @@ pub(crate) fn expr_to_z3<'a>(
             for arg in args {
                 arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
             }
+            vc.reject_quantifier_dependent_call("call", &arg_vals)?;
+
+            // The callee didn't resolve to a known atom — a concrete
+            // `atom_ref` target or contract callee may still store through
+            // its params, and nothing above models that mutation. Havoc
+            // the shared may-write set (every variable arg on this dynamic
+            // path — fail closed); `havoc_array_name` no-ops on non-array
+            // bindings.
+            for name in
+                super::may_write::callee_may_write_args(vc, CalleeRef::Expr(callee), args, env)
+            {
+                havoc_array_name(vc, &name, env);
+            }
 
             static DYNAMIC_CALL_COUNTER: std::sync::atomic::AtomicUsize =
                 std::sync::atomic::AtomicUsize::new(0);
@@ -2078,8 +4468,10 @@ pub(crate) fn expr_to_z3<'a>(
                         .iter()
                         .find(|p| p.name == *callee_var_name)
                     {
-                        // contract(f): ensures: <expr> が宣言されている場合
-                        if let Some(ref fn_ensures) = param.fn_contract_ensures {
+                        // Check either clause when a callback contract is declared.
+                        if param.fn_contract_ensures.is_some()
+                            || param.fn_contract_requires.is_some()
+                        {
                             let mut contract_env = env.clone();
 
                             // atom_ref のパラメータ型情報から引数名を生成
@@ -2114,8 +4506,10 @@ pub(crate) fn expr_to_z3<'a>(
                                         if let Some(solver) = solver_opt {
                                             solver.push();
                                             solver.assert(&req_bool.not());
-                                            if solver.check() == SatResult::Sat {
-                                                solver.pop(1);
+                                            let sat_result =
+                                                crate::verification::phase_artifacts::check(solver);
+                                            solver.pop(1);
+                                            if sat_result == SatResult::Sat {
                                                 return Err(MumeiError::verification(format!(
                                                     "call_with_contract({}): precondition '{}' may not hold at call site",
                                                     callee_var_name, fn_requires
@@ -2124,31 +4518,38 @@ pub(crate) fn expr_to_z3<'a>(
                                                     "関数パラメータの事前条件を満たしていません。引数の制約を確認してください",
                                                 ));
                                             }
-                                            solver.pop(1);
+                                            if sat_result == SatResult::Unknown {
+                                                return Err(MumeiError::verification(format!(
+                                                    "call_with_contract({}): precondition '{}' could not be decided (Z3 unknown)",
+                                                    callee_var_name, fn_requires
+                                                )));
+                                            }
                                         }
                                     }
                                 }
                             }
 
                             // ensures を事実として solver に追加
-                            if fn_ensures.trim() != "true" {
-                                let ens_ast = parse_expression(fn_ensures);
-                                let ens_z3 = expr_to_z3(vc, &ens_ast, &mut contract_env, None)
+                            if let Some(fn_ensures) = param.fn_contract_ensures.as_deref() {
+                                if fn_ensures.trim() != "true" {
+                                    let ens_ast = parse_expression(fn_ensures);
+                                    let ens_z3 = expr_to_z3(vc, &ens_ast, &mut contract_env, None)
                                     .map_err(|e| MumeiError::verification(format!(
                                         "call_with_contract({}): failed to evaluate ensures '{}': {}",
                                         callee_var_name, fn_ensures, e
                                     )))?;
-                                if let Some(ens_bool) = ens_z3.as_bool() {
-                                    if let Some(solver) = solver_opt {
-                                        solver.assert(&ens_bool);
-                                        profile_solver_assertion(
-                                            vc,
-                                            &format!(
-                                                "call_with_contract_{}_ensures",
-                                                callee_var_name
-                                            ),
-                                            None,
-                                        );
+                                    if let Some(ens_bool) = ens_z3.as_bool() {
+                                        if let Some(solver) = solver_opt {
+                                            solver.assert(&ens_bool);
+                                            profile_solver_assertion(
+                                                vc,
+                                                &format!(
+                                                    "call_with_contract_{}_ensures",
+                                                    callee_var_name
+                                                ),
+                                                None,
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -2161,6 +4562,16 @@ pub(crate) fn expr_to_z3<'a>(
         }
 
         Expr::FieldAccess(inner_expr, field_name) => {
+            if let Expr::Variable(name) = inner_expr.as_ref() {
+                if vc.module_env.resource_field(name, field_name).is_some() {
+                    let key = format!("{name}.{field_name}");
+                    return env.get(&key).cloned().ok_or_else(|| {
+                        MumeiError::verification(format!(
+                            "shared state '{key}' accessed outside 'acquire {name}'"
+                        ))
+                    });
+                }
+            }
             if let Expr::Variable(name) = inner_expr.as_ref() {
                 if name == "result" && env.contains_key(&tuple_result_arity_key(name)) {
                     let Some(index) = field_name
@@ -2188,6 +4599,41 @@ pub(crate) fn expr_to_z3<'a>(
                             "{UNSUPPORTED_TUPLE_RESULT_INDEXING} component is unavailable"
                         ))
                     });
+                }
+            }
+
+            // P10-C: `Enum::Variant` (nullary) parses as
+            // `FieldAccess(Variable("Enum"), "Variant")` — construct the
+            // datatype value. A bound variable named `Enum` wins (shadowing),
+            // and `.`-spelled accesses to an enum name are equivalent here.
+            if let Expr::Variable(name) = inner_expr.as_ref() {
+                if !env.contains_key(name)
+                    && vc.module_env.enums.contains_key(name)
+                    && datatype::is_finite_adt(vc.module_env.get_enum(name).unwrap(), vc.module_env)
+                {
+                    if let Some(value) =
+                        datatype::enum_ctor_apply(vc, &format!("{}::{}", name, field_name), &[])?
+                    {
+                        return Ok(value);
+                    }
+                }
+                // Non-finite enums (recursive / generic / non-scalar payload /
+                // empty) keep the Int-tag encoding: `Enum::Variant` on them
+                // denotes the variant's tag index, so `l == IntList::Nil`
+                // means `l == 0`. Previously this fell through to a fresh
+                // unconstrained const, making the comparison vacuous.
+                if !env.contains_key(name) {
+                    if let Some(ed) = vc.module_env.get_enum(name) {
+                        if let Some(idx) = ed.variants.iter().position(|v| v.name == *field_name) {
+                            return Ok(Int::from_i64(ctx, idx as i64).into());
+                        }
+                        // `E` names a known enum but `V` is not one of its
+                        // variants — a typo'd variant must not degrade to a
+                        // fresh const (vacuous comparison).
+                        return Err(MumeiError::verification(format!(
+                            "Enum '{name}' has no variant named '{field_name}'"
+                        )));
+                    }
                 }
             }
 
@@ -2277,8 +4723,21 @@ pub(crate) fn expr_to_z3<'a>(
                 };
                 Ok(sym.into())
             } else {
-                // パスが構築できない場合: 式を評価してシンボリック変数を生成
-                let _base = expr_to_z3(vc, inner_expr, env, solver_opt)?;
+                // パスが構築できない場合: 式を評価してシンボリック変数を生成。
+                // 構造体を返す呼び出し (`f(1).x`) なら、結果ハンドルの ast を
+                // キーに `call_result_fields` を引く — さもなければ
+                // `field_<x>` が全呼び出しで共有され、`f(1).x == f(2).x`
+                // が偽の等式として通ってしまう。
+                let base = expr_to_z3(vc, inner_expr, env, solver_opt)?;
+                if let Some((fields, _keep)) = vc
+                    .call_result_fields
+                    .borrow()
+                    .get(&(base.get_z3_ast() as usize))
+                {
+                    if let Some((_, value)) = fields.iter().find(|(name, _)| name == field_name) {
+                        return Ok(value.clone());
+                    }
+                }
                 let sym = Int::new_const(ctx, format!("field_{}", field_name));
                 Ok(sym.into())
             }
@@ -2304,8 +4763,33 @@ pub(crate) fn expr_to_z3<'a>(
                 lambda_env.insert(p.name.clone(), p_sym.into());
             }
 
-            // Verify the lambda body in the sub-environment
-            let _body_val = stmt_to_z3(vc, body, &mut lambda_env, solver_opt)?;
+            // A param shadows a same-named outer lambda binding for the
+            // body's duration, and lambda `let`s bound inside the body
+            // stay body-local — both fall out of restoring the map.
+            // Params bind as `Opaque` rather than dropping outright so a
+            // body like `|f, x| f(x)` still translates — the callee shape
+            // is only known once a call site supplies a real closure.
+            let saved_lambdas = vc.local_lambdas.borrow().clone();
+            {
+                let mut map = vc.local_lambdas.borrow_mut();
+                for p in params {
+                    map.insert(p.name.clone(), std::rc::Rc::new(LocalLambda::Opaque));
+                }
+            }
+            // Verify the lambda body in the sub-environment. This is a
+            // bind-time pass with arbitrary param constants, so recursive
+            // calls inside are not congruent: no `rec_fn#` application and
+            // no termination obligation (the real invocation through
+            // `apply_local_lambda` re-checks both with actual arguments).
+            vc.recursion
+                .lambda_bind_depth
+                .set(vc.recursion.lambda_bind_depth.get() + 1);
+            let body_result = stmt_to_z3(vc, body, &mut lambda_env, solver_opt);
+            vc.recursion
+                .lambda_bind_depth
+                .set(vc.recursion.lambda_bind_depth.get() - 1);
+            *vc.local_lambdas.borrow_mut() = saved_lambdas;
+            let _body_val = body_result?;
 
             Ok(lambda_sym.into())
         }
@@ -2324,5 +4808,399 @@ pub(crate) fn expr_to_z3<'a>(
             let recv_sym = Int::new_const(ctx, format!("__chan_recv_{}", recv_id).as_str());
             Ok(recv_sym.into())
         }
+    }
+}
+
+/// Binding identity for two `LocalLambda` entries — the `if`/`else`
+/// merge keeps a name bound on both sides only when both left the *same*
+/// binding in place (untouched, or re-aliased to the same `Rc` — e.g.
+/// `let g = f` shares `f`'s allocation); an `ite` over two different
+/// closures has no Z3 encoding, and textually identical lambdas written
+/// in both branches are still distinct bindings, so they drop.
+fn same_local_lambda<'a>(
+    a: &std::rc::Rc<LocalLambda<'a>>,
+    b: &std::rc::Rc<LocalLambda<'a>>,
+) -> bool {
+    std::rc::Rc::ptr_eq(a, b)
+}
+
+/// Apply a `let`/`assign`-bound lambda to call-site arguments:
+/// `f(args)` and `call(f, args)` evaluate the lambda's `body` with each
+/// formal parameter bound to the evaluated actual — the call is the
+/// let-in expression `let p_i = arg_i in body`.
+///
+/// Free lambda-variable names inside the body resolve against
+/// `lambda.captured` — the scope live where the lambda was bound — not
+/// the call-site `local_lambdas`, so a same-named later rebind cannot
+/// redirect calls the body makes. Parameter names are removed from that
+/// scope so a param like `|g| g(1)` shadows an outer lambda `g`.
+/// `local_lambdas`, `local_enum_types`, and `local_array_elem_types`
+/// are all restored afterwards: `let`s inside the body stay call-local
+/// (they land in the cloned `call_env`, but the type/lambda side tables
+/// are shared and would otherwise leak).
+fn apply_local_lambda<'a>(
+    vc: &VCtx<'a>,
+    call_name: &str,
+    lambda: &LocalLambda<'a>,
+    args: &[Expr],
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> DynResult<'a> {
+    let LocalLambda::Closure { expr, captured } = lambda else {
+        match lambda {
+            // `let h = if c { f } else { g }`: applying `h` inlines both
+            // bodies behind the let-site condition.
+            LocalLambda::Ite {
+                cond,
+                then_lam,
+                else_lam,
+            } => {
+                let t = apply_local_lambda(vc, call_name, then_lam, args, env, solver_opt)?;
+                let e = apply_local_lambda(vc, call_name, else_lam, args, env, solver_opt)?;
+                return Ok(cond.ite(&t, &e));
+            }
+            // `Opaque` — a lambda param called inside its own body while the
+            // body is being translated at binding time. The call's arity and
+            // return type are unknowable until a real closure reaches the
+            // param at a call site, so yield a fresh symbolic int and let the
+            // check continue (its value is discarded anyway).
+            LocalLambda::Opaque => {
+                static OPAQUE_CALL_COUNTER: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(0);
+                let call_id = OPAQUE_CALL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(Int::new_const(
+                    vc.ctx,
+                    format!("__lam_param_call_{}_{}", call_name, call_id).as_str(),
+                )
+                .into());
+            }
+            LocalLambda::Closure { .. } => unreachable!(),
+        }
+    };
+    let Expr::Lambda { params, body, .. } = expr else {
+        return Err(MumeiError::verification(format!(
+            "Call to '{call_name}': binding is not a lambda"
+        )));
+    };
+    if params.len() != args.len() {
+        return Err(MumeiError::verification(format!(
+            "Call to lambda '{call_name}' takes {} argument(s), got {}",
+            params.len(),
+            args.len()
+        )));
+    }
+
+    // Arguments evaluate in the caller's env (call-by-value) before the
+    // param bindings overwrite anything.
+    let mut arg_vals = Vec::with_capacity(args.len());
+    for arg in args {
+        arg_vals.push(expr_to_z3(vc, arg, env, solver_opt)?);
+    }
+
+    let mut call_env = env.clone();
+    for (i, param) in params.iter().enumerate() {
+        call_env.insert(param.name.clone(), arg_vals[i].clone());
+        alias_struct_fields(&mut call_env, &param.name, &arg_vals[i]);
+        wire_array_slots(vc, &param.name, args.get(i), &arg_vals[i], &mut call_env);
+    }
+
+    let mut call_lambdas = captured.clone();
+    {
+        let caller_lambdas = vc.local_lambdas.borrow();
+        for (i, param) in params.iter().enumerate() {
+            // A param shadows any same-named outer lambda; when the actual
+            // is itself a lambda (a bound name or a literal), the param
+            // re-binds to it so `apply(f, x)`-style higher-order calls keep
+            // a real body behind `f(…)` inside the callee.
+            call_lambdas.remove(&param.name);
+            let passed = match args.get(i) {
+                Some(Expr::Variable(src)) => caller_lambdas.get(src).cloned(),
+                Some(Expr::Lambda { .. }) => Some(std::rc::Rc::new(LocalLambda::Closure {
+                    expr: args[i].clone(),
+                    captured: caller_lambdas.clone(),
+                })),
+                _ => None,
+            };
+            if let Some(passed) = passed {
+                call_lambdas.insert(param.name.clone(), passed);
+            }
+        }
+    }
+    let saved_lambdas = std::mem::replace(&mut *vc.local_lambdas.borrow_mut(), call_lambdas);
+    let enum_types_before = vc.local_enum_types.borrow().clone();
+    let elem_types_before = vc.local_array_elem_types.borrow().clone();
+    let result = stmt_to_z3(vc, body, &mut call_env, solver_opt);
+    *vc.local_lambdas.borrow_mut() = saved_lambdas;
+    *vc.local_enum_types.borrow_mut() = enum_types_before;
+    *vc.local_array_elem_types.borrow_mut() = elem_types_before;
+    // The body ran on a cloned `call_env`, so stores through a lambda
+    // param (`x[i] = v`) never reached the caller's tracked slot — but at
+    // real execution the `[T]` arg shares the caller's backing. Havoc the
+    // caller's slot for each storing param so post-call reads can't claim
+    // pre-call elements.
+    // Captured variables likewise share the caller's bindings, so a store
+    // to an outer name mutates caller state too (`havoc_array_name` no-ops
+    // on non-array bindings).
+    if result.is_ok() {
+        for name in super::may_write::lambda_may_write_args(vc.module_env, lambda, args, env) {
+            havoc_array_name(vc, &name, env);
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod termination_measure_tests {
+    use super::termination_measure_obligation;
+    use z3::ast::{Bool, Dynamic, Int, BV};
+    use z3::{Config, Context, SatResult, Solver};
+
+    fn int_pair<'ctx>(ctx: &'ctx Context, first: i64, second: i64) -> [Dynamic<'ctx>; 2] {
+        [
+            Int::from_i64(ctx, first).into(),
+            Int::from_i64(ctx, second).into(),
+        ]
+    }
+
+    fn bitvector_pair<'ctx>(ctx: &'ctx Context, first: i64, second: i64) -> [Dynamic<'ctx>; 2] {
+        [
+            BV::from_i64(ctx, first, 64).into(),
+            BV::from_i64(ctx, second, 64).into(),
+        ]
+    }
+
+    fn assert_holds(ctx: &Context, obligation: &Bool) {
+        let solver = Solver::new(ctx);
+        solver.assert(&obligation.not());
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    fn assert_never_holds(ctx: &Context, obligation: &Bool) {
+        let solver = Solver::new(ctx);
+        solver.assert(obligation);
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    #[test]
+    fn single_int_measure_matches_the_previous_obligation() {
+        let ctx = Context::new(&Config::new());
+        let a = Int::new_const(&ctx, "measure_a");
+        let b = Int::new_const(&ctx, "measure_b");
+        let expected = Bool::and(&ctx, &[&Int::from_i64(&ctx, 0).le(&a), &b.lt(&a)]);
+        let actual = termination_measure_obligation(&ctx, &[a.into()], &[b.into()])
+            .expect("compatible integer measures");
+
+        assert_eq!(actual.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn single_bitvector_measure_matches_the_previous_obligation() {
+        let ctx = Context::new(&Config::new());
+        let a = BV::new_const(&ctx, "measure_a", 64);
+        let b = BV::new_const(&ctx, "measure_b", 64);
+        let expected = Bool::and(&ctx, &[&BV::from_i64(&ctx, 0, 64).bvsle(&a), &b.bvslt(&a)]);
+        let actual = termination_measure_obligation(&ctx, &[a.into()], &[b.into()])
+            .expect("compatible bitvector measures");
+
+        assert_eq!(actual.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn lexicographic_int_measure_obligations_match_the_order() {
+        let ctx = Context::new(&Config::new());
+        let cases = [
+            ((2, 0), (1, 100), true),
+            ((1, 5), (1, 4), true),
+            ((1, 4), (1, 4), false),
+            ((1, 4), (2, 0), false),
+            ((1, -1), (1, -2), false),
+        ];
+
+        for ((a1, a2), (b1, b2), should_hold) in cases {
+            let measure_a = int_pair(&ctx, a1, a2);
+            let measure_b = int_pair(&ctx, b1, b2);
+            let obligation = termination_measure_obligation(&ctx, &measure_a, &measure_b)
+                .expect("compatible integer measures");
+
+            if should_hold {
+                assert_holds(&ctx, &obligation);
+            } else {
+                assert_never_holds(&ctx, &obligation);
+            }
+        }
+    }
+
+    #[test]
+    fn lexicographic_bitvector_measure_obligations_use_signed_order() {
+        let ctx = Context::new(&Config::new());
+        let measure_a = bitvector_pair(&ctx, 1, 5);
+        let measure_b = bitvector_pair(&ctx, 1, 4);
+        let obligation = termination_measure_obligation(&ctx, &measure_a, &measure_b)
+            .expect("compatible bitvector measures");
+        assert_holds(&ctx, &obligation);
+
+        let measure_a = bitvector_pair(&ctx, 0, -1);
+        let measure_b = bitvector_pair(&ctx, 0, -2);
+        let obligation = termination_measure_obligation(&ctx, &measure_a, &measure_b)
+            .expect("compatible bitvector measures");
+        assert_never_holds(&ctx, &obligation);
+    }
+
+    #[test]
+    fn incompatible_termination_measure_shapes_return_none() {
+        let ctx = Context::new(&Config::new());
+        let a1 = Int::new_const(&ctx, "a1");
+        let a2 = Int::new_const(&ctx, "a2");
+        let b1 = Int::new_const(&ctx, "b1");
+        assert!(
+            termination_measure_obligation(&ctx, &[a1.into(), a2.into()], &[b1.into()]).is_none()
+        );
+        assert!(termination_measure_obligation(&ctx, &[], &[]).is_none());
+
+        let int_measure = Int::new_const(&ctx, "int_measure");
+        let bitvector_measure = BV::new_const(&ctx, "bitvector_measure", 64);
+        assert!(termination_measure_obligation(
+            &ctx,
+            &[int_measure.into()],
+            &[bitvector_measure.into()]
+        )
+        .is_none());
+    }
+}
+
+#[cfg(test)]
+mod constant_args_tests {
+    use super::constant_args;
+    use z3::ast::{Array, Bool, Int};
+    use z3::{Config, Context};
+
+    #[test]
+    fn accepts_int_numeral_beyond_i64_range() {
+        let ctx = Context::new(&Config::new());
+        let max = Int::from_i64(&ctx, i64::MAX);
+        let three = Int::from_i64(&ctx, 3);
+        let large = &max + &three;
+        let result = constant_args(&[large.into()]);
+
+        assert!(result.is_some(), "large Int numeral should be constant");
+        assert_eq!(result.unwrap().1, "int:9223372036854775810");
+    }
+
+    #[test]
+    fn formats_regular_int_numeral() {
+        let ctx = Context::new(&Config::new());
+        let args = [Int::from_i64(&ctx, 3).into()];
+
+        assert_eq!(constant_args(&args).unwrap().1, "int:3");
+    }
+
+    #[test]
+    fn rejects_non_numeral_int() {
+        let ctx = Context::new(&Config::new());
+        let args = [Int::new_const(&ctx, "x").into()];
+
+        assert!(constant_args(&args).is_none());
+    }
+
+    #[test]
+    fn formats_mixed_int_and_bool_args() {
+        let ctx = Context::new(&Config::new());
+        let args = [
+            Int::from_i64(&ctx, 2).into(),
+            Bool::from_bool(&ctx, true).into(),
+        ];
+
+        assert_eq!(constant_args(&args).unwrap().1, "int:2,bool:true");
+    }
+
+    #[test]
+    fn rejects_array_arguments() {
+        let ctx = Context::new(&Config::new());
+        let int_sort = z3::Sort::int(&ctx);
+        let array = Array::new_const(&ctx, "a", &int_sort, &int_sort);
+
+        assert!(constant_args(&[array.into()]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod rec_fn_args_tests {
+    use super::{expand_rec_fn_args, RecFnParamKind};
+    use z3::ast::{Array, Ast, Dynamic, Int, BV};
+    use z3::{Config, Context, FuncDecl, SatResult, Sort};
+
+    fn assert_length_is_part_of_the_domain(bitvec_i64: bool) {
+        let ctx = Context::new(&Config::new());
+        let int_sort = Sort::int(&ctx);
+        let array = Array::new_const(&ctx, "a", &int_sort, &int_sort);
+        let (length_sort, length_one, length_two): (Sort, Dynamic, Dynamic) = if bitvec_i64 {
+            (
+                Sort::bitvector(&ctx, 64),
+                BV::new_const(&ctx, "l1", 64).into(),
+                BV::new_const(&ctx, "l2", 64).into(),
+            )
+        } else {
+            (
+                int_sort.clone(),
+                Int::new_const(&ctx, "l1").into(),
+                Int::new_const(&ctx, "l2").into(),
+            )
+        };
+        let kinds = [RecFnParamKind::Array];
+        let expanded_one = expand_rec_fn_args(
+            &kinds,
+            &[array.clone().into()],
+            &length_sort,
+            |_| Some(array.clone().into()),
+            |_| Some(length_one.clone()),
+            |_, _| None,
+        )
+        .expect("array length should expand");
+        let expanded_two = expand_rec_fn_args(
+            &kinds,
+            &[array.clone().into()],
+            &length_sort,
+            |_| Some(array.clone().into()),
+            |_| Some(length_two.clone()),
+            |_, _| None,
+        )
+        .expect("array length should expand");
+        let domain: Vec<Sort> = expanded_one.iter().map(|value| value.get_sort()).collect();
+        let domain_refs: Vec<&Sort> = domain.iter().collect();
+        let decl = FuncDecl::new(&ctx, "rec_test", &domain_refs, &int_sort);
+        let first_args: Vec<&dyn Ast> =
+            expanded_one.iter().map(|value| value as &dyn Ast).collect();
+        let second_args: Vec<&dyn Ast> =
+            expanded_two.iter().map(|value| value as &dyn Ast).collect();
+        let first = decl.apply(&first_args);
+        let second = decl.apply(&second_args);
+
+        let solver = z3::Solver::new(&ctx);
+        solver.assert(&length_one._eq(&length_two).not());
+        solver.assert(&first._eq(&second).not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Sat,
+            "different lengths must remain distinguishable UF arguments"
+        );
+
+        let same = decl.apply(&first_args);
+        let solver = z3::Solver::new(&ctx);
+        solver.assert(&same._eq(&same).not());
+        assert_eq!(
+            solver.check(),
+            SatResult::Unsat,
+            "identical expanded arguments must produce identical UF applications"
+        );
+    }
+
+    #[test]
+    fn array_length_is_a_recursive_uf_argument_in_int_mode() {
+        assert_length_is_part_of_the_domain(false);
+    }
+
+    #[test]
+    fn array_length_is_a_recursive_uf_argument_in_bitvec_mode() {
+        assert_length_is_part_of_the_domain(true);
     }
 }

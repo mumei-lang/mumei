@@ -58,8 +58,12 @@ DEFAULT_BIN = REPO_ROOT / "target" / "release" / "mumei"
 FALLBACK_BIN = REPO_ROOT / "target" / "debug" / "mumei"
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-ATOM_START = re.compile(r"^atom\s+([A-Za-z_][A-Za-z0-9_]*)")
-ITEM_START = re.compile(r"^(atom|type|effect|import|resource)\b")
+ATOM_START = re.compile(
+    r"^(?:trusted\s+|unverified\s+|async\s+)*atom\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
+ITEM_START = re.compile(
+    r"^(?:(?:trusted|unverified|async)\s+)*(atom|type|effect|import|resource)\b"
+)
 CLAUSE_START = re.compile(r"^\s*(requires|ensures|effect_pre|effect_post):")
 ERROR_SPLIT = re.compile(r"Verification Error:")
 SPAN = re.compile(r"╭─\[(?P<file>[^\]]+?):(?P<line>\d+):(?P<col>\d+)\]")

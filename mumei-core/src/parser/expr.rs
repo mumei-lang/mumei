@@ -5,29 +5,35 @@
 use super::pattern::parse_pattern;
 use super::token::Token;
 use super::ParseContext;
-use crate::parser::{Expr, JoinSemantics, LambdaParam, MatchArm, Op, Stmt};
+use crate::ast::TypeRef;
+use crate::parser::{Expr, JoinSemantics, LambdaParam, MatchArm, Op, Span, Stmt};
+
+// This must exceed FatArrow's left binding power so guards and arm bodies
+// stop before `=>`.
+const ABOVE_FAT_ARROW_BP: u8 = 5;
 
 /// Pratt parser binding power for binary operators.
 /// Returns (left_bp, right_bp). Left-associative: left < right.
 /// Right-associative: left > right.
 fn binding_power(tok: &Token) -> Option<(u8, u8)> {
     match tok {
-        Token::FatArrow => Some((1, 2)), // left-assoc => (matches old parser's while-loop behavior)
-        Token::Or => Some((3, 4)),
-        Token::And => Some((5, 6)),
-        Token::Eq | Token::Neq | Token::Gt | Token::Lt | Token::Ge | Token::Le => Some((7, 8)),
+        Token::Pipe => Some((1, 2)),
+        Token::FatArrow => Some((3, 4)), // left-assoc => (matches old parser's while-loop behavior)
+        Token::Or => Some((5, 6)),
+        Token::And => Some((7, 8)),
+        Token::Eq | Token::Neq | Token::Gt | Token::Lt | Token::Ge | Token::Le => Some((9, 10)),
         // Bitwise operators bind tighter than comparison and looser than
         // arithmetic, following the C/Rust ordering `| < ^ < & < shift`.
         // `Token::Bar` is only a bitwise OR in infix position; in prefix
         // position it still opens a lambda parameter list (`|x| x + 1`).
-        Token::Bar => Some((9, 10)),
-        Token::Caret => Some((11, 12)),
-        Token::Amp => Some((13, 14)),
-        Token::Shl | Token::Shr => Some((15, 16)),
-        Token::Plus | Token::Minus => Some((17, 18)),
-        Token::Star | Token::Slash => Some((19, 20)),
-        Token::StarStar => Some((21, 20)),
-        Token::Dot | Token::ColonColon => Some((23, 24)),
+        Token::Bar => Some((11, 12)),
+        Token::Caret => Some((13, 14)),
+        Token::Amp => Some((15, 16)),
+        Token::Shl | Token::Shr => Some((17, 18)),
+        Token::Plus | Token::Minus => Some((19, 20)),
+        Token::Star | Token::Slash => Some((21, 22)),
+        Token::StarStar => Some((23, 22)),
+        Token::Dot | Token::ColonColon => Some((25, 26)),
         _ => None,
     }
 }
@@ -135,6 +141,7 @@ fn normalize_expr(expr: Expr) -> Expr {
             then_branch,
             else_branch,
         },
+        Expr::Block(stmt) => Expr::Block(stmt),
         Expr::CallRef { callee, args } => Expr::CallRef {
             callee: Box::new(normalize_expr(*callee)),
             args: args.into_iter().map(normalize_expr).collect(),
@@ -227,6 +234,40 @@ pub fn parse_expr(ctx: &mut ParseContext, min_bp: u8) -> Expr {
             if l_bp < min_bp {
                 break;
             }
+            if tok == Token::Pipe {
+                ctx.advance();
+                let rhs_starts_bare_lambda = ctx.peek() == &Token::Bar;
+                let rhs = parse_expr(ctx, r_bp);
+                if rhs_starts_bare_lambda {
+                    ctx.syntax_failure(
+                        "pipeline lambda must be parenthesized: x |> (|y| ...)".to_string(),
+                    );
+                    continue;
+                }
+                lhs = match rhs {
+                    Expr::Variable(name) => Expr::Call(name, vec![lhs]),
+                    Expr::Call(name, mut args) => {
+                        args.push(lhs);
+                        Expr::Call(name, args)
+                    }
+                    Expr::CallRef { callee, mut args } => {
+                        args.push(lhs);
+                        Expr::CallRef { callee, args }
+                    }
+                    Expr::Lambda { .. } => Expr::CallRef {
+                        callee: Box::new(rhs),
+                        args: vec![lhs],
+                    },
+                    _ => {
+                        ctx.syntax_failure(
+                            "pipeline right-hand side must be a function name, call, or lambda"
+                                .to_string(),
+                        );
+                        lhs
+                    }
+                };
+                continue;
+            }
             let op = match token_to_op(&tok) {
                 Some(op) => op,
                 None => break,
@@ -237,6 +278,18 @@ pub fn parse_expr(ctx: &mut ParseContext, min_bp: u8) -> Expr {
         } else {
             break;
         }
+    }
+
+    // `a[i][j]` / `f()[0]` cannot be expressed: `ArrayAccess`/`ArrayStore`
+    // only accept a bare identifier in the array position. Left unparsed,
+    // the trailing `[…]` re-lexes as a stray array-literal statement, so the
+    // intended index silently evaluates a different program. Flag it.
+    if ctx.peek() == &Token::LBracket {
+        ctx.syntax_failure(
+            "indexing into an expression (e.g. `a[i][j]` or `f()[0]`) is not supported; \
+             bind the value to a variable first"
+                .to_string(),
+        );
     }
 
     lhs
@@ -370,8 +423,35 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
                     else_branch: Box::new(else_branch),
                 }
             } else {
-                panic!("Mumei requires an 'else' branch.");
+                // `if` requires an `else` branch (it is an expression). Recover
+                // with an unbound marker as the else value instead of
+                // panicking: the recorded syntax failure fails checked callers
+                // closed, and if an unchecked caller keeps the AST, MIR
+                // lowering still rejects the unresolved marker name.
+                let found = format!("{}", ctx.peek());
+                let (line, col) = ctx
+                    .tokens_ref()
+                    .get(ctx.pos())
+                    .map(|t| (t.line, t.col))
+                    .unwrap_or((0, 0));
+                ctx.syntax_failure(format!(
+                    "if expression requires an 'else' branch, found {found} at {line}:{col}"
+                ));
+                let else_span = ctx.current_span();
+                Expr::IfThenElse {
+                    cond: Box::new(cond),
+                    then_branch: Box::new(then_branch),
+                    else_branch: Box::new(Stmt::Expr(
+                        Expr::Variable("__mumei_missing_else_branch".to_string()),
+                        else_span,
+                    )),
+                }
             }
+        }
+
+        Token::LBrace => {
+            let block = parse_block_or_stmt(ctx);
+            Expr::Block(Box::new(block))
         }
 
         Token::Match => {
@@ -384,8 +464,7 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
                 // Optional guard: if cond
                 let guard = if ctx.peek() == &Token::If {
                     ctx.advance();
-                    // Parse guard at binding power above => (l_bp=1, so min_bp=3 excludes it)
-                    Some(Box::new(parse_expr(ctx, 3)))
+                    Some(Box::new(parse_expr(ctx, ABOVE_FAT_ARROW_BP)))
                 } else {
                     None
                 };
@@ -422,6 +501,35 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             expr
         }
 
+        Token::LBracket => {
+            // Array literal `[e0, e1, …]` at expression position (a `[` after an
+            // identifier is parsed as `Expr::ArrayAccess` by
+            // `parse_ident_continuation`, so this arm only sees genuine literals).
+            ctx.advance();
+            let mut elements = Vec::new();
+            while ctx.peek() != &Token::RBracket && ctx.peek() != &Token::Eof {
+                elements.push(parse_expr(ctx, 0));
+                if ctx.peek() == &Token::Comma {
+                    ctx.advance();
+                } else {
+                    break;
+                }
+            }
+            ctx.expect(Token::RBracket);
+            if elements.is_empty() {
+                // `[]` cannot infer an element type — record a checked
+                // syntax failure (the marker variable fails closed if a
+                // caller ignores the diagnostics).
+                ctx.syntax_failure(
+                    "empty array literal `[]` needs an element type — annotate \
+                     via a non-empty literal or a typed let binding"
+                        .to_string(),
+                );
+                return Expr::Variable("__mumei_empty_array_literal".to_string());
+            }
+            Expr::ArrayLit(elements)
+        }
+
         Token::IntLit(n) => {
             let val = n;
             ctx.advance();
@@ -449,6 +557,27 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
         Token::False => {
             ctx.advance();
             Expr::Variable("false".to_string())
+        }
+
+        Token::Bang => {
+            // Unary logical not — desugared to `if e { false } else { true }`.
+            // (A relational `e == false` desugar is not safe: the
+            // comparison-chain normalizer would flatten `!(a < b)` into
+            // `a < b && b == false`.) Verify requires a Bool condition; codegen
+            // emits the 0/1 branch, matching `if e { 0 } else { 1 }`.
+            ctx.advance();
+            let operand = parse_prefix(ctx);
+            Expr::IfThenElse {
+                cond: Box::new(operand),
+                then_branch: Box::new(Stmt::Expr(
+                    Expr::Variable("false".to_string()),
+                    Span::default(),
+                )),
+                else_branch: Box::new(Stmt::Expr(
+                    Expr::Variable("true".to_string()),
+                    Span::default(),
+                )),
+            }
         }
 
         Token::Minus => {
@@ -542,8 +671,17 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
                 ctx.advance();
                 parse_ident_continuation(ctx, name)
             } else {
+                let found = format!("{tok}");
+                let (line, col) = ctx
+                    .tokens_ref()
+                    .get(ctx.pos())
+                    .map(|t| (t.line, t.col))
+                    .unwrap_or((0, 0));
+                ctx.syntax_failure(format!(
+                    "unexpected token {found} in expression at {line}:{col}"
+                ));
                 ctx.advance();
-                Expr::Number(0)
+                Expr::Variable("__mumei_unexpected_token".to_string())
             }
         }
     }
@@ -601,12 +739,67 @@ fn parse_ident_continuation(ctx: &mut ParseContext, name: String) -> Expr {
             Expr::ArrayAccess(name, Box::new(index))
         }
 
+        Token::Lt => {
+            // `name<T, …>(args)`: an explicit type-argument call. The `<`
+            // is ambiguous with a comparison (`a < b`), so commit only
+            // when the full `<` type-list `>` `(` shape matches; otherwise
+            // rewind and let the Pratt loop parse `<` as `Op::Lt`.
+            // The callee name carries the instantiation
+            // (`apply<i64, Network>`), matching the monomorphizer's
+            // `parse_type_ref(call_name)` convention and the atom
+            // registry's `display_name()` keys.
+            if let Some(type_args) = parse_explicit_type_args(ctx) {
+                let callee = TypeRef::generic(&name, type_args).display_name();
+                Expr::Call(callee, parse_call_args(ctx))
+            } else {
+                Expr::Variable(name)
+            }
+        }
+
         _ => Expr::Variable(name),
     }
 }
 
+/// Speculatively parse an explicit type-argument list at `ident<`…: the
+/// shape `<` type-ref (`,` type-ref)* `>` `(`. Returns the `TypeRef`s
+/// with the cursor on the argument list's `(` when the shape matches,
+/// else rewinds the stream — including any `>>` splits
+/// `parse_type_ref_from_ctx` spliced in — so `<` stays a comparison.
+fn parse_explicit_type_args(ctx: &mut ParseContext) -> Option<Vec<TypeRef>> {
+    let snapshot = ctx.snapshot();
+    ctx.advance(); // consume '<'
+    let mut type_args = Vec::new();
+    let closed = loop {
+        let entry_start = ctx.pos();
+        let type_ref = crate::parser::item::parse_type_ref_from_ctx(ctx);
+        if ctx.pos() == entry_start {
+            // No type-shaped token consumed: `a < 1`, `a < >`, `a < <b`.
+            break false;
+        }
+        type_args.push(type_ref);
+        match ctx.peek() {
+            Token::Comma => {
+                ctx.advance();
+            }
+            Token::Gt => {
+                ctx.advance();
+                break true;
+            }
+            _ => break false,
+        }
+    };
+    // Only `>` directly followed by `(` makes this a call: `a < b > c`,
+    // `f<T> { … }` and `a < b > (x)`-less shapes all stay comparisons.
+    if !closed || ctx.peek() != &Token::LParen {
+        ctx.rewind(snapshot);
+        return None;
+    }
+    Some(type_args)
+}
+
 /// Parse match arm body.
-/// Uses parse_expr with binding power above => to avoid consuming => as implies.
+/// Uses parse_expr with binding power above FatArrow to avoid consuming `=>`
+/// as implies.
 fn parse_match_arm_body(ctx: &mut ParseContext) -> Stmt {
     if ctx.peek() == &Token::LBrace {
         parse_block_or_stmt(ctx)
@@ -615,8 +808,7 @@ fn parse_match_arm_body(ctx: &mut ParseContext) -> Stmt {
         if ctx.peek() == &Token::Match || ctx.peek() == &Token::If {
             Stmt::Expr(parse_expr(ctx, 0), arm_span)
         } else {
-            // Parse at binding power 3, above => (l_bp=1) so => is not consumed
-            Stmt::Expr(parse_expr(ctx, 3), arm_span)
+            Stmt::Expr(parse_expr(ctx, ABOVE_FAT_ARROW_BP), arm_span)
         }
     }
 }
@@ -639,6 +831,88 @@ pub fn parse_block_or_stmt(ctx: &mut ParseContext) -> Stmt {
         Stmt::Block(stmts, span)
     } else {
         parse_statement(ctx)
+    }
+}
+
+pub(crate) fn stmt_assigns_var(stmt: &Stmt, var: &str) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } => expr_assigns_var(value, var),
+        Stmt::Assign {
+            var: assigned_var,
+            value,
+            ..
+        } => assigned_var == var || expr_assigns_var(value, var),
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_assigns_var(index, var) || expr_assigns_var(value, var)
+        }
+        Stmt::Block(stmts, _) => stmts.iter().any(|stmt| stmt_assigns_var(stmt, var)),
+        Stmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+            ..
+        } => {
+            expr_assigns_var(cond, var)
+                || expr_assigns_var(invariant, var)
+                || decreases
+                    .as_deref()
+                    .is_some_and(|expr| expr_assigns_var(expr, var))
+                || stmt_assigns_var(body, var)
+        }
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_assigns_var(body, var),
+        Stmt::TaskGroup { children, .. } => children.iter().any(|stmt| stmt_assigns_var(stmt, var)),
+        Stmt::Cancel { .. } => false,
+        Stmt::Expr(expr, _) => expr_assigns_var(expr, var),
+    }
+}
+
+fn expr_assigns_var(expr: &Expr, var: &str) -> bool {
+    match expr {
+        Expr::ArrayLit(items) => items.iter().any(|expr| expr_assigns_var(expr, var)),
+        Expr::ArrayAccess(_, index) => expr_assigns_var(index, var),
+        Expr::BinaryOp(left, _, right) => {
+            expr_assigns_var(left, var) || expr_assigns_var(right, var)
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_assigns_var(cond, var)
+                || stmt_assigns_var(then_branch, var)
+                || stmt_assigns_var(else_branch, var)
+        }
+        Expr::Block(stmt) => stmt_assigns_var(stmt, var),
+        Expr::Call(_, args) => args.iter().any(|expr| expr_assigns_var(expr, var)),
+        Expr::StructInit { fields, .. } => {
+            fields.iter().any(|(_, expr)| expr_assigns_var(expr, var))
+        }
+        Expr::FieldAccess(base, _) => expr_assigns_var(base, var),
+        Expr::Match { target, arms } => {
+            expr_assigns_var(target, var)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_deref()
+                        .is_some_and(|expr| expr_assigns_var(expr, var))
+                        || stmt_assigns_var(&arm.body, var)
+                })
+        }
+        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_assigns_var(body, var),
+        Expr::Await { expr } => expr_assigns_var(expr, var),
+        Expr::CallRef { callee, args } => {
+            expr_assigns_var(callee, var) || args.iter().any(|expr| expr_assigns_var(expr, var))
+        }
+        Expr::Perform { args, .. } => args.iter().any(|expr| expr_assigns_var(expr, var)),
+        Expr::ChanSend { channel, value } => {
+            expr_assigns_var(channel, var) || expr_assigns_var(value, var)
+        }
+        Expr::ChanRecv { channel } => expr_assigns_var(channel, var),
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
     }
 }
 
@@ -668,7 +942,14 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                 if ctx.peek() == &Token::Colon {
                     ctx.advance();
                 }
-                let inv = parse_expr(ctx, 0);
+                let inv = if matches!(ctx.peek(), Token::Ident(name) if name == "infer")
+                    && matches!(ctx.peek_at(1), Some(Token::LBrace) | Some(Token::Decreases))
+                {
+                    ctx.advance();
+                    Expr::Variable("__mumei_infer_invariant".to_string())
+                } else {
+                    parse_expr(ctx, 0)
+                };
                 let decreases = if ctx.peek() == &Token::Decreases {
                     ctx.advance();
                     if ctx.peek() == &Token::Colon {
@@ -687,8 +968,181 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                     span: stmt_span,
                 }
             } else {
-                panic!("Mumei loops require an 'invariant'.");
+                // Same fail-closed recovery as a missing `else`: record the
+                // failure and bind a poisoned invariant that can never verify.
+                let found = format!("{}", ctx.peek());
+                let (line, col) = ctx
+                    .tokens_ref()
+                    .get(ctx.pos())
+                    .map(|t| (t.line, t.col))
+                    .unwrap_or((0, 0));
+                ctx.syntax_failure(format!(
+                    "while loop requires an 'invariant' clause, found {found} at {line}:{col}"
+                ));
+                let decreases = if ctx.peek() == &Token::Decreases {
+                    ctx.advance();
+                    if ctx.peek() == &Token::Colon {
+                        ctx.advance();
+                    }
+                    Some(Box::new(parse_expr(ctx, 0)))
+                } else {
+                    None
+                };
+                let body = parse_block_or_stmt(ctx);
+                Stmt::While {
+                    cond: Box::new(cond),
+                    invariant: Box::new(Expr::Variable("__mumei_missing_invariant".to_string())),
+                    decreases,
+                    body: Box::new(body),
+                    span: stmt_span,
+                }
             }
+        }
+
+        Token::For => {
+            ctx.advance();
+            let var = ctx.expect_ident();
+            match ctx.peek().clone() {
+                Token::Ident(name) if name == "in" => {
+                    ctx.advance();
+                }
+                found => {
+                    let (line, col) = ctx
+                        .tokens_ref()
+                        .get(ctx.pos())
+                        .map(|tok| (tok.line, tok.col))
+                        .unwrap_or((0, 0));
+                    ctx.syntax_failure(format!(
+                        "for loop requires 'in' after loop variable, found {found} at {line}:{col}"
+                    ));
+                }
+            }
+            let lo = parse_expr(ctx, 0);
+            if ctx.peek() != &Token::DotDot {
+                let (line, col) = ctx
+                    .tokens_ref()
+                    .get(ctx.pos())
+                    .map(|tok| (tok.line, tok.col))
+                    .unwrap_or((0, 0));
+                ctx.syntax_failure(format!(
+                    "for loop requires '..' between bounds, found {} at {line}:{col}",
+                    ctx.peek()
+                ));
+            }
+            let hi = if ctx.peek() == &Token::DotDot {
+                ctx.advance();
+                parse_expr(ctx, 0)
+            } else {
+                Expr::Variable("__mumei_missing_range_bound".to_string())
+            };
+            let lo_var = format!("__for_lo_{var}");
+            let hi_var = format!("__for_hi_{var}");
+            let lo_ref = Expr::Variable(lo_var.clone());
+            let hi_ref = Expr::Variable(hi_var.clone());
+            let user_invariant = if ctx.peek() == &Token::Invariant {
+                ctx.advance();
+                if ctx.peek() == &Token::Colon {
+                    ctx.advance();
+                }
+                Some(parse_expr(ctx, 0))
+            } else {
+                None
+            };
+            let user_decreases = if ctx.peek() == &Token::Decreases {
+                ctx.advance();
+                if ctx.peek() == &Token::Colon {
+                    ctx.advance();
+                }
+                Some(parse_expr(ctx, 0))
+            } else {
+                None
+            };
+            let user_body = parse_block_or_stmt(ctx);
+            if stmt_assigns_var(&user_body, &var) {
+                ctx.syntax_failure(format!(
+                    "for loop body must not assign to loop variable `{var}`"
+                ));
+            }
+            let increment = Stmt::Assign {
+                var: var.clone(),
+                value: Box::new(Expr::BinaryOp(
+                    Box::new(Expr::Variable(var.clone())),
+                    Op::Add,
+                    Box::new(Expr::Number(1)),
+                )),
+                span: stmt_span.clone(),
+            };
+            let loop_body = match user_body {
+                Stmt::Block(mut stmts, _) => {
+                    stmts.push(increment);
+                    Stmt::Block(stmts, stmt_span.clone())
+                }
+                stmt => Stmt::Block(vec![stmt, increment], stmt_span.clone()),
+            };
+            let auto_invariant = Expr::BinaryOp(
+                Box::new(Expr::BinaryOp(
+                    Box::new(lo_ref.clone()),
+                    Op::Le,
+                    Box::new(Expr::Variable(var.clone())),
+                )),
+                Op::And,
+                Box::new(Expr::BinaryOp(
+                    Box::new(Expr::BinaryOp(
+                        Box::new(Expr::Variable(var.clone())),
+                        Op::Le,
+                        Box::new(hi_ref.clone()),
+                    )),
+                    Op::Or,
+                    Box::new(Expr::BinaryOp(
+                        Box::new(Expr::Variable(var.clone())),
+                        Op::Eq,
+                        Box::new(lo_ref.clone()),
+                    )),
+                )),
+            );
+            let invariant = if let Some(user_invariant) = user_invariant {
+                Expr::BinaryOp(Box::new(auto_invariant), Op::And, Box::new(user_invariant))
+            } else {
+                auto_invariant
+            };
+            let decreases = user_decreases.unwrap_or_else(|| {
+                Expr::BinaryOp(
+                    Box::new(hi_ref.clone()),
+                    Op::Sub,
+                    Box::new(Expr::Variable(var.clone())),
+                )
+            });
+            Stmt::Block(
+                vec![
+                    Stmt::Let {
+                        var: lo_var,
+                        value: Box::new(lo),
+                        span: stmt_span.clone(),
+                    },
+                    Stmt::Let {
+                        var: hi_var,
+                        value: Box::new(hi),
+                        span: stmt_span.clone(),
+                    },
+                    Stmt::Let {
+                        var: var.clone(),
+                        value: Box::new(lo_ref),
+                        span: stmt_span.clone(),
+                    },
+                    Stmt::While {
+                        cond: Box::new(Expr::BinaryOp(
+                            Box::new(Expr::Variable(var)),
+                            Op::Lt,
+                            Box::new(hi_ref),
+                        )),
+                        invariant: Box::new(invariant),
+                        decreases: Some(Box::new(decreases)),
+                        body: Box::new(loop_body),
+                        span: stmt_span.clone(),
+                    },
+                ],
+                stmt_span,
+            )
         }
 
         Token::Acquire => {
@@ -716,10 +1170,11 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
                         JoinSemantics::All
                     }
                     ref tok => {
-                        panic!(
-                            "Unknown task_group join semantics '{}'. Expected 'all' or 'any'.",
-                            tok
-                        );
+                        ctx.syntax_failure(format!(
+                            "unknown task_group join semantics '{tok}' — expected 'all' or 'any'"
+                        ));
+                        ctx.advance();
+                        JoinSemantics::All
                     }
                 }
             } else {
@@ -771,6 +1226,25 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
         // Check for assignment: ident = expr (or array store: ident[idx] = expr)
         Token::Ident(ref name) => {
             let name_clone = name.clone();
+            if ctx.peek_at(1) == Some(&Token::Dot)
+                && matches!(ctx.peek_at(2), Some(Token::Ident(_)))
+                && ctx.peek_at(3) == Some(&Token::Assign)
+            {
+                let field = match ctx.peek_at(2).cloned() {
+                    Some(Token::Ident(field)) => field,
+                    _ => unreachable!(),
+                };
+                ctx.advance(); // consume resource name
+                ctx.advance(); // consume dot
+                ctx.advance(); // consume field name
+                ctx.advance(); // consume =
+                let value = parse_expr(ctx, 0);
+                Stmt::Assign {
+                    var: format!("{name_clone}.{field}"),
+                    value: Box::new(value),
+                    span: stmt_span,
+                }
+            } else
             // Peek ahead for direct variable assignment
             if ctx.peek_at(1).is_some_and(|t| *t == Token::Assign)
                 && ctx

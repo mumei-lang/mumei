@@ -1,4 +1,4 @@
-use crate::hir::{HirAtom, HirExpr, HirStmt};
+use crate::hir::{HirAtom, HirBinOp, HirExpr, HirStmt};
 use crate::mir::MirBody;
 use crate::parser::{Atom, Expr, Op, Stmt};
 use crate::verification::module_env::{LinearityCtx, ModuleEnv};
@@ -7,8 +7,7 @@ use crate::verification::mutation::{
 };
 use crate::verification::support::EffectCtx;
 use crate::verification::translator::{
-    apply_refinement_constraint, expr_to_z3, param_z3_value, stmt_to_z3, VCtx,
-    DEFAULT_CONSTRAINT_BUDGET,
+    apply_refinement_constraint, expr_to_z3, stmt_to_z3, VCtx, DEFAULT_CONSTRAINT_BUDGET,
 };
 use crate::verification::types::Env;
 use serde::{Deserialize, Serialize};
@@ -142,15 +141,33 @@ fn verify_mutated_body(
         module_env,
         current_atom: Some(atom),
         linearity_ctx: Some(&linearity_ctx_cell),
+        inferred_invariants: None,
+        cover_obligations: None,
         effect_ctx: Some(&effect_ctx_cell),
         constraint_count: Some(&constraint_count_cell),
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64: false,
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
+        call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -158,13 +175,10 @@ fn verify_mutated_body(
     for param in &atom.params {
         env.insert(
             param.name.clone(),
-            param_z3_value(
-                &ctx,
+            super::support::datatype::param_z3_value_for_vc(
+                &vc,
                 &param.name,
                 param.type_name.as_deref(),
-                module_env,
-                false,
-                bitvec_i64,
             ),
         );
     }
@@ -210,7 +224,7 @@ fn verify_mutated_body(
     };
     solver.push();
     solver.assert(&ens_bool.not());
-    let passed = solver.check() == SatResult::Unsat;
+    let passed = crate::verification::phase_artifacts::check(&solver) == SatResult::Unsat;
     solver.pop(1);
     passed
 }
@@ -320,9 +334,20 @@ fn mutate_binary_expr(expr: &mut Expr, original_op: &Op, conditions_only: bool) 
                 | mutate_stmt(then_branch, &mutation)
                 | mutate_stmt(else_branch, &mutation)
         }
+        Expr::Block(stmt) => {
+            let mutation = if conditions_only {
+                MutationOperator::ConditionFlip(original_op.clone())
+            } else {
+                MutationOperator::BinaryOpFlip(original_op.clone())
+            };
+            mutate_stmt(stmt, &mutation)
+        }
         Expr::Call(_, args) | Expr::CallRef { args, .. } | Expr::Perform { args, .. } => args
             .iter_mut()
             .any(|arg| mutate_binary_expr(arg, original_op, conditions_only)),
+        Expr::ArrayLit(elements) => elements
+            .iter_mut()
+            .any(|element| mutate_binary_expr(element, original_op, conditions_only)),
         Expr::StructInit { fields, .. } => fields
             .iter_mut()
             .any(|(_, expr)| mutate_binary_expr(expr, original_op, conditions_only)),
@@ -401,9 +426,13 @@ fn mutate_array_access_expr(expr: &mut Expr, offset: i64) -> bool {
                 | mutate_stmt(then_branch, &MutationOperator::ArrayIndexOffset(offset))
                 | mutate_stmt(else_branch, &MutationOperator::ArrayIndexOffset(offset))
         }
+        Expr::Block(stmt) => mutate_stmt(stmt, &MutationOperator::ArrayIndexOffset(offset)),
         Expr::Call(_, args) | Expr::CallRef { args, .. } | Expr::Perform { args, .. } => args
             .iter_mut()
             .any(|arg| mutate_array_access_expr(arg, offset)),
+        Expr::ArrayLit(elements) => elements
+            .iter_mut()
+            .any(|element| mutate_array_access_expr(element, offset)),
         Expr::StructInit { fields, .. } => fields
             .iter_mut()
             .any(|(_, expr)| mutate_array_access_expr(expr, offset)),
@@ -459,9 +488,16 @@ fn mutate_constant_expr(expr: &mut Expr, value: i64) -> bool {
                 | mutate_stmt(then_branch, &mutation)
                 | mutate_stmt(else_branch, &mutation)
         }
+        Expr::Block(stmt) => {
+            let mutation = constant_mutation(value);
+            mutate_stmt(stmt, &mutation)
+        }
         Expr::Call(_, args) | Expr::CallRef { args, .. } | Expr::Perform { args, .. } => {
             args.iter_mut().any(|arg| mutate_constant_expr(arg, value))
         }
+        Expr::ArrayLit(elements) => elements
+            .iter_mut()
+            .any(|element| mutate_constant_expr(element, value)),
         Expr::StructInit { fields, .. } => fields
             .iter_mut()
             .any(|(_, expr)| mutate_constant_expr(expr, value)),
@@ -536,6 +572,9 @@ fn mutate_hir_expr(expr: &mut HirExpr, mutation: &MutationOperator) -> bool {
             }
             _ => false,
         },
+        HirExpr::ArrayLit(elements) => elements
+            .iter_mut()
+            .any(|element| mutate_hir_expr(element, mutation)),
         HirExpr::ArrayAccess(_, idx) => {
             let changed = mutate_hir_expr(idx, mutation);
             if let MutationOperator::ArrayIndexOffset(offset) = mutation {
@@ -543,13 +582,13 @@ fn mutate_hir_expr(expr: &mut HirExpr, mutation: &MutationOperator) -> bool {
                 **idx = if *offset >= 0 {
                     HirExpr::BinaryOp(
                         Box::new(original),
-                        Op::Add,
+                        HirBinOp::Add,
                         Box::new(HirExpr::Number(*offset)),
                     )
                 } else {
                     HirExpr::BinaryOp(
                         Box::new(original),
-                        Op::Sub,
+                        HirBinOp::Sub,
                         Box::new(HirExpr::Number(offset.abs())),
                     )
                 };
@@ -563,9 +602,9 @@ fn mutate_hir_expr(expr: &mut HirExpr, mutation: &MutationOperator) -> bool {
             match mutation {
                 MutationOperator::BinaryOpFlip(original_op)
                 | MutationOperator::ConditionFlip(original_op)
-                    if op == original_op =>
+                    if Op::from(*op) == *original_op =>
                 {
-                    *op = flip_binary_op(op);
+                    *op = HirBinOp::from(flip_binary_op(&Op::from(*op)));
                     changed = true;
                 }
                 _ => {}

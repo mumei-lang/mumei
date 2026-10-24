@@ -9,6 +9,31 @@ keywords: "mumei specification guide, Z3 decidable fragment, formal methods, pro
 
 This guide describes the P8-D decidable specification fragment that Mumei expects Z3 to verify reliably. Stay inside these patterns for first-pass verification; use Lean escalation for specifications that intentionally need stronger reasoning.
 
+## Optional clause labels
+
+`requires` and `ensures` clauses may have an optional quoted label before the
+colon. Labels are diagnostic metadata: they do not change verification,
+proof hashes, cache keys, or certificates. An ensures label on a conjunction
+is shown for whichever top-level conjunct fails.
+Labels on extern function contracts are accepted by the parser but are not
+currently shown in diagnostics; caller-side precondition failures report the
+callee's whole `requires` and do not carry labels.
+
+```mumei
+atom safe_div(a: i64, b: i64) -> i64
+requires "divisor must be non-zero": b != 0;
+ensures "bounded by dividend": result <= a && result >= 0 - a;
+body: a / b;
+```
+
+## Phase contracts
+
+`mumei_core::verification::phase_contract::PHASE_CONTRACTS` documents executor
+order and facts that flow between verification phases. Facts are declared only
+where data actually flows; static checks are independent of those facts.
+Counterexample fidelity is diagnostic metadata and does not affect verification
+results.
+
 ## Decidable Fragment
 
 ### Linear arithmetic
@@ -42,6 +67,25 @@ Lean escalation candidates:
 - symbolic division, modulo, or exponentiation
 - nonlinear loop invariants, such as `result == i * i`
 - algebraic equalities that require ring reasoning
+
+#### Bounded low-degree nonlinear arithmetic (nlsat first)
+
+A `nonlinear_arithmetic` atom is tried by Z3's nonlinear real/integer engine (`nlsat` + Groebner) before it becomes a Lean escalation candidate when every one of the following holds. Outside this window the atom keeps the unconditional Lean escalation behaviour described above.
+
+- total degree of every monomial is at most 2 (`x * y`, `x * x`, `x / y`; no cubes)
+- at most 3 distinct variables take part in nonlinear terms
+- every such variable has a literal lower **and** upper bound in `requires` (`x >= 0 && x <= 1000`)
+- a symbolic divisor has a closed bound that excludes zero (`d >= 1 && d <= 64`)
+- no `%`, exponentiation, finite-field (`ff_*`) semantics, or nonlinear loop invariants
+
+```mumei
+atom bounded_product(a: i64, b: i64) -> i64
+requires: a >= 0 && a <= 1000 && b >= 0 && b <= 1000;
+ensures: result >= 0 && result <= 1000000;
+body: a * b;
+```
+
+Z3 `sat` / `unsat` is final; only `unknown` / timeout demotes the atom to Lean, and the proof certificate keeps the nlsat reason in the failing atom's message (the `escalation_reason` stays `nonlinear_arithmetic` / `z3_timeout`).
 
 ### Struct invariants (cross-field)
 
@@ -150,7 +194,7 @@ Keep quantifier bodies simple: linear arithmetic, a single array access pattern,
 
 ### Effects and temporal state
 
-Stateful effects should be finite state machines with explicit transitions. Keep effect preconditions local to the current state and avoid encoding unbounded histories in contracts. Path, URL, and regex constraints should be reduced to bounded string predicates or finite cases when possible; otherwise they are outside the most reliable Z3 fragment.
+Stateful effects should be finite state machines with explicit transitions. Keep effect preconditions local to the current state and avoid encoding unbounded histories in contracts. Path, URL, and regex constraints inside the RegLan fragment are decided by Z3 directly (`str.in_re`); regex constructs outside that fragment are outside the most reliable Z3 fragment.
 
 Recommended:
 
@@ -164,6 +208,67 @@ effect File
 ```
 
 Prefer small state sets, deterministic transitions, and explicit operation order in atom bodies.
+
+### String and regular-expression constraints
+
+`matches(s, "pattern")` (and the aliases `match_regex` / `re_match`) compile the literal pattern into a native Z3 regular-language expression (`str.in_re`) instead of approximating it with `prefix_of`/`suffix_of`/`contains`. The compile target follows Rust `regex::is_match` semantics — substring search — so `^`/`$` anchors only take effect at the outermost edges of the pattern.
+
+The decidable fragment covers:
+
+- literals and concatenation, alternation `|`, grouping `(...)`;
+- repetition `*` `+` `?` (including lazy `*?`/`+?`/`??`) and counted `{n}` `{n,}` `{n,m}` with bounds ≤ 64 (`{n,}` desugars to `{n}` + `*`);
+- character classes `[a-z]`, `[^...]`, and escapes `\d \w \s` (plus `\D \W \S` complements), `\n \r \t \f \v \a`, `\xHH` (also inside classes), and escaped metacharacters. Unlike Rust `regex`, the class escapes are interpreted **ASCII-only** (`\w` = `[0-9A-Za-z_]`, `\s` = `[ \t\n\r\u{b}\u{c}]`) — non-ASCII word/space characters are outside the RegLan constraint;
+- `.` matching any ASCII character except `\n` — Z3's `re.range` is limited to the 7-bit ASCII plane, so `.` and classes cannot address code points above U+007F (literal characters above U+007F still compile);
+- outer `^`/`$` anchors (`str.in_re` handles them by dropping the implicit `Σ*` wrapper at that end).
+
+Anything outside this fragment — lookarounds (`(?=`, `(?!`, `(?<`), backreferences (`\1`), inline flags (`(?i)`), interior anchors, word boundaries (`\b`), Unicode escapes (`\uXXXX`, `\u{...}`), malformed or whitespace bounds (`a{`, `a{ 2}`), and `{n,m}` with `m < n` — keeps the `regex_semantics` tag, fails closed as a spec-lowering error in contracts, and remains a Lean 4 delegation target.
+
+Recommended:
+
+```mumei
+effect RegexSafeFileRead(path: Str) where matches(path, "^/tmp/[a-z]+/.*");
+```
+
+### Finite enums and tagged unions
+
+A non-recursive `enum` with no type parameters and only scalar payload fields (`i64`, `f64`, `Str`, `bool`) is verified on a native Z3 *datatype sort*: each variant becomes a constructor with an `is-<Variant>` tester and one selector per payload field that carries the field's real sort — a `Str` payload projects as a Z3 `String`, an `f64` payload as `Real` (or IEEE 754 `Float` under `--ieee754-f64`).
+
+What this buys over the legacy Int-tag encoding:
+
+- **Exhaustiveness is exact**: `match` coverage is decided by the datatype completeness axiom, so a missing arm reports the uncovered constructor by name (`value = Blue -- no matching arm`) — no Int domain-constraint step.
+- **Payload reasoning**: field patterns bind to selector applications with the real sort. `requires: s == Shape::Named("hi")` implies `n == "hi"` inside the `Named(n)` arm.
+- **Constructor equality/injectivity**: `Shape::Point != Shape::Named("x")` and `s == Shape::Point` in `requires`/`ensures` are real equalities.
+- **Construction**: `Shape::Named("x")`, `Shape::Point`, and bare `Point` (when unbound) all construct datatype values.
+
+```mumei
+enum Shape { Point, Named(Str) }
+
+atom label_of(s: Shape) -> Str
+    requires: s == Shape::Named("hi");
+    ensures: result == "hi";
+    body: { match s { Point => "origin", Named(n) => n } }
+```
+
+Out of scope (these keep the Int-tag encoding and the `inductive_data_type` fragment tag for Lean 4 delegation):
+
+- empty enums (`enum Empty {}` — Z3 datatypes need ≥1 constructor; they keep the Int-tag path, so an `Empty` param tags `inductive_data_type`),
+- recursive enums (`enum List { Nil, Cons(i64, List) }` — any `Self` payload),
+- generic enums (`Option<T>`, `Result<T, E>` — until a monomorphisation layer exists),
+- enums whose payload is another enum, a struct, or an array,
+- a `match` with only literal/variable arms on a scalar target (conservatively still tagged),
+- `let x = <ctor>; match x` hits a pre-existing MIR move-analysis limitation on pattern-bound locals (use `match` on the constructor expression directly or on a parameter).
+
+For the Int-tag enums above, `Enum::Variant` in a contract still resolves — to the variant's tag index (`l == IntList::Nil` means `l == 0`), matching the `match` discriminant convention. Payload-carrying constructors (`IntList::Cons(x, t)`) are not constructible in specs and fail closed as a spec-lowering error, as do arity mismatches and unknown variant names on a known enum (`Shape::Foo` errors rather than silently dropping the clause).
+
+A bare variant name (`Ok`, `Red`) is ambiguous when several enums declare it — note the auto-loaded prelude contributes `Option`/`Result`/`List`, so `Ok`/`Err`/`Some`/`None`/`Nil`/`Cons` are always ambiguous without a qualifier. Write `R2::Ok` instead of bare `Ok`; comparing two different enum types (`r == R1::Ok` on `r: R2`) is a spec-lowering error, not a `false` clause.
+
+The same ambiguity applies to `match` arms: a `Variant` pattern resolves its tag against the match target's **declared enum type** (`match l` on `l: IntList` uses `IntList`'s indices), so `enum IntList { Cons(i64, Self), Nil }` keeps `Cons = 0` even though the prelude `List` numbers it `1`. The same rule covers `match result` (the atom's return type), `let`-aliases of a declared parameter, nested variant field patterns (`Cons(h, Cons(h2, t2))` — the `Self` field's enum), `match t` on a bound tail — projector constants are named `__proj_{Enum}_{Variant}_{i}` so the declared type survives binding — and `match th.t` on a struct field (the field's declared type, including nested paths like `o.inner.depth`). `let`/`assign` bindings record the inferred enum type of their value — `let e = IntList::Nil; match e` resolves `Nil`/`Cons` to `IntList`, as do `let e = if c { E::V(..) } else { E::W }` (branches must agree) and `let e = f(..)` when `f` is declared to return an enum. When the target's type cannot be determined (e.g. `match x + 1`, or a `let`-bound value whose branches disagree) and the owners disagree on indices or arity, verification fails closed with an ambiguity error rather than picking an enum at random.
+
+Arms may also be **qualified**: `match e { Mine::Yes(v) => .., Mine::Nil => .. }` pins the owning enum by its qualifier — equivalent to the bare form when the qualifier matches the target's declared type, and a fail-closed verification error when it names a *different* enum (`match e { Other::Nil => .. }` on `e: Mine` reports "belongs to enum 'Other' but the match target is declared as 'Mine'", instead of silently matching `Mine`'s `Nil`). A qualifier that is not a known enum name resolves by the bare leaf segment, as before.
+
+`mumei build`/codegen applies the identical rule when it emits the tag comparisons for a `match`: the compiled code uses the declared enum's variant indices (parameters and `let`-bound enum values carry their declared type through `var_types`), and an irresolvable collision fails the build with the same ambiguity error. Before this fix, codegen could pick a different owner than the verifier for a colliding name — the compiled tag checks would then disagree with the verified semantics.
+
+Qualified constructor expressions `E::V(..)` / `E::V` work in bodies too — `Mine::Cons(x)` and `Mine::Nil` build the tagged union in place (tag `insertvalue` + per-slot `bitpreserve` payload), so `atom mk(p: i64) -> Mine { Mine::Cons(p) }` compiles and verifies, and a bound variable named like an enum still wins (`Fruit.label` reads the struct field when `Fruit` is a struct-typed binding, matching the verifier's shadow rule). Construction obeys the same limits as the enum's runtime layout: a recursive enum (`IntList::Nil`) fails the build with a clean "recursive enum" codegen error rather than overflowing the eager layout, and an arity mismatch or unknown variant is a build error (verification already rejects it before codegen is reached). The payload slots are positional unions — an enum mixing pointer (`Str`) and `f64` payloads at the same slot index cannot represent both and fails closed at the cast site. Non-equality binary operators on aggregate values (e.g. `x + s`) remain a clean codegen error. `==`/`!=` between two values of the same enum type compile to deep equality — the tag and every payload slot are compared (`Str` slots via `mumei_str_eq` content equality, `f64` slots via ordered float compare), matching the verifier's datatype equality; `undef` slots of unit variants carry no payload and are skipped. This deep-equality lowering also fixed three latent parameter bugs: enum-typed atom parameters used to be split like fat-pointer arrays, which bound `match` payloads to `0`, compared `a == b` on the tag alone, and passed only the tag when forwarding the value to a callee — parameters now bind the whole tagged-union value, so `match m { Mine::Cons(v) => v }` extracts the real payload and `consume(m)` forwards the full struct. Comparing two *different* enum types, or any struct values, is still a clean codegen error (not a crash).
 
 ## Bit-vector `i64` (`--bitvec-i64`)
 
@@ -233,15 +338,15 @@ With `mumei verify --warn-fragment`, the verifier emits an `outside_decidable_fr
 
 | Fragment tag | Typical pattern | Recommended response |
 |---|---|---|
-| `nonlinear_arithmetic` | `x * y`, symbolic `/`, `%`, polynomial invariant | Rewrite to linear bounds or escalate to Lean |
+| `nonlinear_arithmetic` | `x * y`, symbolic `/`, `%`, polynomial invariant | Bound every variable (literal lower and upper) to stay in the nlsat-first window, otherwise rewrite to linear bounds or escalate to Lean |
 | `array_without_bounds` | `arr[i]` without `i >= 0 && i < n` | Add explicit bounds in `requires`, `ensures`, or quantifier range |
 | `quantifier_alternation` | Mixed `forall` and `exists` obligations | Split the spec or provide a constructible witness |
 | `trigger_sensitive_quantifier` | Quantifier over array access or nested quantifier | Bound the range tightly and simplify the body |
-| `inductive_data_type` | Recursive enum/match shape | Prefer finite enum cases or Lean proofs |
+| `inductive_data_type` | Recursive/generic/non-scalar enum param, scalar-only `match` | Use a finite scalar-payload enum (verified natively — see "Finite enums and tagged unions") or escalate to Lean |
 | `recursive_invariant` | While loop or recursive invariant | Keep invariants linear and local, or escalate to Lean |
 | `complex_temporal_effect` | Many states/transitions or implicit history | Reduce to finite explicit transitions |
 | `nested_aliasing` | Multiple `ref mut` aliases or nested mutable scopes | Split the atom or serialize mutation through one owner |
-| `regex_semantics` | `regex_match`, `matches`, or equivalent regex constraints | Replace with prefix/contains/bounded finite cases or escalate to Lean |
+| `regex_semantics` | Regex constructs outside the RegLan fragment (lookarounds, backreferences, inline flags, interior anchors) | Rewrite into the supported fragment (see "String and regular-expression constraints"), or escalate to Lean |
 
 ### Anti-pattern examples
 
@@ -602,6 +707,15 @@ mumei verify --enable-vacuity-check spec.mm
 ```
 
 Use this check in AI-generated-code workflows to catch semantic evasion such as replacing meaningful `requires` or `ensures` clauses with `true`.
+
+### Unreachable verification contexts
+
+Postcondition verification also checks whether the `requires` and body
+constraints can hold together. An unreachable context remains an error under
+the existing contradiction check. The report classifies its ensures clauses
+as vacuous and includes a diagnostic explaining that they would hold
+vacuously. This reachability check is distinct from the mutation-based vacuity
+check above.
 
 ## Contract Isolation Sandbox
 

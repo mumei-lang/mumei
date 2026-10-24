@@ -6,6 +6,108 @@ use crate::lowering::{lower, LoweredType};
 
 pub const DEFAULT_CONSTRAINT_BUDGET: usize = 1000;
 
+pub(crate) type UnfoldCall<'a> = (String, Vec<Dynamic<'a>>);
+
+/// Field values of a struct-returning call's result plus the result
+/// handle ast they were keyed under (kept alive so the `usize` key can
+/// never alias a newer const).
+pub(crate) type CallResultFields<'a> = (Vec<(String, Dynamic<'a>)>, Dynamic<'a>);
+
+/// Cached `rec_fn#` UF plus the signature it was declared with, so a
+/// re-registration with a different domain/range can be caught.
+pub(crate) type RecFnEntry<'a> = (
+    std::rc::Rc<z3::FuncDecl<'a>>,
+    Vec<z3::Sort<'a>>,
+    z3::Sort<'a>,
+);
+
+/// A lambda-shaped name in `VCtx::local_lambdas`, so an indirect call
+/// `f(args)` / `call(f, args)` can resolve instead of failing as an
+/// unknown function.
+#[derive(Debug, Clone)]
+pub(crate) enum LocalLambda<'a> {
+    /// A `let`/`assign`-bound lambda (`let f = |a| a + 1`): the call
+    /// inlines the body with formal parameters bound to the evaluated
+    /// arguments — the call behaves like `let p_i = arg_i in body`.
+    Closure {
+        /// The `Expr::Lambda` the name was bound to.
+        expr: crate::parser::Expr,
+        /// The `local_lambdas` contents captured at the binding site: free
+        /// lambda-variable names inside `expr`'s body resolve against this
+        /// captured scope — not the (possibly rebound) call-site scope — so
+        /// `let g = …; let f = |a| g(a); let g = …; f(x)` keeps the `g`
+        /// that was live when `f` was defined.
+        captured: std::collections::HashMap<String, std::rc::Rc<LocalLambda<'a>>>,
+    },
+    /// `let h = if c { f } else { g }` where both branch tails resolve to
+    /// lambdas: `h(args)` applies as `ite(cond, f(args), g(args))`. `cond`
+    /// is evaluated once at the binding site, so a later `c = …` rebind
+    /// cannot silently re-pick the branch the call inlines.
+    Ite {
+        cond: z3::ast::Bool<'a>,
+        then_lam: std::rc::Rc<LocalLambda<'a>>,
+        else_lam: std::rc::Rc<LocalLambda<'a>>,
+    },
+    /// Placeholder for a lambda's own parameter while the lambda body is
+    /// checked at binding time (`let apply = |f, x| f(x)`): the param's
+    /// arity and return type are unknown until a call site supplies a
+    /// closure, so a call through it yields a fresh symbolic int. Only
+    /// ever present during the bind-time body check — applying a closure
+    /// re-binds params that receive lambdas to real `Closure` entries.
+    Opaque,
+}
+
+/// Congruent recursive-contract state. Only `verify_inner`'s main VCtx sets
+/// `enabled = true`; every auxiliary VCtx (spec validation, vacuity,
+/// invariant, law, property-based) keeps the default so their solver input
+/// is unchanged.
+pub(crate) struct RecursionCtx<'a> {
+    pub(crate) enabled: std::cell::Cell<bool>,
+    /// `recursive_scc` results keyed by atom name (None = not on a cycle).
+    pub(crate) scc_cache: std::cell::RefCell<
+        std::collections::HashMap<String, Option<std::rc::Rc<super::super::support::RecursiveScc>>>,
+    >,
+    /// `rec_fn#<callee>` uninterpreted functions, keyed by UF name and
+    /// cached with the signature they were declared under, so a
+    /// re-registration with a different domain/range is caught loudly
+    /// instead of applying the cached decl over a wrong-arity tuple.
+    pub(crate) rec_fns: std::cell::RefCell<std::collections::HashMap<String, RecFnEntry<'a>>>,
+    /// The current atom's lowered `decreases` measure, when it is verified
+    /// inside an eligible SCC.
+    pub(crate) current_measure: std::cell::RefCell<Option<Vec<Dynamic<'a>>>>,
+    /// The current atom's eligible SCC.
+    pub(crate) current_scc:
+        std::cell::RefCell<Option<std::rc::Rc<super::super::support::RecursiveScc>>>,
+    /// Termination obligations lowered while no solver was available
+    /// (requires/ensures lowering passes `solver_opt = None`): each entry is
+    /// `(implies(path_conds, obligation), callee_name)` and is drained by the
+    /// executor once the preconditions hold.
+    pub(crate) pending_termination: std::cell::RefCell<Vec<(Bool<'a>, String)>>,
+    /// `rec_fn#` applications recorded while unfolding a constant-argument
+    /// contract instance (§8 D7); `Some` while one is active.
+    pub(crate) unfold_sink: std::cell::RefCell<Option<Vec<UnfoldCall<'a>>>>,
+    /// Depth of lambda bodies being translated at bind time (arbitrary
+    /// param constants, not real arguments). Recursive calls there take the
+    /// ordinary non-congruent path; the real invocation via
+    /// `apply_local_lambda` keeps the full congruent treatment.
+    pub(crate) lambda_bind_depth: std::cell::Cell<u32>,
+}
+
+impl<'a> Default for RecursionCtx<'a> {
+    fn default() -> Self {
+        RecursionCtx {
+            enabled: std::cell::Cell::new(false),
+            scc_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            rec_fns: std::cell::RefCell::new(std::collections::HashMap::new()),
+            current_measure: std::cell::RefCell::new(None),
+            current_scc: std::cell::RefCell::new(None),
+            pending_termination: std::cell::RefCell::new(Vec::new()),
+            unfold_sink: std::cell::RefCell::new(None),
+            lambda_bind_depth: std::cell::Cell::new(0),
+        }
+    }
+}
+
 /// 検証時に共有するコンテキスト（ctx, module_env を束ねて引数を削減）
 pub(crate) struct VCtx<'a> {
     pub(crate) ctx: &'a Context,
@@ -18,6 +120,10 @@ pub(crate) struct VCtx<'a> {
     /// Wrapped in RefCell so that recursive expr_to_z3/stmt_to_z3 calls can
     /// mutate it without changing every call-site signature.
     pub(crate) linearity_ctx: Option<&'a std::cell::RefCell<LinearityCtx>>,
+    pub(crate) inferred_invariants: Option<
+        &'a std::cell::RefCell<Vec<crate::verification::invariant_inference::InferredInvariant>>,
+    >,
+    pub(crate) cover_obligations: Option<std::cell::RefCell<Vec<Bool<'a>>>>,
     /// EffectCtx for tracking allowed vs used effects during body evaluation.
     pub(crate) effect_ctx: Option<&'a std::cell::RefCell<EffectCtx>>,
     /// Per-atom constraint budget: tracks the number of solver.assert() calls.
@@ -38,6 +144,11 @@ pub(crate) struct VCtx<'a> {
     /// implied by being in the `else` of `if n <= 1`) participate in the
     /// satisfiability query without leaking into sibling branches.
     pub(crate) path_cond_stack: std::cell::RefCell<Vec<Bool<'a>>>,
+    pub(crate) held_resources: std::cell::RefCell<std::collections::HashMap<String, usize>>,
+    pub(crate) acquire_counter: std::cell::RefCell<usize>,
+    /// Monotonic per-context ID used to namespace loop snapshots during
+    /// nested invariant inference probes.
+    pub(crate) loop_counter: std::cell::RefCell<usize>,
     pub(crate) profiler: Option<&'a std::cell::RefCell<IncrementalProfiler<'a>>>,
     /// Opt-in IEEE 754 `f64` verification (`--ieee754-f64`). When `true`,
     /// `f64` parameters/literals are encoded as Z3 IEEE 754 binary64 `Float`
@@ -61,9 +172,127 @@ pub(crate) struct VCtx<'a> {
     /// replays them against the atom's solver so that `0 <= n < 64` is enforced
     /// for `requires`/`ensures`/invariant shifts too, not just body shifts.
     pub(crate) bv_shift_obligations: std::cell::RefCell<Vec<(Bool<'a>, BV<'a>)>>,
+    /// `(dividend, divisor)` pairs lowered without a solver, like shift
+    /// amounts above, so `divisor != 0` and `!(i64::MIN / -1)` are enforced
+    /// for contract divisions too, not just body divisions.
+    /// `discharge_bv_div_obligations` replays them under each entry's path
+    /// condition.
+    pub(crate) bv_div_obligations: std::cell::RefCell<Vec<(Bool<'a>, BV<'a>, BV<'a>)>>,
+    /// Clause booleans asserted so far during spec validation, in source
+    /// order. Deferred obligations are conditioned on the clauses already in
+    /// scope so a bound in one conjunct (`result <= 62`) discharges a shift
+    /// in a later one (`n >> result`).
+    pub(crate) clause_context: std::cell::RefCell<Vec<Bool<'a>>>,
+    /// P10-C: per-context cache of Z3 `DatatypeSort`s created for finite,
+    /// non-recursive enums. Rebuilding the same-named datatype would yield a
+    /// distinct sort and break `_eq`/`ite` between two declarations of the
+    /// same enum, so the first build is reused.
+    pub(crate) enum_sorts:
+        std::cell::RefCell<crate::verification::support::datatype::EnumSortCache<'a>>,
+    /// Declared enum type inferred for `let`/`assign`-bound variables
+    /// (`let e = Mine::Cons(1)` records `e -> Mine`), so a `match e` on a
+    /// local binding resolves variant owners the same way a declared
+    /// parameter type does. Entries are removed when the variable is
+    /// reassigned to a value with no inferable enum type.
+    pub(crate) local_enum_types: std::cell::RefCell<std::collections::HashMap<String, String>>,
+    /// Element type name inferred for `let`-bound array literals
+    /// (`let a = [1.0, 2.0]` records `a -> "f64"`), so `array_element_sort`
+    /// resolves the element type for a local binding the same way a declared
+    /// `[T]` parameter type does. Removed when the variable is rebound to a
+    /// non-array value.
+    pub(crate) local_array_elem_types:
+        std::cell::RefCell<std::collections::HashMap<String, String>>,
+    /// `let`/`assign`-bound lambdas (`let f = |a| a + 1` records
+    /// `f -> LocalLambda`) so `f(args)` / `call(f, args)` inline the body
+    /// instead of failing as an unknown function. Entries drop when the
+    /// variable is rebound to a non-lambda value and are branch-scoped
+    /// the same way `local_enum_types` is. `Rc` wrapping keeps binding
+    /// *identity* through map clones — an alias (`let g = f`) shares the
+    /// same `Rc`, which is what lets the if/else merge keep a name only
+    /// when both sides left the same binding in place (`Rc::ptr_eq`).
+    pub(crate) local_lambdas:
+        std::cell::RefCell<std::collections::HashMap<String, std::rc::Rc<LocalLambda<'a>>>>,
+    /// Len symbol minted for an array-returning call, keyed by the result
+    /// array's raw `Z3_ast` pointer. A callee's `ensures: len(result) == k`
+    /// asserts on that symbol; the map lets `let t = f(..)` bind `len_t` to
+    /// the *same* symbol so the guarantee reaches the caller instead of a
+    /// fresh unconstrained `len_t`. The stored `Dynamic` keeps the key ast
+    /// alive (Z3 refcount) so a freed pointer can never alias a new const.
+    pub(crate) call_result_lens:
+        std::cell::RefCell<std::collections::HashMap<usize, (Dynamic<'a>, Dynamic<'a>)>>,
+    /// Field values of a struct-returning call's result, keyed by the
+    /// result handle's raw `Z3_ast` pointer — the struct analogue of
+    /// `call_result_lens`. A direct read `f(1).x` cannot rebuild the
+    /// per-call `call_<name>_<id>` binding name from the expression, so
+    /// `FieldAccess` looks the result ast up here and returns the stored
+    /// field value (the `rec_fn#<f>#field.<x>` projection on congruent
+    /// calls) instead of minting a `field_x` const shared across calls —
+    /// which would make `f(1).x == f(2).x` spuriously verify. The second
+    /// `Dynamic` keeps the key ast alive (Z3 refcount).
+    pub(crate) call_result_fields:
+        std::cell::RefCell<std::collections::HashMap<usize, CallResultFields<'a>>>,
+    /// Callee atoms whose caller-side contract (`requires`/`ensures`) is being
+    /// lowered at a call site right now. A call to one of these while its own
+    /// contract is being lowered is a recursive instance: it gets a fresh,
+    /// unconstrained result instead of instantiating the contract again, which
+    /// only drops assumptions and keeps call lowering finite.
+    pub(crate) contracts_in_instantiation: std::cell::RefCell<Vec<String>>,
+    /// Congruent recursive-contract state (see `RecursionCtx`). Disabled
+    /// everywhere except `verify_inner`'s main VCtx.
+    pub(crate) recursion: RecursionCtx<'a>,
+    /// Variables bound by the `forall` / `exists` quantifiers currently being
+    /// lowered (innermost last), with their Z3 bound constants. A call lowers
+    /// to one result constant per call site, which a quantifier would share
+    /// across every instance of its binder, so a call whose arguments mention
+    /// one of these is rejected (see `reject_quantifier_dependent_call`).
+    pub(crate) quantifier_binders: std::cell::RefCell<Vec<(String, Dynamic<'a>)>>,
+    pub(crate) call_result_symbols: std::cell::RefCell<std::collections::HashSet<String>>,
 }
 
 impl<'a> VCtx<'a> {
+    /// Innermost active quantifier binder occurring in any of `vals`.
+    /// Quantifier sub-terms are not traversed and count as dependent, so the
+    /// check errs on the side of rejecting the call.
+    pub(crate) fn quantifier_binder_in(&self, vals: &[Dynamic<'a>]) -> Option<String> {
+        let binders = self.quantifier_binders.borrow();
+        let innermost = binders.last()?.0.clone();
+        let mut seen = std::collections::HashSet::new();
+        let mut stack: Vec<Dynamic<'a>> = vals.to_vec();
+        while let Some(node) = stack.pop() {
+            if let Some((name, _)) = binders.iter().rev().find(|(_, bound)| *bound == node) {
+                return Some(name.clone());
+            }
+            if !seen.insert(node.clone()) {
+                continue;
+            }
+            match node.kind() {
+                z3::AstKind::App | z3::AstKind::Numeral => stack.extend(node.children()),
+                z3::AstKind::Quantifier => return Some(innermost),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Fail closed on a call whose arguments depend on a quantifier-bound
+    /// variable: the error is classified as an unsupported clause, so the
+    /// enclosing clause (or atom) is reported as unverifiable.
+    pub(crate) fn reject_quantifier_dependent_call(
+        &self,
+        callee: &str,
+        vals: &[Dynamic<'a>],
+    ) -> Result<(), MumeiError> {
+        match self.quantifier_binder_in(vals) {
+            None => Ok(()),
+            Some(binder) => Err(MumeiError::verification(format!(
+                "{QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED}: the call to '{callee}' has an \
+                 argument that depends on '{binder}', which is bound by an enclosing \
+                 forall/exists. Sound per-instance encoding of such calls is planned with \
+                 the lemma-export work; until then the enclosing clause is unverifiable."
+            ))),
+        }
+    }
+
     /// Conjunction of the current branch path conditions (or `true` if
     /// no enclosing `if/else` has narrowed the path). Used at intermediate
     /// check sites (see `path_cond_stack` doc) so that branch guards
@@ -76,6 +305,114 @@ impl<'a> VCtx<'a> {
             let refs: Vec<&Bool<'a>> = stack.iter().collect();
             Bool::and(self.ctx, &refs)
         }
+    }
+
+    /// Cached `recursive_scc` lookup for `atom` (None when not on a cycle or
+    /// when recursion congruence is disabled).
+    pub(crate) fn recursive_scc_of(
+        &self,
+        atom: &str,
+    ) -> Option<std::rc::Rc<super::super::support::RecursiveScc>> {
+        if let Some(entry) = self.recursion.scc_cache.borrow().get(atom) {
+            return entry.clone();
+        }
+        let computed =
+            super::super::support::recursive_scc(self.module_env, atom).map(std::rc::Rc::new);
+        self.recursion
+            .scc_cache
+            .borrow_mut()
+            .insert(atom.to_string(), computed.clone());
+        computed
+    }
+
+    /// Whether `callee` participates in congruent recursive contracts: the
+    /// callee declares `decreases` and sits on an eligible SCC. Callers
+    /// pre-filter on `decreases.is_some()` so the SCC analysis only runs for
+    /// atoms that could qualify.
+    pub(crate) fn callee_congruent(&self, callee: &crate::parser::Atom) -> bool {
+        self.recursion.enabled.get()
+            && self.recursion.lambda_bind_depth.get() == 0
+            && callee.decreases.is_some()
+            && self
+                .recursive_scc_of(&callee.name)
+                .map(|scc| scc.is_eligible())
+                .unwrap_or(false)
+    }
+
+    /// `rec_fn#<callee>`: the uninterpreted function backing a congruent
+    /// recursive call, cached per callee name.
+    pub(crate) fn rec_fn(
+        &self,
+        callee: &crate::parser::Atom,
+        domain: &[z3::Sort<'a>],
+        range: &z3::Sort<'a>,
+    ) -> std::rc::Rc<z3::FuncDecl<'a>> {
+        self.rec_fn_named(&format!("rec_fn#{}", callee.name), domain, range)
+    }
+
+    /// A `rec_fn#…` uninterpreted function cached per UF name: the callee's
+    /// primary result plus the projections a non-scalar result needs
+    /// (`#len` for arrays, `#field.<name>` per struct field), all declared
+    /// over the same expanded domain.
+    pub(crate) fn rec_fn_named(
+        &self,
+        uf_name: &str,
+        domain: &[z3::Sort<'a>],
+        range: &z3::Sort<'a>,
+    ) -> std::rc::Rc<z3::FuncDecl<'a>> {
+        if let Some((decl, cached_domain, cached_range)) =
+            self.recursion.rec_fns.borrow().get(uf_name)
+        {
+            // Call sites and `unfold_constant_calls` must declare every
+            // `rec_fn#` over the SAME expanded domain (`rec_fn_args`). A
+            // mismatch means a declaration snuck in over a different
+            // domain — applying the cached decl would build a wrong-arity
+            // application, which is an encoding bug, not a model issue.
+            debug_assert!(
+                cached_domain.as_slice() == domain && cached_range == range,
+                "rec_fn {uf_name} re-registered with a different signature"
+            );
+            return decl.clone();
+        }
+        let domain_refs: Vec<&z3::Sort<'a>> = domain.iter().collect();
+        let decl = std::rc::Rc::new(z3::FuncDecl::new(
+            self.ctx,
+            uf_name.to_string(),
+            &domain_refs,
+            range,
+        ));
+        self.recursion.rec_fns.borrow_mut().insert(
+            uf_name.to_string(),
+            (decl.clone(), domain.to_vec(), range.clone()),
+        );
+        decl
+    }
+
+    pub(crate) fn is_instantiating_contract(&self, atom: &str) -> bool {
+        self.contracts_in_instantiation
+            .borrow()
+            .iter()
+            .any(|entry| entry == atom)
+    }
+
+    pub(crate) fn enter_contract_instantiation(
+        &self,
+        atom: &str,
+    ) -> ContractInstantiationGuard<'_, 'a> {
+        self.contracts_in_instantiation
+            .borrow_mut()
+            .push(atom.to_string());
+        ContractInstantiationGuard { vc: self }
+    }
+}
+
+pub(crate) struct ContractInstantiationGuard<'v, 'a> {
+    vc: &'v VCtx<'a>,
+}
+
+impl Drop for ContractInstantiationGuard<'_, '_> {
+    fn drop(&mut self) {
+        let _ = self.vc.contracts_in_instantiation.borrow_mut().pop();
     }
 }
 

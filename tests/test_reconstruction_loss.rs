@@ -15,6 +15,9 @@ fn atom(name: &str) -> Atom {
         params: Vec::new(),
         trace_id: None,
         spec_metadata: HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
         requires: "true".to_string(),
         forall_constraints: Vec::new(),
         ensures: "result > 10".to_string(),
@@ -27,6 +30,7 @@ fn atom(name: &str) -> Atom {
         invariant: None,
         effects: Vec::new(),
         return_type: None,
+        decreases: None,
         span: Span::default(),
         effect_pre: HashMap::new(),
         effect_post: HashMap::new(),
@@ -154,7 +158,10 @@ body: { x + 1 };
         payload["reconstruction_losses"][0]["violated_property"],
         "result > 10"
     );
-    assert!(payload["reconstruction_losses"][0]["counter_example"]["x"].is_string());
+    assert_eq!(
+        payload["reconstruction_losses"][0]["counter_example"]["x"],
+        5
+    );
     assert_eq!(payload["reconstruction_losses"][0]["loss_set_size"], 1);
     assert_eq!(payload["reconstruction_losses"][0]["is_zero_loss"], false);
     assert!(payload["reconstruction_losses"][0]["loss_vector"].is_array());

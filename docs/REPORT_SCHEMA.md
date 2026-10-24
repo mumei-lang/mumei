@@ -8,6 +8,14 @@ External tools (e.g., [mumei-agent](https://github.com/mumei-lang/mumei-agent)) 
 - `mumei verify --json file.mm` — outputs report to stdout
 - `mumei verify --report-dir <dir> file.mm` — writes report.json to specified directory
 
+Without `--report-dir`, per-atom reports are staged in a private temp dir and
+the final `report.json` is published to the current directory when the run
+ends, so concurrent runs in the same directory each print their own result;
+the copy left in the directory is from whichever run finished last.
+An early exit before any atom is verified — an input error, a cross-spec load
+failure, or unavailable Z3 — removes any `report.json` already present in the
+output directory so it cannot be mistaken for this run's result.
+
 ## Rich Diagnostics
 
 Human-facing diagnostics are powered by [miette](https://crates.io/crates/miette): multi-span source locations, compound constraint decomposition, and expression-level dataflow tracking can all be attached to one verification error.
@@ -116,14 +124,51 @@ LSP diagnostics include `relatedInformation` for multi-location errors, enabling
 | `input_a` | `string` | No | First input description (legacy; prefer `counterexample`) |
 | `input_b` | `string` | No | Second input description (legacy; prefer `counterexample`) |
 | `reason` | `string` | Yes | Human-readable result description |
+| `context_reachability` | `"reachable" \| "unreachable" \| "unknown"` | Ensures reports | Satisfiability of the context used to verify postconditions |
+| `ensures_outcomes` | `array` | Ensures reports | Per-clause postcondition outcome (`proved`, `vacuous`, `always_false`, `fails_on_some_inputs`, `fails`, `unknown`, `skipped`, or `assumed`) |
 | `violation_type` | `string` | No | `"effect_mismatch"`, `"effect_propagation"`, etc. |
 | `effect_violation` | `object` | No | Effect violation details (see below) |
 | `semantic_feedback` | `object` | No | Rich diagnostics (see below) |
 | `counterexample` | `object` | No | Z3 counter-example values |
 | `failure_type` | `string` | No | Failure category code |
+| `failed_clause` | `string` | No | Failing ensures conjunct on a postcondition violation |
+| `failed_clause_label` | `string` | No | Optional label for the failing ensures conjunct; absent when unlabeled |
+| `counterexample_fidelity` | `"exact" \| "bounded" \| "approximate"` | No | Exact means replayed under Mumei semantics and the violation reproduced; approximate means not replayed or replay was inconclusive; bounded means a bounded-depth phase produced the counterexample |
+| `counterexample_provenance` | `object` | No | Per-value raising status and lowering, optional source type/solver symbol, and omitted internal solver symbols |
+| `cover_results[].witness_provenance` | `object` | Cover results | Raising provenance for the corresponding witness |
 | `suggestion` | `string` | No | Fix suggestion text (counterexample や unsat core を踏まえた動的な修正提案が含まれる場合がある) |
 | `span` | `object` | No | Source location (`file`, `line`, `col`, `len`) |
 | `type_definition_locations` | `array` | No | Constraint source locations |
+
+`counterexample` remains an object mapping source names to rendered strings.
+`counterexample_provenance.values` describes the same reported source values
+with a `raised` or `unraisable` status and the lowering used. Unraisable values
+retain their solver rendering and include a reason; their presence makes
+`complete` false and `counterexample_fidelity` `"approximate"`.
+`omitted_solver_symbols` lists internal solver values that were not emitted as
+source counterexample fields.
+
+Primitive lowering labels include `int` for integer-sorted source integers,
+`bitvec_i64` and `bitvec_i32` for signed bit-vectors, `bitvec_u64` and
+`bitvec_u32` for unsigned bit-vectors, `real_f64` and `real_f32` for exactly
+representable real values, and `ieee754_f64` and `ieee754_f32` for matching
+IEEE floating-point sorts. `str_length` and `array_length` identify the
+solver-side length companions of `Str` and array parameters (`len(s)`); they
+are reported in reconstruction-loss values and provenance.
+
+Ensures reports include `context_reachability` and an `ensures_outcomes` entry
+for each non-trivial lowered, skipped, or assumed clause. Each outcome entry
+contains the source `clause` text and its classified `outcome`; an assumed
+clause may also include its optional `label`. Assumed clauses are not sent to
+the solver, and their warning is included in `diagnostics`. An unknown context
+is never reported as unreachable. Unless a satisfiable `ctx ∧ ¬Q` query has already
+established reachability, `context_reachability` comes from the existing Phase 6
+final consistency check. Reports produced before Phase 6 without that evidence
+use `"unknown"`. An unreachable context remains a contradiction error. The report attaches
+`context_reachability: "unreachable"`, `"vacuous"` outcomes, and a diagnostic
+explaining that every ensures clause would hold vacuously.
+These keys are absent from cached (unchanged) results because verification was
+not recomputed for that run.
 
 ## semantic_feedback.structured_unsat_core
 
@@ -260,6 +305,11 @@ Example:
 }
 ```
 
+`mumei verify --emit sarif` also writes `report.sarif` beside the report
+artifacts. It contains a SARIF 2.1.0 run with atom-level and obligation-level
+findings; see [the CLI reference](CLI.md#sarif-output) for its rule mapping and
+properties.
+
 ## proof_graph.json Schema
 
 `mumei verify --emit proof-graph` writes `proof_graph.json` in the report
@@ -288,13 +338,13 @@ verification health used by `visualize_std_graph`.
 | `nodes[].trust_boundaries` | `array` | P23 trust boundaries the atom crosses |
 | `nodes[].trust_boundaries[].kind` | `string` | `trusted_atom`, `extern_ffi` or `effect_pre_override` |
 | `nodes[].trust_boundaries[].rationale` | `string` | Why the boundary exists |
-| `nodes[].verification_status` | `string \| null` | Per-atom status from this run, `null` when the atom was not verified here |
+| `nodes[].verification_status` | `string \| null` | Per-atom status from this run; an imported / prelude atom takes `verified` from a fresh sibling proof certificate (matching `content_hash`, current Lean translator metadata), otherwise `null` |
 | `nodes[].health` | `string` | `green` (proven, no boundary), `yellow` (trust boundary), `red` (failed / unverifiable) |
 | `nodes[].session_protocol_violations` | `array[number]` | Indices into the top-level `session_protocol_violations[]` |
 | `edges` | `array` | One entry per `dependency_graph[].dependencies` pair |
 | `edges[].from` | `string` | Caller atom |
 | `edges[].to` | `string` | Callee atom |
-| `edges[].is_consistent` | `boolean` | "No contract mismatch detected" — `true` also covers a pair cross-spec analysis never checked, so it is not evidence the call was examined |
+| `edges[].is_consistent` | `boolean` / `null` | `true` = checked and consistent, `false` = checked and inconsistent, `null` = the pair was never examined by cross-spec analysis ("not checked" is not reported as "no mismatch") |
 | `edges[].violations` | `array[string]` | Contract violations for the pair |
 | `edges[].warnings` | `array[string]` | Non-fatal consistency warnings for the pair |
 | `session_protocol_violations` | `array` | Same objects as `cross_spec.json`, stored once and referenced by index |
@@ -364,6 +414,14 @@ without parsing stderr. `warnings` stays advisory-only.
 | `message` | `string` | First line of the rendered verification error |
 | `tags` | `array` | Status tag plus `z3_<result>` (e.g. `z3_sat`, `z3_unknown`) |
 | `escalation_reason` | `string` | Present only for entries with `code: "escalation_candidate"` |
+
+Advisory codes produced by the recursive-contract analysis are
+`recursive_contract_needs_decreases` (atom on a recursive SCC where a member
+lacks `decreases`) and `recursive_contract_unsupported` (the SCC uses a
+feature outside the congruent-contract fragment: effects, `ref
+mut`/`consume`, `async`, type params, `trusted`, assume-mode ensures, or
+non-scalar `Int`/`Bool` signatures). Both carry `severity: "hint"` and never
+change the verdict.
 
 Every entry is an object with this field set; legacy string diagnostics coming
 from `report.json` are normalised to `code: "note"` / `severity: "warning"` with

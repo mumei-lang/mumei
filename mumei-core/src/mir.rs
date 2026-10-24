@@ -20,7 +20,7 @@
 
 use crate::ast::CapabilityType;
 use crate::hir::{HirAtom, HirExpr, HirStmt};
-use crate::parser::Op;
+use crate::parser::{Op, Param};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -63,6 +63,8 @@ pub enum Rvalue {
         operation: String,
         args: Vec<Operand>,
     },
+    /// Array literal `[e0, e1, …]` — the produced value is an array (Move type).
+    ArrayLit(Vec<Operand>),
 }
 
 /// An operand: either a place (variable) or a constant.
@@ -70,7 +72,18 @@ pub enum Rvalue {
 #[allow(dead_code)]
 pub enum Operand {
     Place(Place),
+    /// An explicit ownership-consuming use of a place.
+    Move(Place),
     Constant(MirConstant),
+}
+
+/// Parameter mode recorded on a MIR body for callee-side borrow checking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MirParamMode {
+    Owned,
+    Shared,
+    Mut,
+    Consume,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -132,6 +145,14 @@ pub struct MirBody {
     pub locals: Vec<LocalDecl>,
     pub blocks: Vec<BasicBlock>,
     pub entry_block: BasicBlockId,
+    /// Names referenced in the body with no binding at lowering time.
+    /// The verifier fails closed on any entry — these are typos or
+    /// mis-parsed keywords, not free variables.
+    #[serde(default)]
+    pub unbound_names: Vec<String>,
+    /// Borrow mode for each atom parameter local.
+    #[serde(default)]
+    pub param_modes: HashMap<Local, MirParamMode>,
 }
 
 impl MirBody {
@@ -225,7 +246,11 @@ pub fn movability_from_type(ty: &Option<String>) -> Movability {
             "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "f64" | "f32" | "Int"
             | "Nat" | "Pos" | "Float" | "bool" | "Bool"
             // Standard library refined types (all i64-based)
-            | "RawPtr" | "NullablePtr" | "HumanAge",
+            | "RawPtr" | "NullablePtr" | "HumanAge"
+            // `let f = |params| …` — a lambda binding is an immutable
+            // closure reference, not an owned resource: reads copy, never
+            // move, so `if c {f} else {g}` doesn't consume f/g.
+            | "__lambda" | "resource",
         ) => Movability::Copy,
         _ => Movability::Move,
     }
@@ -258,6 +283,20 @@ struct LowerCtx {
     /// User type aliases (`type Usd = i64 ...;`) resolved to their base type,
     /// so movability follows the underlying representation.
     alias_bases: std::collections::HashMap<String, String>,
+    /// Enum definitions keyed by enum name — used to give match pattern
+    /// bindings their declared field types so Copy fields stay Copy.
+    enum_defs: std::collections::HashMap<String, crate::parser::EnumDef>,
+    /// Module-level declaration names (enums, structs, atoms, type aliases,
+    /// effects). Referencing one of these names — e.g. the `Shape` in
+    /// `Shape::Point`, the effect name in `perform FileWrite.write(x)`, or an
+    /// atom name inside `atom_ref(name)` / generic-call sugar — is a type or
+    /// item reference, not an unbound variable.
+    env_names: std::collections::BTreeSet<String>,
+    /// Callee parameter modes used to materialize call-site loans.
+    callee_modes: std::collections::HashMap<String, Vec<MirParamMode>>,
+    /// Variable names that had no binding when they were referenced —
+    /// surfaced to the caller as `MirBody::unbound_names` (fail-closed).
+    unbound_names: std::collections::BTreeSet<String>,
     next_local: usize,
     next_block: usize,
 }
@@ -276,12 +315,55 @@ impl LowerCtx {
                     .collect()
             })
             .unwrap_or_default();
+        let enum_defs = module_env.map(|env| env.enums.clone()).unwrap_or_default();
+        let env_names = module_env
+            .map(|env| {
+                env.enums
+                    .keys()
+                    .chain(env.structs.keys())
+                    .chain(env.atoms.keys())
+                    .chain(env.types.keys())
+                    .chain(env.effects.keys())
+                    .chain(env.effect_defs.keys())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let callee_modes = module_env
+            .map(|env| {
+                env.atoms
+                    .iter()
+                    .map(|(name, atom)| {
+                        let modes = atom
+                            .params
+                            .iter()
+                            .map(|param| {
+                                if param.is_ref_mut {
+                                    MirParamMode::Mut
+                                } else if param.is_ref {
+                                    MirParamMode::Shared
+                                } else if atom.consumes_param(&param.name) {
+                                    MirParamMode::Consume
+                                } else {
+                                    MirParamMode::Owned
+                                }
+                            })
+                            .collect();
+                        (name.clone(), modes)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             locals: Vec::new(),
             blocks: Vec::new(),
             current_stmts: Vec::new(),
             var_map: std::collections::HashMap::new(),
             alias_bases,
+            enum_defs,
+            env_names,
+            callee_modes,
+            unbound_names: std::collections::BTreeSet::new(),
             next_local: 0,
             next_block: 0,
         }
@@ -325,6 +407,19 @@ impl LowerCtx {
         self.alloc_local(None, None)
     }
 
+    fn call_arg_mode(&self, func: &str, index: usize) -> MirParamMode {
+        self.callee_modes
+            .get(func)
+            .or_else(|| self.callee_modes.get(&func.replace('.', "::")))
+            .and_then(|modes| modes.get(index).copied())
+            .unwrap_or(MirParamMode::Owned)
+    }
+
+    fn has_known_callee(&self, func: &str) -> bool {
+        self.callee_modes.contains_key(func)
+            || self.callee_modes.contains_key(&func.replace('.', "::"))
+    }
+
     /// Finish the current basic block with the given terminator and return its id.
     fn finish_block(&mut self, terminator: Terminator) -> BasicBlockId {
         let id = self.next_block;
@@ -353,14 +448,41 @@ impl LowerCtx {
     }
 
     /// Look up a variable by name, returning its Place.
-    fn lookup_var(&self, name: &str) -> Place {
+    fn lookup_var(&mut self, name: &str) -> Place {
         if let Some(local) = self.var_map.get(name) {
             Place::Local(local.clone())
         } else {
-            // Variable not yet seen (e.g. atom parameter or free variable).
-            // Return a placeholder local 0 — will be refined in later phases.
-            Place::Local(Local(0))
+            // Unbound name: allocate a dedicated local instead of silently
+            // aliasing Local(0) — otherwise an unresolved name (typo, or a
+            // mis-parsed keyword like a bare `task`) would consume/move the
+            // atom's first local during ownership analysis.
+            // `result` is exempt: it is the atom's implicit named return
+            // binding (`result = x` in a body assigns the return value).
+            if name != "result" && !self.env_names.contains(name) {
+                self.unbound_names.insert(name.to_string());
+            }
+            let local = self.alloc_local(Some(format!("__unbound:{name}")), None);
+            self.var_map.insert(name.to_string(), local.clone());
+            Place::Local(local)
         }
+    }
+
+    fn lookup_resource(&mut self, name: &str) -> Place {
+        if let Some(local) = self.var_map.get(name) {
+            return Place::Local(local.clone());
+        }
+        Place::Local(self.alloc_local(Some(name.to_string()), Some("resource".to_string())))
+    }
+
+    /// A bare name that resolves to a nullary variant of a declared enum
+    /// (e.g. `Red` for `enum Color { Red, .. }`) — not an unbound variable.
+    fn is_nullary_enum_variant(&self, name: &str) -> bool {
+        let leaf = name.rsplit_once("::").map(|(_, l)| l).unwrap_or(name);
+        self.enum_defs.values().any(|def| {
+            def.variants
+                .iter()
+                .any(|v| v.name == leaf && v.fields.is_empty())
+        })
     }
 
     /// Look up the recorded type of a named variable, if any.
@@ -372,46 +494,147 @@ impl LowerCtx {
             .and_then(|d| d.ty.clone())
     }
 
+    /// The enum a match `Variant` pattern belongs to: a qualified `E::V` name
+    /// pins `E`; otherwise the scrutinee's declared type supplies it.
+    fn pattern_enum_name(&self, variant_name: &str, scrutinee_ty: Option<&str>) -> Option<String> {
+        if let Some((qual, _)) = variant_name.rsplit_once("::") {
+            if self.enum_defs.contains_key(qual) {
+                return Some(qual.to_string());
+            }
+        }
+        let ty = scrutinee_ty?;
+        if self.enum_defs.contains_key(ty) {
+            Some(ty.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// The declared type of variant field `idx`, with `Self` resolved to the
+    /// owning enum. `variant_name` may be qualified (`E::V`) or a leaf (`V`).
+    fn variant_field_ty(
+        &self,
+        enum_name: Option<&str>,
+        variant_name: &str,
+        idx: usize,
+    ) -> Option<String> {
+        let def = self.enum_defs.get(enum_name?)?;
+        let leaf = variant_name
+            .rsplit_once("::")
+            .map(|(_, l)| l)
+            .unwrap_or(variant_name);
+        let variant = def.variants.iter().find(|v| v.name == leaf)?;
+        let name = variant.field_types.get(idx)?.name.clone();
+        Some(if name == "Self" {
+            def.name.clone()
+        } else {
+            name
+        })
+    }
+
+    /// Type of the variable a match pattern binds at position `name` — either
+    /// the scrutinee's type (whole-scrutinee `Variable`) or a variant field's
+    /// declared type. Used by `infer_hir_ty` on `Match` values, which runs
+    /// before the arm's locals exist in `var_map`.
+    fn pattern_binding_ty(
+        &self,
+        scrutinee_ty: Option<&str>,
+        pattern: &crate::hir::HirPattern,
+        name: &str,
+    ) -> Option<String> {
+        match pattern {
+            crate::hir::HirPattern::Variable(bound) if bound == name => {
+                scrutinee_ty.map(std::string::ToString::to_string)
+            }
+            crate::hir::HirPattern::Variant {
+                variant_name,
+                fields,
+            } => {
+                let enum_name = self.pattern_enum_name(variant_name, scrutinee_ty);
+                fields.iter().enumerate().find_map(|(idx, fp)| match fp {
+                    crate::hir::HirPattern::Variable(bound) if bound == name => {
+                        self.variant_field_ty(enum_name.as_deref(), variant_name, idx)
+                    }
+                    crate::hir::HirPattern::Variant { .. } => {
+                        let nested_ty =
+                            self.variant_field_ty(enum_name.as_deref(), variant_name, idx);
+                        self.pattern_binding_ty(nested_ty.as_deref(), fp, name)
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Best-effort type inference for a HIR expression. Used to populate
     /// `LocalDecl::ty` when the surface syntax does not annotate `let` /
     /// induction-variable types. Only the common cases that influence
     /// `Movability` (i.e. the Copy primitives) are recognised; anything
     /// unknown returns `None` and the local stays conservatively Move.
     fn infer_hir_ty(&self, expr: &HirExpr) -> Option<String> {
+        self.infer_hir_ty_in(expr, &std::collections::HashMap::new())
+    }
+
+    fn infer_hir_ty_in(
+        &self,
+        expr: &HirExpr,
+        locals: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
         match expr {
             HirExpr::Number(_) => Some("i64".to_string()),
             HirExpr::Float(_) => Some("f64".to_string()),
             HirExpr::StringLit(_) => Some("Str".to_string()),
+            // `|params| body` — mark the bound local with the internal
+            // lambda type so `movability_from_type` makes it Copy: lambda
+            // locals are immutable references, and reuse after a
+            // conditional binding (`let h = if c {f} else {g}`) must not
+            // trip move analysis.
+            HirExpr::Lambda { .. } => Some("__lambda".to_string()),
             HirExpr::Variable(name) => {
                 if name == "true" || name == "false" {
                     Some("bool".to_string())
                 } else {
-                    self.lookup_var_ty(name)
+                    locals
+                        .get(name)
+                        .cloned()
+                        .or_else(|| self.lookup_var_ty(name))
                 }
             }
             HirExpr::BinaryOp(lhs, op, rhs) => match op {
-                crate::parser::Op::Eq
-                | crate::parser::Op::Neq
-                | crate::parser::Op::Lt
-                | crate::parser::Op::Le
-                | crate::parser::Op::Gt
-                | crate::parser::Op::Ge
-                | crate::parser::Op::And
-                | crate::parser::Op::Or
-                | crate::parser::Op::Implies => Some("bool".to_string()),
-                crate::parser::Op::Pow => {
-                    if self.infer_hir_ty(lhs).as_deref() == Some("f64")
-                        || self.infer_hir_ty(rhs).as_deref() == Some("f64")
+                crate::hir::HirBinOp::Eq
+                | crate::hir::HirBinOp::Neq
+                | crate::hir::HirBinOp::Lt
+                | crate::hir::HirBinOp::Le
+                | crate::hir::HirBinOp::Gt
+                | crate::hir::HirBinOp::Ge
+                | crate::hir::HirBinOp::And
+                | crate::hir::HirBinOp::Or
+                | crate::hir::HirBinOp::Implies => Some("bool".to_string()),
+                crate::hir::HirBinOp::Pow => {
+                    if self.infer_hir_ty_in(lhs, locals).as_deref() == Some("f64")
+                        || self.infer_hir_ty_in(rhs, locals).as_deref() == Some("f64")
                     {
                         Some("f64".to_string())
                     } else {
                         Some("i64".to_string())
                     }
                 }
-                _ => self.infer_hir_ty(lhs).or_else(|| self.infer_hir_ty(rhs)),
+                _ => self
+                    .infer_hir_ty_in(lhs, locals)
+                    .or_else(|| self.infer_hir_ty_in(rhs, locals)),
             },
-            HirExpr::ArrayAccess(name, _) => self
-                .lookup_var_ty(name)
+            // `[e0, …]` — element type from the first element; the binding is
+            // an array (Move) so later `a[i]` reads and `let b = a` moves are
+            // tracked correctly. Empty literals can't reach HIR (parse error).
+            HirExpr::ArrayLit(elements) => elements
+                .first()
+                .and_then(|e| self.infer_hir_ty_in(e, locals))
+                .map(|elem| format!("[{elem}]")),
+            HirExpr::ArrayAccess(name, _) => locals
+                .get(name)
+                .cloned()
+                .or_else(|| self.lookup_var_ty(name))
                 .and_then(|ty| {
                     if ty.starts_with('[') && ty.ends_with(']') {
                         Some(ty[1..ty.len() - 1].to_string())
@@ -424,26 +647,68 @@ impl LowerCtx {
                 then_branch,
                 else_branch,
                 ..
-            } => {
-                fn tail_expr(stmt: &HirStmt) -> Option<&HirExpr> {
-                    match stmt {
-                        HirStmt::Expr(e) => Some(e),
-                        HirStmt::Block { tail_expr, .. } => tail_expr.as_deref(),
-                        _ => None,
-                    }
-                }
-                tail_expr(then_branch)
-                    .and_then(|e| self.infer_hir_ty(e))
-                    .or_else(|| tail_expr(else_branch).and_then(|e| self.infer_hir_ty(e)))
+            } => self
+                .infer_hir_branch_ty_in(then_branch, locals)
+                .or_else(|| self.infer_hir_branch_ty_in(else_branch, locals)),
+            HirExpr::Match { target, arms } => {
+                let scrutinee_ty = self.infer_hir_ty_in(target, locals);
+                arms.iter().find_map(|arm| {
+                    hir_stmt_tail_expr(&arm.body)
+                        .and_then(|e| match e {
+                            HirExpr::Variable(name) => {
+                                self.pattern_binding_ty(scrutinee_ty.as_deref(), &arm.pattern, name)
+                            }
+                            _ => None,
+                        })
+                        .or_else(|| self.infer_hir_branch_ty_in(&arm.body, locals))
+                })
             }
             // P25: `recv(ch)` yields the channel's declared payload type.
             HirExpr::ChanRecv { channel } => match channel.as_ref() {
-                HirExpr::Variable(name) => self
-                    .lookup_var_ty(name)
+                HirExpr::Variable(name) => locals
+                    .get(name)
+                    .cloned()
+                    .or_else(|| self.lookup_var_ty(name))
                     .and_then(|ty| crate::lowering::chan_payload_type(&ty)),
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    fn infer_hir_branch_ty(&self, stmt: &HirStmt) -> Option<String> {
+        self.infer_hir_branch_ty_in(stmt, &std::collections::HashMap::new())
+    }
+
+    fn infer_hir_branch_ty_in(
+        &self,
+        stmt: &HirStmt,
+        outer_locals: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        match stmt {
+            HirStmt::Block { stmts, tail_expr } => {
+                let mut locals = outer_locals.clone();
+                for stmt in stmts {
+                    if let HirStmt::Let { var, ty, value } = stmt {
+                        // HIR `ty` can be inferred before parameter types are
+                        // available, so prefer the param-aware expression
+                        // inference and retain it only as a fallback.
+                        let inferred = self.infer_hir_ty_in(value, &locals).or_else(|| ty.clone());
+                        match inferred {
+                            Some(ty) => {
+                                locals.insert(var.clone(), ty);
+                            }
+                            None => {
+                                locals.remove(var);
+                            }
+                        }
+                    }
+                }
+                tail_expr
+                    .as_deref()
+                    .and_then(|expr| self.infer_hir_ty_in(expr, &locals))
+            }
+            _ => hir_stmt_tail_expr(stmt).and_then(|expr| self.infer_hir_ty_in(expr, outer_locals)),
         }
     }
 }
@@ -474,15 +739,27 @@ pub fn lower_hir_to_mir_with_env(
     module_env: Option<&crate::verification::ModuleEnv>,
 ) -> MirBody {
     let mut ctx = LowerCtx::with_env(module_env);
+    let mut param_modes = HashMap::new();
 
     // Allocate locals for atom parameters.
     for param in &hir_atom.atom.params {
         let capability = param.type_ref.as_ref().and_then(|ty| ty.capability.clone());
+        let pname = param.name.as_str();
         let local = ctx.alloc_local_with_capability(
-            Some(param.name.clone()),
+            Some(pname.to_string()),
             param.type_name.clone(),
             capability,
         );
+        let mode = if param.is_ref_mut {
+            MirParamMode::Mut
+        } else if param.is_ref {
+            MirParamMode::Shared
+        } else if hir_atom.atom.consumes_param(&param.name) {
+            MirParamMode::Consume
+        } else {
+            MirParamMode::Owned
+        };
+        param_modes.insert(local.clone(), mode);
         ctx.emit(MirStatement::StorageLive(local));
     }
 
@@ -499,31 +776,116 @@ pub fn lower_hir_to_mir_with_env(
         locals: ctx.locals,
         blocks: ctx.blocks,
         entry_block: 0,
+        unbound_names: ctx.unbound_names.into_iter().collect(),
+        param_modes,
     }
 }
 
 /// Infer an atom's return type from its lowered body expression.
 pub fn infer_atom_return_type(atom: &crate::parser::Atom) -> Option<String> {
     let hir = crate::hir::lower_atom_to_hir(atom);
+    infer_return_type_from_hir(&atom.params, &hir.body)
+}
+
+pub fn infer_return_type_from_hir(params: &[Param], body: &HirStmt) -> Option<String> {
     let mut ctx = LowerCtx::new();
-    for param in &hir.atom.params {
-        ctx.alloc_local(Some(param.name.clone()), param.type_name.clone());
+    for param in params {
+        let pname = param.name.as_str();
+        ctx.alloc_local(Some(pname.to_string()), param.type_name.clone());
     }
-    match &hir.body {
+    match body {
         crate::hir::HirStmt::Expr(expr) => ctx.infer_hir_ty(expr),
-        crate::hir::HirStmt::Block { stmts, tail_expr } => {
-            // Register let-bound locals so the tail expression can resolve
-            // their types. Infer each binding with the param-aware context
-            // rather than the HIR-recorded `ty`, which is param-blind.
-            for stmt in stmts {
-                if let crate::hir::HirStmt::Let { var, value, .. } = stmt {
-                    let ty = ctx.infer_hir_ty(value);
-                    ctx.alloc_local(Some(var.clone()), ty);
-                }
-            }
-            tail_expr.as_ref().and_then(|expr| ctx.infer_hir_ty(expr))
-        }
+        crate::hir::HirStmt::Block { .. } => ctx.infer_hir_branch_ty(body),
         _ => None,
+    }
+}
+
+/// The value expression a statement position evaluates to, if any.
+fn hir_stmt_tail_expr(stmt: &HirStmt) -> Option<&HirExpr> {
+    match stmt {
+        HirStmt::Expr(e) => Some(e),
+        HirStmt::Block { tail_expr, .. } => tail_expr.as_deref(),
+        _ => None,
+    }
+}
+
+/// Emit MIR locals for the variables a match pattern binds.
+///
+/// `Variable` binds the whole scrutinee; `Variant` binds each field pattern to
+/// a `FieldAccess` projection of the scrutinee (nested variants recurse through
+/// a temporary). Wildcards and literals bind nothing. Bound locals carry the
+/// field's declared type when it resolves (`enum_defs`), so `i64` payloads stay
+/// Copy instead of defaulting to Move.
+fn lower_pattern_bindings(
+    ctx: &mut LowerCtx,
+    pattern: &crate::hir::HirPattern,
+    discr: &Operand,
+    scrutinee_ty: Option<&str>,
+) {
+    match pattern {
+        crate::hir::HirPattern::Variable(name) => {
+            let local = ctx.alloc_local(
+                Some(name.clone()),
+                scrutinee_ty.map(std::string::ToString::to_string),
+            );
+            ctx.emit(MirStatement::StorageLive(local.clone()));
+            ctx.emit(MirStatement::Assign(
+                Place::Local(local),
+                Rvalue::Use(discr.clone()),
+            ));
+        }
+        crate::hir::HirPattern::Variant {
+            variant_name,
+            fields,
+        } => {
+            let enum_name = ctx.pattern_enum_name(variant_name, scrutinee_ty);
+            for (idx, field_pattern) in fields.iter().enumerate() {
+                let field_ty = ctx.variant_field_ty(enum_name.as_deref(), variant_name, idx);
+                lower_variant_field_binding(ctx, field_pattern, discr, idx, field_ty);
+            }
+        }
+        crate::hir::HirPattern::Wildcard | crate::hir::HirPattern::Literal(_) => {}
+    }
+}
+
+fn lower_variant_field_binding(
+    ctx: &mut LowerCtx,
+    pattern: &crate::hir::HirPattern,
+    discr: &Operand,
+    idx: usize,
+    field_ty: Option<String>,
+) {
+    match pattern {
+        crate::hir::HirPattern::Variable(name) => {
+            let local = ctx.alloc_local(Some(name.clone()), field_ty);
+            ctx.emit(MirStatement::StorageLive(local.clone()));
+            ctx.emit(MirStatement::Assign(
+                Place::Local(local),
+                Rvalue::FieldAccess(discr.clone(), idx.to_string()),
+            ));
+        }
+        crate::hir::HirPattern::Variant {
+            variant_name,
+            fields,
+        } => {
+            // Nested variant pattern: bind a temporary to the intermediate
+            // field value, then bind its sub-patterns off the temporary.
+            let tmp = ctx.alloc_local(None, field_ty.clone());
+            ctx.emit(MirStatement::StorageLive(tmp.clone()));
+            ctx.emit(MirStatement::Assign(
+                Place::Local(tmp.clone()),
+                Rvalue::FieldAccess(discr.clone(), idx.to_string()),
+            ));
+            let tmp_op = Operand::Place(Place::Local(tmp));
+            // A qualified nested pattern (`Mine::Yes(v)`) names its own enum;
+            // otherwise the parent field's declared type supplies it.
+            let enum_name = ctx.pattern_enum_name(variant_name, field_ty.as_deref());
+            for (sub_idx, sub_pattern) in fields.iter().enumerate() {
+                let sub_ty = ctx.variant_field_ty(enum_name.as_deref(), variant_name, sub_idx);
+                lower_variant_field_binding(ctx, sub_pattern, &tmp_op, sub_idx, sub_ty);
+            }
+        }
+        crate::hir::HirPattern::Wildcard | crate::hir::HirPattern::Literal(_) => {}
     }
 }
 
@@ -548,7 +910,11 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
         }
         HirStmt::Assign { var, value } => {
             let val_op = lower_expr(ctx, value);
-            let place = ctx.lookup_var(var);
+            let place = if let Some((resource, field)) = var.split_once('.') {
+                Place::Field(Box::new(ctx.lookup_resource(resource)), field.to_string())
+            } else {
+                ctx.lookup_var(var)
+            };
             ctx.emit(MirStatement::Assign(place, Rvalue::Use(val_op)));
             None
         }
@@ -628,6 +994,108 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &HirStmt) -> Option<Operand> {
 }
 
 /// Lower a HirExpr to an Operand, emitting MIR statements as needed.
+fn lower_place(ctx: &mut LowerCtx, expr: &HirExpr) -> Option<Place> {
+    match expr {
+        HirExpr::Variable(name) => Some(ctx.lookup_var(name)),
+        HirExpr::FieldAccess(base, field) => Some(Place::Field(
+            Box::new(lower_place(ctx, base)?),
+            field.clone(),
+        )),
+        _ => None,
+    }
+}
+
+fn lower_call_args(ctx: &mut LowerCtx, name: &str, args: &[HirExpr]) -> (Vec<Operand>, Vec<Local>) {
+    let binder = if matches!(
+        name,
+        "forall" | "exists" | "sum" | "all" | "any" | "prod" | "count"
+    ) && args.len() >= 3
+    {
+        match &args[0] {
+            HirExpr::Variable(v) => Some(v.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let saved_prior = binder.as_ref().and_then(|b| ctx.var_map.get(b).cloned());
+    let binder_local = binder
+        .as_ref()
+        .map(|b| ctx.alloc_local(Some(b.clone()), Some("i64".to_string())));
+    if let Some(b) = &binder {
+        match &saved_prior {
+            Some(l) => {
+                ctx.var_map.insert(b.clone(), l.clone());
+            }
+            None => {
+                ctx.var_map.remove(b);
+            }
+        }
+    }
+
+    let mut loan_holders = Vec::new();
+    let arg_ops = args
+        .iter()
+        .enumerate()
+        .map(|(i, arg_expr)| {
+            if i == 0 {
+                if let Some(local) = &binder_local {
+                    return Operand::Place(Place::Local(local.clone()));
+                }
+            }
+            if i == args.len() - 1 {
+                if let (Some(b), Some(local)) = (&binder, &binder_local) {
+                    let saved = ctx.var_map.insert(b.clone(), local.clone());
+                    let op = lower_expr(ctx, arg_expr);
+                    match saved {
+                        Some(l) => {
+                            ctx.var_map.insert(b.clone(), l);
+                        }
+                        None => {
+                            ctx.var_map.remove(b);
+                        }
+                    }
+                    return op;
+                }
+            }
+
+            let mode = ctx.call_arg_mode(name, i);
+            let arg = if matches!(mode, MirParamMode::Shared | MirParamMode::Mut) {
+                lower_place(ctx, arg_expr)
+                    .map(Operand::Place)
+                    .unwrap_or_else(|| lower_expr(ctx, arg_expr))
+            } else {
+                lower_expr(ctx, arg_expr)
+            };
+            match mode {
+                MirParamMode::Shared | MirParamMode::Mut => {
+                    let place = match arg {
+                        Operand::Place(place) | Operand::Move(place) => place,
+                        Operand::Constant(_) => return arg,
+                    };
+                    let holder = ctx.alloc_temp();
+                    ctx.emit(MirStatement::StorageLive(holder.clone()));
+                    let rvalue = if mode == MirParamMode::Mut {
+                        Rvalue::RefMut(place)
+                    } else {
+                        Rvalue::Ref(place)
+                    };
+                    ctx.emit(MirStatement::Assign(Place::Local(holder.clone()), rvalue));
+                    loan_holders.push(holder.clone());
+                    Operand::Place(Place::Local(holder))
+                }
+                MirParamMode::Consume => match arg {
+                    Operand::Place(place) => Operand::Move(place),
+                    other => other,
+                },
+                MirParamMode::Owned => arg,
+            }
+        })
+        .collect();
+
+    (arg_ops, loan_holders)
+}
+
 fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
     match expr {
         HirExpr::Number(n) => Operand::Constant(MirConstant::Int(*n)),
@@ -639,6 +1107,10 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
                 Operand::Constant(MirConstant::Bool(true))
             } else if name == "false" {
                 Operand::Constant(MirConstant::Bool(false))
+            } else if ctx.is_nullary_enum_variant(name) {
+                // Bare nullary enum variant (e.g. `Red`) — a fresh value,
+                // not an unbound variable.
+                Operand::Constant(MirConstant::Int(0))
             } else {
                 Operand::Place(ctx.lookup_var(name))
             }
@@ -650,21 +1122,25 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             ctx.emit(MirStatement::StorageLive(tmp.clone()));
             ctx.emit(MirStatement::Assign(
                 Place::Local(tmp.clone()),
-                Rvalue::BinaryOp(op.clone(), l, r),
+                Rvalue::BinaryOp((*op).into(), l, r),
             ));
             Operand::Place(Place::Local(tmp))
         }
         HirExpr::Call { name, args, .. } => {
-            let arg_ops: Vec<Operand> = args.iter().map(|a| lower_expr(ctx, a)).collect();
+            let call_name = name.replace('.', "::");
+            let (arg_ops, loan_holders) = lower_call_args(ctx, name, args);
             let tmp = ctx.alloc_temp();
             ctx.emit(MirStatement::StorageLive(tmp.clone()));
             ctx.emit(MirStatement::Assign(
                 Place::Local(tmp.clone()),
                 Rvalue::Call {
-                    func: name.clone(),
+                    func: call_name,
                     args: arg_ops,
                 },
             ));
+            for holder in loan_holders {
+                ctx.emit(MirStatement::StorageDead(holder));
+            }
             Operand::Place(Place::Local(tmp))
         }
         HirExpr::IfThenElse {
@@ -736,7 +1212,15 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             Operand::Place(Place::Local(tmp))
         }
         HirExpr::FieldAccess(base, field) => {
-            let base_op = lower_expr(ctx, base);
+            let base_op = if let HirExpr::Variable(name) = base.as_ref() {
+                if let Some(resource) = name.strip_prefix("__mumei_resource_") {
+                    Operand::Place(ctx.lookup_resource(resource))
+                } else {
+                    lower_expr(ctx, base)
+                }
+            } else {
+                lower_expr(ctx, base)
+            };
             let tmp = ctx.alloc_temp();
             ctx.emit(MirStatement::StorageLive(tmp.clone()));
             ctx.emit(MirStatement::Assign(
@@ -764,6 +1248,16 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
             ));
             Operand::Place(Place::Local(tmp))
         }
+        HirExpr::ArrayLit(elements) => {
+            let elem_ops: Vec<Operand> = elements.iter().map(|e| lower_expr(ctx, e)).collect();
+            let tmp = ctx.alloc_temp();
+            ctx.emit(MirStatement::StorageLive(tmp.clone()));
+            ctx.emit(MirStatement::Assign(
+                Place::Local(tmp.clone()),
+                Rvalue::ArrayLit(elem_ops),
+            ));
+            Operand::Place(Place::Local(tmp))
+        }
         HirExpr::ArrayAccess(name, idx) => {
             let idx_op = lower_expr(ctx, idx);
             let base_local = ctx.lookup_var(name);
@@ -787,6 +1281,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
         HirExpr::Match { target, arms } => {
             // Lower match target to a discriminant operand.
             let discr_op = lower_expr(ctx, target);
+            let scrutinee_ty = ctx.infer_hir_ty(target);
             let result_local = ctx.alloc_temp();
             ctx.emit(MirStatement::StorageLive(result_local.clone()));
 
@@ -811,6 +1306,17 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
                 let arm_start = ctx.next_block;
                 arm_block_ids.push(arm_start);
 
+                // Bind pattern variables to locals. Without this, names bound
+                // by the pattern (e.g. `Mk(a, s, f)`) have no entry in var_map
+                // and `lookup_var` falls back to Local(0) — the parameter —
+                // producing spurious use-after-move violations on the scrutinee's
+                // source binding.
+                // Pattern bindings are scoped to the arm: a bound name that
+                // shadows an outer variable must not leak past the arm, so the
+                // var_map is restored after the arm body is lowered.
+                let saved_var_map = ctx.var_map.clone();
+                lower_pattern_bindings(ctx, &arm.pattern, &discr_op, scrutinee_ty.as_deref());
+
                 // Lower the arm body.
                 let arm_val =
                     lower_stmt(ctx, &arm.body).unwrap_or(Operand::Constant(MirConstant::Int(0)));
@@ -823,22 +1329,27 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
 
                 // Map pattern to integer target.
                 match &arm.pattern {
-                    crate::parser::Pattern::Literal(n) => {
+                    crate::hir::HirPattern::Literal(n) => {
                         arm_targets.push((*n, arm_start));
                     }
-                    crate::parser::Pattern::Wildcard => {
+                    crate::hir::HirPattern::Wildcard => {
                         otherwise_id = Some(arm_start);
                     }
-                    crate::parser::Pattern::Variable(_) => {
+                    crate::hir::HirPattern::Variable(_) => {
                         // Variable pattern binds the value — treat as otherwise.
                         otherwise_id = Some(arm_start);
                     }
-                    crate::parser::Pattern::Variant { .. } => {
+                    crate::hir::HirPattern::Variant { .. } => {
                         // Variant pattern — use variant index if available.
                         // For now, treat as otherwise fallback.
                         otherwise_id = Some(arm_start);
                     }
                 }
+
+                // Restore the pre-arm scope: pattern bindings (and any `let`s
+                // inside the arm body) do not leak to sibling arms or to code
+                // after the match.
+                ctx.var_map = saved_var_map;
             }
 
             // Merge block.
@@ -874,14 +1385,28 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
         HirExpr::CallRef { callee, args } => {
             // Indirect call through a callee expression.
             let callee_op = lower_expr(ctx, callee);
-            let arg_ops: Vec<Operand> = args.iter().map(|a| lower_expr(ctx, a)).collect();
             let tmp = ctx.alloc_temp();
             ctx.emit(MirStatement::StorageLive(tmp.clone()));
 
             // If callee is a FuncRef constant, extract the name for a direct call.
-            let func_name = match &callee_op {
-                Operand::Constant(MirConstant::FuncRef(name)) => name.clone(),
-                _ => "__indirect_call".to_string(),
+            let (func_name, arg_ops, loan_holders) = match &callee_op {
+                Operand::Constant(MirConstant::FuncRef(name)) => {
+                    if ctx.has_known_callee(name) {
+                        let (arg_ops, loan_holders) = lower_call_args(ctx, name, args);
+                        (name.replace('.', "::"), arg_ops, loan_holders)
+                    } else {
+                        (
+                            name.replace('.', "::"),
+                            args.iter().map(|arg| lower_expr(ctx, arg)).collect(),
+                            Vec::new(),
+                        )
+                    }
+                }
+                _ => (
+                    "__indirect_call".to_string(),
+                    args.iter().map(|arg| lower_expr(ctx, arg)).collect(),
+                    Vec::new(),
+                ),
             };
             ctx.emit(MirStatement::Assign(
                 Place::Local(tmp.clone()),
@@ -890,15 +1415,42 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
                     args: arg_ops,
                 },
             ));
+            for holder in loan_holders {
+                ctx.emit(MirStatement::StorageDead(holder));
+            }
             Operand::Place(Place::Local(tmp))
         }
 
-        HirExpr::Lambda { body, captures, .. } => {
+        HirExpr::Lambda {
+            params,
+            body,
+            captures,
+            ..
+        } => {
             // Lambda: lower captures and body inline.
             // Capture references are already in scope from the enclosing function.
             // Lower the body as statements and return the result.
             let _capture_refs: Vec<Place> = captures.iter().map(|c| ctx.lookup_var(c)).collect();
-            lower_stmt(ctx, body).unwrap_or(Operand::Constant(MirConstant::Int(0)))
+            // Lambda parameters are bound names inside the body — register them
+            // so they don't fall into the unbound fallback (and so uses of a
+            // same-named outer variable inside the body resolve to the param).
+            let saved: Vec<(String, Option<Local>)> = params
+                .iter()
+                .map(|p| (p.name.clone(), ctx.var_map.get(&p.name).cloned()))
+                .collect();
+            for p in params {
+                let ty = p.type_ref.as_ref().map(|t| t.to_string());
+                let local = ctx.alloc_local(Some(p.name.clone()), ty);
+                ctx.var_map.insert(p.name.clone(), local);
+            }
+            let result = lower_stmt(ctx, body).unwrap_or(Operand::Constant(MirConstant::Int(0)));
+            for (name, prior) in saved {
+                match prior {
+                    Some(local) => ctx.var_map.insert(name, local),
+                    None => ctx.var_map.remove(&name),
+                };
+            }
+            result
         }
 
         HirExpr::Async { body } => {
@@ -971,6 +1523,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &HirExpr) -> Operand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::hir::lower_atom_to_hir;
     use crate::parser::{self, Atom, Expr, Param, Span, Stmt, TrustLevel};
 
@@ -983,6 +1536,9 @@ mod tests {
             params,
             trace_id: None,
             spec_metadata: std::collections::HashMap::new(),
+            clause_labels: Vec::new(),
+            clause_modes: Vec::new(),
+            covers: Vec::new(),
             requires: "true".to_string(),
             forall_constraints: vec![],
             ensures: "true".to_string(),
@@ -995,6 +1551,7 @@ mod tests {
             invariant: None,
             effects: vec![],
             return_type: None,
+            decreases: None,
             span: Span::new("", 1, 1, 0),
             effect_pre: std::collections::HashMap::new(),
             effect_post: std::collections::HashMap::new(),
@@ -1008,6 +1565,7 @@ mod tests {
             type_ref: Some(parser::parse_type_ref(ty)),
             is_ref: false,
             is_ref_mut: false,
+            consume: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
         }
@@ -1290,6 +1848,8 @@ mod tests {
             locals,
             blocks,
             entry_block: 0,
+            param_modes: HashMap::new(),
+            unbound_names: Vec::new(),
         };
 
         assert_eq!(body.block_count(), 100);

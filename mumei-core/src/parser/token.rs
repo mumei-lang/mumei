@@ -99,6 +99,7 @@ pub enum Token {
     Bar,        // |
     Assign,     // =
     Dot,        // .
+    DotDot,     // ..
     Comma,      // ,
     Colon,      // :
     ColonColon, // ::
@@ -125,6 +126,35 @@ impl Token {
     pub fn same_kind(&self, other: &Token) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
     }
+
+    /// `true` when the token reads as a word — `Ident` or an alphabetic
+    /// keyword — i.e. something that could be mistaken for a clause
+    /// keyword (`inputs:`) at grammar positions that expect one.
+    pub fn is_word_like(&self) -> bool {
+        format!("{}", self)
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic())
+    }
+}
+
+/// Re-encode a decoded string literal for round-tripping. The lexer stores
+/// the DECODED content (`\n` is a real newline, `\"` a real quote), so a bare
+/// `"{s}"` corrupts the value when the atom body is re-lexed: `"a\nb"` —
+/// backslash-n — would come back as a real newline, and a real `"` would
+/// close the literal early. Escape exactly the characters the lexer decodes.
+pub(crate) fn escape_string_content(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 impl std::fmt::Display for Token {
@@ -188,8 +218,11 @@ impl std::fmt::Display for Token {
             Token::Recv => write!(f, "recv"),
             Token::Cancel => write!(f, "cancel"),
             Token::IntLit(n) => write!(f, "{}", n),
-            Token::FloatLit(n) => write!(f, "{}", n),
-            Token::StringLit(s) => write!(f, "\"{}\"", s),
+            // `{n:?}` keeps the fraction (`1.0` → "1.0") where `{}` would print
+            // "1" — the atom body is re-lexed from this text, so a whole-valued
+            // float must round-trip as FloatLit, not IntLit.
+            Token::FloatLit(n) => write!(f, "{n:?}"),
+            Token::StringLit(s) => write!(f, "\"{}\"", escape_string_content(s)),
             Token::Ident(s) => write!(f, "{}", s),
             Token::Plus => write!(f, "+"),
             Token::Minus => write!(f, "-"),
@@ -214,6 +247,7 @@ impl std::fmt::Display for Token {
             Token::Bar => write!(f, "|"),
             Token::Assign => write!(f, "="),
             Token::Dot => write!(f, "."),
+            Token::DotDot => write!(f, ".."),
             Token::Comma => write!(f, ","),
             Token::Colon => write!(f, ":"),
             Token::ColonColon => write!(f, "::"),

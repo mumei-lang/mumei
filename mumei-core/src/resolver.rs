@@ -53,7 +53,7 @@ pub use dependencies::{
 };
 pub use imports::{
     resolve_imports, resolve_imports_with_full_options, resolve_imports_with_options,
-    resolve_prelude,
+    resolve_prelude, IMPORT_ALIAS_METADATA_KEY, PRELUDE_METADATA_KEY,
 };
 pub use metrics::{emit_escalation_bundle, LeanEscalationMetrics};
 #[cfg(test)]
@@ -480,6 +480,8 @@ atom caller(n: i64) -> i64
                 type_deps: vec!["Nat".to_string()],
                 timestamp: "1234567890s".to_string(),
                 skipped_clauses: 2,
+                inferred_invariants: Vec::new(),
+                cover_results: Vec::new(),
             },
         );
 
@@ -494,6 +496,19 @@ atom caller(n: i64) -> i64
         assert_eq!(entry.dependencies, vec!["dep1"]);
         assert_eq!(entry.type_deps, vec!["Nat"]);
         assert_eq!(entry.skipped_clauses, 2);
+        assert!(entry.cover_results.is_empty());
+
+        let legacy_entry = serde_json::from_value::<VerificationCacheEntry>(serde_json::json!({
+            "proof_hash": "legacy",
+            "result": "verified",
+            "dependencies": [],
+            "type_deps": [],
+            "timestamp": "0s",
+            "skipped_clauses": 0,
+            "inferred_invariants": []
+        }))
+        .expect("cache entries without cover results remain readable");
+        assert!(legacy_entry.cover_results.is_empty());
         let _ = std::fs::remove_dir_all(base_dir);
     }
 
@@ -522,6 +537,8 @@ atom caller(n: i64) -> i64
                     type_deps: vec![],
                     timestamp: "0s".to_string(),
                     skipped_clauses: 0,
+                    inferred_invariants: Vec::new(),
+                    cover_results: Vec::new(),
                 },
             );
         }

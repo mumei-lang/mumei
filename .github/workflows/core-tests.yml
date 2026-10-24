@@ -1,0 +1,79 @@
+name: Core Tests
+
+# Runs every workspace unit and integration target, so new tests are
+# picked up automatically.
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    paths:
+      - 'mumei-core/**'
+      - 'mumei-emit-*/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'std/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/core-tests.yml'
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+jobs:
+  core-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libz3-dev z3 libzstd-dev
+          # Use the signed-by pattern (apt-key is deprecated on Ubuntu 22.04+).
+          # Matches release.yml for consistency.
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          codename=$(lsb_release -cs)
+          echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm-17.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y llvm-17-dev libclang-17-dev libpolly-17-dev
+
+      - name: Set up modern Z3
+        uses: ./.github/actions/setup-z3
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-core-tests-${{ hashFiles('Cargo.toml', '**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: |
+            cargo-core-tests-
+
+      - name: Unit tests (lib + bins)
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
+        run: cargo test --workspace --lib --bins
+
+      - name: Integration tests
+        env:
+          LLVM_SYS_170_PREFIX: /usr/lib/llvm-17
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
+        # mumei-ffi-tests is covered by ffi-contract-tests.yml (generation +
+        # coverage gates). The two skipped cases call the mumei-lean bridge
+        # (scripts/bridge.py), which this job doesn't check out.
+        run: |
+          cargo test --workspace --exclude mumei-ffi-tests --test '*' --no-fail-fast -- \
+            --skip escalate_lean_promotes_outside_fragment_to_candidate_bundle \
+            --skip nlsat_first_fixture_outside_window_keeps_lean_escalation

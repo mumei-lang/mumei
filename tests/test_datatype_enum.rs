@@ -1,0 +1,144 @@
+use std::process::Command;
+
+fn mumei_verify(file: &str) -> std::process::Output {
+    let bin = env!("CARGO_BIN_EXE_mumei");
+    Command::new(bin)
+        .arg("verify")
+        .arg(file)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run mumei verify {file}: {err}"))
+}
+
+#[test]
+fn datatype_enum_match_verifies() {
+    let output = mumei_verify("tests/test_datatype_enum.mm");
+    assert!(
+        output.status.success(),
+        "finite-ADT enum verification should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("Verification passed") && !combined.contains('❌'),
+        "every atom should verify on the datatype path:\n{combined}"
+    );
+}
+
+#[test]
+fn enum_variant_resolution_is_deterministic_via_declared_type() {
+    // IntList's `Cons = 0` collides with the prelude `List`'s `Cons = 1`;
+    // `l: IntList` must resolve IntList's tags on every run.
+    for _ in 0..3 {
+        let output = mumei_verify("tests/test_enum_variant_resolution.mm");
+        let combined = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.status.success() && combined.contains("Verification passed"),
+            "declared-type resolution should be deterministic:\n{combined}"
+        );
+    }
+}
+
+#[test]
+fn ambiguous_variant_match_fails_closed() {
+    let output = mumei_verify("tests/test_enum_variant_resolution_negative.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("Ambiguous enum variant"),
+        "unresolvable variant collision must fail closed:\n{combined}"
+    );
+}
+
+#[test]
+fn datatype_enum_missing_arm_fails_with_ctor_name() {
+    let output = mumei_verify("tests/test_datatype_enum_negative.mm");
+    assert!(
+        !output.status.success(),
+        "non-exhaustive enum match should fail verification"
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("Match is not exhaustive") && combined.contains("Color::Blue (tag=2)"),
+        "expected uncovered-constructor counterexample naming 'Blue', got:\n{combined}"
+    );
+}
+
+#[test]
+fn datatype_enum_missing_payload_arm_shows_fields_and_tag() {
+    let output = mumei_verify("tests/test_datatype_enum_payload_negative.mm");
+    assert!(
+        !output.status.success(),
+        "non-exhaustive enum match should fail verification"
+    );
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("Match is not exhaustive")
+            && combined.contains("Shape::Circle(i64=?) (tag=1)"),
+        "expected payload-variant counterexample `(fields) (tag=N)`, got:\n{combined}"
+    );
+}
+
+#[test]
+fn shared_variant_names_resolve_to_the_target_enum() {
+    // Two enums share variant names; the uncovered arm must be reported on the
+    // target's own enum (A::X), not the other owner of the same-named variants.
+    let output = mumei_verify("tests/test_enum_shared_variant_negative.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("A::X (tag=0)") && !combined.contains("B::"),
+        "counterexample must name the target's enum, got:\n{combined}"
+    );
+}
+
+#[test]
+fn qualified_variant_arms_resolve_the_qualifier_enum() {
+    let output = mumei_verify("tests/test_enum_qualified_pattern.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "qualified `E::V` arms should verify on datatype, Int-tag, and let-bound targets:\n{combined}"
+    );
+}
+
+#[test]
+fn qualified_arm_mismatching_target_type_fails_closed() {
+    let output = mumei_verify("tests/test_enum_qualified_pattern_negative.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("belongs to enum"),
+        "a `Qual::V` arm on a differently-typed target must fail closed:\n{combined}"
+    );
+}

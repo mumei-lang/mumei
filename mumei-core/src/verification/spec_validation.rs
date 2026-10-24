@@ -2,17 +2,15 @@ use super::module_env::ModuleEnv;
 use super::property_based::{
     run_property_based_test_with_mode, PropertyBasedTestConfig, PropertyBasedTestResult,
 };
+use super::support::datatype::param_z3_value_for_vc;
 use super::translator::{
-    apply_refinement_constraint, assume_struct_contract, expr_to_z3, param_z3_value,
-    seed_struct_fields, seed_tuple_result_components, struct_fields_of_value,
-    tuple_component_types, VCtx, DEFAULT_CONSTRAINT_BUDGET, I64_BITS,
-    UNSUPPORTED_TUPLE_RESULT_INDEXING,
+    apply_refinement_constraint, assume_struct_contract, expr_to_z3, seed_struct_fields,
+    seed_tuple_result_components, struct_fields_of_value, tuple_component_types, VCtx,
+    DEFAULT_CONSTRAINT_BUDGET, UNSUPPORTED_TUPLE_RESULT_INDEXING,
 };
 use super::types::Env;
 use super::SpecContradiction;
-use super::{
-    parse_expression, Atom, Bool, Config, Context, Dynamic, HashMap, Int, SatResult, Solver, BV,
-};
+use super::{parse_expression, Atom, Bool, Config, Context, HashMap, SatResult, Solver};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -129,10 +127,11 @@ pub fn check_spec_satisfiability(
 }
 
 fn check_with_deadline(solver: &Solver<'_>, ctx: &Context, timeout_ms: u64) -> SatResult {
+    let query = crate::verification::phase_artifacts::capture(solver);
     let handle = ctx.handle();
     let done = Mutex::new(false);
     let wake = Condvar::new();
-    std::thread::scope(|scope| {
+    let result = std::thread::scope(|scope| {
         scope.spawn(|| {
             let deadline = Instant::now()
                 + Duration::from_millis(timeout_ms.saturating_add(SOLVER_INTERRUPT_GRACE_MS));
@@ -159,7 +158,9 @@ fn check_with_deadline(solver: &Solver<'_>, ctx: &Context, timeout_ms: u64) -> S
         *done.lock().expect("solver watchdog mutex poisoned") = true;
         wake.notify_one();
         result
-    })
+    });
+    query.record(result);
+    result
 }
 
 pub fn check_spec_satisfiability_with_property_based(
@@ -223,7 +224,7 @@ pub fn check_spec_satisfiability_with_timeout(
         bitvec_i64,
         bitvec_i64_global,
     );
-    let mut env = seed_env(&ctx, atom, module_env, ieee754_f64, bitvec_i64);
+    let mut env = seed_env(&vc, atom);
     let mut had_clause_skips = false;
     assert_parameter_refinements(&vc, &solver, atom, module_env, &mut env)?;
     let checked_requires =
@@ -276,7 +277,7 @@ pub fn check_spec_satisfiability_with_timeout(
     let mut checked_ensures = 0usize;
     for (index, clause) in ensure_clauses.iter().enumerate() {
         let local_solver = Solver::new(&ctx);
-        let mut local_env = seed_env(&ctx, atom, module_env, ieee754_f64, bitvec_i64);
+        let mut local_env = seed_env(&vc, atom);
         assert_parameter_refinements(&vc, &local_solver, atom, module_env, &mut local_env)?;
         if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
             &vc,
@@ -311,7 +312,7 @@ pub fn check_spec_satisfiability_with_timeout(
 
     if !ensure_clauses.is_empty() {
         let combined_solver = Solver::new(&ctx);
-        let mut combined_env = seed_env(&ctx, atom, module_env, ieee754_f64, bitvec_i64);
+        let mut combined_env = seed_env(&vc, atom);
         assert_parameter_refinements(&vc, &combined_solver, atom, module_env, &mut combined_env)?;
         if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
             &vc,
@@ -358,7 +359,7 @@ pub fn check_spec_satisfiability_with_timeout(
                 continue;
             }
             let local_solver = Solver::new(&ctx);
-            let mut local_env = seed_env(&ctx, atom, module_env, ieee754_f64, bitvec_i64);
+            let mut local_env = seed_env(&vc, atom);
             assert_parameter_refinements(&vc, &local_solver, atom, module_env, &mut local_env)?;
             if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
                 &vc,
@@ -425,6 +426,41 @@ pub fn check_spec_satisfiability_with_timeout(
         }
     }
 
+    // Divisions lowered in contract clauses without a solver carry the
+    // same deferred-safety contract as shifts: `divisor != 0` and the
+    // `i64::MIN / -1` pair are only decidable here, where the requires
+    // clause is asserted.
+    match super::translator::div_safety_status(&vc, &solver) {
+        super::translator::DivSafetyStatus::Safe => {}
+        super::translator::DivSafetyStatus::DivisionByZero => {
+            return Err(SpecContradiction::new(
+                &atom.name,
+                "division_by_zero",
+                "divisor may be zero under requires",
+                vec![atom.requires.clone(), atom.ensures.clone()],
+                atom.span.clone(),
+            ));
+        }
+        super::translator::DivSafetyStatus::Overflow => {
+            return Err(SpecContradiction::new(
+                &atom.name,
+                "division_overflow",
+                "division may hit i64::MIN / -1 under requires",
+                vec![atom.requires.clone(), atom.ensures.clone()],
+                atom.span.clone(),
+            ));
+        }
+        super::translator::DivSafetyStatus::Undecided => {
+            return Err(SpecContradiction::new(
+                &atom.name,
+                "division_safety_unknown",
+                "Z3 returned unknown for division safety under requires",
+                vec![atom.requires.clone(), atom.ensures.clone()],
+                atom.span.clone(),
+            ));
+        }
+    }
+
     let trace_id = effective_trace_id(atom);
     let spec_metadata = effective_spec_metadata(atom);
 
@@ -473,40 +509,49 @@ fn validation_ctx<'a>(
         module_env,
         current_atom: Some(atom),
         linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64,
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
+        call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global,
     }
 }
 
-fn seed_env<'a>(
-    ctx: &'a super::Context,
-    atom: &Atom,
-    module_env: &ModuleEnv,
-    ieee754_f64: bool,
-    bitvec_i64: bool,
-) -> Env<'a> {
+fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
+    let ctx = vc.ctx;
+    let module_env = vc.module_env;
+    let ieee754_f64 = vc.ieee754_f64;
+    let bitvec_i64 = vc.bitvec_i64;
     let mut env: Env<'a> = HashMap::new();
     env.insert("true".to_string(), Bool::from_bool(ctx, true).into());
     env.insert("false".to_string(), Bool::from_bool(ctx, false).into());
     for param in &atom.params {
         env.insert(
             param.name.clone(),
-            param_z3_value(
-                ctx,
-                &param.name,
-                param.type_name.as_deref(),
-                module_env,
-                ieee754_f64,
-                bitvec_i64,
-            ),
+            param_z3_value_for_vc(vc, &param.name, param.type_name.as_deref()),
         );
         if let Some(sdef) = param
             .type_name
@@ -527,13 +572,7 @@ fn seed_env<'a>(
     if tuple_component_types(atom.return_type.as_deref()).is_none() {
         env.insert(
             "result".to_string(),
-            result_z3_value(
-                ctx,
-                atom.return_type.as_deref(),
-                module_env,
-                ieee754_f64,
-                bitvec_i64,
-            ),
+            param_z3_value_for_vc(vc, "result", atom.return_type.as_deref()),
         );
     }
     seed_tuple_result_components(
@@ -562,30 +601,6 @@ fn seed_env<'a>(
         );
     }
     env
-}
-
-/// Sort of the implicit `result` binding. Mirrors `param_z3_value`, so under
-/// `--bitvec-i64` an `i64` result is a `BV(64)` and `ensures` clauses compare
-/// bit-vector terms rather than mixing sorts.
-fn result_z3_value<'a>(
-    ctx: &'a super::Context,
-    return_type: Option<&str>,
-    module_env: &ModuleEnv,
-    ieee754_f64: bool,
-    bitvec_i64: bool,
-) -> Dynamic<'a> {
-    match return_type {
-        Some(type_name) => param_z3_value(
-            ctx,
-            "result",
-            Some(type_name),
-            module_env,
-            ieee754_f64,
-            bitvec_i64,
-        ),
-        None if bitvec_i64 => BV::new_const(ctx, "result", I64_BITS).into(),
-        None => Int::new_const(ctx, "result").into(),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -626,6 +641,7 @@ pub(crate) fn is_unsupported_clause_error(err: &impl std::fmt::Display) -> bool 
             "Unsupported exponentiation: exponent must be a non-negative integer constant",
         )
         || message.contains(UNSUPPORTED_TUPLE_RESULT_INDEXING)
+        || message.contains(crate::verification::QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED)
 }
 
 fn assert_parameter_refinements<'a>(
@@ -703,6 +719,7 @@ fn assert_clause<'a>(
         return Ok(ClauseLoweringOutcome::Applied);
     }
     let clause_ast = parse_expression(trimmed);
+    let marks = super::translator::obligation_marks(vc);
     let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
@@ -729,7 +746,20 @@ fn assert_clause<'a>(
             atom.span.clone(),
         ));
     };
+    // The clause's shifts/divisions are only evaluated where the clause
+    // itself and the clauses already asserted hold, so their bounds
+    // (`result <= 62`) may discharge range obligations recorded while
+    // lowering this one. Only allocate the domain AST when this lowering
+    // actually recorded obligations — building it unconditionally perturbs
+    // the shared context's AST table and can flip borderline nlsat queries.
+    if super::translator::has_new_obligations(vc, marks) {
+        let mut domain = vc.clause_context.borrow().clone();
+        domain.push(clause_bool.clone());
+        let domain_bool = Bool::and(vc.ctx, &domain.iter().collect::<Vec<_>>());
+        super::translator::rebind_deferred_obligations(vc, marks, &domain_bool);
+    }
     solver.assert(&clause_bool);
+    vc.clause_context.borrow_mut().push(clause_bool);
     Ok(ClauseLoweringOutcome::Applied)
 }
 
@@ -748,6 +778,7 @@ fn assert_negated_clause<'a>(
         return Ok(ClauseLoweringOutcome::Applied);
     }
     let clause_ast = parse_expression(trimmed);
+    let marks = super::translator::obligation_marks(vc);
     let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
@@ -777,6 +808,12 @@ fn assert_negated_clause<'a>(
             atom.span.clone(),
         ));
     };
+    if super::translator::has_new_obligations(vc, marks) {
+        let mut domain = vc.clause_context.borrow().clone();
+        domain.push(clause_bool.clone());
+        let domain_bool = Bool::and(vc.ctx, &domain.iter().collect::<Vec<_>>());
+        super::translator::rebind_deferred_obligations(vc, marks, &domain_bool);
+    }
     solver.assert(&clause_bool.not());
     Ok(ClauseLoweringOutcome::Applied)
 }
@@ -874,7 +911,7 @@ pub(crate) fn split_top_level_conjunctions(input: &str) -> Vec<String> {
     clauses
 }
 
-fn strip_wrapping_parens(input: &str) -> &str {
+pub(crate) fn strip_wrapping_parens(input: &str) -> &str {
     let trimmed = input.trim();
     if !(trimmed.starts_with('(') && trimmed.ends_with(')')) {
         return trimmed;
@@ -958,6 +995,7 @@ fn traceability_coverage(
 mod tests {
     use super::*;
     use crate::parser::parse_atom;
+    use z3::ast::Int;
 
     #[test]
     fn contradictory_requires_are_rejected() {

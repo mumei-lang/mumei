@@ -105,6 +105,7 @@ impl<'a> NominalChecker<'a> {
                 else_branch,
                 ..
             } => self.join_struct_types([then_branch.as_ref(), else_branch.as_ref()]),
+            Expr::Block(stmt) => self.join_struct_types([stmt.as_ref()]),
             Expr::Match { arms, .. } => {
                 self.join_struct_types(arms.iter().map(|arm| arm.body.as_ref()))
             }
@@ -159,6 +160,12 @@ impl<'a> NominalChecker<'a> {
             | Expr::StringLit(_)
             | Expr::Variable(_)
             | Expr::AtomRef { .. } => Ok(()),
+            Expr::ArrayLit(elements) => {
+                for element in elements {
+                    self.expr(element, span)?;
+                }
+                Ok(())
+            }
             Expr::ArrayAccess(_, index) => self.expr(index, span),
             Expr::BinaryOp(lhs, _, rhs) => {
                 self.expr(lhs, span)?;
@@ -172,6 +179,7 @@ impl<'a> NominalChecker<'a> {
                 self.expr(cond, span)?;
                 self.branches_agree("if", [then_branch.as_ref(), else_branch.as_ref()], span)
             }
+            Expr::Block(stmt) => self.branches_agree("block", [stmt.as_ref()], span),
             Expr::Call(name, args) => {
                 for arg in args {
                     self.expr(arg, span)?;
@@ -419,7 +427,7 @@ impl<'a> NominalChecker<'a> {
 }
 
 /// The expression a statement evaluates to, if it has one.
-fn tail_expr(stmt: &Stmt) -> Option<&Expr> {
+pub(crate) fn tail_expr(stmt: &Stmt) -> Option<&Expr> {
     match stmt {
         Stmt::Expr(e, _) => Some(e),
         Stmt::Block(stmts, _) => stmts.last().and_then(tail_expr),

@@ -32,11 +32,29 @@ pub fn parse_pattern(ctx: &mut ParseContext) -> Pattern {
         }
 
         Token::Ident(ref name) => {
-            let name = name.clone();
+            let mut name = name.clone();
             ctx.advance();
 
-            if name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                // Uppercase → Variant pattern
+            // Fold `::`-separated path segments into the name regardless of
+            // case — a qualified path is a variant reference, never a
+            // binding. Previously only uppercase idents folded, so
+            // `mine::Cons` bound `mine` as a variable and orphaned
+            // `::Cons(x)` into the arm tail.
+            let mut qualified = false;
+            while ctx.peek() == &Token::ColonColon {
+                if let Some(Token::Ident(seg)) = ctx.peek_at(1) {
+                    let seg = seg.clone();
+                    ctx.advance(); // ::
+                    ctx.advance(); // segment
+                    name.push_str("::");
+                    name.push_str(&seg);
+                    qualified = true;
+                } else {
+                    break;
+                }
+            }
+
+            if qualified || name.chars().next().is_some_and(|c| c.is_uppercase()) {
                 if ctx.peek() == &Token::LParen {
                     ctx.advance(); // (
                     let mut fields = Vec::new();

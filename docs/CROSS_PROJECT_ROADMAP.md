@@ -47,9 +47,11 @@ Every PR in this area should review this file together with the local roadmap it
 
 ## 現状サマリ
 
-**mumei (コンパイラ)**: P1〜P3の戦略ロードマップ、Plan 1〜24すべて実装済み。エフェクトシステム、MIR、temporal verification、modular verification、LSP completion/definitionまで到達。
+**mumei (コンパイラ)**: 戦略ロードマップ P1〜P31 すべて実装済み（P31 は 2026-09-22 に seq 中段 `task_group` lowering で完結、対象 atom は反例につき live 化対象外）。エフェクトシステム、MIR、temporal verification、modular verification、LSP、concurrency codegen、proof certificate / proof graph、capability Stage 1、nlsat 先行経路まで到達（v0.6.21 リリース済み）。
 
-**mumei-agent**: mumeiリポジトリから分離直後（PR #90）。single/multi-stage strategy、retry history、generate mode、metricsが実装済み。ただしまだ初期段階。
+**mumei-agent**: V1-A〜V1-E（spec health / 監査 / 双方向整合 / 人向け UX）全項目実装済み。Track A データフロー層（A-1〜A-6）、Lean AI 証明生成（B-4〜B-6、`--external-proofs` 経路）、`language_patterns` レジストリ（tree-sitter scope-aware、confidence フィールド付き）まで到達。Forge Mode は Infrastructure Complete / Expansion In Progress（cron 稼働中）。
+
+**mumei-lean**: live generated theorem path 20 本、obligation class 9 種（P31 で `concurrency_obligation` 追加）。B-1 群 1 全 4 構文 lowering 完了、`task`/`task_group:all`/`any` の並行意味論 bridge lemma と seq 中段 `task_group` lowering（P31 完結、2026-09-22）も実装済み。B-2/B-3 external-proof 受理面と群 3 loop-VC（B-4 経由）で全 3 atom `lean_verified` 実証済み。`bridge_lemma_hash = 5716cfdd…`（3 repo lockstep）。
 
 ---
 
@@ -113,7 +115,7 @@ mumeiの差別化は「Z3による完全自動検証」。この強みをさら�
 - ✅ `get_traits_for_method()` returns all candidates; callers use `find_impl()` to disambiguate
 - ✅ `infer_requires` callee argument substitution with simultaneous placeholder-based replacement
 - ✅ `collect_callees_with_args_expr/stmt` and `expr_to_source_string` helpers added
-- ✅ `check_contract_subsumption()`: when `atom_ref(concrete)` is passed to a `contract(f)` parameter, verifies that concrete ensures implies contract ensures (warning, not hard error)
+- ✅ `check_contract_subsumption()`: when `atom_ref(concrete)` is passed to a `contract(f)` parameter, verifies both `contract.requires ⇒ concrete.requires` and `(concrete.requires ∧ concrete.ensures) ⇒ contract.ensures`, failing closed with a verification error on a violated or undecidable implication
 - ✅ Unit tests for all items (replace_constraint_placeholder, method_trait_index, infer_requires substitution, subsumption check)
 
 ### P2-C: Struct method parsing（`impl Struct { atom ... }` 構文） ✅ Implemented
@@ -908,7 +910,7 @@ audit / migration / self-healing / MCP の 1 コマンド導線を提供する�
 | ✅ | P14-D: 人間向けUX強化（Human-in-the-Loop） | mumei + mumei-agent + mumei-demo | Implemented |
 | ✅ | 自然言語仕様抽出の曖昧性レポート（欠落要件 vs underspecified 意図） | mumei-agent | Implemented (`agent/spec_ambiguity.py`: 抽出された contract clause が trivial かつ prose が対象に一切言及しない場合のみ `missing_requirement` として `cross_validation_gaps` に出し `verified` verdict を止める。言及はあるが確定していない場合・語彙的に曖昧な prose は `underspecified_intent` として `next_steps` の人手確認へ回し、clause を推測で補完しない。8 固定キー契約（`AUDIT_SCHEMA_KEYS`）はそのままで、新規 verdict 分類や別名 alias は追加しない。回帰ゲートは mumei-agent `tests/test_spec_ambiguity.py` / `tests/test_audit.py`) |
 | ✅ | SI-6: Lean 4 Executable Code Generation | mumei-lean | Completed |
-| ✅ | SI-6 / Lean fallback unknown-obligation bridge | mumei + mumei-lean | Implemented (14 live generated paths: `abs_saturating`, `bounded_mul_with_overflow_check`, `constant_time_eq_flag`, `ff_zero_eq_zero`, `verified_insertion_sort_ascending`, `poly_bound_monotone`, `exists_pivot_partition`, `sum_nonneg_inductive`, `rtgs_transfer_conservation`, `ff_mul_commutative`, `ff_mul_associative`, `ff_mul_add_distributive`, `predicate_guard_collapse`, `ff_pow_square_expands`)。escalation bundle は `body_expr` / `body_summary` を搬送するため、`mumei verify --escalate-lean` 経路でも body semantics 依存 obligation が `lean_verified` へ昇格する |
+| ✅ | SI-6 / Lean fallback unknown-obligation bridge | mumei + mumei-lean | Implemented (20 live generated paths: `abs_saturating`, `bounded_mul_with_overflow_check`, `constant_time_eq_flag`, `ff_zero_eq_zero`, `verified_insertion_sort_ascending`, `poly_bound_monotone`, `exists_pivot_partition`, `sum_nonneg_inductive`, `rtgs_transfer_conservation`, `ff_mul_commutative`, `ff_mul_associative`, `ff_mul_add_distributive`, `predicate_guard_collapse`, `ff_pow_square_expands`, `cei_compliant_withdraw` / `guarded_state_update`, `move_once` / `read_before_move`, `clamp_to_range`, `take_point`, `join_all_last_result`, `race_two_replicas`)。escalation bundle は `body_expr` / `body_summary` を搬送するため、`mumei verify --escalate-lean` 経路でも body semantics 依存 obligation が `lean_verified` へ昇格する |
 | ✅ | 生成定理の自動タクティク探索 | mumei-lean | Implemented (`scripts/tactic_search.py`: 決定的 17 候補 ladder、per-obligation timeout `--tactic-search-timeout`（既定 300s）、`residual` / `build_failure` の 2 stage。採用タクティクは生成 proof として emit され、再生成した定理が実際に `lake build` を通った場合のみ `lean_verified`。失敗時は `manual_lemma_reason` を保持し誤昇格しない。探索時間は既存 `lean_solver_time_s` に加算。12 番目の live path `ff_mul_add_distributive` を `mumei_ff_mod` で discharge; `docs/LEAN_TRANSLATOR_SPEC.md` §12) |
 | ✅ | タクティク ladder の非算術拡張と候補順序の学習 | mumei-lean | Implemented (arithmetic / modular / field 以外の命題論理・リスト・順序・帰納目標をカバーする `tauto` / `mumei_list` / `mumei_order` / `mumei_induct` を追加して ladder を 16 候補へ拡張。候補順序の学習は pinned artifact `data/tactic_search_history.json`（`mumei-lean.tactic_search_history/v1`）に基づく決定的な並べ替えのみで、候補の追加・削除は行わず ladder の permutation を超えない（tie は宣言順、未知候補・壊れた artifact は無視）。記録は実際に `lake build` を通った採用のみ。13 番目の live path `predicate_guard_collapse` を `tauto` で discharge。`translator_version` / `bridge_lemma_hash` は不変; `docs/LEAN_TRANSLATOR_SPEC.md` §12.2/§12.5) |
 | ✅ | タクティク ladder の剰余べき乗拡張（候補 C）| mumei-lean | Implemented (`mumei_ff_pow` を ladder 末尾に追記して 17 候補へ拡張。`Int.toNat` リテラル還元と指数の下の剰余還元（`MumeiLean.Algebra.emod_pow_emod`）を含むため、`mumei_ff_mod` では届かない modular exponentiation 目標を discharge できる。14 番目の live path `std/algebra/finite_field.mm::ff_pow_square_expands`。bridge lemma catalog は無変のため `bridge_lemma_hash` / `translator_version` は不変。既存 16 候補の順序は prefix として不変; `docs/LEAN_TRANSLATOR_SPEC.md` §12.2) |
@@ -926,8 +928,8 @@ audit / migration / self-healing / MCP の 1 コマンド導線を提供する�
 | ✅ | Priority 22 / P26: Interactive Proof Graph（依存・証明関係のインタラクティブ可視化） | mumei | Implemented (測定 2026-08-30。`cargo test -p mumei-core proof_graph` 8/8 / `cargo test --test test_proof_graph_export` 3/3 / `PYTHONPATH=. pytest tests/` 151/151 passed（`tests/test_proof_graph_lib.py` 10 件を新規追加）。`mumei verify --emit proof-graph` が cross-spec の `dependency_graph[]`・各 atom の requires/ensures・P23 trust boundary 分類・session protocol 違反を単一の `proof_graph.json` に畳み込み、既存 Streamlit 基盤に追加した Proof Graph ビュー（`visualizer/app.py` + 純粋変換層 `visualizer/proof_graph_lib.py`）が atom 選択で契約・依存元 / 依存先・trust boundary・session 違反を表示する。色分けは `std_graph_lib` と同じ緑 / 黄 / 赤で、新規 verdict 語彙・新規 Web フレームワーク・追加 Python 依存はなし。`cargo tree --edges no-dev` に opentelemetry は現れない) |
 | ✅ | Priority 23 / P27: 6 軸定量評価スイート（paper §7 の評価軸を制御タスク群で測定） | mumei + papers | Implemented (測定 2026-08-30。`PYTHONPATH=. pytest tests/` 177/177 passed（`tests/test_evaluation_suite.py` 23 件を新規追加）。`benchmarks/evaluation_suite.py` が既存 6 カテゴリ 46 ファイル / 105 atom を制御タスク群として `PAPER_DRAFT.md` §7 の 6 軸を 1 回の run で測定する: proof success rate 100.00%（46/46）、counterexample quality 100.00%（20/20）、trust surface アプリ trusted atom 0 / FFI 境界 0 / Lean escalation 候補 6、user burden 2.4667 clauses/atom・spec/impl token 比 1.8902、runtime artifact utility 93.27%（97/104 emission）、repair convergence は agent 修復データ非投入のため `SKIP`。既存 `run_benchmarks.py` / `scale_trust_surface.py` の測定をそのまま再利用し、新規 verdict 語彙は追加せず欠測は `SKIP` に決定論的縮退。artifact は `benchmarks/evaluation/evaluation_suite.json`（`mumei.evaluation_suite/v1`）と `docs/EVALUATION_SUITE.md`。`cargo tree --edges no-dev` に opentelemetry は現れない) |
 | ✅ | Priority 24 / P28: ベンチマーク verdict とインフラ失敗の分離 | mumei | Implemented (測定 2026-08-30。`PYTHONPATH=. pytest tests/` 185/185 passed（回帰テスト 8 件を新規追加）。`mumei verify` は棄却と判定未到達（timeout / 入力不可読 / crash）の双方で終了コード 1 を返すため、`run_benchmarks.py` が verdict サマリ行（`✅` / `❌` / unverifiable の `⚠️`）の有無で両者を見分け、判定に到達しなかった run を `verify_status` = `TIMEOUT` / `FAIL` かつ `actual` = `SKIP` として counterexample catch rate から構造的に除外し、`no_verdict_files` / `no_verdict_statuses` として markdown・forge feedback・`evaluation_suite.json` に明示する。既存 6 カテゴリ 46 ファイルは全件 `MEASURED` / `no_verdict_files` 0 のため P27 の測定値は不変。新規 verdict 語彙は追加せず `MEASURED` / `TIMEOUT` / `FAIL` / `SKIP` の既存語彙のみ) |
-| 🔧 | Priority 25: 意味モデル移行と AI 主体 Lean 証明生成 — 実行計画 | mumei-agent + mumei-lean + mumei + papers | Proposed（Track A: 外部コード安全性のデータフロー層 / Track B: AI 主体 Lean 証明生成 / Track C: コンパイラ側補助。Wave 1〜5 の対応順序は本書「Priority 25」節） |
-| 🔧 | Priority 26: mumei コンパイラ側残課題バックログの整理と対応順序 | mumei + mumei-agent + papers | Proposed（群 1: 独立・小規模 R-1〜R-6 随時 / 群 2: Priority 25 Wave 連動 R-7〜R-10 / 群 3: 需要待ち R-11〜R-18。詳細は本書「Priority 26」節） |
+| 🔧 | Priority 25: 意味モデル移行と AI 主体 Lean 証明生成 — 実行計画 | mumei-agent + mumei-lean + mumei + papers | In progress（棚卸し 2026-09-18。Track A: A-1〜A-6 ✅ mumei-agent PR #570 / #588 / #589 / #590（A-6 全 3 系統対応済み） / Track B: B-4・B-5・B-6 と B-0 の mumei-agent 側 ✅ PR #572、mumei-lean 側 B-1 / B-2 / B-3 ✅ PR #115 / #116、B-4 → B-2 経路接続 ✅・B-7 測定 ✅（2026-09-13、Wave 4 ✅ 完了）/ Track C: C-1 ✅ 分類済み（mumei P30 / P31 起票）・C-2 ✅ Implemented（mumei PR #562、2026-09-14、Wave 5）+ B-7 再測定 ✅（escalation 候補 6 → 6・`lean_verified_delta` 0 不変）。Wave 表は本書「Priority 25」節で実装実態に合わせて改訂済み） |
+| 🔧 | Priority 26: mumei コンパイラ側残課題バックログの整理と対応順序 | mumei + mumei-agent + papers | In progress（棚卸し 2026-09-18: 群 1 R-1 ✅（PR #553）・R-2 ✅（PR #554）・R-3 / R-4 ✅（PR #555）・R-5 ✅・R-6 需要待ち / 群 2 R-7 ✅（2026-09-13、repair convergence `MEASURED`）・R-9 ✅・R-8 ✅ Implemented（= C-2、Wave 5、mumei PR #562、2026-09-14）・R-10 ✅ 分類済み（= C-1、mumei P30 / P31 起票）/ 群 3: 需要待ち R-11〜R-18。詳細は本書「Priority 26」節） |
 | ⏸️ | SI-4: no_std Ecosystem | mumei | Deferred |
 
 ## vStd: Verified Standard Library Expansion
@@ -1352,6 +1354,7 @@ SI-5 Autonomous Proliferation が 9 フェーズ全て ✅ Implemented / Complet
 | ベンチマーク評価スイート拡張 (P16) | mumei / mumei-agent / mumei-lean | ✅ Implemented | mumei-local な実装チェックポイントは `docs/ROADMAP.md` P16。arithmetic / state_machine / concurrency / domain_compliance の 4 カテゴリを追加（成功例＋「検証で捕捉されるべきバグを含む反例ケース」）し、総 atom 数 6→**105**・カテゴリ数 2→**6**、反例バグ捕捉率 **20/20 = 100%** を達成。`run_benchmarks.py` の `success_rate` は「expected どおりの結果になった率」に一般化し、`mumei verify --proof-cert --escalate-lean` 経由の Lean escalation 時間を `details.lean_solver_time_s` として収集（bridge 不在・candidate 0 件時はゼロコストで `SKIP`）。`benchmarks/arithmetic/finite_field_modular.mm` と `benchmarks/domain_compliance/modular_commitment.mm` の 6 atom は Z3 が実際に `unknown` を返すため、この channel は実測値を記録し（カテゴリ別 Lean discharge 率 6/6、うち 4 件は mumei-lean の自動タクティク探索が採用）。回帰ゲートは `python3 -m pytest tests/test_benchmark_suite.py -q`。標準ライブラリ拡張パイプライン（vStd forge / proliferate）へのフィードバック接続も P16-C で実装済み: `run_benchmarks.py --forge-feedback <path>` が `mumei.benchmark_forge_feedback/v1`（カテゴリ別の weakness score → stdlib ドメインへの負の `priority_delta`）を出力し、mumei-agent の `agent/benchmark_feedback.py` が `python -m agent forge|proliferate --benchmark-feedback <path>` で gap proposal / forge task spec の優先度のみを並べ替える（提案の追加・削除なし、provenance は run summary の `benchmark_feedback`）。回帰ゲートは mumei-agent `tests/test_benchmark_feedback.py`。提案生成自体の導出も P16-C 拡張として実装済み: `run_benchmarks.py` は弱点カテゴリ（expected-outcome 不一致 / 反例捕捉不足 / trusted 比率）から決定的な新規 vStd 提案を後方互換の optional フィールド `generated_proposals` として出力し、mumei-agent の `agent/benchmark_feedback.py` が既存 gap proposal と重複しないものだけを forge / proliferate のキューへ合流させる（provenance は `benchmark_generated`、既存提案の削除は行わない）。canonical harness 語彙（`harness_contract` / `artifact_paths` / `lean_verified`）と既存優先順位を保持し、競合する priority order は導入しない |
 | 並行性・所有権証明の強化 (paper Future Work #5 / P17) | mumei | ✅ Implemented | mumei-local な実装チェックポイントは `docs/ROADMAP.md` P17。MIR lowering が `task_group` の子を逐次チェーンへ平坦化するため MIR move 解析（Phase 1h）では並行 interleaving も `task_group:any` のキャンセルも表現できない。この不足を AST レベルの検証フェーズ **Phase 1h-2**（`mumei-core/src/verification/support/task_ownership.rs`）で補い、`task_group:any` winner cancellation を超えるカバレッジを追加した: 並行二重 move（`ConcurrentDoubleMove`）、兄弟が参照中の値の move（`MoveWhileSiblingUses`）、同期なしの共有書き込み（`ConcurrentDataRace`）、子が consume した値の親による使用（`UseAfterConcurrentMove`）、`task_group:any` の子が書いた値の親による読み出し（`CancelDependentRead`）。非 i64 キャプチャ（配列 / struct / `f64` / pointer）も宣言型から movability を導くため対象に含まれる。Z3 側は子が `acquire` したリソースについて `parent_done ⇒ resource_released`、`JoinSemantics::All` では `parent_done ⇒ ¬cancelled_i` を assert する。これらの義務は構文的に決定されるため常に hard error となり Z3 `unknown` を経由せず、Lean escalation（`lean_solver_time_s` / mumei-lean `MumeiLean/Ownership.lean`）へ流れず `lean_verified` へ誤昇格しない。struct キャプチャは `struct Name { ... }` 宣言形（`type Name = ...` は refinement type）で正例・反例とも回帰固定済み。失敗理由は `mumei verify --json` の `diagnostics` に atom 毎（`code` / `severity` / `message` / `tags`）で出力され、`warnings` は advisory のみを保持する（[`docs/REPORT_SCHEMA.md`](REPORT_SCHEMA.md)）。E2E テストで判明した検証パスの穴も解消済み: 束縛変数を含まない Z3 quantifier pattern（`forall(i, .., exists(j, .., arr[i] * arr[j] ...))` の `arr[j]`）による null AST panic を `expr_mentions_var` によるパターン絞り込みで解消し、`--solver-timeout` を Phase 0a（spec validation）と effect-state probe にも伝播、`code: "escalation_candidate"` 診断（`escalation_reason` / `z3_unknown`）を `tests/test_verify_json_diagnostics.rs` で回帰固定した。回帰ゲートは `cargo test --test test_concurrency`、`cargo test --test test_verify_json_diagnostics`、`cargo test -p mumei-core task_ownership`、`python3 -m pytest tests/test_benchmark_suite.py -q`、`python3 scripts/check_contract_vocabulary.py`、mumei-agent `uv run pytest tests/test_contract_vocabulary.py -q`、mumei-lean `PYTHONPATH=scripts MUMEI_LEAN_SKIP_LIVE=1 python -m pytest tests/test_contract_vocabulary.py -q`。canonical 語彙（`harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` / `lean_verified`）と既存優先順位を保持し、競合する priority order や alias は導入しない |
 | 外部コード dogfooding 堅牢性拡張 | mumei-agent | ✅ Implemented | mumei-agent-local な受け入れ詳細は `mumei-agent/docs/ROADMAP.md`「外部コード dogfooding 堅牢性拡張」。項目1: `tests/corpora/oss/`（`MANIFEST.json` で upstream commit sha をピン留めした python / rust / typescript / go / solidity の実 OSS ファイル 13 件 / 1139 行）を決定的抽出（`use_llm=False`）に通し、全 62 atom の `requires` / `ensures` を既存 oracle（`_malformed_extraction_issue_strings` / `_is_boolean_like_clause` / `_is_multi_value_return_expression`）で面検証（`tests/test_foreign_code_oss_corpus.py`, 実行 < 1s / CI 予算ガード付き）。漸進拡大分（generics 2 件 / inline assembly 1 件）は `MANIFEST.json` の `risk_shape` に追加理由を記録する。項目2: `scripts/dogfood_triage_gate.py` がディレクトリ / コーパス監査を既存 verdict（`refuted` / `unverifiable` / `verified`）でバケット分けし、`refuted` のみを既存 `next_steps` 入口に浮かせ、`unverifiable` は原因サブカテゴリへ畳み込む。`.github/workflows/dogfood-triage.yml` が cron + `ollama-local`（外部依存ゼロ）で恒久運用。8 固定キー契約（`AUDIT_SCHEMA_KEYS`）はそのまま反射し、新規分類や別名 alias は追加しない。堅牢化として `--per-file-timeout` がファイル単位の子プロセス監視（`agent/dogfood_timeout.py`）で予算超過ファイルのみを打ち切り（既存語彙の `unverifiable` / `timeout` に畳み込み、構造的 risk marker `large_function` / `inline_assembly` / `complex_generics` を job summary に出力）、`--history-file` が verdict バケットの時系列（`agent/dogfood_trend.py`, workflow 側は `actions/cache` 保持）から `refuted` 急増と `unverifiable` サブカテゴリ偏りを `::warning::` で検知する。回帰ゲートは `uv run pytest tests/test_foreign_code_oss_corpus.py tests/test_dogfood_triage_gate.py tests/test_dogfood_timeout.py tests/test_dogfood_trend.py tests/test_contract_vocabulary.py tests/test_ci_workflow_timeouts.py -q` |
+| ドッグフーディング本監査（12リポ・4331ファイル） | mumei-agent | ✅ 集計完了・バックログ起票 | 2026-09 実施、`verified` 515 / `unverifiable` 237 / `refuted` 6 / timeout 3576（≈82%、主因はローカル LLM 推論律速）。是正 4 PR（mumei-agent #573 encoding-gap 誤判定 / #574 Solidity const・配列長 / #580 Rust 固定長配列パラメータ / #582 Go interface スコープ）マージ済み。残る改善は mumei-agent `docs/ROADMAP.md`「ドッグフーディング本監査（12リポ・4331ファイル）」に B-1〜B-8 として起票。対象リポ側の確定的な不具合はゼロ |
 | NLAE マルチエージェント検証ワークフロー (paper Future Work #9) | mumei-agent | ✅ Implemented | mumei-agent-local な実装チェックポイントは `mumei-agent/docs/ROADMAP.md` P12-D。P9-G の単一 pipeline（generate → verify → self-correct → Lean fidelity）と `LatentProtocol` の 1 対 1 メッセージングに留まっていた範囲を、1 つの spec を複数の検証エージェントで分担する opt-in ワークフローへ拡張した: `agent/nlae_multi_agent.py` の `MultiAgentOrchestrator` が `generator`（生成 + verify）/ `counterexample`（Loss Vector 駆動 self-correction、`NLAE_MULTI_AGENT_MAX_ROUNDS` ラウンド）/ `lean_escalation`（`mumei-lean` fidelity check）の 3 role を固定順で決定的にオーケストレーションする。role 間の受け渡しは既存の `LatentProtocol.encode_message` envelope（`lp-v2` versioned envelope / `blake2b-128` semantic hash / `hmac-sha256` authentication tag / AES-256-GCM / redacted audit log）に載せ、`NLAEResult.multi_agent` に handoff 毎の `from_role` / `to_role` / `round` / `semantic_hash` / `protocol_version` / `transfer_bytes` / `authenticated` を記録する。verdict は従来どおり verifier と Lean bridge のみが決定し、新規 verdict 分類や別名 alias は追加しない。OTel は 1 本の分散トレースを維持（`mumei.nlae.pipeline` root → `mumei.nlae.multi_agent` → `mumei.nlae.agent.<role>` / `mumei.nlae.handoff`）。デフォルト無効（`ENABLE_NLAE_MULTI_AGENT`、MCP は `run_nlae_pipeline` の `multi_agent` 引数）で、失敗時は既存の単一 pipeline へ graceful fallback（`multi_agent.status = "fallback"`）する。回帰ゲートは mumei-agent `uv run pytest tests/test_nlae_pipeline.py tests/test_latent_protocol.py tests/test_contract_vocabulary.py -q`、`python3 scripts/check_contract_vocabulary.py`（mumei）、mumei-lean `PYTHONPATH=scripts MUMEI_LEAN_SKIP_LIVE=1 python -m pytest tests/test_contract_vocabulary.py -q`。canonical 語彙（`harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` / `lean_verified`）と 8 固定キー契約（`AUDIT_SCHEMA_KEYS`）を保持する |
 | P13 harness externalization telemetry / ablation (paper Future Work #10) | mumei-agent | ✅ Implemented | `mumei-agent/docs/ROADMAP.md` P13-B / P13-C。P13-B: `agent/harness_metrics.py` が stage/module 単位で `artifact_contract_passed` / `verification_gate` / `handoff_count` / `retry_class` / `intent_fidelity_status` を集計し、P8-G `budget_metrics.py` と同じ summary に出力、`--harness-profile basic\|stateful\|verifier\|self_evolution\|lean_fallback\|full` で ablation 実行が可能。P13-C: `forge_log.json` / `proliferate --output-json` の details に harness stage evidence を追加し、Lean fallback / manual review / blast-radius rollback を同一 failure taxonomy で表示、certificate metadata（`harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint`）を summary から参照する。残作業は harness 配線ではなく、より大きな task population での ablation データ蓄積。paper 側の記述はこの実装済み状態に同期済み |
 | proof artifact の配布 / CI / エディタ診断統合 (paper Future Work #7 / Priority 17) | mumei / homebrew-mumei | ✅ Implemented | P17 で `scripts/bundle_std_certs.py` v1.1 が `artifact_paths` と `lean_provenance` を生成し、release / Homebrew が per-module `std/certs/` と bundle を同梱する。既知の未証明 atom は certificate-derived baseline `scripts/std_proof_baseline.json` と共有 checker `scripts/verify_packaged_certs.py` で厳密に固定し、配布物のみで再検証する。`.github/workflows/stdlib-proof-gate.yml` が stdlib metrics `--check` と baseline drift gate を通常 CI で実行する。`docs/LSP_DIAGNOSTIC_DATA.md` / `docs/MCP_TOOL_CONTRACT.md` と AST 回帰テストがエディタ・MCP 契約を固定する。既存の proof certificate chain（P5-A）、package registry（P5-B）、Lean escalation（P5-C/P18-B）は互換のまま維持する。 |
@@ -1460,76 +1463,25 @@ graph TD
 
 ### V1-A: 自然言語仕様の健全性検証
 
-**対象リポジトリ**: `mumei-lang/mumei-agent`（主）、`mumei-lang/mumei`（MCP拡張）
+**対象リポジトリ**: `mumei-lang/mumei-agent`（主）、`mumei-lang/mumei`（検証基盤）
 
-**現状のギャップ**:
-- `ambiguity_detector.py`は曖昧さを検出するが、**仕様の充足可能性・完全性・一貫性**は未検証
-- `P8-B SpecContradiction`はmumei atom内の矛盾検出だが、**自然言語テキスト段階**での検証がない
-- フィードバックが英語のみ・機械向けで、人が読みやすい形式になっていない
+**実装状況**: ✅ Implemented（旧計画の `verify-spec` / `spec_verifier.py` / MCP `verify_spec_soundness` / `check_spec_satisfiability` は下記の実装に置き換わった）
 
-**追加すべき機能**:
-
-```
-V1-A-1: 仕様充足可能性チェック
-  - requires同士の矛盾（例: "残高 >= 0 かつ 残高 < 0"）を抽出前に検出
-  - 暗黙の前提条件の欠落を警告（例: 除算があるのに分母 != 0 がない）
-  - Z3で充足可能性を事前チェックし、SpecContradictionを仕様テキスト段階に前出し
-
-V1-A-2: 仕様完全性チェック
-  - ドメインヒントに基づく必須条件の欠落検出
-  - 例: financial ドメインで "残高保存則" が ensures に含まれていない場合に警告
-  - 既存 DOMAIN_TEMPLATES を「チェックリスト」として活用
-
-V1-A-3: 人向けフィードバックレポート
-  - 日本語/英語対応の構造化フィードバック
-  - 問題箇所の引用 + 修正提案 + 重要度（error/warning/info）
-  - CLI: python -m agent verify-spec --text-file requirements.md --report report.md
-  - MCP: verify_spec_soundness(natural_language, domain_hint) → structured JSON
-```
-
-**実装ファイル**:
-- `agent/spec_verifier.py` — 新規: 仕様健全性検証エンジン
-- `agent/prompts/spec_verification.py` — 新規: 検証プロンプト
-- `agent/verify_spec.py` — 新規: CLIサブコマンド
-- `agent/mcp_server.py` — `verify_spec_soundness()` ツール追加
-- `mumei/mcp_server.py` — `check_spec_satisfiability()` ツール追加（Z3連携）
+- **V1-A-1 仕様充足可能性チェック — 実装済み**: `python -m agent audit` / `validate-spec`（`agent/cross_validation.py` の `main_validate_spec`）が抽出仕様を `mumei verify --enable-vacuity-check --proof-cert` にかけ、`SpecHealthChecker`（`agent/strategies/spec_health_strategy.py`）が矛盾（`ContradictionInfo`）・vacuity・過剰拘束（`_suggest_overconstrained_fix`）・曖昧さを分類して `spec_health_issues` 出力キーに集約する。MCP では `check_spec_health` / `check_spec_contradiction` / `validate_nl_spec` / `scan_and_fix` が同経路を公開する。
+- **V1-A-2 仕様完全性チェック — 実装済み**（mumei-agent PR #596/#597）: `audit --domain-hint` / `validate-spec --domain` / `extract-spec --domain`（MCP `extract_spec_from_code(domain_hint=)`）が `DOMAIN_CHECKLISTS`（`agent/spec_completeness_checker.py` の `check_domain_completeness` / `check_forge_spec_domain_completeness`）でドメイン必須条件の欠落を検査する。checklist 項目は `clause` スコープ（requires/ensures/any）持ち — 例: financial は残高保存則を ensures に、非負金額を requires に要求し、欠落時は `domain-completeness: financial spec lacks balance conservation (…; expected in ensures)` を `spec_health_issues` / `completeness_warnings` に出す。prose-only 仕様は clause 単位で全文フォールバック。残件: keyword ヒューリスティックのため意味的マッチは限定的。
+- **V1-A-3 人向けフィードバックレポート — 実装済み**: `audit`/`validate-spec` は構造化 JSON（`spec_health_issues` + `next_steps`）と人向けレポートを出力し、mumei-demo Phase 7 `mode_a` でも実行される。
 
 ---
 
 ### V1-B: 既存他言語コードの検証・フィードバック
 
-**対象リポジトリ**: `mumei-lang/mumei-agent`（主）、`mumei-lang/mumei`（コンパイラ拡張）
+**対象リポジトリ**: `mumei-lang/mumei-agent`（主）、`mumei-lang/mumei`（検証基盤）
 
-**現状のギャップ**:
-- `code_to_spec.py` + `extract_spec_from_code` は「コード → 仕様抽出」まで
-- 抽出した仕様をZ3で検証し、**元のコードの問題点にフィードバックを返す**部分が未実装
-- コードの行番号・関数名と検証失敗を紐付けるマッピングがない
+**実装状況**: ✅ Implemented（旧計画の `verify-code` / `code_verifier.py` は `validate-code` + `audit` に置き換わった）
 
-**追加すべき機能**:
-
-```
-V1-B-1: コード→仕様→Z3検証パイプライン
-  - code_to_spec.py で抽出した forge task spec を mumei verify にかける
-  - 検証失敗を元のコードの行番号・関数名にマッピングして返す
-  - 既存の spec_code_mapper.py を逆方向（検証結果→コード位置）に拡張
-
-V1-B-2: 言語別の検証ヒューリスティクス
-  - Rust: ownership/borrow違反パターン、unwrap()の危険箇所
-  - Python: 型アノテーション不整合、None安全性
-  - Go: goroutineリーク、エラー無視
-  - 各言語の「よくある問題」をdomain_templatesと同様に注入
-
-V1-B-3: 差分フィードバック
-  - 検証前後の比較（どの関数が問題か、どう直すか）
-  - CLI: python -m agent verify-code --code-file src/payment.rs --language rust
-  - MCP: verify_foreign_code(code_file, language, domain_hint)
-```
-
-**実装ファイル**:
-- `agent/code_verifier.py` — 新規: コード検証エンジン（code_to_spec + verify + map back）
-- `agent/verify_code.py` — 新規: CLIサブコマンド
-- `agent/mcp_server.py` — `verify_foreign_code()` ツール追加
-- `agent/prompts/code_verification.py` — 新規: 言語別検証プロンプト
+- **V1-B-1 コード→仕様→Z3検証パイプライン — 実装済み**: `python -m agent validate-code`（旧 `verify-foreign` は同サブコマンドに統合）が Python/Rust/TypeScript/Go/Solidity から契約を推定し `mumei verify` で検証、違反は `_with_source_lines` / `_infer_foreign_source_line_map`（`agent/cross_validation.py`）で元コードの行番号に紐付けて `verification_violations` に出す。MCP では `validate_code` / `validate_foreign_code` / `verify_foreign_code` が利用可能。
+- **V1-B-2 言語別の検証ヒューリスティクス — ✅ Implemented**（mumei-agent PR #598、マージ済み）: `agent/language_patterns.py` の宣言的 registry（`LANGUAGE_PATTERNS`）で 5 言語の「よくある問題」パターンを advisory warning として注入 — Python mutable default/bare except、Rust unguarded unwrap/expect、Go defer-in-loop、TS floating promise、Solidity tx.origin/selfdestruct/unchecked low-level call。advisory のみで `success` を反転させない配線（`_language_advisory_issues` 経由、`fix_suggestion` テンプレート連携）。現行の言語別契約推定は `_infer_{go,python,rust}_contracts` 等で動作中。残件: cross-file/import 解決、custom guard 関数、`#[allow]` 系 opt-out（Rust conditional repairs は mumei-agent PR #607 で対応中）。
+- **V1-B-3 差分フィードバック — 実装済み**（mumei-agent PR #596/#597）: `validate-code` の各 issue に `_with_fix_suggestions` が `fix_suggestion` を付与 — 違反種別テンプレート（reentrancy→`nonReentrant`、access-control→`require(msg.sender …)`、除算→`divisor != 0`、overflow→operand bound、bounds→`0 <= i && i < len(…)`、null→non-null 前提等）に加え、`source_line`/`location` があれば行アンカー付き `Suggested diff` fenced block（契約コメント挿入・solidity 1 行ガード）。残件: rewrite patch ではなく挿入ヒント；自動適用なし（`next_steps` が唯一の human-review 入口のまま）。
 
 ---
 
@@ -1537,35 +1489,11 @@ V1-B-3: 差分フィードバック
 
 **対象リポジトリ**: `mumei-lang/mumei-agent`（主）
 
-**現状のギャップ**:
-- `spec_code_mapper.py`は仕様とコードのマッピングを持つが、**仕様に書かれた条件がコードに実装されているか**の検証がない
-- `intent_tracker.py`はspec refinement時のdrift検出だが、**外部コードとの整合**には未対応
+**実装状況**: ✅ Implemented（計画どおりの `conformance_verifier.py` / `verify-conformance` が実装済み — MCP ツール名は `validate_spec_to_code`）
 
-**追加すべき機能**:
-
-```
-V1-C-1: 仕様→コード網羅性チェック
-  - 自然言語仕様の requires/ensures 相当の条件が、コード内に実装されているか検証
-  - 例: "残高不足はエラーにする" → コード内に balance < amount のチェックがあるか
-  - LLMによる意味的マッピング + Z3による形式的検証の2段階
-
-V1-C-2: 未実装条件の特定とフィードバック
-  - 仕様に書かれているが実装されていない条件を列挙
-  - 実装されているが仕様に書かれていない条件（隠れた仕様）を検出
-  - 修正提案（コードへの追加 or 仕様への追記）を提示
-
-V1-C-3: トレーサビリティマトリクス生成
-  - 仕様の各条件 ↔ コードの各関数/行のマッピング表を生成
-  - 人が確認しやすいMarkdown/HTML形式で出力
-  - CLI: python -m agent verify-conformance --spec req.md --code src/ --language rust
-  - MCP: verify_spec_code_conformance(spec_text, code_file, language)
-```
-
-**実装ファイル**:
-- `agent/conformance_verifier.py` — 新規: 整合性検証エンジン
-- `agent/verify_conformance.py` — 新規: CLIサブコマンド
-- `agent/mcp_server.py` — `verify_spec_code_conformance()` ツール追加
-- `agent/prompts/conformance_verification.py` — 新規
+- **V1-C-1 仕様→コード網羅性チェック — 実装済み**: `python -m agent validate-spec-to-code` / `verify-conformance`（MCP `validate_spec_to_code` / `verify_conformance`）が自然言語仕様の各条件をコード内実装にマッピングし（LLM 意味的マッピング + 抽出 atom の `mumei verify` の 2 段階）、未実装条件を `cross_validation_gaps` に列挙する。`agent/conformance_verifier.py` + `agent/verify_conformance.py`。
+- **V1-C-2 未実装条件の特定 — 実装済み**: 仕様にあるが実装されない条件・実装されるが仕様に無い条件の両方向を `cross_validation_gaps` で報告（`_with_spec_code_source_lines` で行番号紐付け）。
+- **V1-C-3 トレーサビリティマトリクス — 実装済み**: `verify-traceability`（V1-D-3 と共有）が条件↔コードの対応を `conformance` ビューで出力する。
 
 ---
 
@@ -1573,36 +1501,11 @@ V1-C-3: トレーサビリティマトリクス生成
 
 **対象リポジトリ**: `mumei-lang/mumei-agent`（主）
 
-**現状のギャップ**:
-- `code_to_spec.py`でコードから仕様を抽出できるが、**元の自然言語仕様との比較・差分検出**がない
-- 「コードが仕様を超えた実装をしている」「仕様に書かれていない副作用がある」の検出がない
+**実装状況**: ✅ Implemented
 
-**追加すべき機能**:
-
-```
-V1-D-1: コード→抽出仕様 vs 元仕様の差分検出
-  - code_to_spec.py で抽出した仕様と元の自然言語仕様を比較
-  - 仕様に書かれていない条件がコードに実装されている（仕様の不足）
-  - コードが仕様の条件を満たしていない（実装の問題）
-  - 既存 intent_tracker.py の IntentDriftResult を活用・拡張
-
-V1-D-2: 仕様ドリフトレポート
-  - 仕様とコードの乖離度スコア（0.0〜1.0）
-  - 乖離箇所の具体的な説明と修正提案
-  - 仕様側の修正案 or コード側の修正案を選択可能
-
-V1-D-3: 双方向整合性サマリ（実装済み）
-  - V1-C（仕様→コード）とV1-D（コード→仕様）を組み合わせた統合レポート
-  - CLI: python -m agent verify-traceability --code src/ --spec req.md
-  - MCP: verify_code_spec_traceability(code_file, spec_text, language)
-  - 出力: conformance / drift / cross_validation_gaps / drift_score / next_steps
-  - next_steps が唯一の human-review 入口で、recommendations 等の alias は出さない
-```
-
-**実装ファイル**:
-- `agent/traceability_verifier.py` — 実装済み: トレーサビリティ検証エンジン
-- `agent/verify_traceability.py` — 実装済み: CLIサブコマンド
-- `agent/mcp_server.py` — 実装済み: `verify_code_spec_traceability()` ツール追加
+- **V1-D-1 コード→抽出仕様 vs 元仕様の差分検出 — 実装済み**: `python -m agent validate-code-to-spec`（MCP `validate_code_to_spec`）が `code_to_spec` で抽出した契約と元の自然言語仕様を比較し、仕様不足・実装の仕様超過を `cross_validation_gaps` / `drift` に列挙する。
+- **V1-D-2 仕様ドリフトレポート — 実装済み**: 乖離度 `drift_score`（0.0〜1.0）と乖離箇所の説明を `verify-traceability` が出力し、`next_steps` で修正方向を提示する。
+- **V1-D-3 双方向整合性サマリ — 実装済み**: `python -m agent verify-traceability --code src/ --spec req.md` / MCP `verify_code_spec_traceability`（`agent/traceability_verifier.py` + `agent/verify_traceability.py`）。出力キーは `conformance` / `drift` / `cross_validation_gaps` / `drift_score` / `next_steps` で固定、`next_steps` が唯一の human-review 入口（`recommendations` 等の alias は出さない）。
 
 ---
 
@@ -1656,7 +1559,7 @@ V1-E-3 の LSP diagnostics 拡張により、V1-E 系は V1-E-1〜V1-E-4 まで�
 | V1-C: 仕様→コード整合 | mumei-agent P16 | V1-A + V1-B |
 | V1-D: コード→仕様整合 | mumei-agent P17 | V1-B + intent_tracker ✅ |
 | V1-E: 人向けUX | mumei P10 / mumei-agent P18 | V1-A〜D |
-| mumei-lean連携 | ✅ 実装済み（math / crypto / algebra / sort / nonlinear-monic / quantifier-alternation / induction / RTGS / finite-field-commutativity / finite-field-associativity / finite-field-distributivity / predicate-guard-collapse / finite-field-exponentiation の14 live generated theorem paths が `known_witness_used = false` で `lean_verified` を E2E export） | V1-A〜D（Z3 unknown時）✅ |
+| mumei-lean連携 | ✅ 実装済み（math / crypto / algebra / sort / nonlinear-monic / quantifier-alternation / induction / RTGS / finite-field-commutativity / finite-field-associativity / finite-field-distributivity / predicate-guard-collapse / finite-field-exponentiation / perform-statement-sequence / let-statement-sequence / nested-if / struct-projection / task-group-all / task-group-any の20 live generated theorem paths が `known_witness_used = false` で `lean_verified` を E2E export） | V1-A〜D（Z3 unknown時）✅ |
 
 ---
 
@@ -1672,7 +1575,7 @@ graph LR
     E --> Demo["Phase 7 Demo\nspec_code_verification_suite\n(mumei-demo)"]
 ```
 
-**V1 系はすべて実装済み**。`mumei-lean連携` は Z3 `unknown` 専用の補完経路として math / crypto / algebra / sort / nonlinear-monic / quantifier-alternation / induction / RTGS / finite-field-commutativity / finite-field-associativity / finite-field-distributivity / predicate-guard-collapse / finite-field-exponentiation の14 live generated theorem paths を通し、いずれも `known_witness_used = false` のまま `lean_verified` を E2E export することを確認済みです。sort ascending-preservation 経路は `tests/fixtures/sort_ascending.mm::verified_insertion_sort_ascending` の `forall(i, 0, n-1, arr[i] <= arr[i+1])` ensures を `MumeiLean.Sort.insertion_sort_ascending_bridge` で mathlib の `List.Sorted` に接続します。追加3経路は `std/math/patterns.mm::poly_bound_monotone`（非 conjunction 非線形算術を `mumei_arith_deep` で）、`std/list.mm::exists_pivot_partition`（∀∃ 交代を `MumeiLean.Quantifiers.forall_exists_swap_of_finite` で）、`std/math/patterns.mm::sum_nonneg_inductive`（自然数帰納を `MumeiLean.AdvancedPatterns.int_nonnegative_induction_pattern` で）discharge し、いずれも既存 backing lemma を再利用するため `bridge_lemma_hash` は不変です。10 番目の `std/algebra/finite_field.mm::ff_mul_commutative` は swapped operand の `ff_eq` を `MumeiLean.Algebra.ff_mul_comm_eq` で discharge し、この 2 補題が catalog に加わるため `bridge_lemma_hash` は `ee8cd3ba…4347` に更新されています。11 番目の `ff_mul_associative` は `MumeiLean.Algebra.ff_mul_assoc_mod` + `ff_eq_refl` で discharge し、12 番目の `ff_mul_add_distributive` と 13 番目の `std/core_predicates.mm::predicate_guard_collapse` は bridge lemma template を持たないため、決定的な tactic 探索（`mumei-lean/scripts/tactic_search.py` の 17 候補 ladder）がそれぞれ `mumei_ff_mod` / `tauto` を採用します。14 番目の `std/algebra/finite_field.mm::ff_pow_square_expands`（modular exponentiation の展開）は ladder 末尾に追記した `mumei_ff_pow` が採用され、bridge lemma catalog は変更しないため `bridge_lemma_hash` は不変のままです。いずれも既存補題または tactic のみを使うため `bridge_lemma_hash` は不変です。`Phase 7 Demo` は `mumei-demo/scenarios/spec_code_verification_suite` として実体化済みで、推奨順序を壊さずに4モードを1本の CI fixture シナリオで確認できます。
+**V1 系はすべて実装済み**。`mumei-lean連携` は Z3 `unknown` 専用の補完経路として math / crypto / algebra / sort / nonlinear-monic / quantifier-alternation / induction / RTGS / finite-field-commutativity / finite-field-associativity / finite-field-distributivity / predicate-guard-collapse / finite-field-exponentiation / perform-statement-sequence / let-statement-sequence / nested-if / struct-projection / task-group-all / task-group-any の20 live generated theorem paths を通し、いずれも `known_witness_used = false` のまま `lean_verified` を E2E export することを確認済みです。sort ascending-preservation 経路は `tests/fixtures/sort_ascending.mm::verified_insertion_sort_ascending` の `forall(i, 0, n-1, arr[i] <= arr[i+1])` ensures を `MumeiLean.Sort.insertion_sort_ascending_bridge` で mathlib の `List.Sorted` に接続します。追加3経路は `std/math/patterns.mm::poly_bound_monotone`（非 conjunction 非線形算術を `mumei_arith_deep` で）、`std/list.mm::exists_pivot_partition`（∀∃ 交代を `MumeiLean.Quantifiers.forall_exists_swap_of_finite` で）、`std/math/patterns.mm::sum_nonneg_inductive`（自然数帰納を `MumeiLean.AdvancedPatterns.int_nonnegative_induction_pattern` で）discharge し、いずれも既存 backing lemma を再利用するため `bridge_lemma_hash` は不変です。10 番目の `std/algebra/finite_field.mm::ff_mul_commutative` は swapped operand の `ff_eq` を `MumeiLean.Algebra.ff_mul_comm_eq` で discharge し、この 2 補題が catalog に加わるため `bridge_lemma_hash` は `ee8cd3ba…4347` に更新されています。11 番目の `ff_mul_associative` は `MumeiLean.Algebra.ff_mul_assoc_mod` + `ff_eq_refl` で discharge し、12 番目の `ff_mul_add_distributive` と 13 番目の `std/core_predicates.mm::predicate_guard_collapse` は bridge lemma template を持たないため、決定的な tactic 探索（`mumei-lean/scripts/tactic_search.py` の 17 候補 ladder）がそれぞれ `mumei_ff_mod` / `tauto` を採用します。14 番目の `std/algebra/finite_field.mm::ff_pow_square_expands`（modular exponentiation の展開）は ladder 末尾に追記した `mumei_ff_pow` が採用され、bridge lemma catalog は変更しないため `bridge_lemma_hash` は不変のままです。15 番目は `domain_compliance/defi_invariants.mm::cei_compliant_withdraw` / `guarded_state_update` で、`{ perform Eff.op…; <pure tail> }` body が `perform_statement_lowering`（mumei-lean spec §4.3）で tail 式に lowering されて `lean_verified` へ昇格します。16 番目は `concurrency/linear_ownership.mm::move_once` / `read_before_move` で、`{ let x = e; …; <tail> }` body が `let_statement_lowering`（§4.4）により束縛を tail へ代入展開して lowering されます。17 番目は `arithmetic/saturating.mm::clamp_to_range` で、`{ if c { a } else { if … } }` body が `nested_if_lowering`（§4.5）によりブランチを再帰 lowering し、`mumei_arith_deep` の `split <;> omega` 段で discharge されます。18 番目は `concurrency/task_struct_capture_double_move_fail.mm::take_point` で、`p.x` のフィールド読み取りが `struct_projection_lowering`（§4.6）により Int バインダ `p_x` へ一貫改名され、`mumei_arith_deep` で discharge されます。15〜18 番目はいずれも既存補題または tactic のみを使うため `bridge_lemma_hash` は不変です。19 番目は `concurrency/task_group_all.mm::join_all_last_result` で、`task_group:all { task {…}; … }` body が `task_group_all_lowering`（§4.7）により最終 task の値へ lowering され `omega` で discharge されます。本 path は新 obligation class `concurrency_obligation`（§10 catalog）を伴うため `bridge_lemma_hash` は `5716cfdd…d8e9` に更新されています。20 番目は `concurrency/task_group_any_winner.mm::race_two_replicas` で、`task_group:any { task {…}; … }` body が `task_group_any_lowering`（§4.7）により候補値リスト `[e₁, …, eₙ]`（`List Int`）へ lowering され、`result ∈ <def>` 仮定を `fin_cases` が候補毎に分解して discharge されます。既存 `concurrency_obligation` catalog を再利用するため `bridge_lemma_hash` は不変です。`Phase 7 Demo` は `mumei-demo/scenarios/spec_code_verification_suite` として実体化済みで、推奨順序を壊さずに4モードを1本の CI fixture シナリオで確認できます。
 
 ---
 
@@ -2014,7 +1917,7 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 **目的**: paper §8 の Known limitation #2「Lean escalation still depends on translation coverage」を縮小する。Z3 `unknown` atom が**手書き bridge lemma を要さずに** `lean_verified` へ昇格する割合を上げ、`manual_lemma_reason` を保持したまま残る obligation を減らす。
 
 **方針**: 拡張は次の 2 系統のいずれか最小のものに限る。
-1. 新規 bridge lemma を `MumeiLean/*.lean` に追加し catalog（`docs/LEAN_TRANSLATOR_SPEC.md` §10）へ登録する。この場合 `compute_bridge_lemma_hash()` が変わるため、pinned doc 4 本 / `scripts/export_cert.py` / mumei-agent `_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH` を**同一 diff で lockstep 更新**する。
+1. `mumei-lang/mumei-lean/bridge_lemma_catalog.json` だけを編集し、mumei-lean repo から `python scripts/sync_contract_constants.py --write` を実行する（兄弟 repo を隣接 checkout に置くか、`--mumei-repo` / `--mumei-agent-repo` で指定）。3 repo の diff をレビューする。
 2. tactic ladder（§12.2）へ新候補を**末尾追記**する（既存の採用結果を変えないため interleave しない）。bridge lemma catalog が不変なら `bridge_lemma_hash` も不変。
 
 **第 1 弾の実装**（2026-08-30、方針 2）:
@@ -2036,7 +1939,23 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 
 ---
 
-## Priority 25: 意味モデル移行と AI 主体 Lean 証明生成 — 実行計画（🔧 Proposed）
+## Priority 25: 意味モデル移行と AI 主体 Lean 証明生成 — 実行計画（🔧 In progress）
+
+**ステータス棚卸し（2026-09-13、実コード・テスト照合）**:
+
+| 項目 | 現況 | 根拠 |
+|---|---|---|
+| Track A: A-1〜A-6 ✅ | 実装済み | mumei-agent PR #570（`agent/dataflow_facts.py` / `tree_sitter_extract.extract_statements` / `tests/test_dataflow_facts.py`）・PR #588（A-6 第 2 弾 `uninitialized_use`）・PR #589（A-6 第 3 弾: 状態遷移前提 — `use_after_close` / `send_on_closed_channel` / `close_nil_channel` / `unlock_of_unlocked`）・PR #590（A-6 最終: 契約由来事後条件 `contract_output_unassigned`）。mumei-agent `docs/ROADMAP.md` P14-B「意味モデル化 ✅ Implemented (stage 3)」 |
+| B-0（契約合意） | 部分実装 | mumei-agent 側は PR #572 で `bundle_schema_version` / `atom` / `counterexamples` / `tried_invariants`（`cegis_loop_helpers.escalate_to_lean`）と lean-cert の `ai_proof_used` / `ai_proof_attempts` を実装・`docs/LEAN_FALLBACK.md` に記載。mumei-lean 側（`docs/ARCHITECTURE.md` への同一スキーマ記載、B-0 (3) の build 失敗構造化形式）は未着手で、B-2 / B-3 と同一 PR で扱う |
+| B-1 / B-2 / B-3（mumei-lean） | ✅ Implemented | mumei-lean PR #115（B-1）/ PR #116（B-2 `scripts/external_proof.py` + `scripts/ingest_cert.py` / `scripts/bridge.py --external-proofs`、B-3 `--failure-report` の `mumei-lean-build-failures-v1`）。B-2 敵対行列（`sorry` / unsolved goals / type mismatch / missing witness lemma）は `.agents/skills/testing-mumei-lean-live-generated/SKILL.md` §4 と `tests/test_lean_bridge_e2e.py -k external_proof_matrix` で固定 |
+| B-4 / B-5 / B-6（mumei-agent） | ✅ Implemented | mumei-agent PR #572（2026-09-11 マージ）。`agent/lean_ai_proof.py::run_ai_proof_repair` / `lean_bridge.py::run_lean_bridge(..., ai_proof_generator=...)` / `--enable-lean-ai-proof` / `lean_fallback_strategy = "ai_generated_proof"` / `human_review.escalate_to_lean` の `stage = "human_final_fallback"`。`tests/test_lean_ai_proof.py` |
+| B-4 → B-2 経路接続（mumei-agent、Wave 4） | ✅ Implemented（2026-09-13） | `agent/lean_ai_proof.py` の自前 `lake build` 実行・ログ解釈（`_lake_build_module` / `_build_log_accepts`）を撤去し、LLM が返す tactic script を `mumei-agent.external_proofs/v1` として `scripts/bridge.py --external-proofs --failure-report` に渡す。昇格は mumei-lean 正規経路（`export_cert.py` ゲート）が書いた lean-cert の `z3_check_result == "lean_verified"` かつ `ai_proof_used == true` のみ。禁止 token 事前拒否・`#print axioms` 監査は維持、修復 feedback は B-3 の atom 単位構造化 JSON。`tests/test_lean_ai_proof.py`（FakeBridge 行列）+ live E2E |
+| B-7（mumei + papers） | ✅ Measured（2026-09-13） | `benchmarks/evaluation_suite.py --ai-proof-cert-dir` で AI off/on 2 測定を `evaluation_suite.json` の `trust_surface.lean_ai_proof` に記録。Lean escalation 候補 6 atom（2 ファイル）: off `lean_verified` 6 / on 6、増分 +0、`ai_proof_used` 0、`ai_proof_attempts` 0、`manual_lemma_reason` 残 0、`lean_solver_time_s` off 19.517 / on 16.22（off 側は suite 実行ごとに再計測される wall-clock で、コミット済み `evaluation_suite.json` の値が正典。on 側は固定 cert から読む。on cert は certificate version 1.1 = `content_hash` v2 の binary で再生成し、off 側 atom hash と一致することを suite が検証）。R-1 の exit 3（INCONCLUSIVE）導入後は harness が Lean escalation 候補を stderr からも読み、`--escalate-lean` の verdict で exit 3 を置き換える（Lean timeout / bridge 無しは SKIP のまま）。ローカル LLM（Ollama `qwen2.5-coder:3b`、CPU）。既存 6 カテゴリ 46 ファイルの P27 値（46/46、20/20、0/105、97/104）不変 |
+| C-1 / C-2（mumei） | ✅ C-1 分類済み / ✅ C-2 Implemented（mumei PR #562、2026-09-14、Wave 5） | C-2: `fragment.rs` の `bounded_nonlinear_arithmetic` 内部マーカー（次数 ≤ 2・非線形変数 ≤ 3・全変数に literal 上下限・除数は 0 除外閉区間・`%` / べき / finite-field 除外）と `executor.rs` の nlsat 先行（`arith.nl` / `arith.nl.nra` / `arith.nl.grobner`）。`sat` / `unsat` は確定、`unknown` / timeout のみ既存 `nonlinear_arithmetic` / `z3_timeout` reason で Lean 降格（mumei `docs/ROADMAP.md` P10-D）。母数: std + benchmark の `nonlinear_arithmetic` 27 atom 中 9 が窓内（全て Z3 `unsat` 確定）、18 は従来どおり Lean 候補。B-7 再測定: escalation 候補 6 → 6（finite-field のみ）、`lean_verified_delta` 0 不変。C-1: benchmark 105 atom を translator で全走査し 37 atom（Z3 `unsat`）を 3 群に分類 — 群 1（ladder 末尾 / 翻訳前処理、hash 不変）23 → B-1 入力、群 2（bridge lemma、hash lockstep）`task_group` 11 → mumei P31（`all`/`any` とも lowering 済み、live path 19/20）・群 3（AI 証明）ループ不変量 3 → B-4 入力（mumei `docs/ROADMAP.md` P30）。群 3 進捗（2026-09-19、mumei-lean）: `while … invariant:` body は `while_loop_invariant_lowering`（spec §4.8）で VC theorem（`requires → I[init] ∧ step ∧ decreases ∧ exit→ensures`）として emit されるようになり、従来の partial 滞留を解消して B-4 external-proof 入力へ到達可能になった（deterministic ladder では `unknown` 残留が設計どおり）。実 cert 実証済み: `all_transactions_within_limit` が `--external-proofs` で `lean_verified`（mumei-lean PR #130、宣言型 `[i64]` の非 index パラメータが `List Int` で bind されるよう修正込み）。新ギャップ: cert の `requires` は spec-level `forall` conjunct を `true` に正規化（`forall_constraints` 非 serialize）— `sum_array` / `queue_total_is_nonnegative` の step VC は要素前提を欠き証明不能、cert への `forall_constraints` 出力を実装済み（emit + mumei-lean ingest 復元）— 群 3 全 3 atom が実 cert で `lean_verified`（external-proof 経路、e2e pin）。B-4 実運用化（2026-09-19、mumei-agent）: `measure_lean_ai_proof.py --force-lean-atom` で Z3 `unsat` atom を bridge 入力側のみ `unknown` 降格して AI 証明生成へ投入 — 実走行（gpt-4o）で `all_transactions_within_limit` が手動 external-proofs 無しに `lean_verified` 到達（残 2 atom: OpenAI 429 → ローカル Ollama 1.5b 再実行は AI 段到達も `tactic_failed`/`unsound_source` で未証明、forced miss は Z3 verdict 復帰を実走行確認） |
+| Priority 26 群 1: R-1〜R-4 | ✅ Implemented | R-1 終了コード分離（PR #553）/ R-2 全 pending atom 表示（PR #554）/ R-3 sibling certificate 補完 + R-4 `--escalate-lean` E2E（PR #555） |
+| Priority 26 群 1: R-5 / 群 2: R-9 | ✅ Implemented | 2026-09-06（各行に記載） |
+| Priority 26: R-6、R-11〜R-19 | R-13 ✅ Implemented / R-14・R-19 Deferred | 各表の記載どおり |
+| Priority 26: R-8（= C-2）/ R-10（= C-1） | ✅ R-8 Implemented（mumei PR #562、2026-09-14）/ ✅ R-10 分類済み（2026-09-13） | 上記 C-1 / C-2 行 |
 
 **Repository**: `mumei-lang/mumei-agent`（データフロー層 / AI 証明生成の起点） / `mumei-lang/mumei-lean`（AI 証明の受理面・translator 拡張） / `mumei-lang/mumei`（escalation bundle・契約定数・評価スイート同期） / `mumei-lang/papers`（Known limitation #2 の更新）
 
@@ -2044,9 +1963,9 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 
 | 由来 | 提案内容 | 状態 |
 |---|---|---|
-| mumei-agent `docs/ROADMAP.md` P14-B「次タスク候補: 外部コード安全性推論の意味モデル化（データフロー / パス感度）」 | 関数内ローカルなデータフロー事実を第三の入力に据え、`_go_*_guarded_indices` / `guaranteed_nonzero` 系の抑制分岐を置換しつつバグ種別を拡大する（stage 3） | proposed |
-| mumei-agent `docs/ROADMAP.md`「Task 2-D: unknown atom の AI 主体 Lean 証明生成」 | Z3 `unknown` 義務に対し AI が Lean 証明を生成・自動修復し、`lake build` 成功時のみ `lean_verified` へ昇格する opt-in 経路 | proposed |
-| mumei-lean `docs/ROADMAP.md`「AI-assisted proof ingestion and translator surface extension」 | (a) translator の `partial_translation` 縮小、(b) 外部（AI）供給 proof body の受理面、(c) `lake build` 失敗の構造化フィードバック | proposed |
+| mumei-agent `docs/ROADMAP.md` P14-B「次タスク候補: 外部コード安全性推論の意味モデル化（データフロー / パス感度）」 | 関数内ローカルなデータフロー事実を第三の入力に据え、`_go_*_guarded_indices` / `guaranteed_nonzero` 系の抑制分岐を置換しつつバグ種別を拡大する（stage 3） | ✅ Implemented（mumei-agent PR #570・A-6 第 2 弾は PR #588・第 3 弾は PR #589・最終弾は PR #590） |
+| mumei-agent `docs/ROADMAP.md`「Task 2-D: unknown atom の AI 主体 Lean 証明生成」 | Z3 `unknown` 義務に対し AI が Lean 証明を生成・自動修復し、`lake build` 成功時のみ `lean_verified` へ昇格する opt-in 経路 | ✅ Implemented（mumei-agent PR #572、B-4〜B-6） |
+| mumei-lean `docs/ROADMAP.md`「AI-assisted proof ingestion and translator surface extension」 | (a) translator の `partial_translation` 縮小、(b) 外部（AI）供給 proof body の受理面、(c) `lake build` 失敗の構造化フィードバック | ✅ Implemented（mumei-lean PR #115 / #116、B-1 / B-2 / B-3。mumei-agent B-4 の `bridge.py` 経由接続は 2026-09-13 完了） |
 | 本書 Priority 23 / mumei `docs/ROADMAP.md` P30「次弾候補」 | benchmark に残る body semantics 依存の非算術 `unknown_obligation` の分類と bridge lemma / ladder 拡張 | 残課題 |
 
 ### 全トラック共通の不変条件
@@ -2054,7 +1973,7 @@ capability model は Stage 1 のみが opt-in 拡張として上積みされて�
 1. **健全性**: AI 出力・LLM 推論を信頼して verdict を上げることはしない。Track A は LLM を呼ばない純決定論解析、Track B は `lake build` 成功のみを `lean_verified` の根拠とする。情報が欠けるときは保守側（偽陰性を出さない / unknown のまま）に倒す。
 2. **既存互換**: 新機能はすべて opt-in（Track B は `--enable-lean-fallback` の内側に `--enable-lean-ai-proof` を追加）とし、無効時と no-LLM / `CI_FIXTURE_MODE` / `MUMEI_LEAN_SKIP_LIVE=1` 経路の出力は byte-identical に保つ。
 3. **語彙固定**: `verification_status`（`verified` / `refuted` / `unverifiable`）、8 固定キーの audit 契約、`lean_verified` / `manual_lemma_reason` / `known_witness_used` に新 verdict や別名 alias を追加しない。`ForeignSafetyIssue` / `requires` 文字列 / counterexample のインタフェースも不変。
-4. **契約定数の lockstep**: `translator_version` / `bridge_lemma_hash` が動く変更は、mumei-lean pinned docs 4 本 / `scripts/export_cert.py` / `mumei-core/src/verification/types.rs` の `LEAN_TRANSLATOR_VERSION` / `LEAN_BRIDGE_LEMMA_HASH` / mumei-agent `_SOLIDITY_GUARD_TRACE_*` を同一変更セットで更新し、各 repo の `tests/test_contract_vocabulary.py` を同時に green にする。
+4. **契約定数の lockstep**: `mumei-lang/mumei-lean/bridge_lemma_catalog.json` だけを編集し、mumei-lean から `python scripts/sync_contract_constants.py --write` を実行する（兄弟 repo は隣接 checkout または `--mumei-repo` / `--mumei-agent-repo` で指定）→ 3 repo の diff をレビューする。CI gate は mumei-lean `--check`（`tests/test_contract_vocabulary.py` 経由）、mumei `scripts/check_contract_vocabulary.py --check`、mumei-agent `tests/test_contract_vocabulary.py` とし、各 repo は in-repo の `schema/bridge_lemma_catalog.json` mirror を読む。
 5. **完了報告の形式**: 各タスクの完了は本節の表と各 repo roadmap の該当節を同一 diff で「✅ Implemented（測定日・回帰ゲート・件数）」に更新することで確定する（Priority 16〜24 と同じ書式）。
 
 ### Track A: 外部コード安全性のデータフロー層（mumei-agent 単独）
@@ -2063,14 +1982,16 @@ Track B と依存関係を持たず、mumei-agent だけで完結する。`agent
 
 | # | タスク | 内容 | 完了条件 / 回帰ゲート |
 |---|---|---|---|
-| A-1 | データフロー事実の器と定数畳み込み | `analyze_expression` の構文的事実・`semantic_safety` の型定数モデルと並ぶ第三の入力 `DataflowFacts`（仮称）を導入し、`const` 派生定数と算術初期化子の値解決を載せる。既存の抑制ヘルパはまだ触らない | `tests/test_foreign_code.py` 全件不変。新規 fixture は決定論（tree-sitter のみ、compiler 不要） |
-| A-2 | ガード条件の伝播 | `if` / 早期 `return` / ループ条件から各文に到達する事実（`i < len(xs)`、`d != 0`）を収集し、添字・除数判定の入力にする | bounds / division の既存偽陽性抑制テストが `_go_*_guarded_indices` を経由せず同一結果になること |
-| A-3 | 到達定義と `len` 由来値の識別 | `n := len(xs); ... xs[n-1]` 型の代入到達、除数・添字に到達する定義の追跡 | `_go_binary_search_guarded_indices` / `_go_sort_search_guarded_indices` 相当ケースの再現 |
-| A-4 | 局所エイリアス追跡 | 同一関数内のスライス / ポインタ / 参照の別名付け。関数スコープを跨ぐ解析は対象外 | nil / bounds の alias 起因偽陽性 fixture |
-| A-5 | 抑制ヘルパの置換と削減計測 | A-1〜A-4 の事実で説明できる `_go_*_guarded_indices` / `guaranteed_nonzero` 系ヘルパを削除・縮退させ、削減行数と dogfood corpus の verdict bucket（`refuted` / `unverifiable`）差分を記録する | dogfood 集計層（cron workflow / pinned corpus）の `refuted` 件数が増えないこと（偽陰性ガード）。削減量を roadmap に記録 |
-| A-6 | 新バグ種別（データフロー層があって初めて健全に扱える種別） | 未初期化値の使用 → リソース取得 / 解放対応（open/close、lock/unlock） → ガード状態依存の呼び出し順序 → `ensures` が参照する戻り値・出力引数の到達定義、の順で 1 種別ずつ | 種別ごとに `verification_violations` への正規化と counterexample 付与を固定。データフロー事実だけで閉じない義務は `unverifiable` または Lean 送りのまま |
+| A-1 ✅ | データフロー事実の器と定数畳み込み | `analyze_expression` の構文的事実・`semantic_safety` の型定数モデルと並ぶ第三の入力 `DataflowFacts`（仮称）を導入し、`const` 派生定数と算術初期化子の値解決を載せる。既存の抑制ヘルパはまだ触らない | `tests/test_foreign_code.py` 全件不変。新規 fixture は決定論（tree-sitter のみ、compiler 不要） |
+| A-2 ✅ | ガード条件の伝播 | `if` / 早期 `return` / ループ条件から各文に到達する事実（`i < len(xs)`、`d != 0`）を収集し、添字・除数判定の入力にする | bounds / division の既存偽陽性抑制テストが `_go_*_guarded_indices` を経由せず同一結果になること |
+| A-3 ✅ | 到達定義と `len` 由来値の識別 | `n := len(xs); ... xs[n-1]` 型の代入到達、除数・添字に到達する定義の追跡 | `_go_binary_search_guarded_indices` / `_go_sort_search_guarded_indices` 相当ケースの再現 |
+| A-4 ✅ | 局所エイリアス追跡 | 同一関数内のスライス / ポインタ / 参照の別名付け。関数スコープを跨ぐ解析は対象外 | nil / bounds の alias 起因偽陽性 fixture |
+| A-5 ✅ | 抑制ヘルパの置換と削減計測 | A-1〜A-4 の事実で説明できる `_go_*_guarded_indices` / `guaranteed_nonzero` 系ヘルパを削除・縮退させ、削減行数と dogfood corpus の verdict bucket（`refuted` / `unverifiable`）差分を記録する | dogfood 集計層（cron workflow / pinned corpus）の `refuted` 件数が増えないこと（偽陰性ガード）。削減量を roadmap に記録 |
+| A-6 ✅ | 新バグ種別（データフロー層があって初めて健全に扱える種別） | 未初期化値の使用 ✅（PR #588 `uninitialized_use`）・状態遷移前提 ✅（PR #589: `use_after_close` / `send_on_closed_channel` / `close_nil_channel` / `unlock_of_unlocked`）・契約由来事後条件 ✅（PR #590 `contract_output_unassigned`: `ensures` が参照する named result / `*T` 出力引数の到達定義） | 種別ごとに `verification_violations` への正規化と counterexample 付与を固定。データフロー事実だけで閉じない義務は `unverifiable` または Lean 送りのまま |
 
 順序は A-1 → A-2 → A-3 → A-4 → A-5 → A-6。A-2 以降は「新しい事実を追加」→「その事実で説明できる抑制分岐を削る」を 1 PR 単位で繰り返し、A-5 は各段の締めとして計測を伴う。A-6 は A-5 で削減が確認できてから着手する（削減が出なければ設計を見直す）。
+
+**実装状況（2026-09-18 棚卸し）**: A-1〜A-6 は mumei-agent PR #570 で一括実装済み（`agent/dataflow_facts.py` の `analyze_function` → `FunctionDataflow` / `PathFacts`、`tree_sitter_extract.extract_statements`、A-5 で 8 系統の `_go_*` 抑制ヘルパを削除、A-6 第 1 弾は nil マップ書き込み / ロック二重取得 / ロック保持 `return` / ハンドル未 `Close` の 4 種別）。A-6 第 2 弾は PR #588 で `uninitialized_use`（`var` 宣言の nil 可能値 — ポインタ / スライス / `func` / `error`・`any`・`interface{…}` — の確定パニック使用）を追加。回帰は `tests/test_dataflow_facts.py`、`tests/test_foreign_code.py` / `tests/test_cross_validation.py` 無変更で通過。A-6 第 3 弾は PR #589 で状態遷移前提（ガード状態依存の呼び出し順序: `use_after_close` / `send_on_closed_channel` / `close_nil_channel` / `unlock_of_unlocked`、`_Env.held` の `closed_chan` / `closed_file` / `mutex_unlocked` / `uninit_chan` マーカ）を追加。A-6 最終弾は PR #590 で契約由来事後条件（`contract_output_unassigned`: doc コメント `ensures:` が指名する named result / `*T` 出力引数が return パスで未代入の場合を `_Env.defined` must-assign 解析で報告）を追加し、A-6 の拡張種別は全件完了。 また A-5 第 2 弾は PR #592 で `_go_median_guarded_indices` / `_go_sort_search_guarded_indices` を汎用事実（`_LEN_DIV`+`min_len`、`i < len` 条件ガード）へ置換し、`:=` での `len_values` seed 非対称修正と `(a+b)>>k` midpoint 規則を追加 — binary search（ループ不変式）/ enum string（iota 未解決）/ bits uint8 lookup（テーブル未宣言）は置換不可を確認し保持。A-5 第 3 弾は PR #593 で残存 `_go_*` ヘルパを全件 probe 監査: range index（ループ内は `_range` の `lt_len` で汎用カバー、ループ後 alias のみ保持）、short-circuit `||`（`i <= len` ∧ `i != len` の合成交差がモデル範囲外）、pow10 / op_enum / mapfast / cnames（enum・iota 値域やテーブルサイズが未解決・未モデル）など全て置換不可を確認し、call site に保持理由を明記 — これで Track A（A-1〜A-6）は全件完了。
 
 ### Track B: AI 主体 Lean 証明生成（mumei-agent × mumei-lean × mumei）
 
@@ -2084,40 +2005,42 @@ Z3 unknown ──> known witness / tactic ladder（決定論、既存） ──>
 
 | # | repo | タスク | 内容 | 完了条件 / 回帰ゲート |
 |---|---|---|---|---|
-| B-0 | 全 repo（docs のみ） | 契約合意 | (1) escalation bundle の拡張スキーマ: CEGIS 側 `escalate_to_lean`（`agent/strategies/cegis_loop_helpers.py`）が現在書く `source_file` / `loop_line` / `loop_context` / `reason` に、対象 atom の `requires` / `ensures` / body、`_extract_counterexample` の反例、試行済み不変量候補を追加する。mumei `mumei verify --escalate-lean` 側 bundle（`body_expr` / `body_summary` / `TranslatorIRMetadata` を既に搬送）とキー名を揃え、両 bundle を mumei-lean が同一の reader で読めるようにする。(2) lean-cert の provenance: `known_witness_used` と対になる `ai_proof_used`（bool）と `ai_proof_attempts`（int）を追加。(3) `lake build` 失敗の構造化フィードバック形式（atom 単位の unsolved goals / 型不一致 / `import_error`）。(4) `translator_version` / `bridge_lemma_hash` は不変とする前提を明記 | 3 repo の roadmap / `docs/PROOF_CERTIFICATE.md` / mumei-lean `docs/ARCHITECTURE.md` / mumei-agent `docs/LEAN_FALLBACK.md` に同一スキーマを記載。コード変更なし |
+| B-0 ✅（mumei-agent 側）/ mumei-lean 側は B-2・B-3 と同時 | 全 repo（docs のみ） | 契約合意 | (1) escalation bundle の拡張スキーマ: CEGIS 側 `escalate_to_lean`（`agent/strategies/cegis_loop_helpers.py`）が現在書く `source_file` / `loop_line` / `loop_context` / `reason` に、対象 atom の `requires` / `ensures` / body、`_extract_counterexample` の反例、試行済み不変量候補を追加する。mumei `mumei verify --escalate-lean` 側 bundle（`body_expr` / `body_summary` / `TranslatorIRMetadata` を既に搬送）とキー名を揃え、両 bundle を mumei-lean が同一の reader で読めるようにする。(2) lean-cert の provenance: `known_witness_used` と対になる `ai_proof_used`（bool）と `ai_proof_attempts`（int）を追加。(3) `lake build` 失敗の構造化フィードバック形式（atom 単位の unsolved goals / 型不一致 / `import_error`）。(4) `translator_version` / `bridge_lemma_hash` は不変とする前提を明記 | 3 repo の roadmap / `docs/PROOF_CERTIFICATE.md` / mumei-lean `docs/ARCHITECTURE.md` / mumei-agent `docs/LEAN_FALLBACK.md` に同一スキーマを記載。コード変更なし |
 | B-1 | mumei-lean | translator surface 拡張（提案 (a)） | `_unsupported_reasons` に列挙される unsupported function call / `match` / regex / `==>` / `let` のうち sound な lowering が存在するものを 1 構文ずつ下ろし `partial_translation` を縮小。`LEAN_TRANSLATOR_SPEC.md` §8 / §10 を更新。catalog に触らない lowering-only 変更に限定し hash 不変を原則とする | `PYTHONPATH=scripts MUMEI_LEAN_SKIP_LIVE=1 python -m pytest -q`、`test_bridge_lemma_hash_matches_catalog`、`lake build`（`sorry` なし）。構文ごとに live generated path を 1 本追加 |
 | B-2 | mumei-lean | 外部 proof body の受理面（提案 (b)） | `IngestedAtom.auto_tactic` を一般化し、外部供給の tactic script / witness lemma を `render_theorem` に注入する経路を `scripts/ingest_cert.py` / `scripts/bridge.py` に追加。`scripts/export_cert.py` の `_translator_contract_current` / `_lean_result_contract_current` ゲートは迂回しない。`ai_proof_used` を lean-cert に書く | 敵対的「no false promotion」行列（`.agents/skills/testing-mumei-lean-live-generated/SKILL.md`）に「AI proof が `sorry` を含む」「build 失敗」「tactic 未解決」を追加し、いずれも `lean_verified` にならないこと |
 | B-3 | mumei-lean | build 失敗の構造化フィードバック（提案 (c)） | `export_cert.py` の build-log 帰属を使い、atom 単位の失敗理由を B-0 (3) の形式で出力する | fixture の失敗ログから決定論的に同一 JSON が出ること |
-| B-4 | mumei-agent | AI 証明生成と修復ループ | `--enable-lean-ai-proof` を追加し、`extract_unknown_atoms` → known witness / ladder で残った atom にのみ AI 生成 → B-2 経由で `lake build` → B-3 のフィードバックで上限回数まで再生成。多エージェント handoff は `agent/nlae_pipeline.py` の `LeanBridgeRunner` / `ConfiguredLeanBridgeRunner` 構造を再利用。生成 Lean ソースと検証ログは証跡として保存 | `tests/test_lean_bridge.py` / `tests/test_lean_bridge_e2e.py` の既存結果不変。LLM をモックした fixture で「1 回目失敗 → 修復成功」「上限到達で unknown 残置」「フラグ無効で byte-identical」を固定 |
-| B-5 | mumei-agent | 昇格のマージと集計伝搬 | 成功 atom を `merge_lean_cert_into_proof_cert` で non-mutating にマージし、`summary.json.details[].publish_result.proof_certificate_summary.lean_verified_count` へ Task 2-C と同一経路で伝搬。`ai_proof_used` 件数を summary に併記 | `proliferate` の `partial_success` 判定が AI 経路の失敗で変わらないこと |
-| B-6 | mumei-agent | 人手フォールバックの再配置 | `docs/LEAN_FALLBACK.md` error code 表（`tactic_failed` / `partial_translation` の Typical action）を「AI 証明生成を先に試み、残余のみ手書き witness」へ更新。`agent/human_review.py` / MCP `escalate_to_lean` は AI 残余に対してのみ起動 | `tests/test_contract_vocabulary.py`、MCP docstring と README の同一記述 |
-| B-7 | mumei + papers | 測定と Known limitation 更新 | `benchmarks/evaluation_suite.py` の trust surface 軸（Lean escalation 候補 6）と `lean_solver_time_s` チャネルで、AI 経路有効時の `lean_verified` 増分と `manual_lemma_reason` 残数を測定。`PAPER_DRAFT.md` §8 Known limitation #2 を更新 | `evaluation_suite.json` に AI 経路の on/off 2 測定を記録。既存 6 カテゴリ 46 ファイルの P27 測定値は不変 |
+| B-4 ✅（PR #572、B-2 経路接続 ✅ 2026-09-13） | mumei-agent | AI 証明生成と修復ループ | `--enable-lean-ai-proof` を追加し、`extract_unknown_atoms` → known witness / ladder で残った atom にのみ AI 生成 → `agent/lean_ai_proof.py` が `scripts/ingest_cert.py` で statement を再生成し、LLM の tactic script を `scripts/bridge.py --external-proofs` に渡して mumei-lean 正規経路（`export_cert.py` ゲート）で build → `--failure-report` の B-3 構造化 JSON をフィードバックに上限回数まで再生成（PR #572 時点の自前 `lake build` 実行・ログ解釈は Wave 4 で撤去）。多エージェント handoff は `agent/nlae_pipeline.py` の `LeanBridgeRunner` / `ConfiguredLeanBridgeRunner` 構造を再利用。生成 Lean ソースと検証ログは証跡として保存 | `tests/test_lean_bridge.py` / `tests/test_lean_bridge_e2e.py` の既存結果不変。LLM をモックした fixture で「1 回目失敗 → 修復成功」「上限到達で unknown 残置」「フラグ無効で byte-identical」を固定 |
+| B-5 ✅（PR #572） | mumei-agent | 昇格のマージと集計伝搬 | 成功 atom を `merge_lean_cert_into_proof_cert` で non-mutating にマージし、`summary.json.details[].publish_result.proof_certificate_summary.lean_verified_count` へ Task 2-C と同一経路で伝搬。`ai_proof_used` 件数を summary に併記 | `proliferate` の `partial_success` 判定が AI 経路の失敗で変わらないこと |
+| B-6 ✅（PR #572） | mumei-agent | 人手フォールバックの再配置 | `docs/LEAN_FALLBACK.md` error code 表（`tactic_failed` / `partial_translation` の Typical action）を「AI 証明生成を先に試み、残余のみ手書き witness」へ更新。`agent/human_review.py` / MCP `escalate_to_lean` は AI 残余に対してのみ起動 | `tests/test_contract_vocabulary.py`、MCP docstring と README の同一記述 |
+| B-7 ✅（2026-09-13） | mumei + papers | 測定と Known limitation 更新 | `benchmarks/evaluation_suite.py` の trust surface 軸（Lean escalation 候補 6）と `lean_solver_time_s` チャネルで、AI 経路有効時の `lean_verified` 増分と `manual_lemma_reason` 残数を測定。`PAPER_DRAFT.md` §8 Known limitation #2 を更新 | `evaluation_suite.json` に AI 経路の on/off 2 測定を記録（`trust_surface.lean_ai_proof`: off 6 / on 6 `lean_verified`、増分 +0、`ai_proof_used` 0、`manual_lemma_reason` 残 0。既存 tactic ladder が候補 6 atom を全て解くため AI 段に渡る残余は 0。ローカル Ollama `qwen2.5-coder:3b`）。既存 6 カテゴリ 46 ファイルの P27 測定値は不変 |
 
 ### Track C: mumei コンパイラ側の補助（Track B の対象義務を減らす）
 
 | # | タスク | 内容 | 位置づけ |
 |---|---|---|---|
-| C-1 | P30 残課題の分類 | benchmark に残る body semantics 依存の非算術 `unknown_obligation` の goal 形状を分類し、「ladder 末尾追記で届く」「bridge lemma 追加が必要（hash lockstep）」「AI 証明生成へ回す」の 3 群に振り分ける | B-1 / B-4 の対象義務の一覧を与える。B-0 と同時に着手可 |
-| C-2 | P10-D 有界低次数非線形算術 | 有界・低次数の非線形式を `nlsat` / `grobner` で Z3 側で先行処理し、無条件 Lean escalation を緩和する | Lean 送り件数そのものを減らす独立タスク。Track B とは非依存、B-7 の測定前に入れると比較が濁るため **B-7 の測定後** に着手 |
+| C-1 ✅（2026-09-13） | P30 残課題の分類 | benchmark に残る body semantics 依存の非算術 `unknown_obligation` の goal 形状を分類し、「ladder 末尾追記で届く」「bridge lemma 追加が必要（hash lockstep）」「AI 証明生成へ回す」の 3 群に振り分ける | B-1 / B-4 の対象義務の一覧を与える。B-0 と同時に着手可 |
+| C-2 ✅ Implemented（mumei PR #562、2026-09-14） | P10-D 有界低次数非線形算術 | 有界・低次数の非線形式を `nlsat` / `grobner` で Z3 側で先行処理し、無条件 Lean escalation を緩和する | Lean 送り件数そのものを減らす独立タスク。Track B とは非依存、B-7 の測定前に入れると比較が濁るため **B-7 の測定後** に着手 |
 
-### 対応順序（Wave）
+### 対応順序（Wave）— 2026-09-13 改訂
 
 各 Wave は 1 repo あたり 1〜数 PR。Wave 内は並行可能、Wave 間は前 Wave の完了条件を前提とする。
 
-| Wave | mumei-agent | mumei-lean | mumei / papers | 前提 |
+**当初計画からの乖離と解消**: 当初は「受理面（mumei-lean B-2 / B-3）→ 生成側（mumei-agent B-4）」の順を前提にしていたが、実装では mumei-agent PR #572 の B-4 が **mumei-lean の受理面に依存せずに** 先行完了した。`agent/lean_ai_proof.py` は (1) 現在の certificate に対して mumei-lean の `scripts/ingest_cert.py` を subprocess として再実行し `theorem <atom>_correct` の statement を再生成（LLM は statement を書けない）、(2) LLM が返す tactic script を `:= by` の後ろに連結して `Generated.AiProof.<Atom>_<run>` モジュールを組み立て、(3) mumei-lean checkout 内で独立に `lake build` を実行して exit 0 / `error:` 無し / `declaration uses 'sorry'` 無し / `#print axioms` 監査を通過した atom のみ `lean_verified` に昇格する。したがって B-2（`IngestedAtom.auto_tactic` 一般化による tactic 注入）と B-3（build-log の atom 単位構造化 JSON）は **B-4 の前提ではなく**、「同じ AI 証明経路を mumei-lean の `scripts/bridge.py` 経由でも動かし、mumei-agent 側の自前 lake 実行・ログ解釈（`_build_log_accepts` / `_classify_bridge_failure`）を mumei-lean 側の正規経路に寄せる」ための **後続タスク** に位置づけ直す。B-0 の mumei-lean 側（`docs/ARCHITECTURE.md` への `ai_proof_used` / `ai_proof_attempts` スキーマ記載）は B-2 と同一 PR で行う。
+
+| Wave | mumei-agent | mumei-lean | mumei / papers | 状態 / 前提 |
 |---|---|---|---|---|
-| 1 | A-1, A-2 / B-0（docs） | B-1（第 1 構文）/ B-0（docs） | B-0（docs）/ C-1 | なし。3 repo の B-0 を同一時期に揃え、スキーマが 3 repo で一致した時点で Wave 2 へ |
-| 2 | A-3, A-4, A-5（第 1 回計測） | B-2, B-3, B-1（続き） | — | B-0 合意 |
-| 3 | B-4, B-5 / A-6（第 1 種別） | B-1（続き）/ B-2 の敵対行列拡充 | — | B-2 / B-3 が mumei-lean develop に入っていること |
-| 4 | B-6 / A-6（続き） | — | B-7（測定・paper 同期） | B-4 / B-5 完了 |
-| 5 | A-6（残り） | — | C-2 | B-7 の測定値が確定していること |
+| 1 | A-1〜A-6（PR #570）/ B-0（agent 側スキーマ、PR #572） | — | — | ✅ 完了 |
+| 2 | B-4, B-5, B-6（PR #572） | — | — | ✅ 完了。mumei-lean 受理面に依存せず `ingest_cert.py` statement 再生成 + 独立 `lake build` で自己完結 |
+| 3 | docs-sync（Task 2-D 節 / `LEAN_FALLBACK.md` の実装一致） | B-1（第 1 構文）/ B-2 + B-0 mumei-lean 側 docs / B-3 | 群 1 R-1〜R-4（Priority 26） | ✅ 完了（mumei-lean PR #115 / #116、mumei R-1〜R-4）。mumei-lean 側は既存 lean-cert キー（`ai_proof_used` / `ai_proof_attempts` / `lean_fallback_strategy = "ai_generated_proof"`）に合わせ、新 alias なし |
+| 4 | B-4 を mumei-lean B-2 経路へ接続 ✅（mumei-agent PR #579: `bridge.py --external-proofs` に tactic を渡し、B-3 `--failure-report` の構造化 JSON を feedback に使う、2026-09-13）| B-2 敵対行列拡充 ✅（mumei-lean PR #118、SKILL.md §4） | B-7 ✅ + R-7 ✅（mumei PR #558 / papers PR #6、2026-09-13、同一 PR 群。repair convergence `SKIP` → `MEASURED`: 20 counterexample ファイル 24 atom、収束 10（41.67%）、平均 1.33 attempts、Ollama `qwen2.5-coder:3b`）| ✅ 完了（2026-09-13）。A-6 残種別・B-1 続きは Wave 5 以降へ持ち越し。B-7 / R-7 の再測定は OpenAI 互換 API でも同一経路（`--ai-proof-cert-dir` / `--repair-cert-dir`）で可能 |
+| 5（現在） | A-6（残種別）全完了 ✅ `uninitialized_use`（PR #588）・状態遷移前提（PR #589）・契約由来事後条件（PR #590 `contract_output_unassigned`、2026-09-19） | B-1（続き: C-1 群 1 の 23 atom を対象義務入力とする）群 1 は全 4 構文 lowering 済み ✅（mumei-lean PR #121〜#124）/ 群 2 P31 は全形状完了（mumei-lean PR #126 / #128 + seq 中段 `task_group` 2026-09-22、live generated theorem path 20 本）/ 群 3 は VC emission で B-4 入力面へ到達（while_loop_invariant_lowering、spec §4.8）+ 実 cert で external-proof 経路 `lean_verified` 実証（regtech atom、mumei-lean PR #130）— forall は `forall_constraints` フィールドとして cert emit + ingest 復元済み — 群 3 全 3 atom が `lean_verified` 到達（external-proof）+ B-4 自動経路を `--force-lean-atom` で実運用化し AI 生成証明による `lean_verified` を実 cert で実証（mumei-agent、gpt-4o） | C-2（= R-8）✅ Implemented（mumei PR #562、2026-09-14）+ B-7 再測定 ✅（同一 PR 群、escalation 候補 6 → 6・`lean_verified_delta` 0 不変）/ C-1（= R-10）✅ 分類済み（mumei `docs/ROADMAP.md` P30、bridge lemma 群は P31 起票） | 進行中。前提「B-7 の測定値が確定していること」は Wave 4 で満たされた。C-1 群 2（`task_group`、hash lockstep）は P31 として別起票 → `all`/`any` は 2026-09-19 完了、seq 中段は 2026-09-22 に lowering で完結（hash は slice-1 で `5716cfdd…` へ lockstep 済み、slice-3 は catalog 不変）。群 3（while 不変量 3 atom）は VC emission 実装済みで B-4 入力へ接続 |
 
 **順序の根拠**:
-- **契約を先に固める（B-0 が Wave 1）**: Task 2-D は bundle スキーマ拡張を「前提タスク」と明記しており、mumei-lean 側も「契約が両側で合意されてから (b) を進める」としている。ここが先行しないと B-2 と B-4 が別々のキー名で実装されて手戻りになる。
-- **受理面が生成側より先（B-2/B-3 → B-4）**: AI 生成は `lake build` で機械検証されて初めて意味を持つため、mumei-lean の受理面と構造化フィードバックが無いと mumei-agent 側はモックしか書けない。逆順にすると健全性ガードの回帰を後付けすることになる。
+- **契約は mumei-agent 側の実装が先に固めた（B-0）**: escalation bundle v2（`bundle_schema_version` / `atom` / `counterexamples` / `tried_invariants`）と lean-cert provenance（`ai_proof_used` / `ai_proof_attempts`）は PR #572 で確定し `docs/LEAN_FALLBACK.md` に記載済み。mumei-lean 側 B-2 はこのキー名をそのまま採用する（別名 alias を作らない）。
+- **受理面は生成側の後続になった（B-4 → B-2/B-3）**: B-4 は translator（`ingest_cert.py`）を信頼境界として再利用し、`lake build` を自前で実行することで健全性ガードを mumei-agent 側に持った。B-2 / B-3 の価値は「同じガードを mumei-lean の正規経路（`bridge.py` → `export_cert.py` の `_translator_contract_current` / `_lean_result_contract_current`）に置き、mumei-agent の自前ログ解釈を薄くする」ことにある。
 - **B-1 は独立に前倒し**: translator 拡張は AI 統合と無関係に `partial_translation` を減らし、B-4 が扱う義務の母数も減らす。hash lockstep を伴う bridge lemma 追加は C-1 の分類が出るまで保留する。
 - **Track A は Track B と完全並行**: 共有ファイル・契約定数が無く、mumei-agent 内でも `foreign_code_strategy*` と `lean_bridge*` は疎結合。A-5 の削減計測が出るまで A-6 を始めないのは、「抑制コード削減とバグ種別拡大を同一投資で両立する」という stage 3 の前提を先に検証するため。
-- **C-2 を最後に置く**: Z3 側で解ける義務を増やすと Lean 送りの母数が動き、B-7 の on/off 比較が読めなくなる。測定確定後に入れる。
+- **C-2 を最後に置く**: Z3 側で解ける義務を増やすと Lean 送りの母数が動き、B-7 の on/off 比較が読めなくなる。測定確定後に入れる（Wave 5 で実施。C-2 と B-7 再測定を同一 PR 群で扱い、再測定で escalation 候補 6 → 6 を確認済み）。
 
 ### スコープ外（本計画では扱わない）
 
@@ -2135,7 +2058,7 @@ Z3 unknown ──> known witness / tactic ladder（決定論、既存） ──>
 
 ---
 
-## Priority 26: mumei コンパイラ側残課題バックログの整理と対応順序（🔧 Proposed）
+## Priority 26: mumei コンパイラ側残課題バックログの整理と対応順序（🔧 In progress）
 
 **Repository**: `mumei-lang/mumei`（主） / `mumei-lang/mumei-agent`（P27 repair convergence の certificate 供給、Layer B 言語拡張） / `mumei-lang/papers`（P27 TikZ 図）
 
@@ -2150,12 +2073,14 @@ Z3 unknown ──> known witness / tactic ladder（決定論、既存） ──>
 
 | # | 由来 | タスク | 内容 | 完了条件 / 回帰ゲート |
 |---|---|---|---|---|
-| R-1 | P28 残課題 | `mumei verify` の終了コード分離 | 棄却（counterexample あり）とインフラ失敗（timeout / 入力不可読 / crash）に別々の終了コードを割り当て、`run_benchmarks.py` の verdict サマリ行照合（`✅` / `❌` / `⚠️`）を終了コード判定へ置換する。既存の `1` を棄却に残し、インフラ失敗へ新コードを割り当てて後方互換を保つ | `tests/test_verify_cert_strict.rs` 系 CLI テストに終了コード表を追加。`run_benchmarks.py` の `no_verdict_files` / `no_verdict_statuses` が出力照合なしで同一値。`docs/CLI_GUIDE.md` 相当に終了コード表を追記 |
-| R-2 | P18 残課題 | エディタの全 pending atom 表示 | `src/lsp.rs` の Lean escalation 診断を「1 ファイルにつき最初の未決 atom のみ」から certificate 記載の全未決 atom へ拡張（`lean_verified` 側は既に全件） | `cargo test --test test_lsp_lean_escalation` に複数 pending ケース追加。`editors/vscode` の ghost text は語彙不変 |
-| R-3 | P26 残課題 | Proof Graph の import / prelude atom の `verification_status` | 当該 run で未検証の import 済み / prelude atom の `null` を、sibling `*.proof.json` / `*.proof-cert.json` があれば参照して埋める（無ければ `null` 維持）。参照時は既存の import 信頼判定と同じ鮮度ゲートを通す — certificate の `content_hash` が現在の import 元 atom と一致し、`lean_verified` を採用する場合は `translator_version` / `bridge_lemma_hash` が現行値と一致するものに限る。不一致 / 欠落なら `null` のまま（stale artifact を verified 扱いしない）。`edges[].is_consistent` は「未検査」を `null` で区別できるよう三値化を検討（`true` の意味変更はしない） | `cargo test -p mumei-core proof_graph` / `tests/test_proof_graph_lib.py`。verdict 語彙の追加なし |
-| R-4 | P26 残課題 | Proof Graph の `--escalate-lean` E2E | mumei-lean bridge を要する `lean_verified` 昇格 → proof graph 反映を、mumei-lean 側 fixture（`MUMEI_LEAN_SKIP_LIVE=1` の決定論経路）で回帰固定する | `tests/test_proof_graph_export.rs` または Python 側テストに fixture ベースの 1 ケース追加 |
+| R-1 | P28 残課題 | `mumei verify` の終了コード分離 — ✅ Implemented | 終了コード表 `0` verified / `1` rejected（既存互換）/ `3` inconclusive（Z3 unknown・timeout・resource_limit・unverifiable、counterexample なし）/ `4` input error（入力不可読・resolve 失敗・空ディレクトリ）/ `5` internal error（panic・artifact / bridge 書き出し失敗）を `src/commands/verify.rs` の `VerifyOutcome` に固定し、ディレクトリ verify は最悪値を返す。`benchmarks/run_benchmarks.py` は `VERDICT_SUMMARY_RE` を廃止して終了コードのみで verdict を判定し、`verify_status` 語彙（`MEASURED` / `TIMEOUT` / `FAIL` / `SKIP`）は不変、per-file に `exit_code` を追加。`docs/CLI.md` に終了コード表を追記 | `cargo test --test test_verify_exit_codes`（verified / rejected / inconclusive / input error / directory 最悪値）、`PYTHONPATH=. pytest tests/test_benchmark_suite.py`（終了コード表が `verify.rs` の `EXIT_*` 定数および `docs/CLI.md` と一致することをピン留め） |
+| R-2 | P18 残課題 | エディタの全 pending atom 表示 — ✅ Implemented | `src/lsp.rs` の Lean escalation 診断を「1 ファイルにつき最初の未決 atom のみ」から certificate 記載の全未決 atom へ拡張。sibling `<file>.proof.json` で `escalation_reason` を持ち `lean_verified` でない atom すべてに `data.lean_escalation.status = "pending"` 診断（`certificate` パス付き）を付与し、in-process 失敗で既に表示した atom は重複させない。語彙は既存の `lean_escalation` / `status` / `z3_result_class` / `escalation_reason` のみ | `cargo test --test test_lsp_lean_escalation`（複数 pending ケース `lsp_reports_every_pending_escalation_recorded_in_the_sibling_certificate` を追加）。`editors/vscode` の ghost text は語彙不変 |
+| R-3 | P26 残課題 | Proof Graph の import / prelude atom の `verification_status` — ✅ Implemented | `proof_graph::backfill_verification_status_from_sibling_certificates()` が、当該 run で status を持たない `dependency_graph[]` atom について source file の sibling certificate（`<src>.proof.json` / `<src>.proof-cert.json` / `<dir>/.proof-cert.json` / `<dir>/proof_certificate.json` の順、最初に atom を載せる 1 件で確定）、sibling file が無ければ `verify_import_certificate` と同じ `MUMEI_PROOF_BUNDLE` の module entry を参照し、`cert.file` が当該 source を指すもの（他ファイル向けの directory certificate は不一致として skip）に限り、既存の import 信頼判定と同じ鮮度ゲート（`proof_cert::load_certificate` の translator メタデータ検証 + `proof_cert::verify_certificate` の `content_hash` 一致、`lean_verified` は verify コマンドの `--allow-lean-verified` / `--escalate-lean` opt-in がありかつ `translator_version` / `bridge_lemma_hash` が現行値と一致する場合のみ）を通った `proven` だけを `verified` として補完する。`alias::name` ノードは import 登録時に記録された alias（`spec_metadata["import_alias"]`）だけを外して照合し、`Struct::method` の構造修飾は外さない（top-level `push` は `Stack::push` を証明しない）。certificate 欠落 / 破損 / hash 不一致 / stale translator / 未決（`unknown` / `sat`）はすべて `null` 維持、当該 run の status は上書きしない。`content_hash` は certificate `version` で算法を選択（`"1.0"` = name/requires/ensures/body の旧 hash、`"1.1"` = signature・`spec_metadata`（`semantics: bitvec` 等）・effects・invariant 等を含む content-hash v2）し、新規生成は `1.1` で書く。mumei-lean / mumei-agent は `content_hash` / `version` を不透明値として verbatim に複製するだけで再計算しないため、lockstep 変更は mumei 側の生成 / `verify_certificate` に限られる。`edges[].is_consistent` の三値化も実装済み（`Option<bool>` → JSON `null` で未検査を表現、visualizer は `null` を灰色点線で描画）| `cargo test -p mumei-core proof_graph`（fresh unsat / fresh lean_verified の default-off と opt-in / 変更後 hash / 他ファイル向け certificate / `Stack::push` 衝突 / proof bundle / stale bridge hash / stale translator / metadata 欠落 / 未決 / 既存 status 保持 / 欠落・破損 file）。verdict 語彙の追加なし |
+| R-4 | P26 残課題 | Proof Graph の `--escalate-lean` E2E — ✅ Implemented | `tests/test_proof_graph_export.rs` に、`MUMEI_LEAN_PATH` で差し替えた決定論 bridge stub（mumei-lean `1.0-lean` lean-cert schema を返す）を用いて「library を `--escalate-lean --proof-cert` で `lean_verified` 昇格 → consumer を `--emit proof-graph` で検証 → import atom / alias node の `verification_status` が sibling certificate から `verified` になる」を回帰固定。library 編集後（hash 不一致）、旧 translator の lean-cert（bridge 適用時に拒否 + 偽造 certificate も gate で拒否）、未決 certificate（bridge なし）の 3 ケースは `null` 維持を固定。実 `lake build` を伴う live 経路は mumei-lean 側 `MUMEI_LEAN_SKIP_LIVE` 行列に委ねる | `cargo test --test test_proof_graph_export`（4 ケース追加） |
 | R-5 | P25 残課題 | 非 i64 task join 結果の codegen | ✅ 完了（2026-09-06）: task body の結果が `f64` / ポインタ / aggregate の場合の join 経路を `send` / `recv` と同じビット保存変換（`box_payload_to_i64` / `unbox_payload_from_i64`）へ揃えた | `cargo test --test test_concurrency` 37/37（join 型別ケース 4 件 + 混在型 `task_group:any` 拒否 1 件追加）。runtime helper シグネチャは i64 固定のまま |
 | R-6 | P-Deferred-C | stdin（`-`）入力 | `src/main.rs` の `load_source` を拡張し `-` で stdin から読み込む。パイプライン用途（`mumei-agent` からの一時ファイルレス呼び出し）が出た時点で着手 | `tests/test_cli*.rs` に stdin ケース 1 件 |
+
+**現況（2026-09-18 棚卸し）**: R-1〜R-4 はすべて実装済み（R-1 = PR #553 終了コード表 / R-2 = PR #554 全 pending atom 表示 / R-3 + R-4 = PR #555 sibling certificate 補完と proof-graph E2E）。R-5 は ✅、R-6 は需要待ち。
 
 順序の根拠: R-1 は benchmark harness の脆さ（出力文字列照合）を除く基盤修正で、以降のすべての測定（Priority 25 B-7 を含む）の信頼性に効くため最初に置く。R-2 / R-3 / R-4 は UX の完成度で、他に影響しない。R-5 は codegen だが既存経路の再利用で閉じる。R-6 は需要発生時。
 
@@ -2163,41 +2088,42 @@ Z3 unknown ──> known witness / tactic ladder（決定論、既存） ──>
 
 | # | 由来 | タスク | 内容 | Priority 25 上の位置 |
 |---|---|---|---|---|
-| R-7 | P27 残課題 | repair convergence の `MEASURED` 化 | mumei-agent の自己修復 run（`heal` / `proliferate`）が生成した certificate を `benchmarks/evaluation_suite.py` に投入する経路を固定し、コミット済み測定を `SKIP` から `MEASURED` へ。counterexample タスク（`expected: FAIL`）の runtime artifact utility も測定範囲へ含める | **B-7 と同一 PR 群**（Wave 4）。AI 経路 on/off の測定と同時に repair convergence を初回測定する。paper §9 Future Work #1 の TikZ 図差し替えは papers 側で同時に行う |
-| R-8 | P10-D | 有界低次数非線形算術（`nlsat` / `grobner`） | `fragment.rs` の `nonlinear_arithmetic` タグを「Lean 確定」から「nlsat 先行試行」へ再分類し、`executor.rs` に nlsat 実行経路と unknown / timeout 時の Lean 降格理由記録を追加（`docs/ROADMAP.md` P10-D の Implementation Plan どおり） | **= C-2**（Wave 5、B-7 測定確定後）。Lean 送りの母数を動かすため測定前には入れない |
+| R-7 ✅（2026-09-13） | P27 残課題 | repair convergence の `MEASURED` 化 | mumei-agent の自己修復 run（`heal --proof-cert-out` / `self-correct`、`agent/self_correction.py::write_repair_certificate` が `MUMEI_SELF_CORRECTION_METADATA` 経由で `self_correction_summary` 付き certificate を書く）を `scripts/measure_repair_convergence.py` で counterexample 20 ファイルに実行し、`benchmarks/evaluation_suite.py --repair-cert-dir` に投入。コミット済み測定は `SKIP` → `MEASURED`（24 atom、収束 10 = 41.67%、平均 1.3333 attempts、53,078 tokens、Ollama `qwen2.5-coder:3b`、max 3 retries）。counterexample タスク（`expected: FAIL`）の runtime artifact utility は `runtime_artifact_utility.counterexample` として測定（80/80 = 100.00% as expected、refutation certificate 20/20、build 成果物 leak 0。leak 判定は exit code ではなく非空成果物の有無。#560 以前は concurrency の multi-atom 4 ファイル × 3 build target で先行 atom の `.ll` / header / verified-json が reject 後も残り 68/80 / leak 12 だったが、`mumei build` が reject 時に当該 build の成果物を巻き戻す（#559 / #560）ことで解消） | **B-7 と同一 PR 群**（Wave 4）。paper §8 Known limitation #2 / §9 Future Work #1 は papers 側で同時更新 |
+| R-8 ✅ Implemented（mumei PR #562、2026-09-14） | P10-D | 有界低次数非線形算術（`nlsat` / `grobner`） | `fragment.rs` の `nonlinear_arithmetic` タグを「Lean 確定」から「nlsat 先行試行」へ再分類し、`executor.rs` に nlsat 実行経路と unknown / timeout 時の Lean 降格理由記録を追加（`docs/ROADMAP.md` P10-D の Implementation Plan どおり） | **= C-2**（Wave 5）。実装: `fragment.rs` の内部マーカー `bounded_nonlinear_arithmetic`（次数 ≤ 2・非線形変数 ≤ 3・全変数に literal 上下限・除数は 0 除外閉区間・`%` / べき / finite-field 除外）で窓内 atom を無条件 escalation から外し、`executor.rs` で `arith.nl` / `arith.nl.nra` / `arith.nl.grobner` を設定、`unknown` / timeout のみ既存 reason で Lean 降格（新 alias なし、`translator_version` / `bridge_lemma_hash` 不変）。母数: `nonlinear_arithmetic` 27 atom 中 9 が窓内・18 は従来どおり。B-7 再測定を同一 PR 群で実施し escalation 候補 6 → 6・`lean_verified_delta` 0 不変（mumei `docs/ROADMAP.md` P10-D、`docs/EVALUATION_SUITE.md` 2026-09-13 16:29 UTC） |
 | R-9 | P25 残課題 | 値渡し aggregate payload の codegen | ✅ 完了（2026-09-06）: struct を値で `send` / task 結果に載せる経路を boxed payload（`malloc` した box のアドレスを `ptrtoint` / `inttoptr` で i64 スロットへ搬送、受信 / join 側で `free`）で実装。runtime には i64 シグネチャの `__mumei_chan_send_owned` を追加（cancel で捨てた send を送信側が解放できるようにする）し、既存 helper は無変更 | `cargo test --test test_concurrency` 37/37（struct 値渡し send/recv 2 件 + scalar チャネルへの aggregate 送信拒否 1 件 + cancel 整合 2 件 + 配列 payload 拒否 1 件 + 配列と同レイアウトの struct 受理 1 件追加）。制約（shallow copy / 配列 payload 拒否）は `docs/CONCURRENCY.md` に明記。追補（2026-09-06）: 同レイアウト別名 struct（`Point` / `Pair`）を LLVM 構造型比較では区別できない点は、`mumei-core` に Phase 0-nominal の名前的型検査（`nominal_types.rs`: call 引数 / `send` / `task_group:any` / 戻り値 / struct フィールド / 再代入 / `if` `match` 分岐、スコープ付き型環境、proof hash に署名情報を含めてキャッシュ無効化）を追加して解消。`cargo test --test test_concurrency` 39/39、`cargo test -p mumei-core` 491/491 |
-| R-10 | P30 残課題 | body semantics 依存の非算術 `unknown_obligation` | 残る obligation の goal 形状分類と、ladder 末尾追記 / bridge lemma 追加（hash lockstep）/ AI 証明生成への振り分け | **= C-1**（Wave 1）。bridge lemma 追加が必要と判明した形状は別 Priority として起票 |
+| R-10 ✅（2026-09-13） | P30 残課題 | body semantics 依存の非算術 `unknown_obligation` | 残る obligation の goal 形状分類と、ladder 末尾追記 / bridge lemma 追加（hash lockstep）/ AI 証明生成への振り分け | **= C-1**。完了: benchmark 105 atom を mumei-lean translator で全走査し、Z3 `unsat` 37 atom を群 1（`perform` 列 / let 列 / ネスト if / 構造体射影、23 atom、hash 不変 → B-1 入力）/ 群 2（`task_group: all` / `any`、11 atom → mumei P31 として別起票、hash lockstep は P31 で）/ 群 3（`while` ループ不変量 3 atom → B-4 入力）に分類（mumei `docs/ROADMAP.md` P30） |
 
 ### 群 3: 需要待ち / Deferred 維持（トリガを明記）
 
 | # | 由来 | タスク | 着手トリガ |
 |---|---|---|---|
-| R-11 | P10-B | Regular Expression Theory（`Z3_RE_SORT` / RegLan） | `regex_semantics` タグで Lean へ送られる義務が std / benchmark / dogfood に実際に出現し、Priority 25 B-1（translator 拡張の regex 項目）でも lowering できないと判明したとき。それまでは `prefix_of` / `suffix_of` / `contains` 近似 + Lean 委譲を維持 |
-| R-12 | P10-C | Finite Non-recursive ADT（`Z3_DATATYPE_SORT`） | ペイロード付き enum の `match` 網羅性 / セレクタ型安全性の違反が Int タグ経路で検出漏れ・偽陽性として報告されたとき、または vStd forge task が payload 付き variant を要求したとき |
-| R-13 | P17 残課題 | 同期プリミティブで保護された共有可変状態の干渉推論 | `std/concurrency` 系 atom または mumei-demo シナリオで lock / unlock を伴う共有状態が必要になったとき。Priority 25 Track A の A-6「リソース取得 / 解放対応」の設計（外部コード側）が先に固まるので、その語彙を流用する |
-| R-14 | Multi-Stage IR Phase 4 | borrow checking / lifetime analysis | 設計未着手。`LinearityCtx` の move / drop 解析で std / demo が回っている間は着手しない。参照型（`&T`）を言語に導入する判断が先 |
+| R-11 ✅ Implemented（mumei PR #584、2026-09-19） | P10-B | Regular Expression Theory（`Z3_RE_SORT` / RegLan） | `reglan.rs` の regex→Z3 RegLan ミニコンパイラ（literal / `.` / `*+?` / `{n,m}` / `[]` / `[^]` / `|` / `()` / escapes / anchors）で `matches()` / `match_regex()` / `re_match()` を `str.in_re` にコンパイル — where 句制約と atom 契約の両経路。compilable パターンは `regex_semantics` タグから除外され Lean 委譲なしで完結。非 compilable 構文は従来どおり近似 + Lean 委譲 |
+| R-12 ✅ Implemented（mumei PR #585/#587/#588/#591/#592、2026-09-19） | P10-C | Finite Non-recursive ADT（`Z3_DATATYPE_SORT`） | 有限・非再帰・非 generic・全 payload scalar の enum がネイティブ `DatatypeSort` に下降 — `match` 網羅性は tester 被覆 UNSAT、payload は真の sort のセレクタ束縛、`E::V` ctor 式（#588）と enum 間 `==`/`!=` deep equality（#591）まで codegen 連携。決定的 variant-owner 解決（#587: 宣言型 hint + owners-agree + fail-closed ambiguous）と qualified `E::V` match arm（#592: qualifier は宣言型と一致必須・不一致は "belongs to enum" fail-closed、未知 qualifier は leaf 解決、let 束縛 `local_enum_types` で分岐スコープ済み）。再帰/generic/非 scalar payload は Int-tag + `inductive_data_type` 維持（Lean 委譲境界不変） |
+| R-13 ✅ Implemented (M1) | P17 | 同期プリミティブで保護された共有可変状態の干渉推論 | Typed resource state is visible only inside `acquire`; exclusive mode permits writes, shared mode is read-only, and invariant failure at unlock (including solver `unknown`) is a hard error. `task_group:any` cancellation during an acquire body is not modeled; lock-free ordering, atomics, deadlock freedom, and priority inversion remain out of scope. |
+| R-14 ✅ Implemented (M1/M2, checker-first) | Multi-Stage IR Phase 4 | borrow checking / lifetime analysis | MIR call-site loans for `ref` / `ref mut` / `consume`, conservative place overlap, hard diagnostics for moves/writes/aliasing/borrow-after-move, and callee parameter access rules. First-class `&T`, reborrowing, lifetime parameters, closure/dynamic capture, and region-polymorphic contracts remain out of scope. |
 | R-15 | P19 / P29 残課題 | Capability Stage 2〜4 / per-receiver capability 解決 | Priority 15 の需要トリガ T1〜T4（`docs/CAPABILITY_DEMAND_STUDY.md`）。結論は否定的のため保留継続 |
-| R-16 | mumei-agent Layer B | C / C++ / Java / JavaScript の Layer B（strict Z3 verification） | dogfood corpus に当該言語の実 OSS を追加する判断がされたとき。Priority 25 Track A の `DataflowFacts` が言語非依存に設計されていれば、tree-sitter grammar 追加 + 言語別 `semantic_safety` 述語で足りる想定のため、**A-5 完了後** に再評価 |
+| R-16 | mumei-agent Layer B | C / C++ / Java / JavaScript の Layer B（strict Z3 verification） | 再評価済み（2026-09-22、A-5 完了後）: `DataflowFacts` / `Statement` IR は言語非依存設計どおりだが、`tree_sitter_extract.extract_statements` の statement 分類器は **Go 専用実装**（`_go_statement` 〜210 行＋`_go_statements` wrapper・`inc`/`dec`/`defer`/`range`/`define` 等の kind 正規化）で非 Go は `None` フォールバック。よって見積もりは「grammar dep + `_<lang>_statements` 分類器（〜200 行級/言語）+ `semantic_safety` 述語 + `language_patterns`」に修正。JavaScript は `"js"/"jsx"` → typescript grammar の alias で Layer B 機械部は共有済み — 残は `SUPPORTED_AUDIT_LANGUAGES` への追加と JS 固有 semantics で規模は小さい。着手トリガは変わらず dogfood corpus への当該言語実 OSS 追加判断（① 集計待ち）— **Deferred 維持** |
 | R-17 | mumei-agent P-Deferred-B | `extract_spec_from_code` の Ruby / Swift / Kotlin 等 | 未対応言語でも LLM extractor が `unknown` として扱えるため、ユーザー要求が出るまで保留 |
 | R-18 | P7-C / SI-4 | Wasm target / no_std | 既存どおり Deferred。R-9 の runtime ABI 起票がこれらの前提整理を兼ねる |
+| R-19 Implemented | P32 起票（P27 user burden / spec 記述負担） | loop invariant 自動推論（template-based infer-verify） | **Implemented (M1)**: `invariant: infer` が bounded counter / accumulator bound / monotonic progress / unchanged-prefix の候補を生成し、既存 base/step VC で検証する。`unsat` のみ採用し、`sat` / `unknown` は棄却する。裸の `while` の fail-closed は維持。CLI フラグは parser が config より先に実行されるため Deferred |
 
 ### 推奨着手順（Priority 25 と合わせた全体像）
 
 ```
-随時（群 1）:      R-1 → R-2 → R-3 → R-4 → R-5 → (R-6 需要時)
-Wave 1（P25）:    A-1, A-2, B-0, B-1, C-1(=R-10)
-Wave 2（P25）:    A-3, A-4, A-5, B-2, B-3
-Wave 3（P25）:    B-4, B-5, A-6
-Wave 4（P25）:    B-6, B-7 + R-7（同一 PR 群）
-Wave 5（P25）:    C-2(=R-8), A-6 残り
-その後:           R-9（ABI 起票後）, 群 3 はトリガ発生時に個別起票
+随時（群 1）:      R-1 → R-2 → R-3 → R-4 → (R-6 需要時)      ※ R-5 ✅
+完了（P25）:      Wave 1: A-1〜A-6, B-0(agent 側) / Wave 2: B-4, B-5, B-6   ※ PR #570 / #572
+完了（P25）:      Wave 3: docs-sync, B-1（第 1 構文）, B-2 + B-0(mumei-lean 側), B-3   ※ mumei-lean PR #115 / #116（C-1(=R-10) は未着手のまま Wave 4 以降へ）
+完了（P25）:      Wave 4: B-4 の B-2 経路接続 ✅（mumei-agent #579）, B-7 + R-7 ✅（mumei #558 / papers #6、同一 PR 群）, B-2 敵対行列 ✅（mumei-lean #118）   ※ 2026-09-13
+Wave 5（P25、現在）: C-2(=R-8) ✅ Implemented（mumei PR #562、2026-09-14）+ B-7 再測定 ✅（同一 PR 群）, C-1(=R-10) ✅ 分類（P30、群 2 は P31 起票）, B-1 群 1 全 4 構文 lowering ✅（mumei-lean PR #121〜#124、live path 18）, A-6 全種別 ✅（PR #588〜#590）, A-5 全 3 弾 ✅（PR #592 / #593）
+Wave 6（P25、現在）: P31 `task_group` — `task` / `task_group:all` lowering + `concurrency_obligation` class + `bridge_lemma_hash` lockstep（`5716cfdd…`、live path 19: `join_all_last_result`）+ `task_group:any`（`List Int` メンバーシップ形状、live path 20: `race_two_replicas`）+ seq 中段 `task_group` lowering（`read_cancellable_write` 型、反例 atom につき live 化対象外）— **P31 完了**
+その後:           群 3 はトリガ発生時に個別起票（R-16 再評価済み・Deferred 維持、見積もりは Priority 26 表を参照）
 ```
 
 ### スコープ外
 
 - 新規 verdict 語彙・別名 alias の追加、`translator_version` / `bridge_lemma_hash` の変更（必要なら別 Priority）。
 - units of measure の追加機能（直近 PR 群で実装済みの範囲を維持。残課題が出た時点で `docs/ROADMAP.md` に個別起票）。
-- V1-A〜V1-D 節（本書 1459〜1604 行付近）に残る「未実装」記述は実装済み後の古い記述であり、本 Priority では docs 整理の対象に含めない（別途 docs-sync で扱う）。
+- V1-A〜V1-D 節の「未実装」記述は 2026-09-19 の docs-sync で実装実態に改訂済み（audit / validate-spec / validate-code / validate-spec-to-code / validate-code-to-spec / verify-conformance / verify-traceability が計画済み名の実装を担う）。残件だった V1-A-2 ドメイン完全性チェック（clause スコープ付き `DOMAIN_CHECKLISTS`）と V1-B-3 修正ヒント・行アンカー diff（`fix_suggestion` + `Suggested diff`）は mumei-agent PR #596/#597 で実装済み。V1-B-2 言語別パターン集の registry 拡充も mumei-agent PR #598 で実装済み。
 
 ### 関連ファイル
 

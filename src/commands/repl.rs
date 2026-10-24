@@ -238,6 +238,7 @@ pub(crate) fn repl_register_extern_fn(
             is_ref_mut: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
+            consume: false,
         })
         .collect();
     let atom = parser::Atom {
@@ -247,6 +248,9 @@ pub(crate) fn repl_register_extern_fn(
         params,
         trace_id: None,
         spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
         requires: ext_fn
             .requires
             .clone()
@@ -262,6 +266,7 @@ pub(crate) fn repl_register_extern_fn(
         invariant: None,
         effects: vec![],
         return_type: Some(ext_fn.return_type.clone()),
+        decreases: None,
         span: ext_fn.span.clone(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
@@ -660,13 +665,26 @@ pub(crate) fn repl_brace_balance(input: &str) -> i32 {
     let mut balance = 0;
     let mut in_string = false;
     let mut escaped = false;
+    let mut in_line_comment = false;
+    let mut prev = '\0';
     for ch in input.chars() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            prev = ch;
+            continue;
+        }
         if in_string {
             if ch == '"' && !escaped {
                 in_string = false;
             }
             escaped = ch == '\\' && !escaped;
+            prev = ch;
             continue;
+        }
+        if ch == '/' && prev == '/' {
+            in_line_comment = true;
         }
         match ch {
             '"' => in_string = true,
@@ -674,6 +692,7 @@ pub(crate) fn repl_brace_balance(input: &str) -> i32 {
             '}' => balance -= 1,
             _ => {}
         }
+        prev = ch;
     }
     balance
 }

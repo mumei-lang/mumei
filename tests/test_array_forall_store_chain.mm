@@ -9,7 +9,7 @@
 // the centralised `mbqi` opt-in that powers `forall + store` reasoning.
 
 // --- 1: two consecutive non-negative stores ---
-atom forall_store_chain_two(n: i64, k1: i64, k2: i64)
+atom forall_store_chain_two(arr: [i64], n: i64, k1: i64, k2: i64)
 requires:
     n >= 0
     && k1 >= 0 && k1 < n
@@ -23,7 +23,7 @@ body: {
 };
 
 // --- 2: three consecutive non-negative stores ---
-atom forall_store_chain_three(n: i64, k1: i64, k2: i64, k3: i64)
+atom forall_store_chain_three(arr: [i64], n: i64, k1: i64, k2: i64, k3: i64)
 requires:
     n >= 0
     && k1 >= 0 && k1 < n
@@ -40,7 +40,7 @@ body: {
 
 // --- 3: store inside if-branch ---
 // The stored value is 0 in both arms, so the forall is preserved.
-atom forall_store_chain_branch(n: i64, k: i64, flag: i64)
+atom forall_store_chain_branch(arr: [i64], n: i64, k: i64, flag: i64)
 requires:
     n >= 0
     && k >= 0 && k < n

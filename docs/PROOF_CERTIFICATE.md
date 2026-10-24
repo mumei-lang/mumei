@@ -18,8 +18,18 @@ keywords: "mumei proof certificate, formal verification, verified imports, Z3, L
 2. The atom-level `translator_version` equals the current `LEAN_TRANSLATOR_VERSION` compiled into mumei.
 3. The atom-level `bridge_lemma_hash` equals the current `LEAN_BRIDGE_LEMMA_HASH` compiled into mumei.
 4. `lean_result_metadata` (or the legacy-compatible `lean_metadata`) has `status == "lean_verified"`, a non-empty `theorem_name`, and the same current `translator_version` and `bridge_lemma_hash`.
+5. The kernel-axiom audit is `passed` and reports only the standard axioms
+   `propext`, `Classical.choice`, and `Quot.sound`; certificates without audit
+   fields remain accepted as legacy `Unaudited` evidence.
 
-If any value is missing or stale, certificate verification returns `stale_translator` when `--allow-lean-verified` is enabled and `unproven` when it is not. The same meaning applies to proof-certificate metadata, MCP consumers of certificate JSON, and CLI output from `mumei verify --allow-lean-verified` / `verify-cert --allow-lean-verified`.
+If translator metadata is missing or stale, certificate verification returns
+`stale_translator` when `--allow-lean-verified` is enabled. A rejected or
+errored kernel-axiom audit returns `axiom_rejected` instead. `verify-cert
+--strict --allow-lean-verified` additionally rejects accepted legacy
+`Unaudited` certificates, requiring a fresh Lean audit. The same meaning
+applies to proof-certificate metadata, MCP consumers of certificate JSON, and
+CLI output from `mumei verify --allow-lean-verified` /
+`verify-cert --allow-lean-verified`.
 
 The standard mumei-lean bridge path is live theorem generation for the current Z3 `unknown` obligation. For the body-semantics fixture, `abs_saturating` is emitted as `Generated.Std.Math.Abs.abs_saturating_correct`, exported as `lean_verified`, and recorded with `known_witness_used = false`. Pre-registered known witnesses remain fallback evidence and are recorded with `known_witness_used = true`; they do not replace the live generated theorem path when that path builds successfully.
 
@@ -139,7 +149,7 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
   "ensures": "result >= x",
   "translator_version": "mumei-lean-translator-ir-v2",
   "binder_mapping": { "x": "x", "result": "result" },
-  "bridge_lemma_hash": "ee8cd3ba96c3318b3f07445f4755619744d4e1f9a662af94f3cbce6d41ed4347",
+  "bridge_lemma_hash": "5716cfdd945d68b4a0d75d75c5ade1934cbd76e0dfe16734a8f3dd723cfdd8e9",
   "manual_lemma_reason": null,
   "retry_policy_fingerprint": "9bb6d4f2...",
   "attempt_summary": {
@@ -169,13 +179,14 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
 | Field | Type | Description |
 |---|---|---|
 | `name` | `String` | Atom name |
-| `content_hash` | `String` | SHA-256 hash of the atom's source content |
+| `content_hash` | `String` | SHA-256 hash of the atom's proof-relevant source. Algorithm selected by top-level `version`: `"1.0"` = name + `requires` + `ensures` + body (legacy); `"1.1"` = content-hash v2 — additionally type params / `where` bounds, every parameter (name, type, `&`/`&mut`, HOF contract), return type, `forall` constraints, `invariant`, consumed params, resources, `async`, trust level, `max_unroll`, effects, effect pre/post and `spec_metadata` (e.g. `semantics: bitvec`). Excluded because they are not proof obligations: `span`, `trace_id`, and the load-attribution keys `spec_metadata.source_file` / `spec_metadata.import_alias`. Consumers (mumei-lean, mumei-agent) treat it as opaque and copy it verbatim |
 | `status` | `String` | Verification result: `"proven"`, `"failed"`, or `"skipped"` |
 | `proof_hash` | `String` | Dependency-aware hash from `compute_proof_hash()` — includes transitive callee signatures |
 | `dependencies` | `Vec<String>` | Direct callee atom names from `ModuleEnv.dependency_graph` |
 | `effects` | `Vec<String>` | Declared effect names |
 | `requires` | `String` | Precondition contract text |
 | `ensures` | `String` | Postcondition contract text |
+| `forall_constraints` | `Vec<QuantifierConstraint>` | Quantifier (`forall`/`exists`) constraints extracted from `requires` at parse time — `requires` renders each quantified conjunct as `true`, so this structured form (`{q_type, var, start, end, condition}`) is the only place the hypotheses survive. Lean-side consumers restore them (e.g. elementwise non-negativity a loop step verification condition needs). |
 | `z3_result_class` | `String` | Normalized solver class used for Lean routing; only `unknown` is a Lean candidate, and `sat` / `unsat` classes are not candidates. |
 | `escalation_reason` | `Option<String>` | Reason a Z3-`unknown` obligation is routed to Lean |
 | `logic_fragment_tags` | `Vec<String>` | Detected fragments such as arrays, quantifiers, strings, non-linear arithmetic, or temporal effects |
@@ -327,7 +338,7 @@ mumei build --emit proof-cert src/math.mm
 
 1. Parse source file
 2. Run Z3 verification on all atoms
-3. Compute `content_hash` (source hash) and `proof_hash` (dependency-aware hash) for each atom
+3. Compute `content_hash` (content-hash v2; certificate `version` is written as `"1.1"`) and `proof_hash` (dependency-aware hash) for each atom
 4. Populate `dependencies`, `effects`, `requires`, `ensures` from `ModuleEnv`
 5. Compute `certificate_hash` as SHA-256 of the serialized JSON with all object keys sorted (excluding the hash field), so the hash is reproducible from the certificate alone regardless of how unordered map fields happened to serialize
 6. Write `.proof-cert.json` to output directory
@@ -340,7 +351,7 @@ mumei verify-cert path/to/.proof-cert.json
 
 1. Load the certificate file
 2. Find the corresponding source file (from `cert.file`)
-3. Re-parse the source and compute current content hashes
+3. Re-parse the source and compute current content hashes with the algorithm the certificate's `version` declares (`"1.0"` legacy four-field hash, `"1.1"` content-hash v2) — existing `1.0` certificates keep verifying until regenerated, but only v2 certificates detect signature-only / `semantics`-only edits. Any other `version` is unsupported: every atom is reported `changed` and nothing is trusted
 4. Compare each atom's stored `content_hash` against the current hash
 5. Report per-atom status:
    - **proven**: content hash matches — atom unchanged since last verification

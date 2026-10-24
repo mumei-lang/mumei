@@ -184,6 +184,28 @@ def test_render_proof_graph_dot_highlights_selection_and_mismatches() -> None:
     assert "penwidth=4" not in render_proof_graph_dot(_graph())
 
 
+def test_unchecked_edges_stay_null_and_render_gray_dotted() -> None:
+    graph = {
+        "nodes": [
+            {"atom_name": "caller", "health": "green"},
+            {"atom_name": "callee", "health": "green"},
+        ],
+        "edges": [
+            {
+                "from": "caller",
+                "to": "callee",
+                "is_consistent": None,
+                "violations": [],
+                "warnings": [],
+            }
+        ],
+    }
+    edge = build_graph_elements(graph)["edges"][0]
+    assert edge["is_consistent"] is None
+    dot = render_proof_graph_dot(graph)
+    assert 'atom_caller -> atom_callee [color="#6c757d", style=dotted];' in dot
+
+
 def test_node_detail_resolves_contracts_neighbours_and_violations() -> None:
     detail = node_detail(_graph(), "client_send")
 

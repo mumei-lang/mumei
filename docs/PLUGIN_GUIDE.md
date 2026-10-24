@@ -32,11 +32,32 @@ Every plugin must export:
 
 The ABI version must match `mumei_core::emitter::EMITTER_ABI_VERSION`.
 
+ABI 2 added `signature`, `contract` (including quantified preconditions), and
+`meta` to `HirAtom` and removed `requires_hir` and `ensures_hir`. ABI 3 adds
+the `consume` parameter marker, exact `requires_text`/`ensures_text`, and
+ordered declared effects. The JSON, C-header, and proof-book emitters now read
+these HIR fields without changing their output. The Python and Rust wrappers
+also read their signature and exact contract text from HIR while retaining
+their string translators; output is unchanged and this migration does not
+change the ABI. The runtime monitor also reads HIR, takes trust boundaries
+from `meta.trust_boundaries`, and ignores the `extern_blocks` argument; this
+migration does not change the ABI. ABI-1 and ABI-2 plugins are rejected at
+load time with an ABI version mismatch and must be rebuilt against ABI 3.
+ABI 4 changes `Emitter::emit` to take `&EmitAtom<'_>` — a borrowed HIR-only
+view exposing `body`, `signature`, `contract`, `meta`, and `effect_set` —
+instead of `&HirAtom`. The AST fields (`atom`, `body_stmt`) are no longer
+reachable from emitters, and HIR uses its own `HirBinOp`/`HirJoin`/
+`HirPattern` types. ABI-1/2/3 plugins are rejected at load time and must be
+rebuilt against ABI 4.
+ABI 5 replaces `ast::TypeRef` inside `HirLambdaParam::type_ref` (reachable
+through `EmitAtom.body`) with the HIR-owned `HirTypeRef`/`HirCapabilityType`
+mirrors, changing an emit-reachable layout. ABI-1/2/3/4 plugins are rejected
+at load time and must be rebuilt against ABI 5.
+
 ## No-op sample plugin
 
 ```rust
-use mumei_core::emitter::{Artifact, BoxedEmitter, Emitter, EmitterPluginHandle, EMITTER_ABI_VERSION};
-use mumei_core::hir::HirAtom;
+use mumei_core::emitter::{Artifact, BoxedEmitter, EmitAtom, Emitter, EmitterPluginHandle, EMITTER_ABI_VERSION};
 use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiResult};
 use std::path::Path;
@@ -46,7 +67,7 @@ struct NoopEmitter;
 impl Emitter for NoopEmitter {
     fn emit(
         &self,
-        _hir_atom: &HirAtom,
+        _emit_atom: &EmitAtom<'_>,
         _output_path: &Path,
         _module_env: &ModuleEnv,
         _extern_blocks: &[ExternBlock],

@@ -16,6 +16,10 @@ from check_contract_vocabulary import (
     _count_mcp_tool_decorators,
     _extract_mcp_docstrings_ast,
     _extract_mcp_tool_names_ast,
+    _replace_contract_target,
+    compute_bridge_lemma_hash,
+    contract_constant_targets,
+    load_bridge_lemma_catalog,
     main,
 )
 
@@ -149,6 +153,58 @@ def test_doc_contradiction_type_clean_doc_has_no_violation(tmp_path):
 def test_full_check_passes_on_real_docs():
     """The full vocabulary gate must pass on the checked-in docs surface."""
     assert main() == 0
+
+
+def test_contract_constants_match_catalog():
+    catalog = load_bridge_lemma_catalog()
+    expected_version = catalog["translator_version"]
+    expected_hash = compute_bridge_lemma_hash(catalog["obligation_classes"])
+    for path, field, pattern, expected in contract_constant_targets(
+        expected_version, expected_hash
+    ):
+        assert expected == (
+            expected_version if field == "translator_version" else expected_hash
+        )
+        text = path.read_text(encoding="utf-8")
+        matches = list(pattern.finditer(text))
+        assert matches
+        assert all(match.group(1) == expected for match in matches)
+
+
+def test_write_mode_replaces_only_captured_value(tmp_path):
+    path = tmp_path / "types.rs"
+    path.write_text(
+        'pub const LEAN_TRANSLATOR_VERSION: &str = "wrong";\n'
+        'pub const LEAN_BRIDGE_LEMMA_HASH: &str =\n'
+        '    "wrong";\n'
+        'pub const UNRELATED: &str = "unchanged";\n',
+        encoding="utf-8",
+    )
+    targets = contract_constant_targets("version", "hash")
+    violations = []
+    for target_path, field, pattern, expected in targets[:2]:
+        violations.extend(
+            _replace_contract_target(
+                path, field, pattern, expected, write=True
+            )
+        )
+    assert violations == []
+    assert path.read_text(encoding="utf-8") == (
+        'pub const LEAN_TRANSLATOR_VERSION: &str = "version";\n'
+        'pub const LEAN_BRIDGE_LEMMA_HASH: &str =\n'
+        '    "hash";\n'
+        'pub const UNRELATED: &str = "unchanged";\n'
+    )
+
+
+def test_compute_bridge_lemma_hash_is_order_independent():
+    catalog = load_bridge_lemma_catalog()
+    classes = catalog["obligation_classes"]
+    permuted = {
+        obligation_class: list(reversed(lemmas))
+        for obligation_class, lemmas in reversed(list(classes.items()))
+    }
+    assert compute_bridge_lemma_hash(classes) == compute_bridge_lemma_hash(permuted)
 
 
 def test_non_mcp_tool_decorators_ignored():

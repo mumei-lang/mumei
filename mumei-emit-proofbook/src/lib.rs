@@ -1,8 +1,7 @@
-use mumei_core::emitter::{Artifact, ArtifactKind, Emitter};
-use mumei_core::hir::HirAtom;
+use mumei_core::emitter::{Artifact, ArtifactKind, EmitAtom, Emitter};
+use mumei_core::hir::HirTrustLevel;
 use mumei_core::parser::ExternBlock;
 use mumei_core::verification::{ModuleEnv, MumeiResult};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 pub struct ProofBookEmitter;
@@ -10,34 +9,34 @@ pub struct ProofBookEmitter;
 impl Emitter for ProofBookEmitter {
     fn emit(
         &self,
-        hir_atom: &HirAtom,
+        emit_atom: &EmitAtom<'_>,
         output_path: &Path,
         module_env: &ModuleEnv,
         _extern_blocks: &[ExternBlock],
     ) -> MumeiResult<Vec<Artifact>> {
-        let atom = &hir_atom.atom;
+        let signature = emit_atom.signature;
+        let contract = emit_atom.contract;
+        let meta = emit_atom.meta;
         let mut md = String::new();
 
         // Title
-        md.push_str(&format!("# Proof Certificate: `{}`\n\n", atom.name));
+        md.push_str(&format!("# Proof Certificate: `{}`\n\n", signature.name));
 
         // Metadata table
         md.push_str("## Metadata\n\n");
         md.push_str("| Field | Value |\n");
         md.push_str("|-------|-------|\n");
-        md.push_str(&format!("| **Atom** | `{}` |\n", atom.name));
-        md.push_str(&format!("| **Trust Level** | `{:?}` |\n", atom.trust_level));
+        md.push_str(&format!("| **Atom** | `{}` |\n", signature.name));
+        md.push_str(&format!("| **Trust Level** | `{:?}` |\n", meta.trust_level));
         md.push_str(&format!(
             "| **Mumei Version** | `{}` |\n",
             env!("CARGO_PKG_VERSION")
         ));
-        let content_hash =
-            compute_content_hash(&atom.name, &atom.requires, &atom.ensures, &atom.body_expr);
         md.push_str(&format!(
             "| **Content Hash** | `{}` |\n",
-            &content_hash[..16]
+            &meta.content_hash[..16]
         ));
-        if atom.is_async {
+        if signature.is_async {
             md.push_str("| **Async** | Yes |\n");
         }
         md.push('\n');
@@ -45,44 +44,49 @@ impl Emitter for ProofBookEmitter {
         // Signature
         md.push_str("## Signature\n\n");
         md.push_str("```mumei\n");
-        let params_str: String = atom
+        let params_str: String = signature
             .params
             .iter()
             .map(|p| {
-                let type_name = p.type_name.as_deref().unwrap_or("i64");
+                let name = p.declared_name();
+                let type_name = p.ty.as_deref().unwrap_or("i64");
                 let resolved = module_env.resolve_base_type(type_name);
                 if resolved != type_name {
-                    format!("{}: {} (= {})", p.name, type_name, resolved)
+                    format!("{}: {} (= {})", name, type_name, resolved)
                 } else {
-                    format!("{}: {}", p.name, type_name)
+                    format!("{}: {}", name, type_name)
                 }
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let ret_type = atom.return_type.as_deref().unwrap_or("i64");
+        let ret_type = signature.return_type.as_deref().unwrap_or("i64");
         md.push_str(&format!(
             "atom {}({}) -> {}\n",
-            atom.name, params_str, ret_type
+            signature.name, params_str, ret_type
         ));
         md.push_str("```\n\n");
 
         // Contracts section
         md.push_str("## Formal Contracts\n\n");
         md.push_str("### Precondition (`requires`)\n\n");
-        if atom.requires == "true" {
+        if contract.requires_text == "true" {
             md.push_str("No precondition (accepts all inputs).\n\n");
         } else {
-            md.push_str(&format!("```\n{}\n```\n\n", atom.requires));
+            md.push_str(&format!("```\n{}\n```\n\n", contract.requires_text));
         }
         md.push_str("### Postcondition (`ensures`)\n\n");
-        if atom.ensures == "true" {
+        if contract.ensures_text == "true" {
             md.push_str("No postcondition specified.\n\n");
         } else {
-            md.push_str(&format!("```\n{}\n```\n\n", atom.ensures));
+            md.push_str(&format!("```\n{}\n```\n\n", contract.ensures_text));
         }
 
         // Effects section (only if effects exist)
-        let effects: Vec<String> = atom.effects.iter().map(|e| e.name.clone()).collect();
+        let effects: Vec<String> = signature
+            .effects
+            .iter()
+            .map(|effect| effect.name.clone())
+            .collect();
         if !effects.is_empty() {
             md.push_str("## Effects\n\n");
             md.push_str("| Effect | Description |\n");
@@ -94,18 +98,18 @@ impl Emitter for ProofBookEmitter {
         }
 
         // Temporal contracts (effect_pre / effect_post)
-        if !atom.effect_pre.is_empty() || !atom.effect_post.is_empty() {
+        if !meta.effect_pre.is_empty() || !meta.effect_post.is_empty() {
             md.push_str("## Temporal Contracts\n\n");
-            if !atom.effect_pre.is_empty() {
+            if !meta.effect_pre.is_empty() {
                 md.push_str("### Pre-state (`effect_pre`)\n\n");
-                for (effect, state) in &atom.effect_pre {
+                for (effect, state) in &meta.effect_pre {
                     md.push_str(&format!("- `{}`: `{}`\n", effect, state));
                 }
                 md.push('\n');
             }
-            if !atom.effect_post.is_empty() {
+            if !meta.effect_post.is_empty() {
                 md.push_str("### Post-state (`effect_post`)\n\n");
-                for (effect, state) in &atom.effect_post {
+                for (effect, state) in &meta.effect_post {
                     md.push_str(&format!("- `{}`: `{}`\n", effect, state));
                 }
                 md.push('\n');
@@ -114,22 +118,22 @@ impl Emitter for ProofBookEmitter {
 
         // Verification status
         md.push_str("## Verification Status\n\n");
-        match atom.trust_level {
-            mumei_core::parser::ast::TrustLevel::Verified => {
+        match &meta.trust_level {
+            HirTrustLevel::Verified => {
                 md.push_str("> **VERIFIED** — All contracts proven by Z3 SMT solver.\n\n");
             }
-            mumei_core::parser::ast::TrustLevel::Trusted => {
+            HirTrustLevel::Trusted => {
                 md.push_str("> **TRUSTED** — Contracts assumed correct (not verified by Z3).\n\n");
             }
-            mumei_core::parser::ast::TrustLevel::Unverified => {
+            HirTrustLevel::Unverified => {
                 md.push_str("> **UNVERIFIED** — Contracts not yet verified; use with caution.\n\n");
             }
         }
 
         // Resources (if any)
-        if !atom.resources.is_empty() {
+        if !meta.resources.is_empty() {
             md.push_str("## Resources\n\n");
-            for res in &atom.resources {
+            for res in &meta.resources {
                 md.push_str(&format!("- `{}`\n", res));
             }
             md.push('\n');
@@ -149,22 +153,10 @@ impl Emitter for ProofBookEmitter {
     }
 }
 
-fn compute_content_hash(name: &str, requires: &str, ensures: &str, body: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(name.as_bytes());
-    hasher.update(b"\n---requires---\n");
-    hasher.update(requires.as_bytes());
-    hasher.update(b"\n---ensures---\n");
-    hasher.update(ensures.as_bytes());
-    hasher.update(b"\n---body---\n");
-    hasher.update(body.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mumei_core::hir::{HirEffectSet, HirExpr, HirStmt};
+    use mumei_core::hir::{lower_atom_metadata, HirAtom, HirEffectSet, HirExpr, HirStmt};
     use mumei_core::parser::ast::{Atom, Effect, Expr, Param, Span, Stmt, TrustLevel};
     use mumei_core::verification::ModuleEnv;
     use std::collections::HashMap;
@@ -176,11 +168,13 @@ mod tests {
             type_ref: None,
             is_ref: false,
             is_ref_mut: false,
+            consume: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_hir_atom(
         name: &str,
         params: Vec<Param>,
@@ -195,33 +189,41 @@ mod tests {
         is_async: bool,
         return_type: Option<String>,
     ) -> HirAtom {
+        let body = HirStmt::Expr(HirExpr::Number(0));
+        let atom = Atom {
+            name: name.to_string(),
+            type_params: vec![],
+            where_bounds: vec![],
+            params,
+            trace_id: None,
+            spec_metadata: std::collections::HashMap::new(),
+            clause_labels: Vec::new(),
+            clause_modes: Vec::new(),
+            covers: Vec::new(),
+            requires: requires.to_string(),
+            forall_constraints: vec![],
+            ensures: ensures.to_string(),
+            body_expr: body_expr.to_string(),
+            consumed_params: vec![],
+            resources,
+            is_async,
+            trust_level,
+            max_unroll: None,
+            invariant: None,
+            effects,
+            return_type,
+            decreases: None,
+            span: Span::default(),
+            effect_pre,
+            effect_post,
+        };
+        let (signature, contract, meta) = lower_atom_metadata(&atom, &body, None);
         HirAtom {
-            body: HirStmt::Expr(HirExpr::Number(0)),
-            requires_hir: HirExpr::Number(1),
-            ensures_hir: HirExpr::Number(1),
-            atom: Atom {
-                name: name.to_string(),
-                type_params: vec![],
-                where_bounds: vec![],
-                params,
-                trace_id: None,
-                spec_metadata: std::collections::HashMap::new(),
-                requires: requires.to_string(),
-                forall_constraints: vec![],
-                ensures: ensures.to_string(),
-                body_expr: body_expr.to_string(),
-                consumed_params: vec![],
-                resources,
-                is_async,
-                trust_level,
-                max_unroll: None,
-                invariant: None,
-                effects,
-                return_type,
-                span: Span::default(),
-                effect_pre,
-                effect_post,
-            },
+            body,
+            signature,
+            contract,
+            meta,
+            atom,
             body_stmt: Stmt::Expr(Expr::Number(0), Span::default()),
             effect_set: HirEffectSet::default(),
         }
@@ -249,7 +251,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/safe_divide"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/safe_divide"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         assert_eq!(artifacts.len(), 1);
@@ -284,7 +291,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/write_log"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/write_log"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -316,7 +328,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/close_file"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/close_file"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -345,7 +362,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/ffi_call"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/ffi_call"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -371,7 +393,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/simple_add"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/simple_add"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -396,7 +423,7 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/foo"), &module_env, &[])
+            .emit(&hir.emit_view(), Path::new("/tmp/foo"), &module_env, &[])
             .unwrap();
 
         assert_eq!(
@@ -424,7 +451,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/hash_test"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/hash_test"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -454,7 +486,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/guarded"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/guarded"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -481,7 +518,12 @@ mod tests {
         );
         let module_env = ModuleEnv::new();
         let artifacts = ProofBookEmitter
-            .emit(&hir, Path::new("/tmp/fetch_data"), &module_env, &[])
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/fetch_data"),
+                &module_env,
+                &[],
+            )
             .unwrap();
 
         let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
@@ -490,17 +532,34 @@ mod tests {
 
     #[test]
     fn test_content_hash_matches_proof_cert() {
-        let hash = compute_content_hash("test_atom", "x > 0", "result > 0", "x + 1");
-        // Same algorithm as mumei-core/src/proof_cert.rs compute_atom_content_hash
-        let mut hasher = Sha256::new();
-        hasher.update(b"test_atom");
-        hasher.update(b"\n---requires---\n");
-        hasher.update(b"x > 0");
-        hasher.update(b"\n---ensures---\n");
-        hasher.update(b"result > 0");
-        hasher.update(b"\n---body---\n");
-        hasher.update(b"x + 1");
-        let expected = format!("{:x}", hasher.finalize());
-        assert_eq!(hash, expected);
+        let hir = make_hir_atom(
+            "hash_test",
+            vec![make_param("x", Some("i64"))],
+            "x > 0",
+            "result > 0",
+            "x + 1",
+            TrustLevel::Verified,
+            vec![],
+            HashMap::new(),
+            HashMap::new(),
+            vec![],
+            false,
+            None,
+        );
+        let expected = mumei_core::proof_cert::compute_atom_content_hash_v2(&hir.atom);
+        assert_eq!(hir.meta.content_hash, expected);
+        let artifacts = ProofBookEmitter
+            .emit(
+                &hir.emit_view(),
+                Path::new("/tmp/hash_test"),
+                &ModuleEnv::new(),
+                &[],
+            )
+            .unwrap();
+        let md = String::from_utf8(artifacts[0].data.clone()).unwrap();
+        assert!(md.contains(&format!(
+            "| **Content Hash** | `{}` |",
+            &hir.meta.content_hash[..16]
+        )));
     }
 }

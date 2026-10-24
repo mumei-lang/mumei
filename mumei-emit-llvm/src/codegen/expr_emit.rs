@@ -1,7 +1,7 @@
 use crate::codegen::lowering::{
-    bitpreserve_cast, box_payload_to_i64, declare_chan_send_owned, enum_llvm_type,
-    payload_needs_box, release_boxed_payload, resolve_param_type, resolve_return_type,
-    unbox_payload_from_i64,
+    array_struct_type, bitpreserve_cast, box_payload_to_i64, declare_chan_send_owned,
+    enum_llvm_type, payload_needs_box, release_boxed_payload, resolve_param_type,
+    resolve_return_type, unbox_payload_from_i64, ArrayPtr,
 };
 use crate::codegen::pattern_emit::{
     bind_pattern_variables, compile_pattern_test, find_field_index, find_field_index_by_name,
@@ -11,23 +11,1010 @@ use crate::codegen::task_runtime::{
     compile_task_spawn, declare_task_group_any_externs, emit_task_join_only, emit_task_join_raw,
     emit_task_spawn_only, static_next_task_group_id, PendingTask, TaskGroupAnyContext,
 };
+use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{AnyValue, BasicMetadataValueEnum, BasicValueEnum, FunctionValue};
+use inkwell::values::{
+    AnyValue, AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue,
+};
 use inkwell::AddressSpace;
 use inkwell::{FloatPredicate, IntPredicate};
-use mumei_core::hir::{HirExpr, HirStmt};
-use mumei_core::parser::{JoinSemantics, Op};
+use mumei_core::hir::{
+    collect_assigned_outer_variables_match_arm, collect_assigned_outer_variables_stmt, HirBinOp,
+    HirExpr, HirJoin, HirPattern, HirStmt,
+};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+
+type ArrayMergeState<'a> = (
+    HashMap<String, BasicValueEnum<'a>>,
+    HashMap<String, ArrayPtr<'a>>,
+    BasicBlock<'a>,
+    HashSet<String>,
+);
 
 /// P25 — key under which a `chan<T>` binding records its declared payload
 /// type inside `var_types`. `<` can never appear in a Mumei identifier, so
 /// these entries never collide with a variable's struct type entry.
 pub(crate) fn chan_payload_key(var: &str) -> String {
     format!("<chan>{}", var)
+}
+
+/// Marker recorded in `var_types[name]` when `let f = |…| …` or `f = |…|`
+/// binds a lambda: `@lam:<lifted_fn>:<cap1,cap2,…>`. `@` never appears in a
+/// Mumei identifier, so the marker cannot collide with a real type entry.
+pub(crate) const LAMBDA_MARK: &str = "@lam:";
+
+pub(crate) fn lambda_marker(fn_name: &str, captures: &[String]) -> String {
+    format!("{}{}:{}", LAMBDA_MARK, fn_name, captures.join(","))
+}
+
+/// Parse a `@lam:` marker into (lifted fn name, capture names).
+fn parse_lambda_marker(mark: &str) -> Option<(String, Vec<String>)> {
+    let rest = mark.strip_prefix(LAMBDA_MARK)?;
+    let (fn_name, caps) = rest.split_once(':')?;
+    let caps = if caps.is_empty() {
+        Vec::new()
+    } else {
+        caps.split(',').map(|s| s.to_string()).collect()
+    };
+    Some((fn_name.to_string(), caps))
+}
+
+/// Snapshot/merge helpers for branch-scoped lambda bindings: a lambda bound
+/// on only one `if`/`else` side — or bound to different lifted functions —
+/// must not stay callable after the merge, mirroring the verifier's
+/// branch-scoped `local_lambdas` merge.
+pub(crate) fn lambda_marks(var_types: &HashMap<String, String>) -> HashMap<String, String> {
+    var_types
+        .iter()
+        .filter(|(_, v)| v.starts_with(LAMBDA_MARK))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Merge lambda markers after an `if`/`else` — mirrors the verifier's
+/// `local_lambdas` merge: a binding on only one branch leaks through, while
+/// a name bound on both survives only when both sides kept the *same*
+/// lifted function (a conflicting rebind drops the entry so a post-branch
+/// call fails closed instead of picking one side's body).
+pub(crate) fn merge_lambda_marks(
+    var_types: &mut HashMap<String, String>,
+    then_marks: &HashMap<String, String>,
+    else_marks: &HashMap<String, String>,
+) {
+    var_types.retain(|_, v| !v.starts_with(LAMBDA_MARK));
+    for (name, mark) in then_marks {
+        match else_marks.get(name) {
+            Some(m) if m != mark => {}
+            _ => {
+                var_types.insert(name.clone(), mark.clone());
+            }
+        }
+    }
+    for (name, mark) in else_marks {
+        if !then_marks.contains_key(name) {
+            var_types.insert(name.clone(), mark.clone());
+        }
+    }
+}
+
+/// Bind a value that arrived as a lifted-function argument: array fat
+/// pointers decompose into `array_ptrs` + the len scalar (mirroring how
+/// `driver.rs` binds `[T]` atom params); struct/enum/lambda type entries
+/// carry over so field access and nested indirect calls still resolve.
+#[allow(clippy::too_many_arguments)]
+fn bind_lambda_arg<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    name: &str,
+    val: BasicValueEnum<'a>,
+    declared_ty: Option<&str>,
+    src_array: Option<ArrayPtr<'a>>,
+    src_var_ty: Option<&String>,
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    var_types: &mut HashMap<String, String>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<()> {
+    let is_fat_array = src_array.is_some()
+        || declared_ty.is_some_and(|t| {
+            matches!(
+                mumei_core::lowering::lower(&module_env.resolve_base_type(t)),
+                mumei_core::lowering::LoweredType::Array(_)
+            )
+        });
+    if is_fat_array {
+        let Some(struct_val) = val.is_struct_value().then(|| val.into_struct_value()) else {
+            return Err(MumeiError::codegen(format!(
+                "lambda arg `{name}` must be an array fat pointer"
+            )));
+        };
+        let len_val = builder
+            .build_extract_value(struct_val, 0, &format!("{name}_len"))
+            .map_err(|e| MumeiError::codegen(format!("lambda arg extract failed: {e:?}")))?;
+        let data_ptr = builder
+            .build_extract_value(struct_val, 1, &format!("{name}_data"))
+            .map_err(|e| MumeiError::codegen(format!("lambda arg extract failed: {e:?}")))?;
+        let elem_ty = src_array
+            .map(|(_, e, _)| e)
+            .or_else(|| {
+                declared_ty
+                    .and_then(|t| super::lowering::array_elem_llvm_type(context, t, module_env))
+            })
+            .unwrap_or_else(|| context.i64_type().into());
+        array_ptrs.insert(name.to_string(), (len_val, elem_ty, data_ptr));
+        variables.insert(name.to_string(), len_val);
+        return Ok(());
+    }
+    variables.insert(name.to_string(), val);
+    if let Some(t) = src_var_ty {
+        var_types.insert(name.to_string(), t.clone());
+    }
+    Ok(())
+}
+
+/// Lift `|params| body` into a private module-level function whose leading
+/// parameters are the lambda's captures — a later `f(args)` passes the
+/// call-site values of the captured names, matching how the verifier
+/// inlines the body under `local_lambdas`. Returns the lifted fn name.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_lambda_function<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+    caller_fn: &FunctionValue<'a>,
+    var_name: &str,
+    params: &[mumei_core::hir::HirLambdaParam],
+    return_type: Option<&String>,
+    captures: &[String],
+    body: &HirStmt,
+    outer_variables: &HashMap<String, BasicValueEnum<'a>>,
+    outer_var_types: &HashMap<String, String>,
+    outer_array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<(String, Vec<String>)> {
+    let base = format!(
+        "__lam_{}_{}",
+        caller_fn.get_name().to_string_lossy(),
+        var_name
+    );
+    let mut fn_name = base.clone();
+    let mut counter = 0u32;
+    while module.get_function(&fn_name).is_some() {
+        counter += 1;
+        fn_name = format!("{base}_{counter}");
+    }
+
+    // Lambdas visible at the let site seed the body's `@lam:` scope (a call
+    // to one inside the body resolves the lifted fn by name — no param
+    // needed), but their *value* captures must ride along as extra params:
+    // `let f = |x| x+k; let g = |y| f(y)` — `f`'s `k` is read from
+    // `variables` inside `g`'s body, so `g` must take `k` too.
+    let mut extra_caps: Vec<String> = Vec::new();
+    let lam_marks = lambda_marks(outer_var_types);
+    let mut seed: Vec<String> = lam_marks
+        .values()
+        .filter_map(|m| parse_lambda_marker(m).map(|(_, c)| c))
+        .flatten()
+        .collect();
+    let mut seen: std::collections::HashSet<String> = seed.iter().cloned().collect();
+    while let Some(cap) = seed.pop() {
+        if let Some(m) = lam_marks.get(&cap) {
+            // A captured lambda needs no value param (its marker resolves);
+            // but its own captures contribute transitively.
+            if let Some((_, sub_caps)) = parse_lambda_marker(m) {
+                for c in sub_caps {
+                    if seen.insert(c.clone()) {
+                        seed.push(c);
+                    }
+                }
+            }
+            continue;
+        }
+        let in_scope = params.iter().any(|p| p.name == cap);
+        if captures.contains(&cap) || extra_caps.contains(&cap) || in_scope {
+            continue;
+        }
+        extra_caps.push(cap);
+    }
+    let all_caps: Vec<String> = captures.iter().cloned().chain(extra_caps).collect();
+
+    // Signature: captures first (LLVM types from the binding site's values —
+    // `let f = |x| x + k` needs no annotation on `k`), then declared params.
+    let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+    for cap in &all_caps {
+        if outer_array_ptrs.contains_key(cap.as_str()) {
+            // Array captures travel as the `{i64, ptr}` fat pointer, not
+            // the len scalar `variables[cap]` holds.
+            param_types.push(array_struct_type(context).into());
+            continue;
+        }
+        if lam_marks.contains_key(cap) {
+            // Lambda captures pass the fn pointer (uniformity); the body's
+            // marker resolves the call by name regardless.
+            param_types.push(context.ptr_type(AddressSpace::default()).into());
+            continue;
+        }
+        let Some(v) = outer_variables.get(cap.as_str()) else {
+            return Err(MumeiError::codegen(format!(
+                "lambda `{var_name}` captures `{cap}`, which is not bound at the let site"
+            )));
+        };
+        param_types.push(v.get_type().into());
+    }
+    for p in params {
+        param_types.push(
+            resolve_param_type(
+                context,
+                p.type_ref.as_ref().map(|t| t.to_string()).as_deref(),
+                module_env,
+            )
+            .into(),
+        );
+    }
+    let mut ret_ty = resolve_param_type(context, return_type.map(|s| s.as_str()), module_env);
+
+    // An undeclared `|x: f64| x * 2.0` returns `double`, not `i64` — probe
+    // the body's actual result type by compiling once, then rebuild with
+    // the discovered return type. Nested lambdas lifted during the probe
+    // stay in the module as dead private fns (re-emit gets a `_N` suffix
+    // and the body's marker names the re-emitted one consistently).
+    for attempt in 0..2 {
+        let lam_fn = module.add_function(
+            &fn_name,
+            ret_ty.fn_type(&param_types, false),
+            Some(inkwell::module::Linkage::Private),
+        );
+
+        // Compile the body on a separate builder so the caller's insertion
+        // point is preserved; the body gets a fresh scope seeded with args.
+        let lam_builder = context.create_builder();
+        let entry = context.append_basic_block(lam_fn, "entry");
+        lam_builder.position_at_end(entry);
+
+        let mut variables: HashMap<String, BasicValueEnum> = HashMap::new();
+        let mut var_types: HashMap<String, String> = HashMap::new();
+        let mut array_ptrs: HashMap<String, ArrayPtr> = HashMap::new();
+        // Seed the body with the lambda scope live at the let site — a call
+        // to an outer lambda inside the body resolves its `@lam:` marker.
+        var_types.extend(lam_marks.iter().map(|(k, v)| (k.clone(), v.clone())));
+
+        for (i, cap) in all_caps.iter().enumerate() {
+            let val = lam_fn.get_nth_param(i as u32).unwrap();
+            bind_lambda_arg(
+                context,
+                &lam_builder,
+                cap,
+                val,
+                None,
+                outer_array_ptrs.get(cap.as_str()).copied(),
+                outer_var_types.get(cap.as_str()),
+                &mut variables,
+                &mut var_types,
+                &mut array_ptrs,
+                module_env,
+            )?;
+        }
+        for (i, p) in params.iter().enumerate() {
+            let val = lam_fn.get_nth_param((all_caps.len() + i) as u32).unwrap();
+            let ty = p.type_ref.as_ref().map(|t| t.to_string());
+            let ty_hint = ty
+                .as_deref()
+                .map(|t| resolve_named_type(module_env, t))
+                .filter(|base| {
+                    module_env.get_struct(base).is_some() || module_env.get_enum(base).is_some()
+                });
+            bind_lambda_arg(
+                context,
+                &lam_builder,
+                &p.name,
+                val,
+                ty.as_deref(),
+                None,
+                ty_hint.as_ref(),
+                &mut variables,
+                &mut var_types,
+                &mut array_ptrs,
+                module_env,
+            )?;
+            // `|f| f(1)` shadows an outer lambda `f` — the seeded marker
+            // must not redirect calls meant for the parameter.
+            if ty_hint.is_none() {
+                var_types.remove(&p.name);
+            }
+        }
+
+        let result = compile_hir_stmt(
+            context,
+            &lam_builder,
+            module,
+            &lam_fn,
+            body,
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            module_env,
+        )?;
+
+        let last_block = lam_builder.get_insert_block().unwrap();
+        if last_block.get_terminator().is_none() {
+            if result.get_type() != ret_ty {
+                if return_type.is_none() && attempt == 0 {
+                    ret_ty = result.get_type();
+                    unsafe { lam_fn.delete() };
+                    continue;
+                }
+                return Err(MumeiError::codegen(format!(
+                    "lambda `{var_name}` returns {:?} but its signature expects {:?}",
+                    result.get_type(),
+                    ret_ty
+                )));
+            }
+            lam_builder
+                .build_return(Some(&result))
+                .map_err(|e| MumeiError::codegen(format!("lambda return failed: {e:?}")))?;
+        }
+        return Ok((fn_name, all_caps));
+    }
+    unreachable!()
+}
+
+/// Push the leading capture arguments for a lifted-lambda call: each cap
+/// name resolves to the current `variables` value, repacking array slots
+/// into the `{i64, ptr}` fat pointer.
+fn push_lambda_captures<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    caps: &[String],
+    variables: &HashMap<String, BasicValueEnum<'a>>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+) -> MumeiResult<Vec<BasicMetadataValueEnum<'a>>> {
+    let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(caps.len());
+    for cap in caps {
+        if let Some(&(len_val, _elem_ty, data_ptr)) = array_ptrs.get(cap.as_str()) {
+            let struct_ty = array_struct_type(context);
+            let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
+            agg = builder
+                .build_insert_value(agg, len_val, 0, "lamcap_len")
+                .map_err(|e| MumeiError::codegen(format!("array capture pack failed: {e:?}")))?;
+            agg = builder
+                .build_insert_value(agg, data_ptr, 1, "lamcap_data")
+                .map_err(|e| MumeiError::codegen(format!("array capture pack failed: {e:?}")))?;
+            let agg_val: BasicValueEnum = match agg {
+                inkwell::values::AggregateValueEnum::StructValue(s) => s.into(),
+                inkwell::values::AggregateValueEnum::ArrayValue(a) => a.into(),
+            };
+            arg_vals.push(agg_val.into());
+        } else if let Some(v) = variables.get(cap.as_str()) {
+            arg_vals.push((*v).into());
+        } else {
+            return Err(MumeiError::codegen(format!(
+                "lambda capture `{cap}` is not bound at the call site"
+            )));
+        }
+    }
+    Ok(arg_vals)
+}
+
+/// Collect the `let h = if c { f } else { g }` branch shape into
+/// `(conditions, marker)` leaves: a leaf is a `Variable` carrying a `@lam:`
+/// marker (or an inline `Lambda` literal, lifted on the spot), an
+/// `IfThenElse` recurses with `cond` accumulated onto each leaf.
+/// Returns None when any leaf isn't a lambda — the caller then falls back
+/// to the generic expression compile and the name stays uncallable.
+/// One conjunct of a lambda-selector leaf's taken-condition: an `if`
+/// condition evaluated as truthy (`!= 0`), or a match arm's
+/// `target == literal` equality. A leaf's conds are ANDed.
+pub(crate) type SelScope<'a> = Rc<(HashMap<String, BasicValueEnum<'a>>, HashMap<String, String>)>;
+
+#[derive(Clone)]
+pub(crate) enum SelCond<'e, 'a> {
+    Truthy(&'e HirExpr, Option<SelScope<'a>>),
+    MatchEq(&'e HirExpr, i64, Option<SelScope<'a>>),
+}
+
+type SelBranch<'e, 'a> = (Vec<SelCond<'e, 'a>>, String, Option<SelScope<'a>>);
+
+/// Lambda-only block prefix: every non-tail stmt must be `let v = |…| …`
+/// or `let v = <lambda-bound var>`; anything else makes the selector
+/// fall back to the generic expression path.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn block_lambda_scope<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+    caller_fn: &FunctionValue<'a>,
+    stmts: &[HirStmt],
+    variables: &HashMap<String, BasicValueEnum<'a>>,
+    var_types: &HashMap<String, String>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<Option<(HashMap<String, BasicValueEnum<'a>>, HashMap<String, String>)>> {
+    let mut local_variables = variables.clone();
+    let mut local_var_types = var_types.clone();
+    for stmt in stmts {
+        match stmt {
+            HirStmt::Let { var, value, .. } => match value.as_ref() {
+                HirExpr::Lambda {
+                    params,
+                    return_type,
+                    captures,
+                    body,
+                } => {
+                    let (fn_name, all_caps) = emit_lambda_function(
+                        context,
+                        module,
+                        caller_fn,
+                        var,
+                        params,
+                        return_type.as_ref(),
+                        captures,
+                        body,
+                        &local_variables,
+                        &local_var_types,
+                        array_ptrs,
+                        module_env,
+                    )?;
+                    let lam_fn = module.get_function(&fn_name).unwrap();
+                    let ptr: BasicValueEnum = lam_fn.as_global_value().as_pointer_value().into();
+                    local_variables.insert(var.clone(), ptr);
+                    local_var_types.insert(var.clone(), lambda_marker(&fn_name, &all_caps));
+                }
+                HirExpr::Variable(src)
+                    if local_var_types
+                        .get(src.as_str())
+                        .is_some_and(|mark| mark.starts_with(LAMBDA_MARK)) =>
+                {
+                    let mark = local_var_types.get(src.as_str()).cloned().unwrap();
+                    let ptr = local_variables
+                        .get(src.as_str())
+                        .copied()
+                        .unwrap_or_else(|| context.i64_type().const_int(0, false).into());
+                    local_variables.insert(var.clone(), ptr);
+                    local_var_types.insert(var.clone(), mark);
+                }
+                _ => return Ok(None),
+            },
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some((local_variables, local_var_types)))
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn collect_lambda_branch_body<'e, 'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+    caller_fn: &FunctionValue<'a>,
+    stmt: &'e HirStmt,
+    conds: Vec<SelCond<'e, 'a>>,
+    variables: &HashMap<String, BasicValueEnum<'a>>,
+    var_types: &HashMap<String, String>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+    require_simple_tail: bool,
+    scope: Option<SelScope<'a>>,
+) -> MumeiResult<Option<Vec<SelBranch<'e, 'a>>>> {
+    match stmt {
+        HirStmt::Block {
+            stmts,
+            tail_expr: Some(tail),
+        } if !stmts.is_empty() => {
+            if require_simple_tail
+                && !matches!(tail.as_ref(), HirExpr::Variable(_) | HirExpr::Lambda { .. })
+            {
+                return Ok(None);
+            }
+            let Some((local_variables, local_var_types)) = block_lambda_scope(
+                context, module, caller_fn, stmts, variables, var_types, array_ptrs, module_env,
+            )?
+            else {
+                return Ok(None);
+            };
+            let scope = Some(Rc::new((local_variables.clone(), local_var_types.clone())));
+            collect_lambda_branches(
+                context,
+                module,
+                caller_fn,
+                tail,
+                conds,
+                &local_variables,
+                &local_var_types,
+                array_ptrs,
+                module_env,
+                scope,
+            )
+        }
+        _ => {
+            let Some(tail) = hir_stmt_tail_expr(stmt) else {
+                return Ok(None);
+            };
+            if require_simple_tail && !matches!(tail, HirExpr::Variable(_) | HirExpr::Lambda { .. })
+            {
+                return Ok(None);
+            }
+            collect_lambda_branches(
+                context, module, caller_fn, tail, conds, variables, var_types, array_ptrs,
+                module_env, scope,
+            )
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(crate) fn collect_lambda_branches<'e, 'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+    caller_fn: &FunctionValue<'a>,
+    expr: &'e HirExpr,
+    conds: Vec<SelCond<'e, 'a>>,
+    variables: &HashMap<String, BasicValueEnum<'a>>,
+    var_types: &HashMap<String, String>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+    scope: Option<SelScope<'a>>,
+) -> MumeiResult<Option<Vec<SelBranch<'e, 'a>>>> {
+    // No depth cap: the verifier's `resolve_lambda_stmt` recurses without a
+    // limit, so a cap here would make codegen reject programs verify accepts.
+    match expr {
+        HirExpr::Variable(name) => Ok(var_types
+            .get(name.as_str())
+            .filter(|m| m.starts_with(LAMBDA_MARK))
+            .map(|mark| vec![(conds, mark.clone(), scope.clone())])),
+        HirExpr::Lambda {
+            params,
+            return_type,
+            captures,
+            body,
+        } => {
+            // An inline `|…| …` leaf lifts like any other bound lambda; the
+            // lifted fn's marker is what the branch entry records.
+            let (fn_name, all_caps) = emit_lambda_function(
+                context,
+                module,
+                caller_fn,
+                "branch",
+                params,
+                return_type.as_ref(),
+                captures,
+                body,
+                variables,
+                var_types,
+                array_ptrs,
+                module_env,
+            )?;
+            Ok(Some(vec![(
+                conds,
+                lambda_marker(&fn_name, &all_caps),
+                scope,
+            )]))
+        }
+        HirExpr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            let mut then_conds = conds.clone();
+            then_conds.push(SelCond::Truthy(cond, scope.clone()));
+            let Some(mut then_branches) = collect_lambda_branch_body(
+                context,
+                module,
+                caller_fn,
+                then_branch,
+                then_conds,
+                variables,
+                var_types,
+                array_ptrs,
+                module_env,
+                false,
+                scope.clone(),
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(mut else_branches) = collect_lambda_branch_body(
+                context,
+                module,
+                caller_fn,
+                else_branch,
+                conds,
+                variables,
+                var_types,
+                array_ptrs,
+                module_env,
+                false,
+                scope,
+            )?
+            else {
+                return Ok(None);
+            };
+            then_branches.append(&mut else_branches);
+            Ok(Some(then_branches))
+        }
+        // `let m = match t { 1 => f, _ => g }` — each arm tail is a
+        // lambda leaf guarded by a `MatchEq`/`Always` condition, in
+        // first-match order. Same scoping as the verifier: only
+        // Literal/Wildcard/Variable patterns and no guards.
+        HirExpr::Match { target, arms } => {
+            if arms.is_empty() {
+                return Ok(None);
+            }
+            let mut out: Vec<SelBranch<'e, 'a>> = Vec::new();
+            for arm in arms {
+                if arm.guard.is_some() {
+                    return Ok(None);
+                }
+                let mut leaf_conds = conds.clone();
+                match &arm.pattern {
+                    HirPattern::Wildcard | HirPattern::Variable(_) => {}
+                    HirPattern::Literal(n) => {
+                        leaf_conds.push(SelCond::MatchEq(target.as_ref(), *n, scope.clone()));
+                    }
+                    _ => return Ok(None),
+                }
+                let Some(mut leaves) = collect_lambda_branch_body(
+                    context,
+                    module,
+                    caller_fn,
+                    &arm.body,
+                    leaf_conds,
+                    variables,
+                    var_types,
+                    array_ptrs,
+                    module_env,
+                    true,
+                    scope.clone(),
+                )?
+                else {
+                    return Ok(None);
+                };
+                out.append(&mut leaves);
+            }
+            Ok(Some(out))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The tail expression of a lambda-shaped branch body — a bare `Expr` stmt
+/// or the last stmt of a `Block`.
+fn hir_stmt_tail_expr(stmt: &HirStmt) -> Option<&HirExpr> {
+    match stmt {
+        HirStmt::Expr(e) => Some(e),
+        HirStmt::Block { tail_expr, .. } => tail_expr.as_ref().map(|e| e.as_ref()),
+        _ => None,
+    }
+}
+
+/// Emit `__lamsel_<caller>_<var>` — a dispatcher for
+/// `let h = if c { f } else { g }`. Signature:
+/// `(i64 sel, <union of every branch's captures>, <shared arg params>)`.
+/// `sel` picks the branch: index 0..n-1 for conditional leaves, n-1 for the
+/// trailing unconditional else leaf. The body's `sel`-indexed switch calls
+/// the chosen lifted function with its own capture list.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_lambda_selector<'a>(
+    context: &'a Context,
+    module: &Module<'a>,
+    caller_fn: &FunctionValue<'a>,
+    var_name: &str,
+    branches: &[(String, Option<SelScope<'a>>)],
+    variables: &HashMap<String, BasicValueEnum<'a>>,
+    var_types: &HashMap<String, String>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<Option<(String, Vec<String>)>> {
+    // Resolve each branch's lifted fn and marker captures.
+    let mut branch_fns: Vec<FunctionValue<'a>> = Vec::with_capacity(branches.len());
+    let mut branch_caps: Vec<Vec<String>> = Vec::with_capacity(branches.len());
+    let mut branch_scopes: Vec<Option<SelScope<'a>>> = Vec::with_capacity(branches.len());
+    for (mark, scope) in branches {
+        let Some((fn_name, caps)) = parse_lambda_marker(mark) else {
+            return Ok(None);
+        };
+        let Some(lam_fn) = module.get_function(&fn_name) else {
+            return Ok(None);
+        };
+        branch_fns.push(lam_fn);
+        branch_caps.push(caps);
+        branch_scopes.push(scope.clone());
+    }
+
+    // Arity + argument types + return type must agree across branches —
+    // otherwise no single dispatcher signature exists (fail closed).
+    let arg_arity = |i: usize| branch_fns[i].count_params() as usize - branch_caps[i].len();
+    let arity = arg_arity(0);
+    if branch_fns
+        .iter()
+        .enumerate()
+        .any(|(i, _)| arg_arity(i) != arity)
+    {
+        return Ok(None);
+    }
+    let arg_types_of = |i: usize| -> Vec<BasicMetadataTypeEnum<'a>> {
+        branch_fns[i]
+            .get_type()
+            .get_param_types()
+            .into_iter()
+            .skip(branch_caps[i].len())
+            .map(|t| t.into())
+            .collect()
+    };
+    let arg_types = arg_types_of(0);
+    if (1..branches.len()).any(|i| arg_types_of(i) != arg_types) {
+        return Ok(None);
+    }
+    let ret_ty = branch_fns[0].get_type().get_return_type();
+    if branch_fns
+        .iter()
+        .any(|f| f.get_type().get_return_type() != ret_ty)
+    {
+        return Ok(None);
+    }
+    let Some(ret_ty) = ret_ty else {
+        return Ok(None);
+    };
+
+    // Ordered union of all outer branch captures. Lambda captures that only
+    // exist in a branch's block scope are supplied directly in that branch's
+    // dispatch path instead of becoming dispatcher parameters.
+    let mut union_caps: Vec<String> = Vec::new();
+    let mut scope_lambda_caps: Vec<Vec<(String, BasicValueEnum<'a>)>> =
+        vec![Vec::new(); branches.len()];
+    for (i, caps) in branch_caps.iter().enumerate() {
+        for c in caps {
+            if array_ptrs.contains_key(c.as_str()) || variables.contains_key(c.as_str()) {
+                if !union_caps.contains(c) {
+                    union_caps.push(c.clone());
+                }
+                continue;
+            }
+            let Some(scope) = branch_scopes[i].as_ref() else {
+                return Ok(None);
+            };
+            let Some(mark) = scope
+                .1
+                .get(c.as_str())
+                .filter(|mark| mark.starts_with(LAMBDA_MARK))
+            else {
+                return Ok(None);
+            };
+            let Some(ptr) = scope.0.get(c.as_str()).copied() else {
+                return Ok(None);
+            };
+            if !scope_lambda_caps[i].iter().any(|(name, _)| name == c) {
+                scope_lambda_caps[i].push((c.clone(), ptr));
+            }
+            if let Some((_, transitive_caps)) = parse_lambda_marker(mark) {
+                for transitive_cap in transitive_caps {
+                    if (array_ptrs.contains_key(transitive_cap.as_str())
+                        || variables.contains_key(transitive_cap.as_str()))
+                        && !union_caps.contains(&transitive_cap)
+                    {
+                        union_caps.push(transitive_cap);
+                    }
+                }
+            }
+        }
+    }
+
+    // Dispatcher signature: (i64 sel, union caps, args).
+    let mut param_types: Vec<BasicMetadataTypeEnum> = vec![context.i64_type().into()];
+    for cap in &union_caps {
+        if array_ptrs.contains_key(cap.as_str()) {
+            param_types.push(array_struct_type(context).into());
+        } else if let Some(v) = variables.get(cap.as_str()) {
+            param_types.push(v.get_type().into());
+        } else {
+            return Ok(None);
+        }
+    }
+    param_types.extend(arg_types.iter().cloned());
+
+    let fn_name = format!(
+        "__lamsel_{}_{}",
+        caller_fn.get_name().to_string_lossy(),
+        var_name
+    );
+    let fn_name = if module.get_function(&fn_name).is_some() {
+        let mut n = 1;
+        loop {
+            let cand = format!("{fn_name}_{n}");
+            if module.get_function(&cand).is_none() {
+                break cand;
+            }
+            n += 1;
+        }
+    } else {
+        fn_name
+    };
+    let lam_fn = module.add_function(
+        &fn_name,
+        ret_ty.fn_type(&param_types, false),
+        Some(inkwell::module::Linkage::Private),
+    );
+
+    // Body scope: sel + union caps + args bound by position. The sel
+    // binding name derives from the deduped dispatcher name so a rebinding
+    // (`let m = …; let m = …`) mints a fresh slot — the old binding's sel
+    // value must stay reachable for nested references like `_ => m`.
+    let sel_name = format!("__sel#{var_name}#{fn_name}");
+    let lam_builder = context.create_builder();
+    let entry = context.append_basic_block(lam_fn, "entry");
+    lam_builder.position_at_end(entry);
+    let mut scope_vars: HashMap<String, BasicValueEnum> = HashMap::new();
+    let mut scope_var_types: HashMap<String, String> = HashMap::new();
+    let mut array_ptrs_local: HashMap<String, ArrayPtr> = HashMap::new();
+    let mut arg_vals: Vec<BasicValueEnum> = Vec::new();
+
+    let sel_val = lam_fn.get_nth_param(0).unwrap().into_int_value();
+    scope_vars.insert(sel_name.clone(), sel_val.into());
+    for (i, cap) in union_caps.iter().enumerate() {
+        let val = lam_fn.get_nth_param(1 + i as u32).unwrap();
+        bind_lambda_arg(
+            context,
+            &lam_builder,
+            cap,
+            val,
+            None,
+            array_ptrs.get(cap.as_str()).copied(),
+            var_types.get(cap.as_str()),
+            &mut scope_vars,
+            &mut scope_var_types,
+            &mut array_ptrs_local,
+            module_env,
+        )?;
+    }
+    for i in 0..arity {
+        arg_vals.push(
+            lam_fn
+                .get_nth_param((1 + union_caps.len() + i) as u32)
+                .unwrap(),
+        );
+    }
+
+    // Dispatch chain: `sel == i` → call branch i; the final leaf is the
+    // unconditional else (its conds vec is empty).
+    let n = branches.len();
+    for i in 0..n {
+        if i + 1 < n {
+            // `sel == i` → call branch i, else fall through to the next check.
+            let cond_i = lam_builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    sel_val,
+                    context.i64_type().const_int(i as u64, false),
+                    "sel_eq",
+                )
+                .map_err(|e| MumeiError::codegen(format!("sel compare failed: {e:?}")))?;
+            let call_block = context.append_basic_block(lam_fn, &format!("sel_call_{i}"));
+            let next_block = context.append_basic_block(lam_fn, &format!("sel_next_{i}"));
+            lam_builder
+                .build_conditional_branch(cond_i, call_block, next_block)
+                .map_err(|e| MumeiError::codegen(format!("sel branch failed: {e:?}")))?;
+            lam_builder.position_at_end(call_block);
+            let mut branch_scope_vars = scope_vars.clone();
+            for (name, ptr) in &scope_lambda_caps[i] {
+                branch_scope_vars.insert(name.clone(), *ptr);
+            }
+            let mut vals = push_lambda_captures(
+                context,
+                &lam_builder,
+                &branch_caps[i],
+                &branch_scope_vars,
+                &array_ptrs_local,
+            )?;
+            vals.extend(
+                arg_vals
+                    .iter()
+                    .map(|v| -> BasicMetadataValueEnum { (*v).into() }),
+            );
+            let call = lam_builder
+                .build_call(branch_fns[i], &vals, "sel_call")
+                .map_err(|e| MumeiError::codegen(format!("lambda dispatch call failed: {e:?}")))?;
+            let result: BasicValueEnum = call
+                .try_as_basic_value()
+                .left()
+                .unwrap_or_else(|| context.i64_type().const_int(0, false).into());
+            lam_builder
+                .build_return(Some(&result))
+                .map_err(|e| MumeiError::codegen(format!("lambda dispatch ret failed: {e:?}")))?;
+            lam_builder.position_at_end(next_block);
+        } else {
+            // The trailing else leaf is unconditional: emit its call inline
+            // at the current position.
+            let mut branch_scope_vars = scope_vars.clone();
+            for (name, ptr) in &scope_lambda_caps[i] {
+                branch_scope_vars.insert(name.clone(), *ptr);
+            }
+            let mut vals = push_lambda_captures(
+                context,
+                &lam_builder,
+                &branch_caps[i],
+                &branch_scope_vars,
+                &array_ptrs_local,
+            )?;
+            vals.extend(
+                arg_vals
+                    .iter()
+                    .map(|v| -> BasicMetadataValueEnum { (*v).into() }),
+            );
+            let call = lam_builder
+                .build_call(branch_fns[i], &vals, "sel_call")
+                .map_err(|e| MumeiError::codegen(format!("lambda dispatch call failed: {e:?}")))?;
+            let result: BasicValueEnum = call
+                .try_as_basic_value()
+                .left()
+                .unwrap_or_else(|| context.i64_type().const_int(0, false).into());
+            lam_builder
+                .build_return(Some(&result))
+                .map_err(|e| MumeiError::codegen(format!("lambda dispatch ret failed: {e:?}")))?;
+        }
+    }
+    let mut all_caps = vec![sel_name];
+    for cap in union_caps {
+        if !all_caps.contains(&cap) {
+            all_caps.push(cap);
+        }
+    }
+    Ok(Some((fn_name, all_caps)))
+}
+
+/// Emit a call through a `@lam:` marker: `f(args)` on a `let`/`assign`-bound
+/// lambda resolves to the lifted private function; capture values are read
+/// from `variables` at the call site and passed as leading arguments.
+#[allow(clippy::too_many_arguments)]
+fn emit_lambda_call<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    function: &FunctionValue<'a>,
+    mark: &str,
+    args: &[HirExpr],
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    var_types: &mut HashMap<String, String>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<BasicValueEnum<'a>> {
+    let Some((fn_name, caps)) = parse_lambda_marker(mark) else {
+        return Err(MumeiError::codegen(format!(
+            "malformed lambda binding marker: {mark}"
+        )));
+    };
+    let Some(lam_fn) = module.get_function(&fn_name) else {
+        return Err(MumeiError::codegen(format!(
+            "lifted lambda function {fn_name} not found"
+        )));
+    };
+    let expected = lam_fn.count_params() as usize;
+    if args.len() + caps.len() != expected {
+        return Err(MumeiError::codegen(format!(
+            "lambda call arity mismatch: {} args + {} captures != {} params",
+            args.len(),
+            caps.len(),
+            expected
+        )));
+    }
+    let mut arg_vals: Vec<BasicMetadataValueEnum> =
+        push_lambda_captures(context, builder, &caps, variables, array_ptrs)?;
+    for arg in args {
+        arg_vals.push(
+            compile_hir_expr(
+                context, builder, module, function, arg, variables, var_types, array_ptrs,
+                module_env,
+            )?
+            .into(),
+        );
+    }
+    let call_result = builder
+        .build_call(lam_fn, &arg_vals, "lam_call")
+        .map_err(|e| MumeiError::codegen(format!("lambda call failed: {e:?}")))?;
+    Ok(call_result
+        .try_as_basic_value()
+        .left()
+        .unwrap_or(context.i64_type().const_int(0, false).into()))
 }
 
 /// Numerically convert `val` to a channel's declared payload type before it is
@@ -78,6 +1065,47 @@ pub(crate) fn chan_payload_type_name(
     }
 }
 
+/// Resolve a declared type name to its base name with generics stripped —
+/// `get_enum`/`get_struct` are keyed on the unparameterized name, so
+/// `Option<i64>` resolves to `Option`.
+pub(crate) fn resolve_named_type(module_env: &ModuleEnv, type_name: &str) -> String {
+    let base = module_env.resolve_base_type(type_name);
+    base.split('<')
+        .next()
+        .unwrap_or(base.as_str())
+        .trim()
+        .to_string()
+}
+
+/// Whether `enum_def` (transitively) references itself in a payload field.
+/// `enum_llvm_type` lowers field types eagerly, so constructing a recursive
+/// enum would recurse forever — construction is rejected instead (the same
+/// pre-existing limitation as enum-typed params).
+fn enum_is_recursive(module_env: &ModuleEnv, enum_def: &mumei_core::parser::EnumDef) -> bool {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: Vec<String> = vec![enum_def.name.clone()];
+    while let Some(name) = queue.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(e) = module_env.get_enum(&name) else {
+            continue;
+        };
+        for variant in &e.variants {
+            for field_ty in &variant.field_types {
+                let base = resolve_named_type(module_env, &field_ty.name);
+                if base == enum_def.name {
+                    return true;
+                }
+                if module_env.get_enum(&base).is_some() {
+                    queue.push(base);
+                }
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn infer_struct_type_name(
     expr: &HirExpr,
     var_types: &HashMap<String, String>,
@@ -86,7 +1114,7 @@ pub(crate) fn infer_struct_type_name(
     match expr {
         HirExpr::Variable(name) => var_types.get(name).cloned(),
         HirExpr::StructInit { type_name, .. } => {
-            let base = module_env.resolve_base_type(type_name);
+            let base = resolve_named_type(module_env, type_name);
             if module_env.get_struct(&base).is_some() {
                 Some(base)
             } else {
@@ -95,14 +1123,33 @@ pub(crate) fn infer_struct_type_name(
         }
         HirExpr::Call { name, .. } => {
             let ret_type = module_env.get_atom(name)?.return_type.as_ref()?;
-            let base = module_env.resolve_base_type(ret_type);
-            if module_env.get_struct(&base).is_some() {
+            let base = resolve_named_type(module_env, ret_type);
+            if module_env.get_struct(&base).is_some() || module_env.get_enum(&base).is_some() {
                 Some(base)
             } else {
                 None
             }
         }
+        // `let s = E::V(..)` records `E` so a later `match s` resolves the
+        // owning enum deterministically (callers only consume the name as a
+        // declared-type hint; struct lookups still `get_struct`-check it).
+        HirExpr::VariantInit { enum_name, .. } => {
+            module_env.get_enum(enum_name).map(|_| enum_name.clone())
+        }
         HirExpr::FieldAccess(inner, field) => {
+            // `E::V` / `E.V` unit-variant construction (a FieldAccess whose
+            // qualifier is a known enum declaring `field`, not a bound
+            // variable) types as the enum — `let m = Mine::Nil` records
+            // `m: Mine` so a later `match m` resolves the owner.
+            if let HirExpr::Variable(qual) = inner.as_ref() {
+                if !var_types.contains_key(qual.as_str()) {
+                    if let Some(enum_def) = module_env.get_enum(qual) {
+                        if enum_def.variants.iter().any(|v| v.name == *field) {
+                            return Some(enum_def.name.clone());
+                        }
+                    }
+                }
+            }
             let inner_ty = infer_struct_type_name(inner, var_types, module_env)?;
             let sdef = module_env.get_struct(&inner_ty)?;
             let f = sdef.fields.iter().find(|f| f.name == *field)?;
@@ -121,6 +1168,21 @@ pub(crate) fn infer_struct_type_name(
                 Some(base)
             } else {
                 None
+            }
+        }
+        // `if c { E::V(..) } else { E::W }` types as `E` when both branches
+        // agree — `let e = if …; match e` resolves the owner like a
+        // declared parameter type.
+        HirExpr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let t = infer_stmt_struct_type_name(then_branch, var_types, module_env);
+            let e = infer_stmt_struct_type_name(else_branch, var_types, module_env);
+            match (t, e) {
+                (Some(t), Some(e)) if t == e => Some(t),
+                _ => None,
             }
         }
         // P25: a joined `task` carries its body's tail value.
@@ -148,6 +1210,240 @@ fn infer_stmt_struct_type_name(
     }
 }
 
+/// Materialise an array literal `[e0, e1, …]`: alloca the backing array,
+/// store each element, and return `(len, elem_ty, data_ptr)` — the same
+/// fat-pointer triple `array_ptrs` carries for `[T]` parameters.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_array_literal<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    function: &FunctionValue<'a>,
+    elements: &[HirExpr],
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    var_types: &mut HashMap<String, String>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<(BasicValueEnum<'a>, BasicTypeEnum<'a>, BasicValueEnum<'a>)> {
+    let mut elem_vals = Vec::with_capacity(elements.len());
+    for element in elements {
+        elem_vals.push(compile_hir_expr(
+            context, builder, module, function, element, variables, var_types, array_ptrs,
+            module_env,
+        )?);
+    }
+    let elem_ty = elem_vals[0].get_type();
+    let n = elements.len() as u32;
+    let array_ty = elem_ty.array_type(n);
+    let data_ptr = llvm!(builder.build_alloca(array_ty, "arrlit_data"));
+    for (i, elem) in elem_vals.iter().enumerate() {
+        // Int elements in an f64 literal widen via sitofp — matching the
+        // verifier's int→real coercion for array literals.
+        let stored = if elem_ty.is_float_type() && elem.is_int_value() {
+            llvm!(builder.build_signed_int_to_float(
+                elem.into_int_value(),
+                context.f64_type(),
+                "lit_widen"
+            ))
+            .into()
+        } else if elem.get_type() == elem_ty {
+            *elem
+        } else {
+            return Err(MumeiError::codegen(format!(
+                "array literal elements must share a type (element {i} differs)"
+            )));
+        };
+        let slot = unsafe {
+            llvm!(builder.build_gep(
+                array_ty,
+                data_ptr,
+                &[
+                    context.i64_type().const_int(0, false),
+                    context.i64_type().const_int(i as u64, false)
+                ],
+                "lit_slot"
+            ))
+        };
+        llvm!(builder.build_store(slot, stored));
+    }
+    let len_val: BasicValueEnum = context.i64_type().const_int(n as u64, false).into();
+    Ok((len_val, elem_ty, data_ptr.into()))
+}
+
+/// Phi-merge array bindings that branches reassigned, mirroring the scalar
+/// variable merge while keeping the fat-pointer slots in sync.
+#[allow(clippy::type_complexity)]
+fn merge_array_ptrs<'a>(
+    builder: &Builder<'a>,
+    pre: &HashMap<String, ArrayPtr<'a>>,
+    states: &[(
+        HashMap<String, ArrayPtr<'a>>,
+        BasicBlock<'a>,
+        HashSet<String>,
+    )],
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+) -> MumeiResult<()> {
+    *array_ptrs = pre.clone();
+    for (name, pre_array) in pre {
+        if !states
+            .iter()
+            .any(|(_, _, assigned)| assigned.contains(name))
+        {
+            continue;
+        }
+        let values: Vec<ArrayPtr<'a>> = states
+            .iter()
+            .map(|(state, _, assigned)| {
+                if assigned.contains(name) {
+                    state.get(name).copied().ok_or_else(|| {
+                        MumeiError::codegen(format!(
+                            "array '{name}' reassigned to a non-array value in a branch"
+                        ))
+                    })
+                } else {
+                    Ok(*pre_array)
+                }
+            })
+            .collect::<MumeiResult<_>>()?;
+        let first = values
+            .first()
+            .copied()
+            .ok_or_else(|| MumeiError::codegen(format!("array '{name}' has no branch state")))?;
+        if values.iter().any(|(_, elem_ty, data_ptr)| {
+            *elem_ty != first.1 || data_ptr.get_type() != first.2.get_type()
+        }) {
+            return Err(MumeiError::codegen(format!(
+                "incompatible branch array type for '{name}'"
+            )));
+        }
+        if values
+            .iter()
+            .any(|(len, _, _)| len.get_type() != first.0.get_type())
+        {
+            return Err(MumeiError::codegen(format!(
+                "incompatible branch array length type for '{name}'"
+            )));
+        }
+        if values.iter().all(|(len, _, data_ptr)| {
+            len.as_value_ref() == first.0.as_value_ref()
+                && data_ptr.as_value_ref() == first.2.as_value_ref()
+        }) {
+            array_ptrs.insert(name.clone(), first);
+            variables.insert(name.clone(), first.0);
+            continue;
+        }
+        let len_phi = llvm!(builder.build_phi(first.0.get_type(), &format!("phi_{name}_len")));
+        let len_incoming: Vec<(&dyn BasicValue<'a>, BasicBlock<'a>)> = values
+            .iter()
+            .zip(states.iter())
+            .map(|((len, _, _), (_, block, _))| (len as &dyn BasicValue<'a>, *block))
+            .collect();
+        len_phi.add_incoming(&len_incoming);
+
+        let data_phi = llvm!(builder.build_phi(first.2.get_type(), &format!("phi_{name}_data")));
+        let data_incoming: Vec<(&dyn BasicValue<'a>, BasicBlock<'a>)> = values
+            .iter()
+            .zip(states.iter())
+            .map(|((_, _, data_ptr), (_, block, _))| (data_ptr as &dyn BasicValue<'a>, *block))
+            .collect();
+        data_phi.add_incoming(&data_incoming);
+
+        let len = len_phi.as_basic_value();
+        array_ptrs.insert(name.clone(), (len, first.1, data_phi.as_basic_value()));
+        variables.insert(name.clone(), len);
+    }
+    Ok(())
+}
+
+/// Emit `E::V(..)` / `E::V` as a tagged-union struct value. Fail-closed on a
+/// recursive enum (the eager `enum_llvm_type` layout cannot represent it) and
+/// on arity/unknown-variant mismatches — verification rejects those first, so
+/// these guards are defense-in-depth for HIR built outside the verify gate.
+#[allow(clippy::too_many_arguments)]
+fn emit_enum_variant_init<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    function: &FunctionValue<'a>,
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    var_types: &mut HashMap<String, String>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+    enum_name: &str,
+    variant_name: &str,
+    fields: &[HirExpr],
+) -> MumeiResult<BasicValueEnum<'a>> {
+    let enum_def = module_env.get_enum(enum_name).ok_or_else(|| {
+        MumeiError::codegen(format!("Enum '{}' not found in module_env", enum_name))
+    })?;
+    if enum_is_recursive(module_env, enum_def) {
+        return Err(MumeiError::codegen(format!(
+            "enum '{}' is recursive — variant construction is unsupported in codegen",
+            enum_name
+        )));
+    }
+    let variant = enum_def
+        .variants
+        .iter()
+        .find(|v| v.name == variant_name)
+        .ok_or_else(|| {
+            MumeiError::codegen(format!(
+                "Enum '{}' has no variant named '{}'",
+                enum_name, variant_name
+            ))
+        })?;
+    if fields.len() != variant.fields.len() {
+        return Err(MumeiError::codegen(format!(
+            "Enum constructor '{}::{}' takes {} payload arg(s), got {}",
+            enum_name,
+            variant_name,
+            variant.fields.len(),
+            fields.len()
+        )));
+    }
+    let variant_idx = enum_def
+        .variants
+        .iter()
+        .position(|v| v.name == variant_name)
+        .unwrap_or(0);
+    let enum_type = enum_llvm_type(context, enum_def, Some(module_env));
+    let mut val = enum_type.get_undef();
+    // Set tag
+    val = llvm!(builder.build_insert_value(
+        val,
+        context.i64_type().const_int(variant_idx as u64, false),
+        0,
+        "tag"
+    ))
+    .into_struct_value();
+    // Set payload fields
+    for (i, field_expr) in fields.iter().enumerate() {
+        let field_val = compile_hir_expr(
+            context, builder, module, function, field_expr, variables, var_types, array_ptrs,
+            module_env,
+        )?;
+        let slot_ty = enum_type
+            .get_field_type_at_index((i + 1) as u32)
+            .ok_or_else(|| {
+                MumeiError::codegen(format!("Enum '{}' missing payload slot {}", enum_name, i))
+            })?;
+        let field_val = if field_val.get_type() != slot_ty {
+            bitpreserve_cast(builder, field_val, slot_ty)?
+        } else {
+            field_val
+        };
+        val = llvm!(builder.build_insert_value(
+            val,
+            field_val,
+            (i + 1) as u32,
+            &format!("payload_{}", i)
+        ))
+        .into_struct_value();
+    }
+    Ok(val.into())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_hir_expr<'a>(
     context: &'a Context,
@@ -157,7 +1453,7 @@ pub(crate) fn compile_hir_expr<'a>(
     expr: &HirExpr,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match expr {
@@ -173,9 +1469,46 @@ pub(crate) fn compile_hir_expr<'a>(
             Ok(global.as_pointer_value().into())
         }
 
+        HirExpr::ArrayLit(elements) => {
+            // Literal in expression position (e.g. a call argument):
+            // materialise the backing store and return the `{i64 len, ptr}`
+            // fat-pointer aggregate — the same value shape `[T]` parameters
+            // carry, so it can be passed to a callee directly. A `let`
+            // binding registers the name into `array_ptrs` before this arm
+            // (see stmt_emit), so this path only runs for anonymous literals.
+            let (len_val, elem_ty, data_ptr) = emit_array_literal(
+                context, builder, module, function, elements, variables, var_types, array_ptrs,
+                module_env,
+            )?;
+            let _ = elem_ty;
+            let struct_ty = context.struct_type(
+                &[
+                    context.i64_type().into(),
+                    context.ptr_type(AddressSpace::default()).into(),
+                ],
+                false,
+            );
+            let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
+            agg = llvm!(builder.build_insert_value(agg, len_val, 0, "arrlit_len"));
+            agg = llvm!(builder.build_insert_value(agg, data_ptr, 1, "arrlit_data"));
+            match agg {
+                inkwell::values::AggregateValueEnum::StructValue(s) => Ok(s.into()),
+                _ => Err(MumeiError::codegen(
+                    "array literal aggregate is not a struct value",
+                )),
+            }
+        }
+
         HirExpr::Variable(name) => variables
             .get(name.as_str())
             .cloned()
+            .or_else(|| match name.as_str() {
+                // Booleans are i64 0/1 at runtime — same convention as the
+                // `zext i1` results of comparisons.
+                "true" => Some(context.i64_type().const_int(1, false).into()),
+                "false" => Some(context.i64_type().const_int(0, false).into()),
+                _ => None,
+            })
             .ok_or_else(|| MumeiError::codegen(format!("Undefined variable: {}", name))),
 
         HirExpr::Call { name, args, .. } => match name.as_str() {
@@ -194,14 +1527,78 @@ pub(crate) fn compile_hir_expr<'a>(
                 Ok(result.into_float_value().into())
             }
             "len" => {
-                if !args.is_empty() {
-                    if let HirExpr::Variable(arr_name) = &args[0] {
-                        if let Some((len_val, _)) = array_ptrs.get(arr_name.as_str()) {
-                            return Ok(*len_val);
+                if args.len() != 1 {
+                    return Err(MumeiError::codegen("len() takes exactly one argument"));
+                }
+                let arg = &args[0];
+                // `Str` values are null-terminated string pointers — the
+                // runtime length is libc `strlen`. Verification (which
+                // `build` runs first) only admits `len` on arrays and `Str`,
+                // so a pointer-typed value reaching codegen is a `Str`.
+                let strlen_call = |module: &inkwell::module::Module<'a>,
+                                   builder: &inkwell::builder::Builder<'a>,
+                                   ptr: inkwell::values::PointerValue<'a>|
+                 -> MumeiResult<inkwell::values::IntValue<'a>> {
+                    let strlen_ty = context
+                        .i64_type()
+                        .fn_type(&[context.ptr_type(AddressSpace::default()).into()], false);
+                    let strlen_fn = module
+                        .get_function("strlen")
+                        .unwrap_or_else(|| module.add_function("strlen", strlen_ty, None));
+                    let call = llvm!(builder.build_call(strlen_fn, &[ptr.into()], "str_len"));
+                    Ok(call.as_any_value_enum().into_int_value())
+                };
+                if let HirExpr::Variable(arr_name) = arg {
+                    if let Some((len_val, _, _)) = array_ptrs.get(arr_name.as_str()) {
+                        return Ok(*len_val);
+                    }
+                    if let Some(val) = variables.get(arr_name.as_str()) {
+                        if val.is_pointer_value() {
+                            return Ok(
+                                strlen_call(module, builder, val.into_pointer_value())?.into()
+                            );
                         }
+                        return Err(MumeiError::codegen(format!(
+                            "len() is only supported on arrays and Str; '{arr_name}' is neither"
+                        )));
                     }
                 }
-                Ok(context.i64_type().const_int(0, false).into())
+                match arg {
+                    HirExpr::StringLit(s) => {
+                        // Both sides count bytes: Z3 string literals are
+                        // lowered from their UTF-8 encoding, and `strlen` on
+                        // the emitted globals reports bytes too.
+                        Ok(context.i64_type().const_int(s.len() as u64, false).into())
+                    }
+                    HirExpr::ArrayLit(elements) => Ok(context
+                        .i64_type()
+                        .const_int(elements.len() as u64, false)
+                        .into()),
+                    _ => {
+                        // `len(if …)`, `len(match …)`, `len(call())`, `len(s + t)`:
+                        // compile the argument and take the length off the
+                        // runtime value — `{i64 len, ptr}` arrays expose field
+                        // 0, `Str` values go through `strlen`.
+                        let v = compile_hir_expr(
+                            context, builder, module, function, arg, variables, var_types,
+                            array_ptrs, module_env,
+                        )?;
+                        if v.is_pointer_value() {
+                            return Ok(strlen_call(module, builder, v.into_pointer_value())?.into());
+                        }
+                        if v.is_struct_value() {
+                            let len_val = llvm!(builder.build_extract_value(
+                                v.into_struct_value(),
+                                0,
+                                "len_fat"
+                            ));
+                            return Ok(len_val.into_int_value().into());
+                        }
+                        Err(MumeiError::codegen(
+                            "len() is only supported on arrays and Str values",
+                        ))
+                    }
+                }
             }
             "alloc_raw" => {
                 let size_val = compile_hir_expr(
@@ -245,35 +1642,118 @@ pub(crate) fn compile_hir_expr<'a>(
                 Ok(context.i64_type().const_int(0, false).into())
             }
             _ => {
+                // A `let`/`assign`-bound lambda shadows a same-named atom —
+                // the verifier resolves `local_lambdas` before the atom
+                // table, so the marker check must come first.
+                if let Some(mark) = var_types
+                    .get(name.as_str())
+                    .filter(|m| m.starts_with(LAMBDA_MARK))
+                    .cloned()
+                {
+                    return emit_lambda_call(
+                        context, builder, module, function, &mark, args, variables, var_types,
+                        array_ptrs, module_env,
+                    );
+                }
                 let fqn_name = name.replace('.', "::");
                 let resolved_callee = module_env
                     .get_atom(name)
                     .or_else(|| module_env.get_atom(&fqn_name));
-                if let Some(callee) = resolved_callee {
+                // Lower the callee's signature only when a fresh function
+                // declaration is needed — a callee already declared in this
+                // module (the common case in multi-atom files) is reused
+                // directly, so each callee lowers at most once per module.
+                let callee_fn = if let Some(callee) = resolved_callee {
                     let callee_symbol = callee.name.as_str();
-                    let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee
-                        .params
-                        .iter()
-                        .map(|p| {
-                            resolve_param_type(context, p.type_name.as_deref(), module_env).into()
-                        })
-                        .collect();
+                    Some(module.get_function(callee_symbol).unwrap_or_else(|| {
+                        let sig = mumei_core::hir::lower_atom_to_hir(callee).signature;
+                        let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = sig
+                            .params
+                            .iter()
+                            .map(|p| {
+                                resolve_param_type(context, p.ty.as_deref(), module_env).into()
+                            })
+                            .collect();
 
-                    // Plan 18: Resolve callee return type from its return_type annotation
-                    let callee_ret_type = resolve_return_type(context, callee, module_env);
-                    let callee_fn = {
+                        // Plan 18: Resolve callee return type from its return_type annotation
+                        let callee_ret_type = resolve_return_type(context, &sig, module_env);
                         let fn_type = callee_ret_type.fn_type(&callee_param_types, false);
-                        module.get_function(callee_symbol).unwrap_or_else(|| {
-                            module.add_function(
-                                callee_symbol,
-                                fn_type,
-                                Some(inkwell::module::Linkage::External),
-                            )
+                        module.add_function(
+                            callee_symbol,
+                            fn_type,
+                            Some(inkwell::module::Linkage::External),
+                        )
+                    }))
+                } else {
+                    // A callee absent from module_env may already be declared
+                    // in this module — e.g. `__mumei_user_main`, the renamed
+                    // `main` in binary builds (self-recursive main must call
+                    // it, not the C wrapper `main`). When it is not declared
+                    // yet (a caller compiled before `main` itself), declare it
+                    // from `main`'s own signature so the call still resolves.
+                    module.get_function(name).or_else(|| {
+                        if name != "__mumei_user_main" {
+                            return None;
+                        }
+                        module_env.get_atom("main").map(|main_atom| {
+                            let sig = mumei_core::hir::lower_atom_to_hir(main_atom).signature;
+                            let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = sig
+                                .params
+                                .iter()
+                                .map(|p| {
+                                    resolve_param_type(context, p.ty.as_deref(), module_env).into()
+                                })
+                                .collect();
+                            let ret = resolve_return_type(context, &sig, module_env);
+                            module.add_function(name, ret.fn_type(&param_types, false), None)
                         })
-                    };
-
+                    })
+                };
+                if let Some(callee_fn) = callee_fn {
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                    for arg in args {
+                    for (i, arg) in args.iter().enumerate() {
+                        // `[T]` params take the `{i64, ptr}` fat pointer —
+                        // a bare `compile_hir_expr` on an array var yields
+                        // only the len i64 and emits malformed call IR.
+                        // `param.type_name` is identical to `HirParam.ty`
+                        // (`ty: param.type_name.clone()` in HIR lowering).
+                        let param_is_array = resolved_callee
+                            .and_then(|c| c.params.get(i))
+                            .and_then(|p| p.type_name.as_deref())
+                            .is_some_and(|tn| {
+                                matches!(
+                                    mumei_core::lowering::lower(&module_env.resolve_base_type(tn)),
+                                    mumei_core::lowering::LoweredType::Array(_)
+                                )
+                            });
+                        if param_is_array {
+                            let slots = match arg {
+                                HirExpr::ArrayLit(elements) => Some(emit_array_literal(
+                                    context, builder, module, function, elements, variables,
+                                    var_types, array_ptrs, module_env,
+                                )?),
+                                HirExpr::Variable(name) => array_ptrs.get(name.as_str()).copied(),
+                                _ => None,
+                            };
+                            let Some((len_val, _elem_ty, data_ptr)) = slots else {
+                                return Err(MumeiError::codegen(format!(
+                                    "array argument to '{}' (param {}) must be an array                                      binding or literal (got {:?})",
+                                    name, i, arg
+                                )));
+                            };
+                            let struct_ty = array_struct_type(context);
+                            let mut agg: inkwell::values::AggregateValueEnum =
+                                struct_ty.get_undef().into();
+                            agg = llvm!(builder.build_insert_value(agg, len_val, 0, "arg_arr_len"));
+                            agg =
+                                llvm!(builder.build_insert_value(agg, data_ptr, 1, "arg_arr_data"));
+                            let agg_val: BasicValueEnum = match agg {
+                                inkwell::values::AggregateValueEnum::StructValue(s) => s.into(),
+                                inkwell::values::AggregateValueEnum::ArrayValue(a) => a.into(),
+                            };
+                            arg_vals.push(agg_val.into());
+                            continue;
+                        }
                         let val = compile_hir_expr(
                             context, builder, module, function, arg, variables, var_types,
                             array_ptrs, module_env,
@@ -281,10 +1761,7 @@ pub(crate) fn compile_hir_expr<'a>(
                         arg_vals.push(val.into());
                     }
 
-                    let call_name = format!(
-                        "call_{}",
-                        callee_symbol.replace("::", "_").replace('.', "_")
-                    );
+                    let call_name = format!("call_{}", name.replace("::", "_").replace('.', "_"));
                     let call_result = llvm!(builder.build_call(callee_fn, &arg_vals, &call_name));
                     let result = call_result.as_any_value_enum();
                     if result.is_float_value() {
@@ -308,7 +1785,7 @@ pub(crate) fn compile_hir_expr<'a>(
                 module_env,
             )?
             .into_int_value();
-            if let Some((len_val, data_ptr_val)) = array_ptrs.get(name.as_str()) {
+            if let Some((len_val, elem_ty, data_ptr_val)) = array_ptrs.get(name.as_str()) {
                 let data_ptr = data_ptr_val.into_pointer_value();
                 let len_int = len_val.into_int_value();
                 let in_bounds = llvm!(builder.build_int_compare(
@@ -332,10 +1809,9 @@ pub(crate) fn compile_hir_expr<'a>(
                 llvm!(builder.build_conditional_branch(safe, safe_block, oob_block));
 
                 builder.position_at_end(safe_block);
-                let elem_ptr = unsafe {
-                    llvm!(builder.build_gep(context.i64_type(), data_ptr, &[idx], "elem_ptr"))
-                };
-                let loaded = llvm!(builder.build_load(context.i64_type(), elem_ptr, "elem_val"));
+                let elem_ptr =
+                    unsafe { llvm!(builder.build_gep(*elem_ty, data_ptr, &[idx], "elem_ptr")) };
+                let loaded = llvm!(builder.build_load(*elem_ty, elem_ptr, "elem_val"));
                 let safe_end = builder.get_insert_block().unwrap();
                 llvm!(builder.build_unconditional_branch(merge_block));
 
@@ -357,6 +1833,64 @@ pub(crate) fn compile_hir_expr<'a>(
         }
 
         HirExpr::BinaryOp(left, op, right) => {
+            // `&&` / `||` short-circuit: the RHS is only evaluated when the
+            // LHS does not decide the result (e.g. `i > 0 && arr[i] == x`
+            // must not run the bounds check on a non-positive index).
+            if matches!(op, HirBinOp::And | HirBinOp::Or) {
+                let lhs = compile_hir_expr(
+                    context, builder, module, function, left, variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                if !lhs.is_int_value() {
+                    return Err(MumeiError::codegen(format!(
+                        "operator {:?} requires integer-bool operands in codegen",
+                        op
+                    )));
+                }
+                let lhs_int = lhs.into_int_value();
+                let zero = context.i64_type().const_int(0, false);
+                let l_bool =
+                    llvm!(builder.build_int_compare(IntPredicate::NE, lhs_int, zero, "logic_lhs"));
+                let rhs_block = context.append_basic_block(*function, "logic.rhs");
+                let merge_block = context.append_basic_block(*function, "logic.merge");
+                let lhs_block = builder.get_insert_block().unwrap();
+                if matches!(op, HirBinOp::And) {
+                    llvm!(builder.build_conditional_branch(l_bool, rhs_block, merge_block));
+                } else {
+                    llvm!(builder.build_conditional_branch(l_bool, merge_block, rhs_block));
+                }
+                builder.position_at_end(rhs_block);
+                let rhs = compile_hir_expr(
+                    context, builder, module, function, right, variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                if !rhs.is_int_value() {
+                    return Err(MumeiError::codegen(format!(
+                        "operator {:?} requires integer-bool operands in codegen",
+                        op
+                    )));
+                }
+                let r_bool = llvm!(builder.build_int_compare(
+                    IntPredicate::NE,
+                    rhs.into_int_value(),
+                    zero,
+                    "logic_rhs"
+                ));
+                let rhs_end = builder.get_insert_block().unwrap();
+                llvm!(builder.build_unconditional_branch(merge_block));
+                builder.position_at_end(merge_block);
+                let phi = llvm!(builder.build_phi(context.bool_type(), "logic_result"));
+                let short_val = context
+                    .bool_type()
+                    .const_int(matches!(op, HirBinOp::Or) as u64, false);
+                phi.add_incoming(&[(&short_val, lhs_block), (&r_bool, rhs_end)]);
+                return Ok(llvm!(builder.build_int_z_extend(
+                    phi.as_basic_value().into_int_value(),
+                    context.i64_type(),
+                    "logic_ext"
+                ))
+                .into());
+            }
             let lhs = compile_hir_expr(
                 context, builder, module, function, left, variables, var_types, array_ptrs,
                 module_env,
@@ -370,7 +1904,7 @@ pub(crate) fn compile_hir_expr<'a>(
             if lhs.is_pointer_value() && rhs.is_pointer_value() {
                 let ptr_type = context.ptr_type(inkwell::AddressSpace::default());
                 match op {
-                    Op::Add => {
+                    HirBinOp::Add => {
                         // Call runtime helper mumei_str_concat(a, b) -> *const c_char
                         let str_concat_fn =
                             module.get_function("mumei_str_concat").unwrap_or_else(|| {
@@ -388,7 +1922,7 @@ pub(crate) fn compile_hir_expr<'a>(
                             .left()
                             .ok_or(MumeiError::codegen("str_concat returned void".to_string()));
                     }
-                    Op::Eq | Op::Neq => {
+                    HirBinOp::Eq | HirBinOp::Neq => {
                         // Call runtime helper mumei_str_eq(a, b) -> i64 (0 or 1)
                         let str_eq_fn = module.get_function("mumei_str_eq").unwrap_or_else(|| {
                             let fn_type = context
@@ -406,7 +1940,7 @@ pub(crate) fn compile_hir_expr<'a>(
                             .left()
                             .ok_or(MumeiError::codegen("str_eq returned void".to_string()))?
                             .into_int_value();
-                        if matches!(op, Op::Neq) {
+                        if matches!(op, HirBinOp::Neq) {
                             // Negate: result == 0 means not equal → flip
                             let negated = llvm!(builder.build_int_compare(
                                 IntPredicate::EQ,
@@ -423,7 +1957,7 @@ pub(crate) fn compile_hir_expr<'a>(
                         }
                         return Ok(eq_val.into());
                     }
-                    Op::Pow => {
+                    HirBinOp::Pow => {
                         return Err(MumeiError::codegen(
                             "Unsupported operator Pow for Str type in codegen".to_string(),
                         ));
@@ -457,14 +1991,14 @@ pub(crate) fn compile_hir_expr<'a>(
                     ))
                 };
                 match op {
-                    Op::Add => Ok(llvm!(builder.build_float_add(l, r, "fadd_tmp")).into()),
-                    Op::Sub => Ok(llvm!(builder.build_float_sub(l, r, "fsub_tmp")).into()),
-                    Op::Mul => Ok(llvm!(builder.build_float_mul(l, r, "fmul_tmp")).into()),
-                    Op::Div => Ok(llvm!(builder.build_float_div(l, r, "fdiv_tmp")).into()),
-                    Op::Pow => Err(MumeiError::codegen(
+                    HirBinOp::Add => Ok(llvm!(builder.build_float_add(l, r, "fadd_tmp")).into()),
+                    HirBinOp::Sub => Ok(llvm!(builder.build_float_sub(l, r, "fsub_tmp")).into()),
+                    HirBinOp::Mul => Ok(llvm!(builder.build_float_mul(l, r, "fmul_tmp")).into()),
+                    HirBinOp::Div => Ok(llvm!(builder.build_float_div(l, r, "fdiv_tmp")).into()),
+                    HirBinOp::Pow => Err(MumeiError::codegen(
                         "Unsupported float operator Pow".to_string(),
                     )),
-                    Op::Eq => {
+                    HirBinOp::Eq => {
                         let cmp = llvm!(builder.build_float_compare(
                             FloatPredicate::OEQ,
                             l,
@@ -482,32 +2016,139 @@ pub(crate) fn compile_hir_expr<'a>(
                     ))),
                 }
             } else {
+                if lhs.is_struct_value() || rhs.is_struct_value() {
+                    // Enum equality compares tag + every payload slot —
+                    // matching the verifier's deep datatype equality (P10-C).
+                    // Pointer slots are `Str` payloads → mumei_str_eq.
+                    if matches!(op, HirBinOp::Eq | HirBinOp::Neq)
+                        && lhs.is_struct_value()
+                        && rhs.is_struct_value()
+                    {
+                        let l_enum = infer_struct_type_name(left, var_types, module_env)
+                            .filter(|n| module_env.get_enum(n).is_some());
+                        let r_enum = infer_struct_type_name(right, var_types, module_env)
+                            .filter(|n| module_env.get_enum(n).is_some());
+                        if l_enum.is_some() && l_enum == r_enum && lhs.get_type() == rhs.get_type()
+                        {
+                            let ls = lhs.into_struct_value();
+                            let rs = rhs.into_struct_value();
+                            let field_count = ls.get_type().count_fields();
+                            let mut acc = context.bool_type().const_int(1, false);
+                            for idx in 0..field_count {
+                                let lf = llvm!(builder.build_extract_value(ls, idx, "enum_eq_l"));
+                                let rf = llvm!(builder.build_extract_value(rs, idx, "enum_eq_r"));
+                                // `undef` slots (unit variants store nothing
+                                // in them) carry no information — `and` with
+                                // undef would poison the whole conjunction.
+                                let is_undef = |v: BasicValueEnum| match v {
+                                    BasicValueEnum::IntValue(iv) => iv.is_undef(),
+                                    BasicValueEnum::FloatValue(fv) => fv.is_undef(),
+                                    BasicValueEnum::PointerValue(pv) => pv.is_undef(),
+                                    BasicValueEnum::StructValue(sv) => sv.is_undef(),
+                                    BasicValueEnum::ArrayValue(av) => av.is_undef(),
+                                    BasicValueEnum::VectorValue(vv) => vv.is_undef(),
+                                };
+                                if is_undef(lf) || is_undef(rf) {
+                                    continue;
+                                }
+                                let cmp: inkwell::values::IntValue = if lf.is_int_value() {
+                                    llvm!(builder.build_int_compare(
+                                        IntPredicate::EQ,
+                                        lf.into_int_value(),
+                                        rf.into_int_value(),
+                                        "enum_eq_int"
+                                    ))
+                                } else if lf.is_float_value() {
+                                    llvm!(builder.build_float_compare(
+                                        FloatPredicate::OEQ,
+                                        lf.into_float_value(),
+                                        rf.into_float_value(),
+                                        "enum_eq_float"
+                                    ))
+                                } else {
+                                    // Pointer slot → Str payload — compare
+                                    // contents via the runtime helper.
+                                    let str_eq_fn =
+                                        module.get_function("mumei_str_eq").unwrap_or_else(|| {
+                                            let ptr_t =
+                                                context.ptr_type(inkwell::AddressSpace::default());
+                                            let fn_type = context
+                                                .i64_type()
+                                                .fn_type(&[ptr_t.into(), ptr_t.into()], false);
+                                            module.add_function("mumei_str_eq", fn_type, None)
+                                        });
+                                    let res = llvm!(builder.build_call(
+                                        str_eq_fn,
+                                        &[lf.into(), rf.into()],
+                                        "enum_eq_str"
+                                    ));
+                                    let res_int = res
+                                        .try_as_basic_value()
+                                        .left()
+                                        .ok_or(MumeiError::codegen(
+                                            "str_eq returned void".to_string(),
+                                        ))?
+                                        .into_int_value();
+                                    llvm!(builder.build_int_compare(
+                                        IntPredicate::NE,
+                                        res_int,
+                                        context.i64_type().const_int(0, false),
+                                        "enum_eq_str_bool"
+                                    ))
+                                };
+                                acc = llvm!(builder.build_and(acc, cmp, "enum_eq_and"));
+                            }
+                            if matches!(op, HirBinOp::Neq) {
+                                acc = llvm!(builder.build_not(acc, "enum_neq_not"));
+                            }
+                            return Ok(llvm!(builder.build_int_z_extend(
+                                acc,
+                                context.i64_type(),
+                                "enum_eq_ext"
+                            ))
+                            .into());
+                        }
+                    }
+                    return Err(MumeiError::codegen(format!(
+                        "operator {:?} is unsupported on struct/enum values in codegen",
+                        op
+                    )));
+                }
                 let l = lhs.into_int_value();
                 let r = rhs.into_int_value();
                 match op {
-                    Op::Add => Ok(llvm!(builder.build_int_add(l, r, "add_tmp")).into()),
-                    Op::Sub => Ok(llvm!(builder.build_int_sub(l, r, "sub_tmp")).into()),
-                    Op::Mul => Ok(llvm!(builder.build_int_mul(l, r, "mul_tmp")).into()),
-                    Op::Div => Ok(llvm!(builder.build_int_signed_div(l, r, "div_tmp")).into()),
-                    Op::Pow => Err(MumeiError::codegen(
+                    HirBinOp::Add => Ok(llvm!(builder.build_int_add(l, r, "add_tmp")).into()),
+                    HirBinOp::Sub => Ok(llvm!(builder.build_int_sub(l, r, "sub_tmp")).into()),
+                    HirBinOp::Mul => Ok(llvm!(builder.build_int_mul(l, r, "mul_tmp")).into()),
+                    HirBinOp::Div => {
+                        Ok(llvm!(builder.build_int_signed_div(l, r, "div_tmp")).into())
+                    }
+                    HirBinOp::Pow => Err(MumeiError::codegen(
                         "Unsupported int operator Pow".to_string(),
                     )),
                     // Bit operations on the machine `i64` bit pattern, matching
                     // the `BV(64)` semantics verified under `--bitvec-i64`.
                     // `>>` is an arithmetic (sign-propagating) shift.
-                    Op::BitAnd => Ok(llvm!(builder.build_and(l, r, "and_tmp")).into()),
-                    Op::BitOr => Ok(llvm!(builder.build_or(l, r, "or_tmp")).into()),
-                    Op::BitXor => Ok(llvm!(builder.build_xor(l, r, "xor_tmp")).into()),
-                    Op::Shl => Ok(llvm!(builder.build_left_shift(l, r, "shl_tmp")).into()),
-                    Op::Shr => Ok(llvm!(builder.build_right_shift(l, r, true, "ashr_tmp")).into()),
-                    Op::Eq | Op::Neq | Op::Lt | Op::Gt | Op::Ge | Op::Le => {
+                    HirBinOp::BitAnd => Ok(llvm!(builder.build_and(l, r, "and_tmp")).into()),
+                    HirBinOp::BitOr => Ok(llvm!(builder.build_or(l, r, "or_tmp")).into()),
+                    HirBinOp::BitXor => Ok(llvm!(builder.build_xor(l, r, "xor_tmp")).into()),
+                    HirBinOp::Shl => Ok(llvm!(builder.build_left_shift(l, r, "shl_tmp")).into()),
+                    HirBinOp::Shr => {
+                        Ok(llvm!(builder.build_right_shift(l, r, true, "ashr_tmp")).into())
+                    }
+                    HirBinOp::Eq
+                    | HirBinOp::Neq
+                    | HirBinOp::Lt
+                    | HirBinOp::Gt
+                    | HirBinOp::Ge
+                    | HirBinOp::Le => {
                         let pred = match op {
-                            Op::Eq => IntPredicate::EQ,
-                            Op::Neq => IntPredicate::NE,
-                            Op::Lt => IntPredicate::SLT,
-                            Op::Gt => IntPredicate::SGT,
-                            Op::Ge => IntPredicate::SGE,
-                            Op::Le => IntPredicate::SLE,
+                            HirBinOp::Eq => IntPredicate::EQ,
+                            HirBinOp::Neq => IntPredicate::NE,
+                            HirBinOp::Lt => IntPredicate::SLT,
+                            HirBinOp::Gt => IntPredicate::SGT,
+                            HirBinOp::Ge => IntPredicate::SGE,
+                            HirBinOp::Le => IntPredicate::SLE,
                             _ => unreachable!(),
                         };
                         let cmp = llvm!(builder.build_int_compare(pred, l, r, "cmp_tmp"));
@@ -544,6 +2185,15 @@ pub(crate) fn compile_hir_expr<'a>(
             let then_block = context.append_basic_block(*function, "then");
             let else_block = context.append_basic_block(*function, "else");
             let merge_block = context.append_basic_block(*function, "merge");
+            let pre_vars = variables.clone();
+            let pre_arrays = array_ptrs.clone();
+            let then_assigned = collect_assigned_outer_variables_stmt(then_branch);
+            let else_assigned = collect_assigned_outer_variables_stmt(else_branch);
+
+            // Lambda bindings are branch-scoped like the verifier's
+            // `local_lambdas`: restore the pre-branch markers before the
+            // else side, then keep only markers both sides agree on.
+            let pre_marks = lambda_marks(var_types);
 
             llvm!(builder.build_conditional_branch(cond_bool, then_block, else_block));
 
@@ -559,10 +2209,17 @@ pub(crate) fn compile_hir_expr<'a>(
                 array_ptrs,
                 module_env,
             )?;
+            let then_vars = variables.clone();
+            let then_arrays = array_ptrs.clone();
+            let then_marks = lambda_marks(var_types);
+            var_types.retain(|_, v| !v.starts_with(LAMBDA_MARK));
+            var_types.extend(pre_marks.iter().map(|(k, v)| (k.clone(), v.clone())));
             let then_end_block = builder.get_insert_block().unwrap();
             llvm!(builder.build_unconditional_branch(merge_block));
 
             builder.position_at_end(else_block);
+            *variables = pre_vars.clone();
+            *array_ptrs = pre_arrays.clone();
             let else_val = compile_hir_stmt(
                 context,
                 builder,
@@ -574,12 +2231,58 @@ pub(crate) fn compile_hir_expr<'a>(
                 array_ptrs,
                 module_env,
             )?;
+            let else_vars = variables.clone();
+            let else_arrays = array_ptrs.clone();
+            let else_marks = lambda_marks(var_types);
+            merge_lambda_marks(var_types, &then_marks, &else_marks);
             let else_end_block = builder.get_insert_block().unwrap();
             llvm!(builder.build_unconditional_branch(merge_block));
 
             builder.position_at_end(merge_block);
             let phi = llvm!(builder.build_phi(then_val.get_type(), "if_result"));
             phi.add_incoming(&[(&then_val, then_end_block), (&else_val, else_end_block)]);
+            *variables = pre_vars.clone();
+            for (name, pre_val) in &pre_vars {
+                let then_changed = then_assigned.contains(name);
+                let else_changed = else_assigned.contains(name);
+                if !then_changed && !else_changed {
+                    continue;
+                }
+                let then_val = if then_changed {
+                    then_vars.get(name).cloned().unwrap_or(*pre_val)
+                } else {
+                    *pre_val
+                };
+                let else_val = if else_changed {
+                    else_vars.get(name).cloned().unwrap_or(*pre_val)
+                } else {
+                    *pre_val
+                };
+                if then_val.get_type() != else_val.get_type() {
+                    return Err(MumeiError::codegen(format!(
+                        "incompatible branch types for variable '{name}'"
+                    )));
+                }
+                if then_val.as_value_ref() == else_val.as_value_ref() {
+                    variables.insert(name.clone(), then_val);
+                } else {
+                    let merged =
+                        llvm!(builder.build_phi(then_val.get_type(), &format!("phi_{name}")));
+                    merged
+                        .add_incoming(&[(&then_val, then_end_block), (&else_val, else_end_block)]);
+                    variables.insert(name.clone(), merged.as_basic_value());
+                }
+            }
+            merge_array_ptrs(
+                builder,
+                &pre_arrays,
+                &[
+                    (then_arrays, then_end_block, then_assigned),
+                    (else_arrays, else_end_block, else_assigned),
+                ],
+                array_ptrs,
+                variables,
+            )?;
             Ok(phi.as_basic_value())
         }
 
@@ -646,12 +2349,35 @@ pub(crate) fn compile_hir_expr<'a>(
                 context, builder, module, function, target, variables, var_types, array_ptrs,
                 module_env,
             )?;
+            let pre_vars = variables.clone();
+            let pre_arrays = array_ptrs.clone();
+
+            // Declared enum type of the scrutinee — resolves which enum owns
+            // a colliding variant name deterministically (prelude `List` vs
+            // a user `IntList` both declaring `Cons`). A bare parameter reads
+            // its declared type from `var_types`; `x.f` walks the field's
+            // declared type via the struct def (nested `a.b.c` recurses);
+            // other targets fall back to `infer_expr_type_name` (e.g. `E::V`
+            // ctor expressions and enum-returning calls).
+            let enum_hint: Option<String> = match target.as_ref() {
+                HirExpr::Variable(name) => var_types.get(name).cloned(),
+                HirExpr::FieldAccess(inner, field) => {
+                    infer_struct_type_name(inner, var_types, module_env).and_then(|s| {
+                        module_env
+                            .get_struct(&s)
+                            .and_then(|sdef| sdef.fields.iter().find(|f| f.name == *field))
+                            .map(|f| f.type_name.clone())
+                    })
+                }
+                _ => mumei_core::hir::infer_expr_type_name(target, Some(module_env)),
+            };
 
             let merge_block = context.append_basic_block(*function, "match.merge");
             let unreachable_block = context.append_basic_block(*function, "match.unreachable");
 
             let mut incoming: Vec<(BasicValueEnum<'a>, inkwell::basic_block::BasicBlock<'a>)> =
                 Vec::new();
+            let mut arm_states: Vec<ArrayMergeState<'a>> = Vec::new();
 
             let arm_count = arms.len();
             let mut try_blocks: Vec<inkwell::basic_block::BasicBlock<'a>> = Vec::new();
@@ -676,13 +2402,15 @@ pub(crate) fn compile_hir_expr<'a>(
                     builder,
                     &arm.pattern,
                     target_val,
-                    variables,
+                    &pre_vars,
                     module_env,
+                    enum_hint.as_deref(),
                 )?;
 
                 let full_cond = if let Some(guard) = &arm.guard {
-                    let mut guard_vars = variables.clone();
+                    let mut guard_vars = pre_vars.clone();
                     let mut guard_var_types = var_types.clone();
+                    *array_ptrs = pre_arrays.clone();
                     bind_pattern_variables(
                         context,
                         builder,
@@ -690,6 +2418,7 @@ pub(crate) fn compile_hir_expr<'a>(
                         target_val,
                         &mut guard_vars,
                         module_env,
+                        enum_hint.as_deref(),
                     )?;
                     let guard_val = compile_hir_expr(
                         context,
@@ -719,8 +2448,9 @@ pub(crate) fn compile_hir_expr<'a>(
                 llvm!(builder.build_conditional_branch(full_cond, body_block, fail_block));
 
                 builder.position_at_end(body_block);
-                let mut arm_vars = variables.clone();
+                let mut arm_vars = pre_vars.clone();
                 let mut arm_var_types = var_types.clone();
+                *array_ptrs = pre_arrays.clone();
                 bind_pattern_variables(
                     context,
                     builder,
@@ -728,6 +2458,7 @@ pub(crate) fn compile_hir_expr<'a>(
                     target_val,
                     &mut arm_vars,
                     module_env,
+                    enum_hint.as_deref(),
                 )?;
 
                 let body_val = compile_hir_stmt(
@@ -742,8 +2473,11 @@ pub(crate) fn compile_hir_expr<'a>(
                     module_env,
                 )?;
                 let body_end = builder.get_insert_block().unwrap();
+                let arm_arrays = array_ptrs.clone();
                 llvm!(builder.build_unconditional_branch(merge_block));
                 incoming.push((body_val, body_end));
+                let assigned = collect_assigned_outer_variables_match_arm(arm);
+                arm_states.push((arm_vars, arm_arrays, body_end, assigned));
             }
 
             // Plan 18: Infer phi type from the first arm's body value type
@@ -769,12 +2503,68 @@ pub(crate) fn compile_hir_expr<'a>(
             };
             llvm!(builder.build_unconditional_branch(merge_block));
             incoming.push((unreachable_val, unreachable_block));
+            arm_states.push((
+                pre_vars.clone(),
+                pre_arrays.clone(),
+                unreachable_block,
+                std::collections::HashSet::new(),
+            ));
 
             builder.position_at_end(merge_block);
             let phi = llvm!(builder.build_phi(phi_type, "match_result"));
             for (val, block) in &incoming {
                 phi.add_incoming(&[(val, *block)]);
             }
+            *variables = pre_vars.clone();
+            for (name, pre_val) in &pre_vars {
+                let mut merged_incoming = Vec::with_capacity(arm_states.len());
+                let assigned_any = arm_states
+                    .iter()
+                    .any(|(_, _, _, assigned)| assigned.contains(name));
+                if !assigned_any {
+                    continue;
+                }
+                for (arm_vars, _, arm_end, assigned) in &arm_states {
+                    let value = if assigned.contains(name) {
+                        arm_vars.get(name).cloned().unwrap_or(*pre_val)
+                    } else {
+                        *pre_val
+                    };
+                    if value.get_type() != pre_val.get_type() {
+                        return Err(MumeiError::codegen(format!(
+                            "incompatible match-arm type for variable '{name}'"
+                        )));
+                    }
+                    merged_incoming.push((value, *arm_end));
+                }
+                let first = merged_incoming
+                    .first()
+                    .expect("match always has an unreachable arm");
+                if merged_incoming
+                    .iter()
+                    .all(|(value, _)| value.as_value_ref() == first.0.as_value_ref())
+                {
+                    variables.insert(name.clone(), first.0);
+                } else {
+                    let merged =
+                        llvm!(builder.build_phi(first.0.get_type(), &format!("phi_{name}")));
+                    let incoming_refs: Vec<(&dyn BasicValue<'a>, _)> = merged_incoming
+                        .iter()
+                        .map(|(value, block)| (value as &dyn BasicValue<'a>, *block))
+                        .collect();
+                    merged.add_incoming(&incoming_refs);
+                    variables.insert(name.clone(), merged.as_basic_value());
+                }
+            }
+            let array_states: Vec<(
+                HashMap<String, ArrayPtr<'a>>,
+                inkwell::basic_block::BasicBlock<'a>,
+                std::collections::HashSet<String>,
+            )> = arm_states
+                .iter()
+                .map(|(_, arrays, block, assigned)| (arrays.clone(), *block, assigned.clone()))
+                .collect();
+            merge_array_ptrs(builder, &pre_arrays, &array_states, array_ptrs, variables)?;
 
             Ok(phi.as_basic_value())
         }
@@ -804,7 +2594,7 @@ pub(crate) fn compile_hir_expr<'a>(
             // `HirStmt::Expr(HirExpr::Task { body, … })`. We unwrap
             // that here so `emit_task_spawn_only` operates on the
             // *task body*, not the surrounding `Task` expression.
-            let any_ctx = if matches!(join_semantics, JoinSemantics::Any) && !children.is_empty() {
+            let any_ctx = if matches!(join_semantics, HirJoin::Any) && !children.is_empty() {
                 let i64_type = context.i64_type();
                 let group_id = static_next_task_group_id()
                     .ok_or_else(|| MumeiError::codegen("task_group id overflow".to_string()))?;
@@ -910,13 +2700,14 @@ pub(crate) fn compile_hir_expr<'a>(
             let func = if let Some(f) = module.get_function(name) {
                 f
             } else if let Some(callee_atom) = module_env.get_atom(name) {
-                let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee_atom
+                let callee_sig = mumei_core::hir::lower_atom_to_hir(callee_atom).signature;
+                let callee_param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = callee_sig
                     .params
                     .iter()
-                    .map(|p| resolve_param_type(context, p.type_name.as_deref(), module_env).into())
+                    .map(|p| resolve_param_type(context, p.ty.as_deref(), module_env).into())
                     .collect();
                 // Plan 18: Use resolve_return_type for consistent type resolution
-                let callee_ret = resolve_return_type(context, callee_atom, module_env);
+                let callee_ret = resolve_return_type(context, &callee_sig, module_env);
                 let fn_type = callee_ret.fn_type(&callee_param_types, false);
                 module.add_function(name, fn_type, Some(inkwell::module::Linkage::External))
             } else {
@@ -934,6 +2725,49 @@ pub(crate) fn compile_hir_expr<'a>(
             Ok(ptr_int.into())
         }
         HirExpr::CallRef { callee, args } => {
+            // `call(f, …)` on a `let`/`assign`-bound lambda — the variable's
+            // `@lam:` marker resolves to the lifted private fn directly.
+            if let HirExpr::Variable(lam_var) = callee.as_ref() {
+                if let Some(mark) = var_types
+                    .get(lam_var.as_str())
+                    .filter(|m| m.starts_with(LAMBDA_MARK))
+                    .cloned()
+                {
+                    return emit_lambda_call(
+                        context, builder, module, function, &mark, args, variables, var_types,
+                        array_ptrs, module_env,
+                    );
+                }
+            }
+            // `call(|x| …, args)` — lift the inline lambda on the spot and
+            // call it; captures bind at this site.
+            if let HirExpr::Lambda {
+                params,
+                return_type,
+                body,
+                captures,
+            } = callee.as_ref()
+            {
+                let (fn_name, all_caps) = emit_lambda_function(
+                    context,
+                    module,
+                    function,
+                    "inline",
+                    params,
+                    return_type.as_ref(),
+                    captures,
+                    body,
+                    variables,
+                    var_types,
+                    array_ptrs,
+                    module_env,
+                )?;
+                let mark = lambda_marker(&fn_name, &all_caps);
+                return emit_lambda_call(
+                    context, builder, module, function, &mark, args, variables, var_types,
+                    array_ptrs, module_env,
+                );
+            }
             let callee_val = compile_hir_expr(
                 context, builder, module, function, callee, variables, var_types, array_ptrs,
                 module_env,
@@ -978,11 +2812,19 @@ pub(crate) fn compile_hir_expr<'a>(
                 })
                 .collect();
             // Plan 18: Try to resolve return type from callee atom definition.
-            // For indirect calls via AtomRef, look up the atom name in module_env.
+            // For indirect calls via AtomRef, prefer the function's declared
+            // return type when it already exists in this module (it was built
+            // via resolve_return_type); only lower the signature to declare
+            // or resolve a callee not yet present.
             let indirect_ret_type = if let HirExpr::AtomRef { name } = callee.as_ref() {
-                module_env
-                    .get_atom(name)
-                    .map(|a| resolve_return_type(context, a, module_env))
+                if let Some(f) = module.get_function(name) {
+                    f.get_type().get_return_type()
+                } else {
+                    module_env.get_atom(name).map(|a| {
+                        let callee_sig = mumei_core::hir::lower_atom_to_hir(a).signature;
+                        resolve_return_type(context, &callee_sig, module_env)
+                    })
+                }
             } else {
                 None
             };
@@ -1239,57 +3081,44 @@ pub(crate) fn compile_hir_expr<'a>(
             enum_name,
             variant_name,
             fields,
-        } => {
-            let enum_def = module_env.get_enum(enum_name).ok_or_else(|| {
-                MumeiError::codegen(format!("Enum '{}' not found in module_env", enum_name))
-            })?;
-            let variant_idx = enum_def
-                .variants
-                .iter()
-                .position(|v| v.name == *variant_name)
-                .unwrap_or(0);
-            let enum_type = enum_llvm_type(context, enum_def, Some(module_env));
-            let mut val = enum_type.get_undef();
-            // Set tag
-            val = llvm!(builder.build_insert_value(
-                val,
-                context.i64_type().const_int(variant_idx as u64, false),
-                0,
-                "tag"
-            ))
-            .into_struct_value();
-            // Set payload fields
-            for (i, field_expr) in fields.iter().enumerate() {
-                let field_val = compile_hir_expr(
-                    context, builder, module, function, field_expr, variables, var_types,
-                    array_ptrs, module_env,
-                )?;
-                let slot_ty = enum_type
-                    .get_field_type_at_index((i + 1) as u32)
-                    .ok_or_else(|| {
-                        MumeiError::codegen(format!(
-                            "Enum '{}' missing payload slot {}",
-                            enum_name, i
-                        ))
-                    })?;
-                let field_val = if field_val.get_type() != slot_ty {
-                    bitpreserve_cast(builder, field_val, slot_ty)?
-                } else {
-                    field_val
-                };
-                val = llvm!(builder.build_insert_value(
-                    val,
-                    field_val,
-                    (i + 1) as u32,
-                    &format!("payload_{}", i)
-                ))
-                .into_struct_value();
-            }
-            Ok(val.into())
-        }
+        } => emit_enum_variant_init(
+            context,
+            builder,
+            module,
+            function,
+            variables,
+            var_types,
+            array_ptrs,
+            module_env,
+            enum_name,
+            variant_name,
+            fields,
+        ),
 
         HirExpr::FieldAccess(inner_expr, field_name) => {
             if let HirExpr::Variable(var_name) = inner_expr.as_ref() {
+                let resource_name = var_name
+                    .strip_prefix("__mumei_resource_")
+                    .unwrap_or(var_name);
+                if let Some(resource_field) = module_env.resource_field(resource_name, field_name) {
+                    let global_name =
+                        format!("__mumei_res_{}_{}", resource_name, resource_field.name);
+                    let global = module.get_global(&global_name).ok_or_else(|| {
+                        MumeiError::codegen(format!(
+                            "missing resource state global '{global_name}'"
+                        ))
+                    })?;
+                    let value_ty: inkwell::types::BasicTypeEnum = match resource_field.ty.as_str() {
+                        "bool" => context.bool_type().into(),
+                        "f64" => context.f64_type().into(),
+                        _ => context.i64_type().into(),
+                    };
+                    return Ok(llvm!(builder.build_load(
+                        value_ty,
+                        global.as_pointer_value(),
+                        &format!("{}.{}", resource_name, field_name)
+                    )));
+                }
                 let candidates = [
                     format!("__struct_{}_{}", var_name, field_name),
                     format!("{}_{}", var_name, field_name),
@@ -1312,6 +3141,32 @@ pub(crate) fn compile_hir_expr<'a>(
                                 &format!("{}.{}", var_name, field_name)
                             ));
                             return Ok(extracted);
+                        }
+                    }
+                }
+                // `E::V` / `E.V` unit-variant construction — only when
+                // `var_name` is NOT a bound value (a bound variable named
+                // like an enum shadows it, matching the verifier's
+                // `env.contains_key` precedence) and `field_name` is one of
+                // the enum's declared variants.
+                if !variables.contains_key(var_name.as_str())
+                    && !var_types.contains_key(var_name.as_str())
+                {
+                    if let Some(enum_def) = module_env.get_enum(var_name) {
+                        if enum_def.variants.iter().any(|v| v.name == *field_name) {
+                            return emit_enum_variant_init(
+                                context,
+                                builder,
+                                module,
+                                function,
+                                variables,
+                                var_types,
+                                array_ptrs,
+                                module_env,
+                                var_name,
+                                field_name,
+                                &[],
+                            );
                         }
                     }
                 }
@@ -1410,7 +3265,7 @@ mod tests {
 
         let mut variables = HashMap::new();
         let mut var_types = HashMap::new();
-        let array_ptrs = HashMap::new();
+        let mut array_ptrs = HashMap::new();
         let result = compile_hir_expr(
             &context,
             &builder,
@@ -1419,7 +3274,7 @@ mod tests {
             &expr,
             &mut variables,
             &mut var_types,
-            &array_ptrs,
+            &mut array_ptrs,
             &module_env,
         );
 
@@ -1519,7 +3374,7 @@ mod tests {
         variables.insert("B".to_string(), a_struct.into());
         let mut var_types = HashMap::new();
         var_types.insert("B".to_string(), "A".to_string());
-        let array_ptrs = HashMap::new();
+        let mut array_ptrs = HashMap::new();
         let result = compile_hir_expr(
             &context,
             &builder,
@@ -1528,7 +3383,7 @@ mod tests {
             &expr,
             &mut variables,
             &mut var_types,
-            &array_ptrs,
+            &mut array_ptrs,
             &module_env,
         )?;
 

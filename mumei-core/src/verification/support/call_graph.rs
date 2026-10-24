@@ -48,15 +48,33 @@ pub(crate) fn verify_atom_invariant(
         module_env,
         current_atom: Some(atom),
         linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64,
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
+        call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+
         bitvec_i64_global: false,
     };
 
@@ -64,13 +82,10 @@ pub(crate) fn verify_atom_invariant(
 
     // パラメータをシンボリック変数として登録
     for param in &atom.params {
-        let var = param_z3_value(
-            &ctx,
+        let var = super::datatype::param_z3_value_for_vc(
+            &vc,
             param.name.as_str(),
             param.type_name.as_deref(),
-            module_env,
-            ieee754_f64,
-            bitvec_i64,
         );
         env.insert(param.name.clone(), var);
 
@@ -107,7 +122,7 @@ pub(crate) fn verify_atom_invariant(
             // invariant の否定を assert
             solver.assert(&inv_z3.not());
             // Unsat なら requires → invariant が証明された
-            if solver.check() == SatResult::Sat {
+            if crate::verification::phase_artifacts::check(&solver) == SatResult::Sat {
                 solver.pop(1);
                 return Err(MumeiError::verification_at(
                     format!(
@@ -127,7 +142,7 @@ pub(crate) fn verify_atom_invariant(
         // requires が true の場合、invariant は無条件に成立する必要がある
         solver.push();
         solver.assert(&inv_z3.not());
-        if solver.check() == SatResult::Sat {
+        if crate::verification::phase_artifacts::check(&solver) == SatResult::Sat {
             solver.pop(1);
             return Err(MumeiError::verification_at(
                 format!(
@@ -170,7 +185,7 @@ pub(crate) fn verify_atom_invariant(
 
         // invariant の維持を検証: ¬inv_after が Unsat なら維持されている
         solver.assert(&inv_after.not());
-        if solver.check() == SatResult::Sat {
+        if crate::verification::phase_artifacts::check(&solver) == SatResult::Sat {
             solver.pop(1);
             return Err(MumeiError::verification_at(
                 format!(
@@ -197,6 +212,7 @@ pub(crate) fn verify_atom_invariant(
         }
     }
     discharge_bv_shift_obligations(&vc, &solver)?;
+    discharge_bv_div_obligations(&vc, &solver)?;
     solver.pop(1);
 
     Ok(())
@@ -219,7 +235,7 @@ pub(crate) fn expr_to_source_string(expr: &Expr) -> String {
     match expr {
         Expr::Number(n) => n.to_string(),
         Expr::Float(f) => format!("{}", f),
-        Expr::StringLit(s) => format!("\"{}\"", s),
+        Expr::StringLit(s) => format!("\"{}\"", crate::parser::token::escape_string_content(s)),
         Expr::Variable(v) => v.clone(),
         Expr::BinaryOp(l, op, r) => {
             let op_str = match op {
@@ -266,6 +282,7 @@ pub(crate) fn expr_to_source_string(expr: &Expr) -> String {
             stmt_to_source_string(then_branch),
             stmt_to_source_string(else_branch)
         ),
+        Expr::Block(stmt) => stmt_to_source_string(stmt),
         Expr::StructInit { type_name, fields } => {
             let fields_str: Vec<String> = fields
                 .iter()
@@ -362,6 +379,7 @@ pub(crate) fn collect_callees_with_args_expr(expr: &Expr) -> Vec<(String, Vec<Ex
             callees.extend(collect_callees_with_args_stmt(then_branch));
             callees.extend(collect_callees_with_args_stmt(else_branch));
         }
+        Expr::Block(stmt) => callees.extend(collect_callees_with_args_stmt(stmt)),
         Expr::BinaryOp(l, _, r) => {
             callees.extend(collect_callees_with_args_expr(l));
             callees.extend(collect_callees_with_args_expr(r));
@@ -495,6 +513,7 @@ pub(crate) fn collect_array_accesses_inner(expr: &Expr, out: &mut Vec<(String, E
             collect_array_accesses_in_stmt(then_branch, out);
             collect_array_accesses_in_stmt(else_branch, out);
         }
+        Expr::Block(stmt) => collect_array_accesses_in_stmt(stmt, out),
         _ => {}
     }
 }
@@ -547,6 +566,7 @@ pub(crate) fn collect_callees_expr(expr: &Expr) -> Vec<String> {
             callees.extend(collect_callees_stmt(then_branch));
             callees.extend(collect_callees_stmt(else_branch));
         }
+        Expr::Block(stmt) => callees.extend(collect_callees_stmt(stmt)),
         Expr::BinaryOp(l, _, r) => {
             callees.extend(collect_callees_expr(l));
             callees.extend(collect_callees_expr(r));

@@ -22,12 +22,20 @@ runs:
         test -x "$z3_dir/bin/z3"
         test -f "$z3_dir/bin/libz3.so"
         test -f "$z3_dir/include/z3.h"
-        library_path="$z3_dir/bin"
+        # Apt's libz3-dev gives linked binaries a `libz3.so.4` NEEDED entry;
+        # without that name on LD_LIBRARY_PATH the loader resolves it to the
+        # system z3 (4.8.x) instead of this toolchain.
+        lib_dir="$extract_dir/lib"
+        mkdir -p "$lib_dir"
+        ln -sfn "$z3_dir/bin/libz3.so" "$lib_dir/libz3.so"
+        ln -sfn "$z3_dir/bin/libz3.so" "$lib_dir/libz3.so.4"
+        test "$(readlink -f "$lib_dir/libz3.so.4")" = "$(readlink -f "$z3_dir/bin/libz3.so")"
+        library_path="$lib_dir"
         if [ -n "${LD_LIBRARY_PATH:-}" ]; then
           library_path="$library_path:$LD_LIBRARY_PATH"
         fi
         {
           echo "Z3_SYS_Z3_HEADER=$z3_dir/include/z3.h"
-          echo "Z3_SYS_Z3_LIB_DIR=$z3_dir/bin"
+          echo "Z3_SYS_Z3_LIB_DIR=$lib_dir"
           echo "LD_LIBRARY_PATH=$library_path"
         } >> "$GITHUB_ENV"

@@ -148,7 +148,7 @@ impl std::fmt::Display for MoveViolationKind {
 fn collect_operand_read_locals(op: &Operand) -> Vec<Local> {
     let mut locals = Vec::new();
     match op {
-        Operand::Place(place) => {
+        Operand::Place(place) | Operand::Move(place) => {
             let mut set = HashSet::new();
             collect_place_locals(place, &mut set);
             locals.extend(set);
@@ -183,7 +183,8 @@ fn process_statement_for_moves(
             match rvalue {
                 Rvalue::Use(op) => {
                     // Rvalue::Use(Operand::Place(...)) is a potential move
-                    if let Operand::Place(Place::Local(src)) = op {
+                    if let Operand::Move(Place::Local(src)) | Operand::Place(Place::Local(src)) = op
+                    {
                         // Copy types are never consumed — only check alive
                         if lookup_movability(src, locals) == Movability::Copy {
                             if state.check_alive(src).is_err() {
@@ -236,6 +237,30 @@ fn process_statement_for_moves(
                 }
                 Rvalue::Call { args, .. } => {
                     for op in args {
+                        if let Operand::Move(Place::Local(src)) = op {
+                            match state.consume(src) {
+                                Ok(()) => {}
+                                Err(_) => violations.push(MoveViolation {
+                                    block_id,
+                                    local: src.clone(),
+                                    kind: MoveViolationKind::DoubleMove,
+                                }),
+                            }
+                            continue;
+                        }
+                        for l in collect_operand_read_locals(op) {
+                            if state.check_alive(&l).is_err() {
+                                violations.push(MoveViolation {
+                                    block_id,
+                                    local: l,
+                                    kind: MoveViolationKind::UseAfterMove,
+                                });
+                            }
+                        }
+                    }
+                }
+                Rvalue::ArrayLit(elements) => {
+                    for op in elements {
                         for l in collect_operand_read_locals(op) {
                             if state.check_alive(&l).is_err() {
                                 violations.push(MoveViolation {
@@ -343,6 +368,14 @@ pub fn analyze_moves(body: &MirBody) -> MoveAnalysisResult {
     let mut exit_states: HashMap<BasicBlockId, MirLinearityState> = HashMap::new();
     let mut violations: Vec<MoveViolation> = Vec::new();
 
+    // Liveness for ConflictingMerge filtering: a local that is moved on one
+    // branch and merely unused on the other is dead-after on every path, so
+    // the divergent ownership is unobservable (`let r = …; if c { r } else { 0 }`
+    // moves `r` into the result on the then-path only — legal). Conflicts on
+    // locals that ARE used after the merge stay violations; the merged state
+    // already marks them dead, so any later use is also a UseAfterMove.
+    let liveness = crate::mir_analysis::compute_liveness(body);
+
     // Initialize entry block with all locals alive
     let init_state = MirLinearityState::init_all_alive(&body.locals);
     entry_states.insert(body.entry_block, init_state);
@@ -439,6 +472,15 @@ pub fn analyze_moves(body: &MirBody) -> MoveAnalysisResult {
                             .and_then(|d| d.name.as_ref())
                             .is_some();
                         if !is_named {
+                            continue;
+                        }
+                        // Dead-after-merge locals cannot observe the divergent
+                        // ownership state — suppress (see liveness note above).
+                        let live_at_merge = liveness
+                            .live_in
+                            .get(&succ_id)
+                            .is_some_and(|live| live.contains(&conflict.local));
+                        if !live_at_merge {
                             continue;
                         }
                         violations.push(MoveViolation {

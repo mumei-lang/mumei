@@ -38,19 +38,36 @@ pub(crate) fn read_source_file<P: AsRef<Path>>(path: P) -> Result<String, String
 
 /// Z3 が利用可能かチェックし、なければ親切なメッセージで終了する
 pub(crate) fn check_z3_available() {
-    use std::process::Command as Cmd;
-    if Cmd::new("z3").arg("--version").output().is_err() {
-        eprintln!("❌ Error: Z3 solver not found.");
-        eprintln!();
-        eprintln!("   Mumei requires Z3 for formal verification.");
-        eprintln!("   Install it with one of:");
-        eprintln!("     macOS:  brew install z3");
-        eprintln!("     Ubuntu: sudo apt-get install libz3-dev");
-        eprintln!("     Auto:   mumei setup");
-        eprintln!();
-        eprintln!("   After installing, run `mumei inspect` to verify.");
+    if let Err(message) = z3_availability() {
+        eprintln!("{message}");
         std::process::exit(1);
     }
+}
+
+/// Preflight for the Z3 solver. Mumei links libz3 directly and never
+/// invokes a `z3` executable, so this probes the linked library via FFI
+/// rather than looking for a `z3` binary on PATH. Returns the
+/// installation hint as the error so callers with their own exit-code
+/// contract (`mumei verify`) can report a missing solver without
+/// exiting here.
+pub(crate) fn z3_availability() -> Result<(), String> {
+    let (major, minor, build, _) = verification::linked_z3_version();
+    if (major, minor, build) == (0, 0, 0) {
+        let mut message = String::new();
+        use std::fmt::Write as _;
+        let _ = writeln!(message, "❌ Error: Z3 solver is not usable.");
+        let _ = writeln!(message);
+        let _ = writeln!(
+            message,
+            "   Mumei requires a linked Z3 library for formal verification."
+        );
+        let _ = writeln!(
+            message,
+            "   Rebuild with libz3 available, or run `mumei setup`."
+        );
+        return Err(message);
+    }
+    Ok(())
 }
 
 /// parse → resolve → monomorphize → ModuleEnv に全定義を登録
@@ -100,7 +117,13 @@ pub(crate) fn try_load_and_prepare_with_full_options(
 ) -> Result<(Vec<Item>, verification::ModuleEnv, Vec<ImportDecl>, String), String> {
     let source =
         read_source_file(input).map_err(|e| format!("Could not read '{}': {}", input, e))?;
-    let items = parser::parse_module(&source);
+    let items = parser::parse_module_checked(&source).map_err(|failures| {
+        format!(
+            "Syntax error(s) in '{}':\n  {}",
+            input,
+            failures.join("\n  ")
+        )
+    })?;
 
     let mut module_env = verification::ModuleEnv::new();
     verification::register_builtin_traits(&mut module_env);
@@ -162,6 +185,25 @@ pub(crate) fn try_load_and_prepare_with_full_options(
 
     let mut mono = ast::Monomorphizer::new();
     mono.collect(&items);
+    if !mono.body_parse_failures.is_empty() {
+        return Err(format!(
+            "Syntax error(s) in atom bodies of '{}':\n  {}",
+            input,
+            mono.body_parse_failures.join("\n  ")
+        ));
+    }
+    // Generic defs are dropped from the post-mono item list (only concrete
+    // instances remain), but their names are still declared items bodies may
+    // reference (`atom_ref(pipe)`, `List::Nil`, generic-call sugar lowered as
+    // a path). Register them so such names resolve in the env.
+    for item in &items {
+        match item {
+            Item::Atom(a) if !a.type_params.is_empty() => module_env.register_atom(a),
+            Item::EnumDef(e) if !e.type_params.is_empty() => module_env.register_enum(e),
+            Item::StructDef(s) if !s.type_params.is_empty() => module_env.register_struct(s),
+            _ => {}
+        }
+    }
     let mut items = if mono.has_generics() {
         let mono_items = mono.monomorphize(&items, Some(&module_env));
         eprintln!(
@@ -213,6 +255,7 @@ pub(crate) fn try_load_and_prepare_with_full_options(
                             is_ref_mut: false,
                             fn_contract_requires: None,
                             fn_contract_ensures: None,
+                            consume: false,
                         })
                         .collect();
 
@@ -223,6 +266,9 @@ pub(crate) fn try_load_and_prepare_with_full_options(
                         params,
                         trace_id: None,
                         spec_metadata: std::collections::HashMap::new(),
+                        clause_labels: Vec::new(),
+                        clause_modes: Vec::new(),
+                        covers: Vec::new(),
                         requires: ext_fn
                             .requires
                             .clone()
@@ -238,6 +284,7 @@ pub(crate) fn try_load_and_prepare_with_full_options(
                         invariant: None,
                         effects: vec![],
                         return_type: Some(ext_fn.return_type.clone()),
+                        decreases: None,
                         span: ext_fn.span.clone(),
                         effect_pre: std::collections::HashMap::new(),
                         effect_post: std::collections::HashMap::new(),
@@ -299,7 +346,7 @@ pub(crate) fn load_cross_spec_files(
     module_env: &mut verification::ModuleEnv,
     imports: &mut Vec<ImportDecl>,
     verbose: bool,
-) {
+) -> Result<(), String> {
     for file in cross_spec_files {
         if verbose {
             println!(
@@ -308,11 +355,12 @@ pub(crate) fn load_cross_spec_files(
             );
         }
         let (mut extra_items, extra_env, mut extra_imports, _source) =
-            load_and_prepare_with_full_options(file, strict_imports, allow_lean_verified);
+            try_load_and_prepare_with_full_options(file, strict_imports, allow_lean_verified)?;
         items.append(&mut extra_items);
         imports.append(&mut extra_imports);
         merge_module_env(module_env, extra_env);
     }
+    Ok(())
 }
 
 pub(crate) fn merge_module_env(
@@ -373,17 +421,17 @@ pub(crate) fn collect_mm_files(dir: &Path) -> Vec<std::path::PathBuf> {
     result
 }
 
-pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) {
-    let _ = fs::create_dir_all(dst);
-    if let Ok(entries) = fs::read_dir(src) {
-        for entry in entries.flatten() {
-            let src_path = entry.path();
-            let dst_path = dst.join(entry.file_name());
-            if src_path.is_dir() {
-                copy_dir_recursive(&src_path, &dst_path);
-            } else {
-                let _ = fs::copy(&src_path, &dst_path);
-            }
+pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
         }
     }
+    Ok(())
 }

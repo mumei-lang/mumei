@@ -137,9 +137,9 @@ pub(crate) fn cmd_run(
     }
     let hir_atoms = collect_binary_hir_atoms(&items, &module_env);
 
-    let runtime_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/mumei_runtime.c");
-    if !runtime_path.exists() {
-        eprintln!("❌ Runtime library not found: {}", runtime_path.display());
+    let runtime_path = tmp_dir.join("mumei_runtime.c");
+    if let Err(e) = fs::write(&runtime_path, MUMEI_RUNTIME_C) {
+        eprintln!("❌ Failed to stage runtime library: {}", e);
         let _ = fs::remove_dir_all(&tmp_dir);
         std::process::exit(1);
     }
@@ -194,7 +194,7 @@ pub(crate) fn cmd_run(
     );
     let mut link_inputs = vec![link_input.clone(), runtime_stubs_path.clone()];
     let rust_ffi_lib = if uses_rust_ffi(&extern_blocks) {
-        match generate_rust_ffi_staticlib(Path::new(env!("CARGO_MANIFEST_DIR")), &tmp_dir) {
+        match generate_rust_ffi_staticlib(&tmp_dir) {
             Ok(path) => Some(path),
             Err(e) => {
                 eprintln!("❌ Rust FFI runtime build failed: {}", e);

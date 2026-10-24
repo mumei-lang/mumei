@@ -7,11 +7,15 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
     let mut tags = Vec::new();
 
     for param in &atom.params {
-        if param
-            .type_name
-            .as_ref()
-            .is_some_and(|type_name| module_env.enums.contains_key(type_name))
-        {
+        // P10-C: finite, non-recursive, scalar-payload enums lower to native
+        // Z3 datatypes and stay decidable — only enums outside that fragment
+        // (recursive or generic) keep the Int-tag encoding and escalate to
+        // `inductive_data_type` for Lean 4.
+        if param.type_name.as_ref().is_some_and(|type_name| {
+            module_env.enums.get(type_name).is_some_and(|e| {
+                !crate::verification::support::datatype::is_finite_adt(e, module_env)
+            })
+        }) {
             push_unique_tag(&mut tags, "inductive_data_type");
         }
     }
@@ -28,9 +32,28 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
     {
         push_unique_tag(&mut tags, "nonlinear_arithmetic");
     }
-    if expr_has_inductive_shape(&requires_expr)
-        || expr_has_inductive_shape(&ensures_expr)
-        || stmt_has_inductive_shape(&body_stmt)
+    // Declared enum types visible to the classifier: parameters seed the
+    // environment and `let` bindings extend it sequentially, so a bare
+    // `match r { Ok(v) => … }` on a `Res2` can disambiguate `Ok` from a
+    // same-named variant of another enum (e.g. prelude `Result`) — the same
+    // declared-type rule the verifier uses. Without the hint the owner is
+    // ambiguous and the atom was tagged `inductive_data_type` even though
+    // the finite-ADT path verifies natively.
+    let mut enum_names: std::collections::HashMap<String, String> = atom
+        .params
+        .iter()
+        .filter_map(|p| {
+            let base =
+                crate::verification::support::datatype::type_name_base(p.type_name.as_deref()?);
+            module_env
+                .get_enum(base)
+                .map(|e| (p.name.clone(), e.name.clone()))
+        })
+        .collect();
+
+    if expr_has_inductive_shape(&requires_expr, module_env, &enum_names)
+        || expr_has_inductive_shape(&ensures_expr, module_env, &enum_names)
+        || stmt_has_inductive_shape(&body_stmt, module_env, &mut enum_names)
     {
         push_unique_tag(&mut tags, "inductive_data_type");
     }
@@ -44,12 +67,22 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
             push_unique_tag(&mut tags, "nonlinear_arithmetic");
         }
     }
+    let mut struct_invariant_nonlinear = false;
     for invariant in atom_struct_invariants(atom, module_env) {
         if expr_has_nonlinear_arithmetic(&parse_expression(&invariant))
             || text_has_nonlinear_arithmetic_marker(&invariant)
         {
             push_unique_tag(&mut tags, "nonlinear_arithmetic");
+            struct_invariant_nonlinear = true;
         }
+    }
+    if tags.iter().any(|tag| tag == "nonlinear_arithmetic")
+        && atom.invariant.is_none()
+        && !struct_invariant_nonlinear
+        && atom.forall_constraints.is_empty()
+        && bounded_low_degree_nonlinear_profile(atom).is_some()
+    {
+        push_unique_tag(&mut tags, BOUNDED_NONLINEAR_TAG);
     }
 
     if stmt_has_while(&body_stmt) {
@@ -59,17 +92,19 @@ pub fn detect_logic_fragment_tags(atom: &Atom, module_env: &ModuleEnv) -> Vec<St
         push_unique_tag(&mut tags, "array_without_bounds");
     }
 
-    let has_forall = atom
-        .forall_constraints
-        .iter()
-        .any(|q| q.q_type == QuantifierType::ForAll)
-        || atom.requires.contains("forall(")
+    let has_forall = atom.forall_constraints.iter().any(|q| {
+        q.q_type == QuantifierType::ForAll
+            || q.condition.contains("forall(")
+            || q.start.contains("forall(")
+            || q.end.contains("forall(")
+    }) || atom.requires.contains("forall(")
         || atom.ensures.contains("forall(");
-    let has_exists = atom
-        .forall_constraints
-        .iter()
-        .any(|q| q.q_type == QuantifierType::Exists)
-        || atom.requires.contains("exists(")
+    let has_exists = atom.forall_constraints.iter().any(|q| {
+        q.q_type == QuantifierType::Exists
+            || q.condition.contains("exists(")
+            || q.start.contains("exists(")
+            || q.end.contains("exists(")
+    }) || atom.requires.contains("exists(")
         || atom.ensures.contains("exists(");
     if has_forall && has_exists {
         push_unique_tag(&mut tags, "quantifier_alternation");
@@ -336,7 +371,283 @@ pub fn is_outside_decidable_fragment(tags: &[String]) -> bool {
         "inductive_data_type",
         "finite_field",
     ];
-    tags.iter().any(|tag| OUTSIDE_TAGS.contains(&tag.as_str()))
+    let nlsat_first = is_nlsat_first_candidate(tags);
+    tags.iter().any(|tag| {
+        OUTSIDE_TAGS.contains(&tag.as_str()) && !(nlsat_first && tag == "nonlinear_arithmetic")
+    })
+}
+
+/// Secondary tag recorded next to `nonlinear_arithmetic` when the obligation
+/// is a bounded, low-degree polynomial (P10-D / C-2). Such atoms are tried by
+/// Z3 with `nlsat` first and only demoted to Lean on `unknown` / timeout.
+pub const BOUNDED_NONLINEAR_TAG: &str = "bounded_nonlinear_arithmetic";
+
+/// Maximum total degree of any product term (`x * y` is 2, `x * x * x` is 3).
+pub const NLSAT_FIRST_MAX_DEGREE: usize = 2;
+/// Maximum number of distinct variables occurring in nonlinear terms.
+pub const NLSAT_FIRST_MAX_VARIABLES: usize = 3;
+
+/// Summary of the nonlinear terms of an atom that qualify for nlsat-first.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BoundedNonlinearProfile {
+    pub max_degree: usize,
+    pub variables: Vec<String>,
+}
+
+/// True when the tags mark a bounded low-degree nonlinear obligation that is
+/// tried by Z3 (`nlsat`) before any Lean escalation.
+pub fn is_nlsat_first_candidate(tags: &[String]) -> bool {
+    tags.iter().any(|tag| tag == BOUNDED_NONLINEAR_TAG)
+        && tags.iter().any(|tag| tag == "nonlinear_arithmetic")
+        && !tags.iter().any(|tag| tag == "finite_field")
+}
+
+#[derive(Default, Clone, Copy)]
+struct VarBounds {
+    lower: Option<i64>,
+    upper: Option<i64>,
+}
+
+impl VarBounds {
+    fn is_closed(&self) -> bool {
+        self.lower.is_some() && self.upper.is_some()
+    }
+
+    fn excludes_zero(&self) -> bool {
+        self.is_closed() && (self.lower.unwrap_or(0) > 0 || self.upper.unwrap_or(0) < 0)
+    }
+}
+
+fn collect_requires_bounds(expr: &Expr, bounds: &mut HashMap<String, VarBounds>) {
+    match expr {
+        Expr::BinaryOp(left, Op::And, right) => {
+            collect_requires_bounds(left, bounds);
+            collect_requires_bounds(right, bounds);
+        }
+        Expr::BinaryOp(left, op, right) => {
+            let (var, literal, flipped) = match (left.as_ref(), right.as_ref()) {
+                (Expr::Variable(v), Expr::Number(n)) => (v, *n, false),
+                (Expr::Number(n), Expr::Variable(v)) => (v, *n, true),
+                _ => return,
+            };
+            let entry = bounds.entry(var.clone()).or_default();
+            // Normalize to `var <op> literal`.
+            let op = if flipped {
+                match op {
+                    Op::Gt => Op::Lt,
+                    Op::Lt => Op::Gt,
+                    Op::Ge => Op::Le,
+                    Op::Le => Op::Ge,
+                    other => other.clone(),
+                }
+            } else {
+                op.clone()
+            };
+            match op {
+                Op::Ge => entry.lower = Some(entry.lower.map_or(literal, |l| l.max(literal))),
+                Op::Gt => {
+                    let lit = literal.saturating_add(1);
+                    entry.lower = Some(entry.lower.map_or(lit, |l| l.max(lit)));
+                }
+                Op::Le => entry.upper = Some(entry.upper.map_or(literal, |u| u.min(literal))),
+                Op::Lt => {
+                    let lit = literal.saturating_sub(1);
+                    entry.upper = Some(entry.upper.map_or(lit, |u| u.min(lit)));
+                }
+                Op::Eq => {
+                    entry.lower = Some(literal);
+                    entry.upper = Some(literal);
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+#[derive(Default)]
+struct PolyShape {
+    degree: usize,
+    variables: Vec<String>,
+    divisors: Vec<String>,
+}
+
+fn poly_shape(expr: &Expr) -> Option<PolyShape> {
+    match expr {
+        Expr::Number(_) | Expr::Float(_) => Some(PolyShape::default()),
+        Expr::Variable(name) => Some(PolyShape {
+            degree: 1,
+            variables: vec![name.clone()],
+            divisors: Vec::new(),
+        }),
+        Expr::BinaryOp(left, Op::Add, right) | Expr::BinaryOp(left, Op::Sub, right) => {
+            let (l, r) = (poly_shape(left)?, poly_shape(right)?);
+            Some(merge_shapes(l, r, false))
+        }
+        Expr::BinaryOp(left, Op::Mul, right) => {
+            let (l, r) = (poly_shape(left)?, poly_shape(right)?);
+            Some(merge_shapes(l, r, true))
+        }
+        Expr::BinaryOp(left, Op::Div, right) => {
+            let l = poly_shape(left)?;
+            match right.as_ref() {
+                Expr::Number(_) => Some(l),
+                Expr::Variable(name) => {
+                    let mut shape = merge_shapes(
+                        l,
+                        PolyShape {
+                            degree: 1,
+                            variables: vec![name.clone()],
+                            divisors: Vec::new(),
+                        },
+                        true,
+                    );
+                    shape.divisors.push(name.clone());
+                    Some(shape)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn merge_shapes(l: PolyShape, r: PolyShape, product: bool) -> PolyShape {
+    let mut variables = l.variables;
+    for v in r.variables {
+        if !variables.contains(&v) {
+            variables.push(v);
+        }
+    }
+    let mut divisors = l.divisors;
+    divisors.extend(r.divisors);
+    PolyShape {
+        degree: if product {
+            l.degree + r.degree
+        } else {
+            l.degree.max(r.degree)
+        },
+        variables,
+        divisors,
+    }
+}
+
+/// Collect every nonlinear product/division term. Returns `false` when a
+/// term is not a plain polynomial over variables and literals.
+fn collect_nonlinear_terms_expr(expr: &Expr, terms: &mut Vec<PolyShape>) -> bool {
+    match expr {
+        Expr::BinaryOp(_, Op::Pow, _) => false,
+        Expr::BinaryOp(_, Op::Mul, _) | Expr::BinaryOp(_, Op::Div, _) => match poly_shape(expr) {
+            Some(shape) => {
+                if shape.degree >= 2 || !shape.divisors.is_empty() {
+                    terms.push(shape);
+                }
+                true
+            }
+            None => false,
+        },
+        Expr::BinaryOp(left, _, right) => {
+            collect_nonlinear_terms_expr(left, terms) && collect_nonlinear_terms_expr(right, terms)
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_nonlinear_terms_expr(cond, terms)
+                && collect_nonlinear_terms_stmt(then_branch, terms)
+                && collect_nonlinear_terms_stmt(else_branch, terms)
+        }
+        Expr::Block(stmt) => collect_nonlinear_terms_stmt(stmt, terms),
+        Expr::Call(_, args) => args
+            .iter()
+            .all(|arg| collect_nonlinear_terms_expr(arg, terms)),
+        Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::Variable(_) => true,
+        other => !expr_has_nonlinear_arithmetic(other),
+    }
+}
+
+fn collect_nonlinear_terms_stmt(stmt: &Stmt, terms: &mut Vec<PolyShape>) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            collect_nonlinear_terms_expr(value, terms)
+        }
+        Stmt::Expr(value, _) => collect_nonlinear_terms_expr(value, terms),
+        Stmt::Block(stmts, _) => stmts
+            .iter()
+            .all(|stmt| collect_nonlinear_terms_stmt(stmt, terms)),
+        other => !stmt_has_nonlinear_arithmetic(other),
+    }
+}
+
+/// Decide whether an atom's nonlinear arithmetic is a *bounded low-degree*
+/// obligation that Z3 should try first with `nlsat` (P10-D step 1).
+///
+/// Conservative acceptance criteria — every one must hold:
+/// - only `*` and `/` over variables/literals (no `**`, `%`, `pow`/`mod`/`exp`,
+///   no finite-field helpers, no loop invariant);
+/// - every product term has total degree `<= NLSAT_FIRST_MAX_DEGREE`;
+/// - at most `NLSAT_FIRST_MAX_VARIABLES` distinct variables occur in nonlinear terms;
+/// - each such variable has both a literal lower and upper bound in `requires`
+///   (`v >= c && v <= d`, `c < v`, `v == c`, ...), and every symbolic divisor's
+///   bounds exclude zero.
+///
+/// Returns `None` when the atom is not nonlinear at all or fails any criterion;
+/// those atoms keep the unconditional Lean escalation path.
+pub fn bounded_low_degree_nonlinear_profile(atom: &Atom) -> Option<BoundedNonlinearProfile> {
+    let contract_text = atom_contract_text(atom);
+    if text_has_nonlinear_arithmetic_marker(&contract_text)
+        || atom_uses_finite_field_semantics(atom)
+    {
+        return None;
+    }
+    let requires_expr = parse_expression(&atom.requires);
+    let ensures_expr = parse_expression(&atom.ensures);
+    let body_stmt = parse_body_expr(&atom.body_expr);
+
+    let mut terms = Vec::new();
+    if !collect_nonlinear_terms_expr(&requires_expr, &mut terms)
+        || !collect_nonlinear_terms_expr(&ensures_expr, &mut terms)
+        || !collect_nonlinear_terms_stmt(&body_stmt, &mut terms)
+    {
+        return None;
+    }
+    if terms.is_empty() {
+        return None;
+    }
+
+    let mut bounds = HashMap::new();
+    collect_requires_bounds(&requires_expr, &mut bounds);
+
+    let mut profile = BoundedNonlinearProfile::default();
+    for term in &terms {
+        if term.degree > NLSAT_FIRST_MAX_DEGREE {
+            return None;
+        }
+        profile.max_degree = profile.max_degree.max(term.degree);
+        for var in &term.variables {
+            if !profile.variables.contains(var) {
+                profile.variables.push(var.clone());
+            }
+        }
+        for divisor in &term.divisors {
+            if !bounds.get(divisor).is_some_and(VarBounds::excludes_zero) {
+                return None;
+            }
+        }
+    }
+    if profile.variables.len() > NLSAT_FIRST_MAX_VARIABLES {
+        return None;
+    }
+    if profile
+        .variables
+        .iter()
+        .any(|var| !bounds.get(var).is_some_and(VarBounds::is_closed))
+    {
+        return None;
+    }
+    profile.variables.sort();
+    Some(profile)
 }
 
 pub fn outside_decidable_fragment_diagnostic(
@@ -437,6 +748,11 @@ fn collect_array_access_names_in_expr(expr: &Expr, names: &mut Vec<String>) {
             names.push(name.clone());
             collect_array_access_names_in_expr(index, names);
         }
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_array_access_names_in_expr(element, names);
+            }
+        }
         Expr::BinaryOp(left, _, right) => {
             collect_array_access_names_in_expr(left, names);
             collect_array_access_names_in_expr(right, names);
@@ -450,6 +766,7 @@ fn collect_array_access_names_in_expr(expr: &Expr, names: &mut Vec<String>) {
             collect_array_access_names_in_stmt(then_branch, names);
             collect_array_access_names_in_stmt(else_branch, names);
         }
+        Expr::Block(stmt) => collect_array_access_names_in_stmt(stmt, names),
         Expr::Call(_, args) | Expr::Perform { args, .. } => {
             for arg in args {
                 collect_array_access_names_in_expr(arg, names);
@@ -624,7 +941,7 @@ fn atom_uses_bitvector_semantics(
         })
 }
 
-fn expr_has_bitwise_op(expr: &Expr) -> bool {
+pub(crate) fn expr_has_bitwise_op(expr: &Expr) -> bool {
     match expr {
         Expr::BinaryOp(left, op, right) => {
             matches!(op, Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr)
@@ -643,6 +960,7 @@ fn expr_has_bitwise_op(expr: &Expr) -> bool {
                 || stmt_has_bitwise_op(then_branch)
                 || stmt_has_bitwise_op(else_branch)
         }
+        Expr::Block(stmt) => stmt_has_bitwise_op(stmt),
         Expr::Match { target, arms } => {
             expr_has_bitwise_op(target) || arms.iter().any(|arm| stmt_has_bitwise_op(&arm.body))
         }
@@ -796,22 +1114,45 @@ pub(crate) fn quantifier_alternation_pattern(atom: &Atom) -> &'static str {
         {
             "forall exists"
         }
+        // Nested alternation: the inner quantifier lives inside the
+        // outer constraint's `condition` (nested matches are not
+        // extracted as separate constraints).
+        _ if atom.forall_constraints.iter().any(|q| {
+            q.q_type == QuantifierType::ForAll
+                && (q.condition.contains("exists(")
+                    || q.start.contains("exists(")
+                    || q.end.contains("exists("))
+        }) =>
+        {
+            "forall exists"
+        }
+        _ if atom.forall_constraints.iter().any(|q| {
+            q.q_type == QuantifierType::Exists
+                && (q.condition.contains("forall(")
+                    || q.start.contains("forall(")
+                    || q.end.contains("forall("))
+        }) =>
+        {
+            "exists forall"
+        }
         _ => "mixed quantifiers",
     }
 }
 
 pub(crate) fn atom_has_quantifier_alternation(atom: &Atom) -> bool {
-    let has_forall = atom
-        .forall_constraints
-        .iter()
-        .any(|q| q.q_type == QuantifierType::ForAll)
-        || atom.requires.contains("forall(")
+    let has_forall = atom.forall_constraints.iter().any(|q| {
+        q.q_type == QuantifierType::ForAll
+            || q.condition.contains("forall(")
+            || q.start.contains("forall(")
+            || q.end.contains("forall(")
+    }) || atom.requires.contains("forall(")
         || atom.ensures.contains("forall(");
-    let has_exists = atom
-        .forall_constraints
-        .iter()
-        .any(|q| q.q_type == QuantifierType::Exists)
-        || atom.requires.contains("exists(")
+    let has_exists = atom.forall_constraints.iter().any(|q| {
+        q.q_type == QuantifierType::Exists
+            || q.condition.contains("exists(")
+            || q.start.contains("exists(")
+            || q.end.contains("exists(")
+    }) || atom.requires.contains("exists(")
         || atom.ensures.contains("exists(");
     has_forall && has_exists
 }
@@ -859,10 +1200,87 @@ pub(crate) fn atom_has_regex_semantics(
 
 pub(crate) fn text_has_regex_semantics(text: &str) -> bool {
     let normalized = text.to_ascii_lowercase();
-    normalized.contains("regex")
-        || normalized.contains("regexp")
-        || normalized.contains("match_regex(")
-        || normalized.contains("re_match(")
+    // P10-B: `matches(` / `match_regex(` / `re_match(` calls whose literal
+    // pattern compiles to Z3 RegLan stay decidable — mask each such call so
+    // the word triggers below do not tag it ("match_regex" itself contains
+    // "regex"). Unparseable or uncompilable patterns keep the tag.
+    let mut masked = normalized.clone().into_bytes();
+    for name in ["matches(", "match_regex(", "re_match("] {
+        let mut search_from = 0usize;
+        while let Some(rel) = normalized[search_from..].find(name) {
+            let start = search_from + rel;
+            // Word boundary: `more_match(` must not be read as `re_match(`.
+            if start > 0
+                && (normalized.as_bytes()[start - 1].is_ascii_alphanumeric()
+                    || normalized.as_bytes()[start - 1] == b'_')
+            {
+                search_from = start + name.len();
+                continue;
+            }
+            let open = start + name.len() - 1; // byte index of '('
+            match regex_call_span(&normalized, open) {
+                Some((close, Some(pattern)))
+                    if crate::verification::support::reglan::supported(&pattern) =>
+                {
+                    for b in &mut masked[start..=close] {
+                        *b = b' ';
+                    }
+                    search_from = close + 1;
+                }
+                _ => return true,
+            }
+        }
+    }
+    let masked = String::from_utf8_lossy(&masked);
+    masked.contains("regex") || masked.contains("regexp")
+}
+
+/// `matches` / `match_regex` / `re_match` lower to Z3 RegLan when their
+/// pattern is a supported literal.
+fn is_regex_builtin_name(name: &str) -> bool {
+    matches!(name, "matches" | "match_regex" | "re_match")
+}
+
+/// Byte offsets of a `name(...)` call's closing `)` plus its last quoted
+/// string literal (the regex pattern), tracking paren depth and skipping
+/// quoted spans. `open` is the index of the call's `(`.
+fn regex_call_span(text: &str, open: usize) -> Option<(usize, Option<String>)> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                // Skip the quoted span (honoring \" escapes).
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' => i += 1,
+                        b'"' => break,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let inner = &text[open + 1..i];
+                    // The pattern is the last quoted literal inside the call.
+                    if let Some(endq) = inner.rfind('"') {
+                        if let Some(startq) = inner[..endq].rfind('"') {
+                            return Some((i, Some(inner[startq + 1..endq].to_string())));
+                        }
+                    }
+                    return Some((i, None));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 pub(crate) fn atom_has_unbounded_array_access(
@@ -934,6 +1352,11 @@ pub(crate) fn collect_array_index_names_from_expr(expr: &Expr, indexes: &mut Vec
             collect_array_index_name(index, indexes);
             collect_array_index_names_from_expr(index, indexes);
         }
+        Expr::ArrayLit(elements) => {
+            for element in elements {
+                collect_array_index_names_from_expr(element, indexes);
+            }
+        }
         Expr::BinaryOp(left, _, right) => {
             collect_array_index_names_from_expr(left, indexes);
             collect_array_index_names_from_expr(right, indexes);
@@ -947,6 +1370,7 @@ pub(crate) fn collect_array_index_names_from_expr(expr: &Expr, indexes: &mut Vec
             collect_array_index_names_from_stmt(then_branch, indexes);
             collect_array_index_names_from_stmt(else_branch, indexes);
         }
+        Expr::Block(stmt) => collect_array_index_names_from_stmt(stmt, indexes),
         Expr::Call(_, args) => {
             for arg in args {
                 collect_array_index_names_from_expr(arg, indexes);
@@ -1040,6 +1464,7 @@ pub(crate) fn atom_uses_temporal_effect(atom: &Atom, module_env: &ModuleEnv) -> 
 pub(crate) fn expr_has_array_access(expr: &Expr) -> bool {
     match expr {
         Expr::ArrayAccess(_, _) => true,
+        Expr::ArrayLit(elements) => elements.iter().any(expr_has_array_access),
         Expr::BinaryOp(left, _, right) => {
             expr_has_array_access(left) || expr_has_array_access(right)
         }
@@ -1052,6 +1477,7 @@ pub(crate) fn expr_has_array_access(expr: &Expr) -> bool {
                 || stmt_has_array_access(then_branch)
                 || stmt_has_array_access(else_branch)
         }
+        Expr::Block(stmt) => stmt_has_array_access(stmt),
         Expr::Call(_, args) => args.iter().any(expr_has_array_access),
         Expr::StructInit { fields, .. } => fields
             .iter()
@@ -1118,6 +1544,7 @@ pub(crate) fn expr_has_linear_arithmetic(expr: &Expr) -> bool {
             expr_has_linear_arithmetic(left) || expr_has_linear_arithmetic(right)
         }
         Expr::ArrayAccess(_, idx) => expr_has_linear_arithmetic(idx),
+        Expr::ArrayLit(elements) => elements.iter().any(expr_has_linear_arithmetic),
         Expr::IfThenElse {
             cond,
             then_branch,
@@ -1127,6 +1554,7 @@ pub(crate) fn expr_has_linear_arithmetic(expr: &Expr) -> bool {
                 || stmt_has_linear_arithmetic(then_branch)
                 || stmt_has_linear_arithmetic(else_branch)
         }
+        Expr::Block(stmt) => stmt_has_linear_arithmetic(stmt),
         Expr::Call(_, args) => args.iter().any(expr_has_linear_arithmetic),
         Expr::StructInit { fields, .. } => fields
             .iter()
@@ -1195,6 +1623,7 @@ pub(crate) fn expr_has_nonlinear_arithmetic(expr: &Expr) -> bool {
             expr_has_nonlinear_arithmetic(left) || expr_has_nonlinear_arithmetic(right)
         }
         Expr::ArrayAccess(_, idx) => expr_has_nonlinear_arithmetic(idx),
+        Expr::ArrayLit(elements) => elements.iter().any(expr_has_nonlinear_arithmetic),
         Expr::IfThenElse {
             cond,
             then_branch,
@@ -1204,6 +1633,7 @@ pub(crate) fn expr_has_nonlinear_arithmetic(expr: &Expr) -> bool {
                 || stmt_has_nonlinear_arithmetic(then_branch)
                 || stmt_has_nonlinear_arithmetic(else_branch)
         }
+        Expr::Block(stmt) => stmt_has_nonlinear_arithmetic(stmt),
         Expr::Call(_, args) => args.iter().any(expr_has_nonlinear_arithmetic),
         Expr::StructInit { fields, .. } => fields
             .iter()
@@ -1262,8 +1692,22 @@ pub(crate) fn stmt_has_nonlinear_arithmetic(stmt: &Stmt) -> bool {
 pub(crate) fn expr_has_regex_semantics(expr: &Expr) -> bool {
     match expr {
         Expr::Call(name, args) => {
-            text_has_regex_semantics(name) || args.iter().any(expr_has_regex_semantics)
+            // P10-B: a regex builtin call is decidable when its pattern is a
+            // literal inside the supported RegLan fragment; anything else
+            // keeps the `regex_semantics` tag for Lean delegation.
+            let own_call = if is_regex_builtin_name(name) {
+                match args.get(1) {
+                    Some(Expr::StringLit(pattern)) => {
+                        !crate::verification::support::reglan::supported(pattern)
+                    }
+                    _ => true,
+                }
+            } else {
+                text_has_regex_semantics(name)
+            };
+            own_call || args.iter().any(expr_has_regex_semantics)
         }
+        Expr::ArrayLit(elements) => elements.iter().any(expr_has_regex_semantics),
         Expr::BinaryOp(left, _, right) => {
             expr_has_regex_semantics(left) || expr_has_regex_semantics(right)
         }
@@ -1277,6 +1721,7 @@ pub(crate) fn expr_has_regex_semantics(expr: &Expr) -> bool {
                 || stmt_has_regex_semantics(then_branch)
                 || stmt_has_regex_semantics(else_branch)
         }
+        Expr::Block(stmt) => stmt_has_regex_semantics(stmt),
         Expr::StructInit { fields, .. } => fields
             .iter()
             .any(|(_, field_expr)| expr_has_regex_semantics(field_expr)),
@@ -1326,37 +1771,173 @@ pub(crate) fn stmt_has_regex_semantics(stmt: &Stmt) -> bool {
     }
 }
 
-pub(crate) fn expr_has_inductive_shape(expr: &Expr) -> bool {
+/// The enum type an expression evaluates to, when statically inferable for
+/// fragment classification: variables resolve through the `names` env
+/// (params + enclosing `let` bindings), `E::V(..)`/`E::V` constructors name
+/// their enum, calls to atoms declared to return an enum resolve via the
+/// return type, and `if`/`match` resolve when every branch agrees.
+fn expr_enum_name(
+    expr: &Expr,
+    names: &std::collections::HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
     match expr {
-        Expr::Match { .. } => true,
-        Expr::BinaryOp(left, _, right) => {
-            expr_has_inductive_shape(left) || expr_has_inductive_shape(right)
+        Expr::Variable(v) => names.get(v.as_str()).cloned(),
+        Expr::Call(name, _) => {
+            if let Some((enum_name, variant)) = name.split_once("::") {
+                module_env
+                    .get_enum(enum_name)
+                    .filter(|e| e.variants.iter().any(|v| v.name == variant))
+                    .map(|e| e.name.clone())
+            } else {
+                module_env
+                    .get_atom(name)
+                    .and_then(|a| a.return_type.as_deref())
+                    .map(|t| crate::verification::support::datatype::type_name_base(t).to_string())
+                    .filter(|t| module_env.get_enum(t).is_some())
+            }
         }
-        Expr::ArrayAccess(_, idx) => expr_has_inductive_shape(idx),
+        Expr::FieldAccess(inner, field) => match inner.as_ref() {
+            // `E.V` unit constructor (or `value.field` — only the qualified
+            // unit-constructor form names an enum).
+            Expr::Variable(base) => module_env
+                .get_enum(base)
+                .filter(|e| e.variants.iter().any(|v| v.name == *field))
+                .map(|e| e.name.clone()),
+            _ => None,
+        },
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let t = stmt_enum_name(then_branch, names, module_env);
+            let e = stmt_enum_name(else_branch, names, module_env);
+            if t.is_some() && t == e {
+                t
+            } else {
+                None
+            }
+        }
+        Expr::Block(stmt) => stmt_enum_name(stmt, names, module_env),
+        Expr::Match { arms, .. } => {
+            let mut results = arms
+                .iter()
+                .filter_map(|arm| stmt_enum_name(&arm.body, names, module_env));
+            let first = results.next()?;
+            if results.all(|n| n == first) {
+                Some(first)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The enum type a statement position evaluates to (expression statement or
+/// block tail), mirroring `expr_enum_name`.
+fn stmt_enum_name(
+    stmt: &Stmt,
+    names: &std::collections::HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    match stmt {
+        Stmt::Expr(e, _) => expr_enum_name(e, names, module_env),
+        Stmt::Block(stmts, _) => stmts
+            .last()
+            .and_then(|s| stmt_enum_name(s, names, module_env)),
+        _ => None,
+    }
+}
+
+pub(crate) fn expr_has_inductive_shape(
+    expr: &Expr,
+    module_env: &ModuleEnv,
+    names: &std::collections::HashMap<String, String>,
+) -> bool {
+    match expr {
+        // P10-C: a `match` whose arms resolve to a finite, non-recursive enum
+        // is verified natively on the Z3 datatype encoding — it is inductive
+        // only when a nested subexpression is. Scalar `match`es and recursive
+        // enums keep the historic `inductive_data_type` tag. The owner enum
+        // is resolved with the scrutinee's declared type as the hint (the
+        // verifier's rule): a bare `Ok` colliding with a same-named variant
+        // of another enum resolves to the declared enum instead of staying
+        // ambiguous; without a resolvable owner the match fails closed at
+        // verify time and keeps the tag here too.
+        Expr::Match { target, arms } => {
+            let hint = expr_enum_name(target, names, module_env);
+            let on_finite_adt = arms.iter().any(|arm| {
+                matches!(&arm.pattern, crate::parser::ast::Pattern::Variant { variant_name, .. }
+                if module_env
+                    .resolve_variant_owner_by_hint(variant_name, hint.as_deref())
+                    .ok()
+                    .flatten()
+                    .is_some_and(|e| {
+                        crate::verification::support::datatype::is_finite_adt(e, module_env)
+                    }))
+            });
+            !on_finite_adt
+                || expr_has_inductive_shape(target, module_env, names)
+                || arms.iter().any(|arm| {
+                    // Arm bodies are a fresh scope for `let`-bound enum names.
+                    let mut arm_names = names.clone();
+                    arm.guard
+                        .as_ref()
+                        .is_some_and(|g| expr_has_inductive_shape(g, module_env, names))
+                        || stmt_has_inductive_shape(&arm.body, module_env, &mut arm_names)
+                })
+        }
+        Expr::BinaryOp(left, _, right) => {
+            expr_has_inductive_shape(left, module_env, names)
+                || expr_has_inductive_shape(right, module_env, names)
+        }
+        Expr::ArrayAccess(_, idx) => expr_has_inductive_shape(idx, module_env, names),
+        Expr::ArrayLit(elements) => elements
+            .iter()
+            .any(|e| expr_has_inductive_shape(e, module_env, names)),
         Expr::IfThenElse {
             cond,
             then_branch,
             else_branch,
         } => {
-            expr_has_inductive_shape(cond)
-                || stmt_has_inductive_shape(then_branch)
-                || stmt_has_inductive_shape(else_branch)
+            let mut then_names = names.clone();
+            let mut else_names = names.clone();
+            expr_has_inductive_shape(cond, module_env, names)
+                || stmt_has_inductive_shape(then_branch, module_env, &mut then_names)
+                || stmt_has_inductive_shape(else_branch, module_env, &mut else_names)
         }
-        Expr::Call(_, args) => args.iter().any(expr_has_inductive_shape),
+        Expr::Block(stmt) => {
+            let mut block_names = names.clone();
+            stmt_has_inductive_shape(stmt, module_env, &mut block_names)
+        }
+        Expr::Call(_, args) => args
+            .iter()
+            .any(|arg| expr_has_inductive_shape(arg, module_env, names)),
         Expr::StructInit { fields, .. } => fields
             .iter()
-            .any(|(_, field_expr)| expr_has_inductive_shape(field_expr)),
-        Expr::FieldAccess(base, _) => expr_has_inductive_shape(base),
-        Expr::Async { body } | Expr::Lambda { body, .. } => stmt_has_inductive_shape(body),
-        Expr::Await { expr } => expr_has_inductive_shape(expr),
+            .any(|(_, field_expr)| expr_has_inductive_shape(field_expr, module_env, names)),
+        Expr::FieldAccess(base, _) => expr_has_inductive_shape(base, module_env, names),
+        Expr::Async { body } | Expr::Lambda { body, .. } => {
+            let mut body_names = names.clone();
+            stmt_has_inductive_shape(body, module_env, &mut body_names)
+        }
+        Expr::Await { expr } => expr_has_inductive_shape(expr, module_env, names),
         Expr::CallRef { callee, args } => {
-            expr_has_inductive_shape(callee) || args.iter().any(expr_has_inductive_shape)
+            expr_has_inductive_shape(callee, module_env, names)
+                || args
+                    .iter()
+                    .any(|arg| expr_has_inductive_shape(arg, module_env, names))
         }
-        Expr::Perform { args, .. } => args.iter().any(expr_has_inductive_shape),
+        Expr::Perform { args, .. } => args
+            .iter()
+            .any(|arg| expr_has_inductive_shape(arg, module_env, names)),
         Expr::ChanSend { channel, value } => {
-            expr_has_inductive_shape(channel) || expr_has_inductive_shape(value)
+            expr_has_inductive_shape(channel, module_env, names)
+                || expr_has_inductive_shape(value, module_env, names)
         }
-        Expr::ChanRecv { channel } => expr_has_inductive_shape(channel),
+        Expr::ChanRecv { channel } => expr_has_inductive_shape(channel, module_env, names),
         Expr::Number(_)
         | Expr::Float(_)
         | Expr::StringLit(_)
@@ -1365,26 +1946,64 @@ pub(crate) fn expr_has_inductive_shape(expr: &Expr) -> bool {
     }
 }
 
-pub(crate) fn stmt_has_inductive_shape(stmt: &Stmt) -> bool {
+pub(crate) fn stmt_has_inductive_shape(
+    stmt: &Stmt,
+    module_env: &ModuleEnv,
+    names: &mut std::collections::HashMap<String, String>,
+) -> bool {
     match stmt {
-        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => expr_has_inductive_shape(value),
-        Stmt::Expr(value, _) => expr_has_inductive_shape(value),
-        Stmt::ArrayStore { index, value, .. } => {
-            expr_has_inductive_shape(index) || expr_has_inductive_shape(value)
+        Stmt::Let { var, value, .. } | Stmt::Assign { var, value, .. } => {
+            let inductive = expr_has_inductive_shape(value, module_env, names);
+            // Record (or clear) the binding's enum type so later siblings
+            // resolve `match <var>` against the declared type.
+            match expr_enum_name(value, names, module_env) {
+                Some(enum_name) => {
+                    names.insert(var.clone(), enum_name);
+                }
+                None => {
+                    names.remove(var);
+                }
+            }
+            inductive
         }
-        Stmt::Block(stmts, _) => stmts.iter().any(stmt_has_inductive_shape),
+        Stmt::Expr(value, _) => expr_has_inductive_shape(value, module_env, names),
+        Stmt::ArrayStore { index, value, .. } => {
+            expr_has_inductive_shape(index, module_env, names)
+                || expr_has_inductive_shape(value, module_env, names)
+        }
+        Stmt::Block(stmts, _) => {
+            // `let` bindings are block-scoped: visible to later siblings,
+            // invisible past the block.
+            let mut block_names = names.clone();
+            let mut inductive = false;
+            for s in stmts {
+                inductive |= stmt_has_inductive_shape(s, module_env, &mut block_names);
+            }
+            inductive
+        }
         Stmt::While {
             cond,
             invariant,
             body,
             ..
         } => {
-            expr_has_inductive_shape(cond)
-                || expr_has_inductive_shape(invariant)
-                || stmt_has_inductive_shape(body)
+            let mut body_names = names.clone();
+            expr_has_inductive_shape(cond, module_env, names)
+                || expr_has_inductive_shape(invariant, module_env, names)
+                || stmt_has_inductive_shape(body, module_env, &mut body_names)
         }
-        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => stmt_has_inductive_shape(body),
-        Stmt::TaskGroup { children, .. } => children.iter().any(stmt_has_inductive_shape),
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => {
+            let mut body_names = names.clone();
+            stmt_has_inductive_shape(body, module_env, &mut body_names)
+        }
+        Stmt::TaskGroup { children, .. } => {
+            let mut inductive = false;
+            for child in children {
+                let mut child_names = names.clone();
+                inductive |= stmt_has_inductive_shape(child, module_env, &mut child_names);
+            }
+            inductive
+        }
         Stmt::Cancel { .. } => false,
     }
 }
@@ -1411,10 +2030,12 @@ pub(crate) fn expr_contains_while(expr: &Expr) -> bool {
             else_branch,
             ..
         } => stmt_has_while(then_branch) || stmt_has_while(else_branch),
+        Expr::Block(stmt) => stmt_has_while(stmt),
         Expr::Match { arms, .. } => arms.iter().any(|arm| stmt_has_while(&arm.body)),
         Expr::Async { body } | Expr::Lambda { body, .. } => stmt_has_while(body),
         Expr::BinaryOp(left, _, right) => expr_contains_while(left) || expr_contains_while(right),
         Expr::ArrayAccess(_, idx) => expr_contains_while(idx),
+        Expr::ArrayLit(elements) => elements.iter().any(expr_contains_while),
         Expr::Call(_, args) => args.iter().any(expr_contains_while),
         Expr::StructInit { fields, .. } => fields
             .iter()
@@ -1635,7 +2256,8 @@ impl<'ctx> MinimalUnsatCoreProbe<'ctx> {
             .map(|label| Bool::new_const(self.context, normalize_tracking_label(label)))
             .collect();
 
-        self.solver.check_assumptions(&assumptions) == SatResult::Unsat
+        crate::verification::phase_artifacts::check_assumptions(&self.solver, &assumptions)
+            == SatResult::Unsat
     }
 }
 

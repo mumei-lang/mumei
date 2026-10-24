@@ -49,10 +49,11 @@
 // enforcement. Object-based capability model documented as future alternative.
 // =============================================================================
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::parser::{
-    parse_body_expr, parse_expression, Atom, Expr, JoinSemantics, Op, Pattern, Stmt,
+    parse_body_expr, parse_expression, parse_expression_checked, Atom, ClauseKind, ClauseTrustMode,
+    Expr, JoinSemantics, Op, Pattern, Stmt, TrustLevel,
 };
 
 /// Effect set attached to HIR nodes.
@@ -77,6 +78,270 @@ pub struct HirEffectUsage {
     pub param_values: Vec<String>,
 }
 
+/// HIR-owned binary operator — a 1:1 mirror of `parser::Op`.
+/// Emitter-facing HIR must not depend on AST types (design doc step 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HirBinOp {
+    Add,
+    Sub,
+    Mul,
+    Pow,
+    Div,
+    Eq,
+    Neq,
+    Gt,
+    Lt,
+    Ge,
+    Le,
+    And,
+    Or,
+    Implies,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+}
+
+impl From<Op> for HirBinOp {
+    fn from(op: Op) -> Self {
+        match op {
+            Op::Add => HirBinOp::Add,
+            Op::Sub => HirBinOp::Sub,
+            Op::Mul => HirBinOp::Mul,
+            Op::Pow => HirBinOp::Pow,
+            Op::Div => HirBinOp::Div,
+            Op::Eq => HirBinOp::Eq,
+            Op::Neq => HirBinOp::Neq,
+            Op::Gt => HirBinOp::Gt,
+            Op::Lt => HirBinOp::Lt,
+            Op::Ge => HirBinOp::Ge,
+            Op::Le => HirBinOp::Le,
+            Op::And => HirBinOp::And,
+            Op::Or => HirBinOp::Or,
+            Op::Implies => HirBinOp::Implies,
+            Op::BitAnd => HirBinOp::BitAnd,
+            Op::BitOr => HirBinOp::BitOr,
+            Op::BitXor => HirBinOp::BitXor,
+            Op::Shl => HirBinOp::Shl,
+            Op::Shr => HirBinOp::Shr,
+        }
+    }
+}
+
+impl From<HirBinOp> for Op {
+    fn from(op: HirBinOp) -> Self {
+        match op {
+            HirBinOp::Add => Op::Add,
+            HirBinOp::Sub => Op::Sub,
+            HirBinOp::Mul => Op::Mul,
+            HirBinOp::Pow => Op::Pow,
+            HirBinOp::Div => Op::Div,
+            HirBinOp::Eq => Op::Eq,
+            HirBinOp::Neq => Op::Neq,
+            HirBinOp::Gt => Op::Gt,
+            HirBinOp::Lt => Op::Lt,
+            HirBinOp::Ge => Op::Ge,
+            HirBinOp::Le => Op::Le,
+            HirBinOp::And => Op::And,
+            HirBinOp::Or => Op::Or,
+            HirBinOp::Implies => Op::Implies,
+            HirBinOp::BitAnd => Op::BitAnd,
+            HirBinOp::BitOr => Op::BitOr,
+            HirBinOp::BitXor => Op::BitXor,
+            HirBinOp::Shl => Op::Shl,
+            HirBinOp::Shr => Op::Shr,
+        }
+    }
+}
+
+/// HIR-owned task-group join semantics — a 1:1 mirror of `parser::JoinSemantics`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HirJoin {
+    All,
+    Any,
+}
+
+impl HirJoin {
+    pub fn completes_after_first_child(&self) -> bool {
+        matches!(self, HirJoin::Any)
+    }
+
+    pub fn cancels_remaining_children(&self) -> bool {
+        matches!(self, HirJoin::Any)
+    }
+}
+
+impl From<JoinSemantics> for HirJoin {
+    fn from(join: JoinSemantics) -> Self {
+        match join {
+            JoinSemantics::All => HirJoin::All,
+            JoinSemantics::Any => HirJoin::Any,
+        }
+    }
+}
+
+impl From<HirJoin> for JoinSemantics {
+    fn from(join: HirJoin) -> Self {
+        match join {
+            HirJoin::All => JoinSemantics::All,
+            HirJoin::Any => JoinSemantics::Any,
+        }
+    }
+}
+
+/// HIR-owned match pattern — a 1:1 mirror of `parser::Pattern`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HirPattern {
+    Wildcard,
+    Literal(i64),
+    Variable(String),
+    Variant {
+        variant_name: String,
+        fields: Vec<HirPattern>,
+    },
+}
+
+impl From<Pattern> for HirPattern {
+    fn from(pattern: Pattern) -> Self {
+        match pattern {
+            Pattern::Wildcard => HirPattern::Wildcard,
+            Pattern::Literal(n) => HirPattern::Literal(n),
+            Pattern::Variable(name) => HirPattern::Variable(name),
+            Pattern::Variant {
+                variant_name,
+                fields,
+            } => HirPattern::Variant {
+                variant_name,
+                fields: fields.into_iter().map(HirPattern::from).collect(),
+            },
+        }
+    }
+}
+
+impl From<HirPattern> for Pattern {
+    fn from(pattern: HirPattern) -> Self {
+        match pattern {
+            HirPattern::Wildcard => Pattern::Wildcard,
+            HirPattern::Literal(n) => Pattern::Literal(n),
+            HirPattern::Variable(name) => Pattern::Variable(name),
+            HirPattern::Variant {
+                variant_name,
+                fields,
+            } => Pattern::Variant {
+                variant_name,
+                fields: fields.into_iter().map(Pattern::from).collect(),
+            },
+        }
+    }
+}
+
+/// HIR-owned capability type info — a 1:1 mirror of `ast::CapabilityType`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirCapabilityType {
+    pub effect: String,
+    pub constraint: Option<String>,
+}
+
+impl From<crate::ast::CapabilityType> for HirCapabilityType {
+    fn from(cap: crate::ast::CapabilityType) -> Self {
+        HirCapabilityType {
+            effect: cap.effect,
+            constraint: cap.constraint,
+        }
+    }
+}
+
+impl From<HirCapabilityType> for crate::ast::CapabilityType {
+    fn from(cap: HirCapabilityType) -> Self {
+        crate::ast::CapabilityType {
+            effect: cap.effect,
+            constraint: cap.constraint,
+        }
+    }
+}
+
+/// HIR-owned type reference — a 1:1 mirror of `ast::TypeRef`.
+/// Emitter-facing HIR must not depend on AST types (design doc step 7
+/// follow-up): `HirLambdaParam::type_ref` is the last embedded AST type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirTypeRef {
+    pub name: String,
+    pub type_args: Vec<HirTypeRef>,
+    pub effect_set: Option<Vec<String>>,
+    pub capability: Option<HirCapabilityType>,
+}
+
+impl HirTypeRef {
+    /// 関数型 `atom_ref(params...) -> ret` かどうか。
+    pub fn is_fn_type(&self) -> bool {
+        self.name == "atom_ref" && !self.type_args.is_empty()
+    }
+
+    /// `ast::TypeRef::display_name` と同一のレンダリング。
+    pub fn display_name(&self) -> String {
+        let base = if self.name == "[]" && self.type_args.len() == 1 {
+            format!("[{}]", self.type_args[0].display_name())
+        } else if self.is_fn_type() {
+            let param_types: Vec<String> = self.type_args[..self.type_args.len() - 1]
+                .iter()
+                .map(|a| a.display_name())
+                .collect();
+            let return_type = self.type_args.last().unwrap().display_name();
+            format!("atom_ref({}) -> {}", param_types.join(", "), return_type)
+        } else if self.name == "tuple" {
+            let args: Vec<String> = self.type_args.iter().map(|a| a.display_name()).collect();
+            format!("({})", args.join(", "))
+        } else if self.type_args.is_empty() {
+            self.name.clone()
+        } else {
+            let args: Vec<String> = self.type_args.iter().map(|a| a.display_name()).collect();
+            format!("{}<{}>", self.name, args.join(", "))
+        };
+        if let Some(ref effects) = self.effect_set {
+            if effects.len() == 1 {
+                format!("{} with {}", base, effects[0])
+            } else {
+                format!("{} with [{}]", base, effects.join(", "))
+            }
+        } else {
+            base
+        }
+    }
+}
+
+impl std::fmt::Display for HirTypeRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display_name())
+    }
+}
+
+impl From<crate::ast::TypeRef> for HirTypeRef {
+    fn from(ty: crate::ast::TypeRef) -> Self {
+        HirTypeRef {
+            name: ty.name,
+            type_args: ty.type_args.into_iter().map(HirTypeRef::from).collect(),
+            effect_set: ty.effect_set,
+            capability: ty.capability.map(HirCapabilityType::from),
+        }
+    }
+}
+
+impl From<HirTypeRef> for crate::ast::TypeRef {
+    fn from(ty: HirTypeRef) -> Self {
+        crate::ast::TypeRef {
+            name: ty.name,
+            type_args: ty
+                .type_args
+                .into_iter()
+                .map(crate::ast::TypeRef::from)
+                .collect(),
+            effect_set: ty.effect_set,
+            capability: ty.capability.map(crate::ast::CapabilityType::from),
+        }
+    }
+}
+
 /// HIR 式: 純粋な式を表す
 #[derive(Debug, Clone)]
 pub enum HirExpr {
@@ -85,8 +350,10 @@ pub enum HirExpr {
     /// Plan 9: First-class string literal
     StringLit(String),
     Variable(String),
+    /// Array literal `[e0, e1, …]` — element type inferred from elements.
+    ArrayLit(Vec<HirExpr>),
     ArrayAccess(String, Box<HirExpr>),
-    BinaryOp(Box<HirExpr>, Op, Box<HirExpr>),
+    BinaryOp(Box<HirExpr>, HirBinOp, Box<HirExpr>),
     IfThenElse {
         cond: Box<HirExpr>,
         then_branch: Box<HirStmt>,
@@ -147,7 +414,7 @@ pub enum HirExpr {
     #[allow(dead_code)]
     TaskGroup {
         children: Vec<HirStmt>,
-        join_semantics: JoinSemantics,
+        join_semantics: HirJoin,
     },
     /// Lambda 式（クロージャ変換前）
     // NOTE: Lambda is constructed via lower_expr(Expr::Lambda) → HirExpr::Lambda.
@@ -224,32 +491,140 @@ pub enum HirStmt {
 
 #[derive(Debug, Clone)]
 // NOTE: HirLambdaParam is constructed via lower_expr(Expr::Lambda) → HirExpr::Lambda.
-// Fields are used by Lambda variant but not yet consumed by codegen passes.
 #[allow(dead_code)]
 pub struct HirLambdaParam {
     pub name: String,
-    pub type_ref: Option<crate::ast::TypeRef>,
+    pub type_ref: Option<HirTypeRef>,
 }
 
 /// Match 式のアーム
 #[derive(Debug, Clone)]
 pub struct HirMatchArm {
-    pub pattern: Pattern,
+    pub pattern: HirPattern,
     pub guard: Option<Box<HirExpr>>,
     pub body: Box<HirStmt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirRefKind {
+    Value,
+    Ref,
+    RefMut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirParam {
+    pub name: String,
+    pub consume: bool,
+    pub ty: Option<String>,
+    pub by_ref: HirRefKind,
+}
+
+impl HirParam {
+    /// The parameter as written in the signature, e.g. `consume x`.
+    pub fn declared_name(&self) -> String {
+        if self.consume {
+            format!("consume {}", self.name)
+        } else {
+            self.name.clone()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirDeclaredEffect {
+    pub name: String,
+    pub negated: bool,
+    /// Argument values as written in the declaration, e.g. `"v"` for
+    /// `effects: [MyEffect("v")]`. Emitters render these verbatim.
+    pub param_values: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirSignature {
+    pub name: String,
+    pub params: Vec<HirParam>,
+    pub effects: Vec<HirDeclaredEffect>,
+    pub return_type: Option<String>,
+    pub inferred_return_type: Option<String>,
+    pub is_async: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirClauseKind {
+    Requires,
+    Ensures,
+    Cover,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirClauseMode {
+    Plain,
+    Assume,
+    Check,
+}
+
+#[derive(Debug, Clone)]
+pub struct HirClause {
+    pub kind: HirClauseKind,
+    pub mode: HirClauseMode,
+    pub label: Option<String>,
+    pub text: String,
+    pub expr: Option<HirExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirQuantifierKind {
+    ForAll,
+    Exists,
+}
+
+#[derive(Debug, Clone)]
+pub struct HirQuantifier {
+    pub kind: HirQuantifierKind,
+    pub var: String,
+    pub start: String,
+    pub end: String,
+    pub condition: String,
+    pub condition_expr: Option<HirExpr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HirContract {
+    pub clauses: Vec<HirClause>,
+    /// Quantified preconditions, which the parser keeps out of the `requires` text.
+    pub quantifiers: Vec<HirQuantifier>,
+    /// Conjoined source text for printing; `clauses` is the structured per-conjunct view.
+    pub requires_text: String,
+    /// Conjoined source text for printing; `clauses` is the structured per-conjunct view.
+    pub ensures_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HirTrustLevel {
+    Verified,
+    Trusted,
+    Unverified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirAtomMeta {
+    pub trust_level: HirTrustLevel,
+    pub trust_boundaries: Vec<crate::trust_boundary::TrustBoundaryKind>,
+    pub effect_pre: HashMap<String, String>,
+    pub effect_post: HashMap<String, String>,
+    pub resources: Vec<String>,
+    pub content_hash: String,
+    pub span: crate::parser::Span,
 }
 
 /// Atom の HIR 版: body が String ではなく構造化された HirStmt として保持される
 #[derive(Debug, Clone)]
 pub struct HirAtom {
     pub body: HirStmt,
-    // NOTE: requires_hir/ensures_hir are not yet consumed by verification (which still re-parses
-    // from atom.requires/ensures strings). They will be used once verification migrates to
-    // HIR-based Z3 constraint generation (Phase 2).
-    #[allow(dead_code)]
-    pub requires_hir: HirExpr,
-    #[allow(dead_code)]
-    pub ensures_hir: HirExpr,
+    pub signature: HirSignature,
+    pub contract: HirContract,
+    pub meta: HirAtomMeta,
     /// 元の Atom（メタデータアクセス用）
     pub atom: Atom,
     /// パース済みの body ステートメント（verification.rs での再パースを避ける）
@@ -275,12 +650,17 @@ pub fn lower_atom_to_hir_with_env(
 ) -> HirAtom {
     let body_stmt = parse_body_expr(&atom.body_expr);
     let body = lower_stmt_with_env(&body_stmt, module_env);
-
-    let requires_expr = parse_expression(&atom.requires);
-    let requires_hir = lower_expr_with_env(&requires_expr, module_env);
-
-    let ensures_expr = parse_expression(&atom.ensures);
-    let ensures_hir = lower_expr_with_env(&ensures_expr, module_env);
+    let (mut signature, contract, meta) = lower_atom_metadata(atom, &body, module_env);
+    // `signature.inferred_return_type` must equal `mir::infer_atom_return_type`,
+    // which infers on a body lowered WITHOUT a ModuleEnv. The stored `body`
+    // above is env-lowered, so `let` annotations on it can carry types that
+    // no-env inference never sees (call results, variant constructors) —
+    // inference over it could disagree with the AST-path result. Redo the
+    // inference on a no-env lowering so the field is identical either way.
+    if module_env.is_some() && atom.return_type.is_none() {
+        signature.inferred_return_type =
+            crate::mir::infer_return_type_from_hir(&atom.params, &lower_stmt(&body_stmt));
+    }
 
     // Build effect set from atom.effects
     let effect_set = HirEffectSet {
@@ -299,11 +679,168 @@ pub fn lower_atom_to_hir_with_env(
 
     HirAtom {
         body,
-        requires_hir,
-        ensures_hir,
+        signature,
+        contract,
+        meta,
         atom: atom.clone(),
         body_stmt,
         effect_set,
+    }
+}
+
+pub fn lower_atom_metadata(
+    atom: &Atom,
+    body: &HirStmt,
+    module_env: Option<&crate::verification::ModuleEnv>,
+) -> (HirSignature, HirContract, HirAtomMeta) {
+    let signature = HirSignature {
+        name: atom.name.clone(),
+        params: atom
+            .params
+            .iter()
+            .map(|param| HirParam {
+                name: param.name.clone(),
+                consume: param.consume,
+                ty: param.type_name.clone(),
+                by_ref: if param.is_ref_mut {
+                    HirRefKind::RefMut
+                } else if param.is_ref {
+                    HirRefKind::Ref
+                } else {
+                    HirRefKind::Value
+                },
+            })
+            .collect(),
+        effects: atom
+            .effects
+            .iter()
+            .map(|effect| HirDeclaredEffect {
+                name: effect.name.clone(),
+                negated: effect.negated,
+                param_values: effect.params.iter().map(|p| p.value.clone()).collect(),
+            })
+            .collect(),
+        return_type: atom.return_type.clone(),
+        inferred_return_type: if atom.return_type.is_none() {
+            crate::mir::infer_return_type_from_hir(&atom.params, body)
+        } else {
+            None
+        },
+        is_async: atom.is_async,
+    };
+
+    let mut clauses = Vec::new();
+    for (text, mode) in
+        crate::verification::contract_view::conjunct_modes(atom, ClauseKind::Requires)
+    {
+        let label =
+            crate::verification::executor::clause_label_for_atom(atom, ClauseKind::Requires, &text)
+                .map(str::to_string);
+        clauses.push(lower_contract_clause(
+            text,
+            HirClauseKind::Requires,
+            lower_clause_mode(mode),
+            label,
+            module_env,
+        ));
+    }
+    for (text, mode) in
+        crate::verification::contract_view::conjunct_modes(atom, ClauseKind::Ensures)
+    {
+        let label =
+            crate::verification::executor::clause_label_for_atom(atom, ClauseKind::Ensures, &text)
+                .map(str::to_string);
+        clauses.push(lower_contract_clause(
+            text,
+            HirClauseKind::Ensures,
+            lower_clause_mode(mode),
+            label,
+            module_env,
+        ));
+    }
+    for cover in &atom.covers {
+        clauses.push(lower_contract_clause(
+            cover.clause.clone(),
+            HirClauseKind::Cover,
+            HirClauseMode::Plain,
+            cover.label.clone(),
+            module_env,
+        ));
+    }
+    let quantifiers = atom
+        .forall_constraints
+        .iter()
+        .map(|quantifier| HirQuantifier {
+            kind: match &quantifier.q_type {
+                crate::parser::QuantifierType::ForAll => HirQuantifierKind::ForAll,
+                crate::parser::QuantifierType::Exists => HirQuantifierKind::Exists,
+            },
+            var: quantifier.var.clone(),
+            start: quantifier.start.clone(),
+            end: quantifier.end.clone(),
+            condition: quantifier.condition.clone(),
+            condition_expr: parse_expression_checked(&quantifier.condition)
+                .ok()
+                .map(|expr| lower_expr_with_env(&expr, module_env)),
+        })
+        .collect();
+    let contract = HirContract {
+        clauses,
+        quantifiers,
+        requires_text: atom.requires.clone(),
+        ensures_text: atom.ensures.clone(),
+    };
+
+    let trust_boundaries = crate::trust_boundary::classify_trust_boundaries(
+        atom,
+        module_env
+            .map(|env| env.extern_blocks.as_slice())
+            .unwrap_or(&[]),
+    );
+    let meta = HirAtomMeta {
+        trust_level: match &atom.trust_level {
+            TrustLevel::Verified => HirTrustLevel::Verified,
+            TrustLevel::Trusted => HirTrustLevel::Trusted,
+            TrustLevel::Unverified => HirTrustLevel::Unverified,
+        },
+        trust_boundaries,
+        effect_pre: atom.effect_pre.clone(),
+        effect_post: atom.effect_post.clone(),
+        resources: atom.resources.clone(),
+        content_hash: crate::proof_cert::compute_atom_content_hash_v2(atom),
+        span: atom.span.clone(),
+    };
+
+    (signature, contract, meta)
+}
+
+fn lower_clause_mode(mode: Option<ClauseTrustMode>) -> HirClauseMode {
+    match mode {
+        Some(ClauseTrustMode::Assume) => HirClauseMode::Assume,
+        Some(ClauseTrustMode::Check) => HirClauseMode::Check,
+        None => HirClauseMode::Plain,
+    }
+}
+
+fn lower_contract_clause(
+    text: String,
+    kind: HirClauseKind,
+    mode: HirClauseMode,
+    label: Option<String>,
+    module_env: Option<&crate::verification::ModuleEnv>,
+) -> HirClause {
+    // Fail-closed: a clause that does not parse cleanly keeps `expr: None` so
+    // consumers (e.g. the runtime monitor's node-kind check) treat it as
+    // unlowerable instead of inspecting a recovery placeholder AST.
+    let expr = parse_expression_checked(&text)
+        .ok()
+        .map(|expr| lower_expr_with_env(&expr, module_env));
+    HirClause {
+        kind,
+        mode,
+        label,
+        text,
+        expr,
     }
 }
 
@@ -323,12 +860,18 @@ pub fn lower_expr_with_env(
         // Plan 9: String literal lowering
         Expr::StringLit(s) => HirExpr::StringLit(s.clone()),
         Expr::Variable(s) => HirExpr::Variable(s.clone()),
+        Expr::ArrayLit(elements) => HirExpr::ArrayLit(
+            elements
+                .iter()
+                .map(|e| lower_expr_with_env(e, module_env))
+                .collect(),
+        ),
         Expr::ArrayAccess(name, idx) => {
             HirExpr::ArrayAccess(name.clone(), Box::new(lower_expr_with_env(idx, module_env)))
         }
         Expr::BinaryOp(l, op, r) => HirExpr::BinaryOp(
             Box::new(lower_expr_with_env(l, module_env)),
-            op.clone(),
+            op.clone().into(),
             Box::new(lower_expr_with_env(r, module_env)),
         ),
         Expr::IfThenElse {
@@ -340,6 +883,14 @@ pub fn lower_expr_with_env(
             then_branch: Box::new(lower_stmt_with_env(then_branch, module_env)),
             else_branch: Box::new(lower_stmt_with_env(else_branch, module_env)),
         },
+        Expr::Block(stmt) => {
+            let block = lower_stmt_with_env(stmt, module_env);
+            HirExpr::IfThenElse {
+                cond: Box::new(HirExpr::Variable("true".to_string())),
+                then_branch: Box::new(block.clone()),
+                else_branch: Box::new(block),
+            }
+        }
         Expr::Call(name, args) => {
             let callee_effects = module_env.and_then(|env| {
                 env.get_atom(name).map(|callee_atom| HirEffectSet {
@@ -372,16 +923,24 @@ pub fn lower_expr_with_env(
                 .map(|(name, expr)| (name.clone(), lower_expr_with_env(expr, module_env)))
                 .collect(),
         },
-        Expr::FieldAccess(expr, field) => HirExpr::FieldAccess(
-            Box::new(lower_expr_with_env(expr, module_env)),
-            field.clone(),
-        ),
+        Expr::FieldAccess(expr, field) => {
+            let base = if let (Expr::Variable(resource), Some(env)) = (expr.as_ref(), module_env) {
+                if env.resource_field(resource, field).is_some() {
+                    HirExpr::Variable(format!("__mumei_resource_{resource}"))
+                } else {
+                    lower_expr_with_env(expr, module_env)
+                }
+            } else {
+                lower_expr_with_env(expr, module_env)
+            };
+            HirExpr::FieldAccess(Box::new(base), field.clone())
+        }
         Expr::Match { target, arms } => HirExpr::Match {
             target: Box::new(lower_expr_with_env(target, module_env)),
             arms: arms
                 .iter()
                 .map(|arm| HirMatchArm {
-                    pattern: arm.pattern.clone(),
+                    pattern: arm.pattern.clone().into(),
                     guard: arm
                         .guard
                         .as_ref()
@@ -443,7 +1002,7 @@ pub fn lower_expr_with_env(
                     .iter()
                     .map(|p| HirLambdaParam {
                         name: p.name.clone(),
-                        type_ref: p.type_ref.clone(),
+                        type_ref: p.type_ref.clone().map(HirTypeRef::from),
                     })
                     .collect(),
                 return_type: return_type.clone(),
@@ -472,18 +1031,53 @@ pub fn lower_expr_with_env(
         if let Some(env) = module_env {
             // Only convert if the name is NOT a known atom (functions take priority)
             if env.get_atom(name).is_none() {
-                if let Some(enum_def) = env.find_enum_by_variant(name) {
-                    return HirExpr::VariantInit {
-                        enum_name: enum_def.name.clone(),
-                        variant_name: name.clone(),
-                        fields: args.clone(),
-                    };
+                // Qualified `E::V(..)`: the qualifier must be a known enum
+                // declaring the variant — a module path (`mod::f(..)`) or
+                // method call (`obj.f(..)`) stays a Call. The `.`-spelled form
+                // is not converted here because verification rejects
+                // `E.V(..)` as an unknown function (only `::` ctor calls are
+                // spec-constructible), so converting it would let codegen
+                // accept a program the verifier refused.
+                if let Some((qual, variant)) = name.rsplit_once("::") {
+                    if let Some(enum_def) = env.get_enum(qual) {
+                        if enum_def.variants.iter().any(|v| v.name == variant) {
+                            return HirExpr::VariantInit {
+                                enum_name: enum_def.name.clone(),
+                                variant_name: variant.to_string(),
+                                fields: args.clone(),
+                            };
+                        }
+                    }
+                } else {
+                    // Bare `V(..)`: resolve the owning enum deterministically —
+                    // a sole owner or owners with identical signatures convert;
+                    // a genuinely ambiguous bare name stays a Call so
+                    // downstream stages fail closed instead of picking an enum
+                    // per HashMap order.
+                    if let Ok(Some(enum_def)) = env.resolve_variant_owner_by_hint(name, None) {
+                        return HirExpr::VariantInit {
+                            enum_name: enum_def.name.clone(),
+                            variant_name: name.clone(),
+                            fields: args.clone(),
+                        };
+                    }
                 }
             }
         }
     }
 
     result
+}
+
+/// Type of a lowered expression when inferrable — `Some("IntList")` for a
+/// variable/field declared as an enum, call results via the callee's
+/// declared return type, etc. Used by codegen to resolve variant-pattern
+/// owners deterministically (the match target's declared type).
+pub fn infer_expr_type_name(
+    expr: &HirExpr,
+    module_env: Option<&crate::verification::ModuleEnv>,
+) -> Option<String> {
+    infer_hir_expr_type(expr, module_env)
 }
 
 fn infer_hir_expr_type(
@@ -498,22 +1092,26 @@ fn infer_hir_expr_type(
             let left_ty = infer_hir_expr_type(left, module_env);
             let right_ty = infer_hir_expr_type(right, module_env);
             match op {
-                Op::Eq
-                | Op::Neq
-                | Op::Gt
-                | Op::Lt
-                | Op::Ge
-                | Op::Le
-                | Op::And
-                | Op::Or
-                | Op::Implies => Some("bool".to_string()),
-                Op::Add
+                HirBinOp::Eq
+                | HirBinOp::Neq
+                | HirBinOp::Gt
+                | HirBinOp::Lt
+                | HirBinOp::Ge
+                | HirBinOp::Le
+                | HirBinOp::And
+                | HirBinOp::Or
+                | HirBinOp::Implies => Some("bool".to_string()),
+                HirBinOp::Add
                     if left_ty.as_deref() == Some("Str") && right_ty.as_deref() == Some("Str") =>
                 {
                     Some("Str".to_string())
                 }
-                Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr => Some("i64".to_string()),
-                Op::Add | Op::Sub | Op::Mul | Op::Pow | Op::Div => {
+                HirBinOp::BitAnd
+                | HirBinOp::BitOr
+                | HirBinOp::BitXor
+                | HirBinOp::Shl
+                | HirBinOp::Shr => Some("i64".to_string()),
+                HirBinOp::Add | HirBinOp::Sub | HirBinOp::Mul | HirBinOp::Pow | HirBinOp::Div => {
                     if left_ty.as_deref() == Some("f64") || right_ty.as_deref() == Some("f64") {
                         Some("f64".to_string())
                     } else {
@@ -649,7 +1247,7 @@ pub fn lower_stmt_with_env(
                 .iter()
                 .map(|s| lower_stmt_with_env(s, module_env))
                 .collect(),
-            join_semantics: join_semantics.clone(),
+            join_semantics: join_semantics.clone().into(),
         }),
         // Plan 8: Cancel statement lowering
         Stmt::Cancel { target, .. } => HirStmt::Expr(HirExpr::Call {
@@ -662,17 +1260,17 @@ pub fn lower_stmt_with_env(
 }
 
 /// Collect variable names bound by a pattern (recursive for nested Variant patterns).
-fn collect_pattern_bindings(pattern: &crate::parser::Pattern, bound: &mut HashSet<String>) {
+pub(crate) fn collect_pattern_bindings(pattern: &HirPattern, bound: &mut HashSet<String>) {
     match pattern {
-        crate::parser::Pattern::Variable(name) => {
+        HirPattern::Variable(name) => {
             bound.insert(name.clone());
         }
-        crate::parser::Pattern::Variant { fields, .. } => {
+        HirPattern::Variant { fields, .. } => {
             for field_pattern in fields {
                 collect_pattern_bindings(field_pattern, bound);
             }
         }
-        crate::parser::Pattern::Wildcard | crate::parser::Pattern::Literal(_) => {}
+        HirPattern::Wildcard | HirPattern::Literal(_) => {}
     }
 }
 
@@ -689,7 +1287,9 @@ pub fn collect_free_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
             // an outer binding that must be captured).
         }
         HirStmt::Assign { var, value } => {
-            vars.insert(var.clone());
+            if !var.contains('.') {
+                vars.insert(var.clone());
+            }
             vars.extend(collect_free_variables_expr(value));
         }
         HirStmt::ArrayStore {
@@ -746,17 +1346,190 @@ pub fn collect_free_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
     vars
 }
 
+/// Collect outer variable names assigned by a HirStmt.
+///
+/// Local `let` bindings are excluded so code generation can merge only
+/// assignments that update a value from before a branch.
+pub fn collect_assigned_outer_variables_stmt(stmt: &HirStmt) -> HashSet<String> {
+    let mut assigned = HashSet::new();
+    match stmt {
+        HirStmt::Let { value, .. } => {
+            assigned.extend(collect_assigned_outer_variables_expr(value));
+        }
+        HirStmt::Assign { var, value } => {
+            if !var.contains('.') {
+                assigned.insert(var.clone());
+            }
+            assigned.extend(collect_assigned_outer_variables_expr(value));
+        }
+        HirStmt::ArrayStore { index, value, .. } => {
+            assigned.extend(collect_assigned_outer_variables_expr(index));
+            assigned.extend(collect_assigned_outer_variables_expr(value));
+        }
+        HirStmt::While {
+            cond,
+            invariant,
+            decreases,
+            body,
+        } => {
+            assigned.extend(collect_assigned_outer_variables_expr(cond));
+            assigned.extend(collect_assigned_outer_variables_expr(invariant));
+            if let Some(decrease) = decreases {
+                assigned.extend(collect_assigned_outer_variables_expr(decrease));
+            }
+            assigned.extend(collect_assigned_outer_variables_stmt(body));
+        }
+        HirStmt::Block { stmts, tail_expr } => {
+            let mut bound = HashSet::new();
+            for stmt in stmts {
+                let stmt_assigned = collect_assigned_outer_variables_stmt(stmt);
+                for name in stmt_assigned {
+                    if !bound.contains(&name) {
+                        assigned.insert(name);
+                    }
+                }
+                if let HirStmt::Let { var, .. } = stmt {
+                    bound.insert(var.clone());
+                }
+            }
+            if let Some(tail) = tail_expr {
+                for name in collect_assigned_outer_variables_expr(tail) {
+                    if !bound.contains(&name) {
+                        assigned.insert(name);
+                    }
+                }
+            }
+        }
+        HirStmt::Acquire { body, .. } => {
+            assigned.extend(collect_assigned_outer_variables_stmt(body));
+        }
+        HirStmt::Expr(expr) => {
+            assigned.extend(collect_assigned_outer_variables_expr(expr));
+        }
+    }
+    assigned
+}
+
+/// Collect outer variable names assigned by nested control-flow expressions.
+pub fn collect_assigned_outer_variables_expr(expr: &HirExpr) -> HashSet<String> {
+    let mut assigned = HashSet::new();
+    match expr {
+        HirExpr::Number(_)
+        | HirExpr::Float(_)
+        | HirExpr::StringLit(_)
+        | HirExpr::AtomRef { .. } => {}
+        HirExpr::Variable(_) => {}
+        HirExpr::ArrayLit(elements) => {
+            for element in elements {
+                assigned.extend(collect_assigned_outer_variables_expr(element));
+            }
+        }
+        HirExpr::ArrayAccess(_, index) => {
+            assigned.extend(collect_assigned_outer_variables_expr(index));
+        }
+        HirExpr::BinaryOp(left, _, right) => {
+            assigned.extend(collect_assigned_outer_variables_expr(left));
+            assigned.extend(collect_assigned_outer_variables_expr(right));
+        }
+        HirExpr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            assigned.extend(collect_assigned_outer_variables_expr(cond));
+            assigned.extend(collect_assigned_outer_variables_stmt(then_branch));
+            assigned.extend(collect_assigned_outer_variables_stmt(else_branch));
+        }
+        HirExpr::Call { args, .. } => {
+            for arg in args {
+                assigned.extend(collect_assigned_outer_variables_expr(arg));
+            }
+        }
+        HirExpr::StructInit { fields, .. } => {
+            for (_, field) in fields {
+                assigned.extend(collect_assigned_outer_variables_expr(field));
+            }
+        }
+        HirExpr::FieldAccess(expr, _) => {
+            assigned.extend(collect_assigned_outer_variables_expr(expr));
+        }
+        HirExpr::Match { target, arms } => {
+            assigned.extend(collect_assigned_outer_variables_expr(target));
+            for arm in arms {
+                assigned.extend(collect_assigned_outer_variables_match_arm(arm));
+                if let Some(guard) = &arm.guard {
+                    let mut guard_assigned = collect_assigned_outer_variables_expr(guard);
+                    let mut pattern_bound = HashSet::new();
+                    collect_pattern_bindings(&arm.pattern, &mut pattern_bound);
+                    guard_assigned.retain(|name| !pattern_bound.contains(name));
+                    assigned.extend(guard_assigned);
+                }
+            }
+        }
+        HirExpr::CallRef { callee, args } => {
+            assigned.extend(collect_assigned_outer_variables_expr(callee));
+            for arg in args {
+                assigned.extend(collect_assigned_outer_variables_expr(arg));
+            }
+        }
+        HirExpr::Async { body } | HirExpr::Task { body, .. } => {
+            assigned.extend(collect_assigned_outer_variables_stmt(body));
+        }
+        HirExpr::Await { expr } => {
+            assigned.extend(collect_assigned_outer_variables_expr(expr));
+        }
+        HirExpr::Perform { args, .. } => {
+            for arg in args {
+                assigned.extend(collect_assigned_outer_variables_expr(arg));
+            }
+        }
+        HirExpr::TaskGroup { children, .. } => {
+            for child in children {
+                assigned.extend(collect_assigned_outer_variables_stmt(child));
+            }
+        }
+        HirExpr::Lambda { .. } => {}
+        HirExpr::ChanSend { channel, value } => {
+            assigned.extend(collect_assigned_outer_variables_expr(channel));
+            assigned.extend(collect_assigned_outer_variables_expr(value));
+        }
+        HirExpr::ChanRecv { channel } => {
+            assigned.extend(collect_assigned_outer_variables_expr(channel));
+        }
+        HirExpr::VariantInit { fields, .. } => {
+            for field in fields {
+                assigned.extend(collect_assigned_outer_variables_expr(field));
+            }
+        }
+    }
+    assigned
+}
+
+/// Collect assignments from a match arm while excluding its pattern bindings.
+pub fn collect_assigned_outer_variables_match_arm(arm: &HirMatchArm) -> HashSet<String> {
+    let mut assigned = collect_assigned_outer_variables_stmt(&arm.body);
+    let mut pattern_bound = HashSet::new();
+    collect_pattern_bindings(&arm.pattern, &mut pattern_bound);
+    assigned.retain(|name| !pattern_bound.contains(name));
+    assigned
+}
+
 /// Collect free variables from a HirExpr (recursive traversal).
 pub fn collect_free_variables_expr(expr: &HirExpr) -> HashSet<String> {
     let mut vars = HashSet::new();
     match expr {
         HirExpr::Variable(name) => {
             // Exclude boolean literals
-            if name != "true" && name != "false" {
+            if name != "true" && name != "false" && !name.starts_with("__mumei_resource_") {
                 vars.insert(name.clone());
             }
         }
         HirExpr::Number(_) | HirExpr::Float(_) | HirExpr::StringLit(_) => {}
+        HirExpr::ArrayLit(elements) => {
+            for element in elements {
+                vars.extend(collect_free_variables_expr(element));
+            }
+        }
         HirExpr::ArrayAccess(name, idx) => {
             vars.insert(name.clone());
             vars.extend(collect_free_variables_expr(idx));
@@ -884,4 +1657,404 @@ pub fn lower_expr_from_str(input: &str) -> HirExpr {
 pub fn lower_stmt_from_str(input: &str) -> HirStmt {
     let stmt = parse_body_expr(input);
     lower_stmt(&stmt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::item::parse_atom_from_source;
+
+    fn names(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    #[test]
+    fn atom_signature_carries_parameters_and_return_types() {
+        let atom = parse_atom_from_source(
+            r#"
+async atom signature(value: i64, ref shared: i64, ref mut mutable: i64, consume x: i64) -> i64
+    requires: value >= 0;
+    ensures: result >= 0;
+    body: value;
+"#,
+        );
+        let hir = lower_atom_to_hir(&atom);
+
+        assert_eq!(hir.signature.name, "signature");
+        assert_eq!(
+            hir.signature
+                .params
+                .iter()
+                .map(|param| {
+                    (
+                        param.name.as_str(),
+                        param.ty.as_deref(),
+                        param.by_ref.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("value", Some("i64"), HirRefKind::Value),
+                ("shared", Some("i64"), HirRefKind::Ref),
+                ("mutable", Some("i64"), HirRefKind::RefMut),
+                ("x", Some("i64"), HirRefKind::Value),
+            ]
+        );
+        assert_eq!(hir.signature.return_type.as_deref(), Some("i64"));
+        assert_eq!(hir.signature.inferred_return_type, None);
+        assert!(hir.signature.is_async);
+
+        let inferred_atom =
+            parse_atom_from_source("atom inferred() requires: true; ensures: true; body: 1.5;");
+        let inferred_hir = lower_atom_to_hir(&inferred_atom);
+        assert_eq!(inferred_hir.signature.return_type, None);
+        assert!(inferred_hir.signature.inferred_return_type.is_some());
+        assert_eq!(
+            inferred_hir.signature.inferred_return_type,
+            crate::mir::infer_atom_return_type(&inferred_atom)
+        );
+    }
+
+    #[test]
+    fn atom_contract_preserves_clause_order_modes_labels_and_expressions() {
+        let atom = parse_atom_from_source(
+            r#"
+atom clauses(x: i64, y: i64) -> i64
+    requires: x > 0;
+    requires assume: y > 0;
+    requires check "lbl": x < 100;
+    ensures: result > 0;
+    ensures assume: result < 1000;
+    cover "hit": x == 5;
+    body: x;
+"#,
+        );
+        let hir = lower_atom_to_hir(&atom);
+        let actual = hir
+            .contract
+            .clauses
+            .iter()
+            .map(|clause| {
+                (
+                    clause.kind.clone(),
+                    clause.mode.clone(),
+                    clause.label.clone(),
+                    clause.text.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    HirClauseKind::Requires,
+                    HirClauseMode::Plain,
+                    None,
+                    "x > 0".to_string()
+                ),
+                (
+                    HirClauseKind::Requires,
+                    HirClauseMode::Assume,
+                    None,
+                    "y > 0".to_string()
+                ),
+                (
+                    HirClauseKind::Requires,
+                    HirClauseMode::Check,
+                    Some("lbl".to_string()),
+                    "x < 100".to_string()
+                ),
+                (
+                    HirClauseKind::Ensures,
+                    HirClauseMode::Plain,
+                    None,
+                    "result > 0".to_string()
+                ),
+                (
+                    HirClauseKind::Ensures,
+                    HirClauseMode::Assume,
+                    None,
+                    "result < 1000".to_string()
+                ),
+                (
+                    HirClauseKind::Cover,
+                    HirClauseMode::Plain,
+                    Some("hit".to_string()),
+                    "x == 5".to_string()
+                ),
+            ]
+        );
+        assert!(hir
+            .contract
+            .clauses
+            .iter()
+            .all(|clause| clause.expr.is_some()));
+    }
+
+    #[test]
+    fn atom_contract_carries_quantified_preconditions() {
+        let atom = parse_atom_from_source(
+            r#"
+atom quantified(n: i64)
+    requires: n >= 0 && forall(i, 0, n, i >= 0);
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        let hir = lower_atom_to_hir(&atom);
+
+        assert_eq!(hir.contract.requires_text, atom.requires);
+        assert_eq!(hir.contract.ensures_text, atom.ensures);
+        assert_eq!(hir.contract.requires_text, "n >= 0 && true");
+        assert!(hir.contract.clauses.iter().any(|clause| {
+            clause.kind == HirClauseKind::Requires
+                && clause.mode == HirClauseMode::Plain
+                && clause.text == "n >= 0"
+        }));
+        assert_eq!(hir.contract.quantifiers.len(), 1);
+        let quantifier = &hir.contract.quantifiers[0];
+        assert_eq!(quantifier.kind, HirQuantifierKind::ForAll);
+        assert_eq!(quantifier.var, "i");
+        assert_eq!(quantifier.start, "0");
+        assert_eq!(quantifier.end, "n");
+        assert_eq!(quantifier.condition, "i >= 0");
+        assert!(quantifier.condition_expr.is_some());
+    }
+
+    #[test]
+    fn atom_signature_preserves_declared_parameters_and_effects() {
+        let atom = parse_atom_from_source(
+            r#"
+atom metadata(consume a: i64, ref b: i64, ref mut c: i64, plain, amount: NonNegative)
+    requires: a >= 0 && forall(i, 0, a, i >= 0);
+    ensures: result >= a && result >= 0;
+    effects: [Zeta, Alpha, Zeta, !Beta];
+    body: a;
+"#,
+        );
+        let hir = lower_atom_to_hir(&atom);
+
+        assert_eq!(hir.signature.params[0].name, "a");
+        assert!(hir.signature.params[0].consume);
+        assert_eq!(hir.signature.params[0].declared_name(), "consume a");
+        assert_eq!(hir.signature.params[0].by_ref, HirRefKind::Value);
+
+        assert_eq!(hir.signature.params[1].name, "b");
+        assert!(!hir.signature.params[1].consume);
+        assert_eq!(hir.signature.params[1].declared_name(), "b");
+        assert_eq!(hir.signature.params[1].by_ref, HirRefKind::Ref);
+
+        assert_eq!(hir.signature.params[2].name, "c");
+        assert_eq!(hir.signature.params[2].declared_name(), "c");
+        assert_eq!(hir.signature.params[2].by_ref, HirRefKind::RefMut);
+
+        assert_eq!(hir.signature.params[3].name, "plain");
+        assert_eq!(hir.signature.params[3].ty, None);
+        assert_eq!(hir.signature.params[4].ty.as_deref(), Some("NonNegative"));
+        assert_eq!(hir.contract.requires_text, atom.requires);
+        assert_eq!(hir.contract.ensures_text, atom.ensures);
+        assert_eq!(hir.signature.effects.len(), 4);
+        assert_eq!(
+            hir.signature
+                .effects
+                .iter()
+                .map(|effect| (effect.name.as_str(), effect.negated))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Zeta", false),
+                ("Alpha", false),
+                ("Zeta", false),
+                ("Beta", true)
+            ]
+        );
+    }
+
+    #[test]
+    fn atom_contract_keeps_nested_quantifiers_in_clause_text() {
+        let atom = parse_atom_from_source(
+            r#"
+atom nested(n: i64)
+    requires: n == 5 || forall(i, 0, n, i >= 0);
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        let hir = lower_atom_to_hir(&atom);
+
+        assert!(hir.contract.quantifiers.is_empty());
+        let clauses: Vec<_> = hir
+            .contract
+            .clauses
+            .iter()
+            .filter(|clause| {
+                clause.kind == HirClauseKind::Requires
+                    && clause.mode == HirClauseMode::Plain
+                    && clause.text.contains("forall(")
+                    && clause.text.contains("i >= 0")
+            })
+            .collect();
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(clauses[0].text, "n == 5 || forall(i, 0, n, i >= 0)");
+        assert!(clauses[0].expr.is_some());
+    }
+
+    #[test]
+    fn duplicate_conjunct_modes_assign_assume_before_plain() {
+        let atom = parse_atom_from_source(
+            "atom duplicate(x: i64) -> i64 \
+             requires: x > 0; \
+             requires assume: x > 0; \
+             ensures: result > 0; \
+             body: x;",
+        );
+        let hir = lower_atom_to_hir(&atom);
+        let requires = hir
+            .contract
+            .clauses
+            .iter()
+            .filter(|clause| clause.kind == HirClauseKind::Requires)
+            .map(|clause| clause.mode.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(requires, vec![HirClauseMode::Assume, HirClauseMode::Plain]);
+    }
+
+    #[test]
+    fn atom_metadata_tracks_trust_boundaries_hash_and_trust_level() {
+        let atom = parse_atom_from_source(
+            "atom assumed(x: i64) -> i64 \
+             requires assume: x > 0; \
+             ensures: result == x; \
+             body: x;",
+        );
+        let hir = lower_atom_to_hir(&atom);
+        let expected_boundaries = crate::trust_boundary::classify_trust_boundaries(&atom, &[]);
+
+        assert_eq!(hir.meta.trust_boundaries, expected_boundaries);
+        assert!(hir
+            .meta
+            .trust_boundaries
+            .contains(&crate::trust_boundary::TrustBoundaryKind::AssumedClause));
+        assert_eq!(
+            hir.meta.content_hash,
+            crate::proof_cert::compute_atom_content_hash_v2(&atom)
+        );
+
+        let trusted = parse_atom_from_source(
+            "trusted atom trusted_contract(x: i64) -> i64 \
+             requires: x >= 0; \
+             ensures: result == x; \
+             body: x;",
+        );
+        assert_eq!(
+            lower_atom_to_hir(&trusted).meta.trust_level,
+            HirTrustLevel::Trusted
+        );
+    }
+
+    #[test]
+    fn assigned_outer_variables_excludes_shadowing_let() {
+        let stmt = HirStmt::Block {
+            stmts: vec![
+                HirStmt::Let {
+                    var: "acc".to_string(),
+                    ty: None,
+                    value: Box::new(HirExpr::Number(1)),
+                },
+                HirStmt::Assign {
+                    var: "acc".to_string(),
+                    value: Box::new(HirExpr::Number(2)),
+                },
+            ],
+            tail_expr: None,
+        };
+        assert_eq!(collect_assigned_outer_variables_stmt(&stmt), HashSet::new());
+    }
+
+    #[test]
+    fn assigned_outer_variables_includes_plain_assignment() {
+        let stmt = HirStmt::Assign {
+            var: "acc".to_string(),
+            value: Box::new(HirExpr::Number(2)),
+        };
+        assert_eq!(
+            collect_assigned_outer_variables_stmt(&stmt),
+            names(&["acc"])
+        );
+    }
+
+    #[test]
+    fn assigned_outer_variables_excludes_pattern_bindings() {
+        let expr = HirExpr::Match {
+            target: Box::new(HirExpr::Variable("value".to_string())),
+            arms: vec![HirMatchArm {
+                pattern: HirPattern::Variant {
+                    variant_name: "Cons".to_string(),
+                    fields: vec![HirPattern::Variable("x".to_string())],
+                },
+                guard: None,
+                body: Box::new(HirStmt::Assign {
+                    var: "x".to_string(),
+                    value: Box::new(HirExpr::Number(1)),
+                }),
+            }],
+        };
+        assert_eq!(collect_assigned_outer_variables_expr(&expr), HashSet::new());
+    }
+
+    #[test]
+    fn assigned_outer_variables_finds_nested_if_inside_block() {
+        let stmt = HirStmt::Block {
+            stmts: vec![HirStmt::Expr(HirExpr::IfThenElse {
+                cond: Box::new(HirExpr::Variable("condition".to_string())),
+                then_branch: Box::new(HirStmt::Assign {
+                    var: "acc".to_string(),
+                    value: Box::new(HirExpr::Number(1)),
+                }),
+                else_branch: Box::new(HirStmt::Expr(HirExpr::Number(0))),
+            })],
+            tail_expr: None,
+        };
+        assert_eq!(
+            collect_assigned_outer_variables_stmt(&stmt),
+            names(&["acc"])
+        );
+    }
+
+    #[test]
+    fn assigned_outer_variables_finds_if_nested_in_assignment_expression() {
+        let stmt = HirStmt::Assign {
+            var: "acc".to_string(),
+            value: Box::new(HirExpr::BinaryOp(
+                Box::new(HirExpr::Variable("acc".to_string())),
+                HirBinOp::Add,
+                Box::new(HirExpr::IfThenElse {
+                    cond: Box::new(HirExpr::BinaryOp(
+                        Box::new(HirExpr::Variable("i".to_string())),
+                        HirBinOp::Eq,
+                        Box::new(HirExpr::Number(0)),
+                    )),
+                    then_branch: Box::new(HirStmt::Block {
+                        stmts: vec![HirStmt::Assign {
+                            var: "xs".to_string(),
+                            value: Box::new(HirExpr::ArrayLit(vec![
+                                HirExpr::Number(9),
+                                HirExpr::Number(9),
+                            ])),
+                        }],
+                        tail_expr: Some(Box::new(HirExpr::Number(1))),
+                    }),
+                    else_branch: Box::new(HirStmt::Block {
+                        stmts: Vec::new(),
+                        tail_expr: Some(Box::new(HirExpr::Number(0))),
+                    }),
+                }),
+            )),
+        };
+        assert_eq!(
+            collect_assigned_outer_variables_stmt(&stmt),
+            names(&["acc", "xs"])
+        );
+    }
 }

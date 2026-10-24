@@ -273,6 +273,9 @@ function extractLeanEscalationText(diag: vscode.Diagnostic): string | undefined 
     if (status === 'lean_verified') {
         return '\u{1F517} lean_verified by mumei-lean';
     }
+    if (status === 'stale_translator') {
+        return '\u{26A0} stale_translator: lean_verified without current Lean metadata';
+    }
     if (status === 'pending') {
         return typeof reason === 'string' && reason.length > 0
             ? `\u{2696} Lean escalation pending (${reason})`

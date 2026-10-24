@@ -6,6 +6,47 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
+/// Bump when verifier semantics change so cached proofs are re-derived.
+/// Version 3 enables checker-first MIR borrow checking.
+/// Version 4 stops lowering calls whose arguments depend on a quantifier-bound
+/// variable, so earlier "verified" results for such atoms must be re-derived.
+/// Version 6 checks a callee's quantified requires at call sites and keeps
+/// quantifiers nested under non-conjunctive operators in the requires text,
+/// and stops quantifier binders from capturing same-named outer variables.
+/// Version 7 enables recursive contracts: `decreases` termination obligations
+/// and congruent recursive calls.
+/// Version 8 accepts lexicographic `decreases: (m1, ..., mk);` measures.
+/// Version 9 rejects calls whose argument count differs from the callee's
+/// parameter count, so earlier "verified" results for such calls must be
+/// re-derived.
+/// Version 10 unfolds constant-argument calls into eligible recursive SCCs
+/// up to a fixed depth, guarding each instance with the callee's requires
+/// and parameter refinements.
+/// Version 11 admits one-dimensional scalar arrays and scalar-field structs
+/// as recursive-contract parameters, with length/field-valued UF domains.
+/// Version 12 lowers whole-array `==`/`!=` to length equality plus a bounded
+/// `forall` over `select`, so specs that compare arrays must be re-derived.
+/// Version 13 admits `[i64]`/`[bool]` arrays and scalar-field structs as
+/// recursive-contract RETURN values, modeling array results as (contents,
+/// len) UF pairs and struct results field-wise.
+/// Version 14 normalizes `Param.name` to the bare identifier and moves the
+/// `consume` signature marker to `Param::consume`, so spec references such as
+/// `len(xs)` resolve on `consume xs: [i64]` and prior verifications recorded
+/// against prefixed names must be re-derived.
+/// Version 15 declares `rec_fn#<atom>` in `unfold_constant_calls` over the
+/// same expanded domain the call sites use, and catches UF
+/// re-registration under a different signature.
+/// Version 16 excludes auto-injected std/prelude atoms from the global
+/// invariant conflict comparison — their `result` bounds are implicit
+/// infrastructure, not part of the user's spec surface.
+/// Version 17 unifies the two `consume` spellings: the signature marker
+/// `consume x: T` now goes through the same linearity machinery as the
+/// `consume x;` clause (arg consumption at call sites, is_alive tracking,
+/// double-declaration rejected), so previously-verifying programs that
+/// reuse an argument after calling a signature-`consume` callee may now
+/// fail verification and cached results must be re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 17;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
     /// ソースファイルの SHA-256 ハッシュ
@@ -39,7 +80,7 @@ pub(crate) fn compute_hash(source: &str) -> String {
 
 /// Atom の契約+body+メタデータのハッシュを計算する（Incremental Build 用）
 /// 以下のフィールドを結合してハッシュ化する:
-/// - name, requires, ensures, body_expr（基本契約）
+/// - name, requires, ensures, covers, body_expr（基本契約）
 /// - consumed_params, ref params（所有権制約）
 /// - resources, async flag（並行性制約）
 /// - invariant（帰納的不変量）
@@ -56,7 +97,25 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
     hasher.update(atom.requires.as_bytes());
     hasher.update(b"|");
     hasher.update(atom.ensures.as_bytes());
+    for cover in &atom.covers {
+        hasher.update(b"|cover:");
+        hasher.update(cover.clause.as_bytes());
+        if let Some(label) = &cover.label {
+            hasher.update(b"|label=");
+            hasher.update(label.as_bytes());
+        }
+    }
     hasher.update(b"|");
+    if !atom.clause_modes.is_empty() {
+        for mode in &atom.clause_modes {
+            hasher.update(b"|clause_mode:");
+            hasher.update(format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause).as_bytes());
+        }
+    }
+    if let Some(ref dec) = atom.decreases {
+        hasher.update(b"|decreases:");
+        hasher.update(dec.as_bytes());
+    }
     hasher.update(atom.body_expr.as_bytes());
     // consumed_params も含める（所有権制約の変更を検出）
     for cp in &atom.consumed_params {
@@ -71,6 +130,10 @@ pub fn compute_atom_hash(atom: &crate::parser::Atom) -> String {
         }
         if p.is_ref_mut {
             hasher.update(b"|ref_mut:");
+            hasher.update(p.name.as_bytes());
+        }
+        if p.consume {
+            hasher.update(b"|consume_param:");
             hasher.update(p.name.as_bytes());
         }
         // fn_contract_requires / fn_contract_ensures も含める（契約変更を検出）
@@ -171,6 +234,10 @@ pub struct VerificationCacheEntry {
     pub timestamp: String,
     #[serde(default)]
     pub skipped_clauses: usize,
+    #[serde(default)]
+    pub inferred_invariants: Vec<crate::verification::invariant_inference::InferredInvariant>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cover_results: Vec<serde_json::Value>,
 }
 
 /// Compute a proof hash that includes transitive dependency signatures and type predicates.
@@ -185,6 +252,7 @@ pub fn compute_proof_hash_with_flags(
     flags: &[&str],
 ) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(format!("|policy:{VERIFIER_POLICY_VERSION}").as_bytes());
 
     // 1. Include everything from the basic atom hash
     hasher.update(atom.name.as_bytes());
@@ -192,7 +260,25 @@ pub fn compute_proof_hash_with_flags(
     hasher.update(atom.requires.as_bytes());
     hasher.update(b"|");
     hasher.update(atom.ensures.as_bytes());
+    for cover in &atom.covers {
+        hasher.update(b"|cover:");
+        hasher.update(cover.clause.as_bytes());
+        if let Some(label) = &cover.label {
+            hasher.update(b"|label=");
+            hasher.update(label.as_bytes());
+        }
+    }
     hasher.update(b"|");
+    if !atom.clause_modes.is_empty() {
+        for mode in &atom.clause_modes {
+            hasher.update(b"|clause_mode:");
+            hasher.update(format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause).as_bytes());
+        }
+    }
+    if let Some(ref dec) = atom.decreases {
+        hasher.update(b"|decreases:");
+        hasher.update(dec.as_bytes());
+    }
     hasher.update(atom.body_expr.as_bytes());
     for cp in &atom.consumed_params {
         hasher.update(b"|consume:");
@@ -205,6 +291,10 @@ pub fn compute_proof_hash_with_flags(
         }
         if p.is_ref_mut {
             hasher.update(b"|ref_mut:");
+            hasher.update(p.name.as_bytes());
+        }
+        if p.consume {
+            hasher.update(b"|consume_param:");
             hasher.update(p.name.as_bytes());
         }
         // fn_contract_requires / fn_contract_ensures も含める（契約変更を検出）
@@ -236,6 +326,24 @@ pub fn compute_proof_hash_with_flags(
     for r in &atom.resources {
         hasher.update(b"|resource:");
         hasher.update(r.as_bytes());
+        if let Some(resource) = module_env.get_resource(r) {
+            hasher.update(b"|priority:");
+            hasher.update(resource.priority.to_string().as_bytes());
+            hasher.update(b"|mode:");
+            hasher.update(format!("{:?}", resource.mode).as_bytes());
+            for field in &resource.state {
+                hasher.update(b"|state:");
+                hasher.update(field.name.as_bytes());
+                hasher.update(b":");
+                hasher.update(field.ty.as_bytes());
+            }
+            if let Some(invariant) = &resource.invariant {
+                hasher.update(b"|resource_invariant:");
+                hasher.update(
+                    crate::verification::support::expr_to_source_string(invariant).as_bytes(),
+                );
+            }
+        }
     }
     for e in &atom.effects {
         hasher.update(b"|effect:");
@@ -243,6 +351,18 @@ pub fn compute_proof_hash_with_flags(
         for p in &e.params {
             hasher.update(b",param:");
             hasher.update(p.value.as_bytes());
+        }
+    }
+    // Replayability inputs: which non-deterministic roots the declared effects
+    // resolve to (through the effect hierarchy) and which parameters act as
+    // their witnesses. Atoms without such effects contribute nothing, so their
+    // hashes are unchanged.
+    for root in crate::verification::declared_nondeterministic_effects(atom, module_env) {
+        hasher.update(b"|replay:");
+        hasher.update(root.as_bytes());
+        for witness in crate::verification::witness_params(atom, root) {
+            hasher.update(b",witness:");
+            hasher.update(witness.as_bytes());
         }
     }
     if atom.is_async {
@@ -371,9 +491,92 @@ pub fn compute_proof_hash_with_flags(
             hasher.update(callee_atom.requires.as_bytes());
             hasher.update(b":");
             hasher.update(callee_atom.ensures.as_bytes());
+            if let Some(ref dec) = callee_atom.decreases {
+                hasher.update(b"|decreases:");
+                hasher.update(dec.as_bytes());
+            }
+            for e in &callee_atom.effects {
+                hasher.update(b",effect:");
+                hasher.update(e.name.as_bytes());
+                if e.negated {
+                    hasher.update(b",negated");
+                }
+                for p in &e.params {
+                    hasher.update(b",param:");
+                    hasher.update(p.value.as_bytes());
+                }
+            }
+            if callee_atom.trust_level != crate::parser::TrustLevel::Verified {
+                hasher.update(b",trust:");
+                hasher.update(
+                    match callee_atom.trust_level {
+                        crate::parser::TrustLevel::Trusted => "trusted",
+                        crate::parser::TrustLevel::Unverified => "unverified",
+                        crate::parser::TrustLevel::Verified => "verified",
+                    }
+                    .as_bytes(),
+                );
+            }
+            if callee_atom.is_async {
+                hasher.update(b",async");
+            }
+            if !callee_atom.type_params.is_empty() {
+                hasher.update(b",type_params:");
+                hasher.update(callee_atom.type_params.join(",").as_bytes());
+            }
+            if !callee_atom.forall_constraints.is_empty() {
+                for q in &callee_atom.forall_constraints {
+                    let quantifier_type = match q.q_type {
+                        crate::parser::QuantifierType::ForAll => "forall",
+                        crate::parser::QuantifierType::Exists => "exists",
+                    };
+                    hasher.update(b",quantified_requires:");
+                    hasher.update(quantifier_type.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.var.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.start.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.end.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(q.condition.as_bytes());
+                }
+            }
+            if !callee_atom.clause_modes.is_empty() {
+                for mode in &callee_atom.clause_modes {
+                    hasher.update(b",clause_mode:");
+                    hasher.update(
+                        format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause).as_bytes(),
+                    );
+                }
+            }
             for p in &callee_atom.params {
                 hasher.update(b",param_type:");
                 hasher.update(p.type_name.as_deref().unwrap_or("").as_bytes());
+                if let Some(refined) = p.type_name.as_deref().and_then(|t| module_env.get_type(t)) {
+                    hasher.update(b",param_refinement:");
+                    hasher.update(refined.operand.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(refined._base_type.as_bytes());
+                    hasher.update(b"|");
+                    hasher.update(refined.predicate_raw.as_bytes());
+                }
+                hasher.update(b",param_mode:");
+                let mode = if p.is_ref_mut {
+                    "ref mut"
+                } else if p.is_ref {
+                    "ref"
+                } else if p.consume
+                    || callee_atom
+                        .consumed_params
+                        .iter()
+                        .any(|consumed| consumed == &p.name)
+                {
+                    "consume"
+                } else {
+                    "owned"
+                };
+                hasher.update(mode.as_bytes());
             }
             hasher.update(b",return_type:");
             hasher.update(callee_atom.return_type.as_deref().unwrap_or("").as_bytes());
@@ -420,6 +623,26 @@ pub fn compute_contract_hash(atom: &crate::parser::Atom) -> String {
         hash_field(&mut hasher, "quantifier.condition", &q.condition);
     }
     hash_field(&mut hasher, "ensures", &atom.ensures);
+    if let Some(ref dec) = atom.decreases {
+        hash_field(&mut hasher, "decreases", dec);
+    }
+    if !atom.clause_modes.is_empty() {
+        for mode in &atom.clause_modes {
+            hash_field(
+                &mut hasher,
+                "clause_mode",
+                &format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause),
+            );
+        }
+    }
+    for cover in &atom.covers {
+        let mut section = cover.clause.clone();
+        if let Some(label) = &cover.label {
+            section.push_str("|label=");
+            section.push_str(label);
+        }
+        hash_field(&mut hasher, "cover", &section);
+    }
     if let Some(ref inv) = atom.invariant {
         hash_field(&mut hasher, "invariant", inv);
     }
@@ -603,6 +826,8 @@ pub fn migrate_old_cache(base_dir: &Path) {
                         type_deps: Vec::new(),
                         timestamp: timestamp.clone(),
                         skipped_clauses: 0,
+                        inferred_invariants: Vec::new(),
+                        cover_results: Vec::new(),
                     },
                 );
             }
@@ -652,6 +877,9 @@ mod nominal_hash_tests {
                 Item::StructDef(s) => {
                     module_env.structs.insert(s.name.clone(), s.clone());
                 }
+                Item::ResourceDef(resource) => {
+                    module_env.register_resource(resource);
+                }
                 _ => {}
             }
         }
@@ -680,6 +908,81 @@ body: { getx(Pair { a: 1, b: 2 }) };
         let after = env_and_hash(&format!(
             "{structs}\ntrusted atom getx(p: Point) -> i64\nrequires: true;\nensures: true;\nbody: {{ p.x }};\n{MAIN}"
         ));
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn callee_quantified_requires_change_invalidates_the_proof_hash() {
+        let before = env_and_hash(
+            "trusted atom getx(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 0 && forall(i, 0, n, arr[i] > 0);\n\
+             ensures: result > 0;\n\
+             body: arr[0];\n\
+             trusted atom main(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 1 && forall(i, 0, n, arr[i] > 1);\n\
+             ensures: result > 0;\n\
+             body: getx(arr, n);\n",
+        );
+        let after = env_and_hash(
+            "trusted atom getx(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 0 && forall(i, 0, n, arr[i] > 1);\n\
+             ensures: result > 0;\n\
+             body: arr[0];\n\
+             trusted atom main(arr: [i64], n: i64) -> i64\n\
+             requires: n >= 1 && forall(i, 0, n, arr[i] > 1);\n\
+             ensures: result > 0;\n\
+             body: getx(arr, n);\n",
+        );
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn callee_param_mode_change_invalidates_the_proof_hash() {
+        let before = env_and_hash(
+            "trusted atom getx(ref p: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: p;\n\
+             trusted atom main(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: getx(ref x);\n",
+        );
+        let after = env_and_hash(
+            "trusted atom getx(ref mut p: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: p;\n\
+             trusted atom main(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: getx(ref mut x);\n",
+        );
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn callee_signature_consume_invalidates_the_proof_hash() {
+        let before = env_and_hash(
+            "trusted atom getx(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: x;\n\
+             trusted atom main(y: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: getx(y);\n",
+        );
+        let after = env_and_hash(
+            "trusted atom getx(consume x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: x;\n\
+             trusted atom main(y: i64) -> i64\n\
+             requires: true;\n\
+             ensures: true;\n\
+             body: getx(y);\n",
+        );
         assert_ne!(before, after);
     }
 
@@ -721,5 +1024,55 @@ body: { p.a };\n";
             "struct Pair {{ a: i64, b: i64 }}\n{getx_bitvec}{MAIN}"
         ));
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn resource_invariant_change_invalidates_the_proof_hash() {
+        let before = env_and_hash(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;\n\
+             atom main() -> i64\nresources: [counter];\nrequires: true;\nensures: true;\nbody: { 0 }",
+        );
+        let after = env_and_hash(
+            "resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 1;\n\
+             atom main() -> i64\nresources: [counter];\nrequires: true;\nensures: true;\nbody: { 0 }",
+        );
+        assert_ne!(before, after);
+    }
+}
+
+#[cfg(test)]
+mod replayability_hash_tests {
+    use super::*;
+    use crate::parser::{parse_module, Item};
+
+    fn hash(source: &str) -> String {
+        let items = parse_module(source);
+        let mut module_env = ModuleEnv::default();
+        let mut atom = None;
+        for item in items {
+            match item {
+                Item::EffectDef(def) => {
+                    module_env.effect_defs.insert(def.name.clone(), def);
+                }
+                Item::Atom(a) => atom = Some(a),
+                _ => {}
+            }
+        }
+        compute_proof_hash(&atom.expect("atom"), &module_env)
+    }
+
+    #[test]
+    fn nondeterministic_effect_resolution_participates_in_the_proof_hash() {
+        let body = "body: { perform Dice.next(seed) };";
+        let plain = hash(&format!(
+            "effect Dice;\natom roll(seed: i64) -> i64\neffects: [Dice];\nensures: true;\n{body}"
+        ));
+        let child = hash(&format!(
+            "effect Random;\neffect Dice parent: Random;\natom roll(seed: i64) -> i64\neffects: [Dice];\nensures: true;\n{body}"
+        ));
+        assert_ne!(
+            plain, child,
+            "resolving Dice to the Random root must change the hash"
+        );
     }
 }

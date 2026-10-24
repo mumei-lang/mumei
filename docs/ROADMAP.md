@@ -46,7 +46,7 @@ The current cross-repo execution order is fixed and should be reviewed with `doc
 | 2 | `V1-C` and `V1-D` | Compare spec→code and code→spec only after V1-A/V1-B artifacts use the stable names `spec_health_issues`, `verification_violations`, `verification_status`, `cross_validation_gaps`, `next_steps`, `migration_hints`, `healed_files`, and `heal_errors`. |
 | 3 | `V1-E` | Human review enters through `next_steps` and the traceability metadata, not through renamed issue fields. The Phase 7 `mumei-demo/scenarios/spec_code_verification_suite` scenario now demonstrates V1-A〜V1-D in one fixture-safe flow before migration or Lean escalation. |
 
-The no-`.mm` front door remains `audit -> migrate-suggest -> heal`. `mumei-lean` is expanded only for Z3 `unknown` obligations, not `sat` / `unsat` / parser failure / audit findings, and now completes the V1 live generated theorem paths (fourteen in total: `abs_saturating`, `bounded_mul_with_overflow_check`, `constant_time_eq_flag`, `ff_zero_eq_zero`, `verified_insertion_sort_ascending`, `poly_bound_monotone`, `exists_pivot_partition`, `sum_nonneg_inductive`, `rtgs_transfer_conservation`, `ff_mul_commutative`, `ff_mul_associative`, `ff_mul_add_distributive`, `predicate_guard_collapse`, `ff_pow_square_expands`). The reference path `Generated.Std.Math.Abs.abs_saturating_correct` exports `lean_verified` with `known_witness_used = false` when `translator_version` and `bridge_lemma_hash` match; stale metadata is `stale_translator`, and `known_witness_used = true` remains fallback witness evidence only.
+The no-`.mm` front door remains `audit -> migrate-suggest -> heal`. `mumei-lean` is expanded only for Z3 `unknown` obligations, not `sat` / `unsat` / parser failure / audit findings, and now completes the V1 live generated theorem paths (twenty in total: `abs_saturating`, `bounded_mul_with_overflow_check`, `constant_time_eq_flag`, `ff_zero_eq_zero`, `verified_insertion_sort_ascending`, `poly_bound_monotone`, `exists_pivot_partition`, `sum_nonneg_inductive`, `rtgs_transfer_conservation`, `ff_mul_commutative`, `ff_mul_associative`, `ff_mul_add_distributive`, `predicate_guard_collapse`, `ff_pow_square_expands`, `cei_compliant_withdraw` / `guarded_state_update`, `move_once` / `read_before_move`, `clamp_to_range`, `take_point`, `join_all_last_result`, `race_two_replicas`). The reference path `Generated.Std.Math.Abs.abs_saturating_correct` exports `lean_verified` with `known_witness_used = false` when `translator_version` and `bridge_lemma_hash` match; stale metadata is `stale_translator`, and `known_witness_used = true` remains fallback witness evidence only.
 
 Local docs were reviewed with the five-language no-`.mm` contract: Python, Rust,
 TypeScript, Go, and Solidity all use the same eight audit keys, and language selection
@@ -545,9 +545,132 @@ Extensions to the effect subtyping system:
 
 - **Phase 2 (Basic Effects)**: ✅ Complete — parameterized effects (`FileRead(path: Str)`, `HttpGet(url: Str)`) implemented with security policy enforcement. Standard library effects defined in `std/effects.mm`, `std/http.mm`, `std/file.mm`. Z3 verifies parameter constraints (e.g., `starts_with(path, "/tmp/")`) at compile time.
 - **Phase 3 (Effect Polymorphism)**: ✅ Complete — Effect polymorphism via `<E: Effect>` bounds and `with E` syntax. Resolved through monomorphization (same as type polymorphism).
-- **Phase 4 (MIR)**: A CFG-based intermediate representation is needed for borrow checking and lifetime analysis, but the borrow checking design itself is not yet started. Will be introduced after the design is finalized.
+- **Phase 4 (MIR)**: Phase 4a–4c are done (liveness, move analysis, Copy/Move distinction, drop insertion in `mir_analysis/`). The checker-first borrow checking / lifetime analysis layer is implemented for existing `ref`, `ref mut`, and `consume` call semantics; first-class `&T` remains out of scope.
 - **Phase 5 (HIR Effect Type Information)**: ✅ Complete — `HirEffectSet` attached to `HirAtom`, `HirExpr::Call`, `HirExpr::Perform`. `lower_atom_to_hir_with_env()` populates effect info from `ModuleEnv`. Codegen reads effects from `hir_atom.effect_set`.
 - **Phase 6 (Capability Security)**: ✅ Complete — Evaluation documented in `docs/CAPABILITY_SECURITY.md`. Recommendation: Continue with parameterized effects + Z3 (Option A). `EffectCtx`, `SecurityPolicy`, `verify_effect_params`, `verify_effect_consistency`, `build_effect_feedback` all wired into the verification pipeline.
+
+### R-14 設計メモ: Borrow Checking / Lifetime Analysis — Implemented (M1/M2, checker-first)
+
+**Status: Implemented (M1/M2, checker-first)**. The MIR checker validates
+call-site loans for the existing `ref`, `ref mut`, and `consume` parameter
+modifiers without adding `&T` surface syntax.
+
+#### (a) The `&T` decision framework
+
+The prerequisite decision is whether Mumei introduces a first-class reference
+type `&T` / `&mut T`. The frame for that decision:
+
+What a reference type must satisfy in Mumei's atom/effect model:
+
+1. **Contract-boundary hygiene**: an atom is verified modularly — the caller
+   proves `requires`, assumes `ensures`, and the callee body is not re-verified
+   (`docs/LANGUAGE.md` §Inter-atom Function Calls). A `&T` that can be returned
+   or stored lets a callee hand the caller a path into a frame whose state the
+   caller's contract never described. Any `&T` must therefore be restricted so
+   that a reference cannot outlive the atom activation that produced it, or
+   contracts must grow a lifetime/region vocabulary (a much larger change).
+2. **Effect accounting**: effects are enforced by `param_leaves ⊆
+   allowed_leaves` containment (`verification/support/effects.rs`). A `&mut T`
+   param is an observable mutation channel — writes through it must stay inside
+   the declared effect/param surface exactly as today's `ref mut` does.
+3. **Erasable lowering**: whatever is adopted must lower to existing codegen
+   shapes — today `ref` / `ref mut` are verification-only markers (params are
+   bound as plain locals; codegen has no `is_ref` distinction, and arrays are
+   already fat-pointer `(len, data)` values), so a stored `&T` would be the
+   first construct needing a genuine pointer representation with no aliasing
+   guarantee gaps (no interior pointers into aggregates that ownership
+   analysis cannot see).
+
+Options:
+
+| Option | Shape | Cost | Payoff |
+|---|---|---|---|
+| A. Full `&T`/`&mut T` | References storable in locals/structs, returnable from atoms; lifetime params in signatures | Requires true region inference + lifetime polymorphism; largest verifier surface | Full expressiveness (iterator views, shared sub-structure) |
+| B. Stack-only shared `&T` | First-class `&T` as read-only references; never returned, never stored into aggregates; scope = declaring block | No region inference needed — lexical liveness suffices | Cheap alias-free reads of large aggregates without `consume` |
+| C. Checker-first (recommended) | Keep `ref` / `ref mut` / `consume` parameter-declaration modifiers as the only borrow surface; build the MIR borrow-check architecture (below) anyway | No language change; the checker validates `Ref`/`RefMut` loans on MIR | De-risks whichever `&T` option is later chosen; turns today's hypotheses into hard rules |
+
+Recommended: **Option C now, Option B if `&T` lands**. `LinearityCtx` + MIR
+move analysis already keep `std/` and the demos green, and `ref` params cover
+the dominant "lend a large value read-only" case. Full `&mut T` (Option A) is
+the last resort — its cost is a real lifetime system.
+
+What triggers the decision: (i) a `std/` atom or benchmark that must return or
+store a reference (array slice views, iterator-style APIs); (ii) agent-generated
+code repeatedly unable to express shared sub-structure without `consume`+copy;
+(iii) codegen measurements showing reference-shaped copies dominating. Until
+one fires, `&T` stays out of the language.
+
+#### (b) Borrow-check architecture on MIR
+
+All pieces exist on MIR today; the borrow checker is a dataflow pass alongside
+`analyze_moves`:
+
+- **Places/paths**: reuse `Place { Local, Field(Box<Place>, String),
+  Index(Box<Place>, Local) }`. The current checker conservatively treats any
+  two places rooted at the same local as overlapping, including distinct
+  field/index projections.
+- **Loan set**: per-program-point dataflow state
+  `Loan { place: Place, kind: Shared | Mut, holder: Local }`. `Assign(dst,
+  Rvalue::Ref(p))` / `RefMut(p)` generates a loan on `p` held by `dst`; a loan
+  dies when `holder` dies (`StorageDead`/`Drop`) or is overwritten — i.e. its
+  region is the holder's liveness range, computed by the existing
+  `compute_liveness`/`GenKill` machinery. Same worklist+merge skeleton as
+  `analyze_moves` (join = set union; conflicts reported at merge like
+  `ConflictingMerge`).
+- **Region inference — NLL-lite, or lexical fallback**: because `&T` would not
+  appear in signatures (Option B keeps borrows intraprocedural), there are no
+  lifetime parameters to solve. A loan's region = the set of CFG points where
+  its holder is live — that is exactly non-lexical lifetime semantics, obtained
+  free from liveness. The lexical fallback (loan lives to end of enclosing
+  block) is the degenerate form if holder liveness proves too coarse in
+  practice.
+- **`LinearityCtx` → borrow checker**: today's `borrow()` / `release_borrow()` /
+  `consume()` / `check_alive()` and the `__alive_` / `__borrowed_` /
+  `__exclusive_` Z3 Bools (keyed on the declared param modes) become hard MIR
+  rules evaluated per program point:
+  (1) consume/move of `p` while a live loan covers a prefix of `p` → error;
+  (2) write through `ref mut` or assignment to `p` while any live `Shared` loan
+  conflicts `p` → error; (3) `RefMut(p)` while any live loan conflicts `p` →
+  error (the xor-mutable/aliased rule); (4) use of a holder outside its
+  loan's region → error. These are `MoveViolation`-class hard errors —
+  decided syntactically, never Z3 `unknown` (Lean escalation only for Z3
+  `unknown`), so they cannot promote to `lean_verified`. `LinearityCtx`
+  remains as the Z3-level encoding of `ref`/`ref mut` call-site facts until
+  the MIR rules subsume it (its current role per `docs/ARCHITECTURE.md`
+  §LinearityCtx).
+- **Effects/contracts interaction**: a `ref`/`ref mut` argument must satisfy the
+  callee's `requires` on entry and the caller may assume the callee's `ensures`
+  over the mutated referent on return (post-state read-back). Borrowed
+  capability/effect-typed params keep `param_leaves ⊆ allowed_leaves`
+  accounting — a borrow never widens the permitted leaf set.
+
+Call-site loans have the call as their region: temporary `Ref`/`RefMut`
+holders are live from immediately before the call through the call and are
+dead immediately afterward. Shared parameters are read-only; `ref mut`
+parameters may be written but may not be moved. Moves, writes, mutable
+aliasing, and borrow-after-move are hard MIR diagnostics.
+
+#### (c) Milestones and out-of-scope
+
+- **M0 — decision record**: this memo; trigger checklist in (a).
+- **M1 — loan-set dataflow (implemented)**: `lower_hir_to_mir` gains
+  `Rvalue::Ref`/`RefMut` emission for `ref`/`ref mut`-marked call arguments,
+  explicit `Operand::Move` for `consume`, and
+  `mir_analysis/borrow_check.rs` computes call-scoped loan sets over them;
+  rules (1)–(4) are `MoveViolation`-style hard errors.
+- **M2 — diagnostics + regression (implemented)**: conflict messages with place paths;
+  `tests/test_concurrency.rs`-style fixture pairs (legal shared read /
+  illegal alias-write).
+- **M3 — (only if `&T` lands, deferred)** surface syntax + signature regions;
+  gated on the (a) triggers.
+
+Explicitly out of scope: lifetime elision, reborrowing (`&mut *p`), closure /
+`dyn` captures of borrows, lifetime parameters on types or atoms,
+region-polymorphic contracts, and any change to contract vocabulary or proof
+certificate schema. Static targets of `atom_ref`/`CallRef` are checked like
+direct calls; first-class values of atoms with `ref`, `ref mut`, or `consume`
+parameters are rejected and may only be invoked directly via
+`call(atom_ref(f), ...)`.
 
 ---
 
@@ -1131,9 +1254,17 @@ Lean 委譲境界: `mumei-core/src/verification/types.rs` の `integer_overflow_
 - 手動オーバーフロー境界（`requires` の ±4×10^18 等）を必要とする atom 数: ≥ 80% 削減
 - `--bitvec-i64` 無効時の既存 proof certificate 回帰: 0 件
 
-**P10-B: Regular Expression Theory（`Z3_RE_SORT` / RegLan）** — ★★
+**P10-B: Regular Expression Theory（`Z3_RE_SORT` / RegLan）** — ★★ — ✅ 実装完了（2026-09-19）
 
-現状のギャップ: 正規表現制約は String Sort 上の `prefix_of` / `suffix_of` / `contains` 近似のみで表現され、`regex_semantics` タグが付いた義務は `docs/SPEC_GUIDE.md` の方針どおり Lean 4 へ回している。
+`mumei-core/src/verification/support/reglan.rs` に Rust `regex` 構文のミニコンパイラを新設し、`matches` / `match_regex` / `re_match` のリテラルパターンを Z3 `RegLan`（`str.in_re`）へ直接写像する。Rust `is_match` 部分一致意味論を `Σ*·re·Σ*` で再現（外側 `^`/`$` アンカーで該当側の `Σ*` を省略）。対応断片: リテラル・連接・`|`・`()`・`*`/`+`/`?`（lazy 含む）・`{n,m}`（≤64）・文字クラス・`[^…]`・`\d\w\s`/`\D\W\S`・`\xHH`・`.`（Z3 `re.range` は 7bit ASCII まで — 範囲上限超過は unsupported）。Lookaround・後方参照・`(?i)` フラグ・内部アンカー等は `regex_semantics` タグを維持し契約内では fail-closed の lowering error。
+
+- `verification/support/effects.rs` の `matches(` where 句と `translator/expr.rs` の新しい Call arm が `regex_matches` を emit（旧 prefix/suffix/contains 近似はフォールバックとして保持）
+- `fragment.rs` は compilable 呼び出しを word-scan からマスク（compilable でなければタグ維持）、`expr_has_regex_semantics` の Call arm が `reglan::supported` で分岐
+- `proof_cert/validation.rs` の `manual_lemma_reason` 判定も同じ fragment 判定に統一（compilable `match_regex` 名の "regex" 含有で従来常に手動 lemma 要求だった）
+- 単体: `reglan` パリティコーパス（Z3 vs Rust regex 一致）、fragment: compilable→タグ無し / uncompilable→タグ維持（tests/test_decidable_fragment.rs）
+- `docs/SPEC_GUIDE.md` に決定可能な regex 断片を明記
+
+旧ギャップ: 正規表現制約は String Sort 上の `prefix_of` / `suffix_of` / `contains` 近似のみで表現され、`regex_semantics` タグが付いた義務は `docs/SPEC_GUIDE.md` の方針どおり Lean 4 へ回していた。
 
 Lean 委譲境界: `mumei-core/src/verification/types.rs` の `string_regex_bridge` ノート（Z3 と Lean で String / regex 意味論が異なる）に従い、複雑な意味論を要する義務のみ Lean 4 に残す。
 
@@ -1166,44 +1297,31 @@ Lean 委譲境界: `mumei-core/src/verification/types.rs` の `string_regex_brid
 - `regex_semantics` タグによる Lean escalation 件数: ≥ 60% 削減
 - RE 変換由来の反例（受理/非受理文字列）出力率: 100%
 
-**P10-C: Finite Non-recursive Algebraic Data Types（`Z3_DATATYPE_SORT` / `theory_datatype`）** — ★★
+**P10-C: Finite Non-recursive Algebraic Data Types（`Z3_DATATYPE_SORT` / `theory_datatype`）** — ★★ — ✅ 実装完了（2026-09-18）
 
-現状のギャップ: enum は Int タグとして扱われ、`match` 網羅性は `mumei-core/src/verification/translator/expr.rs` で「tag を `0..n_variants` に制約 → 被覆の否定が UNSAT か」という Int エンコードで実現している。ペイロード付きタグ付き共用体のフィールド型安全性は Int タグでは表現しきれない。
+実装ノート:
 
-Lean 委譲境界: 再帰 ADT は `mumei-core/src/verification/fragment.rs` で `inductive_data_type` タグとして検出され Lean 4 へ回る設計を維持する（有限・非再帰は Z3、再帰 ADT の帰納証明は Lean）。
+- 新モジュール `mumei-core/src/verification/support/datatype.rs` が有限・非再帰 enum（`!is_recursive` && `type_params` 空 && 全 payload が `i64`/`f64`/`Str`/`bool` に resolve するスカラーのみ）をネイティブ Z3 `DatatypeSort` へ下げる。`VCtx::enum_sorts` に per-context キャッシュを持ち、同名再宣言による sort 不一致を防ぐ。
+- `param_z3_value_for_vc` が `param_z3_value` を包み、enum 型パラメータ / `result` / callee 戻り値を `Datatype` const としてシード（spec_validation / vacuity / call_graph / executor / expr.rs の呼出結果シードを経由）。enum・struct・配列フィールドを持つ enum は Int-tag 経路に留まる。
+- `match` 網羅性は tester 述語 `is-<Variant>(target)` の被覆否定 UNSAT で判定（Int ドメイン制約は datatype ターゲットでは自動的にスキップ）。未被覆バリアントは Z3 model のコンストラクタ適用そのままに反例表示（`value = Blue -- no matching arm`）。
+- パターンの payload 束縛は真のセレクタ適用（`Named_0(s)`）で、`Str` フィールドは Z3 `String` として型安全にプロジェクションされる — `s == Shape::Named("hi")` から `n == "hi"` が証明できる。`==`/`!=` の datatype 同値性は expr.rs に追加。
+- 構築経路: `Shape::Named("x")`（Call `E::V`）、`Shape::Point`（FieldAccess nullary）、裸の `Point`（Variable — 束縛変数が優先）。
+- fragment.rs: 有限 ADT enum パラメータと有限 ADT 上の `match` は `inductive_data_type` を tag 付けしない（再帰 enum・generic `Option<T>`・scalar のみの match は従来どおり tag 維持）。
+- 既知制限: `let x = <ctor>; match x` は MIR move analysis のパターン束縛変数（`Local(0)` プレースホルダ）の既存制約で失敗 — P10-C 以前からの制限で、Int-tag 経路と同じ。
+- Follow-up（2026-09-19）: qualified ctor 式 `E::V(..)` / `E::V` が codegen に到達 — HIR lowering で `VariantInit` へ変換し tagged union を emit（verify は従来通り受理していたが build が `Unknown function`/`Field not found` で失敗していたギャップを解消）。再帰 enum の構築は clean codegen error、arity/不明 variant は fail-closed。同一スロットに `Str`/`f64` を混在させる enum は positional union layout の既存制約で codegen 不可。
 
-**Implementation Plan**:
+**検証**: `tests/test_datatype_enum.mm`（7 atom: enum-param match・Str/f64/bool payload selector・requires 側同値性・コンストラクタ単射性・再帰 enum の Int-tag 維持）、`tests/test_datatype_enum_negative.mm`（未被覆コンストラクタ名入り反例）、fragment.rs 単体テスト 6 件。
 
-```
-1. ネイティブ datatype sort 生成
-   - z3_types.rs に有限・非再帰 enum 用の Z3 datatype sort（コンストラクタ・セレクタ・判別子）生成経路を追加
-   - ペイロード付きバリアントのフィールド型を セレクタの sort として保持する
-   - Int タグ経路は後方互換のため残し、有限・非再帰と判定された型のみ datatype へ切り替える
+**Success Metrics 達成状況**:
+- 有限・非再帰 enum の `match` 網羅性チェックの datatype 経路移行率: 100%（`param_z3_value_for_vc` 経由で enum パラメータが Datatype sort を持つ全経路）
+- ペイロード付きバリアントのフィールド型安全性違反の検出率: 100%（セレクタが真の sort を持つ — `Str` フィールドに Int を渡すと sort mismatch で失敗）
+- 再帰 ADT の `inductive_data_type` タグ付け精度: 100%（`is_recursive` / 非スカラーフィールド / generic は全て Int-tag + tag 維持）
 
-2. 網羅性チェックの datatype 化
-   - expr.rs の match 網羅性を tag 範囲制約から判別子ベースの被覆否定 UNSAT 判定へ拡張
-   - 未被覆バリアントを反例のコンストラクタ名で報告する
-   - セレクタ適用の well-formedness（判別子が一致する場合のみ）を制約として付与
+**P10-D: Bounded Low-degree Nonlinear Arithmetic（`nlsat` / `grobner`）** — ★ ✅ Implemented（2026-09-13、= `docs/CROSS_PROJECT_ROADMAP.md` C-2 / Priority 26 R-8、Wave 5）
 
-3. fragment 判定の整理
-   - fragment.rs で有限・非再帰 enum を datatype 経路、再帰 ADT を inductive_data_type タグとして分離
-   - docs/SPEC_GUIDE.md に enum / タグ付き共用体の決定可能断片を追記
-```
+実装（2026-09-13）: `fragment.rs` は `nonlinear_arithmetic` タグを保持したまま、有界・低次数の atom にのみ内部マーカー `bounded_nonlinear_arithmetic` を追加し（`NLSAT_FIRST_MAX_DEGREE = 2` / `NLSAT_FIRST_MAX_VARIABLES = 3`、全非線形変数が `requires` に literal の上下限を持つこと、記号除数は 0 を除外する閉区間を持つこと、`%` / べき / finite-field / ループ不変量は対象外）、`is_outside_decidable_fragment` はこの窓内の atom を無条件 escalation 候補から外す。`executor.rs` は窓内の atom に `arith.nl` / `arith.nl.nra` / `arith.nl.grobner` / `arith.nl.delay = 0` を設定し、Z3 の `sat` / `unsat` はそこで確定、`unknown` / timeout のみ（Lean escalation only for Z3 `unknown` / timeout; `sat` / `unsat` は Z3 で確定）従来の `nonlinear_arithmetic` / `z3_timeout` escalation reason で Lean に降格し、降格理由（nlsat 先行試行済み + Z3 の `reason_unknown`）を失敗メッセージとして certificate に残す。母数が動く範囲は「上記 5 条件をすべて満たす atom」のみで、窓外の atom（片側境界・3 次以上・4 変数以上・`%`・finite-field）は従来どおり無条件 Lean 候補（fixture: `tests/fixtures/nlsat_first/`、回帰: `cargo test --test test_decidable_fragment`、`mumei-core` `nlsat_first_*` 4 件）。母数の実測（`std/` + `benchmarks/` の `nonlinear_arithmetic` タグ付き 27 atom）: 窓内 **9 atom**（benchmark 7: `bounded_mul` / `fp_percentage` / `square_is_nonnegative` / `square_of_successor` / `product_of_nonnegatives` / `share_price_is_bounded` / `infusion_rate_is_bounded`、std 2: `gcd.mm::lcm_from_gcd` / `pow_nat.mm::pow_nat`）はすべて Z3 `unsat` で確定し escalation reason なし、窓外 18 atom（`cube_on_small_nonneg` 3 次、`safe_div` / `safe_mod` / `hash_bucket` などの `%` / 片側境界、`ff_pow_square_expands` finite-field）は従来どおり `nonlinear_arithmetic` escalation reason を保持。B-7 再測定への影響: benchmark 105 atom の escalation 候補は 6 → 6（すべて finite-field、窓外）で不変、`lean_verified_delta` 0 も不変（`docs/EVALUATION_SUITE.md` 2026-09-13 16:29 UTC）。仕様ガイド: `docs/SPEC_GUIDE.md` §Bounded low-degree nonlinear arithmetic。
 
-**Files to modify/create**:
-- `mumei-core/src/verification/translator/z3_types.rs` — 有限・非再帰 enum の datatype sort 生成
-- `mumei-core/src/verification/translator/expr.rs` — datatype ベースの `match` 網羅性チェック
-- `mumei-core/src/verification/fragment.rs` — 有限・非再帰 / 再帰 ADT の分離判定
-- `docs/SPEC_GUIDE.md` — enum / タグ付き共用体の決定可能断片
-
-**Success Metrics**:
-- 有限・非再帰 enum の `match` 網羅性チェックの datatype 経路移行率: 100%
-- ペイロード付きバリアントのフィールド型安全性違反の検出率: 100%
-- 再帰 ADT の `inductive_data_type` タグ付け精度: 100%
-
-**P10-D: Bounded Low-degree Nonlinear Arithmetic（`nlsat` / `grobner`）** — ★
-
-現状のギャップ: `x * y` や記号的除算は `mumei-core/src/verification/fragment.rs` の `expr_has_nonlinear_arithmetic` により一律 `nonlinear_arithmetic` タグが付き、無条件で Lean escalation 候補になる。ただし `std/math/safe_mul.mm` のように明示境界があれば Z3 でも `result == a * b` を検証できている。
+現状のギャップ（実装前）: `x * y` や記号的除算は `mumei-core/src/verification/fragment.rs` の `expr_has_nonlinear_arithmetic` により一律 `nonlinear_arithmetic` タグが付き、無条件で Lean escalation 候補になる。ただし `std/math/safe_mul.mm` のように明示境界があれば Z3 でも `result == a * b` を検証できている。
 
 Lean 委譲境界: 多項式不変量・リング等式など真のリング推論は引き続き Lean 4 が担当する。
 
@@ -1767,8 +1885,91 @@ E2E テストで判明した検証パスの穴を解消した:
 - `verify --json` の `code: "escalation_candidate"` 診断（`escalation_reason` / `z3_unknown`
   タグ付き）を回帰テストで固定。
 
-**残課題**: 明示的な同期プリミティブで保護された共有可変状態の干渉推論。
+**残課題**: lock-free/atomics、deadlock/priority-inversion の完全分析、task_group:any のクリティカルセクション中キャンセルモデル — **設計起票済み**（下記 P17 R-13 のスコープ外）。
 task body 内の配列要素キャプチャは P25 で解消済み。
+
+#### P17 R-13: Mutex/RwLock 下の共有可変状態 — Implemented (M1)
+
+**ステータス: Implemented (M1)**。Typed resource state, acquire-only access, and unlock invariant obligations are implemented.
+
+**スコープ**: `Mutex` / `RwLock` で保護された共有可変状態のみを対象とする
+rely-guarantee-lite。lock 取得でシリアライズされる critical section 内の書き込みが、
+unlock 時点で宣言済みの共有不変量を再確立することを検証する。
+
+**表面構文**: 共有状態は `resource` 宣言に typed state と `invariant:` 節を載せる形で宣言する
+（既存の `resource NAME priority: N mode: exclusive|shared;` を拡張し、排他 resource の
+mutex 的な意味に不変量を付ける）。
+
+```mumei
+resource counter { value: i64 } priority: 1 mode: exclusive invariant: counter.value >= 0;
+
+async atom bump(n: i64)
+requires: n >= 0;
+ensures: result >= 0;
+body: {
+    acquire counter {
+        counter.value = counter.value + n;   // invariant は一時的に崩れてよい
+        // unlock 点（acquire ブロック終端）で invariant が再確立されることを検査
+    }
+}
+```
+
+**ストレージモデル**: Resource state fields support `i64`, `bool`, and `f64`. State cells
+exist only while their resource is held by `acquire`, and are lowered to module-scoped cells
+for code generation. A resource without a state map remains a pure lock.
+本設計は `resource` 宣言を型付き state map で拡張する（`resource counter { value: i64 }
+priority: 1 mode: exclusive invariant: counter.value >= 0;`）。`acquire` ブロック内の
+`counter.<field>` アクセスはその resource が所有する state cell への load/store に lowering
+され、lowering 上の表現は resource 毎の heap cell（または module-scoped slot）とする。
+state map の無い resource は従来どおり純粋な lock として扱う。
+
+`mode: shared` の read 側は `acquire` 内で不変量を前提として使い、共有フィールドへの
+書き込みは行わない。現行の `ResourceMode` は exclusive の同一 atom 内重複取得と
+priority 階層のみを検査するため、**shared mode の `acquire` 内での書き込みを hard error
+とする規則は本設計で新たに導入する**（書き込みは `mode: exclusive` の `acquire` 経路に
+限定）。sibling task 間の capture 書き込み競合は既存の `ConcurrentDataRace`
+（Phase 1h-2、`verification/support/task_ownership.rs`）が別レイヤで担う。
+
+**Phase 1h-2 との統合（lock-aware ownership）**: Ownership analysis treats
+`Stmt::Acquire { body }` を `Task` / `While` と同じく body へ再帰するだけで、
+acquire による serialize は race 判定に寄与しない — `task` 内で `acquire res` に包まれた
+共有状態への書き込みも unsynchronized write として `ConcurrentDataRace` になる。
+本設計では同 pass を lock-aware にする: ある resource の `state` フィールドへのアクセスが
+同一 resource の `acquire` に支配されている場合は race 判定の対象から外し、上記の unlock
+点不変量義務へ振り替える。逆に、guard される state への acquire なしのアクセス、
+および state map を持つ resource の critical section 外アクセスは引き続き hard error
+（missing-acquire 診断）とする。これにより「lock 無しの共有書き込みは従来どおり弾き、
+lock 有りは不変量義務へ昇格」という役割分担になる。
+
+**実装位置**: mumei-lean ではなく mumei-core 側の verifier に置く。義務は quantifier-free
+（不変量を havoc 済み post-body 環境で再評価する形）で、Phase 1h-2 を担う
+`verification/support/task_ownership.rs` と同じ AST-level pass の隣に新しい解析
+（Phase 1h-3 相当、`support/shared_invariants.rs` 候補）として追加する。`Stmt::Acquire` は既に translator で `__resource_held_<name>` Bool を
+assert している（`translator/stmt.rs`）ため、義務はその延長線上に載る:
+
+- **エントリ**: `acquire res { body }` に入る時点で宣言不変量 `inv` を環境に assume
+  （guard された共有フィールドへの read が不変量の下で評価される）。
+- **unlock 点（acquire ブロック終端）**: body を実行した post-env で `¬inv` が
+  `sat` になれば hard error（critical section が不変量を再確立していない）。
+  `Stmt::While` の inductive step と同じ機械部（havoc → 前提 assert → body 走査 →
+  事後の否定を check）を再利用する。
+- **途中離脱**: `task_group:any` の cancel 経路・`acquire` 内の early return をまたぐ
+  場合も unlock 点として同一義務を課す（cancel しても不変量を壊したまま解放しない
+  こと）。cancel 可能点をまたぐ acquire は resource hierarchy の既存規則
+  （`await` inside `acquire` → error）で既に制限されている。
+
+これらの義務は常に hard error であり、Z3 `unknown` も失敗として扱われ、Lean escalation を経由しない
+（Lean escalation only for unrelated verification obligations）— `lean_verified` へ誤昇格しない。
+
+**明示的な除外**:
+
+- lock-free / atomic メモリオーダリング（release-acquire 等の weak memory 推論は対象外）
+- deadlock freedom（resource priority hierarchy が別レイヤで既に担保; 本設計は不変量のみ）
+- priority inversion・fairness・スケジューラの liveness
+- `task_group:any` の子が critical section の途中で cancellation される実行はモデル化しない。
+  acquire body は cancellation に対して atomic として扱い、これは follow-up である。
+- 真の interleaving モデル化 — critical section の逐次合成だけを見る "lite" 版であり、
+  lock 間の相互作用の完全な rely-guarantee は対象外
 
 ---
 
@@ -1818,8 +2019,11 @@ python3 scripts/check_contract_vocabulary.py
 (cd editors/vscode && npm run compile)
 ```
 
-**残課題**: エディタは 1 ファイルにつき最初の未決 atom のみ pending 表示する
-（`lean_verified` は certificate 記載分すべて表示）。全 atom 分の pending 表示は follow-up。
+**後続（R-2, ✅ Implemented）**: in-process 検証は最初の失敗 atom で停止するため、sibling
+`<file>.proof.json` に `escalation_reason` を持ち `lean_verified` でない atom すべてに
+同形の `data.lean_escalation = { status: "pending", ... , certificate }` 診断を追加し、
+1 ファイルの全 pending atom を各 1 回ずつ表示する（`lean_verified` 側は従来どおり全件）。
+回帰: `cargo test --test test_lsp_lean_escalation`（複数 pending ケース）。
 
 ---
 
@@ -2273,7 +2477,7 @@ streamlit run visualizer/app.py -- --report-dir reports
 - `PYTHONPATH=. pytest tests/`（153 件、うち `tests/test_proof_graph_lib.py` 12 件を P26 で追加）: JSON → ノード / エッジ変換、両端点欠落エッジの除去、未知 health のグレーアウト、DOT の選択強調と不一致エッジ、ノード詳細（契約 / 依存 / 違反解決）、範囲外 index の無視、集計、`proof_graph.json` 以外のドキュメントの拒否。`visualize_std_graph` / `analyze_contract_conflicts` の既存テストは無変更で通過する。
 - **ゼロコスト検証（P15 / P23 / P24 / P25 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。proof graph は検証後の成果物変換のみで、証明済み pure atom の実行時経路には触れない。
 
-**残課題**: `st.graphviz_chart` はノードのクリックイベントを返さないため、選択はサイドバーの atom セレクタと依存先 / 依存元ボタンで行う（クリック相当の遷移は可能だがグラフ上の直接クリックではない）。`verification_status` は当該 run で検証された atom のみに付き、import 済み / prelude atom は `null`（黄 / 緑判定は trust boundary のみに基づく）。`--escalate-lean` による `lean_verified` 昇格は mumei-lean bridge の実行環境を要するため、回帰テストは `proof_graph_statuses()` の単体経路のみで、bridge を含む end-to-end テストは未追加。`edges[].is_consistent` は「不一致が検出されていない」の意味で、cross-spec が検査しなかったペアも `true` になる（検査済みの証明ではない）。
+**残課題**: `st.graphviz_chart` はノードのクリックイベントを返さないため、選択はサイドバーの atom セレクタと依存先 / 依存元ボタンで行う（クリック相当の遷移は可能だがグラフ上の直接クリックではない）。`verification_status` は当該 run で検証された atom に付き、import 済み / prelude atom は sibling certificate（`<src>.proof.json` 等、無ければ `MUMEI_PROOF_BUNDLE`）が鮮度ゲート（`content_hash` 一致、`lean_verified` は `--allow-lean-verified` / `--escalate-lean` の opt-in かつ `translator_version` / `bridge_lemma_hash` が現行値）を通る場合のみ `verified` に補完され、それ以外は `null`（黄 / 緑判定は trust boundary のみに基づく）（R-3, ✅ Implemented）。`--escalate-lean` → `lean_verified` 昇格 → proof graph 反映の end-to-end は `tests/test_proof_graph_export.rs` で決定論 bridge stub により回帰固定（R-4, ✅ Implemented; 実 `lake build` を伴う経路は mumei-lean 側に委ねる）。`edges[].is_consistent` は三値（`true` = 検査済みで整合、`false` = 検査済みで不一致、`null` = cross-spec が未検査）で、「未検査」を「不一致なし」と誤認させない（R-3 残課題、✅ Implemented）。
 
 ---
 
@@ -2331,7 +2535,7 @@ python benchmarks/evaluation_suite.py --repair-cert-dir ../mumei-agent/artifacts
 - `PYTHONPATH=. pytest tests/`（177 件）: 既存 154 件は無変更で通過する（`tests/test_benchmark_suite.py` 16 件を含む）。
 - **ゼロコスト検証（P15 / P23〜P26 と同一）**: `cargo tree --edges no-dev | grep -i opentelemetry` が空であること。本スイートは Rust を触らない測定層のみ。
 
-**残課題**: repair convergence は mumei-agent 側の自己修復 run が生成した certificate を渡したときにのみ `MEASURED` になる（本リポジトリにコミット済みの測定は `SKIP`）。runtime artifact utility は `expected: PASS` タスクのみを対象とするため、counterexample タスクの emitter 挙動は測定範囲外。paper §9 Future Work #1 前半の TikZ 図差し替えは本スイートのスコープ外で未着手のまま。
+**残課題（2026-09-13 解消、Priority 25 Wave 4 B-7 / R-7）**: コミット済み `evaluation_suite.json` の repair convergence は mumei-agent `scripts/measure_repair_convergence.py`（`heal --proof-cert-out` が `MUMEI_SELF_CORRECTION_METADATA` 経由で `self_correction_summary` 付き certificate を書く）を counterexample 20 ファイルに実行した certificate を `--repair-cert-dir` で投入し `MEASURED`（24 atom、収束 10 = 41.67%、平均 1.3333 attempts、53,078 tokens、ローカル Ollama `qwen2.5-coder:3b`、max 3 retries）。runtime artifact utility は `expected: FAIL` タスクを `counterexample` ブロックとして別集計し（build target 3 種は非出力・`proof-cert` は refutation certificate 出力が期待値。80/80 = 100.00% as expected、refutation certificate 20/20、leak 0。leak は非空成果物の有無で判定。#560 以前は concurrency の multi-atom 4 ファイルで先行 atom の成果物が reject 後も残り 68/80 / leak 12 だったが、`mumei build` の reject 時巻き戻し（#559 / #560）で解消）、`expected: PASS` 側の 97/104 は不変。trust surface には `--ai-proof-cert-dir`（mumei-agent `scripts/measure_lean_ai_proof.py --ai-proof on` の certificate）による AI 経路 on/off 測定 `lean_ai_proof` を追加（off 6 / on 6 `lean_verified`、増分 +0、`ai_proof_used` 0、`manual_lemma_reason` 残 0）。paper §8 Known limitation #2 / §9 Future Work #1 は papers 側で同時更新。再測定手順は `docs/CROSS_PROJECT_ROADMAP.md` Priority 25 B-7 / Priority 26 R-7 行を正とする。
 
 ---
 
@@ -2358,7 +2562,7 @@ python benchmarks/evaluation_suite.py --repair-cert-dir ../mumei-agent/artifacts
 | `benchmarks/evaluation_suite.py` | proof / counterexample 軸への `no_verdict_files` の通し |
 | `tests/test_benchmark_suite.py` | 回帰ゲート（棄却と crash の分離、timeout が catch にならないこと、catch rate からの除外、`No Verdict` 描画） |
 
-**残課題**: 判定の有無は CLI 出力の照合で見分けている。`mumei verify` が棄却とインフラ失敗に別々の終了コードを返すようになれば、出力照合は不要になる。
+**後続（R-1, ✅ Implemented）**: `mumei verify` が棄却 `1` とは別に inconclusive `3` / input error `4` / internal error `5` を返すようになり、`run_benchmarks.py` の verdict 判定は `VERDICT_SUMMARY_RE` の出力照合から終了コード判定に置き換えた（`verify_status` 語彙は不変、per-file に `exit_code` を追加）。終了コード表は `docs/CLI.md` を参照。
 
 ---
 
@@ -2444,7 +2648,104 @@ bridge lemma catalog（`docs/LEAN_TRANSLATOR_SPEC.md` §10）には一切追加�
 - `benchmarks/run_benchmarks.py` の `lean_solver_time_s` チャネルは回帰なし（arithmetic 平均 8.848s / domain_compliance 平均 8.839s、SKIP 挙動は不変、`benchmarks/arithmetic/finite_field_modular.mm` は 4 escalated / 4 lean_verified / tactic search 2）。
 - stdlib atom 数は 344 → 345（`std/algebra/finite_field.mm` が 2 → 3）で、`docs/STDLIB_METRICS.md` と `scripts/std_proof_baseline.json` を同一 diff で更新済み。
 
-**残課題**: benchmark 側に残る `unknown_obligation`（body semantics 依存の非算術 obligation）は未カバーのまま。次弾で bridge lemma 追加が必要な形状に着手する場合は、`bridge_lemma_hash` の lockstep 更新（pinned doc 4 本 + `scripts/export_cert.py` + mumei-agent `_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH`）が必須。
+### C-1（= Priority 26 R-10）残余 `unknown_obligation` の棚卸し（2026-09-13）
+
+benchmark 105 atom の proof certificate（`benchmarks/evaluation_suite.py` B-7 再測定と同一の cert）に対し、mumei-lean `expr_translator.translate_contract` / `translate_body` を全 atom に適用して body semantics の翻訳ギャップ（`is_partial` / `unsupported_reasons`）を走査した。escalation 対象になり得るのは Z3 `unsat` の 37 atom で、`sat`（counterexample 課題、13 atom）は反例確定のため Lean へ送られず対象外（Lean escalation only for Z3 `unknown`）。現行 benchmark で実際に escalation されているのは finite-field 6 atom のみ（すべて `lean_verified`）であり、下表は将来これらの atom が Z3 `unknown` に落ちた場合、または B-4 が対象義務を選ぶ際の入力一覧である。**本棚卸しでは `bridge_lemma_hash` / `translator_version` を一切動かさない。**
+
+| 群 | goal 形状 | 件数 | 代表 atom | 翻訳ギャップ | 振り分け先 |
+|---|---|---|---|---|---|
+| 1. ladder 末尾追記 / 翻訳前処理で届く（hash 不変） | `perform Effect.op; …; <pure tail>` — effect 文列の後に純算術の tail 式 | 19 | `domain_compliance/defi_invariants.mm::cei_compliant_withdraw`、`state_machine/order_lifecycle.mm::full_fulfillment`、`state_machine/session_auth.mm::full_session_cycle` | `body: unknown_token`（`perform` / `;`） | **B-1**: `perform` 文を translator の body 前処理で除去し tail 式を `translate_body` に渡す（obligation class は `arithmetic_obligation` のまま、新 bridge lemma 不要） |
+| 1. 同上 | `let x = e; …; <pure tail>` — 純 let 列 | 2 | `concurrency/linear_ownership.mm::move_once` / `read_before_move` | `body: unknown_token`（`;`） | **B-1**: let 列を tail への代入展開として lowering（既存 `_parse_let_binding_scope` の拡張） |
+| 1. 同上 | ネスト `if … else { if … }` tail | 1 | `arithmetic/saturating.mm::clamp_to_range` | `body: unsupported_syntax`（`_if_else_tail_is_supported` が単段のみ） | **B-1**: else 側ネストを許容 + ladder 末尾に `split_ifs <;> omega` 相当の候補を追記 |
+| 1. 同上 | 構造体射影 `p.x` を requires / body に含む | 1 | `concurrency/task_struct_capture_double_move_fail.mm::take_point` | `requires` / `body: unknown_token`（`.`） | **B-1**: 射影を Int binder（`p_x`）へ名前変換して lowering（新 lemma 不要） |
+| 2. bridge lemma 追加が必要（hash lockstep） | `task_group: all { task {…}; … }`（最終 task の値が result）/ `task_group: any { … }`（いずれかの task の値が result）、ネストを含む | 11 | `concurrency/task_group_all.mm::join_all_last_result` / `nested_task_groups`、`concurrency/task_group_any_winner.mm::race_two_replicas`、`concurrency/task_ownership.mm::per_task_local_writes` | `body: unknown_token`（`task_group:` / `task`） | **別 Priority（P31）へ起票**: `all` = 最終 task 値、`any` = 候補値の選言、という並行意味論の bridge lemma（新 obligation class）が必要で、`bridge_lemma_hash` の lockstep 更新を伴う |
+| 3. AI 証明生成へ回す | `while … invariant: … decreases: … { … }; <tail>` ループ不変量（配列和 / カウンタ） | 3 | `svcomp_style/loop_invariant.mm::sum_array`、`domain_compliance/regtech_exhaustiveness.mm::all_transactions_within_limit`、`domain_compliance/rtgs_balance_conservation.mm::queue_total_is_nonnegative` | `body: statement_block_requires_manual_lemma, unknown_token`、tags `recursive_invariant` / `trigger_sensitive_quantifier` | **B-4**: 帰納法による不変量証明は定型 lowering では届かないため、`lean_fallback_strategy` = AI 証明生成の対象義務とする（`ai_proof_attempts` / `ai_proof_used` で計測） |
+
+- 群 1（23 atom）は B-1（mumei-lean translator 拡張）の対象義務入力。いずれも既存 8 obligation class の範囲内で `arithmetic_obligation` に落ちるため hash 不変（Lean escalation only for Z3 `unknown`; `unsat` 確定 atom を Lean に送る変更ではなく、translator が body を lowering できる範囲を広げる入力）。進捗（2026-09-18）: `perform` 文列 19 atom は `perform_statement_lowering`（mumei-lean PR #121、spec §4.3）、純 `let` 列 2 atom は `let_statement_lowering`（PR #122、spec §4.4、live path 16）、ネスト `if` 1 atom は `nested_if_lowering`（spec §4.5、live path 17）、構造体射影 1 atom は `struct_projection_lowering`（spec §4.6、live path 18、`p.x` → Int バインダ `p_x` 改名）で lowering 済み。群 1 はすべて lowering 完了。
+- 群 2（11 atom）は P31 として起票（下記）。進捗（2026-09-18〜19、mumei-lean 側実装）: `task` / `task_group:all` は `task_value_lowering` / `task_group_all_lowering`（spec §4.7、live path 19: `join_all_last_result`）+ 新 `concurrency_obligation` class で lowering 済み。`task_group:any` も候補値リスト（`List Int`）+ `fin_cases` 形状で lowering 済み（live path 20: `race_two_replicas`）— P31 残は statement 列中段の `task_group` のみ。
+- 群 3（3 atom）は B-4（mumei-agent AI 証明生成）の対象義務入力。進捗（2026-09-19、mumei-lean 側実装）: `while … invariant: … [decreases: …] { … }; <tail>` body はループ検証条件（`I[init] ∧ step ∧ decreases ∧ exit→ensures`）を theorem goal として emit する `while_loop_invariant_lowering`（spec §4.8）が実装済み — これらの atom は従来 partial のまま emission ゲートで落ちており B-4 入力にすら乗らなかったが、今後は emitted theorem（deterministic ladder では `unknown` 残留）として `external_proof` / AI 証明経路に到達する。あわせて `len(arr)` が `List Int` 型識別子に対して `((arr.length : Int))` へ lowering されるよう修正（従来は scalar `mumei_len` との型衝突で partial）。live path 数は不変（VC theorem は証明到着まで `lean_verified` ではない）。
+- 群 3 実証（2026-09-19、mumei-lean PR #130）: 実 emitted cert で B-4 external-proof 経路を実走行確認 — `all_transactions_within_limit` が `--external-proofs` で `lean_verified` に到達（`ai_proof_used`, `known_witness_used=false`）。2 件の発見を修正・記録: (a) `translator_ir` 宣言型（`[i64]`/`array<t>`）が使用スキャンより優先されるようになり、非 index 化の配列パラメータ（`amounts` 等）が `List Int` で正しく bind; (b) **新ギャップ**: 証明書の `requires` は spec-level の `forall(i,0,n,arr[i]>=0)` conjunct を `true` に正規化して emit（`forall_constraints` は cert に非 serialize）— `sum_array` / `queue_total_is_nonnegative` の step VC は要素前提を欠き証明不能のため、cert への `forall_constraints` 出力は本 PR 群で解決（後述の新規 bullet）。
+- 群 3 ギャップ解消（2026-09-19、mumei + mumei-lean）: cert の `requires` が spec-level `forall` conjunct を `true` に正規化していたため `sum_array` / `queue_total_is_nonnegative` の step VC は要素前提を欠き証明不能だった → `AtomCertificate.forall_constraints`（`{q_type, var, start, end, condition}` 構造化出力、`schema/proof-cert.schema.json` 更新）を追加し、mumei-lean ingest が requires へ `forall(...)` conjunct として復元するようになった。**3 atom 全てが実 emitted cert で `--external-proofs` → `lean_verified` を実証**（mumei-lean e2e pin: sum_array / queue_total_is_nonnegative、ai_proof_used=true, known_witness_used=false）。C-1 群 3 は B-4 入力面 + 証明到達経路ともに実証完了。
+- 群 3 B-4 実運用化（2026-09-19、mumei-agent）: これら atom は Z3 `unsat` のため `extract_unknown_atoms` の候補に乗らず AI 経路へ自動到達しなかった → `measure_lean_ai_proof.py --force-lean-atom <atom>`（repeatable）が bridge 入力 cert の写像でのみ `unknown` へ降格し、昇格マージもその写像で行う（未証明なら元の Z3 verdict へ復帰、出力回帰なし）。`run.json` に `force_lean_atoms` / `forced_atoms` / `lean_verified_forced` を出処として記録。**実走行（gpt-4o、ENABLE_LEAN_AI_PROOF=1）で `all_transactions_within_limit` が手動 `--external-proofs` 無しに AI 生成証明で `lean_verified` 到達**を実証。残 2 atom は OpenAI 429 で停止したためローカル Ollama `qwen2.5-coder:1.5b` で再実行 — AI 段には到達したが `tactic_failed` / `unsound_source` で未証明（小規模モデルの能力限界。未証明 forced atom は出力 cert で元の Z3 verdict に復帰することも実走行で確認）。
+- 走査対象外: Z3 `sat` の 13 atom（`take_buffer` / `take_point` の `unsupported_call` を含む）は counterexample 課題であり escalation 母数に入らない。
+
+---
+
+## P31: task_group 並行意味論の bridge lemma 追加（C-1 群 2、hash lockstep）— ✅ Implemented
+
+**ステータス: ✅ Implemented（2026-09-18 開始、2026-09-19 slice-2 で any 完了、2026-09-22 seq 中段で完結）**。P30 の C-1 棚卸しで「bridge lemma 追加が必要」と判明した唯一の形状群（`task_group: all` / `task_group: any`、benchmark 11 atom）を扱う。回帰ゲート: mumei-lean `PYTHONPATH=scripts MUMEI_LEAN_SKIP_LIVE=1 python -m pytest -q`（529 pass）+ `lake build`、3 repo `test_contract_vocabulary.py` / `check_contract_vocabulary.py` green。
+
+- **意味論**: `task_group: all { task { e₁ }; …; task { eₙ } }` の result は `eₙ`、`task_group: any { … }` の result は `e₁ ∨ … ∨ eₙ` のいずれか（選言）。ensures は result に対する区間 / 等式制約なので、`all` は最終 task 値への書き換え補題、`any` は各分岐がすべて ensures を満たすことを要求する選言除去補題として bridge lemma 化する。
+- **実装済み（mumei-lean）**: `MumeiLean/Concurrency.lean` に `task_group_all_result_last` / `task_group_any_result_mem` / `task_value_result` を追加し、新 `concurrency_obligation` class を §10 catalog に登録。`bridge_lemma_hash` を `5716cfdd945d68b4a0d75d75c5ade1934cbd76e0dfe16734a8f3dd723cfdd8e9` へ lockstep 更新（`types.rs`・`verified_sample` fixture・pinned doc 群・mumei-agent 側定数を含む）。`task {…}` / `task_group:all {…}` の body lowering と `x = e` rebind segment（let 束縛名のみ）を実装、live path 19（`concurrency/task_group_all.mm::join_all_last_result`）が `lean_verified` で通る。
+- **完了（slice-3、2026-09-22、mumei-lean）**: statement 列中段の `task_group` 形状（`read_cancellable_write` 型）が lowering されるようになった — `task_group:all` は子 task の enclosing-scope 書き込みを宣言順に適用、`task_group:any` は winner シナリオ毎に束縛環境を分岐させ、tail がシナリオ間で不一致なら既存の `∈` 候補リスト形状へ lowering（`task_group_all_seq_lowering` / `task_group_any_seq_lowering`、spec §4.7、fan-out 上限 `_MAX_SEQ_SCENARIOS`=16）。当該 atom は `expected: FAIL` の反例のため live path 化の対象外（verifier の `CancelDependentRead` が Lean escalation 前に hard reject）— live path 数は 20 のまま、catalog 変更なしで `bridge_lemma_hash` 不変（`5716cfdd…`）。
+- **完了（slice-2）**: `task_group:any { task {…}; … }` は候補値リスト `[e₁, …, eₙ]`（`List Int`）へ lowering され、生成 theorem は `h_body : result ∈ <def>` を仮定して `fin_cases` で候補毎に分解・discharge（live path 20: `concurrency/task_group_any_winner.mm::race_two_replicas` が `lean_verified`）。全要素の Int 型検査付き（非 Int 要素は partial のまま）。catalog 変更なし — `task_group_any_result_mem` は slice-1 で登録済みのため `bridge_lemma_hash` 不変。
+- **契約定数への影響**: 新 obligation class（例: `concurrency_obligation`）と bridge lemma を `docs/LEAN_TRANSLATOR_SPEC.md` §10 catalog に追加するため、`bridge_lemma_hash` の lockstep 更新（pinned doc 4 本 + mumei-lean `scripts/export_cert.py` + mumei-agent `_SOLIDITY_GUARD_TRACE_BRIDGE_LEMMA_HASH`）が必須。`translator_version` を動かすかは IR schema 変更の有無で判断する。契約語彙（`harness_contract` / `intent_fidelity` / `artifact_paths` / `budget_policy_fingerprint` / `lean_verified` / 8 固定 audit キー / `verification_status` / `contradiction_type` / `ai_proof_used` / `ai_proof_attempts` / `lean_fallback_strategy`）に新規 alias は導入しない。
+- **前提**: B-1 群 1（`perform` / let 列の前処理）が先に入ること。`task` 内部の `let acc = n; acc = acc + 1; acc` などは群 1 の lowering を再利用する。
+- **回帰ゲート**: 既存 8 obligation class の bridge lemma 集合と ladder prefix 不変、`tests/test_contract_vocabulary.py`（3 リポジトリ）green、`scripts/check_proof_bundle_drift.py` pass。
+
+---
+
+## P32: Loop Invariant 自動推論（template-based infer-verify）— Implemented (M1–M3)
+
+**ステータス: Implemented (M1–M3)**。`while` は opt-in 構文 `invariant: infer` で bounded counter、monotonic progress、accumulator bound、unchanged prefix の 4 テンプレートから候補を生成する。候補は既存の base/inductive VC に投入し、Z3 の `unsat` のみを採用する（`sat` / `unknown` は棄却）。推論結果は CLI の人間向け出力と JSON に報告される。CLI フラグは parser が config より先に実行されるため Deferred。裸の `while` は引き続き fail-closed。
+
+**基本原則**: 推論された不変量は一切信用しない。全候補は既存の `Stmt::While` 検証条件機械（`translator/stmt.rs` の havoc → 前提 assert → body 走査 → `¬inv` check、base case + inductive step）にそのまま投入し、Z3 が `unsat` を返した候補のみを採用する。`sat` / `unknown` を返した候補は棄却 — 検証を通らなかった推論不変量で loop を通す経路は設けない（推論はあくまで「書けたはずの不変量を代筆する」位置付けであり、検証強度は手書き不変量と同一）。
+
+**候補生成（candidate source）**: candidate generation reads the loop AST
+directly in `invariant_inference.rs`; `LoopInfo` remains unchanged. The
+templates are:
+
+| テンプレ | 形状 | 発生条件（ヒューリスティック） |
+|---|---|---|
+| bounded counter | `lo <= i && i <= hi`（厳密: `i <= hi`、step が正なら更に `i >= lo`） | `i = i + c` 形式の更新 + 条件 `i < hi` / `i <= hi` |
+| accumulator bound | `acc >= lo'` / `acc <= hi'`、または `requires` の範囲制約から写像した合計・件数 bound | `acc = acc + e` の更新 + `requires` / 配列長から取れる bound |
+| monotonic progress | `i <= n` で `decreases: n - i` と整合する進行度 | `while` 条件が変数の単調増減で終了する形 |
+| unchanged prefix | `forall(j, 0, i, arr[j] == arr0[j])` 相当の prefix 不変（配列書き込みが index `i` 以降に限定される場合） | `arr[i] = …` のみを行う loop（i がループ index） |
+
+`for i in lo..hi` では既存の自動不変量が先に立つため、推論は `while` と、ユーザー不変量が未記述の `for` 追加分（accumulator 等）に限定する。候補は各テンプレ独立に生成し、採用されたもの同士を conjunction で結合して最終不変量とする。
+
+**検証順序（verification order）**: 候補は安い順にソートして逐次 Z3 投入する — (1) bounded counter → (2) monotonic progress → (3) accumulator bound → (4) unchanged prefix（`forall` を含むため最も高コスト）。各候補は単体で base/step 両方の `¬inv` check を受け、採用済み候補集合は後続候補の検証環境に assume として加える（候補間の相互依存を許す順次強化）。タイムアウトは既存の `check_spec_satisfiability_with_timeout` 系の予算に従う。`forall` 候補が `unknown` になる場合は棄却して次候補へ — 推論段階では Lean escalation しない（Lean escalation only for Z3 `unknown` on the *final* user-visible proof obligation, not per-candidate; 推論候補の `unknown` は単に不採用を意味し、`lean_verified` 判定へは一切載らない）。
+
+**失敗時の振る舞い（failure behavior）**: 全候補が棄却された場合、あるいは採用候補の conjunction が ensures/post-loop 義務（`inv ∧ ¬cond` → 後続）を支えきれない場合は、現行と同じ fail-closed 経路に戻る — 不変量の記述を要求する diagnostic を出す。ユーザーが `invariant:` を書いた場合は推論を走らせず手書き不変量のみを使う（推論は補完であり上書きしない）。推論の起動は opt-in とする: 構文案は `invariant: infer`（明示的委譲）、または `verify --infer-invariants` フラグ経由。黙って parser 必須要件を緩める変更は行わない — ただし現行は `invariant:` 欠落を **parse 時点**で `syntax_failure` + `__mumei_missing_invariant` poison とするため、`LoopInfo` が利用可能になる前に loop が死ぬ。`invariant: infer` は marker としてそのまま parse を通せるが、フラグ経路（裸の `while` に推論を効かせる）には deferred-parse が要る: `--infer-invariants` 時は poison ではなく「infer-eligible marker」（例: `Expr::Variable("__mumei_infer_invariant")`）を emit して loop を verify 段まで到達させ、全候補棄却時に verify 側で従来どおりの missing-invariant diagnostic を出す（fail-closed は緩めず、発火点を parse から verify へ遅らせるだけ）。推論成功時は採用不変量を diagnostic / `--suggest-cegis` 系 JSON で報告し、証明書 schema・contract vocabulary には新規フィールドを導入しない。
+
+**マイルストーン**:
+
+- **M0**: 本メモ。テンプレ集合と候補発生条件の確定。
+- **M1**: ✅ candidate generation reads the loop AST directly; `LoopInfo` remains unchanged.
+- **M2**: ✅ 候補生成 + 逐次 infer-verify（bounded counter / monotonic / accumulator の 3 テンプレ）。
+- **M3**: ✅ unchanged-prefix テンプレ + `forall` 翻訳のコスト制御、opt-in 構文。CLI フラグは parser が config より先に実行されるため Deferred。
+- **スコープ外**: CEGIS による不変量の反例駆動 *修正*（反例からの式修补は B-4/mumei-agent 側の管轄）、`decreases` の自動推論、ネスト loop の交互不変量、非線形・浮動小数点不変量。
+
+## P33: 検証診断と信頼境界の明示化（VC 結果分類・phase contract・bridge 公理監査）— ✅ Implemented (Wave 1–2)
+
+**目的**: 「通った / 落ちた」の 2 値だった検証結果に *なぜ* を付け、検証器自身が置いている前提（フェーズ間の事実、反例の忠実度、Lean bridge の信頼境界）を宣言・監査可能にする。いずれも既存の fail-closed 方針を緩めない — 追加するのは診断と監査のみで、`unknown` を証明・到達不能として扱う経路は設けない。
+
+### Wave 1（優先度: 高）
+
+| 項目 | repo | 内容 | 判断ポイント |
+|---|---|---|---|
+| W1-A: ensures 結果の分類 | mumei | 文脈 `ctx`（requires ∧ body 制約）の SAT と、反例経路でのみ `ctx ∧ Q` を追加照会し、各 ensures 句を `proved` / `vacuous` / `always_false` / `fails_on_some_inputs` / `fails` / `unknown` / `skipped` に分類。verify レポートに `context_reachability` / `ensures_outcomes` を追加。 | `ctx` unsat は従来どおり Phase 6 の矛盾エラーのまま（緩めない）。追加クエリは文脈 1 回 + 失敗時 1 回のみ。 |
+| W1-B: clause label | mumei | `requires "理由": expr;` / `ensures "理由": expr;` で句に人間可読ラベルを付与し、失敗メッセージ・レポートに載せる。 | ラベルなしは完全互換。ラベルは意味論に影響しない。 |
+| W1-C: phase contract | mumei | atom 検証の各フェーズが前提とする事実・確立する事実・無効化する事実を宣言テーブル化し、順序整合をテストで検査。各フェーズの反例忠実度（exact / bounded / approximate）を宣言し、失敗レポートに付与。 | 宣言は実行順を変えない。テーブルと実装の乖離をテストで検出する。 |
+| W1-D: bridge 公理監査 | mumei-lean | 生成 Lean に atom ごとの名前付き bridge 公理と `<atom>_certified` 定理を出力し、`lake build` 後に依存公理を収集。標準公理と自身の bridge 公理以外（`sorryAx`、証明が持ち込んだ axiom 等）があれば昇格を拒否し、証明書メタデータに監査結果を記録。 | 既存の translator version / bridge hash ゲートは維持。 |
+| W1-E: label の消費・生成 | mumei-agent | verify レポートの clause label を heal / 監査レポートで利用し、移行提案で検出理由をラベルとして出力。 | 旧 mumei との互換のため出力はバージョン検出でゲート。 |
+
+### Wave 2（優先度: 中）
+
+- **句単位の信頼モード**: `requires assume` / `requires check` / `ensures assume` / `ensures check`。`assume` 句は trust boundary（`assumed_clause`）として証明書の `assumed_clauses` に記録する（#664）。
+- **`cover` 句**: assert の双対として「この条件を満たす実行が存在する」ことを検査し、witness を report に出す。到達不能なら `cover_unreachable`（#663）。
+- **`verify-cert` での公理監査表示**: W1-D の監査結果を mumei 側で表示し、標準 3 公理以外への依存や監査失敗を `axiom_rejected` として受理しない（#662）。
+- **Z3 インクリメンタル再利用 — 見送り**: executor は ensures 句ごとに push/pop しており、W1-A で増えるクエリは句が失敗したときの 1 回だけ。文脈の到達可能性は追加クエリを発行せず、Phase 6 の最終 check の結果で事後的に分類している。solver をさらに使い回すと Z3 の判定が変わる事例を W1-A で確認しているため、計測でクエリ数が問題になるまで着手しない。
+- **ensures の lemma エクスポート — Wave 3 へ移動**: 呼び出し側で callee の ensures を前提にする明示的な経路は既にある。自動注入はトリガを付けられるのが配列 select だけで、算術の事実は MBQI 頼みになり、性能と判定が不安定になりやすい。トリガ設計を先に仕様化する。
+
+### Wave 3（優先度: 低〜長期、記録のみ）
+
+- ensures の lemma エクスポート（トリガ付き量化事実の供給。トリガ設計の仕様化が前提）。
+- refinement 型の witness 必須化、量化束縛への refinement 注入規則。
+- 例外出口ごとの契約と網羅性検査、async の rely/guarantee。
+- 反例の source 復元を lowering の逆写像として体系化。
+- `--keep-phase-artifacts`（中間フェーズ dump）、SARIF 出力、終了コードの契約化。
+- HIR を中心にした emit 系の再編、検証器の宣言的仕様書。
 
 ---
 

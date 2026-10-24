@@ -17,6 +17,34 @@ fn is_valid_emitter_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// Dependency-derived names become TOML bare keys and directory names
+/// under `~/.mumei/packages/`; restrict them to a safe set so a crafted
+/// `dep` string cannot inject TOML or escape the packages directory.
+fn sanitize_pkg_name(raw: &str) -> String {
+    let sanitized: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim_matches('_').to_string();
+    if sanitized.is_empty() || sanitized.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        "pkg".to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// Escape a string for embedding inside a TOML double-quoted basic
+/// string so `dep` cannot break out of the `[dependencies]` table.
+fn toml_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Resolve the compiled cdylib to install for `name` from a user-supplied
 /// `--path`, which may be the library itself, a directory containing it, or a
 /// cargo project whose `target/{release,debug}` holds it.
@@ -180,23 +208,24 @@ pub(crate) fn cmd_add(dep: &str, version: Option<&str>) {
             std::process::exit(1);
         }
         // パッケージ名はディレクトリ名から推定
-        let pkg_name = dep_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .replace('-', "_");
-        let toml_line = format!("{} = {{ path = \"{}\" }}", pkg_name, dep);
+        let pkg_name = sanitize_pkg_name(
+            dep_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown"),
+        );
+        let toml_line = format!("{} = {{ path = \"{}\" }}", pkg_name, toml_escape(dep));
         println!("📦 Adding local dependency: {} → {}", pkg_name, dep);
         (pkg_name, toml_line)
     } else if dep.contains("github.com") || dep.contains("gitlab.com") || dep.ends_with(".git") {
         // Git URL 依存 — clone to ~/.mumei/packages/<name>/
-        let pkg_name = dep
-            .split('/')
-            .next_back()
-            .unwrap_or("unknown")
-            .trim_end_matches(".git")
-            .replace('-', "_");
-        let toml_line = format!("{} = {{ git = \"{}\" }}", pkg_name, dep);
+        let pkg_name = sanitize_pkg_name(
+            dep.split('/')
+                .next_back()
+                .unwrap_or("unknown")
+                .trim_end_matches(".git"),
+        );
+        let toml_line = format!("{} = {{ git = \"{}\" }}", pkg_name, toml_escape(dep));
         println!("📦 Adding git dependency: {} → {}", pkg_name, dep);
 
         // Pre-clone the repository so it's available for build
@@ -205,8 +234,17 @@ pub(crate) fn cmd_add(dep: &str, version: Option<&str>) {
         if !clone_dir.exists() {
             let _ = fs::create_dir_all(&packages_dir);
             println!("   Cloning {}...", dep);
+            // `--` keeps a `dep` that starts with `-` from being parsed
+            // as a git option (e.g. `-c core.sshCommand=...`).
             let status = std::process::Command::new("git")
-                .args(["clone", "--depth", "1", dep, &clone_dir.to_string_lossy()])
+                .args([
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--",
+                    dep,
+                    &clone_dir.to_string_lossy(),
+                ])
                 .status();
             match status {
                 Ok(s) if s.success() => {

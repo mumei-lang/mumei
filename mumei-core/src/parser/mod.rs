@@ -34,11 +34,32 @@ use token::{SpannedToken, Token};
 pub struct ParseContext {
     tokens: Vec<SpannedToken>,
     pos: usize,
+    expect_failures: Vec<String>,
 }
 
 impl ParseContext {
     pub fn new(tokens: Vec<SpannedToken>) -> Self {
-        ParseContext { tokens, pos: 0 }
+        ParseContext {
+            tokens,
+            pos: 0,
+            expect_failures: Vec::new(),
+        }
+    }
+
+    /// Diagnostics recorded by `expect` calls whose token was missing.
+    /// Callers that want fail-closed parsing (e.g. `mumei check`) read
+    /// these after parsing instead of losing the information.
+    pub fn expect_failures(&self) -> &[String] {
+        &self.expect_failures
+    }
+
+    /// Record a non-`expect` syntax failure (e.g. an unrecognized clause
+    /// keyword a grammar loop skipped past) so fail-closed callers treat
+    /// the input as malformed just like a missing expected token.
+    pub fn syntax_failure(&mut self, message: String) {
+        if self.expect_failures.len() < 100 {
+            self.expect_failures.push(message);
+        }
     }
 
     pub fn peek(&self) -> &Token {
@@ -91,8 +112,20 @@ impl ParseContext {
     pub fn expect(&mut self, expected: Token) {
         if self.peek() == &expected {
             self.advance();
+        } else {
+            // Tolerant by design (the parser recovers and continues), but
+            // record the miss so callers can elect to treat malformed
+            // input as an error instead of silently accepting it.
+            let (found, line, col) = match self.tokens.get(self.pos) {
+                Some(tok) => (format!("{}", tok.token), tok.line, tok.col),
+                None => ("<eof>".to_string(), 0, 0),
+            };
+            if self.expect_failures.len() < 100 {
+                self.expect_failures.push(format!(
+                    "expected {expected}, found {found} at {line}:{col}"
+                ));
+            }
         }
-        // Silently skip if not matching (backward compat with old parser behavior)
     }
 
     pub fn tokens_ref(&self) -> &[SpannedToken] {
@@ -101,6 +134,20 @@ impl ParseContext {
 
     pub fn pos(&self) -> usize {
         self.pos
+    }
+
+    /// Snapshot for speculative parsing. `split_shr` mutates the token
+    /// stream (a `>>` becomes two `>` tokens), so rolling back a failed
+    /// lookahead needs the pre-split stream, not just the cursor.
+    pub(crate) fn snapshot(&self) -> (usize, Vec<SpannedToken>) {
+        (self.pos, self.tokens.clone())
+    }
+
+    /// Rewind to a `snapshot` taken before a speculative parse, undoing
+    /// any `split_shr` splices made since.
+    pub(crate) fn rewind(&mut self, snapshot: (usize, Vec<SpannedToken>)) {
+        self.pos = snapshot.0;
+        self.tokens = snapshot.1;
     }
 
     /// Get a Span from the current token position.
@@ -142,6 +189,13 @@ pub fn parse_module(source: &str) -> Vec<Item> {
     item::parse_module_from_source(source)
 }
 
+/// Strict variant of `parse_module`: returns the accumulated `expect`
+/// diagnostics as `Err` when any token the grammar required was missing,
+/// so a syntactically malformed `.mm` file cannot report success.
+pub fn parse_module_checked(source: &str) -> Result<Vec<Item>, Vec<String>> {
+    item::parse_module_from_source_checked(source)
+}
+
 /// Parse a pure expression (for requires/ensures/conditions).
 pub fn parse_expression(input: &str) -> Expr {
     let mut lexer = lexer::Lexer::new(input);
@@ -156,6 +210,46 @@ pub fn parse_body_expr(input: &str) -> Stmt {
     let tokens = lexer.tokenize();
     let mut ctx = ParseContext::new(tokens);
     expr::parse_block_or_stmt(&mut ctx)
+}
+
+/// Fail-closed variant of `parse_expression`: returns the recorded
+/// `expect`/`syntax_failure` diagnostics as `Err`, and also rejects input that
+/// leaves trailing tokens after the expression (e.g. `x > 0 -> y` keeps `-> y`
+/// unconsumed). Use this when the parsed AST feeds code generation rather than
+/// a tolerant path.
+pub fn parse_expression_checked(input: &str) -> Result<Expr, Vec<String>> {
+    let mut lexer = lexer::Lexer::new(input);
+    let tokens = lexer.tokenize();
+    let mut ctx = ParseContext::new(tokens);
+    let expr = expr::normalize_comparison_chains(expr::parse_expr(&mut ctx, 0));
+    let mut failures = ctx.expect_failures().to_vec();
+    if ctx.peek() != &Token::Eof {
+        failures.push(format!(
+            "unexpected trailing input starting at token `{:?}`",
+            ctx.peek()
+        ));
+    }
+    if failures.is_empty() {
+        Ok(expr)
+    } else {
+        Err(failures)
+    }
+}
+
+/// Fail-closed variant of `parse_body_expr`: returns the recorded
+/// `expect`/`syntax_failure` diagnostics as `Err` so callers can reject a
+/// malformed atom body instead of running verification on a recovered AST.
+pub fn parse_body_expr_checked(input: &str) -> Result<Stmt, Vec<String>> {
+    let mut lexer = lexer::Lexer::new(input);
+    let tokens = lexer.tokenize();
+    let mut ctx = ParseContext::new(tokens);
+    let stmt = expr::parse_block_or_stmt(&mut ctx);
+    let failures = ctx.expect_failures();
+    if failures.is_empty() {
+        Ok(stmt)
+    } else {
+        Err(failures.to_vec())
+    }
 }
 
 /// Parse a single atom definition from source text.
@@ -366,6 +460,84 @@ mod tests {
             atom.spec_metadata.get("semantics").map(String::as_str),
             Some("bitvec")
         );
+    }
+
+    #[test]
+    fn test_parse_explicit_type_arg_call() {
+        // `name<T, …>(args)` produces `Expr::Call` whose name carries the
+        // instantiation — the same key the monomorphizer/atom registry use.
+        let expr = parse_expression("apply<i64, Network>(42, atom_ref(net_fn))");
+        match expr {
+            Expr::Call(name, args) => {
+                assert_eq!(name, "apply<i64, Network>");
+                assert_eq!(args.len(), 2);
+                assert!(matches!(args[1], Expr::AtomRef { .. }));
+            }
+            other => panic!("expected explicit-type call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_explicit_type_arg_call_spacing_and_nesting() {
+        for (src, expected) in [
+            ("f<i64>(x)", "f<i64>"),
+            ("f < i64 > (x)", "f<i64>"),
+            ("pipe<[i64]>(x)", "pipe<[i64]>"),
+            ("f<Map<String, i64>>(x)", "f<Map<String, i64>>"),
+            ("f<A<B<C>>>(x)", "f<A<B<C>>>"),
+        ] {
+            match parse_expression(src) {
+                Expr::Call(name, _) => assert_eq!(name, expected, "src: {src}"),
+                other => panic!("expected explicit-type call for {src}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_less_than_still_comparison() {
+        // Without the `>` `(` terminator the `<` stays a comparison —
+        // including `>>` that a speculative scan spliced and undid.
+        for src in [
+            "a < b",
+            "a < b > c",
+            "a < 1",
+            "a < f<c >> d",
+            "a < b[i]",
+            "a < b >",
+        ] {
+            assert!(
+                matches!(parse_expression(src), Expr::BinaryOp(..)),
+                "expected comparison for {src}"
+            );
+        }
+        // `a < b > c` normalizes to a conjunction of comparisons.
+        match parse_expression("a < b > c") {
+            Expr::BinaryOp(_, Op::And, _) => {}
+            other => panic!("expected chained comparison, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_explicit_call_nested_in_comparison_rhs() {
+        match parse_expression("a < f<i64>(x)") {
+            Expr::BinaryOp(_, Op::Lt, rhs) => {
+                assert!(matches!(*rhs, Expr::Call(ref n, _) if n == "f<i64>"));
+            }
+            other => panic!("expected `a < f<i64>(x)` comparison, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_while_cond_less_than_not_generic_call() {
+        let stmt = parse_body_expr(
+            "while i < n invariant: i >= 0 && i <= n decreases: n - i { i = i + 1 }",
+        );
+        match stmt {
+            Stmt::While { cond, .. } => {
+                assert!(matches!(*cond, Expr::BinaryOp(_, Op::Lt, _)));
+            }
+            other => panic!("expected while, got {other:?}"),
+        }
     }
 
     #[test]
@@ -630,6 +802,203 @@ atom add(a: i64, b: i64)
     }
 
     #[test]
+    fn test_parse_optional_clause_labels() {
+        let labeled = parse_atom(
+            r#"
+atom labeled(x: i64) -> i64
+    requires "positive input": x > 0;
+    requires "small input": x < 10;
+    ensures "bounded \"result\"": result >= 0 && result <= 10;
+    body: x;
+"#,
+        );
+        let unlabeled = parse_atom(
+            r#"
+atom labeled(x: i64) -> i64
+    requires: x > 0;
+    requires: x < 10;
+    ensures: result >= 0 && result <= 10;
+    body: x;
+"#,
+        );
+
+        assert_eq!(labeled.requires, unlabeled.requires);
+        assert_eq!(labeled.ensures, unlabeled.ensures);
+        assert_eq!(
+            labeled.clause_labels,
+            vec![
+                ClauseLabel {
+                    kind: ClauseKind::Requires,
+                    clause: "x > 0".to_string(),
+                    label: "positive input".to_string(),
+                },
+                ClauseLabel {
+                    kind: ClauseKind::Requires,
+                    clause: "x < 10".to_string(),
+                    label: "small input".to_string(),
+                },
+                ClauseLabel {
+                    kind: ClauseKind::Ensures,
+                    clause: "result >= 0 && result <= 10".to_string(),
+                    label: "bounded \"result\"".to_string(),
+                },
+            ]
+        );
+        assert!(unlabeled.clause_labels.is_empty());
+        assert_eq!(
+            crate::resolver::compute_proof_hash(&labeled, &crate::verification::ModuleEnv::new()),
+            crate::resolver::compute_proof_hash(&unlabeled, &crate::verification::ModuleEnv::new())
+        );
+        assert_eq!(
+            crate::proof_cert::compute_atom_content_hash_v2(&labeled),
+            crate::proof_cert::compute_atom_content_hash_v2(&unlabeled)
+        );
+    }
+
+    #[test]
+    fn test_parse_clause_trust_modes_with_optional_labels() {
+        let atom = parse_atom(
+            r#"
+atom modes(x: i64) -> i64
+    requires assume "trusted input": x > 0;
+    requires check: x < 10;
+    ensures assume "trusted result": result > 0;
+    ensures check: result < 20;
+    body: x;
+"#,
+        );
+
+        assert_eq!(
+            atom.clause_modes,
+            vec![
+                ClauseMode {
+                    kind: ClauseKind::Requires,
+                    clause: "x > 0".to_string(),
+                    mode: ClauseTrustMode::Assume,
+                },
+                ClauseMode {
+                    kind: ClauseKind::Requires,
+                    clause: "x < 10".to_string(),
+                    mode: ClauseTrustMode::Check,
+                },
+                ClauseMode {
+                    kind: ClauseKind::Ensures,
+                    clause: "result > 0".to_string(),
+                    mode: ClauseTrustMode::Assume,
+                },
+                ClauseMode {
+                    kind: ClauseKind::Ensures,
+                    clause: "result < 20".to_string(),
+                    mode: ClauseTrustMode::Check,
+                },
+            ]
+        );
+        assert_eq!(atom.clause_labels.len(), 2);
+        assert_eq!(atom.clause_labels[0].label, "trusted input");
+        assert_eq!(atom.clause_labels[1].label, "trusted result");
+
+        let errors = item::parse_module_from_source_checked(
+            r#"
+atom bad_mode(x: i64) -> i64
+    requires foo: x > 0;
+    ensures: result > 0;
+    body: x;
+"#,
+        )
+        .expect_err("unknown clause mode must be a syntax failure");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("unknown clause trust mode 'foo'")),
+            "unexpected syntax errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_rejects_quantified_moded_requires() {
+        for (mode, quantifier) in [("check", "forall"), ("assume", "exists")] {
+            let source = format!(
+                r#"
+atom quantified(arr: [i64], n: i64) -> i64
+    requires {mode}: {quantifier}(i, 0, n, arr[i] > 0);
+    ensures: result > 0;
+    body: arr[0];
+"#
+            );
+            let errors = item::parse_module_from_source_checked(&source)
+                .expect_err("quantified moded requires must be rejected");
+            assert!(
+                errors.iter().any(|error| error
+                    == "clause trust modes (assume/check) are not supported on requires clauses containing quantifiers (forall/exists)"),
+                "unexpected syntax errors: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_keeps_unmoded_quantified_requires() {
+        let items = item::parse_module_from_source_checked(
+            r#"
+atom quantified(arr: [i64], n: i64) -> i64
+    requires: n >= 1 && forall(i, 0, n, arr[i] > 0);
+    ensures: result > 0;
+    body: arr[0];
+"#,
+        )
+        .expect("ordinary quantified requires remain supported");
+        let atom = items
+            .iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) => Some(atom),
+                _ => None,
+            })
+            .expect("quantified atom");
+        assert_eq!(atom.forall_constraints.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_cover_clauses_and_contextual_cover_identifier() {
+        let covered = parse_atom(
+            r#"
+atom covered(x: i64) -> i64
+    requires: x >= 0;
+    ensures: result >= 0;
+    cover "zero": result == 0;
+    cover: x > 0;
+    cover "maximum": x == 100;
+    body: x;
+"#,
+        );
+
+        assert_eq!(
+            covered.covers,
+            vec![
+                CoverClause {
+                    clause: "result == 0".to_string(),
+                    label: Some("zero".to_string()),
+                },
+                CoverClause {
+                    clause: "x > 0".to_string(),
+                    label: None,
+                },
+                CoverClause {
+                    clause: "x == 100".to_string(),
+                    label: Some("maximum".to_string()),
+                },
+            ]
+        );
+
+        let identifier = parse_atom(
+            r#"
+atom identity(cover: i64) -> i64
+    body: cover;
+"#,
+        );
+        assert_eq!(identifier.body_expr, "cover");
+        assert!(identifier.covers.is_empty());
+    }
+
+    #[test]
     fn test_parse_atom_with_trait_bounds() {
         let source = r#"
 atom max_val<T: Comparable>(a: T, b: T)
@@ -662,8 +1031,67 @@ atom max_val<T: Comparable>(a: T, b: T)
             .collect();
         assert_eq!(resources.len(), 1);
         assert_eq!(resources[0].name, "mutex_a");
+        assert!(resources[0].state.is_empty());
+        assert!(resources[0].invariant.is_none());
         assert_eq!(resources[0].priority, 1);
         assert_eq!(resources[0].mode, ResourceMode::Exclusive);
+    }
+
+    #[test]
+    fn test_parse_typed_resource_state_and_invariant() {
+        let items = parse_module(
+            "resource counter { value: i64, ready: bool, ratio: f64 } \
+             priority: 1 mode: exclusive invariant: counter.value >= 0;",
+        );
+        let resource = items
+            .iter()
+            .find_map(|item| match item {
+                Item::ResourceDef(resource) => Some(resource),
+                _ => None,
+            })
+            .expect("resource should parse");
+        assert_eq!(
+            resource
+                .state
+                .iter()
+                .map(|field| (field.name.as_str(), field.ty.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("value", "i64"), ("ready", "bool"), ("ratio", "f64")]
+        );
+        assert!(resource.invariant.is_some());
+    }
+
+    #[test]
+    fn test_parse_resource_rejects_unsupported_state_type() {
+        let failures =
+            parse_module_checked("resource counter { value: String } priority: 1 mode: exclusive;")
+                .expect_err("unsupported resource state type should fail");
+        assert!(failures
+            .iter()
+            .any(|failure| failure.contains("unsupported type 'String'")));
+    }
+
+    #[test]
+    fn test_parse_resource_invariant_requires_state() {
+        let failures =
+            parse_module_checked("resource counter priority: 1 mode: exclusive invariant: true;")
+                .expect_err("resource invariant without state should fail");
+        assert!(failures
+            .iter()
+            .any(|failure| failure == "resource invariant requires a state block"));
+    }
+
+    #[test]
+    fn test_parse_dotted_resource_assignment() {
+        let stmt = parse_body_expr_checked("{ counter.value = counter.value + 1; }")
+            .expect("dotted assignment should parse");
+        let Stmt::Block(stmts, _) = stmt else {
+            panic!("expected block");
+        };
+        let Stmt::Assign { var, .. } = &stmts[0] else {
+            panic!("expected assignment");
+        };
+        assert_eq!(var, "counter.value");
     }
 
     #[test]
@@ -985,6 +1413,196 @@ atom find_positive(n: i64)
     }
 
     #[test]
+    fn test_forall_constraints_split_on_top_level_commas() {
+        // Bound expressions may contain commas inside parens — the four
+        // fields must split only at depth-0 commas.
+        let source = r#"
+atom m(n: i64)
+    requires: forall(i, min(0, n), max(n, 0), i >= 0);
+    ensures: result >= 0;
+    body: 0;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        let q = &atoms[0].forall_constraints[0];
+        assert_eq!(q.var, "i");
+        assert_eq!(q.start, "min(0, n)");
+        assert_eq!(q.end, "max(n, 0)");
+        assert_eq!(q.condition, "i >= 0");
+    }
+
+    #[test]
+    fn test_forall_constraints_skip_nested_quantifiers() {
+        // `forall` inside an `exists` condition is part of that exists —
+        // hoisting it to a top-level conjunct would free `i` and
+        // unsoundly strengthen the hypothesis.
+        let source = r#"
+atom probe(n: i64)
+    requires: n >= 0 && exists(i, 0, n, forall(j, 0, n, i + j >= 0));
+    ensures: result >= 0;
+    body: 0;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].forall_constraints.len(), 1);
+        let q = &atoms[0].forall_constraints[0];
+        assert_eq!(q.q_type, QuantifierType::Exists);
+        assert_eq!(q.var, "i");
+        assert_eq!(q.condition, "forall(j, 0, n, i + j >= 0)");
+        assert_eq!(atoms[0].requires, "n >= 0 && true");
+    }
+
+    #[test]
+    fn test_forall_constraints_unclosed_paren_does_not_panic() {
+        // Malformed contract text must not crash the strip pass.
+        let source = r#"
+atom probe(n: i64)
+    requires: n >= 0 && forall(i, 0, n, arr[i] >= 0;
+    ensures: result >= 0;
+    body: 0;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].requires, "n >= 0 && true");
+        assert_eq!(atoms[0].forall_constraints.len(), 1);
+        // The unclosed tail is swallowed into the condition — malformed
+        // input, but it must not panic.
+        assert!(atoms[0].forall_constraints[0]
+            .condition
+            .starts_with("arr[i] >= 0"));
+    }
+
+    fn only_atom(source: &str) -> Atom {
+        parse_module(source)
+            .into_iter()
+            .find_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .expect("one atom")
+    }
+
+    #[test]
+    fn test_forall_nested_under_disjunction_stays_in_requires() {
+        let atom = only_atom(
+            r#"
+atom probe(arr: [i64], n: i64)
+    requires: n >= 1 && len(arr) >= n && (n == 5 || forall(i, 0, n, arr[i] > 0));
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        assert!(atom.forall_constraints.is_empty());
+        assert_eq!(
+            atom.requires,
+            "n >= 1 && len(arr) >= n &&(n == 5 || forall(i, 0, n, arr[i] > 0))"
+        );
+    }
+
+    #[test]
+    fn test_forall_nested_under_negation_stays_in_requires() {
+        let atom = only_atom(
+            r#"
+atom probe(arr: [i64], n: i64)
+    requires: n >= 1 && len(arr) >= n && !forall(i, 0, n, arr[i] > 0);
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        assert!(atom.forall_constraints.is_empty());
+        assert_eq!(
+            atom.requires,
+            "n >= 1 && len(arr) >= n && ! forall(i, 0, n, arr[i] > 0)"
+        );
+    }
+
+    #[test]
+    fn test_forall_wrapped_in_parens_is_extracted() {
+        let atom = only_atom(
+            r#"
+atom probe(arr: [i64], n: i64)
+    requires: n >= 0 && (forall(i, 0, n, arr[i] > 0));
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        assert_eq!(atom.forall_constraints.len(), 1);
+        assert_eq!(atom.requires, "n >= 0 &&(true)");
+    }
+
+    #[test]
+    fn test_forall_in_repeated_clause_is_extracted() {
+        let atom = only_atom(
+            r#"
+atom probe(arr: [i64], n: i64)
+    requires: n >= 0 && len(arr) >= n;
+    requires: forall(i, 0, n, arr[i] > 0);
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        assert_eq!(atom.forall_constraints.len(), 1);
+        assert_eq!(atom.requires, "(n >= 0 && len(arr) >= n) && (true)");
+    }
+
+    #[test]
+    fn test_forall_under_top_level_disjunction_stays_in_requires() {
+        let atom = only_atom(
+            r#"
+atom probe(arr: [i64], n: i64)
+    requires: a || b && forall(i, 0, n, arr[i] > 0);
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        assert!(atom.forall_constraints.is_empty());
+        assert_eq!(atom.requires, "a || b && forall(i, 0, n, arr[i] > 0)");
+    }
+
+    #[test]
+    fn test_forall_in_comparison_stays_in_requires() {
+        let atom = only_atom(
+            r#"
+atom probe(arr: [i64], n: i64, x: i64)
+    requires: forall(i, 0, n, arr[i] > 0) == true && x > 0;
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        assert!(atom.forall_constraints.is_empty());
+        assert_eq!(
+            atom.requires,
+            "forall(i, 0, n, arr[i] > 0) == true && x > 0"
+        );
+    }
+
+    #[test]
+    fn test_forall_next_to_if_expression_stays_in_requires() {
+        let atom = only_atom(
+            r#"
+atom probe(arr: [i64], n: i64)
+    requires: if n > 0 { true } else { true } && forall(i, 0, n, arr[i] > 0);
+    ensures: result >= 0;
+    body: 0;
+"#,
+        );
+        assert!(atom.forall_constraints.is_empty());
+        assert_eq!(
+            atom.requires,
+            "if n > 0 { true} else { true} && forall(i, 0, n, arr[i] > 0)"
+        );
+    }
+
+    #[test]
     fn test_parse_atom_with_consume() {
         let source = r#"
 atom take(x: i64)
@@ -1000,6 +1618,62 @@ atom take(x: i64)
             .collect();
         assert_eq!(atoms.len(), 1);
         assert_eq!(atoms[0].consumed_params, vec!["x"]);
+    }
+
+    #[test]
+    fn test_param_name_strips_ownership_prefixes() {
+        // Issue #717: `Param.name` must be the bare identifier; ownership
+        // markers live on `consume` / `is_ref` / `is_ref_mut` so spec-side
+        // name lookups (`len(xs)`, param equality) resolve.
+        let source = r#"
+atom f(consume xs: [i64], ref ys: [i64], ref mut zs: [i64], n: i64)
+    requires: n >= 0;
+    ensures: result >= 0;
+    body: 0;
+"#;
+        let items = parse_module(source);
+        let atoms: Vec<_> = items
+            .iter()
+            .filter_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .collect();
+        assert_eq!(atoms.len(), 1);
+        let params = &atoms[0].params;
+        assert_eq!(params[0].name, "xs");
+        assert!(params[0].consume);
+        assert!(!params[0].is_ref && !params[0].is_ref_mut);
+        assert_eq!(params[1].name, "ys");
+        assert!(params[1].is_ref && !params[1].is_ref_mut && !params[1].consume);
+        assert_eq!(params[2].name, "zs");
+        assert!(params[2].is_ref_mut && !params[2].is_ref && !params[2].consume);
+        assert_eq!(params[3].name, "n");
+        assert!(!params[3].consume && !params[3].is_ref && !params[3].is_ref_mut);
+    }
+
+    #[test]
+    fn test_consumed_names_unifies_both_spellings() {
+        // `consume:` clause targets and signature `consume` markers describe
+        // the same concept; `consumed_names()`/`consumes_param()` give the
+        // canonical union, deduplicated across spellings.
+        let source = r#"
+atom f(consume xs: [i64], ys: i64, zs: i64)
+    requires: ys >= 0;
+    consume ys;
+    ensures: result >= 0;
+    body: 0;
+"#;
+        let items = parse_module(source);
+        let atom = items
+            .iter()
+            .find_map(|i| if let Item::Atom(a) = i { Some(a) } else { None })
+            .expect("atom");
+        assert!(atom.has_consumed_params());
+        assert!(atom.consumes_param("xs"));
+        assert!(atom.consumes_param("ys"));
+        assert!(!atom.consumes_param("zs"));
+        assert_eq!(
+            atom.consumed_names(),
+            vec!["ys".to_string(), "xs".to_string()]
+        );
     }
 
     #[test]
@@ -1147,6 +1821,15 @@ atom transfer(x: i64)
     }
 
     #[test]
+    fn test_parse_block_expression_is_expr_block() {
+        let expr = parse_expression("{ let t = 1; t }");
+        assert!(
+            matches!(expr, Expr::Block(_)),
+            "expected Expr::Block: {expr:?}"
+        );
+    }
+
+    #[test]
     fn test_parse_body_if() {
         let stmt = parse_body_expr("if x > 0 { x } else { 0 }");
         match stmt {
@@ -1161,6 +1844,31 @@ atom transfer(x: i64)
         match stmt {
             Stmt::Expr(Expr::Match { arms, .. }, _) => assert_eq!(arms.len(), 2),
             _ => panic!("Expected Match"),
+        }
+    }
+
+    #[test]
+    fn test_parse_match_guards() {
+        let expr = parse_expression("match amount { a if a <= 10 => 0, _ => 3 }");
+        match expr {
+            Expr::Match { arms, .. } => {
+                assert_eq!(arms.len(), 2);
+                assert!(matches!(
+                    arms[0].guard.as_deref(),
+                    Some(Expr::BinaryOp(left, Op::Le, right))
+                        if matches!(left.as_ref(), Expr::Variable(name) if name == "a")
+                            && matches!(right.as_ref(), Expr::Number(10))
+                ));
+                assert!(matches!(
+                    arms[0].body.as_ref(),
+                    Stmt::Expr(Expr::Number(0), _)
+                ));
+                assert!(matches!(
+                    arms[1].body.as_ref(),
+                    Stmt::Expr(Expr::Number(3), _)
+                ));
+            }
+            _ => panic!("Expected guarded Match"),
         }
     }
 
@@ -1276,6 +1984,30 @@ extern "Rust" {
         assert_eq!(externs[0].functions.len(), 2);
     }
 
+    #[test]
+    fn test_parse_extern_block_with_labeled_contracts() {
+        let source = r#"
+extern "Rust" {
+    fn abs(x: i64) -> i64
+        requires "nonnegative input": x >= 0;
+        ensures "nonnegative result": result >= 0;
+}
+"#;
+        let items = parse_module(source);
+        let extern_fn = items
+            .iter()
+            .find_map(|item| {
+                if let Item::ExternBlock(block) = item {
+                    block.functions.first()
+                } else {
+                    None
+                }
+            })
+            .expect("extern function");
+        assert_eq!(extern_fn.requires.as_deref(), Some("x >= 0"));
+        assert_eq!(extern_fn.ensures.as_deref(), Some("result >= 0"));
+    }
+
     // --- New tests: Lexer and token-based parsing ---
 
     #[test]
@@ -1336,8 +2068,252 @@ extern "Rust" {
     }
 
     #[test]
+    fn test_lexer_range_and_field_tokens() {
+        let mut lexer = lexer::Lexer::new("0..10 a.b");
+        let tokens: Vec<_> = lexer.tokenize().into_iter().map(|t| t.token).collect();
+        assert_eq!(tokens[0], token::Token::IntLit(0));
+        assert_eq!(tokens[1], token::Token::DotDot);
+        assert_eq!(tokens[2], token::Token::IntLit(10));
+        assert_eq!(tokens[3], token::Token::Ident("a".to_string()));
+        assert_eq!(tokens[4], token::Token::Dot);
+        assert_eq!(tokens[5], token::Token::Ident("b".to_string()));
+    }
+
+    #[test]
+    fn test_parse_for_range_desugars_to_while() {
+        let stmt = parse_body_expr("for i in 0..n { acc = acc + i }");
+        match stmt {
+            Stmt::Block(stmts, _) => {
+                assert_eq!(stmts.len(), 4);
+                assert!(matches!(
+                    &stmts[0],
+                    Stmt::Let { var, value, .. }
+                        if var == "__for_lo_i" && matches!(value.as_ref(), Expr::Number(0))
+                ));
+                assert!(matches!(
+                    &stmts[1],
+                    Stmt::Let { var, value, .. }
+                        if var == "__for_hi_i"
+                            && matches!(value.as_ref(), Expr::Variable(name) if name == "n")
+                ));
+                assert!(matches!(
+                    &stmts[2],
+                    Stmt::Let { var, value, .. }
+                        if var == "i"
+                            && matches!(value.as_ref(), Expr::Variable(name) if name == "__for_lo_i")
+                ));
+                match &stmts[3] {
+                    Stmt::While {
+                        cond,
+                        invariant,
+                        decreases: Some(decreases),
+                        body,
+                        ..
+                    } => {
+                        assert!(matches!(
+                            cond.as_ref(),
+                            Expr::BinaryOp(left, Op::Lt, right)
+                                if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
+                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "__for_hi_i")
+                        ));
+                        assert!(matches!(
+                            invariant.as_ref(),
+                            Expr::BinaryOp(auto, Op::And, rest)
+                                if matches!(
+                                    auto.as_ref(),
+                                Expr::BinaryOp(left, Op::Le, right)
+                                        if matches!(left.as_ref(), Expr::Variable(name) if name == "__for_lo_i")
+                                            && matches!(right.as_ref(), Expr::Variable(name) if name == "i")
+                                ) && matches!(
+                                    rest.as_ref(),
+                                    Expr::BinaryOp(bounds, Op::Or, start)
+                                        if matches!(
+                                            bounds.as_ref(),
+                                            Expr::BinaryOp(left, Op::Le, right)
+                                                if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
+                                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "__for_hi_i")
+                                        ) && matches!(
+                                            start.as_ref(),
+                                            Expr::BinaryOp(left, Op::Eq, right)
+                                                if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
+                                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "__for_lo_i")
+                                        )
+                                )
+                        ));
+                        assert!(matches!(
+                            decreases.as_ref(),
+                            Expr::BinaryOp(left, Op::Sub, right)
+                                if matches!(left.as_ref(), Expr::Variable(name) if name == "__for_hi_i")
+                                    && matches!(right.as_ref(), Expr::Variable(name) if name == "i")
+                        ));
+                        match body.as_ref() {
+                            Stmt::Block(body_stmts, _) => {
+                                assert_eq!(body_stmts.len(), 2);
+                                assert!(
+                                    matches!(body_stmts[0], Stmt::Assign { ref var, .. } if var == "acc")
+                                );
+                                assert!(matches!(
+                                    &body_stmts[1],
+                                    Stmt::Assign { ref var, value, .. }
+                                        if var == "i"
+                                            && matches!(
+                                                value.as_ref(),
+                                                Expr::BinaryOp(left, Op::Add, right)
+                                                    if matches!(left.as_ref(), Expr::Variable(name) if name == "i")
+                                                        && matches!(right.as_ref(), Expr::Number(1))
+                                            )
+                                ));
+                            }
+                            other => panic!("expected loop body block, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected desugared while, got {other:?}"),
+                }
+            }
+            other => panic!("expected desugared outer block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_for_range_custom_invariant_and_decreases() {
+        let stmt = parse_body_expr(
+            "for i in lo..hi invariant: acc >= 0 decreases: hi - i { acc = acc + 1 }",
+        );
+        let Stmt::Block(stmts, _) = stmt else {
+            panic!("expected desugared outer block");
+        };
+        let Stmt::While {
+            invariant,
+            decreases: Some(decreases),
+            ..
+        } = &stmts[3]
+        else {
+            panic!("expected desugared while");
+        };
+        assert!(matches!(
+            invariant.as_ref(),
+            Expr::BinaryOp(auto, Op::And, user)
+                    if matches!(user.as_ref(), Expr::BinaryOp(_, Op::Ge, _))
+                    && matches!(auto.as_ref(), Expr::BinaryOp(_, Op::And, _))
+        ));
+        assert!(matches!(
+            decreases.as_ref(),
+            Expr::BinaryOp(left, Op::Sub, right)
+                if matches!(left.as_ref(), Expr::Variable(name) if name == "hi")
+                    && matches!(right.as_ref(), Expr::Variable(name) if name == "i")
+        ));
+    }
+
+    #[test]
+    fn test_parse_for_range_missing_syntax_is_recorded() {
+        let missing_in = parse_body_expr_checked("for i 0..n { i = i + 1 }")
+            .expect_err("missing `in` must be recorded instead of panicking");
+        assert!(
+            missing_in.iter().any(|failure| failure.contains("'in'")),
+            "expected missing `in` diagnostic, got {missing_in:?}"
+        );
+
+        let missing_separator = parse_body_expr_checked("for i in 0 { i = i + 1 }")
+            .expect_err("missing `..` must be recorded instead of panicking");
+        assert!(
+            missing_separator
+                .iter()
+                .any(|failure| failure.contains("'..'")),
+            "expected missing range separator diagnostic, got {missing_separator:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_for_range_rejects_loop_variable_assignment() {
+        let failures = parse_body_expr_checked("for i in 0..n { i = i + 1 }")
+            .expect_err("assigning the loop variable must be rejected");
+        assert!(
+            failures.iter().any(|failure| {
+                failure.contains("for loop body must not assign to loop variable `i`")
+            }),
+            "expected loop variable assignment diagnostic, got {failures:?}"
+        );
+
+        let nested_failures = parse_body_expr_checked("for i in 0..n { if i >= 0 { i = i } }")
+            .expect_err("nested loop-variable assignment must be rejected");
+        assert!(
+            nested_failures.iter().any(|failure| {
+                failure.contains("for loop body must not assign to loop variable `i`")
+            }),
+            "expected nested loop variable assignment diagnostic, got {nested_failures:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_pipeline() {
+        assert!(matches!(
+            parse_expression("x |> f |> g"),
+            Expr::Call(name, args)
+                if name == "g"
+                    && args.len() == 1
+                    && matches!(
+                        &args[0],
+                        Expr::Call(inner_name, inner_args)
+                            if inner_name == "f"
+                                && matches!(&inner_args[..], [Expr::Variable(x)] if x == "x")
+                    )
+        ));
+        assert!(matches!(
+            parse_expression("x |> add(1)"),
+            Expr::Call(name, args)
+                if name == "add"
+                    && matches!(&args[..], [Expr::Number(1), Expr::Variable(x)] if x == "x")
+        ));
+        assert!(matches!(
+            parse_expression("a + 1 |> f"),
+            Expr::Call(name, args)
+                if name == "f"
+                    && matches!(
+                        &args[..],
+                        [Expr::BinaryOp(left, Op::Add, right)]
+                            if matches!(left.as_ref(), Expr::Variable(x) if x == "a")
+                                && matches!(right.as_ref(), Expr::Number(1))
+                )
+        ));
+    }
+
+    #[test]
+    fn test_parse_pipeline_lambda_and_rejects_unsupported_rhs() {
+        let failures = parse_body_expr_checked("x |> |y| y + 1 |> g")
+            .expect_err("bare pipeline lambda must be rejected");
+        assert!(
+            failures.iter().any(|failure| {
+                failure.contains("pipeline lambda must be parenthesized: x |> (|y| ...)")
+            }),
+            "expected bare pipeline lambda diagnostic, got {failures:?}"
+        );
+
+        assert!(matches!(
+            parse_expression("x |> (|y| y + 1)"),
+            Expr::CallRef { callee, args }
+                if matches!(callee.as_ref(), Expr::Lambda { .. })
+                    && matches!(&args[..], [Expr::Variable(name)] if name == "x")
+        ));
+
+        assert!(matches!(
+            parse_expression("x |> call(f)"),
+            Expr::CallRef { callee, args }
+                if matches!(callee.as_ref(), Expr::Variable(name) if name == "f")
+                    && matches!(&args[..], [Expr::Variable(name)] if name == "x")
+        ));
+
+        let failures = parse_body_expr_checked("x |> 42")
+            .expect_err("unsupported pipeline RHS must be recorded as a syntax failure");
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("pipeline right-hand side")),
+            "expected unsupported pipeline RHS diagnostic, got {failures:?}"
+        );
+    }
+
+    #[test]
     fn test_parse_pipeline_ready() {
-        // The lexer can tokenize |> even though the parser doesn't use it yet
         let mut lexer = lexer::Lexer::new("x |> f |> g");
         let tokens = lexer.tokenize();
         let pipes: Vec<_> = tokens
@@ -1865,5 +2841,138 @@ atom simple(x: i64)
         assert_eq!(atoms.len(), 1);
         assert!(atoms[0].effect_pre.is_empty());
         assert!(atoms[0].effect_post.is_empty());
+    }
+
+    #[test]
+    fn test_unknown_atom_clause_keyword_is_a_checked_parse_error() {
+        // `inputs:`/`th:` lines used to be silently skipped, leaving an
+        // atom with no params and a vacuous contract that still verified.
+        let source = r#"
+atom wrong_syntax
+    inputs: x: i64
+    requires: true;
+    ensures: result >= 999;
+    body: { x + 1 };
+"#;
+        let err = item::parse_module_from_source_checked(source)
+            .expect_err("malformed clause keywords must fail the checked parse");
+        assert!(
+            err.iter().any(|f| f.contains("inputs:")),
+            "expected an unknown-clause-keyword failure, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_known_atom_clauses_do_not_fail_checked_parse() {
+        let source = r#"
+atom fine(x: i64) -> i64
+    requires: x >= 0;
+    ensures: result >= 0;
+    invariant: x >= 0;
+    effects: [];
+    consume: ;
+    resources: ;
+    semantics: default;
+    max_unroll: 4;
+    body: { x };
+"#;
+        assert!(
+            item::parse_module_from_source_checked(source).is_ok(),
+            "every known atom clause should parse cleanly"
+        );
+    }
+
+    #[test]
+    fn test_parse_module_checked_rejects_top_level_junk() {
+        let failures = item::parse_module_from_source_checked("this is not valid mumei\n")
+            .expect_err("prose is not a module");
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.starts_with("unexpected token this at top level at 1:1")),
+            "expected a top-level diagnostic, got {failures:?}"
+        );
+
+        let stray_brace = "atom a(x: i64) -> i64\nensures: result == x;\nbody: { x }\n}\n";
+        assert!(item::parse_module_from_source_checked(stray_brace).is_err());
+
+        let items = item::parse_module_from_source_checked(
+            "atom a(x: i64) -> i64 { ensures: result == x; body: { x } }\n\
+             atom b(x: i64) -> i64\nensures: result == x;\nbody: x;\n",
+        )
+        .expect("braced atoms and a trailing `;` are valid");
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_atom_decreases_clause() {
+        let source = r#"
+atom tri(n: i64) -> i64
+    requires: n >= 0;
+    ensures: result >= 0;
+    decreases: n;
+    body: { if n == 0 { 0 } else { n + tri(n - 1) } };
+"#;
+        let atom = parse_module(source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "tri" => Some(atom),
+                _ => None,
+            })
+            .expect("atom tri");
+        assert_eq!(atom.decreases.as_deref(), Some("n"));
+    }
+
+    #[test]
+    fn test_parse_atom_decreases_compound_expression() {
+        let source = r#"
+atom f(a: i64, b: i64) -> i64
+    requires: a >= 0 && b >= 0;
+    decreases: a + b;
+    body: { a };
+"#;
+        let atom = parse_module(source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "f" => Some(atom),
+                _ => None,
+            })
+            .expect("atom f");
+        assert_eq!(atom.decreases.as_deref(), Some("a + b"));
+    }
+
+    #[test]
+    fn test_parse_atom_without_decreases() {
+        let source = r#"
+atom g(x: i64) -> i64
+    requires: true;
+    body: { x };
+"#;
+        let atom = parse_module(source)
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "g" => Some(atom),
+                _ => None,
+            })
+            .expect("atom g");
+        assert!(atom.decreases.is_none());
+    }
+
+    #[test]
+    fn test_parse_atom_duplicate_decreases_fails() {
+        let source = r#"
+atom h(x: i64) -> i64
+    requires: true;
+    decreases: x;
+    decreases: x - 1;
+    body: { x };
+"#;
+        let err = item::parse_module_from_source_checked(source)
+            .expect_err("a duplicate decreases clause must fail the checked parse");
+        assert!(
+            err.iter()
+                .any(|f| f.contains("duplicate `decreases` clause in atom 'h'")),
+            "expected a duplicate-decreases failure, got {err:?}"
+        );
     }
 }

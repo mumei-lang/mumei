@@ -149,6 +149,12 @@ impl<'a> UnitCtx<'a> {
         match expr {
             Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) => Ok(Ty::default()),
             Expr::Variable(name) => Ok(self.vars.get(name).cloned().unwrap_or_default()),
+            Expr::ArrayLit(elements) => {
+                for element in elements {
+                    self.infer(element)?;
+                }
+                Ok(Ty::default())
+            }
             Expr::ArrayAccess(_, idx) => {
                 self.infer(idx)?;
                 Ok(Ty::default())
@@ -200,6 +206,7 @@ impl<'a> UnitCtx<'a> {
                 let e = self.check_stmt(else_branch)?;
                 self.join_branches("conditional branches", t, e, || expr_to_source_string(expr))
             }
+            Expr::Block(stmt) => self.check_stmt(stmt),
             Expr::Call(name, args) => {
                 let arg_units = args
                     .iter()

@@ -65,7 +65,7 @@ extern "Rust" {
 
 // Bind a server to the given address and mint a bound-server witness.
 atom bind_server(addr: Str)
-    effects: [HttpServer]
+    effects: [HttpServer];
     effect_pre: { HttpServer: Init };
     effect_post: { HttpServer: Bound };
     requires: contains(addr, ":") && not_contains(addr, "\n") && not_contains(addr, "\r");
@@ -80,7 +80,7 @@ atom bind_server(addr: Str)
 // state transition that enables accept_request to be called.
 // Returns 1 if server handle is valid, 0 otherwise.
 atom listen_server(server_handle: ServerHandle)
-    effects: [HttpServer]
+    effects: [HttpServer];
     effect_pre: { HttpServer: Bound };
     effect_post: { HttpServer: Listening };
     requires: server_handle > 0 && server_bound(server_handle);
@@ -92,7 +92,7 @@ atom listen_server(server_handle: ServerHandle)
 
 // Accept an incoming request and mint a live-request witness.
 atom accept_request(server_handle: ServerHandle)
-    effects: [HttpServer]
+    effects: [HttpServer];
     effect_pre: { HttpServer: Listening };
     effect_post: { HttpServer: Responding };
     requires: server_handle > 0 && server_listening(server_handle);
@@ -105,7 +105,7 @@ atom accept_request(server_handle: ServerHandle)
 // Send an HTTP response with the given status code and body.
 // Returns 1 on success, 0 on failure.
 atom send_response(req_handle: RequestHandle, status: i64, body: Str)
-    effects: [HttpServer]
+    effects: [HttpServer];
     effect_pre: { HttpServer: Responding };
     effect_post: { HttpServer: Listening };
     requires: req_handle > 0 && request_live(req_handle) && status >= 100 && status <= 599;

@@ -11,3 +11,4 @@ pub(crate) mod repl;
 pub(crate) mod run;
 pub(crate) mod verify;
 pub(crate) mod verify_cert;
+pub(crate) mod verify_sarif;

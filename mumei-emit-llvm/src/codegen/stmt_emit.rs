@@ -1,14 +1,16 @@
 use crate::codegen::expr_emit::{
-    chan_payload_key, chan_payload_type_name, compile_hir_expr, infer_struct_type_name,
+    chan_payload_key, chan_payload_type_name, compile_hir_expr, emit_array_literal,
+    infer_struct_type_name, resolve_named_type, LAMBDA_MARK,
 };
+use crate::codegen::lowering::ArrayPtr;
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::values::{BasicValueEnum, FunctionValue, PhiValue};
+use inkwell::values::{AsValueRef, BasicValueEnum, FunctionValue, PhiValue};
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
-use mumei_core::hir::HirStmt;
+use mumei_core::hir::{collect_assigned_outer_variables_stmt, HirExpr, HirStmt};
 use mumei_core::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::HashMap;
 
@@ -29,6 +31,165 @@ fn rebind_chan_payload(
     }
 }
 
+/// `let/assign h = if c { f } else { g }` where every branch tail resolves
+/// to a lambda binding: lift a `__lamsel_*` dispatcher whose first param is
+/// the branch index computed at the binding site, and mark `h` so calls
+/// route through it. Returns `Ok(None)` when any leaf isn't lambda-shaped —
+/// the caller then takes the generic path and `h` stays uncallable.
+#[allow(clippy::too_many_arguments)]
+fn bind_lambda_selector<'a>(
+    context: &'a Context,
+    builder: &Builder<'a>,
+    module: &Module<'a>,
+    function: &FunctionValue<'a>,
+    var: &str,
+    value: &HirExpr,
+    variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    var_types: &mut HashMap<String, String>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> MumeiResult<Option<BasicValueEnum<'a>>> {
+    let Some(branches) = super::expr_emit::collect_lambda_branches(
+        context,
+        module,
+        function,
+        value,
+        Vec::new(),
+        variables,
+        var_types,
+        array_ptrs,
+        module_env,
+        None,
+    )?
+    else {
+        return Ok(None);
+    };
+    let selector_branches: Vec<(String, Option<super::expr_emit::SelScope<'a>>)> = branches
+        .iter()
+        .map(|(_, mark, scope)| (mark.clone(), scope.clone()))
+        .collect();
+    // The selector index is frozen at the binding site: fold the branch
+    // conditions back-to-front into a nested `select` so a later rebind of a
+    // cond variable cannot re-pick the branch.
+    let n = branches.len();
+    let mut sel: BasicValueEnum = context.i64_type().const_int((n - 1) as u64, false).into();
+    for i in (0..n - 1).rev() {
+        let mut taken = context.bool_type().const_int(1, false);
+        for cond in &branches[i].0 {
+            let c_bool = match cond {
+                super::expr_emit::SelCond::Truthy(e, scope) => {
+                    let c = if let Some(scope) = scope {
+                        let mut scope_variables = scope.0.clone();
+                        let mut scope_var_types = scope.1.clone();
+                        compile_hir_expr(
+                            context,
+                            builder,
+                            module,
+                            function,
+                            e,
+                            &mut scope_variables,
+                            &mut scope_var_types,
+                            array_ptrs,
+                            module_env,
+                        )?
+                    } else {
+                        compile_hir_expr(
+                            context, builder, module, function, e, variables, var_types,
+                            array_ptrs, module_env,
+                        )?
+                    };
+                    builder
+                        .build_int_compare(
+                            IntPredicate::NE,
+                            c.into_int_value(),
+                            context.i64_type().const_int(0, false),
+                            "sel_cond",
+                        )
+                        .map_err(|e| {
+                            MumeiError::codegen(format!("lambda sel cond failed: {e:?}"))
+                        })?
+                }
+                super::expr_emit::SelCond::MatchEq(t, lit, scope) => {
+                    let tv = if let Some(scope) = scope {
+                        let mut scope_variables = scope.0.clone();
+                        let mut scope_var_types = scope.1.clone();
+                        compile_hir_expr(
+                            context,
+                            builder,
+                            module,
+                            function,
+                            t,
+                            &mut scope_variables,
+                            &mut scope_var_types,
+                            array_ptrs,
+                            module_env,
+                        )?
+                    } else {
+                        compile_hir_expr(
+                            context, builder, module, function, t, variables, var_types,
+                            array_ptrs, module_env,
+                        )?
+                    };
+                    // Literal patterns only compare integer targets — a
+                    // non-i64 scrutinee (f64, Str) can't form this selector,
+                    // so fall back to the generic path instead of panicking.
+                    if !tv.is_int_value() {
+                        return Ok(None);
+                    }
+                    builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            tv.into_int_value(),
+                            context.i64_type().const_int(*lit as u64, true),
+                            "sel_eq",
+                        )
+                        .map_err(|e| {
+                            MumeiError::codegen(format!("lambda sel match cond failed: {e:?}"))
+                        })?
+                }
+            };
+            taken = builder
+                .build_and(taken, c_bool, "sel_and")
+                .map_err(|e| MumeiError::codegen(format!("lambda sel and failed: {e:?}")))?;
+        }
+        sel = builder
+            .build_select(
+                taken,
+                context.i64_type().const_int(i as u64, false),
+                sel.into_int_value(),
+                "sel_pick",
+            )
+            .map_err(|e| MumeiError::codegen(format!("lambda sel select failed: {e:?}")))?;
+    }
+    let Some((fn_name, all_caps)) = super::expr_emit::emit_lambda_selector(
+        context,
+        module,
+        function,
+        var,
+        &selector_branches,
+        variables,
+        var_types,
+        array_ptrs,
+        module_env,
+    )?
+    else {
+        return Ok(None);
+    };
+    let lam_fn = module.get_function(&fn_name).unwrap();
+    let ptr: BasicValueEnum = lam_fn.as_global_value().as_pointer_value().into();
+    // `all_caps[0]` is the per-binding sel name the dispatcher minted —
+    // unique across rebindings so a nested `_ => m` leaf keeps resolving
+    // to the older selector's frozen index.
+    let sel_name = all_caps[0].clone();
+    variables.insert(sel_name, sel);
+    variables.insert(var.to_string(), ptr);
+    var_types.insert(
+        var.to_string(),
+        super::expr_emit::lambda_marker(&fn_name, &all_caps),
+    );
+    Ok(Some(ptr))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_hir_stmt<'a>(
     context: &'a Context,
@@ -38,11 +199,107 @@ pub(crate) fn compile_hir_stmt<'a>(
     stmt: &HirStmt,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
     var_types: &mut HashMap<String, String>,
-    array_ptrs: &HashMap<String, (BasicValueEnum<'a>, BasicValueEnum<'a>)>,
+    array_ptrs: &mut HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
 ) -> MumeiResult<BasicValueEnum<'a>> {
     match stmt {
         HirStmt::Let { var, ty, value } => {
+            // `let h = if c { f } else { g }` / `let m = match t { … => f }`
+            // where every branch resolves to a lambda: emit a selector
+            // dispatcher `__lamsel_*` and bind the name so `h(args)` calls
+            // the branch the let-site condition picked.
+            if matches!(
+                value.as_ref(),
+                HirExpr::IfThenElse { .. } | HirExpr::Match { .. }
+            ) {
+                if let Some(ptr) = bind_lambda_selector(
+                    context, builder, module, function, var, value, variables, var_types,
+                    array_ptrs, module_env,
+                )? {
+                    return Ok(ptr);
+                }
+            }
+            // `let f = |params| body` — lift the lambda to a private
+            // module-level function and mark `f` so `f(args)` /
+            // `call(f, args)` resolve it. Captures pass as leading args.
+            if let HirExpr::Lambda {
+                params,
+                return_type,
+                body,
+                captures,
+            } = value.as_ref()
+            {
+                let (fn_name, all_caps) = super::expr_emit::emit_lambda_function(
+                    context,
+                    module,
+                    function,
+                    var,
+                    params,
+                    return_type.as_ref(),
+                    captures,
+                    body,
+                    variables,
+                    var_types,
+                    array_ptrs,
+                    module_env,
+                )?;
+                let lam_fn = module.get_function(&fn_name).unwrap();
+                let ptr: BasicValueEnum = lam_fn.as_global_value().as_pointer_value().into();
+                variables.insert(var.clone(), ptr);
+                var_types.insert(
+                    var.clone(),
+                    super::expr_emit::lambda_marker(&fn_name, &all_caps),
+                );
+                return Ok(ptr);
+            }
+            // `let a = [e0, e1, …]` — materialise the literal into an alloca'd
+            // array and register it as a fat pointer `(len, elem_ty, data_ptr)`
+            // exactly like an `[T]` parameter, so `a[i]` reads, `a[i] = x`
+            // stores, and `len(a)` share the existing array_ptrs machinery.
+            if let HirExpr::ArrayLit(elements) = value.as_ref() {
+                let (len_val, elem_ty, data_ptr) = emit_array_literal(
+                    context, builder, module, function, elements, variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                variables.insert(var.clone(), len_val);
+                if var_types
+                    .get(var.as_str())
+                    .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
+                {
+                    var_types.remove(var.as_str());
+                }
+                return Ok(len_val);
+            }
+            // `let a = arr` — the binding aliases the tracked fat pointer so
+            // `a[i]`/`len(a)`/`a[i] = x` hit the source's slots.
+            if let HirExpr::Variable(src) = value.as_ref() {
+                if let Some(&(len_val, elem_ty, data_ptr)) = array_ptrs.get(src.as_str()) {
+                    array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                    variables.insert(var.clone(), len_val);
+                    if var_types
+                        .get(var.as_str())
+                        .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
+                    {
+                        var_types.remove(var.as_str());
+                    }
+                    return Ok(len_val);
+                }
+                // `let g = f` on a lambda binding: alias the same lifted fn
+                // (same captures) by copying the `@lam:` marker.
+                if let Some(mark) = var_types.get(src.as_str()) {
+                    if mark.starts_with(super::expr_emit::LAMBDA_MARK) {
+                        let mark = mark.clone();
+                        let ptr = variables
+                            .get(src.as_str())
+                            .copied()
+                            .unwrap_or_else(|| context.i64_type().const_int(0, false).into());
+                        variables.insert(var.clone(), ptr);
+                        var_types.insert(var.clone(), mark);
+                        return Ok(ptr);
+                    }
+                }
+            }
             let val = compile_hir_expr(
                 context, builder, module, function, value, variables, var_types, array_ptrs,
                 module_env,
@@ -50,8 +307,10 @@ pub(crate) fn compile_hir_stmt<'a>(
             variables.insert(var.clone(), val);
             let inferred_ty = ty
                 .as_deref()
-                .map(|ty_name| module_env.resolve_base_type(ty_name))
-                .filter(|base| module_env.get_struct(base).is_some())
+                .map(|ty_name| resolve_named_type(module_env, ty_name))
+                .filter(|base| {
+                    module_env.get_struct(base).is_some() || module_env.get_enum(base).is_some()
+                })
                 .or_else(|| infer_struct_type_name(value, var_types, module_env));
             if let Some(struct_ty) = inferred_ty {
                 var_types.insert(var.clone(), struct_ty);
@@ -64,6 +323,97 @@ pub(crate) fn compile_hir_stmt<'a>(
             Ok(val)
         }
         HirStmt::Assign { var, value } => {
+            if let Some((resource, field)) = module_env.is_resource_state_var(var) {
+                let val = compile_hir_expr(
+                    context, builder, module, function, value, variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                let global_name = format!("__mumei_res_{}_{}", resource.name, field.name);
+                let global = module.get_global(&global_name).ok_or_else(|| {
+                    MumeiError::codegen(format!("missing resource state global '{global_name}'"))
+                })?;
+                llvm!(builder.build_store(global.as_pointer_value(), val));
+                return Ok(val);
+            }
+            // `h = if c { f } else { g }` / `m = match …` — same selector
+            // binding as `let`.
+            if matches!(
+                value.as_ref(),
+                HirExpr::IfThenElse { .. } | HirExpr::Match { .. }
+            ) {
+                if let Some(ptr) = bind_lambda_selector(
+                    context, builder, module, function, var, value, variables, var_types,
+                    array_ptrs, module_env,
+                )? {
+                    return Ok(ptr);
+                }
+            }
+            // `f = |params| body` — rebind the name to a freshly lifted fn,
+            // replacing any earlier `@lam:` marker like the verifier's
+            // `local_lambdas` rebind does.
+            if let HirExpr::Lambda {
+                params,
+                return_type,
+                body,
+                captures,
+            } = value.as_ref()
+            {
+                let (fn_name, all_caps) = super::expr_emit::emit_lambda_function(
+                    context,
+                    module,
+                    function,
+                    var,
+                    params,
+                    return_type.as_ref(),
+                    captures,
+                    body,
+                    variables,
+                    var_types,
+                    array_ptrs,
+                    module_env,
+                )?;
+                let lam_fn = module.get_function(&fn_name).unwrap();
+                let ptr: BasicValueEnum = lam_fn.as_global_value().as_pointer_value().into();
+                variables.insert(var.clone(), ptr);
+                var_types.insert(
+                    var.clone(),
+                    super::expr_emit::lambda_marker(&fn_name, &all_caps),
+                );
+                return Ok(ptr);
+            }
+            if let HirExpr::ArrayLit(elements) = value.as_ref() {
+                let (len_val, elem_ty, data_ptr) = emit_array_literal(
+                    context, builder, module, function, elements, variables, var_types, array_ptrs,
+                    module_env,
+                )?;
+                array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                variables.insert(var.clone(), len_val);
+                if var_types
+                    .get(var.as_str())
+                    .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
+                {
+                    var_types.remove(var.as_str());
+                }
+                return Ok(len_val);
+            }
+            if let HirExpr::Variable(src) = value.as_ref() {
+                if let Some(&(len_val, elem_ty, data_ptr)) = array_ptrs.get(src.as_str()) {
+                    array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
+                    variables.insert(var.clone(), len_val);
+                    if var_types
+                        .get(var.as_str())
+                        .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
+                    {
+                        var_types.remove(var.as_str());
+                    }
+                    return Ok(len_val);
+                }
+            }
+            if array_ptrs.contains_key(var.as_str()) {
+                return Err(MumeiError::codegen(format!(
+                    "array '{var}' can only be reassigned from an array literal or another array binding"
+                )));
+            }
             let val = compile_hir_expr(
                 context, builder, module, function, value, variables, var_types, array_ptrs,
                 module_env,
@@ -93,7 +443,7 @@ pub(crate) fn compile_hir_stmt<'a>(
                 module_env,
             )?
             .into_int_value();
-            if let Some((len_val, data_ptr_val)) = array_ptrs.get(array.as_str()) {
+            if let Some((len_val, elem_ty, data_ptr_val)) = array_ptrs.get(array.as_str()) {
                 let data_ptr = data_ptr_val.into_pointer_value();
                 let len_int = len_val.into_int_value();
 
@@ -119,10 +469,26 @@ pub(crate) fn compile_hir_stmt<'a>(
                 llvm!(builder.build_conditional_branch(safe, safe_block, merge_block));
 
                 builder.position_at_end(safe_block);
-                let elem_ptr = unsafe {
-                    llvm!(builder.build_gep(context.i64_type(), data_ptr, &[idx], "store_elem_ptr"))
+                // Coerce the stored value to the array's declared element
+                // type — `arr[i] = 42` on a `[f64]` stores 42.0.
+                let stored = match (elem_ty, val) {
+                    (
+                        inkwell::types::BasicTypeEnum::FloatType(ft),
+                        BasicValueEnum::IntValue(iv),
+                    ) => llvm!(builder.build_signed_int_to_float(iv, *ft, "store_i2f")).into(),
+                    _ if *elem_ty == val.get_type() => val,
+                    _ => crate::codegen::lowering::bitpreserve_cast(builder, val, *elem_ty)
+                        .map_err(|e| {
+                            MumeiError::codegen(format!(
+                                "Array store value type mismatch on '{}': {}",
+                                array, e
+                            ))
+                        })?,
                 };
-                llvm!(builder.build_store(elem_ptr, val.into_int_value()));
+                let elem_ptr = unsafe {
+                    llvm!(builder.build_gep(*elem_ty, data_ptr, &[idx], "store_elem_ptr"))
+                };
+                llvm!(builder.build_store(elem_ptr, stored));
                 llvm!(builder.build_unconditional_branch(merge_block));
 
                 builder.position_at_end(merge_block);
@@ -146,6 +512,7 @@ pub(crate) fn compile_hir_stmt<'a>(
             let after_block = context.append_basic_block(*function, "loop.after");
 
             let pre_loop_vars = variables.clone();
+            let pre_loop_arrays = array_ptrs.clone();
             let entry_end_block = builder.get_insert_block().unwrap();
 
             llvm!(builder.build_unconditional_branch(header_block));
@@ -193,6 +560,21 @@ pub(crate) fn compile_hir_stmt<'a>(
                 module_env,
             )?;
             let body_end_block = builder.get_insert_block().unwrap();
+            let body_assigned = collect_assigned_outer_variables_stmt(body);
+            for (name, pre_array) in &pre_loop_arrays {
+                let changed = array_ptrs.get(name).is_none_or(|body_array| {
+                    body_array.0.as_value_ref() != pre_array.0.as_value_ref()
+                        || body_array.1 != pre_array.1
+                        || body_array.2.as_value_ref() != pre_array.2.as_value_ref()
+                });
+                if body_assigned.contains(name) && changed {
+                    return Err(MumeiError::codegen(format!(
+                        "array '{name}' is reassigned inside a loop, which native codegen does not support yet"
+                    )));
+                }
+                array_ptrs.insert(name.clone(), *pre_array);
+            }
+            array_ptrs.retain(|name, _| pre_loop_arrays.contains_key(name));
 
             for (name, phi) in &phi_nodes {
                 if let Some(body_val) = variables.get(name) {

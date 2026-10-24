@@ -32,12 +32,14 @@ def _documented_sources_and_data_keys() -> tuple[set[str], set[str]]:
         key
         for key in (
             "counterexample",
+            "counterexample_provenance",
             "lean_escalation",
             "status",
             "atom",
             "z3_result_class",
             "escalation_reason",
             "certificate",
+            "disallowed",
             "intentDrift",
             "kind",
             "score",

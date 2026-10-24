@@ -111,11 +111,7 @@ fn consumed_positions(callee: &str, module_env: &ModuleEnv) -> Vec<usize> {
     atom.params
         .iter()
         .enumerate()
-        .filter(|(_, p)| {
-            // `consume x;` clause form, or the `consume x: T` parameter-prefix
-            // form (which the parser keeps in the parameter name).
-            atom.consumed_params.contains(&p.name) || p.name.starts_with("consume ")
-        })
+        .filter(|(_, p)| atom.consumes_param(&p.name))
         .map(|(i, _)| i)
         .collect()
 }
@@ -164,6 +160,11 @@ impl<'a> UsageCollector<'a> {
         match expr {
             Expr::Number(_) | Expr::Float(_) | Expr::StringLit(_) | Expr::AtomRef { .. } => {}
             Expr::Variable(v) => self.record_read(v),
+            Expr::ArrayLit(elements) => {
+                for element in elements {
+                    self.expr(element);
+                }
+            }
             Expr::ArrayAccess(name, index) => {
                 self.record_read(name);
                 self.expr(index);
@@ -181,6 +182,7 @@ impl<'a> UsageCollector<'a> {
                 self.stmt(then_branch);
                 self.stmt(else_branch);
             }
+            Expr::Block(stmt) => self.stmt(stmt),
             Expr::Call(name, args) => {
                 let consumed = consumed_positions(name, self.module_env);
                 for (i, arg) in args.iter().enumerate() {
@@ -199,7 +201,14 @@ impl<'a> UsageCollector<'a> {
                     self.expr(value);
                 }
             }
-            Expr::FieldAccess(base, _) => self.expr(base),
+            Expr::FieldAccess(base, field) => {
+                if let Expr::Variable(resource) = base.as_ref() {
+                    if self.module_env.resource_field(resource, field).is_some() {
+                        return;
+                    }
+                }
+                self.expr(base);
+            }
             Expr::Match { target, arms } => {
                 self.expr(target);
                 for arm in arms {
@@ -249,7 +258,9 @@ impl<'a> UsageCollector<'a> {
             }
             Stmt::Assign { var, value, .. } => {
                 self.expr(value);
-                self.record_write(var);
+                if !var.contains('.') {
+                    self.record_write(var);
+                }
             }
             Stmt::ArrayStore {
                 array,
@@ -528,6 +539,7 @@ fn check_expr(
             check_stmt(then_branch, module_env, &mut types.clone(), violations);
             check_stmt(else_branch, module_env, &mut types.clone(), violations);
         }
+        Expr::Block(stmt) => check_stmt(stmt, module_env, &mut types.clone(), violations),
         Expr::Async { body } | Expr::Lambda { body, .. } => {
             check_stmt(body, module_env, &mut types.clone(), violations)
         }

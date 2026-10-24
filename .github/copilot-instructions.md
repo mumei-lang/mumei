@@ -134,6 +134,6 @@ Prefer `mumei verify --json` or `validate_logic` while repairing code. Agent-ori
 - `semantic_feedback`: human-readable explanation of violated constraints.
 - `machine_readable`: structured diagnostics with `failure_type`, `actions`, related locations, data flow, and conflicting constraints.
 - `counter_example`: concrete model values that violate a contract.
-- `failure_type`: categories such as `postcondition_violated`, `precondition_violated`, `division_by_zero`, `linearity_violated`, `exhaustiveness_failed`, and `effect_not_allowed`.
+- `failure_type`: categories such as `postcondition_violated`, `precondition_violated`, `division_by_zero`, `linearity_violated`, `exhaustiveness_failed`, `effect_not_allowed`, and `termination_measure_violation`.
 
 Fix the `.mm` body or contracts and re-run verification before building.

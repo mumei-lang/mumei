@@ -205,7 +205,9 @@ pub(crate) fn cmd_doc(input: &str, output_dir: &str, format: &str) {
             // Both stream to stdout (for piping) and write to <out>/docs.json
             // so the same invocation works for CLI scripting and static hosting.
             println!("{}", payload);
-            let _ = fs::write(out_path.join("docs.json"), payload);
+            if let Err(e) = fs::write(out_path.join("docs.json"), &payload) {
+                eprintln!("  ⚠️  Failed to write docs.json: {}", e);
+            }
         }
         _ => {
             eprintln!(
@@ -405,8 +407,27 @@ pub(crate) fn highlight_mumei_code(code: &str) -> String {
     out
 }
 
+/// Unique output stems per module — modules from different directories can
+/// share a file stem, and writing `<stem>.html`/`.md` for each would silently
+/// overwrite earlier pages. Collisions get a `-2`, `-3`, … suffix in order.
+pub(crate) fn doc_output_stems(docs: &[ModuleDoc]) -> Vec<String> {
+    let mut used: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    docs.iter()
+        .map(|doc| {
+            let count = used.entry(doc.name.clone()).or_insert(0);
+            *count += 1;
+            if *count == 1 {
+                doc.name.clone()
+            } else {
+                format!("{}-{}", doc.name, count)
+            }
+        })
+        .collect()
+}
+
 /// HTML ドキュメントを生成
 pub(crate) fn generate_html_docs(docs: &[ModuleDoc], out_dir: &Path) {
+    let stems = doc_output_stems(docs);
     // index.html
     let mut index = String::from(
         r#"<!DOCTYPE html>
@@ -459,10 +480,10 @@ a:hover { text-decoration: underline; }
 "#,
     );
 
-    for doc in docs {
+    for (doc, stem) in docs.iter().zip(&stems) {
         index.push_str(&format!(
             "<li><a href=\"{}.html\">{}</a> — {}</li>\n",
-            html_escape(&doc.name),
+            html_escape(stem),
             html_escape(&doc.name),
             html_escape(&doc.file_path)
         ));
@@ -483,10 +504,16 @@ document.getElementById('search').addEventListener('input', function (e) {
 </html>
 "#,
     );
-    let _ = fs::write(out_dir.join("index.html"), &index);
+    if let Err(e) = fs::write(out_dir.join("index.html"), &index) {
+        eprintln!(
+            "  ⚠️  Failed to write {}: {}",
+            out_dir.join("index.html").display(),
+            e
+        );
+    }
 
     // 各モジュールのページ
-    for doc in docs {
+    for (doc, stem) in docs.iter().zip(&stems) {
         let mut page = format!(
             r#"<!DOCTYPE html>
 <html lang="en">
@@ -670,13 +697,17 @@ a:hover {{ text-decoration: underline; }}
         }
 
         page.push_str("</div>\n</body>\n</html>\n");
-        let _ = fs::write(out_dir.join(format!("{}.html", doc.name)), &page);
+        let path = out_dir.join(format!("{}.html", stem));
+        if let Err(e) = fs::write(&path, &page) {
+            eprintln!("  ⚠️  Failed to write {}: {}", path.display(), e);
+        }
     }
 }
 
 /// Markdown ドキュメントを生成
 pub(crate) fn generate_markdown_docs(docs: &[ModuleDoc], out_dir: &Path) {
-    for doc in docs {
+    let stems = doc_output_stems(docs);
+    for (doc, stem) in docs.iter().zip(&stems) {
         let mut md = format!("# {}\n\nSource: `{}`\n\n", doc.name, doc.file_path);
 
         if !doc.atoms.is_empty() {
@@ -771,7 +802,10 @@ pub(crate) fn generate_markdown_docs(docs: &[ModuleDoc], out_dir: &Path) {
             }
         }
 
-        let _ = fs::write(out_dir.join(format!("{}.md", doc.name)), &md);
+        let path = out_dir.join(format!("{}.md", stem));
+        if let Err(e) = fs::write(&path, &md) {
+            eprintln!("  ⚠️  Failed to write {}: {}", path.display(), e);
+        }
     }
 }
 
@@ -1073,6 +1107,7 @@ atom main() -> i64
                                 type_ref: Some(parser::parse_type_ref(ty)),
                                 is_ref: false,
                                 is_ref_mut: false,
+                                consume: false,
                                 fn_contract_requires: None,
                                 fn_contract_ensures: None,
                             })
@@ -1084,6 +1119,9 @@ atom main() -> i64
                             params,
                             trace_id: None,
                             spec_metadata: std::collections::HashMap::new(),
+                            clause_labels: Vec::new(),
+                            clause_modes: Vec::new(),
+                            covers: Vec::new(),
                             requires: "true".to_string(),
                             forall_constraints: vec![],
                             ensures: "true".to_string(),
@@ -1096,6 +1134,7 @@ atom main() -> i64
                             invariant: None,
                             effects: vec![],
                             return_type: Some(ext_fn.return_type.clone()),
+                            decreases: None,
                             span: ext_fn.span.clone(),
                             effect_pre: std::collections::HashMap::new(),
                             effect_post: std::collections::HashMap::new(),
@@ -1157,7 +1196,7 @@ atom increment(x: i64)
 atom apply(x: i64, f: atom_ref(i64) -> i64)
     requires: x >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
     body: call(f, x);
 
 atom test_apply()
@@ -1207,7 +1246,7 @@ atom add(a: i64, b: i64)
 atom fold_two(a: i64, b: i64, f: atom_ref(i64, i64) -> i64)
     requires: a >= 0 && b >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0 && y >= 0, ensures: result >= 0;
     body: call(f, a, b);
 
 atom test_fold()
@@ -1231,7 +1270,7 @@ atom test_fold()
 atom option_map(opt: i64, f: atom_ref(i64) -> i64)
     requires: opt >= 0 && opt <= 1;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
     body: {
         match opt {
             0 => 0,
@@ -1265,9 +1304,9 @@ atom apply_no_contract(x: i64, f: atom_ref(i64) -> i64)
     // --- Subsumption check tests ---
 
     #[test]
-    fn test_subsumption_check_no_warning_when_implies() {
+    fn test_subsumption_check_when_implies() {
         // Integration test: increment ensures: result == x + 1, with x >= 0
-        // this implies result >= 0. Subsumption holds, so no warning is emitted.
+        // this implies result >= 0. Subsumption holds.
         // The full verification pipeline should succeed for both atoms.
         //
         // NOTE: The subsumption check return value is tested directly in
@@ -1281,7 +1320,7 @@ atom increment(x: i64)
 atom apply(x: i64, f: atom_ref(i64) -> i64)
     requires: x >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
     body: call(f, x);
 
 atom test_apply()
@@ -1301,16 +1340,14 @@ atom test_apply()
     }
 
     #[test]
-    fn test_subsumption_check_warning_when_not_implies() {
+    fn test_subsumption_check_fails_when_not_implies() {
         // Integration test: negate ensures: result == 0 - x, which does NOT
         // imply result >= 0 even under requires: x >= 0.
-        // The subsumption check emits a warning to stderr, but verification
-        // of the caller still passes because the contract is trusted
-        // (warning only, not a hard error).
+        // The subsumption check rejects the caller because the contract is
+        // not implied by the concrete callback.
         //
-        // NOTE: The subsumption check return value (false = warning emitted)
-        // is tested directly in
-        // mumei-core/src/verification.rs::tests::test_subsumption_check_fails_without_requires.
+        // NOTE: The subsumption check return value is tested directly in
+        // mumei-core/src/verification/tests.rs.
         let source = r#"
 atom negate(x: i64)
     requires: x >= 0;
@@ -1320,7 +1357,7 @@ atom negate(x: i64)
 atom apply(x: i64, f: atom_ref(i64) -> i64)
     requires: x >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
     body: call(f, x);
 
 atom test_apply_negate()
@@ -1328,13 +1365,13 @@ atom test_apply_negate()
     ensures: result >= 0;
     body: apply(5, atom_ref(negate));
 "#;
-        // test_apply_negate should still verify (subsumption is a warning, not error)
-        // The compositional verification trusts the contract's ensures.
+        // test_apply_negate should fail because callback subsumption is a
+        // hard verification error.
         let result = verify_atom_from_source(source, "test_apply_negate");
         assert!(
-            result.is_ok(),
-            "test_apply_negate should verify (subsumption warning only, not error): {:?}",
-            result.err()
+            result.is_err(),
+            "test_apply_negate should fail on callback subsumption: {:?}",
+            result
         );
     }
 
@@ -1351,7 +1388,7 @@ atom add(a: i64, b: i64)
 atom fold_two(a: i64, b: i64, f: atom_ref(i64, i64) -> i64)
     requires: a >= 0 && b >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0 && y >= 0, ensures: result >= 0;
     body: call(f, a, b);
 
 atom test_fold()

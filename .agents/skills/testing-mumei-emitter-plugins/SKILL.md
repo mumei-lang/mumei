@@ -98,8 +98,8 @@ successful overwrite.
 
 | Fixture | How to build | Proves |
 |---|---|---|
-| ABI mismatch | `rustc --crate-type cdylib` of a file exporting only `mumei_emitter_abi_version() -> u32 { 9999 }` | `ABI version mismatch: expected 1, got 9999` |
-| missing factory | same, but ABI returns `1` and no `mumei_create_emitter` | `does not export mumei_create_emitter` |
+| ABI mismatch | `rustc --crate-type cdylib` of a file exporting only `mumei_emitter_abi_version() -> u32 { 9999 }` | `ABI version mismatch: expected 2, got 9999` |
+| missing factory | same, but ABI returns `2` (the current version) and no `mumei_create_emitter` | `does not export mumei_create_emitter` |
 | not a library | `printf 'text' > libmumei_emit_x.so` | `Failed to load ...: file too short` |
 | release-vs-debug | dir with `target/release/lib...so` = working plugin and `target/debug/lib...so` = garbage text | release precedence, because reversed order would *fail validation* instead of merely logging a different path |
 | no library | empty directory | the "looked in ./, target/release/, target/debug/" message |

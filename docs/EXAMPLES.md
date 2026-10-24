@@ -197,7 +197,7 @@ atom increment(x: i64)
 atom apply(x: i64, f: atom_ref(i64) -> i64)
     requires: x >= 0;
     ensures: result >= 0;
-    contract(f): ensures: result >= 0;
+    contract(f): requires: x >= 0, ensures: result >= 0;
     body: call(f, x);
 
 // At call site, increment's contract IS propagated via atom_ref

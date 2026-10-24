@@ -116,16 +116,25 @@ pub fn resolve_prelude(base_dir: &Path, module_env: &mut ModuleEnv) -> MumeiResu
     // prelude の定義を ModuleEnv に登録（alias なし = グローバルスコープ）
     register_imported_items_with_source(&prelude_items, None, module_env, prelude_path.to_str());
 
-    // prelude の atom を検証済みとしてマーク
+    // prelude の atom を検証済みとしてマークし、cross-file 解析から
+    // 除外するための prelude マーカーを刻む
+    let mark_prelude = |module_env: &mut ModuleEnv, name: &str| {
+        module_env.mark_verified(name);
+        if let Some(registered) = module_env.atoms.get_mut(name) {
+            registered
+                .spec_metadata
+                .insert(PRELUDE_METADATA_KEY.to_string(), "true".to_string());
+        }
+    };
     for item in &prelude_items {
         match item {
             Item::Atom(atom) => {
-                module_env.mark_verified(&atom.name);
+                mark_prelude(module_env, &atom.name);
             }
             Item::ImplBlock(ib) => {
                 for method in &ib.methods {
                     let qualified_name = format!("{}::{}", ib.struct_name, method.name);
-                    module_env.mark_verified(&qualified_name);
+                    mark_prelude(module_env, &qualified_name);
                 }
             }
             _ => {}
@@ -626,6 +635,20 @@ pub(crate) fn resolve_imports_recursive(
     }
     Ok(())
 }
+/// `spec_metadata` key recording the import alias an `alias::name` registration
+/// was prefixed with, so consumers can recover the name the defining module
+/// (and its certificate) uses without guessing which `::` segments are the
+/// alias and which are a `Struct::method` qualifier.
+pub const IMPORT_ALIAS_METADATA_KEY: &str = "import_alias";
+
+/// `spec_metadata` key stamped on atoms the automatic std/prelude load
+/// registers. Cross-file analyses (global invariant conflicts) treat
+/// postcondition bounds as a shared surface between *user-authored*
+/// modules; prelude atoms are implicit infrastructure every file gets,
+/// not a spec surface the user wrote, so their bounds must not join the
+/// comparison.
+pub const PRELUDE_METADATA_KEY: &str = "auto_prelude";
+
 /// Attribute an atom to the module file it was loaded from, unless it already
 /// carries an attribution (a re-exported atom keeps its defining file).
 fn with_source_file(atom: &parser::Atom, file: &str) -> parser::Atom {
@@ -672,6 +695,15 @@ pub(crate) fn register_imported_items_with_source(
             None => module_env.register_atom(atom),
         };
     };
+    let register_aliased_atom =
+        |module_env: &mut ModuleEnv, atom: &parser::Atom, prefix: &str, fqn: String| {
+            let mut fqn_atom = atom.clone();
+            fqn_atom.name = fqn;
+            fqn_atom
+                .spec_metadata
+                .insert(IMPORT_ALIAS_METADATA_KEY.to_string(), prefix.to_string());
+            register_atom(module_env, &fqn_atom);
+        };
 
     for item in items {
         match item {
@@ -694,9 +726,8 @@ pub(crate) fn register_imported_items_with_source(
             Item::Atom(atom) => {
                 register_atom(module_env, atom);
                 if let Some(prefix) = alias {
-                    let mut fqn_atom = atom.clone();
-                    fqn_atom.name = format!("{}::{}", prefix, atom.name);
-                    register_atom(module_env, &fqn_atom);
+                    let fqn = format!("{}::{}", prefix, atom.name);
+                    register_aliased_atom(module_env, atom, prefix, fqn);
                 }
             }
             Item::EnumDef(enum_def) => {
@@ -748,9 +779,8 @@ pub(crate) fn register_imported_items_with_source(
                     let atom = crate::trust_boundary::extern_fn_as_trusted_atom(ext_fn);
                     register_atom(module_env, &atom);
                     if let Some(prefix) = alias {
-                        let mut fqn_atom = atom.clone();
-                        fqn_atom.name = format!("{}::{}", prefix, ext_fn.name);
-                        register_atom(module_env, &fqn_atom);
+                        let fqn = format!("{}::{}", prefix, ext_fn.name);
+                        register_aliased_atom(module_env, &atom, prefix, fqn);
                     }
                 }
             }
@@ -760,10 +790,9 @@ pub(crate) fn register_imported_items_with_source(
                     qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
                     register_atom(module_env, &qualified);
                     if let Some(prefix) = alias {
-                        let mut fqn_atom = method.clone();
-                        fqn_atom.name =
+                        let fqn =
                             format!("{}::{}::{}", prefix, impl_block.struct_name, method.name);
-                        register_atom(module_env, &fqn_atom);
+                        register_aliased_atom(module_env, method, prefix, fqn);
                     }
                 }
             }

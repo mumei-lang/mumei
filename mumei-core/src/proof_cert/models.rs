@@ -55,6 +55,23 @@ pub struct ProofCertificate {
     pub budget_policy_fingerprint: Option<String>,
 }
 
+/// A single `forall`/`exists` quantifier constraint as serialized into an
+/// atom certificate (mirror of `parser::Quantifier` with the type rendered
+/// as a string for a stable wire format).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuantifierConstraint {
+    /// `"forall"` or `"exists"`.
+    pub q_type: String,
+    /// Bound variable name.
+    pub var: String,
+    /// Range lower bound expression (inclusive).
+    pub start: String,
+    /// Range upper bound expression (exclusive).
+    pub end: String,
+    /// Body condition expression.
+    pub condition: String,
+}
+
 /// Per-atom verification certificate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtomCertificate {
@@ -86,6 +103,16 @@ pub struct AtomCertificate {
     /// Postcondition contract text (P5-A)
     #[serde(default)]
     pub ensures: String,
+    /// Contract clauses trusted through clause-level `assume` modes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumed_clauses: Vec<String>,
+    /// Quantifier (`forall`/`exists`) constraints extracted from `requires`
+    /// at parse time — `requires` renders each quantified conjunct as `true`,
+    /// so the structured form is the only place the hypotheses survive.
+    /// Lean-side consumers restore them (e.g. elementwise non-negativity a
+    /// loop step verification condition needs).
+    #[serde(default)]
+    pub forall_constraints: Vec<QuantifierConstraint>,
     /// Source body expression used by Lean body-semantics lowering.
     #[serde(default)]
     pub body_expr: String,
@@ -324,6 +351,12 @@ pub struct LeanResultMetadata {
     /// (mumei-lean `docs/LEAN_TRANSLATOR_SPEC.md` §12).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tactic_search: Option<TacticSearchMetadata>,
+    /// Kernel axioms reported by the Lean bridge audit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_axioms: Option<Vec<String>>,
+    /// Result of the Lean kernel-axiom audit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axiom_audit: Option<String>,
 }
 
 /// Automatic tactic search provenance emitted by the mumei-lean bridge.

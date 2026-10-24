@@ -8,8 +8,8 @@ use super::translator::*;
 use super::types::*;
 use crate::hir::lower_atom_to_hir_with_env;
 use crate::parser::{
-    parse_module, Atom, Effect, EffectDef, EffectTransition, Expr, ImplDef, Item, Op, Param,
-    Quantifier, QuantifierType, Span, TraitDef, TraitMethod, TrustLevel,
+    parse_module, Atom, Effect, EffectDef, EffectTransition, EnumDef, EnumVariant, Expr, ImplDef,
+    Item, Op, Param, Quantifier, QuantifierType, Span, TraitDef, TraitMethod, TrustLevel,
 };
 use crate::resolver::compute_contract_hash;
 use crate::verification::{generate_contract_manifest, verify_contract_integrity};
@@ -34,6 +34,9 @@ fn test_atom(
         params,
         trace_id: None,
         spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
         requires: requires.to_string(),
         forall_constraints: vec![],
         ensures: ensures.to_string(),
@@ -46,6 +49,7 @@ fn test_atom(
         invariant: None,
         effects: vec![],
         return_type: return_type.map(str::to_string),
+        decreases: None,
         span: Span::default(),
         effect_pre: HashMap::new(),
         effect_post: HashMap::new(),
@@ -59,9 +63,71 @@ fn test_param(name: &str, type_name: Option<&str>) -> Param {
         type_ref: type_name.map(crate::parser::parse_type_ref),
         is_ref: false,
         is_ref_mut: false,
+        consume: false,
         fn_contract_requires: None,
         fn_contract_ensures: None,
     }
+}
+
+fn test_subsumption_vc<'a>(ctx: &'a Context, module_env: &'a ModuleEnv) -> VCtx<'a> {
+    VCtx {
+        ctx,
+        module_env,
+        current_atom: None,
+        linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
+        effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
+        profiler: None,
+        ieee754_f64: false,
+        bitvec_i64: false,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+        bitvec_i64_global: false,
+    }
+}
+
+#[test]
+fn test_rec_fn_reregistration_returns_cached_decl() {
+    let ctx = Context::new(&z3::Config::new());
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let int_sort = z3::Sort::int(&ctx);
+    let decl = vc.rec_fn_named("rec_fn#f", std::slice::from_ref(&int_sort), &int_sort);
+    let again = vc.rec_fn_named("rec_fn#f", std::slice::from_ref(&int_sort), &int_sort);
+    assert!(std::rc::Rc::ptr_eq(&decl, &again));
+}
+
+#[test]
+#[should_panic(expected = "re-registered with a different signature")]
+fn test_rec_fn_reregistration_with_different_signature_panics() {
+    let ctx = Context::new(&z3::Config::new());
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let int_sort = z3::Sort::int(&ctx);
+    let _ = vc.rec_fn_named("rec_fn#f", std::slice::from_ref(&int_sort), &int_sort);
+    // A raw-domain re-registration after the expanded-domain
+    // declaration is exactly the call-site-vs-unfold mismatch the
+    // signature check guards against.
+    let _ = vc.rec_fn_named("rec_fn#f", &[int_sort.clone(), int_sort.clone()], &int_sort);
 }
 
 #[test]
@@ -225,6 +291,28 @@ fn test_contract_mutation_detection() {
 
     let mut mutated = atom.clone();
     mutated.ensures = "result >= a".to_string();
+    let err = verify_contract_integrity(&mutated, &manifest).unwrap_err();
+
+    assert!(matches!(err, MumeiError::ContractMutation { .. }));
+}
+
+#[test]
+fn test_contract_integrity_verification_flags_decreases_mutation() {
+    let mut atom = test_atom(
+        "bounded_dec",
+        vec![test_param("a", Some("i64")), test_param("b", Some("i64"))],
+        "a >= 0 && b >= 0",
+        "result == a + b",
+        "a + b",
+        Some("i64"),
+    );
+    atom.decreases = Some("a".to_string());
+    let mut module_env = ModuleEnv::new();
+    module_env.register_atom(&atom);
+    let manifest = generate_contract_manifest(&module_env);
+
+    let mut mutated = atom.clone();
+    mutated.decreases = Some("a + 1".to_string());
     let err = verify_contract_integrity(&mutated, &manifest).unwrap_err();
 
     assert!(matches!(err, MumeiError::ContractMutation { .. }));
@@ -407,6 +495,8 @@ fn test_executor_marks_symbolic_exponent_ensures_unverifiable() {
     let report = std::fs::read_to_string(output_dir.join("report.json")).unwrap();
     let report_json: serde_json::Value = serde_json::from_str(&report).unwrap();
     assert_eq!(report_json["status"], "unverifiable");
+    assert_eq!(report_json["context_reachability"], "unknown");
+    assert_eq!(report_json["ensures_outcomes"][0]["outcome"], "skipped");
     let diagnostics = report_json["diagnostics"].as_array().unwrap();
     assert!(diagnostics.iter().any(|diag| {
         diag.as_str()
@@ -1135,15 +1225,32 @@ fn test_constraint_budget_exceeded() {
         module_env: &module_env,
         current_atom: None,
         linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
         effect_ctx: None,
         constraint_count: Some(&count_cell),
         constraint_budget: 5, // Very low budget
         has_string_constraints: Some(&has_string_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
 
@@ -1173,15 +1280,32 @@ fn test_constraint_budget_no_limit() {
         module_env: &module_env,
         current_atom: None,
         linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
 
@@ -1320,6 +1444,52 @@ fn test_z3_string_parse_constraint_starts_with() {
     // Invalid constraint should return None
     let result5 = parse_constraint_to_z3_string(&ctx, "unknown_fn(path, \"x\")", &param);
     assert!(result5.is_none(), "unknown constraint should return None");
+}
+
+#[test]
+fn test_z3_string_parse_constraint_matches_reglan() {
+    // P10-B: matches() compiles the literal pattern to Z3 RegLan
+    // (str.in_re). A satisfiable/unsatisfiable check on the emitted
+    // constraint must agree with Rust regex::is_match.
+    let cfg = z3::Config::new();
+    let ctx = z3::Context::new(&cfg);
+    let solver = z3::Solver::new(&ctx);
+    let param = Z3String::new_const(&ctx, "path");
+
+    let constraint =
+        parse_constraint_to_z3_string(&ctx, "matches(path, \"^/tmp/[a-z]+/.*\")", &param)
+            .expect("compilable pattern should lower to str.in_re");
+    solver.assert(&constraint);
+
+    // A string that satisfies the pattern exists …
+    solver.assert(&param._eq(&Z3String::from_str(&ctx, "/tmp/data/file.txt").unwrap()));
+    assert_eq!(solver.check(), z3::SatResult::Sat);
+
+    // … and a non-matching string violates it (substring semantics).
+    solver.push();
+    solver.assert(&param._eq(&Z3String::from_str(&ctx, "/etc/passwd").unwrap()));
+    assert_eq!(solver.check(), z3::SatResult::Unsat);
+    solver.pop(1);
+
+    // `.*needle.*` is in-fragment too — every literal/metachar compiles.
+    let approx = parse_constraint_to_z3_string(&ctx, "matches(path, \".*needle.*\")", &param);
+    assert!(approx.is_some(), "substring pattern compiles to str.in_re");
+
+    // Uncompilable constructs fall through to the legacy approximation arms,
+    // which only fire on `^….*` / `.*…$` / `.*….*` shapes with a literal
+    // core — a lookahead or interior anchor reaches no arm → None
+    // (constraint unenforceable at the Z3 level, constant path still
+    // Rust-checked).
+    let unsupported = parse_constraint_to_z3_string(&ctx, "matches(path, \"a(?=b)\")", &param);
+    assert!(
+        unsupported.is_none(),
+        "lookahead stays outside the fragment"
+    );
+    let interior = parse_constraint_to_z3_string(&ctx, "matches(path, \"^a$b\")", &param);
+    assert!(
+        interior.is_none(),
+        "interior anchor: no arm, no compile → None"
+    );
 }
 
 #[test]
@@ -1638,6 +1808,9 @@ fn test_build_semantic_feedback_sub_constraints() {
         params: vec![],
         trace_id: None,
         spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
         requires: String::new(),
         forall_constraints: vec![],
         ensures: String::new(),
@@ -1650,6 +1823,7 @@ fn test_build_semantic_feedback_sub_constraints() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::default(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
@@ -1938,15 +2112,32 @@ fn test_subsumption_check_holds_with_requires() {
         module_env: &module_env,
         current_atom: None,
         linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -1959,11 +2150,15 @@ fn test_subsumption_check_holds_with_requires() {
             type_ref: None,
             is_ref: false,
             is_ref_mut: false,
+            consume: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
         }],
         trace_id: None,
         spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
         requires: "x >= 0".to_string(),
         forall_constraints: vec![],
         ensures: "result == x + 1".to_string(),
@@ -1976,10 +2171,42 @@ fn test_subsumption_check_holds_with_requires() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::default(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
     };
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result >= 0",
+        Some("x >= 0"),
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_ok(),
+        "subsumption should hold: x >= 0 ∧ result == x + 1 ⇒ result >= 0"
+    );
+}
+
+#[test]
+fn test_subsumption_check_contract_requires_missing_is_rejected() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let concrete = test_atom(
+        "positive",
+        vec![test_param("x", Some("i64"))],
+        "x >= 0",
+        "result >= 0",
+        "x",
+        Some("i64"),
+    );
     let result = check_contract_subsumption(
         &vc,
         &concrete,
@@ -1990,9 +2217,510 @@ fn test_subsumption_check_holds_with_requires() {
         &solver,
         &ctx,
     );
+    let error = result.expect_err("missing contract requires must fail subsumption");
+    assert!(error.to_string().contains("contract requires"));
+}
+
+#[test]
+fn test_subsumption_check_contract_requires_matches_concrete() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let concrete = test_atom(
+        "positive",
+        vec![test_param("x", Some("i64"))],
+        "x >= 0",
+        "result >= 0",
+        "x",
+        Some("i64"),
+    );
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result >= 0",
+        Some("x >= 0"),
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    );
     assert!(
-        result,
-        "subsumption should hold: x >= 0 ∧ result == x + 1 ⇒ result >= 0"
+        result.is_ok(),
+        "matching callback requires should hold: {result:?}"
+    );
+}
+
+#[test]
+fn test_subsumption_check_outer_callee_parameter_is_unconstrained() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let concrete = test_atom(
+        "positive",
+        vec![test_param("x", Some("i64"))],
+        "x >= 0",
+        "result >= 0",
+        "x",
+        Some("i64"),
+    );
+    let error = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result >= 0",
+        Some("x >= lo"),
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    )
+    .expect_err("an unbound outer callee parameter must produce a counterexample");
+    let message = error.to_string();
+    assert!(
+        message.contains("does not imply concrete requires"),
+        "expected a SAT requires-subsumption failure, got: {message}"
+    );
+    assert!(
+        !message.contains("could not lower"),
+        "unbound outer callee parameter should be unconstrained, not a lowering error: {message}"
+    );
+}
+
+#[test]
+fn test_subsumption_check_stronger_contract_requires_holds() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let concrete = test_atom(
+        "positive",
+        vec![test_param("x", Some("i64"))],
+        "x >= 0",
+        "result >= 0",
+        "x",
+        Some("i64"),
+    );
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result >= 0",
+        Some("x >= 1"),
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_ok(),
+        "stronger callback contract requires should hold: {result:?}"
+    );
+}
+
+#[test]
+fn test_subsumption_check_crossed_contract_requires_names_fail() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let concrete = test_atom(
+        "second",
+        vec![test_param("y", Some("i64")), test_param("x", Some("i64"))],
+        "x >= 0",
+        "result >= 0",
+        "0",
+        Some("i64"),
+    );
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result >= 0",
+        Some("x >= 0"),
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_err(),
+        "contract x must refer to the first callback argument in the requires obligation"
+    );
+}
+
+#[test]
+fn test_subsumption_check_bool_param_and_result() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
+        effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
+        profiler: None,
+        ieee754_f64: false,
+        bitvec_i64: false,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+        bitvec_i64_global: false,
+    };
+    let concrete = Atom {
+        name: "neg".to_string(),
+        type_params: vec![],
+        where_bounds: vec![],
+        params: vec![Param {
+            name: "b".to_string(),
+            type_name: Some("bool".to_string()),
+            type_ref: None,
+            is_ref: false,
+            is_ref_mut: false,
+            consume: false,
+            fn_contract_requires: None,
+            fn_contract_ensures: None,
+        }],
+        trace_id: None,
+        spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
+        requires: "true".to_string(),
+        forall_constraints: vec![],
+        ensures: "result == !b".to_string(),
+        body_expr: "!b".to_string(),
+        consumed_params: vec![],
+        resources: vec![],
+        is_async: false,
+        trust_level: TrustLevel::Verified,
+        max_unroll: None,
+        invariant: None,
+        effects: vec![],
+        return_type: Some("bool".to_string()),
+        decreases: None,
+        span: Span::default(),
+        effect_pre: std::collections::HashMap::new(),
+        effect_post: std::collections::HashMap::new(),
+    };
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result == !x",
+        None,
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_ok(),
+        "boolean callback parameter/result should lower during subsumption: {result:?}"
+    );
+}
+
+#[test]
+fn test_subsumption_check_call_ref_alias_x() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
+        effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
+        profiler: None,
+        ieee754_f64: false,
+        bitvec_i64: false,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+        bitvec_i64_global: false,
+    };
+    let concrete = Atom {
+        name: "identity".to_string(),
+        type_params: vec![],
+        where_bounds: vec![],
+        params: vec![Param {
+            name: "n".to_string(),
+            type_name: Some("i64".to_string()),
+            type_ref: None,
+            is_ref: false,
+            is_ref_mut: false,
+            consume: false,
+            fn_contract_requires: None,
+            fn_contract_ensures: None,
+        }],
+        trace_id: None,
+        spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
+        requires: "true".to_string(),
+        forall_constraints: vec![],
+        ensures: "result == n".to_string(),
+        body_expr: "n".to_string(),
+        consumed_params: vec![],
+        resources: vec![],
+        is_async: false,
+        trust_level: TrustLevel::Verified,
+        max_unroll: None,
+        invariant: None,
+        effects: vec![],
+        return_type: Some("i64".to_string()),
+        decreases: None,
+        span: Span::default(),
+        effect_pre: std::collections::HashMap::new(),
+        effect_post: std::collections::HashMap::new(),
+    };
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result == x",
+        None,
+        "apply_identity",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_ok(),
+        "CallRef alias x should map to the first callback parameter: {result:?}"
+    );
+}
+
+#[test]
+fn test_subsumption_check_call_ref_aliases_do_not_follow_concrete_names() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
+        effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
+        profiler: None,
+        ieee754_f64: false,
+        bitvec_i64: false,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+        bitvec_i64_global: false,
+    };
+    let concrete = test_atom(
+        "second",
+        vec![test_param("y", Some("i64")), test_param("x", Some("i64"))],
+        "true",
+        "result == x",
+        "x",
+        Some("i64"),
+    );
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result == x",
+        None,
+        "apply",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_err(),
+        "contract x must mean the first callback argument, not concrete parameter x"
+    );
+}
+
+#[test]
+fn test_subsumption_check_array_length_does_not_alias_caller_symbol() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let caller_len = Int::new_const(&ctx, "len_a");
+    solver.assert(&caller_len._eq(&Int::from_i64(&ctx, 0)));
+    let module_env = ModuleEnv::new();
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
+        effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
+        profiler: None,
+        ieee754_f64: false,
+        bitvec_i64: false,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+        bitvec_i64_global: false,
+    };
+    let concrete = test_atom(
+        "arr_len",
+        vec![test_param("a", Some("[i64]"))],
+        "true",
+        "result == len(a)",
+        "len(a)",
+        Some("i64"),
+    );
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result == 0",
+        None,
+        "apply_array",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_err(),
+        "callback length must not reuse the caller's len_a solver symbol"
+    );
+}
+
+#[test]
+fn test_subsumption_check_array_length_aliases_follow_callback_position() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    let module_env = ModuleEnv::new();
+    let vc = VCtx {
+        ctx: &ctx,
+        module_env: &module_env,
+        current_atom: None,
+        linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
+        effect_ctx: None,
+        constraint_count: None,
+        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
+        has_string_constraints: None,
+        path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
+        profiler: None,
+        ieee754_f64: false,
+        bitvec_i64: false,
+        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
+        bitvec_i64_global: false,
+    };
+    let concrete = test_atom(
+        "arr_len",
+        vec![test_param("a", Some("[i64]"))],
+        "true",
+        "result == len(a)",
+        "len(a)",
+        Some("i64"),
+    );
+    let result = check_contract_subsumption(
+        &vc,
+        &concrete,
+        "result == len(x)",
+        None,
+        "apply_array",
+        "f",
+        &solver,
+        &ctx,
+    );
+    assert!(
+        result.is_ok(),
+        "contract len(x) should use the first callback array length: {result:?}"
     );
 }
 
@@ -2010,15 +2738,32 @@ fn test_subsumption_check_fails_without_requires() {
         module_env: &module_env,
         current_atom: None,
         linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2031,11 +2776,15 @@ fn test_subsumption_check_fails_without_requires() {
             type_ref: None,
             is_ref: false,
             is_ref_mut: false,
+            consume: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
         }],
         trace_id: None,
         spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
         requires: "x >= 0".to_string(),
         forall_constraints: vec![],
         ensures: "result == 0 - x".to_string(),
@@ -2048,6 +2797,7 @@ fn test_subsumption_check_fails_without_requires() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::default(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
@@ -2063,7 +2813,7 @@ fn test_subsumption_check_fails_without_requires() {
         &ctx,
     );
     assert!(
-        !result,
+        result.is_err(),
         "subsumption should fail: x >= 0 ∧ result == -x does NOT imply result >= 0"
     );
 }
@@ -2085,15 +2835,32 @@ fn test_subsumption_check_crossed_param_names() {
         module_env: &module_env,
         current_atom: None,
         linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2107,6 +2874,7 @@ fn test_subsumption_check_crossed_param_names() {
                 type_ref: None,
                 is_ref: false,
                 is_ref_mut: false,
+                consume: false,
                 fn_contract_requires: None,
                 fn_contract_ensures: None,
             },
@@ -2116,12 +2884,16 @@ fn test_subsumption_check_crossed_param_names() {
                 type_ref: None,
                 is_ref: false,
                 is_ref_mut: false,
+                consume: false,
                 fn_contract_requires: None,
                 fn_contract_ensures: None,
             },
         ],
         trace_id: None,
         spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
         requires: "x != 0".to_string(),
         forall_constraints: vec![],
         ensures: "result == y / x".to_string(),
@@ -2134,6 +2906,7 @@ fn test_subsumption_check_crossed_param_names() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::default(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
@@ -2149,7 +2922,7 @@ fn test_subsumption_check_crossed_param_names() {
         &ctx,
     );
     assert!(
-        !result,
+        result.is_err(),
         "subsumption should fail: y/x can be negative (e.g. y=-1, x=1)"
     );
 }
@@ -2167,15 +2940,32 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         module_env: &module_env,
         current_atom: None,
         linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2188,11 +2978,15 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
             type_ref: None,
             is_ref: false,
             is_ref_mut: false,
+            consume: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
         }],
         trace_id: None,
         spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
         requires: "true".to_string(),
         forall_constraints: vec![],
         ensures: "result == x".to_string(),
@@ -2205,6 +2999,7 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::default(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
@@ -2213,15 +3008,15 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
     let result =
         check_contract_subsumption(&vc, &concrete, "true", None, "apply", "f", &solver, &ctx);
     assert!(
-        result,
+        result.is_ok(),
         "trivial contract ensures 'true' should be skipped (returns true)"
     );
 }
 
 #[test]
-fn test_subsumption_check_concrete_true_ensures_warns() {
+fn test_subsumption_check_concrete_true_ensures_fails() {
     // If concrete_atom.ensures is "true" but contract requires "result >= 0",
-    // the concrete atom guarantees nothing → subsumption should FAIL (warn).
+    // the concrete atom guarantees nothing → subsumption should fail closed.
     let cfg = Config::new();
     let ctx = Context::new(&cfg);
     let solver = Solver::new(&ctx);
@@ -2231,15 +3026,32 @@ fn test_subsumption_check_concrete_true_ensures_warns() {
         module_env: &module_env,
         current_atom: None,
         linearity_ctx: None,
+        inferred_invariants: None,
+        cover_obligations: None,
         effect_ctx: None,
         constraint_count: None,
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: None,
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let concrete = Atom {
@@ -2252,11 +3064,15 @@ fn test_subsumption_check_concrete_true_ensures_warns() {
             type_ref: None,
             is_ref: false,
             is_ref_mut: false,
+            consume: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
         }],
         trace_id: None,
         spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
         requires: "true".to_string(),
         forall_constraints: vec![],
         ensures: "true".to_string(),
@@ -2269,6 +3085,7 @@ fn test_subsumption_check_concrete_true_ensures_warns() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::default(),
         effect_pre: std::collections::HashMap::new(),
         effect_post: std::collections::HashMap::new(),
@@ -2286,8 +3103,8 @@ fn test_subsumption_check_concrete_true_ensures_warns() {
         &ctx,
     );
     assert!(
-        !result,
-        "concrete ensures 'true' cannot imply 'result >= 0' — should warn (return false)"
+        result.is_err(),
+        "concrete ensures 'true' cannot imply 'result >= 0' — should return an error"
     );
 }
 
@@ -2433,11 +3250,15 @@ fn test_infer_requires_substitutes_callee_params() {
             type_ref: None,
             is_ref: false,
             is_ref_mut: false,
+            consume: false,
             fn_contract_requires: None,
             fn_contract_ensures: None,
         }],
         trace_id: None,
         spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
         requires: "x > 0".to_string(),
         forall_constraints: vec![],
         ensures: "true".to_string(),
@@ -2450,6 +3271,7 @@ fn test_infer_requires_substitutes_callee_params() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::new("", 0, 0, 0),
         effect_pre: HashMap::new(),
         effect_post: HashMap::new(),
@@ -2466,6 +3288,7 @@ fn test_infer_requires_substitutes_callee_params() {
                 type_ref: None,
                 is_ref: false,
                 is_ref_mut: false,
+                consume: false,
                 fn_contract_requires: None,
                 fn_contract_ensures: None,
             },
@@ -2475,12 +3298,16 @@ fn test_infer_requires_substitutes_callee_params() {
                 type_ref: None,
                 is_ref: false,
                 is_ref_mut: false,
+                consume: false,
                 fn_contract_requires: None,
                 fn_contract_ensures: None,
             },
         ],
         trace_id: None,
         spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
         requires: "true".to_string(),
         forall_constraints: vec![],
         ensures: "true".to_string(),
@@ -2493,6 +3320,7 @@ fn test_infer_requires_substitutes_callee_params() {
         invariant: None,
         effects: vec![],
         return_type: None,
+        decreases: None,
         span: Span::new("", 0, 0, 0),
         effect_pre: HashMap::new(),
         effect_post: HashMap::new(),
@@ -2509,6 +3337,148 @@ fn test_infer_requires_substitutes_callee_params() {
     assert!(
         !inferred.iter().any(|r| r == "x > 0"),
         "Should not contain raw callee param 'x > 0', got: {:?}",
+        inferred
+    );
+}
+
+fn quantified_needs_atom() -> Atom {
+    use std::collections::HashMap;
+    Atom {
+        name: "needs".to_string(),
+        type_params: vec![],
+        where_bounds: vec![],
+        params: vec![
+            Param {
+                name: "arr".to_string(),
+                type_name: Some("[i64]".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                consume: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            },
+            Param {
+                name: "n".to_string(),
+                type_name: Some("i64".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                consume: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            },
+        ],
+        trace_id: None,
+        spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
+        requires: "n >= 0 && true".to_string(),
+        decreases: None,
+        forall_constraints: vec![Quantifier {
+            q_type: QuantifierType::ForAll,
+            var: "i".to_string(),
+            start: "0".to_string(),
+            end: "n".to_string(),
+            condition: "arr[i] > 0".to_string(),
+        }],
+        ensures: "result > 0".to_string(),
+        body_expr: "arr[0]".to_string(),
+        consumed_params: vec![],
+        resources: vec![],
+        is_async: false,
+        trust_level: TrustLevel::Verified,
+        max_unroll: None,
+        invariant: None,
+        effects: vec![],
+        return_type: None,
+        span: Span::new("", 0, 0, 0),
+        effect_pre: HashMap::new(),
+        effect_post: HashMap::new(),
+    }
+}
+
+fn caller_calling_needs(arg_scalar: &str, call_args: &str) -> Atom {
+    use std::collections::HashMap;
+    Atom {
+        name: "caller".to_string(),
+        type_params: vec![],
+        where_bounds: vec![],
+        params: vec![
+            Param {
+                name: "xs".to_string(),
+                type_name: Some("[i64]".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                consume: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            },
+            Param {
+                name: arg_scalar.to_string(),
+                type_name: Some("i64".to_string()),
+                type_ref: None,
+                is_ref: false,
+                is_ref_mut: false,
+                consume: false,
+                fn_contract_requires: None,
+                fn_contract_ensures: None,
+            },
+        ],
+        trace_id: None,
+        spec_metadata: std::collections::HashMap::new(),
+        clause_labels: Vec::new(),
+        clause_modes: Vec::new(),
+        covers: Vec::new(),
+        requires: "true".to_string(),
+        forall_constraints: vec![],
+        decreases: None,
+        ensures: "true".to_string(),
+        body_expr: format!("needs(xs, {call_args})"),
+        consumed_params: vec![],
+        resources: vec![],
+        is_async: false,
+        trust_level: TrustLevel::Verified,
+        max_unroll: None,
+        invariant: None,
+        effects: vec![],
+        return_type: None,
+        span: Span::new("", 0, 0, 0),
+        effect_pre: HashMap::new(),
+        effect_post: HashMap::new(),
+    }
+}
+
+#[test]
+fn test_infer_requires_alpha_renames_colliding_quantifier_var() {
+    let mut env = ModuleEnv::new();
+    env.register_atom(&quantified_needs_atom());
+    // The caller passes its own `i` as `n`; the callee's bound `i` would be
+    // captured by the parameter substitution, so it is alpha-renamed.
+    let caller = caller_calling_needs("i", "i");
+    let inferred = infer_requires(&caller, &env);
+    assert!(
+        inferred
+            .iter()
+            .any(|r| r == "(i >= 0 && true) && (forall(i_q, 0, i, xs[i_q] > 0))"),
+        "Expected alpha-renamed quantified obligation, got: {:?}",
+        inferred
+    );
+}
+
+#[test]
+fn test_infer_requires_keeps_non_colliding_quantifier_var() {
+    let mut env = ModuleEnv::new();
+    env.register_atom(&quantified_needs_atom());
+    let caller = caller_calling_needs("m", "m");
+    let inferred = infer_requires(&caller, &env);
+    assert!(
+        inferred
+            .iter()
+            .any(|r| r == "(m >= 0 && true) && (forall(i, 0, m, xs[i] > 0))"),
+        "Expected quantified obligation with bound var kept, got: {:?}",
         inferred
     );
 }
@@ -2687,15 +3657,32 @@ fn test_expr_to_z3_true_false_are_bool() {
         module_env: &module_env,
         current_atom: None,
         linearity_ctx: Some(&linearity_ctx_cell),
+        inferred_invariants: None,
+        cover_obligations: None,
         effect_ctx: Some(&effect_ctx_cell),
         constraint_count: Some(&constraint_count_cell),
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: Some(&has_string_constraints_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -2748,15 +3735,32 @@ fn test_expr_to_z3_pow_constant_folds_full_precision() {
         module_env: &module_env,
         current_atom: None,
         linearity_ctx: Some(&linearity_ctx_cell),
+        inferred_invariants: None,
+        cover_obligations: None,
         effect_ctx: Some(&effect_ctx_cell),
         constraint_count: Some(&constraint_count_cell),
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: Some(&has_string_constraints_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -2802,15 +3806,32 @@ fn test_tuple_result_indexing_uses_typed_components() {
         module_env: &module_env,
         current_atom: None,
         linearity_ctx: Some(&linearity_ctx_cell),
+        inferred_invariants: None,
+        cover_obligations: None,
         effect_ctx: Some(&effect_ctx_cell),
         constraint_count: Some(&constraint_count_cell),
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: Some(&has_string_constraints_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -2956,15 +3977,32 @@ fn test_chained_comparison_normalizes_before_lowering() {
         module_env: &module_env,
         current_atom: None,
         linearity_ctx: Some(&linearity_ctx_cell),
+        inferred_invariants: None,
+        cover_obligations: None,
         effect_ctx: Some(&effect_ctx_cell),
         constraint_count: Some(&constraint_count_cell),
         constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
         has_string_constraints: Some(&has_string_constraints_cell),
         path_cond_stack: std::cell::RefCell::new(Vec::new()),
+        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
+        acquire_counter: std::cell::RefCell::new(0),
+        loop_counter: std::cell::RefCell::new(0),
         profiler: None,
         ieee754_f64: false,
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
+        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        clause_context: std::cell::RefCell::new(Vec::new()),
+        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_array_elem_types: Default::default(),
+        local_lambdas: Default::default(),
+        call_result_lens: Default::default(),
+        call_result_fields: Default::default(),
+        contracts_in_instantiation: Default::default(),
+        recursion: Default::default(),
+        quantifier_binders: Default::default(),
+        call_result_symbols: Default::default(),
         bitvec_i64_global: false,
     };
     let mut env: Env = HashMap::new();
@@ -3038,4 +4076,410 @@ fn test_forall_arr_transfers_between_requires_and_ensures() {
         "requires forall should discharge equivalent ensures forall under same pattern"
     );
     solver.pop(1);
+}
+
+// ---------------------------------------------------------------------------
+// P10-D / C-2: nlsat-first execution path for bounded low-degree nonlinear atoms.
+// ---------------------------------------------------------------------------
+
+fn nlsat_env(atom: &Atom) -> ModuleEnv {
+    let mut module_env = ModuleEnv::new();
+    register_builtin_traits(&mut module_env);
+    module_env.register_atom(atom);
+    module_env
+}
+
+#[test]
+fn nlsat_first_decides_bounded_low_degree_product() {
+    let atom = test_atom(
+        "nlsat_bounded_mul",
+        vec![test_param("a", Some("i64")), test_param("b", Some("i64"))],
+        "a >= 0 && a <= 1000 && b >= 0 && b <= 1000",
+        "result >= 0 && result <= 1000000",
+        "a * b",
+        Some("i64"),
+    );
+    let module_env = nlsat_env(&atom);
+    assert!(is_nlsat_first_candidate(&detect_logic_fragment_tags(
+        &atom,
+        &module_env
+    )));
+    let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+    verify(&hir, Path::new("."), &module_env).unwrap();
+}
+
+#[test]
+fn nlsat_first_still_refutes_false_bounded_postcondition() {
+    // Guards against the z3-rs 0.12 failure mode where an unrecognized solver
+    // param silently drops assertions: x = 0 must remain a counterexample.
+    let atom = test_atom(
+        "nlsat_bounded_square_positive",
+        vec![test_param("x", Some("i64"))],
+        "x >= 0 && x <= 100",
+        "result >= 1",
+        "x * x",
+        Some("i64"),
+    );
+    let module_env = nlsat_env(&atom);
+    assert!(is_nlsat_first_candidate(&detect_logic_fragment_tags(
+        &atom,
+        &module_env
+    )));
+    let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+    let err = verify(&hir, Path::new("."), &module_env).unwrap_err();
+    let text = err.to_string();
+    assert!(
+        z3_result_from_error_message(&text).is_none()
+            || z3_result_from_error_message(&text) == Some("sat"),
+        "expected a sat/counterexample failure, got: {text}"
+    );
+    assert!(
+        !text.contains("nlsat first"),
+        "unexpected demotion notice: {text}"
+    );
+}
+
+#[test]
+fn nlsat_first_unknown_message_maps_to_existing_z3_result_classes() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let solver = Solver::new(&ctx);
+    // Fresh solver has no unknown reason; wording must still classify as `unknown`.
+    let message =
+        super::executor::nlsat_first_unknown_message(&solver, "during the final consistency check");
+    assert_eq!(z3_result_from_error_message(&message), Some("unknown"));
+    assert!(message.contains("demoted to Lean escalation"));
+
+    let timeout_message = "Z3 nlsat timeout during the final consistency check (bounded low-degree nonlinear arithmetic tried with nlsat first; demoted to Lean escalation, reason: timeout).";
+    assert_eq!(
+        z3_result_from_error_message(timeout_message),
+        Some("timeout")
+    );
+}
+
+#[test]
+fn z3_result_from_error_message_ignores_quoted_identifiers() {
+    for name in ["timeout", "spurious_candidate", "unknown", "resource_limit"] {
+        let message =
+            format!("Verification Error: atom '{name}' declares an unknown semantics mode 'bogus'");
+        assert_eq!(
+            z3_result_from_error_message(&message),
+            None,
+            "atom name {name:?} must not be read as a solver result"
+        );
+    }
+    assert_eq!(
+        z3_result_from_error_message(
+            "Spurious counterexample detected for atom 'f'. Spurious counterexample candidate for atom 'f'"
+        ),
+        Some("spurious_candidate")
+    );
+    assert_eq!(
+        z3_result_from_error_message(
+            "Constraint budget exceeded for atom 'timeout': 10 constraints (limit: 5)"
+        ),
+        Some("resource_limit")
+    );
+}
+
+#[test]
+fn nlsat_first_unknown_demotes_to_lean_with_nonlinear_reason() {
+    // Bounded, degree ≤ 2, ≤ 3 variables → nlsat-first candidate; if Z3 answers
+    // unknown the classification must fall back to the Lean escalation reason.
+    let atom = test_atom(
+        "nlsat_demoted",
+        vec![test_param("a", Some("i64")), test_param("b", Some("i64"))],
+        "a >= 0 && a <= 1000 && b >= 0 && b <= 1000",
+        "result >= 0",
+        "a * b",
+        Some("i64"),
+    );
+    let module_env = nlsat_env(&atom);
+    let unknown = classify_atom_for_lean_escalation(&atom, &module_env, "unknown", "failed");
+    assert!(unknown.should_escalate);
+    assert_eq!(
+        unknown.escalation_reason,
+        Some(EscalationReason::NonlinearArithmetic)
+    );
+    let timeout = classify_atom_for_lean_escalation(&atom, &module_env, "timeout", "failed");
+    assert!(timeout.should_escalate);
+    assert_eq!(timeout.escalation_reason, Some(EscalationReason::Z3Timeout));
+    // A decided (unsat) nlsat-first atom is final: no escalation candidate.
+    let decided = classify_atom_for_lean_escalation(&atom, &module_env, "unsat", "verified");
+    assert!(!decided.should_escalate);
+    assert_eq!(decided.escalation_reason, None);
+}
+
+// ---------------------------------------------------------------------------
+// P10-C: finite non-recursive enums → native Z3 datatype sorts
+// ---------------------------------------------------------------------------
+
+fn test_enum_def(
+    name: &str,
+    variants: &[(&str, &[&str])],
+    type_params: &[&str],
+    is_recursive: bool,
+) -> EnumDef {
+    EnumDef {
+        name: name.to_string(),
+        type_params: type_params.iter().map(|s| s.to_string()).collect(),
+        variants: variants
+            .iter()
+            .map(|(vname, fields)| EnumVariant {
+                name: vname.to_string(),
+                fields: fields.iter().map(|s| s.to_string()).collect(),
+                field_types: vec![],
+                is_recursive: false,
+            })
+            .collect(),
+        is_recursive,
+        span: Span::default(),
+    }
+}
+
+#[test]
+fn test_finite_enum_param_does_not_tag_inductive() {
+    let mut module_env = ModuleEnv::new();
+    module_env.enums.insert(
+        "Color".to_string(),
+        test_enum_def(
+            "Color",
+            &[("Red", &[]), ("Green", &[]), ("Blue", &[])],
+            &[],
+            false,
+        ),
+    );
+    let atom = test_atom(
+        "code_of",
+        vec![test_param("c", Some("Color"))],
+        "true",
+        "result >= 0",
+        "match c { Red => 0, Green => 1, Blue => 2 }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(
+        !tags.iter().any(|tag| tag == "inductive_data_type"),
+        "finite ADT enum param should stay decidable, got tags: {tags:?}"
+    );
+}
+
+#[test]
+fn test_recursive_enum_param_keeps_inductive_tag() {
+    let mut module_env = ModuleEnv::new();
+    module_env.enums.insert(
+        "IntList".to_string(),
+        test_enum_def(
+            "IntList",
+            &[("Nil", &[]), ("Cons", &["i64", "IntList"])],
+            &[],
+            true,
+        ),
+    );
+    let atom = test_atom(
+        "head_or",
+        vec![test_param("l", Some("IntList"))],
+        "true",
+        "true",
+        "match l { Nil => 0, Cons(h, t) => h }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(tags.iter().any(|tag| tag == "inductive_data_type"));
+}
+
+#[test]
+fn test_generic_enum_param_keeps_inductive_tag() {
+    let mut module_env = ModuleEnv::new();
+    module_env.enums.insert(
+        "Option".to_string(),
+        test_enum_def("Option", &[("Some", &["T"]), ("None", &[])], &["T"], false),
+    );
+    let atom = test_atom(
+        "unwrap_or",
+        vec![test_param("o", Some("Option"))],
+        "true",
+        "true",
+        "match o { Some(x) => x, None => 0 }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(
+        tags.iter().any(|tag| tag == "inductive_data_type"),
+        "generic Option<T> must keep the inductive tag until monomorphisation exists"
+    );
+}
+
+#[test]
+fn test_enum_payload_field_tag() {
+    // An enum with a non-scalar payload (another enum) is not a finite ADT.
+    let mut module_env = ModuleEnv::new();
+    module_env.enums.insert(
+        "Inner".to_string(),
+        test_enum_def("Inner", &[("I", &[])], &[], false),
+    );
+    module_env.enums.insert(
+        "Outer".to_string(),
+        test_enum_def("Outer", &[("Wrap", &["Inner"])], &[], false),
+    );
+    let atom = test_atom(
+        "unwrap",
+        vec![test_param("o", Some("Outer"))],
+        "true",
+        "true",
+        "match o { Wrap(i) => 0 }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(tags.iter().any(|tag| tag == "inductive_data_type"));
+}
+
+#[test]
+fn test_finite_adt_match_in_body_does_not_tag() {
+    // Body-only `match` on a *variable* of finite-ADT type: the arm patterns
+    // resolving to a finite enum keep the atom decidable even without an
+    // enum-typed parameter.
+    let mut module_env = ModuleEnv::new();
+    module_env.enums.insert(
+        "Level".to_string(),
+        test_enum_def("Level", &[("Low", &[]), ("High", &[])], &[], false),
+    );
+    let atom = test_atom(
+        "lvl",
+        vec![test_param("x", Some("i64"))],
+        "true",
+        "result >= 0",
+        "{ let l = Level::Low; match l { Low => 0, High => 1 } }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(
+        !tags.iter().any(|tag| tag == "inductive_data_type"),
+        "match on a finite ADT is decidable, got tags: {tags:?}"
+    );
+}
+
+#[test]
+fn test_empty_enum_param_keeps_inductive_tag() {
+    // An empty enum cannot form a Z3 datatype (`DatatypeBuilder` requires ≥1
+    // variant); `is_finite_adt` must reject it rather than let the vacuous
+    // field check claim it — otherwise verification panics.
+    let mut module_env = ModuleEnv::new();
+    module_env
+        .enums
+        .insert("Empty".to_string(), test_enum_def("Empty", &[], &[], false));
+    let atom = test_atom(
+        "exfalso",
+        vec![test_param("e", Some("Empty"))],
+        "true",
+        "result == 0",
+        "0",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(tags.iter().any(|tag| tag == "inductive_data_type"));
+}
+
+#[test]
+fn test_colliding_variant_uses_declared_param_type() {
+    // `Hot` collides between two enums with different tag indices — without
+    // the declared-type hint the owner is ambiguous and the match would
+    // stay tagged inductive even though the finite-ADT path verifies it.
+    let mut module_env = ModuleEnv::new();
+    module_env.enums.insert(
+        "E1".to_string(),
+        test_enum_def("E1", &[("Hot", &[]), ("Cold", &[])], &[], false),
+    );
+    module_env.enums.insert(
+        "E2".to_string(),
+        test_enum_def("E2", &[("Cold", &[]), ("Hot", &[])], &[], false),
+    );
+    let atom = test_atom(
+        "code_of",
+        vec![test_param("c", Some("E1"))],
+        "true",
+        "result >= 0",
+        "match c { Hot => 1, Cold => 0 }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(
+        !tags.iter().any(|tag| tag == "inductive_data_type"),
+        "declared param type should pin the colliding variant's owner, got tags: {tags:?}"
+    );
+}
+
+#[test]
+fn test_colliding_variant_uses_let_binding_type() {
+    // Same collision via a `let`-bound constructor — the binding's inferred
+    // enum type must disambiguate the match arms.
+    let mut module_env = ModuleEnv::new();
+    module_env.enums.insert(
+        "E1".to_string(),
+        test_enum_def("E1", &[("Hot", &[]), ("Cold", &[])], &[], false),
+    );
+    module_env.enums.insert(
+        "E2".to_string(),
+        test_enum_def("E2", &[("Cold", &[]), ("Hot", &[])], &[], false),
+    );
+    let atom = test_atom(
+        "code_of",
+        vec![test_param("x", Some("i64"))],
+        "true",
+        "result >= 0",
+        "{ let c = E1::Hot; match c { Hot => 1, Cold => 0 } }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(
+        !tags.iter().any(|tag| tag == "inductive_data_type"),
+        "let-bound constructor type should pin the colliding variant's owner, got tags: {tags:?}"
+    );
+}
+
+#[test]
+fn test_scalar_match_still_tags_inductive() {
+    // Conservative: a `match` whose arms carry no Variant pattern keeps the
+    // historic `inductive_data_type` tag (Lean handles it).
+    let module_env = ModuleEnv::new();
+    let atom = test_atom(
+        "classify",
+        vec![test_param("n", Some("i64"))],
+        "true",
+        "result >= 0",
+        "match n { 0 => 0, _ => 1 }",
+        Some("i64"),
+    );
+    let tags = detect_logic_fragment_tags(&atom, &module_env);
+    assert!(tags.iter().any(|tag| tag == "inductive_data_type"));
+}
+
+#[test]
+fn quantifier_binder_in_detects_bound_variable_through_terms() {
+    let cfg = Config::new();
+    let ctx = Context::new(&cfg);
+    let module_env = ModuleEnv::new();
+    let vc = test_subsumption_vc(&ctx, &module_env);
+    let i = Int::new_const(&ctx, "i");
+    let k = Int::new_const(&ctx, "k");
+    let arr = Array::new_const(&ctx, "arr", &z3::Sort::int(&ctx), &z3::Sort::int(&ctx));
+    let arr_i: z3::ast::Dynamic = arr.select(&(&i + &Int::from_i64(&ctx, 1)));
+    let k_dyn: z3::ast::Dynamic = k.clone().into();
+
+    assert_eq!(vc.quantifier_binder_in(std::slice::from_ref(&arr_i)), None);
+    vc.quantifier_binders
+        .borrow_mut()
+        .push(("i".to_string(), i.clone().into()));
+    assert_eq!(
+        vc.quantifier_binder_in(std::slice::from_ref(&arr_i)),
+        Some("i".to_string())
+    );
+    assert_eq!(vc.quantifier_binder_in(std::slice::from_ref(&k_dyn)), None);
+    assert!(vc.reject_quantifier_dependent_call("f", &[k_dyn]).is_ok());
+
+    let err = vc
+        .reject_quantifier_dependent_call("f", &[arr_i])
+        .expect_err("call on a bound variable must be rejected");
+    assert!(is_unverifiable_error_message(&err.to_string()));
+    assert!(crate::verification::spec_validation::is_unsupported_clause_error(&err));
 }

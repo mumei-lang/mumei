@@ -23,8 +23,10 @@ pub use bundle_io::{
 
 pub use generation::{
     artifact_paths_from_env, budget_policy_fingerprint_from_env, compute_atom_content_hash,
-    compute_sha256, generate_certificate, generate_certificate_with_reconstruction_losses,
-    get_z3_version, harness_contract_from_env, intent_fidelity_from_env,
+    compute_atom_content_hash_for_version, compute_atom_content_hash_v2, compute_sha256,
+    generate_certificate, generate_certificate_with_reconstruction_losses, get_z3_version,
+    harness_contract_from_env, intent_fidelity_from_env, CERTIFICATE_VERSION,
+    LEGACY_CERTIFICATE_VERSION,
 };
 
 pub use models::{
@@ -32,16 +34,19 @@ pub use models::{
     CostSuccessMetrics, CounterexampleValidationMetadata, EscalationBundle,
     EscalationBundleSummary, EscalationCandidate, HarnessCertificateMetadata, HumanReviewEntry,
     HumanReviewPriority, HumanReviewQueue, IntentFidelity, IntentFidelityMetadata,
-    LeanResultMetadata, ProofBundle, ProofCertificate, SelfCorrectionMetadata,
-    SelfCorrectionSummary, SolverProcessMetadata, TacticSearchMetadata, UnusedHypothesisMetadata,
+    LeanResultMetadata, ProofBundle, ProofCertificate, QuantifierConstraint,
+    SelfCorrectionMetadata, SelfCorrectionSummary, SolverProcessMetadata, TacticSearchMetadata,
+    UnusedHypothesisMetadata,
 };
 
 pub use review::{generate_escalation_bundle, generate_human_review_queue};
 
 pub use validation::{
-    check_certificate_hash, get_required_lowering_rules, refresh_certificate_integrity,
+    check_certificate_hash, get_required_lowering_rules, lean_axiom_audit,
+    lean_certificate_metadata_is_current, refresh_certificate_integrity,
     validate_certificate_translator_versions, validate_translator_version,
     validate_translator_version_with_semantics, verify_certificate, CertificateHashCheck,
+    LeanAxiomAudit, LEAN_STANDARD_KERNEL_AXIOMS,
 };
 
 #[cfg(test)]
@@ -77,6 +82,9 @@ mod tests {
             params: vec![],
             trace_id: None,
             spec_metadata: std::collections::HashMap::new(),
+            clause_labels: Vec::new(),
+            clause_modes: Vec::new(),
+            covers: Vec::new(),
             requires: requires.to_string(),
             forall_constraints: vec![],
             ensures: ensures.to_string(),
@@ -89,10 +97,40 @@ mod tests {
             invariant: None,
             effects: vec![],
             return_type: None,
+            decreases: None,
             span: crate::parser::Span::new("test.mm", 0, 0, 0),
             effect_pre: HashMap::new(),
             effect_post: HashMap::new(),
         }
+    }
+
+    fn current_lean_metadata() -> LeanResultMetadata {
+        LeanResultMetadata {
+            status: "lean_verified".to_string(),
+            theorem_name: "hard_lemma_correct".to_string(),
+            translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+            bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+            proof_path: "Generated/Test.lean".to_string(),
+            diagnostics: vec![],
+            ..Default::default()
+        }
+    }
+
+    fn certificate_with_lean_metadata(
+        metadata: LeanResultMetadata,
+    ) -> (ProofCertificate, parser::Atom) {
+        let atom = make_test_atom("hard_lemma", "true", "true", "42");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut results = HashMap::new();
+        results.insert(
+            "hard_lemma".to_string(),
+            ("lean_verified".to_string(), "verified".to_string()),
+        );
+        let module_env = ModuleEnv::new();
+        let mut cert =
+            generate_certificate("test.mm", &atoms, &results, &module_env, None, None, None);
+        cert.atoms[0].lean_result_metadata = Some(metadata);
+        (cert, atom)
     }
 
     #[test]
@@ -547,6 +585,242 @@ mod tests {
         assert_eq!(status2[0], ("add".to_string(), "changed".to_string()));
     }
 
+    fn unsat_results(name: &str) -> HashMap<String, (String, String)> {
+        let mut results = HashMap::new();
+        results.insert(
+            name.to_string(),
+            ("unsat".to_string(), "verified".to_string()),
+        );
+        results
+    }
+
+    /// content_hash v2: certificates are written as `version: "1.1"` and the
+    /// hash is the full-atom hash, not the legacy four-field hash.
+    #[test]
+    fn test_generate_certificate_writes_v2_content_hash() {
+        let atom = make_test_atom("add", "x > 0", "result > 0", "x + 1");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let cert = generate_certificate(
+            "test.mm",
+            &atoms,
+            &unsat_results("add"),
+            &ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(cert.version, CERTIFICATE_VERSION);
+        assert_eq!(
+            cert.atoms[0].content_hash,
+            compute_atom_content_hash_v2(&atom)
+        );
+        assert_ne!(
+            cert.atoms[0].content_hash,
+            compute_atom_content_hash("add", "x > 0", "result > 0", "x + 1")
+        );
+        assert_eq!(cert.atoms[0].content_hash.len(), 64);
+        // Deterministic across calls / map iteration order.
+        assert_eq!(
+            compute_atom_content_hash_v2(&atom),
+            compute_atom_content_hash_v2(&atom.clone())
+        );
+    }
+
+    /// content_hash v2 changes whenever a proof-relevant field outside
+    /// name/requires/ensures/body changes (the gap flagged on mumei#555).
+    #[test]
+    fn test_content_hash_v2_covers_signature_and_spec_metadata() {
+        let base = make_test_atom("f", "x > 0", "result > 0", "x + 1");
+        let base_hash = compute_atom_content_hash_v2(&base);
+        let mut variants: Vec<(&str, parser::Atom)> = Vec::new();
+
+        let mut a = base.clone();
+        a.params.push(parser::Param {
+            name: "x".to_string(),
+            type_name: Some("i64".to_string()),
+            type_ref: None,
+            is_ref: false,
+            is_ref_mut: false,
+            consume: false,
+            fn_contract_requires: None,
+            fn_contract_ensures: None,
+        });
+        let mut b = a.clone();
+        b.params[0].type_name = Some("u8".to_string());
+        variants.push(("param added", a.clone()));
+        variants.push(("param type changed", b));
+        let mut c = a.clone();
+        c.params[0].is_ref_mut = true;
+        variants.push(("param &mut", c));
+
+        let mut v = base.clone();
+        v.return_type = Some("i64".to_string());
+        variants.push(("return type", v));
+        let mut v = base.clone();
+        v.spec_metadata
+            .insert("semantics".to_string(), "bitvec".to_string());
+        variants.push(("semantics: bitvec", v));
+        let mut v = base.clone();
+        v.type_params.push("T".to_string());
+        variants.push(("type param", v));
+        let mut v = base.clone();
+        v.where_bounds.push(parser::ast::TypeParamBound {
+            param: "T".to_string(),
+            bounds: vec!["Ord".to_string()],
+        });
+        variants.push(("where bound", v));
+        let mut v = base.clone();
+        v.effects.push(parser::Effect {
+            name: "IO".to_string(),
+            params: vec![],
+            span: base.span.clone(),
+            negated: false,
+        });
+        variants.push(("effect", v));
+        let mut v = base.clone();
+        v.invariant = Some("x < 10".to_string());
+        variants.push(("invariant", v));
+        let mut v = base.clone();
+        v.resources.push("File".to_string());
+        variants.push(("resource", v));
+        let mut v = base.clone();
+        v.consumed_params.push("x".to_string());
+        variants.push(("consume", v));
+        let mut v = base.clone();
+        v.effect_pre
+            .insert("Account".to_string(), "Open".to_string());
+        variants.push(("effect_pre", v));
+        let mut v = base.clone();
+        v.effect_post
+            .insert("Account".to_string(), "Closed".to_string());
+        variants.push(("effect_post", v));
+        let mut v = base.clone();
+        v.is_async = true;
+        variants.push(("async", v));
+        let mut v = base.clone();
+        v.trust_level = parser::ast::TrustLevel::Trusted;
+        variants.push(("trust level", v));
+        let mut v = base.clone();
+        v.max_unroll = Some(8);
+        variants.push(("max_unroll", v));
+        let mut v = base.clone();
+        v.forall_constraints.push(parser::ast::Quantifier {
+            q_type: parser::ast::QuantifierType::ForAll,
+            var: "i".to_string(),
+            start: "0".to_string(),
+            end: "n".to_string(),
+            condition: "a[i] > 0".to_string(),
+        });
+        variants.push(("forall constraint", v));
+
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(base_hash.clone());
+        for (label, atom) in &variants {
+            let hash = compute_atom_content_hash_v2(atom);
+            assert_ne!(hash, base_hash, "{label} must change the v2 hash");
+            assert!(seen.insert(hash), "{label} collides with another variant");
+            // The legacy hash is blind to all of these.
+            assert_eq!(
+                compute_atom_content_hash(
+                    &atom.name,
+                    &atom.requires,
+                    &atom.ensures,
+                    &atom.body_expr
+                ),
+                compute_atom_content_hash(
+                    &base.name,
+                    &base.requires,
+                    &base.ensures,
+                    &base.body_expr
+                ),
+                "{label} is a v2-only field"
+            );
+        }
+
+        // Span (location) is not proof-relevant and must not affect the hash.
+        let mut moved = base.clone();
+        moved.span.line += 10;
+        assert_eq!(compute_atom_content_hash_v2(&moved), base_hash);
+        // Neither do the resolver's load-attribution keys: the certifying run
+        // and an importing run annotate the same atom differently.
+        let mut imported = base.clone();
+        imported
+            .spec_metadata
+            .insert("source_file".to_string(), "lib/other.mm".to_string());
+        imported.spec_metadata.insert(
+            crate::resolver::IMPORT_ALIAS_METADATA_KEY.to_string(),
+            "collections".to_string(),
+        );
+        assert_eq!(compute_atom_content_hash_v2(&imported), base_hash);
+    }
+
+    /// A `version: "1.0"` certificate is still verified with the legacy hash
+    /// (compatibility period), and a `1.1` certificate with the v2 hash; the
+    /// v2 certificate rejects the signature-only change that 1.0 misses.
+    #[test]
+    fn test_verify_certificate_dispatches_hash_on_version() {
+        let atom = make_test_atom("add", "x > 0", "result > 0", "x + 1");
+        let atoms: Vec<&parser::Atom> = vec![&atom];
+        let mut retyped = atom.clone();
+        retyped
+            .spec_metadata
+            .insert("semantics".to_string(), "bitvec".to_string());
+        let retyped_atoms: Vec<&parser::Atom> = vec![&retyped];
+
+        let v2 = generate_certificate(
+            "test.mm",
+            &atoms,
+            &unsat_results("add"),
+            &ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(verify_certificate(&v2, &atoms, false)[0].1, "proven");
+        assert_eq!(
+            verify_certificate(&v2, &retyped_atoms, false)[0].1,
+            "changed"
+        );
+
+        let mut legacy = v2.clone();
+        legacy.version = LEGACY_CERTIFICATE_VERSION.to_string();
+        legacy.atoms[0].content_hash =
+            compute_atom_content_hash("add", "x > 0", "result > 0", "x + 1");
+        assert_eq!(verify_certificate(&legacy, &atoms, false)[0].1, "proven");
+        // Known blind spot of the legacy hash, accepted only for 1.0 certificates.
+        assert_eq!(
+            verify_certificate(&legacy, &retyped_atoms, false)[0].1,
+            "proven"
+        );
+        let changed_body = make_test_atom("add", "x > 0", "result > 0", "x + 2");
+        assert_eq!(
+            verify_certificate(&legacy, &[&changed_body], false)[0].1,
+            "changed"
+        );
+
+        // A 1.0 certificate carrying a v2 hash (or vice versa) is `changed`,
+        // never silently `proven`.
+        let mut mislabelled = v2.clone();
+        mislabelled.version = LEGACY_CERTIFICATE_VERSION.to_string();
+        assert_eq!(
+            verify_certificate(&mislabelled, &atoms, false)[0].1,
+            "changed"
+        );
+
+        // A version this build cannot hash is never `proven`, even when the
+        // stored hash happens to equal the current v2 hash.
+        for unknown in ["1.2", "2.0", "", "1.1-lean"] {
+            let mut future = v2.clone();
+            future.version = unknown.to_string();
+            assert_eq!(compute_atom_content_hash_for_version(unknown, &atom), None);
+            assert_eq!(
+                verify_certificate(&future, &atoms, false)[0].1,
+                "changed",
+                "version {unknown:?}"
+            );
+        }
+    }
+
     /// PR 2: `lean_verified` is rejected by default and accepted with the
     /// `allow_lean_verified` opt-in flag, mirroring the cross-project Proof
     /// Certificate Chain (mumei-lean → mumei resolver) handshake.
@@ -617,6 +891,124 @@ mod tests {
             status_stale_result_metadata[0],
             ("hard_lemma".to_string(), "stale_translator".to_string())
         );
+    }
+
+    #[test]
+    fn test_lean_axiom_audit_verdicts_and_statuses() {
+        let check = |metadata: LeanResultMetadata,
+                     expected_audit: LeanAxiomAudit,
+                     expected_status: &str| {
+            let (cert, atom) = certificate_with_lean_metadata(metadata);
+            assert_eq!(lean_axiom_audit(&cert.atoms[0]), expected_audit);
+            assert_eq!(
+                verify_certificate(&cert, &[&atom], true)[0],
+                ("hard_lemma".to_string(), expected_status.to_string())
+            );
+        };
+
+        let mut passed = current_lean_metadata();
+        passed.kernel_axioms = Some(vec![
+            "propext".to_string(),
+            "Classical.choice".to_string(),
+            "Quot.sound".to_string(),
+        ]);
+        passed.axiom_audit = Some("passed".to_string());
+        check(
+            passed,
+            LeanAxiomAudit::Passed {
+                axioms: vec![
+                    "propext".to_string(),
+                    "Classical.choice".to_string(),
+                    "Quot.sound".to_string(),
+                ],
+            },
+            "proven",
+        );
+
+        let mut forged_pass = current_lean_metadata();
+        forged_pass.kernel_axioms = Some(vec!["sorryAx".to_string()]);
+        forged_pass.axiom_audit = Some("passed".to_string());
+        check(
+            forged_pass,
+            LeanAxiomAudit::Rejected {
+                disallowed: vec!["sorryAx".to_string()],
+            },
+            "axiom_rejected",
+        );
+
+        let mut rejected = current_lean_metadata();
+        rejected.kernel_axioms = Some(vec!["propext".to_string()]);
+        rejected.axiom_audit = Some("rejected".to_string());
+        check(
+            rejected,
+            LeanAxiomAudit::Rejected { disallowed: vec![] },
+            "axiom_rejected",
+        );
+
+        let mut errored = current_lean_metadata();
+        errored.kernel_axioms = Some(vec!["propext".to_string()]);
+        errored.axiom_audit = Some("error".to_string());
+        check(errored, LeanAxiomAudit::Error, "axiom_rejected");
+
+        let mut unaudited = current_lean_metadata();
+        unaudited.axiom_audit = None;
+        unaudited.kernel_axioms = None;
+        check(unaudited, LeanAxiomAudit::Unaudited, "proven");
+
+        let mut inferred_pass = current_lean_metadata();
+        inferred_pass.kernel_axioms = Some(vec!["propext".to_string()]);
+        inferred_pass.axiom_audit = None;
+        check(
+            inferred_pass,
+            LeanAxiomAudit::Passed {
+                axioms: vec!["propext".to_string()],
+            },
+            "proven",
+        );
+
+        let (mut stale_cert, stale_atom) = certificate_with_lean_metadata({
+            let mut metadata = current_lean_metadata();
+            metadata.axiom_audit = Some("rejected".to_string());
+            metadata
+        });
+        stale_cert.atoms[0].translator_version = "old-translator".to_string();
+        assert_eq!(
+            verify_certificate(&stale_cert, &[&stale_atom], true)[0],
+            ("hard_lemma".to_string(), "stale_translator".to_string())
+        );
+    }
+
+    #[test]
+    fn test_refresh_certificate_integrity_rejects_axiom_audit_failure() {
+        let (mut cert, _) = certificate_with_lean_metadata({
+            let mut metadata = current_lean_metadata();
+            metadata.kernel_axioms = Some(vec!["sorryAx".to_string()]);
+            metadata.axiom_audit = Some("passed".to_string());
+            metadata
+        });
+
+        refresh_certificate_integrity(&mut cert);
+        assert!(!cert.all_verified);
+    }
+
+    #[test]
+    fn test_legacy_lean_metadata_roundtrips_without_audit_fields() {
+        let (mut cert, _) = certificate_with_lean_metadata(current_lean_metadata());
+        let encoded = serde_json::to_string(&cert).expect("serialize certificate");
+        assert!(!encoded.contains("\"kernel_axioms\""));
+        assert!(!encoded.contains("\"axiom_audit\""));
+
+        let decoded: ProofCertificate =
+            serde_json::from_str(&encoded).expect("deserialize certificate");
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("re-serialize certificate"),
+            encoded
+        );
+
+        cert.atoms[0].lean_result_metadata = None;
+        assert!(!serde_json::to_string(&cert)
+            .expect("serialize certificate without metadata")
+            .contains("\"kernel_axioms\""));
     }
 
     #[test]

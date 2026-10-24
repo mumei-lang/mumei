@@ -17,43 +17,61 @@ use std::path::Path;
 use z3::ast::{Array, Ast, Bool, Dynamic, Float, Int, Real, String as Z3String, BV};
 use z3::{Config, Context, SatResult, Solver};
 
+pub mod contract_view;
 pub mod executor;
 pub mod fragment;
+pub mod invariant_inference;
 pub mod loop_detector;
 pub mod module_env;
 pub mod mutation;
 pub mod nlae_reporter;
+pub mod phase_artifacts;
+pub mod phase_contract;
 pub mod profiler;
 pub mod property_based;
+pub mod raising;
 pub mod spec_validation;
 pub mod spurious_detection;
 pub(crate) mod support;
 pub mod translator;
 pub mod types;
 pub mod vacuity;
+pub mod vc_outcome;
 
 #[cfg(test)]
 mod tests;
 
+pub use contract_view::{
+    caller_requires_obligation, contract_view, dropped_conjuncts, ContractView,
+};
 pub use executor::*;
 pub use fragment::*;
 pub use loop_detector::*;
 pub use module_env::*;
 pub use mutation::{apply_mutation, generate_mutations, MutationOperator, MutationResult};
 pub use nlae_reporter::*;
+pub use phase_contract::{
+    check_phase_order, counterexample_fidelity, phase_contract, raised_counterexample_fidelity,
+    CounterexampleFidelity, PhaseContract, PhaseFact, PhaseOrderError, COVER_PHASE, ENSURES_PHASE,
+    PHASE_CONTRACTS,
+};
 pub use profiler::{ConstraintProfile, IncrementalProfiler, SolverHeatmap};
 pub use property_based::*;
+pub use raising::*;
 pub use spec_validation::*;
 pub use spurious_detection::*;
+pub use support::recursion::recursive_contract_hint_diagnostic;
 pub use support::{
     build_data_flow_trace, infer_contracts_json, infer_effects_json, verify_impl,
     verify_impl_with_options, AllowedEffect, DataFlowTrace, ExecutionStep, SecurityPolicy,
     VariableMutation, VariableState, ViolationInfo,
 };
+pub(crate) use support::{declared_nondeterministic_effects, witness_params};
 pub use types::*;
 pub use vacuity::{
     check_spec_vacuity, check_spec_vacuity_for_hir, VacuityCheckResult, VacuityError,
 };
+pub use vc_outcome::{classify as classify_vc_outcome, ClauseOutcome, ContextReachability};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractManifest {

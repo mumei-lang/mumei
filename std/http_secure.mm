@@ -66,7 +66,7 @@ effect SecureHttpDelete(url: Str) where starts_with(url, "https://");
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
 atom secure_get(url: Str)
-    effects: [SecureHttpGet(url)]
+    effects: [SecureHttpGet(url)];
     requires: starts_with(url, "https://");
     ensures: result >= 0;
     body: {
@@ -78,7 +78,7 @@ atom secure_get(url: Str)
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
 atom secure_post(url: Str, body: Str)
-    effects: [SecureHttpPost(url)]
+    effects: [SecureHttpPost(url)];
     requires: starts_with(url, "https://");
     ensures: result >= 0;
     body: {
@@ -90,7 +90,7 @@ atom secure_post(url: Str, body: Str)
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
 atom secure_put(url: Str, body: Str)
-    effects: [SecureHttpPut(url)]
+    effects: [SecureHttpPut(url)];
     requires: starts_with(url, "https://");
     ensures: result >= 0;
     body: {
@@ -102,7 +102,7 @@ atom secure_put(url: Str, body: Str)
 // TRUSTED(FFI): Contract enforced by Rust runtime (serde_json/reqwest/std::fs).
 // Z3 verifies contract consistency; body execution delegated to FFI backend.
 atom secure_delete(url: Str)
-    effects: [SecureHttpDelete(url)]
+    effects: [SecureHttpDelete(url)];
     requires: starts_with(url, "https://");
     ensures: result >= 0;
     body: {
