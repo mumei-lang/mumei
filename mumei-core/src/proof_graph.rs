@@ -60,7 +60,7 @@ pub struct ProofGraphNode {
     pub dependents: Vec<String>,
     pub trust_boundaries: Vec<TrustBoundaryEntry>,
     /// Per-atom verification status as recorded by `mumei verify`
-    /// (`verified`, `failed`, `unverifiable`, `escalation_candidate`, ...).
+    /// (`verified`, `trusted`, `failed`, `unverifiable`, `escalation_candidate`, ...).
     pub verification_status: Option<String>,
     /// `green` / `yellow` / `red` — see [`classify_health`].
     pub health: String,
@@ -316,9 +316,15 @@ impl ProofBundleSource {
 enum SiblingLookup {
     /// The certificate does not list the atom (or belongs to another file).
     NotListed,
-    /// The certificate lists the atom; `true` when its entry is fresh and
-    /// proven under the current acceptance policy.
-    Listed(bool),
+    /// The certificate lists the atom and either provides an accepted status
+    /// or has an entry that must not be backfilled.
+    Listed(SiblingCertificateDecision),
+}
+
+#[derive(Clone, Copy)]
+enum SiblingCertificateDecision {
+    Rejected,
+    Accepted(&'static str),
 }
 
 fn lookup_in_certificate(
@@ -342,11 +348,20 @@ fn lookup_in_certificate(
         ..atom.clone()
     };
     let results = proof_cert::verify_certificate(cert, &[&certified_atom], allow_lean_verified);
-    SiblingLookup::Listed(
-        results
-            .iter()
-            .any(|(name, status)| name == &certified_atom.name && status == "proven"),
-    )
+    let decision = match results
+        .iter()
+        .find(|(name, _)| name == &certified_atom.name)
+        .map(|(_, status)| status.as_str())
+    {
+        Some(proof_cert::status::CERTIFICATE_PROVEN) => {
+            SiblingCertificateDecision::Accepted("verified")
+        }
+        Some(proof_cert::status::CERTIFICATE_TRUSTED) => {
+            SiblingCertificateDecision::Accepted("trusted")
+        }
+        _ => SiblingCertificateDecision::Rejected,
+    };
+    SiblingLookup::Listed(decision)
 }
 
 /// Fill in `verification_status` for atoms the current run did not verify
@@ -358,11 +373,11 @@ fn lookup_in_certificate(
 /// `lean_verified` atom is only accepted when `allow_lean_verified` is set
 /// (the command's `--allow-lean-verified` / `--escalate-lean` opt-in) *and*
 /// its `translator_version` / `bridge_lemma_hash` (atom and Lean result
-/// metadata) match the current bridge. Only a fresh `proven` result is
-/// copied, as `verified`; every other outcome — no certificate, a
-/// certificate for another file, stale hash, stale translator, unparseable
-/// file, or a certificate that never decided the atom — leaves the status
-/// `null`.
+/// metadata) match the current bridge. A fresh `proven` result is copied as
+/// `verified`, and a fresh `trusted` result is copied as `trusted`; every
+/// other outcome — no certificate, a certificate for another file, stale
+/// hash or translator, an unparseable file, or a certificate that never
+/// decided the atom — leaves the status `null`.
 ///
 /// Atoms already present in `verification_status` are never overwritten.
 pub fn backfill_verification_status_from_sibling_certificates(
@@ -389,7 +404,7 @@ pub fn backfill_verification_status_from_sibling_certificates(
         let source_file = PathBuf::from(source_file);
         let name_candidates = certificate_name_candidates(atom);
 
-        let mut decided: Option<bool> = None;
+        let mut decided: Option<SiblingCertificateDecision> = None;
         for cert_path in sibling_certificate_paths(&source_file) {
             let cert = certificates
                 .entry(cert_path.clone())
@@ -400,7 +415,7 @@ pub fn backfill_verification_status_from_sibling_certificates(
                 // that exists but cannot be trusted is not papered over by
                 // a lower-priority file or the bundle.
                 SiblingCertificate::Invalid => {
-                    decided = Some(false);
+                    decided = Some(SiblingCertificateDecision::Rejected);
                     break;
                 }
                 SiblingCertificate::Valid(cert) => cert,
@@ -415,8 +430,8 @@ pub fn backfill_verification_status_from_sibling_certificates(
                 SiblingLookup::NotListed => continue,
                 // The first certificate that lists the atom decides; a stale
                 // entry is not papered over by another file further down.
-                SiblingLookup::Listed(proven) => {
-                    decided = Some(proven);
+                SiblingLookup::Listed(decision) => {
+                    decided = Some(decision);
                     break;
                 }
             }
@@ -424,19 +439,19 @@ pub fn backfill_verification_status_from_sibling_certificates(
         if decided.is_none() {
             let bundle = bundle.get_or_insert_with(ProofBundleSource::from_env);
             if let Some(cert) = bundle.certificate_for(&source_file) {
-                if let SiblingLookup::Listed(proven) = lookup_in_certificate(
+                if let SiblingLookup::Listed(decision) = lookup_in_certificate(
                     cert,
                     atom,
                     &source_file,
                     &name_candidates,
                     allow_lean_verified,
                 ) {
-                    decided = Some(proven);
+                    decided = Some(decision);
                 }
             }
         }
-        if decided == Some(true) {
-            verification_status.insert(dependency_node.atom_name.clone(), "verified".to_string());
+        if let Some(SiblingCertificateDecision::Accepted(status)) = decided {
+            verification_status.insert(dependency_node.atom_name.clone(), status.to_string());
             backfilled += 1;
         }
     }
@@ -927,6 +942,20 @@ mod tests {
             statuses.get("lib_inc").map(String::as_str),
             Some("verified")
         );
+    }
+
+    #[test]
+    fn a_trusted_sibling_certificate_backfills_trusted() {
+        let (dir, source_file, env) = sibling_fixture("mumei-pg-trusted", "x + 1");
+        let cert = sibling_certificate(&source_file, &env, "skipped", "trusted");
+        proof_cert::save_certificate(&cert, &source_file.with_extension("proof.json"))
+            .expect("write cert");
+
+        let (count, statuses) = backfilled(&env);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(count, 1);
+        assert_eq!(statuses.get("lib_inc").map(String::as_str), Some("trusted"));
     }
 
     #[test]

@@ -54,12 +54,23 @@ BASELINE_FIELDS = (
 def _observed_baseline(bundle: dict) -> dict:
     summary = bundle.get("summary") or {}
     non_proven_modules: dict[str, list[dict[str, str]]] = {}
+    trusted_modules: dict[str, list[str]] = {}
     for module, certificate in (bundle.get("modules") or {}).items():
         atoms = certificate.get("atoms", [])
+        trusted_names = sorted(
+            {
+                str(atom.get("name", ""))
+                for atom in atoms
+                if atom.get("status") == "trusted"
+            }
+        )
+        if trusted_names:
+            trusted_modules[module] = trusted_names
         pairs = {
             (str(atom.get("name", "")), str(atom.get("z3_check_result", "")))
             for atom in atoms
-            if atom.get("z3_check_result") not in {"unsat", "lean_verified"}
+            if atom.get("status") != "trusted"
+            and atom.get("z3_check_result") not in {"unsat", "lean_verified"}
         }
         non_proven = [
             {"name": name, "z3_check_result": result}
@@ -70,6 +81,7 @@ def _observed_baseline(bundle: dict) -> dict:
     return {
         **{field: summary.get(field) for field in BASELINE_FIELDS},
         "modules": non_proven_modules,
+        "trusted": trusted_modules,
     }
 
 
@@ -115,6 +127,28 @@ def check_drift(
             failures.append("baseline_mismatch: " + "; ".join(differences))
             if observed_baseline["proven_atoms"] > baseline_values["proven_atoms"]:
                 failures.append(_baseline_update_message(observed_baseline))
+
+    baseline_trusted = baseline.get("trusted", {})
+    if not isinstance(baseline_trusted, dict) or any(
+        not isinstance(module, str)
+        or not isinstance(names, list)
+        or not all(isinstance(name, str) for name in names)
+        for module, names in baseline_trusted.items()
+    ):
+        failures.append("baseline_invalid: trusted must map modules to atom-name lists")
+        baseline_trusted = {}
+    normalized_trusted = {
+        module: normalized_names
+        for module, names in baseline_trusted.items()
+        if (normalized_names := sorted(set(names)))
+    }
+    if normalized_trusted != observed_baseline["trusted"]:
+        failures.append(
+            "baseline_mismatch: trusted: "
+            f"baseline={normalized_trusted} "
+            f"observed={observed_baseline['trusted']}"
+        )
+        failures.append(_baseline_update_message(observed_baseline))
 
     metric_counts = _metric_summary(metrics_text)
     if metric_counts is None:

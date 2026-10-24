@@ -174,11 +174,12 @@ pub fn resolve_prelude_with_persistence(
     Ok(())
 }
 /// P5-C: Check if an atom passed certificate verification for a given module.
-/// Returns true if the atom is "proven" according to the certificate, false otherwise.
+/// Returns true if the atom is "proven" or "trusted" according to the certificate.
 pub(crate) fn check_cert_for_atom(cert_results: &HashMap<String, String>, atom_name: &str) -> bool {
-    cert_results
-        .get(atom_name)
-        .is_some_and(|status| status == "proven")
+    cert_results.get(atom_name).is_some_and(|status| {
+        status == proof_cert::status::CERTIFICATE_PROVEN
+            || status == proof_cert::status::CERTIFICATE_TRUSTED
+    })
 }
 
 pub(crate) fn unproven_cert_results(atom_refs: &[&parser::Atom]) -> HashMap<String, String> {
@@ -273,7 +274,7 @@ pub(crate) fn log_lean_verified_acceptance(
 }
 
 /// P5-C: Attempt to verify a proof certificate for an imported module directory.
-/// Returns a map of atom_name -> status ("proven", "changed", "unproven", "missing").
+/// Returns a map of atom_name -> status ("proven", "trusted", "changed", "unproven", "missing").
 /// Returns None if no certificate exists.
 ///
 /// Search order:

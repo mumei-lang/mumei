@@ -114,7 +114,7 @@ fn proof_graph_export_carries_contracts_edges_and_trust_boundaries() {
     for name in ["cross_file_caller", "cross_file_callee"] {
         let entry = node(&graph, name);
         assert_eq!(entry["health"], "yellow");
-        assert_eq!(entry["verification_status"], "verified");
+        assert_eq!(entry["verification_status"], "trusted");
         assert_eq!(
             entry["trust_boundaries"]
                 .as_array()

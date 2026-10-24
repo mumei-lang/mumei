@@ -874,10 +874,19 @@ fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyCon
                 .push(structured_feedback_for_passed_atom(atom));
         }
         if promote_outside_fragment {
-            ctx.cert_results.insert(
-                name.to_string(),
-                ("skipped".to_string(), "escalation_candidate".to_string()),
-            );
+            let (z3_result, status) = if atom.trust_level == parser::TrustLevel::Trusted {
+                (
+                    proof_cert::status::Z3_SKIPPED.to_string(),
+                    proof_cert::status::TRUSTED.to_string(),
+                )
+            } else {
+                (
+                    proof_cert::status::Z3_SKIPPED.to_string(),
+                    proof_cert::status::ESCALATION_CANDIDATE.to_string(),
+                )
+            };
+            ctx.cert_results
+                .insert(name.to_string(), (z3_result, status));
             *ctx.escalated += 1;
         }
         return;
@@ -907,17 +916,23 @@ fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyCon
                 println!("  ⚖️  '{}': skipped (unchanged, cached) ⏩", name);
             }
             ctx.module_env.mark_verified(name);
-            ctx.cert_results.insert(
-                name.to_string(),
+            let (z3_result, status) = if atom.trust_level == parser::TrustLevel::Trusted {
                 (
-                    "unsat".to_string(),
+                    proof_cert::status::Z3_SKIPPED.to_string(),
+                    proof_cert::status::TRUSTED.to_string(),
+                )
+            } else {
+                (
+                    proof_cert::status::Z3_UNSAT.to_string(),
                     if promote_outside_fragment {
-                        "escalation_candidate".to_string()
+                        proof_cert::status::ESCALATION_CANDIDATE.to_string()
                     } else {
-                        "verified".to_string()
+                        proof_cert::status::VERIFIED.to_string()
                     },
-                ),
-            );
+                )
+            };
+            ctx.cert_results
+                .insert(name.to_string(), (z3_result, status));
             if promote_outside_fragment {
                 *ctx.escalated += 1;
             }
@@ -1001,17 +1016,23 @@ fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyCon
                 println!("  ⚖️  '{}': verified ✅", name);
             }
             ctx.module_env.mark_verified(name);
-            ctx.cert_results.insert(
-                name.to_string(),
+            let (z3_result, status) = if atom.trust_level == parser::TrustLevel::Trusted {
                 (
-                    "unsat".to_string(),
+                    proof_cert::status::Z3_SKIPPED.to_string(),
+                    proof_cert::status::TRUSTED.to_string(),
+                )
+            } else {
+                (
+                    proof_cert::status::Z3_UNSAT.to_string(),
                     if promote_outside_fragment {
-                        "escalation_candidate".to_string()
+                        proof_cert::status::ESCALATION_CANDIDATE.to_string()
                     } else {
-                        "verified".to_string()
+                        proof_cert::status::VERIFIED.to_string()
                     },
-                ),
-            );
+                )
+            };
+            ctx.cert_results
+                .insert(name.to_string(), (z3_result, status));
             if promote_outside_fragment {
                 *ctx.escalated += 1;
             }

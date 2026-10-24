@@ -5,6 +5,9 @@ runtime or an external proof backend. Z3 still checks each declared contract for
 consistency at call sites, but it cannot inspect every external side effect or
 proof backend implementation.
 
+Certificates record trusted atoms with `z3_check_result: "skipped"` and
+`status: "trusted"` because their bodies are not checked.
+
 Clause-level `assume` is a narrower alternative to marking an entire atom
 `trusted`: it trusts only the selected `requires` or `ensures` clause on one
 side of the call, while the atom's remaining obligations continue to be

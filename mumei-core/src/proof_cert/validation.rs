@@ -140,14 +140,15 @@ pub(crate) fn parse_unsat_core_labels(z3_result: &str) -> Option<Vec<String>> {
 
 /// Verify a proof certificate against the current source file.
 /// Returns a list of (atom_name, status) where status is:
-/// - "proven" if content_hash matches and z3_check_result was "unsat"
-///   (or `"lean_verified"` when `allow_lean_verified` is enabled — see below).
+/// - "proven" if content_hash matches and z3_check_result was "unsat", or
+///   `"lean_verified"` when `allow_lean_verified` is enabled.
+/// - "trusted" if content_hash matches and status is `TRUSTED`.
 /// - "changed" if content_hash differs (re-verification needed). The hash is
 ///   recomputed with the algorithm the certificate's `version` declares
 ///   (`"1.0"` legacy name/requires/ensures/body, `"1.1"` full signature and
 ///   spec metadata), so older certificates stay verifiable until regenerated.
 ///   A `version` this build does not know marks every atom "changed".
-/// - "unproven" if z3_check_result was not "unsat"
+/// - "unproven" if the matching entry does not establish the contract.
 ///
 /// `allow_lean_verified` controls how `z3_check_result == "lean_verified"`
 /// values are treated. mumei-lean (the external Lean 4 proof backend) emits
@@ -177,19 +178,21 @@ pub fn verify_certificate(
         .map(|ac| {
             let status = if let Some(current_hash) = current_hashes.get(&ac.name) {
                 if current_hash.as_deref() != Some(ac.content_hash.as_str()) {
-                    "changed".to_string()
+                    status::CERTIFICATE_CHANGED.to_string()
+                } else if ac.status == status::TRUSTED {
+                    status::CERTIFICATE_TRUSTED.to_string()
                 } else if ac.z3_check_result == status::Z3_UNSAT {
-                    "proven".to_string()
+                    status::CERTIFICATE_PROVEN.to_string()
                 } else if allow_lean_verified && ac.z3_check_result == status::Z3_LEAN_VERIFIED {
                     if !lean_translator_metadata_is_current(ac) {
-                        "stale_translator".to_string()
+                        status::CERTIFICATE_STALE_TRANSLATOR.to_string()
                     } else if matches!(
                         lean_axiom_audit(ac),
                         LeanAxiomAudit::Rejected { .. } | LeanAxiomAudit::Error
                     ) {
-                        "axiom_rejected".to_string()
+                        status::CERTIFICATE_AXIOM_REJECTED.to_string()
                     } else {
-                        "proven".to_string()
+                        status::CERTIFICATE_PROVEN.to_string()
                     }
                 } else if allow_lean_verified
                     && matches!(
@@ -197,12 +200,12 @@ pub fn verify_certificate(
                         LeanAxiomAudit::Rejected { .. } | LeanAxiomAudit::Error
                     )
                 {
-                    "axiom_rejected".to_string()
+                    status::CERTIFICATE_AXIOM_REJECTED.to_string()
                 } else {
-                    "unproven".to_string()
+                    status::CERTIFICATE_UNPROVEN.to_string()
                 }
             } else {
-                "missing".to_string()
+                status::CERTIFICATE_MISSING.to_string()
             };
             (ac.name.clone(), status)
         })

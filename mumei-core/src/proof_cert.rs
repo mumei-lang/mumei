@@ -585,6 +585,58 @@ mod tests {
         assert_eq!(status2[0], ("add".to_string(), "changed".to_string()));
     }
 
+    #[test]
+    fn verify_certificate_distinguishes_trusted_entries_and_preserves_legacy_proven() {
+        let mut atom = make_test_atom("trusted_atom", "true", "result == 7", "7");
+        atom.trust_level = parser::TrustLevel::Trusted;
+        let atoms = vec![&atom];
+        let mut trusted_results = HashMap::new();
+        trusted_results.insert(
+            atom.name.clone(),
+            (status::Z3_SKIPPED.to_string(), status::TRUSTED.to_string()),
+        );
+        let trusted_cert = generate_certificate(
+            "test.mm",
+            &atoms,
+            &trusted_results,
+            &ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            verify_certificate(&trusted_cert, &atoms, false)[0].1,
+            status::CERTIFICATE_TRUSTED
+        );
+
+        let mut changed_atom = atom.clone();
+        changed_atom.body_expr = "8".to_string();
+        let changed_atoms = vec![&changed_atom];
+        assert_eq!(
+            verify_certificate(&trusted_cert, &changed_atoms, false)[0].1,
+            status::CERTIFICATE_CHANGED
+        );
+
+        let mut legacy_results = HashMap::new();
+        legacy_results.insert(
+            atom.name.clone(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        );
+        let legacy_cert = generate_certificate(
+            "test.mm",
+            &atoms,
+            &legacy_results,
+            &ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            verify_certificate(&legacy_cert, &atoms, false)[0].1,
+            status::CERTIFICATE_PROVEN
+        );
+    }
+
     fn unsat_results(name: &str) -> HashMap<String, (String, String)> {
         let mut results = HashMap::new();
         results.insert(
