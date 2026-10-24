@@ -63,13 +63,33 @@ pub fn resolve_imports_with_full_options(
     strict_imports: bool,
     allow_lean_verified: bool,
 ) -> MumeiResult<()> {
+    resolve_imports_with_full_options_and_persistence(
+        items,
+        base_dir,
+        module_env,
+        strict_imports,
+        allow_lean_verified,
+        true,
+    )
+}
+
+pub fn resolve_imports_with_full_options_and_persistence(
+    items: &[Item],
+    base_dir: &Path,
+    module_env: &mut ModuleEnv,
+    strict_imports: bool,
+    allow_lean_verified: bool,
+    persist_cache: bool,
+) -> MumeiResult<()> {
     let cache_path = base_dir.join(".mumei_cache");
     let mut cache = load_cache(&cache_path);
     let mut ctx = ResolverContext::new();
     ctx.strict_imports = strict_imports;
     ctx.allow_lean_verified = allow_lean_verified;
     resolve_imports_recursive(items, base_dir, &mut ctx, &mut cache, module_env)?;
-    save_cache(&cache_path, &cache);
+    if persist_cache {
+        save_cache(&cache_path, &cache);
+    }
     Ok(())
 }
 
@@ -80,6 +100,14 @@ pub fn resolve_imports_with_full_options(
 /// prelude の定義はトレイト・ADT のみを登録し、atom は検証済みとしてマークする。
 /// prelude が見つからない場合はスキップする（組み込みトレイトがフォールバックとして機能）。
 pub fn resolve_prelude(base_dir: &Path, module_env: &mut ModuleEnv) -> MumeiResult<()> {
+    resolve_prelude_with_persistence(base_dir, module_env, true)
+}
+
+pub fn resolve_prelude_with_persistence(
+    base_dir: &Path,
+    module_env: &mut ModuleEnv,
+    persist_cache: bool,
+) -> MumeiResult<()> {
     // prelude のパスを解決（見つからなければスキップ）
     let prelude_path = match resolve_path("std/prelude", base_dir) {
         Ok(path) => path,
@@ -111,7 +139,9 @@ pub fn resolve_prelude(base_dir: &Path, module_env: &mut ModuleEnv) -> MumeiResu
         &mut cache,
         module_env,
     )?;
-    save_cache(&cache_path, &cache);
+    if persist_cache {
+        save_cache(&cache_path, &cache);
+    }
 
     // prelude の定義を ModuleEnv に登録（alias なし = グローバルスコープ）
     register_imported_items_with_source(&prelude_items, None, module_env, prelude_path.to_str());

@@ -1,4 +1,4 @@
-use crate::pipeline::try_load_and_prepare_with_full_options;
+use crate::pipeline::try_load_and_prepare_with_full_options_and_persistence;
 use mumei_core::claimbook::{create_claimbook, render_markdown};
 use mumei_core::parser::Item;
 use mumei_core::{parser, proof_cert};
@@ -31,7 +31,12 @@ pub(crate) fn cmd_claims(
     };
 
     let (items, _module_env, _imports, _source) =
-        match try_load_and_prepare_with_full_options(input, false, allow_lean_verified) {
+        match try_load_and_prepare_with_full_options_and_persistence(
+            input,
+            false,
+            allow_lean_verified,
+            false,
+        ) {
             Ok(loaded) => loaded,
             Err(error) => {
                 eprintln!("❌ {error}");
