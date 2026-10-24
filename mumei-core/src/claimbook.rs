@@ -201,10 +201,15 @@ pub fn own_grade(
     }
 
     let reason = if atom.z3_check_result == status::Z3_LEAN_VERIFIED {
-        if !allow_lean_verified {
-            "Lean evidence requires --allow-lean-verified"
-        } else if !proof_cert::lean_certificate_metadata_is_current(atom) {
+        if !proof_cert::lean_translator_metadata_is_current(atom) {
             "Lean metadata is stale or incomplete"
+        } else if matches!(
+            proof_cert::lean_axiom_audit(atom),
+            proof_cert::LeanAxiomAudit::Rejected { .. } | proof_cert::LeanAxiomAudit::Error
+        ) {
+            "Lean axiom audit did not pass"
+        } else if !allow_lean_verified {
+            "Lean evidence requires --allow-lean-verified"
         } else {
             "Lean axiom audit did not pass"
         }
@@ -284,7 +289,10 @@ pub fn compute_effective_grades(claims: &BTreeMap<String, Claim>) -> BTreeMap<St
     effective_grades
 }
 
-fn apply_effective_grades(claims: &mut BTreeMap<String, Claim>) {
+fn apply_effective_grades(
+    claims: &mut BTreeMap<String, Claim>,
+    method_name_matches: &BTreeMap<String, BTreeMap<String, String>>,
+) {
     let effective_grades = compute_effective_grades(claims);
     let claim_names = claims.keys().cloned().collect::<BTreeSet<_>>();
     let mut completeness = claims
@@ -295,7 +303,8 @@ fn apply_effective_grades(claims: &mut BTreeMap<String, Claim>) {
                 claim
                     .dependencies
                     .iter()
-                    .all(|dependency| claim_names.contains(dependency)),
+                    .all(|dependency| claim_names.contains(dependency))
+                    && !method_name_matches.contains_key(name),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -330,13 +339,22 @@ fn apply_effective_grades(claims: &mut BTreeMap<String, Claim>) {
             .into_iter()
             .collect();
         claim.effective_grade_complete = completeness[name];
-        claim.limiting_premises = limiting_premises(claim, effective_grade, &effective_grades);
+        claim.limiting_premises = limiting_premises(
+            claim,
+            effective_grade,
+            &effective_grades,
+            method_name_matches.get(name),
+        );
     }
 }
 
-fn resolve_claim_dependencies(claims: &mut BTreeMap<String, Claim>) {
+fn resolve_claim_dependencies(
+    claims: &mut BTreeMap<String, Claim>,
+) -> BTreeMap<String, BTreeMap<String, String>> {
     let claim_names = claims.keys().cloned().collect::<BTreeSet<_>>();
-    for claim in claims.values_mut() {
+    let mut method_name_matches = BTreeMap::new();
+    for (claim_name, claim) in claims.iter_mut() {
+        let mut claim_method_name_matches = BTreeMap::new();
         claim.dependencies = claim
             .dependencies
             .iter()
@@ -349,20 +367,28 @@ fn resolve_claim_dependencies(claims: &mut BTreeMap<String, Claim>) {
                 let mut qualified_matches =
                     claim_names.iter().filter(|name| name.ends_with(&suffix));
                 match (qualified_matches.next(), qualified_matches.next()) {
-                    (Some(match_name), None) => match_name.clone(),
+                    (Some(match_name), None) => {
+                        claim_method_name_matches.insert(match_name.clone(), dependency.clone());
+                        match_name.clone()
+                    }
                     _ => dependency.clone(),
                 }
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        if !claim_method_name_matches.is_empty() {
+            method_name_matches.insert(claim_name.clone(), claim_method_name_matches);
+        }
     }
+    method_name_matches
 }
 
 fn limiting_premises(
     claim: &Claim,
     effective_grade: SealGrade,
     effective_grades: &BTreeMap<String, SealGrade>,
+    method_name_matches: Option<&BTreeMap<String, String>>,
 ) -> Vec<LimitingPremise> {
     if effective_grade == claim.grade {
         return Vec::new();
@@ -397,7 +423,12 @@ fn limiting_premises(
             if *dependency_grade < claim.grade {
                 premises.insert(LimitingPremise {
                     kind: "dependency".to_string(),
-                    name: dependency.clone(),
+                    name: method_name_matches
+                        .and_then(|matches| matches.get(dependency))
+                        .map(|matched_name| {
+                            format!("matched `{matched_name}` to `{dependency}` by method name")
+                        })
+                        .unwrap_or_else(|| dependency.clone()),
                     grade: *dependency_grade,
                 });
             }
@@ -524,7 +555,7 @@ pub fn create_claimbook(
             .map(String::as_str);
         let stale_lean_metadata = entry.is_some_and(|entry| {
             entry.z3_check_result == status::Z3_LEAN_VERIFIED
-                && !proof_cert::lean_certificate_metadata_is_current(entry)
+                && !proof_cert::lean_translator_metadata_is_current(entry)
         });
         let (freshness, freshness_reason) = if integrity == CertificateIntegrity::Mismatch {
             (
@@ -623,8 +654,8 @@ pub fn create_claimbook(
         claims.insert((*name).to_string(), claim);
     }
 
-    resolve_claim_dependencies(&mut claims);
-    apply_effective_grades(&mut claims);
+    let method_name_matches = resolve_claim_dependencies(&mut claims);
+    apply_effective_grades(&mut claims, &method_name_matches);
 
     let mut by_effective_grade = SealGrade::all()
         .into_iter()
@@ -983,7 +1014,8 @@ mod tests {
             .into_iter()
             .map(|claim| (claim.atom.clone(), claim))
             .collect();
-        apply_effective_grades(&mut claims);
+        let method_name_matches = resolve_claim_dependencies(&mut claims);
+        apply_effective_grades(&mut claims, &method_name_matches);
         claims
     }
 
@@ -1138,6 +1170,56 @@ mod tests {
         assert!(changed.claims[0]
             .reason
             .starts_with("source content differs from its certificate"));
+    }
+
+    #[test]
+    fn rejected_lean_audit_is_fresh_and_distinct_from_translator_staleness() {
+        let source = source_atom("sample");
+        let mut current_audit_rejected = stale_lean_certificate(&source);
+        let current_metadata = lean_atom(Some("rejected"), Some(vec!["propext"]));
+        current_audit_rejected.atoms[0].translator_version =
+            verification::LEAN_TRANSLATOR_VERSION.to_string();
+        current_audit_rejected.atoms[0].bridge_lemma_hash =
+            verification::LEAN_BRIDGE_LEMMA_HASH.to_string();
+        current_audit_rejected.atoms[0].lean_result_metadata =
+            current_metadata.lean_result_metadata;
+        proof_cert::refresh_certificate_integrity(&mut current_audit_rejected);
+        let atoms = [&source];
+
+        for allow_lean_verified in [false, true] {
+            let report = create_claimbook(
+                "sample.mm",
+                "sample.proof.json",
+                Some(&current_audit_rejected),
+                &atoms,
+                allow_lean_verified,
+            );
+            let claim = &report.claims[0];
+            assert_eq!(claim.freshness, Freshness::Fresh);
+            assert_eq!(claim.grade, SealGrade::G0);
+            assert!(claim.reason.contains("axiom audit"), "{}", claim.reason);
+            assert!(!claim.reason.contains("translator"), "{}", claim.reason);
+        }
+
+        let mut stale_translator_audit_rejected = current_audit_rejected;
+        stale_translator_audit_rejected.atoms[0].translator_version = "old-translator".to_string();
+        proof_cert::refresh_certificate_integrity(&mut stale_translator_audit_rejected);
+
+        for allow_lean_verified in [false, true] {
+            let report = create_claimbook(
+                "sample.mm",
+                "sample.proof.json",
+                Some(&stale_translator_audit_rejected),
+                &atoms,
+                allow_lean_verified,
+            );
+            let claim = &report.claims[0];
+            assert_eq!(claim.freshness, Freshness::Drifted);
+            assert_eq!(
+                claim.reason,
+                "Lean translator metadata is stale; regenerate the Lean certificate"
+            );
+        }
     }
 
     #[test]
@@ -1334,7 +1416,8 @@ mod tests {
         let caller = source_atom("caller");
         let mut point_get = source_atom("Point::get");
         point_get.trust_level = TrustLevel::Trusted;
-        let atoms = [&caller, &point_get];
+        let outer = source_atom("outer");
+        let atoms = [&caller, &point_get, &outer];
         let results = std::collections::HashMap::from([
             (
                 caller.name.clone(),
@@ -1342,6 +1425,10 @@ mod tests {
             ),
             (
                 point_get.name.clone(),
+                (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+            ),
+            (
+                outer.name.clone(),
                 (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
             ),
         ]);
@@ -1359,6 +1446,11 @@ mod tests {
             .find(|entry| entry.name == "caller")
             .expect("caller certificate")
             .dependencies = vec!["get".to_string()];
+        cert.atoms
+            .iter_mut()
+            .find(|entry| entry.name == "outer")
+            .expect("outer certificate")
+            .dependencies = vec!["caller".to_string()];
         proof_cert::refresh_certificate_integrity(&mut cert);
 
         let report = create_claimbook("sample.mm", "sample.proof.json", Some(&cert), &atoms, false);
@@ -1369,14 +1461,21 @@ mod tests {
             .expect("caller claim");
         assert_eq!(caller_claim.dependencies, vec!["Point::get".to_string()]);
         assert_eq!(caller_claim.effective_grade, SealGrade::G1);
+        assert!(!caller_claim.effective_grade_complete);
+        assert_eq!(caller_claim.limiting_premises.len(), 1);
+        assert_eq!(caller_claim.limiting_premises[0].kind, "dependency");
         assert_eq!(
-            caller_claim.limiting_premises,
-            vec![LimitingPremise {
-                kind: "dependency".to_string(),
-                name: "Point::get".to_string(),
-                grade: SealGrade::G1,
-            }]
+            caller_claim.limiting_premises[0].name,
+            "matched `get` to `Point::get` by method name"
         );
+        assert_eq!(caller_claim.limiting_premises[0].grade, SealGrade::G1);
+        let outer_claim = report
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "outer")
+            .expect("outer claim");
+        assert_eq!(outer_claim.effective_grade, SealGrade::G1);
+        assert!(!outer_claim.effective_grade_complete);
 
         let mut circle_get = source_atom("Circle::get");
         circle_get.trust_level = TrustLevel::Trusted;
@@ -1441,11 +1540,13 @@ mod tests {
                 claim("Point::get", SealGrade::G1, Freshness::Fresh, &[], &[]),
             ),
         ]);
-        resolve_claim_dependencies(&mut exact_name_claims);
+        let exact_method_name_matches = resolve_claim_dependencies(&mut exact_name_claims);
+        apply_effective_grades(&mut exact_name_claims, &exact_method_name_matches);
         assert_eq!(
             exact_name_claims["caller"].dependencies,
             vec!["get".to_string()]
         );
+        assert!(exact_name_claims["caller"].effective_grade_complete);
     }
 
     #[test]

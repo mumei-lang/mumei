@@ -13,6 +13,8 @@ mumei claims src/main.mm --require-grade G1
 
 The default format is `both`, writing `claimbook.json` and `CLAIMBOOK.md` in the current directory. `--format` accepts `json`, `md`, or `both`; `--out-dir` selects the output directory. The default certificate path is the same path used by `mumei verify --proof-cert`. If that derived path is absent, every current atom is `uncertified`; an explicitly supplied but missing `--cert` path is an input error. The command prints a short grade and freshness summary.
 
+`mumei claims` does not write the resolver cache, though manifest dependencies that have not been fetched yet may still be fetched into the dependency store.
+
 ## Seal Grade
 
 | Grade | Label | Meaning |
@@ -38,7 +40,7 @@ An integrity mismatch marks every claim as drifted. An integrity mismatch from a
 
 The base grade is the own grade for fresh evidence and G0 otherwise. If source or certificate assumed clauses are present, the base grade is capped at G1. The effective grade is the minimum of that base grade and the effective grades of dependencies present in the Claim Book. Grades are lowered by monotone fixpoint iteration, so mutually recursive dependencies settle at their minimum grade.
 
-- A dependency resolves to an exact claim name first; otherwise a bare method name resolves only when exactly one claim ends in `::<name>`, while missing or ambiguous names remain unresolved.
+- A dependency resolves to an exact claim name first; otherwise a bare method name resolves only when exactly one claim ends in `::<name>`; these suffix matches propagate grade but mark completeness false because the match may be an imported free function, and their limiting premise identifies the method-name match.
 - `assumed_clauses` is the sorted, deduplicated union of certificate values and source clauses declared with `assume` mode, rendered as `requires: ...` or `ensures: ...`.
 - `unresolved_dependencies` lists only direct missing dependencies, and `effective_grade_complete` is false when any transitively reachable resolved dependency has unresolved dependencies.
 
