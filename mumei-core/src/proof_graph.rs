@@ -317,7 +317,7 @@ enum SiblingLookup {
     /// The certificate does not list the atom (or belongs to another file).
     NotListed,
     /// The certificate lists the atom; `true` when its entry is fresh and
-    /// proven under the current acceptance policy.
+    /// accepted under the current policy.
     Listed(bool),
 }
 
@@ -342,11 +342,11 @@ fn lookup_in_certificate(
         ..atom.clone()
     };
     let results = proof_cert::verify_certificate(cert, &[&certified_atom], allow_lean_verified);
-    SiblingLookup::Listed(
-        results
-            .iter()
-            .any(|(name, status)| name == &certified_atom.name && status == "proven"),
-    )
+    SiblingLookup::Listed(results.iter().any(|(name, status)| {
+        name == &certified_atom.name
+            && (status == proof_cert::status::CERTIFICATE_PROVEN
+                || status == proof_cert::status::CERTIFICATE_TRUSTED)
+    }))
 }
 
 /// Fill in `verification_status` for atoms the current run did not verify

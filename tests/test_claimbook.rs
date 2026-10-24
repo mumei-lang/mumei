@@ -103,8 +103,8 @@ fn certified_atoms_have_grades_freshness_and_deterministic_json() {
         .iter()
         .find(|atom| atom.name == "trusted_value")
         .expect("trusted fixture certificate entry");
-    assert_eq!(trusted_cert.status, status::VERIFIED);
-    assert_eq!(trusted_cert.z3_check_result, status::Z3_UNSAT);
+    assert_eq!(trusted_cert.status, status::TRUSTED);
+    assert_eq!(trusted_cert.z3_check_result, status::Z3_SKIPPED);
 
     let out_dir = dir.join("report");
     let output_dir_arg = out_dir.to_string_lossy().into_owned();
@@ -130,6 +130,7 @@ fn certified_atoms_have_grades_freshness_and_deterministic_json() {
     );
     assert_eq!(atom(&report, "verified_value")["freshness"], "fresh");
     assert_eq!(atom(&report, "trusted_value")["grade"], "G1");
+    assert_eq!(atom(&report, "trusted_value")["freshness"], "fresh");
     assert_eq!(atom(&report, "trusted_value")["evidence_kind"], "trusted");
     assert_eq!(
         atom(&report, "trusted_value")["reason"],

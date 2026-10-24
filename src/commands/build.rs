@@ -894,9 +894,24 @@ pub(crate) fn cmd_build(
         let mut cert_results = escalation_cert_results;
         for atom_ref in &cert_atoms {
             if module_env.is_verified(&atom_ref.name) {
-                cert_results
-                    .entry(atom_ref.name.clone())
-                    .or_insert_with(|| ("unsat".to_string(), "verified".to_string()));
+                if atom_ref.trust_level == parser::TrustLevel::Trusted {
+                    cert_results.insert(
+                        atom_ref.name.clone(),
+                        (
+                            proof_cert::status::Z3_SKIPPED.to_string(),
+                            proof_cert::status::TRUSTED.to_string(),
+                        ),
+                    );
+                } else {
+                    cert_results
+                        .entry(atom_ref.name.clone())
+                        .or_insert_with(|| {
+                            (
+                                proof_cert::status::Z3_UNSAT.to_string(),
+                                proof_cert::status::VERIFIED.to_string(),
+                            )
+                        });
+                }
             }
         }
 

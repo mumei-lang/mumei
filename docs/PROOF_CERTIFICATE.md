@@ -180,7 +180,7 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
 |---|---|---|
 | `name` | `String` | Atom name |
 | `content_hash` | `String` | SHA-256 hash of the atom's proof-relevant source. Algorithm selected by top-level `version`: `"1.0"` = name + `requires` + `ensures` + body (legacy); `"1.1"` = content-hash v2 — additionally type params / `where` bounds, every parameter (name, type, `&`/`&mut`, HOF contract), return type, `forall` constraints, `invariant`, consumed params, resources, `async`, trust level, `max_unroll`, effects, effect pre/post and `spec_metadata` (e.g. `semantics: bitvec`). Excluded because they are not proof obligations: `span`, `trace_id`, and the load-attribution keys `spec_metadata.source_file` / `spec_metadata.import_alias`. Consumers (mumei-lean, mumei-agent) treat it as opaque and copy it verbatim |
-| `status` | `String` | Verification result: `"proven"`, `"failed"`, or `"skipped"` |
+| `status` | `String` | Per-atom state: `"verified"`, `"trusted"`, `"failed"`, `"skipped"`, `"escalation_candidate"`, or `"unknown"`. A trusted entry records `z3_check_result: "skipped"` because its body was not checked. |
 | `proof_hash` | `String` | Dependency-aware hash from `compute_proof_hash()` — includes transitive callee signatures |
 | `dependencies` | `Vec<String>` | Direct callee atom names from `ModuleEnv.dependency_graph` |
 | `effects` | `Vec<String>` | Declared effect names |

@@ -56,6 +56,7 @@ pub(crate) fn cmd_verify_cert(
     let results = proof_cert::verify_certificate(&cert, &atom_refs, allow_lean_verified);
 
     let mut proven = 0;
+    let mut trusted = 0;
     let mut changed = 0;
     let mut unproven = 0;
     let mut axiom_rejected = 0;
@@ -63,19 +64,23 @@ pub(crate) fn cmd_verify_cert(
 
     for (name, status) in &results {
         let icon = match status.as_str() {
-            "proven" => {
+            proof_cert::status::CERTIFICATE_PROVEN => {
                 proven += 1;
                 "✅"
             }
-            "changed" => {
+            proof_cert::status::CERTIFICATE_TRUSTED => {
+                trusted += 1;
+                "🛡️"
+            }
+            proof_cert::status::CERTIFICATE_CHANGED => {
                 changed += 1;
                 "⚠️"
             }
-            "unproven" => {
+            proof_cert::status::CERTIFICATE_UNPROVEN => {
                 unproven += 1;
                 "❓"
             }
-            "axiom_rejected" => {
+            proof_cert::status::CERTIFICATE_AXIOM_REJECTED => {
                 axiom_rejected += 1;
                 "❌"
             }
@@ -84,7 +89,11 @@ pub(crate) fn cmd_verify_cert(
                 "❌"
             }
         };
-        println!("  {} {}: {}", icon, name, status);
+        if status == proof_cert::status::CERTIFICATE_TRUSTED {
+            println!("  {} {}: trusted (body not checked)", icon, name);
+        } else {
+            println!("  {} {}: {}", icon, name, status);
+        }
 
         // P5-A: Print extended fields for each atom certificate
         if let Some(ac) = cert.atoms.iter().find(|a| a.name == *name) {
@@ -188,8 +197,8 @@ pub(crate) fn cmd_verify_cert(
     }
     println!("All verified: {}", cert.all_verified);
     println!(
-        "Results: {} proven, {} changed, {} unproven, {} axiom_rejected, {} missing",
-        proven, changed, unproven, axiom_rejected, missing
+        "Results: {} proven, {} trusted (body not checked), {} changed, {} unproven, {} axiom_rejected, {} missing",
+        proven, trusted, changed, unproven, axiom_rejected, missing
     );
 
     if changed > 0 {

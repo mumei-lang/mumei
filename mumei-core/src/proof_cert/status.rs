@@ -56,6 +56,8 @@ pub const CERTIFICATE_CHANGED: &str = "changed";
 pub const CERTIFICATE_STALE_TRANSLATOR: &str = "stale_translator";
 /// `verify_certificate` result: certificate evidence matches current source.
 pub const CERTIFICATE_PROVEN: &str = "proven";
+/// `verify_certificate` result: source matches, but its body was not checked.
+pub const CERTIFICATE_TRUSTED: &str = "trusted";
 /// `verify_certificate` result: current source matches, but evidence did not prove it.
 pub const CERTIFICATE_UNPROVEN: &str = "unproven";
 /// `verify_certificate` result: Lean axiom audit rejected the evidence.

@@ -80,6 +80,22 @@ artifact to stdout as a second JSON document ahead of the summary. A directory
 run with `--json` prints one payload per file followed by the text summary;
 parse it line-oriented or verify files individually.
 
+## `mumei verify-cert`
+
+`mumei verify-cert <certificate> <input>` checks certificate entries against
+the current source. Trusted entries remain distinct from solver-proven entries
+and do not fail `--strict`.
+
+| Result | Meaning |
+|---|---|
+| `proven` | The source matches and the certificate records solver-proven evidence. |
+| `trusted` | The source matches and the certificate records a trusted atom; its body was not checked. |
+| `changed` | The source content hash differs from the certificate. |
+| `stale_translator` | Lean translator metadata does not match the current version. |
+| `unproven` | The source matches, but the certificate does not establish the contract. |
+| `axiom_rejected` | The Lean axiom audit rejected the certificate evidence. |
+| `missing` | The source contains no matching certificate entry. |
+
 ### SARIF output
 
 `mumei verify <file-or-directory> --emit sarif` writes a SARIF 2.1.0 log to

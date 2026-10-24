@@ -224,6 +224,7 @@ pub fn freshness_from_verification_status(value: &str) -> Freshness {
     match value {
         status::CERTIFICATE_CHANGED | status::CERTIFICATE_STALE_TRANSLATOR => Freshness::Drifted,
         status::CERTIFICATE_PROVEN
+        | status::CERTIFICATE_TRUSTED
         | status::CERTIFICATE_UNPROVEN
         | status::CERTIFICATE_AXIOM_REJECTED => Freshness::Fresh,
         _ => Freshness::Uncertified,
@@ -962,6 +963,7 @@ mod tests {
             (status::CERTIFICATE_CHANGED, Freshness::Drifted),
             (status::CERTIFICATE_STALE_TRANSLATOR, Freshness::Drifted),
             (status::CERTIFICATE_PROVEN, Freshness::Fresh),
+            (status::CERTIFICATE_TRUSTED, Freshness::Fresh),
             (status::CERTIFICATE_UNPROVEN, Freshness::Fresh),
             (status::CERTIFICATE_AXIOM_REJECTED, Freshness::Fresh),
             (status::CERTIFICATE_MISSING, Freshness::Uncertified),

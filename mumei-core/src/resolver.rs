@@ -602,6 +602,16 @@ atom caller(n: i64) -> i64
         assert!(check_cert_for_atom(&results, "my_atom"));
     }
 
+    #[test]
+    fn test_check_cert_for_atom_trusted() {
+        let mut results = HashMap::new();
+        results.insert(
+            "my_atom".to_string(),
+            proof_cert::status::CERTIFICATE_TRUSTED.to_string(),
+        );
+        assert!(check_cert_for_atom(&results, "my_atom"));
+    }
+
     /// P5-C: check_cert_for_atom returns false for "changed" status
     #[test]
     fn test_check_cert_for_atom_changed() {
