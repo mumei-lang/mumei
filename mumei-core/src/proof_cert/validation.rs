@@ -244,7 +244,7 @@ pub fn lean_certificate_metadata_is_current(atom: &AtomCertificate) -> bool {
         )
 }
 
-fn lean_translator_metadata_is_current(atom: &AtomCertificate) -> bool {
+pub fn lean_translator_metadata_is_current(atom: &AtomCertificate) -> bool {
     if atom.translator_version != verification::LEAN_TRANSLATOR_VERSION
         || atom.bridge_lemma_hash != verification::LEAN_BRIDGE_LEMMA_HASH
     {

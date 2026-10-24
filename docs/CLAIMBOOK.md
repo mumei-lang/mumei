@@ -13,6 +13,8 @@ mumei claims src/main.mm --require-grade G1
 
 The default format is `both`, writing `claimbook.json` and `CLAIMBOOK.md` in the current directory. `--format` accepts `json`, `md`, or `both`; `--out-dir` selects the output directory. The default certificate path is the same path used by `mumei verify --proof-cert`. If that derived path is absent, every current atom is `uncertified`; an explicitly supplied but missing `--cert` path is an input error. The command prints a short grade and freshness summary.
 
+`mumei claims` does not write the resolver cache, though manifest dependencies that have not been fetched yet may still be fetched into the dependency store.
+
 ## Seal Grade
 
 | Grade | Label | Meaning |
