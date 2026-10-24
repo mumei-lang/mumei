@@ -19,20 +19,26 @@ env:
 
 jobs:
   # Fail fast when a v* tag points at a commit whose version bump never
-  # landed — otherwise the release would publish binaries that report an
-  # older `mumei --version` than the tag name.
+  # landed or that is not on main — otherwise the release would publish
+  # binaries that report an older `mumei --version` than the tag name, or
+  # leave main trailing the published release.
   check-tag-version:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Verify tag matches Cargo.toml version
+        with:
+          fetch-depth: 0
+      - name: Verify tag matches Cargo.toml version and is on main
         env:
+          REF: ${{ github.ref }}
           TAG: ${{ github.ref_name }}
         run: |
-          case "${TAG}" in
-            v*) ;;
-            *) echo "Not a version tag (${TAG}); skipping."; exit 0 ;;
+          # Only real tags are gated; workflow_dispatch dry runs from
+          # v*-named branches must not be treated as tags.
+          case "${REF}" in
+            refs/tags/v*) ;;
+            *) echo "Not a version tag (${REF}); skipping."; exit 0 ;;
           esac
           expected="${TAG#v}"
           actual=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "(.*)"/\1/')
@@ -40,7 +46,11 @@ jobs:
             echo "::error::Tag ${TAG} points at a commit whose Cargo.toml version is ${actual}. Land the version bump and sync it to main before tagging."
             exit 1
           fi
-          echo "Tag ${TAG} matches Cargo.toml version ${actual}."
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::Tag ${TAG} commit is not on main. Release tags must be cut on main so main never trails a published release."
+            exit 1
+          fi
+          echo "Tag ${TAG} matches Cargo.toml version ${actual} and is on main."
 
   build:
     needs: check-tag-version
@@ -726,6 +736,10 @@ jobs:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           if [ -z "${HOMEBREW_TAP_TOKEN}" ]; then
+            if [ "${GITHUB_REPOSITORY}" = "mumei-lang/mumei" ]; then
+              echo "::error::HOMEBREW_TAP_TOKEN is not set on mumei-lang/mumei; restore the secret or the tap will silently stay stale."
+              exit 1
+            fi
             echo "::warning::HOMEBREW_TAP_TOKEN is not set; skipping Homebrew tap update. GitHub Release creation is already complete."
             echo "should_update=false" >> "$GITHUB_OUTPUT"
             exit 0
