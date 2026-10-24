@@ -465,6 +465,102 @@ fn generic_method_candidate_is_not_ambiguous() {
 }
 
 #[test]
+fn generic_implementation_claim_is_included_in_grade_checks() {
+    let dir = TestDir::new("generic-grade");
+    std::fs::write(
+        dir.path().join("generic.charter.mm"),
+        "trusted atom identity<T>(x: i64) -> i64 requires: true; ensures: result == x; body: 0;\n\
+         trusted atom get<T>(self: Box, x: i64) -> i64 requires: true; ensures: result == x; body: 0;",
+    )
+    .expect("write generic charter");
+    std::fs::write(
+        dir.path().join("impl.mm"),
+        "struct Box { value: i64 }\n\
+         trusted atom identity<T>(x: i64) -> i64 requires: true; ensures: result == x; body: x;\n\
+         impl Box { atom get<T>(self: Box, x: i64) -> i64 requires: true; ensures: result == x; body: x; }",
+    )
+    .expect("write generic implementation");
+    lock_charter(dir.path(), "generic.charter.mm");
+    certify(dir.path(), "impl.mm");
+
+    let (g0_check, g0_report) = check_with_cert(
+        dir.path(),
+        &[
+            "charter",
+            "check",
+            "impl.mm",
+            "--charter",
+            "generic.charter.mm",
+            "--cert",
+            "impl.proof.json",
+            "--require-grade",
+            "G0",
+            "--json",
+        ],
+    );
+    assert_eq!(g0_check.status.code(), Some(0));
+    let g0_atoms = g0_report["atoms"]
+        .as_array()
+        .expect("generic charter atom results");
+    assert_eq!(g0_atoms.len(), 2);
+    for atom in g0_atoms {
+        let grade = atom["effective_grade"]
+            .as_str()
+            .expect("generic implementation claim has an effective grade");
+        assert_eq!(atom["status"], "ok");
+        assert_ne!(atom["detail"], "no claim for implementation atom");
+        assert!(atom["effective_grade_complete"].is_boolean());
+        println!(
+            "observed generic implementation effective grade for {}: {grade}",
+            atom["name"]
+        );
+    }
+
+    let (default_check, default_report) = check_with_cert(
+        dir.path(),
+        &[
+            "charter",
+            "check",
+            "impl.mm",
+            "--charter",
+            "generic.charter.mm",
+            "--cert",
+            "impl.proof.json",
+            "--json",
+        ],
+    );
+    let default_atoms = default_report["atoms"]
+        .as_array()
+        .expect("generic charter atom results");
+    let mut all_machine_sealed = true;
+    for g0_atom in g0_atoms {
+        let name = g0_atom["name"].as_str().expect("atom name");
+        let grade = g0_atom["effective_grade"]
+            .as_str()
+            .expect("generic implementation grade");
+        let default_atom = default_atoms
+            .iter()
+            .find(|atom| atom["name"] == name)
+            .expect("matching default-grade atom result");
+        assert_eq!(default_atom["effective_grade"], grade);
+        if matches!(grade, "G4" | "G5") {
+            assert_eq!(default_atom["status"], "ok");
+        } else {
+            all_machine_sealed = false;
+            assert_eq!(default_atom["status"], "grade_below");
+            assert_eq!(
+                default_atom["detail"],
+                format!("effective grade {grade} is below the required G4")
+            );
+        }
+    }
+    assert_eq!(
+        default_check.status.code(),
+        Some(if all_machine_sealed { 0 } else { 1 })
+    );
+}
+
+#[test]
 fn certified_g4_atom_passes_and_reports_grade_fields() {
     let dir = TestDir::new("grade-g4");
     std::fs::write(

@@ -3,6 +3,7 @@ use crate::pipeline::try_load_and_prepare_with_full_options_and_persistence;
 use mumei_core::claimbook::{create_claimbook, SealGrade};
 use mumei_core::parser::Item;
 use mumei_core::{charter, manifest, parser, proof_cert};
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -133,6 +134,34 @@ fn cmd_check(
             }
         }
         atoms.extend(qualified_methods.iter());
+        let mut atom_names: HashSet<String> = atoms.iter().map(|atom| atom.name.clone()).collect();
+        let mut generic_atoms = Vec::new();
+        let mut generic_qualified_methods = Vec::new();
+        for item in &generic_implementation {
+            match item {
+                Item::Atom(atom)
+                    if !atom.type_params.is_empty() && atom_names.insert(atom.name.clone()) =>
+                {
+                    generic_atoms.push(atom);
+                }
+                Item::ImplBlock(block) => {
+                    for method in &block.methods {
+                        if method.type_params.is_empty() {
+                            continue;
+                        }
+                        let qualified_name = format!("{}::{}", block.struct_name, method.name);
+                        if atom_names.insert(qualified_name.clone()) {
+                            let mut qualified = method.clone();
+                            qualified.name = qualified_name;
+                            generic_qualified_methods.push(qualified);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        atoms.extend(generic_atoms);
+        atoms.extend(generic_qualified_methods.iter());
         let book = create_claimbook(
             input,
             cert_path.display().to_string(),
