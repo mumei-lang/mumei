@@ -173,10 +173,15 @@ pub fn own_grade(
     }
 
     let reason = if atom.z3_check_result == status::Z3_LEAN_VERIFIED {
-        if !allow_lean_verified {
-            "Lean evidence requires --allow-lean-verified"
-        } else if !proof_cert::lean_certificate_metadata_is_current(atom) {
+        if !proof_cert::lean_translator_metadata_is_current(atom) {
             "Lean metadata is stale or incomplete"
+        } else if matches!(
+            proof_cert::lean_axiom_audit(atom),
+            proof_cert::LeanAxiomAudit::Rejected { .. } | proof_cert::LeanAxiomAudit::Error
+        ) {
+            "Lean axiom audit did not pass"
+        } else if !allow_lean_verified {
+            "Lean evidence requires --allow-lean-verified"
         } else {
             "Lean axiom audit did not pass"
         }
@@ -264,7 +269,7 @@ pub fn create_claimbook(
             .map(String::as_str);
         let stale_lean_metadata = entry.is_some_and(|entry| {
             entry.z3_check_result == status::Z3_LEAN_VERIFIED
-                && !proof_cert::lean_certificate_metadata_is_current(entry)
+                && !proof_cert::lean_translator_metadata_is_current(entry)
         });
         let (freshness, freshness_reason) = if integrity == CertificateIntegrity::Mismatch {
             (
@@ -766,6 +771,56 @@ mod tests {
         assert!(changed.claims[0]
             .reason
             .starts_with("source content differs from its certificate"));
+    }
+
+    #[test]
+    fn rejected_lean_audit_is_fresh_and_distinct_from_translator_staleness() {
+        let source = source_atom("sample");
+        let mut current_audit_rejected = stale_lean_certificate(&source);
+        let current_metadata = lean_atom(Some("rejected"), Some(vec!["propext"]));
+        current_audit_rejected.atoms[0].translator_version =
+            verification::LEAN_TRANSLATOR_VERSION.to_string();
+        current_audit_rejected.atoms[0].bridge_lemma_hash =
+            verification::LEAN_BRIDGE_LEMMA_HASH.to_string();
+        current_audit_rejected.atoms[0].lean_result_metadata =
+            current_metadata.lean_result_metadata;
+        proof_cert::refresh_certificate_integrity(&mut current_audit_rejected);
+        let atoms = [&source];
+
+        for allow_lean_verified in [false, true] {
+            let report = create_claimbook(
+                "sample.mm",
+                "sample.proof.json",
+                Some(&current_audit_rejected),
+                &atoms,
+                allow_lean_verified,
+            );
+            let claim = &report.claims[0];
+            assert_eq!(claim.freshness, Freshness::Fresh);
+            assert_eq!(claim.grade, SealGrade::G0);
+            assert!(claim.reason.contains("axiom audit"), "{}", claim.reason);
+            assert!(!claim.reason.contains("translator"), "{}", claim.reason);
+        }
+
+        let mut stale_translator_audit_rejected = current_audit_rejected;
+        stale_translator_audit_rejected.atoms[0].translator_version = "old-translator".to_string();
+        proof_cert::refresh_certificate_integrity(&mut stale_translator_audit_rejected);
+
+        for allow_lean_verified in [false, true] {
+            let report = create_claimbook(
+                "sample.mm",
+                "sample.proof.json",
+                Some(&stale_translator_audit_rejected),
+                &atoms,
+                allow_lean_verified,
+            );
+            let claim = &report.claims[0];
+            assert_eq!(claim.freshness, Freshness::Drifted);
+            assert_eq!(
+                claim.reason,
+                "Lean translator metadata is stale; regenerate the Lean certificate"
+            );
+        }
     }
 
     #[test]
