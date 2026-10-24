@@ -99,6 +99,7 @@ fn main() {
             &out_dir,
             require_grade.as_deref(),
         ),
+        Some(Command::Charter { command }) => commands::charter::cmd_charter(command),
         Some(Command::Run {
             input,
             emit,

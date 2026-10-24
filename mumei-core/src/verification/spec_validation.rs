@@ -126,7 +126,11 @@ pub fn check_spec_satisfiability(
     check_spec_satisfiability_with_property_based(atom, module_env, None, false, false)
 }
 
-fn check_with_deadline(solver: &Solver<'_>, ctx: &Context, timeout_ms: u64) -> SatResult {
+pub(crate) fn check_with_deadline(
+    solver: &Solver<'_>,
+    ctx: &Context,
+    timeout_ms: u64,
+) -> SatResult {
     let query = crate::verification::phase_artifacts::capture(solver);
     let handle = ctx.handle();
     let done = Mutex::new(false);
@@ -496,7 +500,7 @@ pub fn check_spec_satisfiability_with_timeout(
     })
 }
 
-fn validation_ctx<'a>(
+pub(crate) fn validation_ctx<'a>(
     ctx: &'a super::Context,
     module_env: &'a ModuleEnv,
     atom: &'a Atom,
@@ -540,7 +544,7 @@ fn validation_ctx<'a>(
     }
 }
 
-fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
+pub(crate) fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
     let ctx = vc.ctx;
     let module_env = vc.module_env;
     let ieee754_f64 = vc.ieee754_f64;
@@ -604,7 +608,7 @@ fn seed_env<'a>(vc: &VCtx<'a>, atom: &Atom) -> Env<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ClauseLoweringOutcome {
+pub(crate) enum ClauseLoweringOutcome {
     Applied,
     Skipped(String),
 }
@@ -644,7 +648,7 @@ pub(crate) fn is_unsupported_clause_error(err: &impl std::fmt::Display) -> bool 
         || message.contains(crate::verification::QUANTIFIER_DEPENDENT_CALL_UNSUPPORTED)
 }
 
-fn assert_parameter_refinements<'a>(
+pub(crate) fn assert_parameter_refinements<'a>(
     vc: &VCtx<'a>,
     solver: &Solver<'a>,
     atom: &Atom,
@@ -705,7 +709,7 @@ fn normalize_foreign_boolean_literals(clause: &str) -> String {
     FALSE_RE.replace_all(&normalized, "false").into_owned()
 }
 
-fn assert_clause<'a>(
+pub(crate) fn assert_clause<'a>(
     vc: &VCtx<'a>,
     solver: &Solver<'a>,
     env: &mut Env<'a>,
@@ -763,7 +767,7 @@ fn assert_clause<'a>(
     Ok(ClauseLoweringOutcome::Applied)
 }
 
-fn assert_negated_clause<'a>(
+pub(crate) fn assert_negated_clause<'a>(
     vc: &VCtx<'a>,
     solver: &Solver<'a>,
     env: &mut Env<'a>,
