@@ -42,12 +42,24 @@ def _non_proven_atoms(cert: dict) -> list[dict[str, str]]:
     pairs = {
         (str(atom.get("name", "")), str(atom.get("z3_check_result", "")))
         for atom in atoms
-        if atom.get("z3_check_result") not in PROVEN_RESULTS
+        if atom.get("status") != "trusted"
+        and atom.get("z3_check_result") not in PROVEN_RESULTS
     }
     return [
         {"name": name, "z3_check_result": result}
         for name, result in sorted(pairs)
     ]
+
+
+def _trusted_atoms(cert: dict) -> list[str]:
+    atoms = cert.get("atoms", [])
+    if not isinstance(atoms, list):
+        raise ValueError("certificate atoms must be a list")
+    return sorted(
+        str(atom.get("name", ""))
+        for atom in atoms
+        if atom.get("status") == "trusted"
+    )
 
 
 def _baseline_modules(baseline: dict) -> dict[str, list[dict[str, str]]]:
@@ -101,6 +113,7 @@ def verify(
     failures: list[str] = []
     observed_modules: set[str] = set()
     observed_non_proven: dict[str, list[dict[str, str]]] = {}
+    observed_trusted: dict[str, list[str]] = {}
     total_atoms = 0
     proven_atoms = 0
     lean_verified_atoms = 0
@@ -123,9 +136,10 @@ def verify(
             lean_verified_atoms += sum(
                 atom.get("z3_check_result") == "lean_verified" for atom in atoms
             )
-            trusted_atoms += sum(
-                atom.get("status") == "trusted" for atom in atoms
-            )
+            trusted_names = _trusted_atoms(certificate)
+            trusted_atoms += len(trusted_names)
+            if trusted_names:
+                observed_trusted[module] = trusted_names
             if non_proven:
                 observed_non_proven[module] = non_proven
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
@@ -190,6 +204,12 @@ def verify(
                 "scripts/std_proof_baseline.json with:\n"
                 f"{_format_baseline_update(observed_baseline)}"
             )
+
+    if trusted_atoms:
+        print(f"trusted atoms (body not checked): {trusted_atoms}")
+        for module, names in sorted(observed_trusted.items()):
+            for name in names:
+                print(f"  {module}: {name}")
 
     return len(certs), len(failures), failures
 

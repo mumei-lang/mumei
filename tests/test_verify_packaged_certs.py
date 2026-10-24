@@ -126,6 +126,34 @@ def test_baseline_tolerated_failure(tmp_path: Path) -> None:
     assert result.returncode == 0
 
 
+def test_trusted_atoms_are_listed_separately_from_non_proven_atoms(
+    tmp_path: Path,
+) -> None:
+    non_proven = [{"name": "unknown", "z3_check_result": "unknown"}]
+    root, binary, baseline = _write_case(
+        tmp_path,
+        atoms=[
+            {
+                "name": "trusted_value",
+                "status": "trusted",
+                "z3_check_result": "skipped",
+            },
+            {
+                "name": "unknown",
+                "status": "failed",
+                "z3_check_result": "unknown",
+            },
+        ],
+        stub_result="fail",
+        baseline_atoms=non_proven,
+    )
+    result = _run(root, binary, baseline)
+    assert result.returncode == 0
+    assert "trusted atoms (body not checked): 1" in result.stdout
+    assert "std/example: trusted_value" in result.stdout
+    assert "new non-proven atoms" not in result.stderr
+
+
 def test_new_unproven_atom_fails(tmp_path: Path) -> None:
     root, binary, baseline = _write_case(
         tmp_path,
