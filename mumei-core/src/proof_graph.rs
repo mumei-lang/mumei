@@ -60,7 +60,7 @@ pub struct ProofGraphNode {
     pub dependents: Vec<String>,
     pub trust_boundaries: Vec<TrustBoundaryEntry>,
     /// Per-atom verification status as recorded by `mumei verify`
-    /// (`verified`, `failed`, `unverifiable`, `escalation_candidate`, ...).
+    /// (`verified`, `trusted`, `failed`, `unverifiable`, `escalation_candidate`, ...).
     pub verification_status: Option<String>,
     /// `green` / `yellow` / `red` — see [`classify_health`].
     pub health: String,
