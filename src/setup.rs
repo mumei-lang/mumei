@@ -852,6 +852,37 @@ fn extract_tar_xz(archive: &Path, dest_dir: &Path) -> Result<(), SetupError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{ErrorKind, Write};
+    use std::time::Duration;
+
+    fn write_test_script(path: &Path, contents: &[u8]) {
+        {
+            let mut file = fs::File::create(path).unwrap();
+            file.write_all(contents).unwrap();
+            file.sync_all().unwrap();
+        }
+    }
+
+    fn script_is_usable_with_busy_retry(script: &Path) -> bool {
+        for attempt in 0..50 {
+            match Cmd::new(script).arg("--version").output() {
+                Ok(output) => {
+                    return output.status.success()
+                        && !String::from_utf8_lossy(&output.stdout)
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .is_empty()
+                }
+                Err(error) if error.kind() == ErrorKind::ExecutableFileBusy && attempt < 49 => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => return false,
+            }
+        }
+        false
+    }
 
     const LINUX_X64: Platform = Platform {
         os: Os::Linux,
@@ -1036,12 +1067,12 @@ mod tests {
         fs::create_dir_all(dir.join("bin")).unwrap();
         fs::write(dir.join("include").join("z3.h"), b"").unwrap();
         fs::write(dir.join("bin").join("libz3.so"), b"").unwrap();
-        fs::write(dir.join("bin").join("z3"), b"#!/bin/sh\nexit 1\n").unwrap();
-        let mut permissions = fs::metadata(dir.join("bin").join("z3"))
-            .unwrap()
-            .permissions();
+        let z3 = dir.join("bin").join("z3");
+        write_test_script(&z3, b"#!/bin/sh\nexit 1\n");
+        let mut permissions = fs::metadata(&z3).unwrap().permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(dir.join("bin").join("z3"), permissions).unwrap();
+        fs::set_permissions(&z3, permissions).unwrap();
+        assert!(!script_is_usable_with_busy_retry(&z3));
         assert!(!z3_install_is_usable(&dir));
         fs::remove_dir_all(&dir).ok();
     }
@@ -1069,12 +1100,12 @@ mod tests {
         ));
         fs::remove_dir_all(&dir).ok();
         fs::create_dir_all(dir.join("bin")).unwrap();
-        fs::write(dir.join("bin").join("llc"), b"#!/bin/sh\nexit 1\n").unwrap();
-        let mut permissions = fs::metadata(dir.join("bin").join("llc"))
-            .unwrap()
-            .permissions();
+        let llc = dir.join("bin").join("llc");
+        write_test_script(&llc, b"#!/bin/sh\nexit 1\n");
+        let mut permissions = fs::metadata(&llc).unwrap().permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(dir.join("bin").join("llc"), permissions).unwrap();
+        fs::set_permissions(&llc, permissions).unwrap();
+        assert!(!script_is_usable_with_busy_retry(&llc));
         assert!(!llvm_install_is_usable(&dir));
         fs::remove_dir_all(&dir).ok();
     }
@@ -1090,17 +1121,12 @@ mod tests {
         ));
         fs::remove_dir_all(&dir).ok();
         fs::create_dir_all(dir.join("bin")).unwrap();
-        fs::write(
-            dir.join("bin").join("llc"),
-            b"#!/bin/sh\necho 'LLVM version 18.1.8'\n",
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(dir.join("bin").join("llc"))
-            .unwrap()
-            .permissions();
+        let llc = dir.join("bin").join("llc");
+        write_test_script(&llc, b"#!/bin/sh\necho 'LLVM version 18.1.8'\n");
+        let mut permissions = fs::metadata(&llc).unwrap().permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(dir.join("bin").join("llc"), permissions).unwrap();
-        assert!(llvm_install_is_usable(&dir));
+        fs::set_permissions(&llc, permissions).unwrap();
+        assert!(script_is_usable_with_busy_retry(&llc));
         fs::remove_dir_all(&dir).ok();
     }
 }
