@@ -14,6 +14,7 @@
 | `mumei verify --proof-cert <file>` | ✅ | Generate Z3 proof certificate (`.proof.json`) |
 | `mumei verify --task-id <id> --solver-timeout <ms> --cache-scope module\|global <file>` | ✅ | Orchestration metadata and cache isolation for MCP/CI parallel verification |
 | `mumei verify-cert` | ✅ | Verify proof certificate against current source |
+| [`mumei claims <file>`](CLAIMBOOK.md) | ✅ | Write a read-only Claim Book report of atom grades and evidence freshness |
 | `mumei check <file>` | ✅ | Parse + resolve + monomorphize (no Z3) |
 | `mumei init <name>` | ✅ | Project scaffolding with `mumei.toml` + example atoms |
 | `mumei add <dep>` | ✅ | Add dependency (local path / git URL / registry name) |

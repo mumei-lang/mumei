@@ -56,6 +56,24 @@ pub fn resolve_manifest_dependencies_with_full_options(
     strict_imports: bool,
     allow_lean_verified: bool,
 ) -> MumeiResult<()> {
+    resolve_manifest_dependencies_with_full_options_and_persistence(
+        manifest,
+        project_dir,
+        module_env,
+        strict_imports,
+        allow_lean_verified,
+        true,
+    )
+}
+
+pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
+    manifest: &crate::manifest::Manifest,
+    project_dir: &Path,
+    module_env: &mut ModuleEnv,
+    strict_imports: bool,
+    allow_lean_verified: bool,
+    persist_cache: bool,
+) -> MumeiResult<()> {
     for (dep_name, dep) in &manifest.dependencies {
         // パス依存
         if let Some(dep_path) = dep.as_path() {
@@ -83,7 +101,9 @@ pub fn resolve_manifest_dependencies_with_full_options(
                 ctx.allow_lean_verified = allow_lean_verified;
                 ctx.strict_imports = strict_imports;
                 resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
-                save_cache(&cache_path, &cache);
+                if persist_cache {
+                    save_cache(&cache_path, &cache);
+                }
                 register_imported_items_with_source(
                     &items,
                     Some(dep_name),
@@ -197,7 +217,9 @@ pub fn resolve_manifest_dependencies_with_full_options(
                 ctx.allow_lean_verified = allow_lean_verified;
                 ctx.strict_imports = strict_imports;
                 resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
-                save_cache(&cache_path, &cache);
+                if persist_cache {
+                    save_cache(&cache_path, &cache);
+                }
                 register_imported_items_with_source(
                     &items,
                     Some(dep_name),
@@ -271,7 +293,9 @@ pub fn resolve_manifest_dependencies_with_full_options(
                         &mut cache,
                         module_env,
                     )?;
-                    save_cache(&cache_path, &cache);
+                    if persist_cache {
+                        save_cache(&cache_path, &cache);
+                    }
                     register_imported_items_with_source(
                         &items,
                         Some(dep_name),

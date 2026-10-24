@@ -50,6 +50,19 @@ pub const VERIFICATION_STATUSES: [&str; 6] = [
     UNKNOWN,
 ];
 
+/// `verify_certificate` result: source content differs from the certificate.
+pub const CERTIFICATE_CHANGED: &str = "changed";
+/// `verify_certificate` result: Lean translator metadata is no longer current.
+pub const CERTIFICATE_STALE_TRANSLATOR: &str = "stale_translator";
+/// `verify_certificate` result: certificate evidence matches current source.
+pub const CERTIFICATE_PROVEN: &str = "proven";
+/// `verify_certificate` result: current source matches, but evidence did not prove it.
+pub const CERTIFICATE_UNPROVEN: &str = "unproven";
+/// `verify_certificate` result: Lean axiom audit rejected the evidence.
+pub const CERTIFICATE_AXIOM_REJECTED: &str = "axiom_rejected";
+/// `verify_certificate` result: the certificate atom is not in current source.
+pub const CERTIFICATE_MISSING: &str = "missing";
+
 /// `LeanResultMetadata.status`: the Lean bridge discharged the obligation.
 ///
 /// This is the mumei-lean-side result status (distinct from the

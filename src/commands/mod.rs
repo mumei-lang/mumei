@@ -1,6 +1,7 @@
 pub(crate) mod add;
 pub(crate) mod build;
 pub(crate) mod check;
+pub(crate) mod claims;
 pub(crate) mod doc;
 pub(crate) mod infer;
 pub(crate) mod init;

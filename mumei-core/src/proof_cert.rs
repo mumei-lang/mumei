@@ -43,10 +43,10 @@ pub use review::{generate_escalation_bundle, generate_human_review_queue};
 
 pub use validation::{
     check_certificate_hash, get_required_lowering_rules, lean_axiom_audit,
-    lean_certificate_metadata_is_current, refresh_certificate_integrity,
-    validate_certificate_translator_versions, validate_translator_version,
-    validate_translator_version_with_semantics, verify_certificate, CertificateHashCheck,
-    LeanAxiomAudit, LEAN_STANDARD_KERNEL_AXIOMS,
+    lean_certificate_metadata_is_current, lean_translator_metadata_is_current,
+    refresh_certificate_integrity, validate_certificate_translator_versions,
+    validate_translator_version, validate_translator_version_with_semantics, verify_certificate,
+    CertificateHashCheck, LeanAxiomAudit, LEAN_STANDARD_KERNEL_AXIOMS,
 };
 
 #[cfg(test)]
