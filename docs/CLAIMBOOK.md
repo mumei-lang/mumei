@@ -42,9 +42,9 @@ The base grade is the own grade for fresh evidence and G0 otherwise. If source o
 
 - A dependency resolves to an exact claim name first; otherwise a bare method name resolves only when exactly one claim ends in `::<name>`; these suffix matches propagate grade but mark completeness false because the match may be an imported free function, and their limiting premise identifies the method-name match.
 - `assumed_clauses` is the sorted, deduplicated union of certificate values and source clauses declared with `assume` mode, rendered as `requires: ...` or `ensures: ...`.
-- `unresolved_dependencies` lists only direct missing dependencies, and `effective_grade_complete` is false when any transitively reachable resolved dependency has unresolved dependencies.
+- `unresolved_dependencies` lists only direct missing dependencies, and `effective_grade_complete` is false when any transitively reachable resolved dependency has unresolved dependencies; it is also false when a method-name match is reachable.
 
-Dependencies not present in the claim set do not lower the grade. `limiting_premises` lists the freshness state, assumed clauses, and direct dependencies that lower the effective grade below the own grade. Each entry includes its kind, name, and grade; the list is empty when the effective grade equals the own grade. Markdown presents examples as `dependency b (G1); assumed_clause x > 0 (G1)`, with `-` when there are no limiting premises.
+Dependencies not present in the claim set do not lower the grade. `limiting_premises` lists the freshness state, assumed clauses, and direct dependencies that lower the effective grade below the own grade. Each entry includes its kind, name, and grade; method-name dependency entries keep the qualified claim in `name` and record the bare name in `matched_from`. The list is empty when the effective grade equals the own grade. Markdown presents examples as `dependency b (G1); assumed_clause x > 0 (G1)`, or `dependency \`Point::get\` (matched from \`get\` by method name) (G1)`, with `-` when there are no limiting premises.
 
 ## Trusted base
 

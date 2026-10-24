@@ -416,6 +416,9 @@ fn dependency_and_assumption_evidence_propagate_and_grade_gate_writes_reports() 
             "grade": "G1"
         }])
     );
+    assert!(atom(&report, "trusted_caller")["limiting_premises"][0]
+        .get("matched_from")
+        .is_none());
     assert_eq!(atom(&report, "assumed_contract")["effective_grade"], "G1");
     assert_eq!(
         atom(&report, "assumed_contract")["limiting_premises"],
@@ -518,6 +521,67 @@ fn impl_methods_use_qualified_atom_names() {
     let report = json_report(&out_dir.join("claimbook.json"));
     assert_eq!(report["claims"].as_array().expect("claims array").len(), 1);
     assert_eq!(report["claims"][0]["atom"], "Point::get");
+}
+
+#[test]
+fn method_name_dependency_keeps_qualified_premise_name() {
+    let dir = fresh_dir("method-name-premise");
+    let source = copy_fixture(&dir, "claimbook_impl.mm", "impl.mm");
+    let contents = std::fs::read_to_string(&source)
+        .expect("read fixture")
+        .replace("    atom get(", "    trusted atom get(");
+    std::fs::write(
+        &source,
+        format!(
+            "{contents}\natom caller() -> i64\n  requires: true;\n  ensures: result == 7;\n  body: 7;\n"
+        ),
+    )
+    .expect("write method dependency source");
+    let cert_path = certify(&dir, &source);
+    let mut cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&cert_path).expect("read generated certificate"))
+            .expect("parse generated certificate");
+    cert.atoms
+        .iter_mut()
+        .find(|entry| entry.name == "caller")
+        .expect("caller certificate")
+        .dependencies = vec!["get".to_string()];
+    refresh_certificate_integrity(&mut cert);
+    std::fs::write(
+        &cert_path,
+        serde_json::to_vec_pretty(&cert).expect("serialize method dependency certificate"),
+    )
+    .expect("write method dependency certificate");
+
+    let out_dir = dir.join("report");
+    let out_dir_arg = out_dir.to_string_lossy().into_owned();
+    let output = claims(
+        &dir,
+        &source,
+        &["--format", "both", "--out-dir", &out_dir_arg],
+    );
+    assert!(
+        output.status.success(),
+        "claims failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = json_report(&out_dir.join("claimbook.json"));
+    let caller = atom(&report, "caller");
+    assert_eq!(caller["dependencies"], serde_json::json!(["Point::get"]));
+    assert_eq!(
+        caller["limiting_premises"],
+        serde_json::json!([{
+            "kind": "dependency",
+            "name": "Point::get",
+            "matched_from": "get",
+            "grade": "G1"
+        }])
+    );
+    assert_eq!(caller["effective_grade_complete"], false);
+    let markdown =
+        std::fs::read_to_string(out_dir.join("CLAIMBOOK.md")).expect("read Claim Book markdown");
+    assert!(markdown.contains("dependency `Point::get` (matched from `get` by method name) (G1)"));
 }
 
 #[test]
