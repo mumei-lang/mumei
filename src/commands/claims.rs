@@ -1,5 +1,5 @@
 use crate::pipeline::try_load_and_prepare_with_full_options_and_persistence;
-use mumei_core::claimbook::{create_claimbook, render_markdown, Claim, SealGrade};
+use mumei_core::claimbook::{create_claimbook, limiting_premises_text, render_markdown, SealGrade};
 use mumei_core::parser::Item;
 use mumei_core::{parser, proof_cert};
 use std::fs;
@@ -146,7 +146,7 @@ pub(crate) fn cmd_claims(
                 grade_code(claim.effective_grade),
                 claim.effective_grade.label(),
                 grade_code(required_grade),
-                limiting_premises_text(claim)
+                limiting_premises_text(&claim.limiting_premises)
             );
         }
         if rejected {
@@ -164,23 +164,4 @@ fn grade_code(grade: SealGrade) -> &'static str {
         SealGrade::G4 => "G4",
         SealGrade::G5 => "G5",
     }
-}
-
-fn limiting_premises_text(claim: &Claim) -> String {
-    if claim.limiting_premises.is_empty() {
-        return "-".to_string();
-    }
-    claim
-        .limiting_premises
-        .iter()
-        .map(|premise| {
-            format!(
-                "{} {} ({})",
-                premise.kind,
-                premise.name,
-                grade_code(premise.grade)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
 }
