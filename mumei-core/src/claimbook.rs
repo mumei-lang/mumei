@@ -463,7 +463,14 @@ fn trusted_base(cert: Option<&ProofCertificate>, atoms: &[&crate::parser::Atom])
             if clause_mode.mode == ClauseTrustMode::Assume {
                 assumed_clauses.insert(TrustedBaseAssumedClause {
                     atom: (*name).to_string(),
-                    clause: clause_mode.clause.clone(),
+                    clause: format!(
+                        "{}: {}",
+                        match &clause_mode.kind {
+                            crate::parser::ClauseKind::Requires => "requires",
+                            crate::parser::ClauseKind::Ensures => "ensures",
+                        },
+                        clause_mode.clause
+                    ),
                 });
             }
         }
@@ -504,7 +511,7 @@ fn trusted_base(cert: Option<&ProofCertificate>, atoms: &[&crate::parser::Atom])
                 for clause in &entry.assumed_clauses {
                     assumed_clauses.insert(TrustedBaseAssumedClause {
                         atom: entry.name.clone(),
-                        clause: assumed_clause_text(clause).to_string(),
+                        clause: clause.clone(),
                     });
                 }
             }
@@ -791,7 +798,7 @@ fn append_claim_table<'a>(markdown: &mut String, claims: impl Iterator<Item = &'
     }
 }
 
-fn limiting_premises_text(premises: &[LimitingPremise]) -> String {
+pub fn limiting_premises_text(premises: &[LimitingPremise]) -> String {
     if premises.is_empty() {
         return "-".to_string();
     }
@@ -1607,8 +1614,47 @@ mod tests {
             report.trusted_base.assumed_clauses,
             vec![TrustedBaseAssumedClause {
                 atom: "assumed".to_string(),
-                clause: "x > 0".to_string(),
+                clause: "requires: x > 0".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn trusted_base_keeps_requires_and_ensures_kinds_for_same_expression() {
+        let mut source = source_atom("assumed");
+        source.requires = "x > 0".to_string();
+        source.ensures = "x > 0".to_string();
+        source.clause_modes = vec![
+            crate::parser::ClauseMode {
+                kind: crate::parser::ClauseKind::Requires,
+                clause: "x > 0".to_string(),
+                mode: ClauseTrustMode::Assume,
+            },
+            crate::parser::ClauseMode {
+                kind: crate::parser::ClauseKind::Ensures,
+                clause: "x > 0".to_string(),
+                mode: ClauseTrustMode::Assume,
+            },
+        ];
+        let mut entry = atom_certificate(status::Z3_UNSAT, status::VERIFIED);
+        entry.name = "assumed".to_string();
+        entry.assumed_clauses = vec!["requires: x > 0".to_string(), "ensures: x > 0".to_string()];
+        let mut cert = proof_certificate();
+        cert.atoms = vec![entry];
+
+        let base = trusted_base(Some(&cert), &[&source]);
+        assert_eq!(
+            base.assumed_clauses,
+            [
+                TrustedBaseAssumedClause {
+                    atom: "assumed".to_string(),
+                    clause: "ensures: x > 0".to_string(),
+                },
+                TrustedBaseAssumedClause {
+                    atom: "assumed".to_string(),
+                    clause: "requires: x > 0".to_string(),
+                },
+            ]
         );
     }
 
@@ -1690,11 +1736,11 @@ mod tests {
             [
                 TrustedBaseAssumedClause {
                     atom: "alpha".to_string(),
-                    clause: "x > 0".to_string(),
+                    clause: "requires: x > 0".to_string(),
                 },
                 TrustedBaseAssumedClause {
                     atom: "beta".to_string(),
-                    clause: "result > 0".to_string(),
+                    clause: "ensures: result > 0".to_string(),
                 },
             ]
         );
@@ -1726,7 +1772,7 @@ mod tests {
             base.assumed_clauses,
             [TrustedBaseAssumedClause {
                 atom: "source_trusted".to_string(),
-                clause: "result > 0".to_string(),
+                clause: "ensures: result > 0".to_string(),
             }]
         );
     }

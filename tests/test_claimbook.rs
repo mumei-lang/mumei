@@ -437,7 +437,7 @@ fn dependency_and_assumption_evidence_propagate_and_grade_gate_writes_reports() 
         report["trusted_base"]["assumed_clauses"],
         serde_json::json!([{
             "atom": "assumed_contract",
-            "clause": "x > 0"
+            "clause": "requires: x > 0"
         }])
     );
     let gate_error = String::from_utf8_lossy(&gate_g4.stderr);
@@ -583,6 +583,22 @@ fn method_name_dependency_keeps_qualified_premise_name() {
     let markdown =
         std::fs::read_to_string(out_dir.join("CLAIMBOOK.md")).expect("read Claim Book markdown");
     assert!(markdown.contains("dependency `Point::get` (matched from `get` by method name) (G1)"));
+
+    let gate = claims(
+        &dir,
+        &source,
+        &[
+            "--require-grade",
+            "G4",
+            "--format",
+            "json",
+            "--out-dir",
+            &out_dir_arg,
+        ],
+    );
+    assert_eq!(gate.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&gate.stderr)
+        .contains("dependency `Point::get` (matched from `get` by method name) (G1)"));
 }
 
 #[test]

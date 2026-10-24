@@ -48,11 +48,11 @@ Dependencies not present in the claim set do not lower the grade. `limiting_prem
 
 ## Trusted base
 
-The `trusted_base` section lists the solver and generator versions, translator versions, bridge lemma hashes, kernel axioms, trusted atoms, and assumed clauses represented by the report. Certificate-backed values come only from entries matching current source claims; source declarations contribute trusted atoms and assume-mode clauses. Lists are sorted and unique. Without a certificate, versions are null and the trusted atoms and assumed clauses are read from the source declarations.
+The `trusted_base` section lists the solver and generator versions, translator versions, bridge lemma hashes, kernel axioms, trusted atoms, and assumed clauses represented by the report. Certificate-backed values come only from entries matching current source claims; source declarations contribute trusted atoms and assume-mode clauses. Assumed clauses retain the `requires:` or `ensures:` kind, so identical expressions of different kinds remain distinct. Lists are sorted and unique. Without a certificate, versions are null and the trusted atoms and assumed clauses are read from the source declarations.
 
 ## Grade gate and exit codes
 
-`--require-grade G0` through `--require-grade G5` requires every claim to meet the requested effective grade. The report files are written before the gate is evaluated. A failing claim is printed to standard error with its limiting premises.
+`--require-grade G0` through `--require-grade G5` requires every claim to meet the requested effective grade. The report files are written before the gate is evaluated. A failing claim is printed to standard error with its limiting premises. The gate checks grade only; CI that needs full dependency coverage should also check `effective_grade_complete` in `claimbook.json`.
 
 | Exit code | Meaning |
 |---|---|
