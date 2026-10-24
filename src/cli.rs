@@ -288,6 +288,11 @@ pub(crate) enum Command {
         #[arg(long, value_parser = ["G0", "G1", "G2", "G3", "G4", "G5"])]
         require_grade: Option<String>,
     },
+    /// Lock or check human-owned charter contracts
+    Charter {
+        #[command(subcommand)]
+        command: CharterCommand,
+    },
     /// P7-B: Build and run a mumei program as a native binary
     Run {
         /// Input .mm file
@@ -304,5 +309,32 @@ pub(crate) enum Command {
         /// Arguments to pass to the compiled program
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum CharterCommand {
+    /// Write deterministic hashes for the selected charter files
+    Lock {
+        /// Charter file path; may be repeated
+        #[arg(long = "charter", action = clap::ArgAction::Append)]
+        charter: Vec<String>,
+        /// Lock file path
+        #[arg(long)]
+        lock: Option<String>,
+    },
+    /// Check an implementation against the locked charter contracts
+    Check {
+        /// Implementation .mm file
+        input: String,
+        /// Charter file path; may be repeated
+        #[arg(long = "charter", action = clap::ArgAction::Append)]
+        charter: Vec<String>,
+        /// Lock file path
+        #[arg(long)]
+        lock: Option<String>,
+        /// Print the JSON report to standard output
+        #[arg(long)]
+        json: bool,
     },
 }

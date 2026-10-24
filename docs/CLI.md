@@ -96,6 +96,25 @@ and do not fail `--strict`.
 | `axiom_rejected` | The Lean axiom audit rejected the certificate evidence. |
 | `missing` | The source contains no matching certificate entry. |
 
+## `mumei charter`
+
+```bash
+mumei charter lock [--charter <file>]... [--lock <path>]
+mumei charter check <impl.mm> [--charter <file>]... [--lock <path>] [--json]
+```
+
+`charter lock` writes deterministic hashes for the selected Charter files.
+`charter check` verifies the lock, checks that implementation atoms have the
+same signatures as the Charter atoms, and proves that their contracts refine
+the Charter contracts. When `mumei.toml` has a `[charter]` section, its
+`files` and `lock` values supply defaults; the lock path defaults to
+`charter.lock`.
+
+The check writes `charter_report.json`; `--json` also prints the report to
+standard output. A passing check exits `0`, a failed gate exits `1`, and an
+input or report I/O error exits `4`. See [Charter](CHARTER.md) for the file
+format, lock behavior, and check semantics.
+
 ### SARIF output
 
 `mumei verify <file-or-directory> --emit sarif` writes a SARIF 2.1.0 log to
