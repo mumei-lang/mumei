@@ -333,6 +333,15 @@ pub(crate) enum CharterCommand {
         /// Lock file path
         #[arg(long)]
         lock: Option<String>,
+        /// Proof certificate for the implementation
+        #[arg(long)]
+        cert: Option<String>,
+        /// Minimum effective Seal Grade required for each chartered atom
+        #[arg(long, value_parser = ["G0", "G1", "G2", "G3", "G4", "G5"])]
+        require_grade: Option<String>,
+        /// Accept current Lean-verified certificate evidence
+        #[arg(long)]
+        allow_lean_verified: bool,
         /// Print the JSON report to standard output
         #[arg(long)]
         json: bool,

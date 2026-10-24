@@ -100,13 +100,19 @@ and do not fail `--strict`.
 
 ```bash
 mumei charter lock [--charter <file>]... [--lock <path>]
-mumei charter check <impl.mm> [--charter <file>]... [--lock <path>] [--json]
+mumei charter check <impl.mm> [--charter <file>]... [--lock <path>] [--cert <path>] [--require-grade <G0..G5>] [--allow-lean-verified] [--json]
 ```
 
 `charter lock` writes deterministic hashes for the selected Charter files.
 `charter check` verifies the lock, checks that implementation atoms have the
 same signatures as the Charter atoms, and proves that their contracts refine
-the Charter contracts. When `mumei.toml` has a `[charter]` section, its
+the Charter contracts. With `--cert`, it also requires each otherwise-passing
+atom to meet the certificate's effective Seal Grade, defaulting to G4.
+`--require-grade` selects a threshold from G0 through G5, and
+`--allow-lean-verified` accepts current Lean-verified certificate evidence.
+The grade gate builds a read-only Claim Book from the current implementation
+and certificate; incomplete dependency coverage is reported but does not by
+itself fail the gate. When `mumei.toml` has a `[charter]` section, its
 `files` and `lock` values supply defaults; the lock path defaults to
 `charter.lock`. A check covers every Charter in the lock plus any files passed
 with `--charter`. A Charter symlink that resolves outside the project is
@@ -114,9 +120,11 @@ rejected.
 
 The check writes `charter_report.json`; `--json` also prints the report to
 standard output. Its top-level `status` is `pass` or `fail`, and every atom
-result identifies its relative Charter path. If the lock is mismatched,
-otherwise-passing atoms are marked `unpinned`. A passing check exits `0`, a
-failed gate exits `1`, and an input or report I/O error exits `4`. See
+result identifies its relative Charter path. When a matching claim exists,
+certificate-backed results include `effective_grade` and
+`effective_grade_complete`. If the lock is mismatched, otherwise-passing
+atoms are marked `unpinned` after the grade check. A passing check exits `0`,
+a failed gate exits `1`, and an input or report I/O error exits `4`. See
 [Charter](CHARTER.md) for the file format, lock behavior, and check semantics.
 
 ### SARIF output
