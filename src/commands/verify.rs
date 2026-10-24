@@ -2055,13 +2055,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
             }),
             Some(&reconstruction_losses),
         );
-        let cert_path = if let Some(output) = cert_output {
-            std::path::PathBuf::from(output)
-        } else {
-            // Default: `<input>.proof.json` beside the source file, the
-            // same convention the LSP uses when it reads certificates.
-            Path::new(input).with_extension("proof.json")
-        };
+        let cert_path = proof_certificate_path(input, cert_output);
 
         if escalate_lean || emit_escalation_bundle || emit_escalation_metrics {
             let bundle = proof_cert::generate_escalation_bundle(&cert);
@@ -2502,6 +2496,16 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         }
     }
     outcome
+}
+
+pub(crate) fn proof_certificate_path(input: &str, output: Option<&str>) -> std::path::PathBuf {
+    if let Some(output) = output {
+        std::path::PathBuf::from(output)
+    } else {
+        // Default: `<input>.proof.json` beside the source file, the
+        // same convention the LSP uses when it reads certificates.
+        Path::new(input).with_extension("proof.json")
+    }
 }
 
 pub(crate) fn save_decidable_fragment_metrics(

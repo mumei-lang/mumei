@@ -268,6 +268,23 @@ pub(crate) enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Summarize atom evidence and its freshness in a Claim Book
+    Claims {
+        /// Input .mm file
+        input: String,
+        /// Proof certificate path (defaults to the path written by `mumei verify --proof-cert`)
+        #[arg(long)]
+        cert: Option<String>,
+        /// Accept current Lean-verified certificate evidence
+        #[arg(long)]
+        allow_lean_verified: bool,
+        /// Output format: json, md, or both
+        #[arg(long, default_value = "both", value_parser = ["json", "md", "both"])]
+        format: String,
+        /// Directory for claimbook.json and CLAIMBOOK.md (default: current directory)
+        #[arg(long, default_value = ".")]
+        out_dir: String,
+    },
     /// P7-B: Build and run a mumei program as a native binary
     Run {
         /// Input .mm file

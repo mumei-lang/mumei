@@ -3,6 +3,7 @@
 #![allow(clippy::new_without_default)]
 
 pub mod ast;
+pub mod claimbook;
 pub mod contract_host;
 pub mod cross_spec;
 pub mod emitter;

@@ -2749,6 +2749,16 @@ templates are:
 
 ---
 
+## P34: Claim Book（主張台帳）と Seal Grade — 🚧 In progress (PR-1)
+
+- `mumei claims` を追加し、既存の proof certificate と現在のソースだけから読み取り専用レポートを生成する。
+- atom ごとに machine checker による証拠、`trusted` による reviewed assumption、証拠なしを Seal Grade G4 / G1 / G0 で区別する。
+- ソース変更、Lean translator metadata の古さ、certificate integrity を freshness として示す。
+- `claimbook.json` は順序・出力を決定的にし、`CLAIMBOOK.md` は grade と freshness を一覧できる形にする。
+- PR-1 は atom 自身の grade と freshness を扱い、drifted / uncertified の effective grade は G0 とする。
+- 依存関係を使った effective grade の伝播は後続 PR に分離する。
+- G5 / G3 / G2 は対応する証拠ソースが存在するまで予約し、現時点では出力しない。
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

@@ -84,6 +84,19 @@ fn main() {
             allow_lean_verified,
             strict,
         }) => commands::verify_cert::cmd_verify_cert(&cert, &input, allow_lean_verified, strict),
+        Some(Command::Claims {
+            input,
+            cert,
+            allow_lean_verified,
+            format,
+            out_dir,
+        }) => commands::claims::cmd_claims(
+            &input,
+            cert.as_deref(),
+            allow_lean_verified,
+            &format,
+            &out_dir,
+        ),
         Some(Command::Run {
             input,
             emit,
