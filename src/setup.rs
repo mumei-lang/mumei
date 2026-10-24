@@ -1127,6 +1127,7 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&llc, permissions).unwrap();
         assert!(script_is_usable_with_busy_retry(&llc));
+        assert!(llvm_install_is_usable(&dir));
         fs::remove_dir_all(&dir).ok();
     }
 }
