@@ -386,6 +386,51 @@ fn generic_charter_atom_matches_pre_monomorphized_implementation() {
 }
 
 #[test]
+fn generic_method_candidate_is_not_ambiguous() {
+    let dir = TestDir::new("generic-method");
+    std::fs::write(
+        dir.path().join("generic.charter.mm"),
+        "trusted atom get<T>(self: Box, value: T) -> T body: 0;",
+    )
+    .expect("write generic charter");
+    std::fs::write(
+        dir.path().join("impl.mm"),
+        "struct Box { value: i64 }\n\
+         impl Box { atom get<T>(self: Box, value: T) -> T body: value; }",
+    )
+    .expect("write generic implementation");
+    let lock = run(
+        dir.path(),
+        &["charter", "lock", "--charter", "generic.charter.mm"],
+    );
+    assert_eq!(lock.status.code(), Some(0));
+
+    let check = run(
+        dir.path(),
+        &[
+            "charter",
+            "check",
+            "impl.mm",
+            "--charter",
+            "generic.charter.mm",
+            "--json",
+        ],
+    );
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("charter_report.json")).unwrap())
+            .expect("parse generic method report");
+    assert!(matches!(check.status.code(), Some(0 | 1)));
+    assert!(matches!(
+        report["atoms"][0]["status"].as_str(),
+        Some("ok" | "inconclusive")
+    ));
+    assert!(!report["atoms"][0]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("ambiguous"));
+}
+
+#[test]
 fn duplicate_atom_names_are_attributed_to_charter_paths() {
     let dir = TestDir::new("duplicate-names");
     std::fs::write(

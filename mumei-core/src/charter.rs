@@ -7,7 +7,7 @@ use crate::verification::spec_validation::{
 use crate::verification::{atom_requires_bitvector_semantics_in_module, ModuleEnv};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use z3::{Config, Context, SatResult, Solver};
@@ -216,7 +216,13 @@ pub fn check_charters_with_generics(
     }
 
     let mut implementation_atoms = implementation_atoms(implementation);
-    implementation_atoms.extend(generic_implementation_atoms(generic_implementation));
+    let mut implementation_names = HashSet::new();
+    implementation_atoms.retain(|candidate| implementation_names.insert(candidate.name.clone()));
+    implementation_atoms.extend(
+        generic_implementation_atoms(generic_implementation)
+            .into_iter()
+            .filter(|candidate| implementation_names.insert(candidate.name.clone())),
+    );
     let mut atoms: Vec<_> = charter_atoms
         .iter()
         .map(|(path, charter_atom)| {
@@ -621,6 +627,9 @@ fn signature_mismatch(charter: &Atom, implementation: &Atom) -> Option<String> {
             charter.type_params, implementation.type_params
         ));
     }
+    if normalized_type_param_bounds(charter) != normalized_type_param_bounds(implementation) {
+        return Some("type parameter bounds mismatch".to_string());
+    }
     if charter.params.len() != implementation.params.len() {
         return Some(format!(
             "expected {} parameter(s), found {}",
@@ -676,6 +685,41 @@ fn signature_mismatch(charter: &Atom, implementation: &Atom) -> Option<String> {
         ));
     }
     None
+}
+
+fn normalized_type_param_bounds(atom: &Atom) -> Vec<(String, Vec<String>)> {
+    let mut bounds = BTreeMap::<String, Vec<String>>::new();
+    let mut add_bounds = |param: &str, values: &[String]| {
+        let param = param.split_whitespace().collect::<String>();
+        let normalized = bounds.entry(param).or_default();
+        normalized.extend(
+            values
+                .iter()
+                .map(|value| value.split_whitespace().collect::<String>()),
+        );
+    };
+
+    for bound in &atom.where_bounds {
+        add_bounds(&bound.param, &bound.bounds);
+    }
+    for parameter in &atom.type_params {
+        if let Some((param, values)) = parameter.split_once(':') {
+            let values = values
+                .split('+')
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            add_bounds(param, &values);
+        }
+    }
+
+    bounds
+        .into_iter()
+        .map(|(param, mut values)| {
+            values.sort();
+            (param, values)
+        })
+        .collect()
 }
 
 fn check_refinement(
@@ -1158,6 +1202,24 @@ mod tests {
             "atom identity<T>(x: T) -> T body: 0;",
         );
         assert_ne!(report_status(&report), "missing");
+    }
+
+    #[test]
+    fn type_parameter_bounds_must_match_in_both_directions() {
+        for (charter_source, implementation_source) in [
+            (
+                "trusted atom f<T>(x: T) -> T body: 0;",
+                "atom f<T: Comparable>(x: T) -> T body: 0;",
+            ),
+            (
+                "trusted atom f<T: Comparable>(x: T) -> T body: 0;",
+                "atom f<T>(x: T) -> T body: 0;",
+            ),
+        ] {
+            let report = run_check(charter_source, implementation_source);
+            assert_eq!(report_status(&report), "signature_mismatch");
+            assert_eq!(report.atoms[0].detail, "type parameter bounds mismatch");
+        }
     }
 
     #[test]
