@@ -193,11 +193,19 @@ mumei observe src/main.mm test-harvest.json
 mumei observe src/main.mm test-harvest.json --json --atom Point::get
 ```
 
-`observe` checks `mumei.test-harvest/v1` examples, relations, and expected
-rejections against atom contracts using the verifier. JSON output uses
-`mumei.observation-check/v1`; each observation is `consistent`,
+`observe` checks `mumei.test-harvest/v1` examples, relations, expected
+rejections, and property-test observations against atom contracts using the
+verifier. A property observation declares its generator `variables` (with
+optional inclusive `min`/`max` bounds), `assumptions`, `args` that pin atom
+parameters to literals or generator variables, and a `predicate` over those
+variables and `result`.
+
+JSON output uses `mumei.observation-check/v1`; each observation is `consistent`,
 `contradicts_ensures`, `outside_requires`, `rejection_explained`,
-`requires_admits_rejected`, `inconclusive`, or `not_checked`. Exit code `1`
+`requires_admits_rejected`, `entailed`, `not_entailed`,
+`domain_exceeds_requires`, `inconclusive`, or `not_checked`. Property checks
+distinguish a contract that entails the predicate from one that does not, and
+report when the generator domain extends beyond `requires`. Exit code `1`
 indicates a contradiction or a rejected input admitted by `requires`;
 `outside_requires` and `rejection_explained` never fail the run. For a relation,
 `contradicts_ensures` means no result the contract allows satisfies the tested

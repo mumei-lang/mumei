@@ -9,7 +9,7 @@ use std::path::Path;
 
 const SCHEMA: &str = "mumei.observation-check/v1";
 const HARVEST_SCHEMA: &str = "mumei.test-harvest/v1";
-const VERDICTS: [&str; 7] = [
+const VERDICTS: [&str; 10] = [
     "consistent",
     "contradicts_ensures",
     "outside_requires",
@@ -17,6 +17,9 @@ const VERDICTS: [&str; 7] = [
     "rejection_explained",
     "requires_admits_rejected",
     "not_checked",
+    "entailed",
+    "not_entailed",
+    "domain_exceeds_requires",
 ];
 
 #[derive(Debug, Serialize)]
@@ -132,6 +135,11 @@ pub fn analyze(
             .get("predicate")
             .and_then(Value::as_str)
             .map(str::to_string);
+        let property = if kind == "property" {
+            Some(parse_property_observation(object, index)?)
+        } else {
+            None
+        };
 
         let Some(atom) = find_atom(&target, implementation, generic_implementation, module_env)
         else {
@@ -149,7 +157,12 @@ pub fn analyze(
             ));
             continue;
         };
-        if let Some(detail) = unsupported_atom_detail(atom) {
+        let unsupported = unsupported_atom_detail(atom).or_else(|| {
+            property
+                .as_ref()
+                .and_then(|_| unsupported_property_atom_detail(atom, module_env))
+        });
+        if let Some(detail) = unsupported {
             results.push(result_record(
                 kind,
                 target,
@@ -161,6 +174,37 @@ pub fn analyze(
                 predicate,
                 "not_checked",
                 detail,
+            ));
+            continue;
+        }
+
+        if let Some(property) = property {
+            let property_result = match map_property_args(atom, &args, &property, module_env) {
+                Err(detail) => ("not_checked", detail),
+                Ok(_) if has_unknown_property_identifier(&property) => {
+                    ("not_checked", "unknown_identifier".to_string())
+                }
+                Ok(values) => check_property_observation(
+                    atom,
+                    &property,
+                    &values,
+                    index,
+                    module_env,
+                    output_dir.path(),
+                    &config,
+                ),
+            };
+            results.push(result_record(
+                kind,
+                target,
+                test,
+                file,
+                line,
+                args,
+                result,
+                predicate,
+                property_result.0,
+                &property_result.1,
             ));
             continue;
         }
@@ -340,6 +384,455 @@ fn unsupported_atom_detail(atom: &Atom) -> Option<&'static str> {
         Some("unsupported_forall_constraints")
     } else {
         None
+    }
+}
+
+#[derive(Debug)]
+struct PropertyVariable {
+    name: String,
+    type_name: String,
+    min: Option<i64>,
+    max: Option<i64>,
+}
+
+#[derive(Debug)]
+struct PropertyObservation {
+    variables: Vec<PropertyVariable>,
+    assumptions: Vec<String>,
+    predicate: String,
+}
+
+fn parse_property_observation(
+    object: &serde_json::Map<String, Value>,
+    index: usize,
+) -> Result<PropertyObservation, String> {
+    let variables = object
+        .get("variables")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            format!(
+                "observation {} property variables must be an array",
+                index + 1
+            )
+        })?;
+    let mut parsed_variables = Vec::with_capacity(variables.len());
+    for variable in variables {
+        let variable = variable.as_object().ok_or_else(|| {
+            format!(
+                "observation {} property variables must contain objects",
+                index + 1
+            )
+        })?;
+        let name = variable
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| is_identifier(name))
+            .ok_or_else(|| {
+                format!(
+                    "observation {} property variable has an invalid name",
+                    index + 1
+                )
+            })?
+            .to_string();
+        if parsed_variables
+            .iter()
+            .any(|item: &PropertyVariable| item.name == name)
+        {
+            return Err(format!(
+                "observation {} property variables contain duplicate name '{name}'",
+                index + 1
+            ));
+        }
+        let type_name = variable
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                format!(
+                    "observation {} property variable is missing a type",
+                    index + 1
+                )
+            })?
+            .to_string();
+        if type_name != "i64" && type_name != "bool" {
+            return Err(format!(
+                "observation {} property variable '{name}' has unsupported type",
+                index + 1
+            ));
+        }
+        let min = property_bound(variable, "min", index)?;
+        let max = property_bound(variable, "max", index)?;
+        if type_name == "bool" && (min.is_some() || max.is_some()) {
+            return Err(format!(
+                "observation {} bool property variable '{name}' cannot have bounds",
+                index + 1
+            ));
+        }
+        if min.zip(max).is_some_and(|(min, max)| min > max) {
+            return Err(format!(
+                "observation {} property variable '{name}' has min greater than max",
+                index + 1
+            ));
+        }
+        parsed_variables.push(PropertyVariable {
+            name,
+            type_name,
+            min,
+            max,
+        });
+    }
+
+    let assumptions = match object.get("assumptions") {
+        None => Vec::new(),
+        Some(Value::Array(assumptions)) => assumptions
+            .iter()
+            .map(|assumption| {
+                assumption.as_str().map(str::to_string).ok_or_else(|| {
+                    format!(
+                        "observation {} property assumptions must contain strings",
+                        index + 1
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => {
+            return Err(format!(
+                "observation {} property assumptions must be an array",
+                index + 1
+            ));
+        }
+    };
+    let predicate = object
+        .get("predicate")
+        .and_then(Value::as_str)
+        .filter(|predicate| !predicate.trim().is_empty())
+        .ok_or_else(|| format!("observation {} property is missing a predicate", index + 1))?
+        .to_string();
+
+    Ok(PropertyObservation {
+        variables: parsed_variables,
+        assumptions,
+        predicate,
+    })
+}
+
+fn property_bound(
+    variable: &serde_json::Map<String, Value>,
+    field: &str,
+    index: usize,
+) -> Result<Option<i64>, String> {
+    variable
+        .get(field)
+        .map(|value| {
+            value.as_i64().ok_or_else(|| {
+                format!(
+                    "observation {} property variable {field} bound must be an i64",
+                    index + 1
+                )
+            })
+        })
+        .transpose()
+}
+
+fn is_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn unsupported_property_atom_detail(atom: &Atom, module_env: &ModuleEnv) -> Option<&'static str> {
+    if matches!(&atom.trust_level, TrustLevel::Trusted) {
+        Some("trusted_atom")
+    } else if atom.params.iter().any(|param| {
+        param
+            .type_name
+            .as_deref()
+            .is_some_and(|type_name| module_env.get_type(type_name).is_some())
+    }) {
+        Some("refinement_parameter")
+    } else if atom.params.iter().any(|param| {
+        let type_name = param.type_name.as_deref().unwrap_or("i64");
+        let unqualified = type_name.rsplit("::").next().unwrap_or(type_name);
+        unqualified != "i64" && unqualified != "bool"
+    }) {
+        Some("unsupported_parameter_type")
+    } else {
+        None
+    }
+}
+
+fn map_property_args(
+    atom: &Atom,
+    args: &Value,
+    property: &PropertyObservation,
+    module_env: &ModuleEnv,
+) -> Result<Vec<String>, String> {
+    let values = match args {
+        Value::Object(object) => {
+            if object.len() != atom.params.len()
+                || atom
+                    .params
+                    .iter()
+                    .any(|param| !object.contains_key(&param.name))
+            {
+                return Err("argument_names_mismatch".to_string());
+            }
+            atom.params
+                .iter()
+                .map(|param| object.get(&param.name).expect("checked argument"))
+                .collect::<Vec<_>>()
+        }
+        Value::Array(values) if values.len() == atom.params.len() => values.iter().collect(),
+        Value::Array(_) => return Err("argument_count_mismatch".to_string()),
+        _ => return Err("unsupported_args_shape".to_string()),
+    };
+    atom.params
+        .iter()
+        .zip(values)
+        .map(|(param, value)| {
+            let parameter_is_bool =
+                is_bool_type(param.type_name.as_deref().unwrap_or("i64"), module_env);
+            if let Some(variable) = value.as_object() {
+                if variable.len() != 1 {
+                    return Err("unsupported_value_type".to_string());
+                }
+                let name = variable
+                    .get("var")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "unsupported_value_type".to_string())?;
+                let generator = property
+                    .variables
+                    .iter()
+                    .find(|generator| generator.name == name)
+                    .ok_or_else(|| "unknown_variable".to_string())?;
+                if (generator.type_name == "bool") != parameter_is_bool {
+                    return Err("argument_type_mismatch".to_string());
+                }
+                Ok(format!("__gen_{name}"))
+            } else {
+                render_for_type(
+                    value,
+                    param.type_name.as_deref().unwrap_or("i64"),
+                    module_env,
+                )
+            }
+        })
+        .collect()
+}
+
+fn has_unknown_property_identifier(property: &PropertyObservation) -> bool {
+    let mut allowed = property
+        .variables
+        .iter()
+        .map(|variable| variable.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    allowed.extend(["true", "false"]);
+    let identifiers = regex::Regex::new(r"\b[A-Za-z_][A-Za-z0-9_]*\b").expect("static regex");
+    property.assumptions.iter().any(|assumption| {
+        identifiers
+            .find_iter(assumption)
+            .any(|identifier| !allowed.contains(identifier.as_str()))
+    }) || identifiers
+        .find_iter(&property.predicate)
+        .any(|identifier| {
+            let name = identifier.as_str();
+            name != "result" && !allowed.contains(name)
+        })
+}
+
+fn check_property_observation(
+    atom: &Atom,
+    property: &PropertyObservation,
+    pinned_values: &[String],
+    index: usize,
+    module_env: &ModuleEnv,
+    output_dir: &Path,
+    config: &VerificationConfig,
+) -> (&'static str, String) {
+    let generator_params = property
+        .variables
+        .iter()
+        .map(generator_param)
+        .collect::<Vec<_>>();
+    let mut property_atom = atom.clone();
+    property_atom.params.extend(generator_params);
+    let pin = pin_expression(atom, pinned_values);
+    let domain = property_domain(property);
+    let requires = format!("({domain}) && ({pin})");
+    let atom_requires = clause_or_true(&atom.requires);
+    let atom_ensures = clause_or_true(&atom.ensures);
+
+    let outside_requires = run_check(
+        &property_atom,
+        format!("__observe_{index}_property_e"),
+        &requires,
+        &format!("!({atom_requires})"),
+        "0",
+        None,
+        module_env,
+        output_dir,
+        config,
+    );
+    if outside_requires == CheckVerdict::Ok {
+        return (
+            "outside_requires",
+            "property domain is outside requires".into(),
+        );
+    }
+    if outside_requires == CheckVerdict::Inconclusive {
+        return ("inconclusive", "outside-requires check inconclusive".into());
+    }
+
+    let admissible = run_check(
+        &property_atom,
+        format!("__observe_{index}_property_a"),
+        &requires,
+        atom_requires,
+        "0",
+        None,
+        module_env,
+        output_dir,
+        config,
+    );
+    if admissible == CheckVerdict::Inconclusive {
+        return ("inconclusive", "admissibility check inconclusive".into());
+    }
+
+    let predicate = property_predicate(property);
+    let mut result_atom = property_atom.clone();
+    result_atom
+        .params
+        .push(observation_result_param(atom.return_type.as_deref()));
+    let contract_domain = format!("(({atom_requires}) && ({atom_ensures}))");
+    let contradiction = run_check(
+        &result_atom,
+        format!("__observe_{index}_property_c"),
+        &requires,
+        &format!("{contract_domain} => !({predicate})"),
+        "__observe_result",
+        atom.return_type.as_deref(),
+        module_env,
+        output_dir,
+        config,
+    );
+    if contradiction == CheckVerdict::Inconclusive {
+        return ("inconclusive", "contradiction check inconclusive".into());
+    }
+    if contradiction == CheckVerdict::Ok {
+        return (
+            "contradicts_ensures",
+            "contract contradicts the property predicate".into(),
+        );
+    }
+
+    let entailment = run_check(
+        &result_atom,
+        format!("__observe_{index}_property_n"),
+        &requires,
+        &format!("{contract_domain} => ({predicate})"),
+        "__observe_result",
+        atom.return_type.as_deref(),
+        module_env,
+        output_dir,
+        config,
+    );
+    let (verdict, detail) =
+        classify_property_checks(outside_requires, admissible, contradiction, entailment);
+    (verdict, detail.to_string())
+}
+
+fn generator_param(variable: &PropertyVariable) -> Param {
+    Param {
+        name: format!("__gen_{}", variable.name),
+        type_name: Some(variable.type_name.clone()),
+        type_ref: None,
+        consume: false,
+        is_ref: false,
+        is_ref_mut: false,
+        fn_contract_requires: None,
+        fn_contract_ensures: None,
+    }
+}
+
+fn property_domain(property: &PropertyObservation) -> String {
+    let mut conditions = Vec::new();
+    for variable in &property.variables {
+        let name = format!("__gen_{}", variable.name);
+        if let Some(min) = variable.min {
+            conditions.push(format!("{name} >= {}", render_integer(min)));
+        }
+        if let Some(max) = variable.max {
+            conditions.push(format!("{name} <= {}", render_integer(max)));
+        }
+    }
+    conditions.extend(
+        property
+            .assumptions
+            .iter()
+            .map(|assumption| replace_property_identifiers(assumption, property)),
+    );
+    if conditions.is_empty() {
+        "true".to_string()
+    } else {
+        conditions
+            .into_iter()
+            .map(|condition| format!("({condition})"))
+            .collect::<Vec<_>>()
+            .join(" && ")
+    }
+}
+
+fn property_predicate(property: &PropertyObservation) -> String {
+    replace_result_identifier(&replace_property_identifiers(&property.predicate, property))
+}
+
+fn replace_property_identifiers(expression: &str, property: &PropertyObservation) -> String {
+    let mut renamed = expression.to_string();
+    for variable in &property.variables {
+        let pattern = regex::Regex::new(&format!(r"\b{}\b", regex::escape(&variable.name)))
+            .expect("escaped identifier regex");
+        renamed = pattern
+            .replace_all(&renamed, format!("__gen_{}", variable.name))
+            .into_owned();
+    }
+    renamed
+}
+
+fn classify_property_checks(
+    outside_requires: CheckVerdict,
+    admissible: CheckVerdict,
+    contradiction: CheckVerdict,
+    entailment: CheckVerdict,
+) -> (&'static str, &'static str) {
+    match outside_requires {
+        CheckVerdict::Ok => return ("outside_requires", "property domain is outside requires"),
+        CheckVerdict::Inconclusive => {
+            return ("inconclusive", "outside-requires check inconclusive")
+        }
+        CheckVerdict::Rejected => {}
+    }
+    if admissible == CheckVerdict::Inconclusive {
+        return ("inconclusive", "admissibility check inconclusive");
+    }
+    match contradiction {
+        CheckVerdict::Ok => {
+            return (
+                "contradicts_ensures",
+                "contract contradicts the property predicate",
+            )
+        }
+        CheckVerdict::Inconclusive => return ("inconclusive", "contradiction check inconclusive"),
+        CheckVerdict::Rejected => {}
+    }
+    match entailment {
+        CheckVerdict::Inconclusive => ("inconclusive", "entailment check inconclusive"),
+        CheckVerdict::Rejected => ("not_entailed", "contract does not entail the property"),
+        CheckVerdict::Ok if admissible == CheckVerdict::Rejected => (
+            "domain_exceeds_requires",
+            "property domain extends beyond requires",
+        ),
+        CheckVerdict::Ok => ("entailed", "contract entails the property"),
     }
 }
 
@@ -654,6 +1147,46 @@ mod tests {
                 .unwrap()
                 .0,
             "rejection_explained"
+        );
+    }
+
+    #[test]
+    fn classifies_property_checks_in_precedence_order() {
+        let ok = CheckVerdict::Ok;
+        let rejected = CheckVerdict::Rejected;
+        let inconclusive = CheckVerdict::Inconclusive;
+
+        assert_eq!(
+            classify_property_checks(ok, rejected, ok, rejected).0,
+            "outside_requires"
+        );
+        assert_eq!(
+            classify_property_checks(inconclusive, ok, rejected, ok).0,
+            "inconclusive"
+        );
+        assert_eq!(
+            classify_property_checks(rejected, inconclusive, rejected, ok).0,
+            "inconclusive"
+        );
+        assert_eq!(
+            classify_property_checks(rejected, rejected, inconclusive, ok).0,
+            "inconclusive"
+        );
+        assert_eq!(
+            classify_property_checks(rejected, rejected, ok, rejected).0,
+            "contradicts_ensures"
+        );
+        assert_eq!(
+            classify_property_checks(rejected, rejected, rejected, rejected).0,
+            "not_entailed"
+        );
+        assert_eq!(
+            classify_property_checks(rejected, rejected, rejected, ok).0,
+            "domain_exceeds_requires"
+        );
+        assert_eq!(
+            classify_property_checks(rejected, ok, rejected, ok).0,
+            "entailed"
         );
     }
 }

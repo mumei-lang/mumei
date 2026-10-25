@@ -322,11 +322,11 @@ pub(crate) enum Command {
         #[arg(long)]
         atom: Option<String>,
     },
-    /// Check harvested test observations against atom contracts
+    /// Check harvested examples, relations, rejections, and property tests against atom contracts
     Observe {
         /// Input .mm file
         input: String,
-        /// mumei.test-harvest/v1 JSON file
+        /// mumei.test-harvest/v1 JSON file, including property observations
         harvest: String,
         /// Print the structured JSON report
         #[arg(long)]
