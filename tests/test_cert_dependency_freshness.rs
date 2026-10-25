@@ -453,6 +453,120 @@ fn changed_requires_and_refined_types_are_dependency_changes() {
 }
 
 #[test]
+fn imported_unit_tag_change_is_a_dependency_change() {
+    let fixture = Fixture::new();
+    let (a_source, b_source, _, a_cert, b_cert) = setup_modules(&fixture);
+    std::fs::write(
+        &a_source,
+        "type Money = i64 unit USD;\n\
+         atom f(x: Money) -> Money\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write A with USD type");
+    std::fs::write(
+        &b_source,
+        "import \"../a/a.mm\";\n\
+         atom g(x: Money) -> Money\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: f(x);\n",
+    )
+    .expect("write B using imported Money type");
+    assert_success(&fixture.certify(&a_source, &a_cert), "certify A with USD");
+    assert_success(&fixture.certify(&b_source, &b_cert), "certify B with USD");
+
+    std::fs::write(
+        &a_source,
+        "type Money = i64 unit EUR;\n\
+         atom f(x: Money) -> Money\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("change only A's unit tag");
+    assert_success(
+        &fixture.certify(&a_source, &a_cert),
+        "re-certify A with EUR",
+    );
+    let changed = verify_cert(&fixture, &b_cert, &b_source, false);
+    let changed_text = output_text(&changed);
+    assert!(
+        changed_text
+            .lines()
+            .any(|line| line.contains("g: dependency_changed")),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("type:Money"), "{changed_text}");
+}
+
+#[test]
+fn imported_effect_post_change_is_a_dependency_change() {
+    let fixture = Fixture::new();
+    let a_dir = fixture.root.join("a");
+    let b_dir = fixture.root.join("b");
+    std::fs::create_dir(&a_dir).expect("create A directory");
+    std::fs::create_dir(&b_dir).expect("create B directory");
+    let a_source = a_dir.join("a.mm");
+    let b_source = b_dir.join("b.mm");
+    let a_cert = a_dir.join(".proof-cert.json");
+    let b_cert = b_dir.join(".proof-cert.json");
+    let a_with_post = |post: &str| {
+        format!(
+            "effect File\n\
+             states: [Open, Closed];\n\
+             initial: Open;\n\
+             transition close: Open -> Closed;\n\
+             transition open: Closed -> Open;\n\
+             trusted atom f(x: i64) -> i64\n\
+             effects: [File];\n\
+             effect_pre: {{ File: Open }};\n\
+             effect_post: {{ File: {post} }};\n\
+             requires: x >= 0;\n\
+             ensures: result == x;\n\
+             body: x;\n"
+        )
+    };
+    std::fs::write(&a_source, a_with_post("Open")).expect("write A with Open post-state");
+    std::fs::write(
+        &b_source,
+        "import \"../a/a.mm\";\n\
+         atom g(x: i64) -> i64\n\
+         effects: [File];\n\
+         effect_pre: { File: Open };\n\
+         effect_post: { File: Open };\n\
+         requires: x >= 0;\n\
+         ensures: result == x;\n\
+         body: f(x);\n",
+    )
+    .expect("write B caller");
+    assert_success(
+        &fixture.certify(&a_source, &a_cert),
+        "certify A with Open post-state",
+    );
+    assert_success(
+        &fixture.certify(&b_source, &b_cert),
+        "certify B with Open post-state",
+    );
+
+    std::fs::write(&a_source, a_with_post("Closed")).expect("change A's effect_post only");
+    assert_success(
+        &fixture.certify(&a_source, &a_cert),
+        "re-certify A with Closed post-state",
+    );
+    let changed = verify_cert(&fixture, &b_cert, &b_source, false);
+    let changed_text = output_text(&changed);
+    assert!(
+        changed_text
+            .lines()
+            .any(|line| line.contains("g: dependency_changed")),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("atom:f"), "{changed_text}");
+}
+
+#[test]
 fn lean_verified_dependency_acceptance_requires_fresh_dependencies() {
     let fixture = Fixture::new();
     let (a_source, b_source, _, a_cert, b_cert) = setup_modules(&fixture);

@@ -590,6 +590,33 @@ fn hash_callee_contract(
     );
 }
 
+fn hash_dependency_signature_units(
+    hasher: &mut Sha256,
+    atom: &crate::parser::Atom,
+    module_env: &ModuleEnv,
+) {
+    for param in &atom.params {
+        if let Some(unit) = param
+            .type_name
+            .as_deref()
+            .and_then(|type_name| module_env.unit_of_type(type_name))
+        {
+            hasher.update(b"|param_unit:");
+            hasher.update(param.name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(unit.as_bytes());
+        }
+    }
+    if let Some(unit) = atom
+        .return_type
+        .as_deref()
+        .and_then(|type_name| module_env.unit_of_type(type_name))
+    {
+        hasher.update(b"|return_unit:");
+        hasher.update(unit.as_bytes());
+    }
+}
+
 pub fn compute_dependency_hashes(
     atom: &crate::parser::Atom,
     module_env: &ModuleEnv,
@@ -610,6 +637,9 @@ pub fn compute_dependency_hashes(
 
         let mut hasher = Sha256::new();
         hash_callee_contract(&mut hasher, callee_atom, module_env, false);
+        hash_dependency_signature_units(&mut hasher, callee_atom, module_env);
+        hash_string_map(&mut hasher, "effect_pre", &callee_atom.effect_pre);
+        hash_string_map(&mut hasher, "effect_post", &callee_atom.effect_post);
         hashes.insert(
             format!("atom:{}", callee_atom.name),
             format!("{:x}", hasher.finalize()),
@@ -655,6 +685,10 @@ pub fn compute_dependency_hashes(
         hasher.update(refined._base_type.as_bytes());
         hasher.update(b"|");
         hasher.update(refined.predicate_raw.as_bytes());
+        if let Some(unit) = module_env.unit_of_type(&name) {
+            hasher.update(b"|unit:");
+            hasher.update(unit.as_bytes());
+        }
         hashes.insert(format!("type:{name}"), format!("{:x}", hasher.finalize()));
     }
     for name in struct_names {
@@ -1013,6 +1047,24 @@ mod nominal_hash_tests {
         )
     }
 
+    fn dependency_hash_for(source: &str, root_name: &str, dependency_key: &str) -> String {
+        let items = parse_module(source);
+        let mut module_env = ModuleEnv::default();
+        for item in items {
+            match item {
+                Item::Atom(atom) => {
+                    module_env.atoms.insert(atom.name.clone(), atom);
+                }
+                Item::TypeDef(refined) => module_env.register_type(&refined),
+                _ => {}
+            }
+        }
+        let root = module_env.atoms.get(root_name).unwrap().clone();
+        compute_dependency_hashes(&root, &module_env)
+            .remove(dependency_key)
+            .unwrap()
+    }
+
     #[test]
     fn dependency_hashes_ignore_callee_trust_but_proof_hashes_include_it() {
         let (verified_dependencies, verified_proof) =
@@ -1023,6 +1075,123 @@ mod nominal_hash_tests {
             assert_eq!(dependencies, verified_dependencies);
             assert_ne!(proof, verified_proof);
         }
+    }
+
+    #[test]
+    fn dependency_hash_tracks_signature_type_units() {
+        let usd = dependency_hash_for(
+            "type Money = i64 unit USD;\n\
+             atom g(x: Money) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n",
+            "g",
+            "type:Money",
+        );
+        let eur = dependency_hash_for(
+            "type Money = i64 unit EUR;\n\
+             atom g(x: Money) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n",
+            "g",
+            "type:Money",
+        );
+        assert_ne!(usd, eur);
+    }
+
+    #[test]
+    fn dependency_hash_tracks_callee_param_type_units() {
+        let usd = dependency_hash_for(
+            "type Money = i64 unit USD;\n\
+             atom f(x: Money) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+            "g",
+            "atom:f",
+        );
+        let eur = dependency_hash_for(
+            "type Money = i64 unit EUR;\n\
+             atom f(x: Money) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+            "g",
+            "atom:f",
+        );
+        assert_ne!(usd, eur);
+    }
+
+    #[test]
+    fn dependency_hash_tracks_callee_effect_pre_and_effect_post() {
+        let effect_pre_open = dependency_hash_for(
+            "atom f(x: i64) -> i64\n\
+             effect_pre: { File: Open };\n\
+             effect_post: { File: Open };\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+            "g",
+            "atom:f",
+        );
+        let effect_pre_closed = dependency_hash_for(
+            "atom f(x: i64) -> i64\n\
+             effect_pre: { File: Closed };\n\
+             effect_post: { File: Open };\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+            "g",
+            "atom:f",
+        );
+        assert_ne!(effect_pre_open, effect_pre_closed);
+
+        let effect_post_open = dependency_hash_for(
+            "atom f(x: i64) -> i64\n\
+             effect_pre: { File: Open };\n\
+             effect_post: { File: Open };\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+            "g",
+            "atom:f",
+        );
+        let effect_post_closed = dependency_hash_for(
+            "atom f(x: i64) -> i64\n\
+             effect_pre: { File: Open };\n\
+             effect_post: { File: Closed };\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+            "g",
+            "atom:f",
+        );
+        assert_ne!(effect_post_open, effect_post_closed);
     }
 
     const MAIN: &str = r#"
