@@ -82,14 +82,16 @@ fn lookup_proof_store(
     module_env: &verification::ModuleEnv,
     proof_hash: &str,
 ) -> Option<resolver::VerificationCacheEntry> {
-    if atom.trust_level == parser::TrustLevel::Trusted
-        || verification::classify_atom_for_lean_escalation(
-            atom,
-            module_env,
-            proof_cert::status::Z3_UNSAT,
-            proof_cert::status::VERIFIED,
-        )
-        .should_escalate
+    if matches!(
+        atom.trust_level,
+        parser::TrustLevel::Trusted | parser::TrustLevel::Unverified
+    ) || verification::classify_atom_for_lean_escalation(
+        atom,
+        module_env,
+        proof_cert::status::Z3_UNSAT,
+        proof_cert::status::VERIFIED,
+    )
+    .should_escalate
     {
         return None;
     }
@@ -577,14 +579,17 @@ pub(crate) fn cmd_build(
                                             cover_results,
                                         },
                                     );
-                                    if qualified_method.trust_level != parser::TrustLevel::Trusted
-                                        && !verification::classify_atom_for_lean_escalation(
-                                            &qualified_method,
-                                            &module_env,
-                                            proof_cert::status::Z3_UNSAT,
-                                            proof_cert::status::VERIFIED,
-                                        )
-                                        .should_escalate
+                                    if !matches!(
+                                        qualified_method.trust_level,
+                                        parser::TrustLevel::Trusted
+                                            | parser::TrustLevel::Unverified
+                                    ) && !verification::classify_atom_for_lean_escalation(
+                                        &qualified_method,
+                                        &module_env,
+                                        proof_cert::status::Z3_UNSAT,
+                                        proof_cert::status::VERIFIED,
+                                    )
+                                    .should_escalate
                                     {
                                         if let (Some(store), Some(entry)) = (
                                             proof_store.as_ref(),
@@ -812,14 +817,16 @@ pub(crate) fn cmd_build(
                                         cover_results,
                                     },
                                 );
-                                if atom.trust_level != parser::TrustLevel::Trusted
-                                    && !verification::classify_atom_for_lean_escalation(
-                                        atom,
-                                        &module_env,
-                                        proof_cert::status::Z3_UNSAT,
-                                        proof_cert::status::VERIFIED,
-                                    )
-                                    .should_escalate
+                                if !matches!(
+                                    atom.trust_level,
+                                    parser::TrustLevel::Trusted | parser::TrustLevel::Unverified
+                                ) && !verification::classify_atom_for_lean_escalation(
+                                    atom,
+                                    &module_env,
+                                    proof_cert::status::Z3_UNSAT,
+                                    proof_cert::status::VERIFIED,
+                                )
+                                .should_escalate
                                 {
                                     if let (Some(store), Some(entry)) = (
                                         proof_store.as_ref(),

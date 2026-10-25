@@ -921,7 +921,11 @@ fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyCon
         .filter(|entry| entry.proof_hash == proof_hash)
         .cloned();
     let cached_entry = project_cache_entry.or_else(|| {
-        if atom.trust_level == parser::TrustLevel::Trusted || promote_outside_fragment {
+        if matches!(
+            atom.trust_level,
+            parser::TrustLevel::Trusted | parser::TrustLevel::Unverified
+        ) || promote_outside_fragment
+        {
             return None;
         }
         let store = ctx.proof_store?;
@@ -1095,7 +1099,11 @@ fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyCon
                     cover_results,
                 },
             );
-            if atom.trust_level != parser::TrustLevel::Trusted && !promote_outside_fragment {
+            if !matches!(
+                atom.trust_level,
+                parser::TrustLevel::Trusted | parser::TrustLevel::Unverified
+            ) && !promote_outside_fragment
+            {
                 if let (Some(store), Some(entry)) =
                     (ctx.proof_store, ctx.verification_cache.get(name))
                 {

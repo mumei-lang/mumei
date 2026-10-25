@@ -1,6 +1,5 @@
 use crate::cli::ProofStoreCommand;
-use mumei_core::resolver::{ProofStore, StoreLookup};
-use serde_json::Value;
+use mumei_core::resolver::ProofStore;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -26,20 +25,6 @@ fn entries(root: &Path) -> Vec<PathBuf> {
     result
 }
 
-fn lookup(store: &ProofStore, path: &Path) -> StoreLookup {
-    let Ok(value) = std::fs::read(path).and_then(|bytes| {
-        serde_json::from_slice::<Value>(&bytes)
-            .map_err(|error| std::io::Error::other(error.to_string()))
-    }) else {
-        return StoreLookup::Invalid("invalid JSON".into());
-    };
-    let key = value["key"].as_str().unwrap_or_default();
-    let inputs = &value["key_inputs"];
-    let proof_hash = inputs["proof_hash"].as_str().unwrap_or_default();
-    let z3_version = inputs["z3_version"].as_str().unwrap_or_default();
-    store.lookup(key, proof_hash, z3_version)
-}
-
 pub(crate) fn cmd_proof_store(command: ProofStoreCommand) {
     match command {
         ProofStoreCommand::Stats { dir, json } => {
@@ -58,7 +43,7 @@ pub(crate) fn cmd_proof_store(command: ProofStoreCommand) {
                 .sum();
             let invalid = files
                 .iter()
-                .filter(|path| matches!(lookup(&store, path), StoreLookup::Invalid(_)))
+                .filter(|path| store.validate_file(path).is_err())
                 .count();
             if json {
                 println!(
@@ -94,7 +79,7 @@ pub(crate) fn cmd_proof_store(command: ProofStoreCommand) {
             let now = SystemTime::now();
             let mut removed = 0;
             for path in entries(store.root()) {
-                let is_invalid = matches!(lookup(&store, &path), StoreLookup::Invalid(_));
+                let is_invalid = store.validate_file(&path).is_err();
                 let is_old = age.is_some_and(|age| {
                     path.metadata()
                         .ok()

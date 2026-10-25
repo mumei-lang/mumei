@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
 const SCHEMA: &str = "mumei.proof-store-entry/v1";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -67,7 +70,12 @@ impl ProofStore {
                 "HOME and MUMEI_PROOF_STORE are unset",
             ));
         };
-        Ok(Self { root })
+        create_private_dirs(&root)?;
+        let store = Self { root };
+        store
+            .check_root_permissions()
+            .map_err(|reason| std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason))?;
+        Ok(store)
     }
 
     pub fn root(&self) -> &Path {
@@ -89,50 +97,40 @@ impl ProofStore {
     }
 
     pub fn lookup(&self, key: &str, proof_hash: &str, z3_version: &str) -> StoreLookup {
-        if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if let Err(reason) = self.check_root_permissions() {
+            return StoreLookup::Invalid(reason);
+        }
+        if !valid_key(key) {
             return StoreLookup::Invalid("invalid key".to_string());
         }
         let path = self.path(key);
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
+        let expected_key = Self::key(proof_hash, z3_version);
+        if key != expected_key {
+            return StoreLookup::Invalid("key mismatch".to_string());
+        }
+        match std::fs::metadata(&path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return StoreLookup::Miss;
             }
             Err(error) => return StoreLookup::Invalid(error.to_string()),
-        };
-        let stored: StoreEntry = match serde_json::from_slice(&bytes) {
+            Ok(_) => {}
+        }
+        let stored = match self.read_valid_entry(&path) {
             Ok(stored) => stored,
-            Err(error) => return StoreLookup::Invalid(format!("invalid JSON: {error}")),
+            Err(reason) => return StoreLookup::Invalid(reason),
         };
-        let expected_key = Self::key(proof_hash, z3_version);
-        if stored.schema != SCHEMA {
-            return StoreLookup::Invalid("schema mismatch".to_string());
-        }
-        if key != expected_key || stored.key != expected_key {
-            return StoreLookup::Invalid("key mismatch".to_string());
-        }
-        if stored.key_inputs.proof_hash != proof_hash
+        if stored.key != key
+            || stored.key_inputs.proof_hash != proof_hash
             || stored.key_inputs.z3_version != z3_version
-            || stored.key_inputs.mumei_version != env!("CARGO_PKG_VERSION")
         {
             return StoreLookup::Invalid("key_inputs mismatch".to_string());
         }
-        let expected_digest = content_digest(
-            &stored.key,
-            &stored.atom_name,
-            &stored.key_inputs,
-            &stored.entry,
-        );
-        if stored.content_digest != expected_digest {
-            return StoreLookup::Invalid("content_digest mismatch".to_string());
-        }
-        if stored.entry.result != "verified" {
-            return StoreLookup::Invalid("entry is not verified".to_string());
-        }
-        if stored.entry.proof_hash != proof_hash {
-            return StoreLookup::Invalid("entry proof_hash mismatch".to_string());
-        }
         StoreLookup::Hit(stored.entry)
+    }
+
+    pub fn validate_file(&self, path: &Path) -> Result<(), String> {
+        self.check_root_permissions()?;
+        self.read_valid_entry(path).map(|_| ())
     }
 
     pub fn record(
@@ -142,6 +140,8 @@ impl ProofStore {
         z3_version: &str,
         entry: &VerificationCacheEntry,
     ) -> std::io::Result<()> {
+        self.check_root_permissions()
+            .map_err(|reason| std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason))?;
         if entry.result != "verified" || entry.proof_hash != proof_hash {
             return Ok(());
         }
@@ -154,7 +154,7 @@ impl ProofStore {
         }
         let path = self.path(&key);
         let parent = path.parent().expect("proof-store key has a parent");
-        std::fs::create_dir_all(parent)?;
+        create_private_dirs(parent)?;
         let key_inputs = KeyInputs {
             proof_hash: proof_hash.to_string(),
             z3_version: z3_version.to_string(),
@@ -196,6 +196,79 @@ impl ProofStore {
             return Err(error);
         }
         Ok(())
+    }
+
+    fn read_valid_entry(&self, path: &Path) -> Result<StoreEntry, String> {
+        let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+        let stored: StoreEntry =
+            serde_json::from_slice(&bytes).map_err(|error| format!("invalid JSON: {error}"))?;
+        if stored.schema != SCHEMA {
+            return Err("schema mismatch".to_string());
+        }
+        if !valid_key(&stored.key) {
+            return Err("invalid key".to_string());
+        }
+        if self.path(&stored.key) != path {
+            return Err("entry is not at its canonical path".to_string());
+        }
+        if stored.key_inputs.mumei_version != env!("CARGO_PKG_VERSION")
+            || stored.key != Self::key(&stored.key_inputs.proof_hash, &stored.key_inputs.z3_version)
+        {
+            return Err("key_inputs mismatch".to_string());
+        }
+        let expected_digest = content_digest(
+            &stored.key,
+            &stored.atom_name,
+            &stored.key_inputs,
+            &stored.entry,
+        );
+        if stored.content_digest != expected_digest {
+            return Err("content_digest mismatch".to_string());
+        }
+        if stored.entry.result != "verified" {
+            return Err("entry is not verified".to_string());
+        }
+        if stored.entry.proof_hash != stored.key_inputs.proof_hash {
+            return Err("entry proof_hash mismatch".to_string());
+        }
+        Ok(stored)
+    }
+
+    fn check_root_permissions(&self) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            match std::fs::metadata(&self.root) {
+                Ok(metadata) if metadata.mode() & 0o022 != 0 => Err(format!(
+                    "proof store {} is writable by other users; ignoring it",
+                    self.root.display()
+                )),
+                Ok(_) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.to_string()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(())
+        }
+    }
+}
+
+fn valid_key(key: &str) -> bool {
+    key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn create_private_dirs(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        builder.mode(0o700);
+        builder.create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
     }
 }
 

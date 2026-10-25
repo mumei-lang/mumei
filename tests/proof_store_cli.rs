@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -292,6 +295,45 @@ fn failed_and_trusted_atoms_are_not_written() {
 }
 
 #[test]
+fn unverified_trivial_contract_is_neither_written_nor_reused() {
+    let scratch = Scratch::new("unverified");
+    let store = scratch.0.join("store");
+    let source = "unverified atom unchecked(x: i64) -> i64\n    requires: true;\n    ensures: true;\n    body: x;\n";
+    let first = scratch.project("first", source);
+    let initial = run(&first, &store, &["--proof-store", "--proof-cert"]);
+    assert!(initial.status.success(), "{}", text(&initial));
+    assert!(json_files(&store).is_empty());
+
+    let cache: std::collections::HashMap<String, mumei_core::resolver::VerificationCacheEntry> =
+        serde_json::from_slice(
+            &fs::read(first.join(".mumei/cache/verification_cache.json")).unwrap(),
+        )
+        .unwrap();
+    let entry = cache.get("unchecked").unwrap();
+    let proof_hash = entry.proof_hash.clone();
+    let z3_version = mumei_core::proof_cert::get_z3_version();
+    let proof_store = mumei_core::resolver::ProofStore::open(Some(&store)).unwrap();
+    proof_store
+        .record("unchecked", &proof_hash, &z3_version, entry)
+        .unwrap();
+    assert_eq!(json_files(&store).len(), 1);
+
+    let second = scratch.project("second", source);
+    let result = run(&second, &store, &["--proof-store", "--proof-cert"]);
+    assert!(result.status.success(), "{}", text(&result));
+    assert!(
+        !text(&result).contains("reused from proof store"),
+        "{}",
+        text(&result)
+    );
+    assert!(text(&result).contains("marked as 'unverified'"));
+    let cert: Value =
+        serde_json::from_slice(&fs::read(second.join("main.proof.json")).unwrap()).unwrap();
+    assert_ne!(cert["atoms"][0]["reused_from_store"], true);
+    assert_eq!(json_files(&store).len(), 1);
+}
+
+#[test]
 fn escalation_candidate_is_neither_written_nor_reused_from_store() {
     let scratch = Scratch::new("escalation-candidate");
     let store = scratch.0.join("store");
@@ -424,6 +466,9 @@ fn proof_store_stats_prune_invalid_and_rejects_empty_selector() {
     let project = scratch.project("project", &basic_module("result == a + b"));
     let verified = run(&project, &store, &["--proof-store"]);
     assert!(verified.status.success(), "{}", text(&verified));
+    let canonical = json_files(&store).into_iter().next().unwrap();
+    let misplaced = store.join("v1/misplaced.json");
+    fs::copy(&canonical, &misplaced).unwrap();
     fs::create_dir_all(store.join("v1/aa")).unwrap();
     fs::write(store.join("v1/aa/invalid.json"), b"{").unwrap();
     let leftover_tmp = store.join("v1/aa/leftover.tmp");
@@ -441,9 +486,9 @@ fn proof_store_stats_prune_invalid_and_rejects_empty_selector() {
         .iter()
         .map(|path| fs::metadata(path).unwrap().len())
         .sum();
-    assert_eq!(json["entries"], 2);
+    assert_eq!(json["entries"], 3);
     assert_eq!(json["total_bytes"], json_bytes);
-    assert_eq!(json["invalid"], 1);
+    assert_eq!(json["invalid"], 2);
 
     let no_selector = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .args(["proof-store", "prune", "--dir"])
@@ -460,6 +505,8 @@ fn proof_store_stats_prune_invalid_and_rejects_empty_selector() {
         .unwrap();
     assert!(pruned.status.success(), "{}", text(&pruned));
     assert_eq!(json_files(&store).len(), 1);
+    assert!(canonical.exists());
+    assert!(!misplaced.exists());
     assert!(leftover_tmp.exists());
 
     let old = Command::new(env!("CARGO_BIN_EXE_mumei"))
@@ -501,4 +548,46 @@ fn proof_store_prunes_only_entries_older_than_the_requested_age() {
     assert!(!files[0].exists());
     assert!(files[1].exists());
     assert!(fs::metadata(&files[1]).unwrap().modified().unwrap() > old_time);
+}
+
+#[cfg(unix)]
+#[test]
+fn proof_store_ignores_root_writable_by_other_users_and_falls_back_to_z3() {
+    let scratch = Scratch::new("shared-store");
+    let store = scratch.0.join("store");
+    fs::create_dir_all(&store).unwrap();
+    fs::set_permissions(&store, fs::Permissions::from_mode(0o777)).unwrap();
+    let project = scratch.project("project", &basic_module("result == a + b"));
+
+    let verified = run(&project, &store, &["--proof-store"]);
+    let output = text(&verified);
+    assert!(verified.status.success(), "{output}");
+    assert!(output.contains("proof store "));
+    assert!(
+        output.contains("is writable by other users; ignoring it"),
+        "{output}"
+    );
+    assert!(output.contains("'add': verified"), "{output}");
+    assert!(json_files(&store).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn proof_store_creates_private_directories() {
+    let scratch = Scratch::new("private-store");
+    let store = scratch.0.join("store");
+    let project = scratch.project("project", &basic_module("result == a + b"));
+    let verified = run(&project, &store, &["--proof-store"]);
+    assert!(verified.status.success(), "{}", text(&verified));
+    let entry = json_files(&store).into_iter().next().unwrap();
+    for directory in [
+        store.clone(),
+        store.join("v1"),
+        entry.parent().unwrap().to_path_buf(),
+    ] {
+        assert_eq!(
+            fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
 }
