@@ -7,6 +7,16 @@
   examples on `v0.6.22`, along with the Homebrew formula template and
   `install.sh` help examples.
 
+### Unreleased: proof-hash callee coverage
+
+- **Qualified calls**: calls such as `lib::f` and `Point::get` are hashed and
+  keyed by their qualified name, while legacy `atom:f` keys still validate.
+- **Package-name aliases**: manifest dependencies are also registered under
+  their package name unless the consumer manifest uses that name.
+
+Proof-cache entries for atoms with qualified callees are recomputed once after
+upgrading.
+
 ### Unreleased: certificate dependency freshness
 
 - New version-1.1 certificates record deterministic per-atom dependency
