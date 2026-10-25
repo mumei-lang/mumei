@@ -567,7 +567,15 @@ fn map_property_args(
     args: &Value,
     property: &PropertyObservation,
     module_env: &ModuleEnv,
-) -> Result<Vec<String>, String> {
+) -> Result<MappedPropertyArgs, String> {
+    if property
+        .variables
+        .iter()
+        .any(|variable| matches!(variable.name.as_str(), "result" | "true" | "false"))
+    {
+        return Err("reserved_variable_name".to_string());
+    }
+    let prefix = property_generator_prefix(atom);
     let values = match args {
         Value::Object(object) => {
             if object.len() != atom.params.len()
@@ -587,7 +595,8 @@ fn map_property_args(
         Value::Array(_) => return Err("argument_count_mismatch".to_string()),
         _ => return Err("unsupported_args_shape".to_string()),
     };
-    atom.params
+    let pinned_values = atom
+        .params
         .iter()
         .zip(values)
         .map(|(param, value)| {
@@ -609,7 +618,7 @@ fn map_property_args(
                 if (generator.type_name == "bool") != parameter_is_bool {
                     return Err("argument_type_mismatch".to_string());
                 }
-                Ok(format!("__gen_{name}"))
+                Ok(format!("{prefix}{name}"))
             } else {
                 render_for_type(
                     value,
@@ -618,7 +627,16 @@ fn map_property_args(
                 )
             }
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(MappedPropertyArgs {
+        prefix,
+        pinned_values,
+    })
+}
+
+struct MappedPropertyArgs {
+    prefix: String,
+    pinned_values: Vec<String>,
 }
 
 fn has_unknown_property_identifier(property: &PropertyObservation) -> bool {
@@ -644,21 +662,22 @@ fn has_unknown_property_identifier(property: &PropertyObservation) -> bool {
 fn check_property_observation(
     atom: &Atom,
     property: &PropertyObservation,
-    pinned_values: &[String],
+    mapped_args: &MappedPropertyArgs,
     index: usize,
     module_env: &ModuleEnv,
     output_dir: &Path,
     config: &VerificationConfig,
 ) -> (&'static str, String) {
+    let prefix = &mapped_args.prefix;
     let generator_params = property
         .variables
         .iter()
-        .map(generator_param)
+        .map(|variable| generator_param(variable, prefix))
         .collect::<Vec<_>>();
     let mut property_atom = atom.clone();
     property_atom.params.extend(generator_params);
-    let pin = pin_expression(atom, pinned_values);
-    let domain = property_domain(property);
+    let pin = pin_expression(atom, &mapped_args.pinned_values);
+    let domain = property_domain(property, prefix);
     let requires = format!("({domain}) && ({pin})");
     let atom_requires = clause_or_true(&atom.requires);
     let atom_ensures = clause_or_true(&atom.ensures);
@@ -699,7 +718,7 @@ fn check_property_observation(
         return ("inconclusive", "admissibility check inconclusive".into());
     }
 
-    let predicate = property_predicate(property);
+    let predicate = property_predicate(property, prefix);
     let mut result_atom = property_atom.clone();
     result_atom
         .params
@@ -742,9 +761,23 @@ fn check_property_observation(
     (verdict, detail.to_string())
 }
 
-fn generator_param(variable: &PropertyVariable) -> Param {
+fn property_generator_prefix(atom: &Atom) -> String {
+    let mut prefix = "__gen_".to_string();
+    let mut suffix = 1;
+    while atom
+        .params
+        .iter()
+        .any(|param| param.name.starts_with(&prefix))
+    {
+        prefix = format!("__gen{suffix}_");
+        suffix += 1;
+    }
+    prefix
+}
+
+fn generator_param(variable: &PropertyVariable, prefix: &str) -> Param {
     Param {
-        name: format!("__gen_{}", variable.name),
+        name: format!("{prefix}{}", variable.name),
         type_name: Some(variable.type_name.clone()),
         type_ref: None,
         consume: false,
@@ -755,10 +788,10 @@ fn generator_param(variable: &PropertyVariable) -> Param {
     }
 }
 
-fn property_domain(property: &PropertyObservation) -> String {
+fn property_domain(property: &PropertyObservation, prefix: &str) -> String {
     let mut conditions = Vec::new();
     for variable in &property.variables {
-        let name = format!("__gen_{}", variable.name);
+        let name = format!("{prefix}{}", variable.name);
         if let Some(min) = variable.min {
             conditions.push(format!("{name} >= {}", render_integer(min)));
         }
@@ -770,7 +803,7 @@ fn property_domain(property: &PropertyObservation) -> String {
         property
             .assumptions
             .iter()
-            .map(|assumption| replace_property_identifiers(assumption, property)),
+            .map(|assumption| replace_property_identifiers(assumption, property, prefix)),
     );
     if conditions.is_empty() {
         "true".to_string()
@@ -783,20 +816,32 @@ fn property_domain(property: &PropertyObservation) -> String {
     }
 }
 
-fn property_predicate(property: &PropertyObservation) -> String {
-    replace_result_identifier(&replace_property_identifiers(&property.predicate, property))
+fn property_predicate(property: &PropertyObservation, prefix: &str) -> String {
+    replace_result_identifier(&replace_property_identifiers(
+        &property.predicate,
+        property,
+        prefix,
+    ))
 }
 
-fn replace_property_identifiers(expression: &str, property: &PropertyObservation) -> String {
-    let mut renamed = expression.to_string();
-    for variable in &property.variables {
-        let pattern = regex::Regex::new(&format!(r"\b{}\b", regex::escape(&variable.name)))
-            .expect("escaped identifier regex");
-        renamed = pattern
-            .replace_all(&renamed, format!("__gen_{}", variable.name))
-            .into_owned();
-    }
-    renamed
+fn replace_property_identifiers(
+    expression: &str,
+    property: &PropertyObservation,
+    prefix: &str,
+) -> String {
+    let identifiers =
+        regex::Regex::new(r"\b[A-Za-z_][A-Za-z0-9_]*\b").expect("static identifier regex");
+    identifiers
+        .replace_all(expression, |captures: &regex::Captures<'_>| {
+            let identifier = &captures[0];
+            property
+                .variables
+                .iter()
+                .find(|variable| variable.name == identifier)
+                .map(|variable| format!("{prefix}{}", variable.name))
+                .unwrap_or_else(|| identifier.to_string())
+        })
+        .into_owned()
 }
 
 fn classify_property_checks(

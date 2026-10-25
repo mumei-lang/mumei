@@ -548,6 +548,124 @@ fn property_observations_are_entailed_or_not_entailed() {
 }
 
 #[test]
+fn property_reserved_generator_names_are_not_checked() {
+    let fixture = Fixture::new(
+        "atom id(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+        &harvest(vec![
+            property(
+                "id",
+                json!({"x": {"var": "result"}}),
+                json!([{"name": "result", "type": "i64"}]),
+                "result == result",
+            ),
+            property(
+                "id",
+                json!({"x": {"var": "true"}}),
+                json!([{"name": "true", "type": "bool"}]),
+                "result == true",
+            ),
+        ]),
+    );
+    let output = fixture.run(&["--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let results = parse(&output)["results"].as_array().unwrap().clone();
+    assert_eq!(results[0]["verdict"], "not_checked");
+    assert_eq!(results[0]["detail"], "reserved_variable_name");
+    assert_eq!(results[1]["verdict"], "not_checked");
+    assert_eq!(results[1]["detail"], "reserved_variable_name");
+}
+
+#[test]
+fn property_generator_renaming_is_single_pass_for_overlapping_names() {
+    let fixture = Fixture::new(
+        "atom add(a: i64, b: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == a + b;\n\
+         body: a + b;\n",
+        &harvest(vec![
+            {
+                let mut item = property(
+                    "add",
+                    json!({"a": {"var": "x"}, "b": {"var": "__gen_x"}}),
+                    json!([
+                        {"name": "x", "type": "i64", "min": 0, "max": 10},
+                        {"name": "__gen_x", "type": "i64", "min": 0, "max": 10}
+                    ]),
+                    "result == x + __gen_x",
+                );
+                item["assumptions"] = json!(["x >= 0", "__gen_x >= 0"]);
+                item
+            },
+            property(
+                "add",
+                json!({"a": {"var": "x"}, "b": {"var": "__gen_x"}}),
+                json!([
+                    {"name": "x", "type": "i64", "min": 0, "max": 10},
+                    {"name": "__gen_x", "type": "i64", "min": 0, "max": 10}
+                ]),
+                "result == x",
+            ),
+        ]),
+    );
+    let output = fixture.run(&["--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let results = parse(&output)["results"].as_array().unwrap().clone();
+    assert_eq!(results[0]["verdict"], "entailed");
+    assert_eq!(results[1]["verdict"], "not_entailed");
+}
+
+#[test]
+fn property_generator_prefix_avoids_atom_parameter_collisions() {
+    let fixture = Fixture::new(
+        "atom id(__gen_x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == __gen_x;\n\
+         body: __gen_x;\n\
+         atom add(__gen_x: i64, __gen1_x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == __gen_x + __gen1_x;\n\
+         body: __gen_x + __gen1_x;\n",
+        &harvest(vec![
+            property(
+                "id",
+                json!({"__gen_x": {"var": "x"}}),
+                json!([{"name": "x", "type": "i64", "min": 0, "max": 10}]),
+                "result == x",
+            ),
+            property(
+                "add",
+                json!({"__gen_x": {"var": "x"}, "__gen1_x": 2}),
+                json!([{"name": "x", "type": "i64", "min": 0, "max": 10}]),
+                "result == x + 2",
+            ),
+        ]),
+    );
+    let output = fixture.run(&["--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let results = parse(&output)["results"].as_array().unwrap().clone();
+    assert_eq!(results[0]["verdict"], "entailed");
+    assert_eq!(results[1]["verdict"], "entailed");
+}
+
+#[test]
 fn property_contradictions_exit_one() {
     let fixture = Fixture::new(
         "atom successor(a: i64) -> i64\n\
