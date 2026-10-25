@@ -64,6 +64,12 @@ fn observation(kind: &str, target: &str, args: Value) -> Value {
     })
 }
 
+fn example(target: &str, args: Value, result: Value) -> Value {
+    let mut item = observation("example", target, args);
+    item["result"] = result;
+    item
+}
+
 fn parse(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
         panic!(
@@ -380,4 +386,70 @@ fn human_output_is_available_without_json_flag() {
     let output = fixture.run(&[]);
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("consistent id"));
+}
+
+#[test]
+fn clause_modes_and_labels_are_preserved_in_observation_checks() {
+    let fixture = Fixture::new(
+        "atom assumed(x: i64) -> i64\n\
+         requires assume: x > 0;\n\
+         ensures: result == x;\n\
+         body: x;\n\
+         atom checked(x: i64) -> i64\n\
+         requires: x > 0;\n\
+         ensures check: result == x;\n\
+         body: x;\n\
+         atom labelled(x: i64) -> i64\n\
+         requires \"positive input\": x > 0;\n\
+         ensures \"identity result\": result == x;\n\
+         body: x;\n",
+        &harvest(vec![
+            example("assumed", json!({"x": 2}), json!(2)),
+            example("assumed", json!({"x": 2}), json!(3)),
+            example("assumed", json!({"x": 0}), json!(0)),
+            example("checked", json!({"x": 2}), json!(2)),
+            example("checked", json!({"x": 2}), json!(3)),
+            example("labelled", json!({"x": 2}), json!(2)),
+            example("labelled", json!({"x": 2}), json!(3)),
+            example("labelled", json!({"x": 0}), json!(0)),
+        ]),
+    );
+    let output = fixture.run(&["--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let results = parse(&output)["results"].as_array().unwrap().clone();
+    assert_eq!(results[0]["verdict"], "consistent");
+    assert_eq!(results[1]["verdict"], "contradicts_ensures");
+    assert_eq!(results[2]["verdict"], "outside_requires");
+    assert_eq!(results[3]["verdict"], "consistent");
+    assert_eq!(results[4]["verdict"], "contradicts_ensures");
+    assert_eq!(results[5]["verdict"], "consistent");
+    assert_eq!(results[6]["verdict"], "contradicts_ensures");
+    assert_eq!(results[7]["verdict"], "outside_requires");
+}
+
+#[test]
+fn structured_parameter_values_are_not_checked() {
+    let fixture = Fixture::new(
+        "struct Point { x: i64 }\n\
+         atom point(p: Point) -> i64\n\
+         requires: true;\n\
+         ensures: result == 0;\n\
+         body: 0;\n\
+         atom total(values: [i64]) -> i64\n\
+         requires: true;\n\
+         ensures: result == 0;\n\
+         body: 0;\n",
+        &harvest(vec![
+            example("point", json!({"p": {"x": 7}}), json!(7)),
+            example("total", json!({"values": [1, 2]}), json!(3)),
+        ]),
+    );
+    let output = fixture.run(&["--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let results = parse(&output)["results"].as_array().unwrap().clone();
+    assert_eq!(results.len(), 2);
+    for result in results {
+        assert_eq!(result["verdict"], "not_checked");
+        assert_eq!(result["detail"], "unsupported_value_type");
+    }
 }

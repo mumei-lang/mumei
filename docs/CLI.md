@@ -198,9 +198,11 @@ rejections against atom contracts using the verifier. JSON output uses
 `mumei.observation-check/v1`; each observation is `consistent`,
 `contradicts_ensures`, `outside_requires`, `rejection_explained`,
 `requires_admits_rejected`, `inconclusive`, or `not_checked`. Exit code `1`
-indicates a contradiction or a rejected input admitted by `requires`; code `4`
-indicates invalid input or an unparsable source file. `--atom` filters by the
-observation's target name.
+indicates a contradiction or a rejected input admitted by `requires`;
+`outside_requires` and `rejection_explained` never fail the run. For a relation,
+`contradicts_ensures` means no result the contract allows satisfies the tested
+predicate. Code `4` indicates invalid input or an unparsable source file.
+`--atom` filters by the observation's target name.
 
 ### SARIF output
 

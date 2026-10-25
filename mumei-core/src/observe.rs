@@ -470,8 +470,12 @@ fn run_check(
     wrapper.name = name;
     wrapper.type_params.clear();
     wrapper.where_bounds.clear();
+    wrapper.trace_id = None;
+    wrapper.spec_metadata.clear();
     wrapper.requires = requires.to_string();
     wrapper.ensures = ensures.to_string();
+    wrapper.clause_labels.clear();
+    wrapper.clause_modes.clear();
     wrapper.body_expr = body.to_string();
     wrapper.return_type = return_type.map(str::to_string);
     wrapper.effects.clear();
