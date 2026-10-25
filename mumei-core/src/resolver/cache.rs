@@ -1203,6 +1203,22 @@ mod nominal_hash_tests {
             .unwrap()
     }
 
+    fn proof_hash_for(source: &str, root_name: &str) -> String {
+        let items = parse_module(source);
+        let mut module_env = ModuleEnv::default();
+        for item in items {
+            if let Item::Atom(atom) = item {
+                let name = atom.name.clone();
+                module_env
+                    .dependency_graph
+                    .insert(name, collect_callees_from_atom(&atom));
+                module_env.atoms.insert(atom.name.clone(), atom);
+            }
+        }
+        let root = module_env.atoms.get(root_name).unwrap().clone();
+        compute_proof_hash(&root, &module_env)
+    }
+
     #[test]
     fn dependency_hashes_ignore_callee_trust_but_proof_hashes_include_it() {
         let (verified_dependencies, verified_proof) =
@@ -1297,54 +1313,6 @@ mod nominal_hash_tests {
         assert_eq!(
             hashes.keys().cloned().collect::<Vec<_>>(),
             vec!["atom:lib::f".to_string()]
-        );
-    }
-
-    fn proof_hash_with_callee_effect(effect: Option<(&str, &str)>) -> String {
-        let items = parse_module(
-            "atom f(x: i64) -> i64\n\
-             requires: true;\n\
-             ensures: result >= 0;\n\
-             body: x;\n\
-             atom g(x: i64) -> i64\n\
-             requires: true;\n\
-             ensures: result >= 0;\n\
-             body: f(x);\n",
-        );
-        let mut module_env = ModuleEnv::default();
-        for item in items {
-            if let Item::Atom(atom) = item {
-                module_env.register_atom(&atom);
-            }
-        }
-        module_env
-            .dependency_graph
-            .entry("g".to_string())
-            .or_default()
-            .insert("f".to_string());
-        if let Some((kind, value)) = effect {
-            let callee = module_env.atoms.get_mut("f").unwrap();
-            let map = match kind {
-                "effect_pre" => &mut callee.effect_pre,
-                "effect_post" => &mut callee.effect_post,
-                _ => panic!("unknown effect map"),
-            };
-            map.insert("File".to_string(), value.to_string());
-        }
-        let root = module_env.get_atom("g").unwrap().clone();
-        compute_proof_hash(&root, &module_env)
-    }
-
-    #[test]
-    fn proof_hash_tracks_callee_effect_pre_and_effect_post() {
-        let unchanged = proof_hash_with_callee_effect(None);
-        assert_ne!(
-            unchanged,
-            proof_hash_with_callee_effect(Some(("effect_pre", "Open")))
-        );
-        assert_ne!(
-            unchanged,
-            proof_hash_with_callee_effect(Some(("effect_post", "Closed")))
         );
     }
 
@@ -1642,6 +1610,75 @@ body: { p.a };\n";
              atom main() -> i64\nresources: [counter];\nrequires: true;\nensures: true;\nbody: { 0 }",
         );
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn proof_hash_tracks_callee_effect_pre_and_effect_post() {
+        let source = "atom f(x: i64) -> i64\n\
+             effect_pre: { File: Closed };\n\
+             effect_post: { File: Open };\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: f(x);\n";
+        let baseline = proof_hash_for(source, "g");
+        let changed_pre = proof_hash_for(
+            &source.replace("effect_pre: { File: Closed }", "effect_pre: { File: Open }"),
+            "g",
+        );
+        let changed_post = proof_hash_for(
+            &source.replace(
+                "effect_post: { File: Open }",
+                "effect_post: { File: Closed }",
+            ),
+            "g",
+        );
+
+        assert_ne!(baseline, changed_pre);
+        assert_ne!(baseline, changed_post);
+    }
+
+    #[test]
+    fn proof_hash_tracks_transitive_callee_effect_states() {
+        let source = "atom f(x: i64) -> i64\n\
+             effect_pre: { File: Closed };\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n\
+             atom h(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: f(x);\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: h(x);\n";
+        let baseline = proof_hash_for(source, "g");
+        let changed = proof_hash_for(
+            &source.replace("effect_pre: { File: Closed }", "effect_pre: { File: Open }"),
+            "g",
+        );
+
+        assert_ne!(baseline, changed);
+    }
+
+    #[test]
+    fn effect_free_proof_hash_matches_develop() {
+        let hash = proof_hash_for(
+            "atom main(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n",
+            "main",
+        );
+
+        assert_eq!(
+            hash,
+            "9e1ad8675ce5b94972092795e1f7583c37747cf2ace33fb3a601f459de1631b3"
+        );
     }
 }
 

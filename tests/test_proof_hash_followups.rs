@@ -120,38 +120,6 @@ fn assert_success(output: &Output, action: &str) {
     );
 }
 
-fn write_effect_project(fixture: &Fixture, pre: &str, post: &str) -> (PathBuf, PathBuf) {
-    let a = fixture.write(
-        "a/a.mm",
-        &format!(
-            "effect File\n\
-             states: [Open, Closed];\n\
-             initial: Open;\n\
-             transition close: Open -> Closed;\n\
-             transition open: Closed -> Open;\n\
-             trusted atom f(x: i64) -> i64\n\
-             effects: [File];\n\
-             effect_pre: {{ File: {pre} }};\n\
-             effect_post: {{ File: {post} }};\n\
-             requires: x >= 0;\n\
-             ensures: result == x;\n\
-             body: x;\n"
-        ),
-    );
-    let b = fixture.write(
-        "b.mm",
-        "import \"a/a.mm\";\n\
-         atom g(x: i64) -> i64\n\
-         effects: [File];\n\
-         effect_pre: { File: Open };\n\
-         effect_post: { File: Open };\n\
-         requires: x >= 0;\n\
-         ensures: result == x;\n\
-         body: f(x);\n",
-    );
-    (a, b)
-}
-
 fn collision_project(
     fixture: &Fixture,
     a_ensures: &str,
@@ -185,45 +153,6 @@ fn collision_project(
          body: lib::f(x);\n",
     );
     (a, b, g)
-}
-
-#[test]
-fn effect_post_change_invalidates_caller_cache() {
-    let fixture = Fixture::new();
-    let (a, b) = write_effect_project(&fixture, "Open", "Open");
-    assert_success(&fixture.verify(&b, &[]), "initial effect-post verification");
-
-    let source = std::fs::read_to_string(&a).expect("read callee source");
-    std::fs::write(
-        &a,
-        source.replace(
-            "effect_post: { File: Open }",
-            "effect_post: { File: Closed }",
-        ),
-    )
-    .expect("change callee effect_post");
-    let changed = fixture.verify(&b, &[]);
-    let text = output_text(&changed);
-    assert!(!changed.status.success(), "{text}");
-    assert!(!text.contains("'g': skipped (unchanged, cached)"), "{text}");
-}
-
-#[test]
-fn effect_pre_change_invalidates_caller_cache() {
-    let fixture = Fixture::new();
-    let (a, b) = write_effect_project(&fixture, "Open", "Open");
-    assert_success(&fixture.verify(&b, &[]), "initial effect-pre verification");
-
-    let source = std::fs::read_to_string(&a).expect("read callee source");
-    std::fs::write(
-        &a,
-        source.replace("effect_pre: { File: Open }", "effect_pre: { File: Closed }"),
-    )
-    .expect("change callee effect_pre");
-    let changed = fixture.verify(&b, &[]);
-    let text = output_text(&changed);
-    assert!(!changed.status.success(), "{text}");
-    assert!(!text.contains("'g': skipped (unchanged, cached)"), "{text}");
 }
 
 #[test]

@@ -9,15 +9,13 @@
 
 ### Unreleased: proof-hash callee coverage
 
-- **Callee effect states**: `effect_pre` and `effect_post` are now part of the
-  caller's proof hash.
 - **Qualified calls**: calls such as `lib::f` and `Point::get` are hashed and
   keyed by their qualified name, while legacy `atom:f` keys still validate.
 - **Package-name aliases**: manifest dependencies are also registered under
   their package name unless the consumer manifest uses that name.
 
-Proof-cache entries for atoms with effectful or qualified callees are
-recomputed once after upgrading.
+Proof-cache entries for atoms with qualified callees are recomputed once after
+upgrading.
 
 ### Unreleased: certificate dependency freshness
 
