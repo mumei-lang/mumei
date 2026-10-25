@@ -456,10 +456,22 @@ fn drain_pending_termination<'a>(
         solver.push();
         solver.assert(&obligation.not());
         let check = solver.check();
-        let err = if check != SatResult::Unsat {
-            Some(termination_violation_error(vc, solver, env, callee_name))
-        } else {
-            None
+        let err = match check {
+            SatResult::Sat => Some(termination_violation_error(
+                vc,
+                solver,
+                env,
+                callee_name,
+                VerdictKind::Rejected,
+            )),
+            SatResult::Unknown => Some(termination_violation_error(
+                vc,
+                solver,
+                env,
+                callee_name,
+                VerdictKind::Inconclusive,
+            )),
+            SatResult::Unsat => None,
         };
         solver.pop(1);
         if let Some(err) = err {

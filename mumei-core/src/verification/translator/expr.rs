@@ -745,6 +745,7 @@ pub(crate) fn termination_violation_error<'a>(
     solver: &Solver<'a>,
     env: &Env<'a>,
     callee_name: &str,
+    verdict: VerdictKind,
 ) -> MumeiError {
     let atom_name = vc.current_atom.map(|a| a.name.as_str()).unwrap_or("?");
     let measure_text = vc
@@ -757,6 +758,7 @@ pub(crate) fn termination_violation_error<'a>(
         atom_name, callee_name, measure_text
     ))
     .with_counterexample(ce)
+    .with_verdict(verdict)
 }
 
 /// Whether `callee` is a member of the current atom's SCC and the call sits
@@ -824,10 +826,22 @@ fn termination_obligation_at_call<'a>(
         }
         solver.assert(&obligation.not());
         let check = solver.check();
-        let err = if check != SatResult::Unsat {
-            Some(termination_violation_error(vc, solver, env, &callee.name))
-        } else {
-            None
+        let err = match check {
+            SatResult::Sat => Some(termination_violation_error(
+                vc,
+                solver,
+                env,
+                &callee.name,
+                VerdictKind::Rejected,
+            )),
+            SatResult::Unknown => Some(termination_violation_error(
+                vc,
+                solver,
+                env,
+                &callee.name,
+                VerdictKind::Inconclusive,
+            )),
+            SatResult::Unsat => None,
         };
         solver.pop(1);
         if let Some(err) = err {

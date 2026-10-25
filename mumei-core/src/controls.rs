@@ -112,7 +112,10 @@ pub fn analyze(
     atom_filter: Option<&str>,
     max_mutants: usize,
 ) -> Result<ControlsReport, String> {
-    let atoms = ordered_atoms(implementation, generic_implementation);
+    if max_mutants == 0 {
+        return Err("--max-mutants must be greater than 0".to_string());
+    }
+    let atoms = ordered_atoms(implementation, generic_implementation, module_env);
     if let Some(filter) = atom_filter {
         if !atoms.iter().any(|(name, _, _)| name == filter) {
             return Err(format!("unknown atom '{filter}'"));
@@ -174,30 +177,34 @@ pub fn analyze(
 fn ordered_atoms<'a>(
     implementation: &'a [Item],
     generic_implementation: &'a [Item],
+    module_env: &'a ModuleEnv,
 ) -> Vec<(String, &'a Atom, bool)> {
     let prepared = charter::implementation_atoms(implementation)
         .into_iter()
         .map(|candidate| (candidate.name, candidate.atom))
         .collect::<HashMap<_, _>>();
-    let generic_names = charter::generic_implementation_atoms(generic_implementation)
-        .into_iter()
-        .map(|candidate| candidate.name)
-        .collect::<HashSet<_>>();
-    charter::implementation_atoms(generic_implementation)
-        .into_iter()
-        .map(|candidate| {
-            let generic = generic_names.contains(&candidate.name);
-            let atom = if generic {
-                candidate.atom
-            } else {
-                prepared
-                    .get(&candidate.name)
-                    .copied()
-                    .unwrap_or(candidate.atom)
-            };
-            (candidate.name, atom, generic)
-        })
-        .collect()
+    let mut names = HashSet::new();
+    let mut atoms = Vec::new();
+    for candidate in charter::implementation_atoms(generic_implementation) {
+        names.insert(candidate.name.clone());
+        let generic = !candidate.atom.type_params.is_empty();
+        let atom = module_env
+            .get_atom(&candidate.name)
+            .or_else(|| prepared.get(&candidate.name).copied())
+            .unwrap_or(candidate.atom);
+        atoms.push((candidate.name, atom, generic));
+    }
+    for candidate in charter::implementation_atoms(implementation) {
+        if !names.insert(candidate.name.clone()) {
+            continue;
+        }
+        let atom = module_env
+            .get_atom(&candidate.name)
+            .unwrap_or(candidate.atom);
+        let generic = !atom.type_params.is_empty();
+        atoms.push((candidate.name, atom, generic));
+    }
+    atoms
 }
 
 fn analyze_atom(
@@ -352,7 +359,34 @@ fn site_mutants(body: &Stmt) -> Vec<SiteMutant> {
     let mut mutants = Vec::new();
     let mut site = 0;
     collect_stmt(body, &mut site, &mut mutants);
-    mutants
+    let mut unique: Vec<SiteMutant> = Vec::new();
+    for mutant in mutants {
+        let original = match &mutant.kind {
+            MutationKind::BinaryOp(op) | MutationKind::ConditionFlip(op) => op,
+            _ => {
+                unique.push(mutant);
+                continue;
+            }
+        };
+        let flipped = crate::verification::vacuity::flip_binary_op(original);
+        if let Some(existing) = unique.iter_mut().find(|existing| {
+            existing.site == mutant.site
+                && matches!(
+                    &existing.kind,
+                    MutationKind::BinaryOp(op) | MutationKind::ConditionFlip(op)
+                        if crate::verification::vacuity::flip_binary_op(op) == flipped
+                )
+        }) {
+            if matches!(mutant.kind, MutationKind::ConditionFlip(_))
+                && matches!(existing.kind, MutationKind::BinaryOp(_))
+            {
+                *existing = mutant;
+            }
+        } else {
+            unique.push(mutant);
+        }
+    }
+    unique
 }
 
 fn collect_stmt(stmt: &Stmt, site: &mut usize, mutants: &mut Vec<SiteMutant>) {

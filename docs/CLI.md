@@ -136,6 +136,15 @@ itself fail the gate. When `mumei.toml` has a `[charter]` section, its
 with `--charter`. A Charter symlink that resolves outside the project is
 rejected.
 
+The check writes `charter_report.json`; `--json` also prints the report to
+standard output. Its top-level `status` is `pass` or `fail`, and every atom
+result identifies its relative Charter path. When a matching claim exists,
+certificate-backed results include `effective_grade` and
+`effective_grade_complete`. If the lock is mismatched, otherwise-passing
+atoms are marked `unpinned` after the grade check. A passing check exits `0`,
+a failed gate exits `1`, and an input or report I/O error exits `4`. See
+[Charter](CHARTER.md) for the file format, lock behavior, and check semantics.
+
 ## `mumei controls`
 
 ```bash
@@ -151,15 +160,6 @@ supports an optional qualified atom filter. JSON reports use
 least one mutation survived, and `4` indicates missing or unparsable input or
 an unknown atom. See [Contract controls](CONTROLS.md) for statuses, outcomes,
 and the distinction from `verify --enable-vacuity-check`.
-
-The check writes `charter_report.json`; `--json` also prints the report to
-standard output. Its top-level `status` is `pass` or `fail`, and every atom
-result identifies its relative Charter path. When a matching claim exists,
-certificate-backed results include `effective_grade` and
-`effective_grade_complete`. If the lock is mismatched, otherwise-passing
-atoms are marked `unpinned` after the grade check. A passing check exits `0`,
-a failed gate exits `1`, and an input or report I/O error exits `4`. See
-[Charter](CHARTER.md) for the file format, lock behavior, and check semantics.
 
 ### SARIF output
 

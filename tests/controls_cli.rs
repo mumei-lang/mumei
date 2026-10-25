@@ -163,6 +163,83 @@ fn method_atoms_use_qualified_names_and_filtering() {
 }
 
 #[test]
+fn recursive_method_mutants_keep_termination_checks() {
+    let fixture = Fixture::new(
+        "struct Counter {}\n\
+         impl Counter {\n\
+             atom down(self: Counter, n: i64) -> i64\n\
+             requires: n >= 0;\n\
+             ensures: true;\n\
+             decreases: n;\n\
+             body: if n == 0 { 0 } else { Counter::down(self, n - 1) };\n\
+         }\n",
+    );
+    let output = run(&fixture.input(), &["--json", "--atom", "Counter::down"]);
+    assert!(
+        matches!(output.status.code(), Some(0 | 1)),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = parse(&output.stdout);
+    assert_eq!(report["atoms"][0]["name"], "Counter::down");
+    let termination_mutant = report["atoms"][0]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|mutant| mutant["id"].as_str().unwrap().contains("Sub->Add"))
+        .expect("recursive argument subtraction mutant");
+    assert_eq!(
+        termination_mutant["outcome"], "killed",
+        "{}",
+        report["atoms"][0]
+    );
+}
+
+#[test]
+fn monomorphized_generic_instances_are_reported_and_selectable() {
+    let fixture = Fixture::new(
+        "atom id<T>(x: T) -> T\n\
+         requires: true;\n\
+         ensures: result == x + 1;\n\
+         body: x + 1;\n\
+         atom main() -> i64\n\
+         requires: true;\n\
+         ensures: result == 4;\n\
+         body: id<i64>(3);\n",
+    );
+    let all = run(&fixture.input(), &["--json"]);
+    assert!(
+        matches!(all.status.code(), Some(0 | 1)),
+        "{}\n{}",
+        String::from_utf8_lossy(&all.stdout),
+        String::from_utf8_lossy(&all.stderr)
+    );
+    let report = parse(&all.stdout);
+    let template = report["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|atom| atom["name"] == "id")
+        .expect("generic template");
+    assert_eq!(template["status"], "not_checked");
+    let instance = report["atoms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|atom| atom["name"] == "id<i64>")
+        .expect("monomorphized instance");
+    assert!(instance["tested"].as_u64().unwrap() > 0);
+    assert!(instance["killed"].as_u64().unwrap() > 0);
+
+    let selected = run(&fixture.input(), &["--json", "--atom", "id<i64>"]);
+    assert!(matches!(selected.status.code(), Some(0 | 1)));
+    let report = parse(&selected.stdout);
+    assert_eq!(report["atoms"].as_array().unwrap().len(), 1);
+    assert_eq!(report["atoms"][0]["name"], "id<i64>");
+}
+
+#[test]
 fn condition_flip_mutant_is_rejected_by_a_strong_spec() {
     let fixture = Fixture::new(
         "atom nonnegative(x: i64) -> i64\n\
@@ -170,7 +247,7 @@ fn condition_flip_mutant_is_rejected_by_a_strong_spec() {
          ensures: result >= 0;\n\
          body: if x >= 0 { x } else { 0 };\n",
     );
-    let output = run(&fixture.input(), &["--json", "--max-mutants", "2"]);
+    let output = run(&fixture.input(), &["--json", "--max-mutants", "1"]);
     assert_eq!(output.status.code(), Some(0));
     let report = parse(&output.stdout);
     let mutants = report["atoms"][0]["mutants"].as_array().unwrap();
@@ -179,6 +256,23 @@ fn condition_flip_mutant_is_rejected_by_a_strong_spec() {
         .find(|mutant| mutant["operator"] == "condition-flip")
         .expect("condition-flip mutant");
     assert_eq!(condition_flip["outcome"], "killed");
+}
+
+#[test]
+fn duplicate_comparison_mutants_do_not_consume_the_cap() {
+    let fixture = Fixture::new(
+        "atom choose(x: i64, y: i64) -> i64\n\
+         requires: x > y;\n\
+         ensures: result == x + y;\n\
+         body: if x > y { x + y } else { x + y };\n",
+    );
+    let output = run(&fixture.input(), &["--json", "--max-mutants", "2"]);
+    assert!(matches!(output.status.code(), Some(0 | 1)));
+    let report = parse(&output.stdout);
+    let mutants = report["atoms"][0]["mutants"].as_array().unwrap();
+    assert_eq!(mutants.len(), 2);
+    assert_ne!(mutants[0]["id"], mutants[1]["id"]);
+    assert!(mutants[1]["site"].as_u64().unwrap() > mutants[0]["site"].as_u64().unwrap());
 }
 
 #[test]
@@ -232,6 +326,9 @@ fn input_and_atom_selection_errors_use_exit_four() {
         run(&fixture.input(), &["--atom", "missing"]).status.code(),
         Some(4)
     );
+    let zero_cap = run(&fixture.input(), &["--max-mutants", "0"]);
+    assert_eq!(zero_cap.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&zero_cap.stderr).contains("must be greater than 0"));
     let bad = Fixture::new("atom broken(");
     assert_eq!(run(&bad.input(), &[]).status.code(), Some(4));
 }
