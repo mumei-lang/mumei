@@ -1,9 +1,3 @@
-### Unreleased
-
-- Proof hashes now include callee effect pre/post states, and dependency
-  hashes preserve qualified callee names to avoid cache and certificate
-  collisions between same-named imports.
-
 ### 2026-10-24: v0.6.22 release version bump
 
 - **Workspace and member crate versions**: bumped versions from `0.6.21` to
@@ -12,6 +6,18 @@
 - **Install references**: synced the README and README_JA pinned install
   examples on `v0.6.22`, along with the Homebrew formula template and
   `install.sh` help examples.
+
+### Unreleased: proof-hash callee coverage
+
+- **Callee effect states**: `effect_pre` and `effect_post` are now part of the
+  caller's proof hash.
+- **Qualified calls**: calls such as `lib::f` and `Point::get` are hashed and
+  keyed by their qualified name, while legacy `atom:f` keys still validate.
+- **Package-name aliases**: manifest dependencies are also registered under
+  their package name unless the consumer manifest uses that name.
+
+Proof-cache entries for atoms with effectful or qualified callees are
+recomputed once after upgrading.
 
 ### Unreleased: certificate dependency freshness
 
