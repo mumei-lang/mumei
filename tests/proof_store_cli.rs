@@ -292,6 +292,86 @@ fn failed_and_trusted_atoms_are_not_written() {
 }
 
 #[test]
+fn escalation_candidate_is_neither_written_nor_reused_from_store() {
+    let scratch = Scratch::new("escalation-candidate");
+    let store = scratch.0.join("store");
+    let source = "atom cube_small(x: i64) -> i64\n    requires: x >= 0 && x <= 20;\n    ensures: result >= 0;\n    body: x * x * x;\n";
+    let verify_only = scratch.project("verify-only", source);
+    let candidate = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args([
+            "verify",
+            "--proof-store",
+            "--proof-cert",
+            "--emit",
+            "escalation-bundle",
+            "main.mm",
+        ])
+        .current_dir(&verify_only)
+        .env("MUMEI_PROOF_STORE", &store)
+        .output()
+        .unwrap();
+    assert!(candidate.status.success(), "{}", text(&candidate));
+    let candidate_text = text(&candidate);
+    assert!(
+        !candidate_text.contains("reused from proof store"),
+        "{candidate_text}"
+    );
+    let cert: Value =
+        serde_json::from_slice(&fs::read(verify_only.join("main.proof.json")).unwrap()).unwrap();
+    assert_eq!(cert["atoms"][0]["status"], "escalation_candidate");
+    assert_ne!(cert["atoms"][0]["reused_from_store"], true);
+    assert!(json_files(&store).is_empty());
+
+    let seed = scratch.project("build-seed", source);
+    let built = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args(["build", "main.mm", "--proof-store", "--emit", "proof-cert"])
+        .current_dir(&seed)
+        .env("MUMEI_PROOF_STORE", &store)
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{}", text(&built));
+    let cache: std::collections::HashMap<String, mumei_core::resolver::VerificationCacheEntry> =
+        serde_json::from_slice(
+            &fs::read(seed.join(".mumei/cache/verification_cache.json")).unwrap(),
+        )
+        .unwrap();
+    let entry = cache.get("cube_small").unwrap();
+    let proof_hash = entry.proof_hash.clone();
+    let z3_version = mumei_core::proof_cert::get_z3_version();
+    let proof_store = mumei_core::resolver::ProofStore::open(Some(&store)).unwrap();
+    proof_store
+        .record("cube_small", &proof_hash, &z3_version, entry)
+        .unwrap();
+    assert_eq!(json_files(&store).len(), 1);
+
+    let second_verify = scratch.project("verify-seeded", source);
+    let candidate = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args([
+            "verify",
+            "--proof-store",
+            "--proof-cert",
+            "--emit",
+            "escalation-bundle",
+            "main.mm",
+        ])
+        .current_dir(&second_verify)
+        .env("MUMEI_PROOF_STORE", &store)
+        .output()
+        .unwrap();
+    assert!(candidate.status.success(), "{}", text(&candidate));
+    let candidate_text = text(&candidate);
+    assert!(
+        !candidate_text.contains("reused from proof store"),
+        "{candidate_text}"
+    );
+    let cert: Value =
+        serde_json::from_slice(&fs::read(second_verify.join("main.proof.json")).unwrap()).unwrap();
+    assert_eq!(cert["atoms"][0]["status"], "escalation_candidate");
+    assert_ne!(cert["atoms"][0]["reused_from_store"], true);
+    assert_eq!(json_files(&store).len(), 1);
+}
+
+#[test]
 fn invalid_records_warn_and_fall_back_to_z3() {
     type Mutation = (&'static str, fn(&mut Value));
     let mutations: [Mutation; 6] = [
@@ -346,6 +426,8 @@ fn proof_store_stats_prune_invalid_and_rejects_empty_selector() {
     assert!(verified.status.success(), "{}", text(&verified));
     fs::create_dir_all(store.join("v1/aa")).unwrap();
     fs::write(store.join("v1/aa/invalid.json"), b"{").unwrap();
+    let leftover_tmp = store.join("v1/aa/leftover.tmp");
+    fs::write(&leftover_tmp, b"partial").unwrap();
 
     let stats = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .args(["proof-store", "stats", "--dir"])
@@ -355,8 +437,12 @@ fn proof_store_stats_prune_invalid_and_rejects_empty_selector() {
         .unwrap();
     assert!(stats.status.success(), "{}", text(&stats));
     let json: Value = serde_json::from_slice(&stats.stdout).unwrap();
+    let json_bytes: u64 = json_files(&store)
+        .iter()
+        .map(|path| fs::metadata(path).unwrap().len())
+        .sum();
     assert_eq!(json["entries"], 2);
-    assert!(json["total_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(json["total_bytes"], json_bytes);
     assert_eq!(json["invalid"], 1);
 
     let no_selector = Command::new(env!("CARGO_BIN_EXE_mumei"))
@@ -374,6 +460,7 @@ fn proof_store_stats_prune_invalid_and_rejects_empty_selector() {
         .unwrap();
     assert!(pruned.status.success(), "{}", text(&pruned));
     assert_eq!(json_files(&store).len(), 1);
+    assert!(leftover_tmp.exists());
 
     let old = Command::new(env!("CARGO_BIN_EXE_mumei"))
         .args(["proof-store", "prune", "--dir"])
@@ -383,4 +470,35 @@ fn proof_store_stats_prune_invalid_and_rejects_empty_selector() {
         .unwrap();
     assert!(old.status.success(), "{}", text(&old));
     assert!(json_files(&store).is_empty());
+}
+
+#[test]
+fn proof_store_prunes_only_entries_older_than_the_requested_age() {
+    let scratch = Scratch::new("age-prune");
+    let store = scratch.0.join("store");
+    let old_project = scratch.project("old", &basic_module("result == a + b"));
+    let fresh_project = scratch.project("fresh", &basic_module("result == a + b + 0"));
+    for project in [&old_project, &fresh_project] {
+        let verified = run(project, &store, &["--proof-store"]);
+        assert!(verified.status.success(), "{}", text(&verified));
+    }
+    let files = json_files(&store);
+    assert_eq!(files.len(), 2);
+    let old_time = SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+    fs::File::open(&files[0])
+        .unwrap()
+        .set_modified(old_time)
+        .unwrap();
+
+    let pruned = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args(["proof-store", "prune", "--dir"])
+        .arg(&store)
+        .args(["--older-than-days", "1"])
+        .output()
+        .unwrap();
+    assert!(pruned.status.success(), "{}", text(&pruned));
+    assert_eq!(json_files(&store).len(), 1);
+    assert!(!files[0].exists());
+    assert!(files[1].exists());
+    assert!(fs::metadata(&files[1]).unwrap().modified().unwrap() > old_time);
 }
