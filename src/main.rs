@@ -129,6 +129,17 @@ fn main() {
                 std::process::exit(exit_code);
             }
         }
+        Some(Command::Observe {
+            input,
+            harvest,
+            json,
+            atom,
+        }) => {
+            let exit_code = commands::observe::cmd_observe(&input, &harvest, json, atom.as_deref());
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
         Some(Command::Charter { command }) => commands::charter::cmd_charter(command),
         Some(Command::Run {
             input,

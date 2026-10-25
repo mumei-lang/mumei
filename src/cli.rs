@@ -322,6 +322,19 @@ pub(crate) enum Command {
         #[arg(long)]
         atom: Option<String>,
     },
+    /// Check harvested test observations against atom contracts
+    Observe {
+        /// Input .mm file
+        input: String,
+        /// mumei.test-harvest/v1 JSON file
+        harvest: String,
+        /// Print the structured JSON report
+        #[arg(long)]
+        json: bool,
+        /// Analyze only observations for the named atom
+        #[arg(long)]
+        atom: Option<String>,
+    },
     /// Lock or check human-owned charter contracts
     Charter {
         #[command(subcommand)]

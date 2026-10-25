@@ -10,6 +10,7 @@ pub(crate) mod infer;
 pub(crate) mod init;
 pub(crate) mod inspect;
 pub(crate) mod list;
+pub(crate) mod observe;
 pub(crate) mod publish;
 pub(crate) mod repl;
 pub(crate) mod run;

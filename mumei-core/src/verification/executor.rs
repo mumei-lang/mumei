@@ -791,12 +791,17 @@ fn verify_inner_impl(
             Some(&[diagnostic]),
             None,
         );
-        return Err(
+        let error =
             MumeiError::verification_at(err.to_string(), err.span.clone()).with_help(format!(
                 "SpecValidation failed before proof attempt (kind: {}, constraints: {:?}). {} Suggested fix: {}",
                 err.kind, err.constraints, err.natural_language_explanation, err.suggested_fix
-            )),
-        );
+            ));
+        let error = if matches!(err.kind.as_str(), "requires_unsat" | "ensures_unsat") {
+            error.with_verdict(VerdictKind::Rejected)
+        } else {
+            error
+        };
+        return Err(error);
     }
     metrics.record_phase("Phase 0a: spec validation", phase_start.elapsed());
 
