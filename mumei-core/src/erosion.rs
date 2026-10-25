@@ -1,0 +1,446 @@
+use crate::charter;
+use crate::parser::{Atom, Item};
+use crate::verification::contract_view::{contract_view, ContractView};
+use crate::verification::ModuleEnv;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+pub const REPORT_SCHEMA: &str = "mumei.erosion-report/v1";
+
+const ERODED_STATUSES: [&str; 5] = [
+    "pre_weakened",
+    "post_weakened",
+    "missing",
+    "signature_mismatch",
+    "inconclusive",
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ErosionAtomReport {
+    pub name: String,
+    pub status: String,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counterexample: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_candidate: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ErosionTotals {
+    pub checked: usize,
+    pub eroded: usize,
+    pub by_status: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ErosionReport {
+    pub schema: String,
+    pub baseline: String,
+    pub candidate: String,
+    pub status: String,
+    pub atoms: Vec<ErosionAtomReport>,
+    pub added: Vec<String>,
+    pub totals: ErosionTotals,
+}
+
+pub fn compare_contracts(
+    baseline_path: &str,
+    candidate_path: &str,
+    baseline: &[Item],
+    candidate: &[Item],
+    generic_candidate: &[Item],
+    module_env: &ModuleEnv,
+) -> ErosionReport {
+    let baseline_atoms = charter::implementation_atoms(baseline);
+    let mut candidate_atoms = charter::implementation_atoms(candidate);
+    let mut candidate_names: HashSet<String> = candidate_atoms
+        .iter()
+        .map(|atom| atom.name.clone())
+        .collect();
+    candidate_atoms.extend(
+        charter::generic_implementation_atoms(generic_candidate)
+            .into_iter()
+            .filter(|atom| candidate_names.insert(atom.name.clone())),
+    );
+
+    let baseline_names: HashSet<&str> = baseline_atoms
+        .iter()
+        .map(|atom| atom.name.as_str())
+        .collect();
+    let added: Vec<String> = candidate_atoms
+        .iter()
+        .filter(|atom| !baseline_names.contains(atom.name.as_str()))
+        .map(|atom| atom.name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    let atoms: Vec<ErosionAtomReport> = baseline_atoms
+        .iter()
+        .map(|baseline_atom| compare_atom(baseline_atom, &candidate_atoms, module_env))
+        .collect();
+    let mut by_status = BTreeMap::new();
+    for atom in &atoms {
+        *by_status.entry(atom.status.clone()).or_insert(0) += 1;
+    }
+    let eroded = atoms
+        .iter()
+        .filter(|atom| ERODED_STATUSES.contains(&atom.status.as_str()))
+        .count();
+
+    ErosionReport {
+        schema: REPORT_SCHEMA.to_string(),
+        baseline: baseline_path.to_string(),
+        candidate: candidate_path.to_string(),
+        status: if eroded == 0 { "pass" } else { "fail" }.to_string(),
+        atoms,
+        added,
+        totals: ErosionTotals {
+            checked: baseline_atoms.len(),
+            eroded,
+            by_status,
+        },
+    }
+}
+
+fn compare_atom(
+    baseline: &charter::NamedAtom<'_>,
+    candidate_atoms: &[charter::NamedAtom<'_>],
+    module_env: &ModuleEnv,
+) -> ErosionAtomReport {
+    let candidate = match charter::match_implementation_atom(&baseline.name, candidate_atoms) {
+        Ok(Some(candidate)) => candidate,
+        Ok(None) => {
+            return atom_result(
+                &baseline.name,
+                "missing",
+                "no matching implementation atom",
+                None,
+                None,
+            )
+        }
+        Err(names) => {
+            return atom_result(
+                &baseline.name,
+                "signature_mismatch",
+                &format!("method name is ambiguous: {}", names.join(", ")),
+                None,
+                None,
+            )
+        }
+    };
+    let matched_candidate = Some(candidate.name.clone());
+
+    if let Some(detail) = charter::signature_mismatch(baseline.atom, candidate.atom) {
+        return atom_result(
+            &baseline.name,
+            "signature_mismatch",
+            &detail,
+            None,
+            matched_candidate,
+        );
+    }
+
+    if contract_text_unchanged(baseline.atom, candidate.atom) {
+        return atom_result(
+            &baseline.name,
+            "preserved",
+            "contract text unchanged",
+            None,
+            matched_candidate,
+        );
+    }
+
+    let (forward, _) = charter::check_atom("", baseline.atom, candidate_atoms, module_env);
+    if forward.status != "ok" {
+        return atom_result(
+            &baseline.name,
+            &forward.status,
+            &forward.detail,
+            forward.counterexample,
+            matched_candidate,
+        );
+    }
+
+    match charter::check_refinement(candidate.atom, baseline.atom, module_env) {
+        Ok(()) => atom_result(
+            &baseline.name,
+            "preserved",
+            "baseline and candidate contracts are equivalent",
+            None,
+            matched_candidate,
+        ),
+        Err((status, detail, counterexample)) if status == "inconclusive" => atom_result(
+            &baseline.name,
+            "refined",
+            &format!("reverse refinement was inconclusive: {detail}"),
+            counterexample,
+            matched_candidate,
+        ),
+        Err((_, detail, counterexample)) => atom_result(
+            &baseline.name,
+            "strengthened",
+            &format!("candidate contract is stronger than the baseline: {detail}"),
+            counterexample,
+            matched_candidate,
+        ),
+    }
+}
+
+fn atom_result(
+    name: &str,
+    status: &str,
+    detail: &str,
+    counterexample: Option<BTreeMap<String, String>>,
+    matched_candidate: Option<String>,
+) -> ErosionAtomReport {
+    ErosionAtomReport {
+        name: name.to_string(),
+        status: status.to_string(),
+        detail: detail.to_string(),
+        counterexample,
+        matched_candidate,
+    }
+}
+
+fn contract_text_unchanged(baseline: &Atom, candidate: &Atom) -> bool {
+    normalize_whitespace(&baseline.requires) == normalize_whitespace(&candidate.requires)
+        && normalize_whitespace(&baseline.ensures) == normalize_whitespace(&candidate.ensures)
+        && charter::normalized_forall_constraints(baseline)
+            == charter::normalized_forall_constraints(candidate)
+        && normalized_clause_modes(baseline) == normalized_clause_modes(candidate)
+        && normalize_whitespace(&contract_view(baseline, ContractView::CallerEnsures))
+            == normalize_whitespace(&contract_view(candidate, ContractView::CallerEnsures))
+}
+
+fn normalized_clause_modes(atom: &Atom) -> Vec<String> {
+    atom.clause_modes
+        .iter()
+        .map(|mode| normalize_whitespace(&format!("{mode:?}")))
+        .collect()
+}
+
+fn normalize_whitespace(value: &str) -> String {
+    value.split_whitespace().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compare_contracts;
+    use crate::parser;
+    use crate::verification::ModuleEnv;
+
+    fn parse(source: &str) -> Vec<parser::Item> {
+        parser::parse_module_checked(source).expect("parse fixture")
+    }
+
+    fn compare(baseline: &str, candidate: &str) -> super::ErosionReport {
+        let baseline = parse(baseline);
+        let candidate = parse(candidate);
+        compare_contracts(
+            "baseline.mm",
+            "candidate.mm",
+            &baseline,
+            &candidate,
+            &candidate,
+            &ModuleEnv::new(),
+        )
+    }
+
+    fn atom_status<'a>(report: &'a super::ErosionReport, name: &str) -> &'a str {
+        report
+            .atoms
+            .iter()
+            .find(|atom| atom.name == name)
+            .expect("atom report")
+            .status
+            .as_str()
+    }
+
+    #[test]
+    fn identical_contract_text_skips_refinement_even_for_unsupported_clauses() {
+        let report = compare(
+            "trusted atom f(x: i64) -> i64 \
+             requires: unknown_predicate(x); ensures: result > x; body: 0;",
+            "atom f(x: i64) -> i64 \
+             requires: unknown_predicate ( x ); ensures: result > x; body: x + 1;",
+        );
+
+        assert_eq!(report.status, "pass");
+        assert_eq!(atom_status(&report, "f"), "preserved");
+        assert_eq!(report.atoms[0].detail, "contract text unchanged");
+    }
+
+    #[test]
+    fn dropped_ensures_is_post_weakened_with_counterexample() {
+        let report = compare(
+            "trusted atom f(x: i64) -> i64 ensures: result >= x + 1; body: 0;",
+            "atom f(x: i64) -> i64 ensures: result >= x; body: x;",
+        );
+
+        assert_eq!(report.status, "fail");
+        assert_eq!(atom_status(&report, "f"), "post_weakened");
+        assert!(report.atoms[0].counterexample.is_some());
+    }
+
+    #[test]
+    fn tightened_requires_is_pre_weakened_with_counterexample() {
+        let report = compare(
+            "trusted atom f(x: i64) -> i64 requires: x >= 0; body: 0;",
+            "atom f(x: i64) -> i64 requires: x > 0; body: 0;",
+        );
+
+        assert_eq!(atom_status(&report, "f"), "pre_weakened");
+        assert!(report.atoms[0].counterexample.is_some());
+    }
+
+    #[test]
+    fn stronger_ensures_and_relaxed_requires_are_strengthened() {
+        let stronger_ensures = compare(
+            "trusted atom f(x: i64) -> i64 ensures: result >= x; body: 0;",
+            "atom f(x: i64) -> i64 ensures: result > x; body: x + 1;",
+        );
+        let relaxed_requires = compare(
+            "trusted atom f(x: i64) -> i64 requires: x > 0; body: 0;",
+            "atom f(x: i64) -> i64 requires: x >= 0; body: 0;",
+        );
+
+        assert_eq!(stronger_ensures.status, "pass");
+        assert_eq!(atom_status(&stronger_ensures, "f"), "strengthened");
+        assert!(stronger_ensures.atoms[0].counterexample.is_some());
+        assert_eq!(relaxed_requires.status, "pass");
+        assert_eq!(atom_status(&relaxed_requires, "f"), "strengthened");
+        assert!(relaxed_requires.atoms[0].counterexample.is_some());
+    }
+
+    #[test]
+    fn equivalent_rewrite_is_preserved_by_both_directions() {
+        let report = compare(
+            "trusted atom f(x: i64, y: i64) -> i64 \
+             requires: x <= y; ensures: result >= x; body: 0;",
+            "atom f(x: i64, y: i64) -> i64 \
+             requires: y >= x; ensures: result >= x; body: 0;",
+        );
+
+        assert_eq!(report.status, "pass");
+        assert_eq!(atom_status(&report, "f"), "preserved");
+        assert!(report.atoms[0].detail.contains("contracts are equivalent"));
+    }
+
+    #[test]
+    fn removed_atoms_and_signature_changes_are_reported() {
+        let removed = compare("trusted atom gone(x: i64) -> i64 body: 0;", "");
+        assert_eq!(atom_status(&removed, "gone"), "missing");
+
+        for (baseline, candidate) in [
+            (
+                "trusted atom f(x: i64) -> i64 body: 0;",
+                "atom f(x: f64) -> i64 body: 0;",
+            ),
+            (
+                "trusted atom f(x: i64) -> i64 body: 0;",
+                "atom f(x: i64, y: i64) -> i64 body: 0;",
+            ),
+            (
+                "trusted atom f(x: i64) -> i64 body: 0;",
+                "atom f(x: i64) -> bool body: false;",
+            ),
+            (
+                "trusted atom f(ref x: i64) -> i64 body: 0;",
+                "atom f(consume x: i64) -> i64 body: 0;",
+            ),
+        ] {
+            let report = compare(baseline, candidate);
+            assert_eq!(atom_status(&report, "f"), "signature_mismatch");
+        }
+    }
+
+    #[test]
+    fn method_and_generic_atoms_are_compared() {
+        let method = compare(
+            "impl Point { trusted atom get(self: Point) -> i64 \
+             ensures: result >= 0; body: 0; }",
+            "impl Point { atom get(self: Point) -> i64 body: 0; }",
+        );
+        assert_eq!(atom_status(&method, "Point::get"), "post_weakened");
+
+        let generic = compare(
+            "trusted atom identity<T>(x: T) -> T \
+             ensures: result == x; body: x;",
+            "atom identity<T>(x: T) -> T body: x;",
+        );
+        assert_eq!(atom_status(&generic, "identity"), "post_weakened");
+    }
+
+    #[test]
+    fn baseline_atoms_and_methods_keep_source_order() {
+        let report = compare(
+            "trusted atom first(x: i64) -> i64 body: 0;\n\
+             impl Point { trusted atom get(self: Point) -> i64 body: 0; }\n\
+             trusted atom last(x: i64) -> i64 body: 0;",
+            "atom first(x: i64) -> i64 body: 0;\n\
+             impl Point { atom get(self: Point) -> i64 body: 0; }\n\
+             atom last(x: i64) -> i64 body: 0;",
+        );
+
+        let names: Vec<&str> = report.atoms.iter().map(|atom| atom.name.as_str()).collect();
+        assert_eq!(names, ["first", "Point::get", "last"]);
+        assert!(report.atoms.iter().all(|atom| atom.status == "preserved"));
+    }
+
+    #[test]
+    fn differing_forall_contracts_are_inconclusive() {
+        let report = compare(
+            "trusted atom f(n: i64) -> i64 \
+             requires: forall(i, 0, n, i >= 0); body: 0;",
+            "atom f(n: i64) -> i64 \
+             requires: forall(i, 0, n, i >= 0) && forall(j, 0, n, j >= 0); body: 0;",
+        );
+
+        assert_eq!(report.status, "fail");
+        assert_eq!(atom_status(&report, "f"), "inconclusive");
+        assert_eq!(report.atoms[0].detail, "quantified clauses differ");
+    }
+
+    #[test]
+    fn ensures_check_clause_is_not_a_caller_postcondition() {
+        let report = compare(
+            "trusted atom f(x: i64) -> i64 ensures: result >= x + 1; body: 0;",
+            "atom f(x: i64) -> i64 ensures check: result >= x + 1; body: 0;",
+        );
+
+        assert_eq!(atom_status(&report, "f"), "post_weakened");
+    }
+
+    #[test]
+    fn added_atoms_are_informational_and_trusted_baselines_are_checked() {
+        let added = compare(
+            "trusted atom f(x: i64) -> i64 ensures: result >= x; body: 0;",
+            "atom f(x: i64) -> i64 ensures: result >= x; body: x; \
+             atom z() -> i64 body: 0; atom a() -> i64 body: 0;",
+        );
+        assert_eq!(added.status, "pass");
+        assert_eq!(atom_status(&added, "f"), "preserved");
+        assert_eq!(added.added, ["a", "z"]);
+
+        let trusted_weakened = compare(
+            "trusted atom f(x: i64) -> i64 ensures: result >= x + 1; body: 0;",
+            "atom f(x: i64) -> i64 ensures: result >= x; body: x;",
+        );
+        assert_eq!(atom_status(&trusted_weakened, "f"), "post_weakened");
+    }
+
+    #[test]
+    fn duplicate_candidate_atoms_keep_charter_ambiguity_behavior() {
+        let report = compare(
+            "trusted atom f(x: i64) -> i64 ensures: result >= x + 1; body: 0;",
+            "atom f(x: i64) -> i64 ensures: result >= x + 1; body: x + 1; \
+             atom f(x: i64) -> i64 ensures: result == x; body: x;",
+        );
+
+        assert_eq!(atom_status(&report, "f"), "signature_mismatch");
+        assert!(report.atoms[0].detail.contains("ambiguous"));
+        assert_eq!(report.atoms[0].matched_candidate, None);
+    }
+}

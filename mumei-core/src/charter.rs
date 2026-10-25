@@ -62,9 +62,9 @@ pub struct CharterReport {
 }
 
 #[derive(Debug)]
-struct NamedAtom<'a> {
-    name: String,
-    atom: &'a Atom,
+pub(crate) struct NamedAtom<'a> {
+    pub(crate) name: String,
+    pub(crate) atom: &'a Atom,
 }
 
 #[derive(Debug)]
@@ -79,7 +79,7 @@ enum ImplicationResult {
     Inconclusive(String),
 }
 
-type RefinementFailure = (String, String, Option<BTreeMap<String, String>>);
+pub(crate) type RefinementFailure = (String, String, Option<BTreeMap<String, String>>);
 
 pub fn write_lock(root: &Path, charter_paths: &[String], lock_path: &Path) -> Result<(), String> {
     if charter_paths.is_empty() {
@@ -540,7 +540,7 @@ fn canonical_lock_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn implementation_atoms(items: &[Item]) -> Vec<NamedAtom<'_>> {
+pub(crate) fn implementation_atoms(items: &[Item]) -> Vec<NamedAtom<'_>> {
     let mut atoms = Vec::new();
     for item in items {
         match item {
@@ -560,27 +560,25 @@ fn implementation_atoms(items: &[Item]) -> Vec<NamedAtom<'_>> {
     atoms
 }
 
-fn generic_implementation_atoms(items: &[Item]) -> Vec<NamedAtom<'_>> {
+pub(crate) fn generic_implementation_atoms(items: &[Item]) -> Vec<NamedAtom<'_>> {
     implementation_atoms(items)
         .into_iter()
         .filter(|candidate| !candidate.atom.type_params.is_empty())
         .collect()
 }
 
-fn check_atom(
-    charter_path: &str,
-    charter: &Atom,
-    implementation: &[NamedAtom<'_>],
-    module_env: &ModuleEnv,
-) -> (CharterAtomReport, Option<String>) {
+pub(crate) fn match_implementation_atom<'items, 'atoms>(
+    name: &str,
+    implementation: &'items [NamedAtom<'atoms>],
+) -> Result<Option<&'items NamedAtom<'atoms>>, Vec<String>> {
     let exact: Vec<_> = implementation
         .iter()
-        .filter(|candidate| candidate.name == charter.name)
+        .filter(|candidate| candidate.name == name)
         .collect();
     let matches = if !exact.is_empty() {
         exact
-    } else if !charter.name.contains("::") {
-        let suffix = format!("::{}", charter.name);
+    } else if !name.contains("::") {
+        let suffix = format!("::{name}");
         implementation
             .iter()
             .filter(|candidate| candidate.name.ends_with(&suffix))
@@ -589,8 +587,24 @@ fn check_atom(
         Vec::new()
     };
 
-    let candidate = match matches.as_slice() {
-        [] => {
+    match matches.as_slice() {
+        [] => Ok(None),
+        [candidate] => Ok(Some(*candidate)),
+        _ => Err(matches
+            .iter()
+            .map(|candidate| candidate.name.as_str().to_string())
+            .collect()),
+    }
+}
+
+pub(crate) fn check_atom(
+    charter_path: &str,
+    charter: &Atom,
+    implementation: &[NamedAtom<'_>],
+    module_env: &ModuleEnv,
+) -> (CharterAtomReport, Option<String>) {
+    let candidate = match match_implementation_atom(&charter.name, implementation) {
+        Ok(None) => {
             return (
                 atom_report(
                     charter_path,
@@ -602,19 +616,14 @@ fn check_atom(
                 None,
             )
         }
-        [candidate] => candidate,
-        _ => {
-            let names = matches
-                .iter()
-                .map(|candidate| candidate.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
+        Ok(Some(candidate)) => candidate,
+        Err(names) => {
             return (
                 atom_report(
                     charter_path,
                     &charter.name,
                     "signature_mismatch",
-                    &format!("method name is ambiguous: {names}"),
+                    &format!("method name is ambiguous: {}", names.join(", ")),
                     None,
                 ),
                 None,
@@ -673,7 +682,7 @@ fn atom_report(
     }
 }
 
-fn signature_mismatch(charter: &Atom, implementation: &Atom) -> Option<String> {
+pub(crate) fn signature_mismatch(charter: &Atom, implementation: &Atom) -> Option<String> {
     if charter.type_params != implementation.type_params {
         return Some(format!(
             "type parameter mismatch: expected {:?}, found {:?}",
@@ -775,7 +784,7 @@ fn normalized_type_param_bounds(atom: &Atom) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-fn check_refinement(
+pub(crate) fn check_refinement(
     charter: &Atom,
     implementation: &Atom,
     module_env: &ModuleEnv,
@@ -837,7 +846,7 @@ fn check_refinement(
     }
 }
 
-fn normalized_forall_constraints(atom: &Atom) -> Vec<String> {
+pub(crate) fn normalized_forall_constraints(atom: &Atom) -> Vec<String> {
     atom.forall_constraints
         .iter()
         .map(|constraint| {

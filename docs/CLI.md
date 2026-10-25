@@ -96,6 +96,24 @@ and do not fail `--strict`.
 | `axiom_rejected` | The Lean axiom audit rejected the certificate evidence. |
 | `missing` | The source contains no matching certificate entry. |
 
+## `mumei erosion`
+
+```bash
+mumei erosion <candidate.mm> --baseline <baseline.mm> [--json]
+```
+
+Compares the contracts in a candidate file with the same atoms in a baseline
+file. A result distinguishes preserved, strengthened, and refined contracts
+from missing or weakened contracts. The command checks top-level atoms and
+implementation methods; newly added atoms are reported for information.
+`--json` prints the deterministic `mumei.erosion-report/v1` report to standard
+output. The command does not write report files.
+
+Exit codes are `0` when no erosion is found, `1` when at least one baseline
+contract is missing, mismatched, weakened, or inconclusive, and `4` for an
+input or candidate-loading error. See [Contract Erosion](EROSION.md) for the
+report schema and status definitions.
+
 ## `mumei charter`
 
 ```bash
