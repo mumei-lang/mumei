@@ -79,6 +79,30 @@ fn strong_contract_is_discriminating_and_weak_contract_fails() {
 }
 
 #[test]
+fn skips_equivalent_addition_mutant() {
+    let fixture = Fixture::new(
+        "atom add_one(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x + 1;\n\
+         body: x + 0 + 1;\n",
+    );
+    let first = run(&fixture.input(), &["--json"]);
+    let second = run(&fixture.input(), &["--json"]);
+    assert_eq!(first.status.code(), Some(0));
+    assert_eq!(first.stdout, second.stdout);
+    let report = parse(&first.stdout);
+    assert_eq!(report["atoms"][0]["status"], "discriminating");
+    assert_eq!(report["atoms"][0]["survived"], 0);
+    let ids = report["atoms"][0]["mutants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|mutant| mutant["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(!ids.contains(&"op-flip:Add->Sub@1"));
+}
+
+#[test]
 fn output_is_deterministic_and_cap_is_per_atom() {
     let fixture = Fixture::new(
         "atom add(x: i64, y: i64) -> i64\nrequires: true;\nensures: true;\nbody: x + y + 1;\n",

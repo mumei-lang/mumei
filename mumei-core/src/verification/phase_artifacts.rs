@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -13,6 +14,27 @@ static SINK: Mutex<Option<State>> = Mutex::new(None);
 thread_local! {
     // Lib tests run concurrently; a per-thread sink keeps one test's captures out of another's trace.
     static SINK: &'static Mutex<Option<State>> = Box::leak(Box::new(Mutex::new(None)));
+}
+
+thread_local! {
+    static CAPTURE_SUSPENSION_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+pub(crate) struct CaptureSuspension;
+
+pub(crate) fn suspend_capture() -> CaptureSuspension {
+    CAPTURE_SUSPENSION_DEPTH.with(|depth| depth.set(depth.get() + 1));
+    CaptureSuspension
+}
+
+impl Drop for CaptureSuspension {
+    fn drop(&mut self) {
+        CAPTURE_SUSPENSION_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+fn capture_suspended() -> bool {
+    CAPTURE_SUSPENSION_DEPTH.with(|depth| depth.get() > 0)
 }
 
 struct State {
@@ -71,6 +93,9 @@ pub fn write_failures() -> Option<(usize, String)> {
 }
 
 pub(crate) fn begin_atom(source_file: &str, atom: &str) {
+    if capture_suspended() {
+        return;
+    }
     let mut sink = lock_sink();
     let Some(state) = sink.as_mut() else {
         return;
@@ -94,6 +119,9 @@ pub(crate) fn begin_atom(source_file: &str, atom: &str) {
 }
 
 pub(crate) fn finish_atom<T, E: std::fmt::Display>(result: &Result<T, E>) {
+    if capture_suspended() {
+        return;
+    }
     let mut sink = lock_sink();
     let Some(state) = sink.as_mut() else {
         return;
@@ -140,6 +168,9 @@ pub(crate) fn finish_atom<T, E: std::fmt::Display>(result: &Result<T, E>) {
 }
 
 pub(crate) fn complete_phase(name: &str) {
+    if capture_suspended() {
+        return;
+    }
     let mut sink = lock_sink();
     let Some(atom) = sink.as_mut().and_then(|state| state.stack.last_mut()) else {
         return;
@@ -181,6 +212,9 @@ pub(crate) fn complete_phase(name: &str) {
 }
 
 pub fn record_cached_atom(source_file: &str, atom: &str) {
+    if capture_suspended() {
+        return;
+    }
     let mut sink = lock_sink();
     let Some(state) = sink.as_mut() else {
         return;
@@ -261,6 +295,9 @@ fn prepare_query(
     source: &str,
     line: u32,
 ) -> Option<PendingQuery> {
+    if capture_suspended() {
+        return None;
+    }
     let mut sink = lock_sink();
     let state = sink.as_mut()?;
     let (pending, failure) = {
@@ -483,7 +520,7 @@ fn disable() {
 mod tests {
     use super::{
         begin_atom, capture, complete_phase, disable, enable, finish_atom, path_component,
-        phase_slug, sanitize, write_failures,
+        phase_slug, record_cached_atom, sanitize, suspend_capture, write_failures,
     };
     use serde_json::Value;
     use std::fs;
@@ -650,6 +687,65 @@ mod tests {
 
         disable();
         fs::remove_file(regular_file_parent).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn suspended_nested_capture_does_not_change_the_outer_trace() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "mumei-phase-artifacts-nested-{}-{unique}",
+            std::process::id()
+        ));
+        enable(directory.clone()).unwrap();
+
+        begin_atom("source.mm", "outer");
+        complete_phase("Phase 0-units: unit consistency");
+        {
+            let _suspension = suspend_capture();
+            begin_atom("source.mm", "nested");
+            let context = Context::new(&Config::new());
+            let solver = Solver::new(&context);
+            solver.assert(&Bool::from_bool(&context, true));
+            let query = capture(&solver);
+            query.record(solver.check());
+            complete_phase("Phase 5: ensures verification");
+            record_cached_atom("source.mm", "cached");
+            let nested: Result<(), &str> = Ok(());
+            finish_atom(&nested);
+        }
+        complete_phase("Phase 1: requires translation");
+        let outer: Result<(), &str> = Ok(());
+        finish_atom(&outer);
+
+        let outer_trace: Value = serde_json::from_slice(
+            &fs::read(
+                directory
+                    .join(path_component("source.mm"))
+                    .join(path_component("outer"))
+                    .join("phases.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(outer_trace["phases"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            outer_trace["phases"][0]["phase"],
+            "Phase 0-units: unit consistency"
+        );
+        assert_eq!(
+            outer_trace["phases"][1]["phase"],
+            "Phase 1: requires translation"
+        );
+        assert!(!directory
+            .join(path_component("source.mm"))
+            .join(path_component("nested"))
+            .exists());
+
+        disable();
         fs::remove_dir_all(directory).unwrap();
     }
 }

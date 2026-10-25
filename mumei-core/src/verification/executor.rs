@@ -150,6 +150,7 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
     .map(|_| ())
 }
 
+#[derive(Clone)]
 pub(crate) struct VerifyInnerOptions<'a> {
     timeout_ms: u64,
     global_max_unroll: usize,
@@ -160,6 +161,22 @@ pub(crate) struct VerifyInnerOptions<'a> {
     property_based_config: Option<&'a PropertyBasedTestConfig>,
     task_id: Option<String>,
     generation_id: Option<String>,
+}
+
+impl<'a> VerifyInnerOptions<'a> {
+    pub(crate) fn for_vacuity(timeout_ms: u64) -> Self {
+        Self {
+            timeout_ms,
+            global_max_unroll: BMC_DEFAULT_UNROLL_DEPTH,
+            enable_spurious_detection: true,
+            enable_vacuity_check: false,
+            ieee754_f64: false,
+            bitvec_i64: false,
+            property_based_config: None,
+            task_id: orchestration_task_id_from_env(),
+            generation_id: orchestration_generation_id_from_env(),
+        }
+    }
 }
 
 pub const DEFAULT_SELF_CORRECTION_REQUIRED_SUCCESSES: usize = 3;
@@ -639,12 +656,25 @@ pub(crate) fn verify_inner(
     result
 }
 
+pub(crate) fn verify_inner_for_vacuity(
+    hir_atom: &HirAtom,
+    output_dir: &Path,
+    module_env: &ModuleEnv,
+    options: &VerifyInnerOptions<'_>,
+) -> MumeiResult<()> {
+    let mut nested_options = options.clone();
+    nested_options.enable_vacuity_check = false;
+    let _capture_suspension = super::phase_artifacts::suspend_capture();
+    verify_inner_impl(hir_atom, output_dir, module_env, nested_options).map(|_| ())
+}
+
 fn verify_inner_impl(
     hir_atom: &HirAtom,
     output_dir: &Path,
     module_env: &ModuleEnv,
     options: VerifyInnerOptions<'_>,
 ) -> MumeiResult<(Vec<InferredInvariant>, Vec<serde_json::Value>)> {
+    let vacuity_options = options.clone();
     let VerifyInnerOptions {
         timeout_ms,
         global_max_unroll,
@@ -1177,13 +1207,22 @@ fn verify_inner_impl(
     // Phase 1i: Vacuity checking via mutation testing
     let phase_start = std::time::Instant::now();
     if enable_vacuity_check && mir_body.check_analysis_budget().is_ok() {
-        match crate::verification::vacuity::check_spec_vacuity_for_hir(
-            atom, hir_atom, &mir_body, module_env, 10, timeout_ms,
+        match crate::verification::vacuity::check_spec_vacuity_for_hir_with_options(
+            atom,
+            hir_atom,
+            &mir_body,
+            module_env,
+            10,
+            &vacuity_options,
         ) {
             Ok(result) => {
                 eprintln!(
-                    "  ✓ Vacuity check passed for '{}': {} mutations tested, none passed verification",
-                    atom.name, result.total_mutations_tested
+                    "  ✓ Vacuity check passed for '{}': tested {}, killed {}, survived {}, unanalyzable {}",
+                    atom.name,
+                    result.total_mutations_tested,
+                    result.killed_mutations,
+                    result.survived_mutations,
+                    result.unanalyzable_mutations
                 );
             }
             Err(vacuity_err) => {

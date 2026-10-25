@@ -16,6 +16,11 @@ and integer constants changed to zero or one. No-op mutations are omitted.
 Methods are reported with qualified names such as `Point::get`. Trusted,
 generic, and originally unverifiable atoms are reported as `not_checked`.
 
+The generator skips a small set of syntactically obvious equivalent operator
+flips, such as `x + 0` to `x - 0` and `x * 1` to `x / 1`, including float
+literal equivalents. This check is intentionally limited: other semantically
+equivalent mutants can still survive and need human judgment.
+
 ## Outcomes
 
 | Status | Meaning |
@@ -47,7 +52,10 @@ least one atom is `weak`.
 
 ## Relation to vacuity checking
 
-`verify --enable-vacuity-check` is Phase 1i's existing diagnostic and remains
-unchanged. `mumei controls` is a separate negative-control report: it uses the
-real verifier, deterministic single-site mutations, and explicit outcomes
-that keep solver uncertainty distinct from confirmed rejection.
+`verify --enable-vacuity-check` runs the same deterministic, one-site mutation
+engine as `mumei controls`, but checks up to ten mutants per atom through the
+real verifier and fails the atom if any mutant survives. Unanalyzable mutants
+are not counted as kills, and no-op mutations such as `Pow` flipped to `Pow`
+are omitted. `mumei controls` is a separate, read-only report that provides
+per-mutant outcomes and configurable limits. See the [verifier
+specification](VERIFIER_SPEC.md) and [CLI reference](CLI.md).
