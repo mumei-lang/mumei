@@ -464,7 +464,7 @@ pub fn compute_proof_hash_with_flags(
             continue; // already visited, prevent infinite loops
         }
         if let Some(callee_atom) = module_env.get_atom(&callee_name) {
-            hash_callee_contract(&mut hasher, callee_atom, module_env);
+            hash_callee_contract(&mut hasher, callee_atom, module_env, true);
         }
         // Walk further dependencies
         if let Some(further_callees) = module_env.dependency_graph.get(&callee_name) {
@@ -485,6 +485,7 @@ fn hash_callee_contract(
     hasher: &mut Sha256,
     callee_atom: &crate::parser::Atom,
     module_env: &ModuleEnv,
+    include_trust: bool,
 ) {
     hasher.update(b"|dep:");
     hasher.update(callee_atom.name.as_bytes());
@@ -507,7 +508,7 @@ fn hash_callee_contract(
             hasher.update(p.value.as_bytes());
         }
     }
-    if callee_atom.trust_level != crate::parser::TrustLevel::Verified {
+    if include_trust && callee_atom.trust_level != crate::parser::TrustLevel::Verified {
         hasher.update(b",trust:");
         hasher.update(
             match callee_atom.trust_level {
@@ -608,7 +609,7 @@ pub fn compute_dependency_hashes(
         };
 
         let mut hasher = Sha256::new();
-        hash_callee_contract(&mut hasher, callee_atom, module_env);
+        hash_callee_contract(&mut hasher, callee_atom, module_env, false);
         hashes.insert(
             format!("atom:{}", callee_atom.name),
             format!("{:x}", hasher.finalize()),
@@ -952,7 +953,7 @@ pub(crate) fn save_cache(cache_path: &Path, cache: &VerificationCache) {
 #[cfg(test)]
 mod nominal_hash_tests {
     use super::*;
-    use crate::parser::{parse_module, Item};
+    use crate::parser::{parse_module, Item, TrustLevel};
 
     fn env_and_hash(source: &str) -> String {
         let items = parse_module(source);
@@ -978,6 +979,50 @@ mod nominal_hash_tests {
             .insert("getx".to_string());
         let main = module_env.atoms.get("main").unwrap().clone();
         compute_proof_hash(&main, &module_env)
+    }
+
+    fn dependency_and_proof_hashes_for_trust(
+        trust_level: TrustLevel,
+    ) -> (BTreeMap<String, String>, String) {
+        let items = parse_module(
+            "atom f(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+        );
+        let mut module_env = ModuleEnv::default();
+        for item in items {
+            if let Item::Atom(atom) = item {
+                module_env.atoms.insert(atom.name.clone(), atom);
+            }
+        }
+        module_env
+            .dependency_graph
+            .entry("g".to_string())
+            .or_default()
+            .insert("f".to_string());
+        module_env.atoms.get_mut("f").unwrap().trust_level = trust_level;
+        let root = module_env.atoms.get("g").unwrap().clone();
+        (
+            compute_dependency_hashes(&root, &module_env),
+            compute_proof_hash(&root, &module_env),
+        )
+    }
+
+    #[test]
+    fn dependency_hashes_ignore_callee_trust_but_proof_hashes_include_it() {
+        let (verified_dependencies, verified_proof) =
+            dependency_and_proof_hashes_for_trust(TrustLevel::Verified);
+
+        for trust_level in [TrustLevel::Unverified, TrustLevel::Trusted] {
+            let (dependencies, proof) = dependency_and_proof_hashes_for_trust(trust_level);
+            assert_eq!(dependencies, verified_dependencies);
+            assert_ne!(proof, verified_proof);
+        }
     }
 
     const MAIN: &str = r#"

@@ -207,7 +207,7 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
 
 ### Dependency freshness coverage limits
 
-Dependency hashes cover resolved transitive callees and refined types or structs referenced directly by an atom's signature. They do not yet cover refined types nested inside generics or struct fields, or types referenced only in bodies. If a callee cannot be resolved in the importer's environment, its expected key is `dependency_unchecked`, never `dependency_changed`. `proof_hash` remains an internal proof-cache fingerprint and is intentionally not compared for import freshness; per-dependency hashes provide the contract-specific comparison without changing the established proof-hash behavior.
+Dependency hashes cover resolved transitive callee contracts and refined types or structs referenced directly by an atom's signature; they do not include a callee's trust level, which is enforced by that callee's own certificate status. They do not yet cover refined types nested inside generics or struct fields, or types referenced only in bodies. If a callee cannot be resolved in the importer's environment, the atom is reported as `dependency_unchecked`, never `dependency_changed`. `proof_hash` remains an internal proof-cache fingerprint and is intentionally not compared for import freshness; per-dependency hashes provide the contract-specific comparison without changing the established proof-hash behavior.
 
 ## Retry Budget Policy Schema (P8-G)
 

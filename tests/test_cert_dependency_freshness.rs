@@ -201,6 +201,24 @@ fn verify_cert(fixture: &Fixture, certificate: &Path, source: &Path, strict: boo
     fixture.run(&args)
 }
 
+fn verify_cert_with_lean_opt_in(
+    fixture: &Fixture,
+    certificate: &Path,
+    source: &Path,
+    strict: bool,
+) -> Output {
+    let mut args = vec![
+        "verify-cert".to_string(),
+        certificate.display().to_string(),
+        source.display().to_string(),
+        "--allow-lean-verified".to_string(),
+    ];
+    if strict {
+        args.push("--strict".to_string());
+    }
+    fixture.run(&args)
+}
+
 #[test]
 fn stale_transitive_contract_is_rejected_and_claimbook_marks_drift() {
     let fixture = Fixture::new();
@@ -493,6 +511,98 @@ fn lean_verified_dependency_acceptance_requires_fresh_dependencies() {
         !changed_text.contains("Lean-verified atom 'g' accepted as proven"),
         "{changed_text}"
     );
+}
+
+#[test]
+fn lean_callee_trust_policy_does_not_change_dependency_freshness() {
+    let fixture = Fixture::new();
+    let (a_source, b_source, c_source, a_cert, b_cert) = setup_modules(&fixture);
+    assert_success(&fixture.certify(&a_source, &a_cert), "certify A");
+
+    let mut a_certificate: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&a_cert).unwrap()).expect("parse A certificate");
+    let f = a_certificate
+        .atoms
+        .iter_mut()
+        .find(|atom| atom.name == "f")
+        .expect("f certificate");
+    f.z3_check_result = "lean_verified".to_string();
+    f.translator_version = verification::LEAN_TRANSLATOR_VERSION.to_string();
+    f.bridge_lemma_hash = verification::LEAN_BRIDGE_LEMMA_HASH.to_string();
+    f.lean_result_metadata = Some(LeanResultMetadata {
+        status: "lean_verified".to_string(),
+        theorem_name: "f_spec".to_string(),
+        translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+        bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+        proof_path: "Generated/Test.lean".to_string(),
+        diagnostics: vec![],
+        ..Default::default()
+    });
+    refresh_certificate_integrity(&mut a_certificate);
+    std::fs::write(&a_cert, serde_json::to_vec_pretty(&a_certificate).unwrap())
+        .expect("write Lean-verified A certificate");
+
+    let b_certified = fixture.verify(
+        &b_source,
+        &[
+            "--allow-lean-verified",
+            "--proof-cert",
+            "--output",
+            b_cert.to_str().unwrap(),
+        ],
+    );
+    assert_success(&b_certified, "certify B with Lean opt-in");
+
+    let without_opt_in = verify_cert(&fixture, &b_cert, &b_source, false);
+    let without_opt_in_text = output_text(&without_opt_in);
+    assert_success(&without_opt_in, "verify B without Lean opt-in");
+    assert!(
+        without_opt_in_text
+            .lines()
+            .any(|line| line.contains("g: proven")),
+        "{without_opt_in_text}"
+    );
+    assert!(
+        without_opt_in_text.lines().any(|line| {
+            line.contains("atom 'f'") && line.contains("failed certificate verification")
+        }),
+        "{without_opt_in_text}"
+    );
+    assert!(
+        !without_opt_in_text
+            .lines()
+            .any(|line| line.contains("g: dependency_changed")),
+        "{without_opt_in_text}"
+    );
+
+    let without_opt_in_import = fixture.verify(&c_source, &[]);
+    let without_opt_in_import_text = output_text(&without_opt_in_import);
+    assert_success(&without_opt_in_import, "import B without Lean opt-in");
+    assert!(
+        without_opt_in_import_text.lines().any(|line| {
+            line.contains("atom 'f'") && line.contains("failed certificate verification")
+        }),
+        "{without_opt_in_import_text}"
+    );
+    assert!(
+        !without_opt_in_import_text
+            .lines()
+            .any(|line| line.contains("atom 'g'") && line.contains("dependency_changed")),
+        "{without_opt_in_import_text}"
+    );
+
+    let with_opt_in = verify_cert_with_lean_opt_in(&fixture, &b_cert, &b_source, true);
+    let with_opt_in_text = output_text(&with_opt_in);
+    assert_success(&with_opt_in, "strictly verify B with Lean opt-in");
+    assert!(
+        with_opt_in_text
+            .lines()
+            .any(|line| line.contains("g: proven")),
+        "{with_opt_in_text}"
+    );
+
+    let strict_import = fixture.verify(&c_source, &["--strict-imports", "--allow-lean-verified"]);
+    assert_success(&strict_import, "strictly import B with Lean opt-in");
 }
 
 #[test]
