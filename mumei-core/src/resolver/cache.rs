@@ -465,6 +465,8 @@ pub fn compute_proof_hash_with_flags(
         }
         if let Some(callee_atom) = module_env.get_atom(&callee_name) {
             hash_callee_contract(&mut hasher, callee_atom, module_env, true);
+            hash_string_map(&mut hasher, "effect_pre", &callee_atom.effect_pre);
+            hash_string_map(&mut hasher, "effect_post", &callee_atom.effect_post);
         }
         // Walk further dependencies
         if let Some(further_callees) = module_env.dependency_graph.get(&callee_name) {
@@ -1065,6 +1067,22 @@ mod nominal_hash_tests {
             .unwrap()
     }
 
+    fn proof_hash_for(source: &str, root_name: &str) -> String {
+        let items = parse_module(source);
+        let mut module_env = ModuleEnv::default();
+        for item in items {
+            if let Item::Atom(atom) = item {
+                let name = atom.name.clone();
+                module_env
+                    .dependency_graph
+                    .insert(name, collect_callees_from_atom(&atom));
+                module_env.atoms.insert(atom.name.clone(), atom);
+            }
+        }
+        let root = module_env.atoms.get(root_name).unwrap().clone();
+        compute_proof_hash(&root, &module_env)
+    }
+
     #[test]
     fn dependency_hashes_ignore_callee_trust_but_proof_hashes_include_it() {
         let (verified_dependencies, verified_proof) =
@@ -1339,6 +1357,75 @@ body: { p.a };\n";
              atom main() -> i64\nresources: [counter];\nrequires: true;\nensures: true;\nbody: { 0 }",
         );
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn proof_hash_tracks_callee_effect_pre_and_effect_post() {
+        let source = "atom f(x: i64) -> i64\n\
+             effect_pre: { File: Closed };\n\
+             effect_post: { File: Open };\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: f(x);\n";
+        let baseline = proof_hash_for(source, "g");
+        let changed_pre = proof_hash_for(
+            &source.replace("effect_pre: { File: Closed }", "effect_pre: { File: Open }"),
+            "g",
+        );
+        let changed_post = proof_hash_for(
+            &source.replace(
+                "effect_post: { File: Open }",
+                "effect_post: { File: Closed }",
+            ),
+            "g",
+        );
+
+        assert_ne!(baseline, changed_pre);
+        assert_ne!(baseline, changed_post);
+    }
+
+    #[test]
+    fn proof_hash_tracks_transitive_callee_effect_states() {
+        let source = "atom f(x: i64) -> i64\n\
+             effect_pre: { File: Closed };\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n\
+             atom h(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: f(x);\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: h(x);\n";
+        let baseline = proof_hash_for(source, "g");
+        let changed = proof_hash_for(
+            &source.replace("effect_pre: { File: Closed }", "effect_pre: { File: Open }"),
+            "g",
+        );
+
+        assert_ne!(baseline, changed);
+    }
+
+    #[test]
+    fn effect_free_proof_hash_matches_develop() {
+        let hash = proof_hash_for(
+            "atom main(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n",
+            "main",
+        );
+
+        assert_eq!(
+            hash,
+            "9e1ad8675ce5b94972092795e1f7583c37747cf2ace33fb3a601f459de1631b3"
+        );
     }
 }
 
