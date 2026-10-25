@@ -103,6 +103,24 @@ and do not fail `--strict`.
 | `axiom_rejected` | The Lean axiom audit rejected the certificate evidence. |
 | `missing` | The source contains no matching certificate entry. |
 
+## `mumei claims`
+
+```bash
+mumei claims <input.mm> [--cert <path>] [--format json|md|both]
+  [--out-dir <directory>] [--controls] [--max-mutants <N>]
+  [--require-discriminating] [--require-grade <G0..G5>]
+```
+
+`claims` writes a read-only Claim Book report. `--controls` attaches negative
+control results to claims; `--max-mutants` sets the per-atom cap (default 32)
+and requires `--controls`. `--require-discriminating` enables controls and
+fails with exit 1 if any claim is weak or inconclusive. It may be combined
+with `--require-grade`; reports are written before either gate is evaluated.
+Controls do not affect grades or freshness. Without `--controls`, JSON and
+Markdown output are unchanged. Equivalent mutants beyond the generator's
+small syntactic filter can still survive and require human judgment; see
+[Contract controls](CONTROLS.md) and the [Claim Book guide](CLAIMBOOK.md).
+
 ## `mumei erosion`
 
 ```bash

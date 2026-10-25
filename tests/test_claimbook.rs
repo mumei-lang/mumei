@@ -111,6 +111,440 @@ fn atom<'a>(report: &'a Value, name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("claim {name:?} missing from {report}"))
 }
 
+fn without_discrimination(mut report: Value) -> Value {
+    for claim in report["claims"].as_array_mut().expect("claims array") {
+        claim
+            .as_object_mut()
+            .expect("claim object")
+            .remove("discrimination");
+    }
+    report["summary"]
+        .as_object_mut()
+        .expect("summary object")
+        .remove("by_discrimination");
+    report
+}
+
+fn write_source(dir: &Path, name: &str, contents: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, contents).expect("write source fixture");
+    path
+}
+
+#[test]
+fn controls_disabled_outputs_match_develop_goldens() {
+    let dir = fresh_dir("controls_off_golden");
+    copy_fixture(&dir, "claimbook_atoms.mm", "main.mm");
+    let out_dir = dir.join("report");
+    let out_dir_arg = out_dir.to_string_lossy().into_owned();
+    let output = claims(
+        &dir,
+        Path::new("main.mm"),
+        &["--format", "both", "--out-dir", &out_dir_arg],
+    );
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected_json = include_bytes!("fixtures/claimbook_controls_off.json");
+    assert_eq!(
+        std::fs::read(out_dir.join("claimbook.json")).expect("read JSON"),
+        expected_json
+            .strip_suffix(b"\n")
+            .expect("golden JSON has a repository-required trailing newline")
+    );
+    assert_eq!(
+        std::fs::read(out_dir.join("CLAIMBOOK.md")).expect("read Markdown"),
+        include_bytes!("fixtures/claimbook_controls_off.md")
+    );
+}
+
+#[test]
+fn controls_results_attach_to_claims_and_render_summary() {
+    let dir = fresh_dir("controls_mixed");
+    let source = write_source(
+        &dir,
+        "mixed.mm",
+        "atom strong(x: i64, y: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x + y;\n\
+         body: x + y;\n\
+         atom weak(x: i64, y: i64) -> i64\n\
+         requires: x >= 0 && y >= 0;\n\
+         ensures: result >= 0;\n\
+         body: x + y + 1;\n",
+    );
+    let plain_out_dir = dir.join("plain");
+    let plain_out_dir_arg = plain_out_dir.to_string_lossy().into_owned();
+    let plain_output = claims(
+        &dir,
+        &source,
+        &["--format", "json", "--out-dir", &plain_out_dir_arg],
+    );
+    assert!(
+        plain_output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&plain_output.stdout),
+        String::from_utf8_lossy(&plain_output.stderr)
+    );
+    let plain_report = json_report(&plain_out_dir.join("claimbook.json"));
+
+    let out_dir = dir.join("report");
+    let out_dir_arg = out_dir.to_string_lossy().into_owned();
+    let output = claims(
+        &dir,
+        &source,
+        &["--controls", "--format", "both", "--out-dir", &out_dir_arg],
+    );
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let report = json_report(&out_dir.join("claimbook.json"));
+    assert_eq!(without_discrimination(report.clone()), plain_report);
+    let strong = atom(&report, "strong")["discrimination"].clone();
+    assert_eq!(strong["status"], "discriminating");
+    assert_eq!(strong["survived"], 0);
+    assert!(strong["killed"].as_u64().unwrap() > 0);
+    let weak = atom(&report, "weak")["discrimination"].clone();
+    assert_eq!(weak["status"], "weak");
+    assert!(weak["surviving"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id == "constant:1->0@2"));
+    assert_eq!(
+        report["summary"]["by_discrimination"],
+        serde_json::json!({"discriminating": 1, "weak": 1})
+    );
+
+    let markdown = std::fs::read_to_string(out_dir.join("CLAIMBOOK.md")).expect("read Markdown");
+    assert!(markdown.contains("Controls: discriminating=1, weak=1"));
+    assert!(markdown.contains("| Controls |"));
+    assert!(markdown.contains("discriminating 1/1"));
+    assert!(markdown.contains("weak (1 survived)"));
+}
+
+#[test]
+fn require_discriminating_gates_weak_and_accepts_strong_claims() {
+    let weak_dir = fresh_dir("controls_gate_weak");
+    let weak_source = write_source(
+        &weak_dir,
+        "weak.mm",
+        "atom add(x: i64, y: i64) -> i64\n\
+         requires: x >= 0 && y >= 0;\n\
+         ensures: result >= 0;\n\
+         body: x + y + 1;\n",
+    );
+    let weak_out = weak_dir.join("report");
+    let weak_out_arg = weak_out.to_string_lossy().into_owned();
+    let weak = claims(
+        &weak_dir,
+        &weak_source,
+        &[
+            "--require-discriminating",
+            "--format",
+            "both",
+            "--out-dir",
+            &weak_out_arg,
+        ],
+    );
+    assert_eq!(weak.status.code(), Some(1));
+    assert!(weak_out.join("claimbook.json").exists());
+    assert!(weak_out.join("CLAIMBOOK.md").exists());
+    let weak_stderr = String::from_utf8_lossy(&weak.stderr);
+    assert!(weak_stderr.contains("add: controls weak"), "{weak_stderr}");
+    assert!(weak_stderr.contains("constant:1->0@2"), "{weak_stderr}");
+
+    let strong_dir = fresh_dir("controls_gate_strong");
+    let strong_source = write_source(
+        &strong_dir,
+        "strong.mm",
+        "atom add(x: i64, y: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x + y;\n\
+         body: x + y;\n",
+    );
+    let strong = claims(
+        &strong_dir,
+        &strong_source,
+        &["--require-discriminating", "--format", "json"],
+    );
+    assert_eq!(
+        strong.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&strong.stderr)
+    );
+}
+
+#[test]
+fn trusted_and_method_claims_attach_controls_by_name() {
+    let trusted_dir = fresh_dir("controls_trusted");
+    let trusted_source = write_source(
+        &trusted_dir,
+        "trusted.mm",
+        "trusted atom external() -> i64\n\
+         requires: true;\n\
+         ensures: result == 7;\n\
+         body: 7;\n",
+    );
+    let trusted_out = trusted_dir.join("report");
+    let trusted_out_arg = trusted_out.to_string_lossy().into_owned();
+    let trusted = claims(
+        &trusted_dir,
+        &trusted_source,
+        &[
+            "--require-discriminating",
+            "--format",
+            "json",
+            "--out-dir",
+            &trusted_out_arg,
+        ],
+    );
+    assert_eq!(trusted.status.code(), Some(0));
+    let trusted_report = json_report(&trusted_out.join("claimbook.json"));
+    assert_eq!(
+        atom(&trusted_report, "external")["discrimination"]["status"],
+        "not_checked"
+    );
+
+    let method_dir = fresh_dir("controls_method");
+    let method_source = copy_fixture(&method_dir, "claimbook_impl.mm", "impl.mm");
+    let method_out = method_dir.join("report");
+    let method_out_arg = method_out.to_string_lossy().into_owned();
+    let method = claims(
+        &method_dir,
+        &method_source,
+        &[
+            "--controls",
+            "--format",
+            "json",
+            "--out-dir",
+            &method_out_arg,
+        ],
+    );
+    assert_eq!(method.status.code(), Some(0));
+    let method_report = json_report(&method_out.join("claimbook.json"));
+    assert_ne!(
+        atom(&method_report, "Point::get")["discrimination"]["status"],
+        Value::Null
+    );
+}
+
+#[test]
+fn generic_instances_do_not_add_claims_when_controls_are_enabled() {
+    let dir = fresh_dir("controls_generic_instance");
+    let source = write_source(
+        &dir,
+        "generic.mm",
+        "atom id<T>(x: T) -> T\n\
+         requires: true;\n\
+         ensures: result == x + 1;\n\
+         body: x + 1;\n\
+         atom main() -> i64\n\
+         requires: true;\n\
+         ensures: result == 4;\n\
+         body: id<i64>(3);\n",
+    );
+    let plain_out_dir = dir.join("plain");
+    let plain_out_dir_arg = plain_out_dir.to_string_lossy().into_owned();
+    let plain = claims(
+        &dir,
+        &source,
+        &["--format", "json", "--out-dir", &plain_out_dir_arg],
+    );
+    assert!(
+        plain.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&plain.stdout),
+        String::from_utf8_lossy(&plain.stderr)
+    );
+
+    let controls_out_dir = dir.join("controls");
+    let controls_out_dir_arg = controls_out_dir.to_string_lossy().into_owned();
+    let with_controls = claims(
+        &dir,
+        &source,
+        &[
+            "--controls",
+            "--format",
+            "json",
+            "--out-dir",
+            &controls_out_dir_arg,
+        ],
+    );
+    assert!(
+        with_controls.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&with_controls.stdout),
+        String::from_utf8_lossy(&with_controls.stderr)
+    );
+
+    let plain_report = json_report(&plain_out_dir.join("claimbook.json"));
+    let controls_report = json_report(&controls_out_dir.join("claimbook.json"));
+    let claim_names = |report: &Value| {
+        report["claims"]
+            .as_array()
+            .expect("claims array")
+            .iter()
+            .map(|claim| claim["atom"].as_str().expect("claim name").to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(claim_names(&controls_report), claim_names(&plain_report));
+    assert_eq!(
+        controls_report["summary"]["total"],
+        plain_report["summary"]["total"]
+    );
+    assert_eq!(
+        controls_report["summary"]["by_effective_grade"],
+        plain_report["summary"]["by_effective_grade"]
+    );
+}
+
+#[test]
+fn discrimination_gate_combines_with_grade_gate_without_rejecting_trusted_controls() {
+    let dir = fresh_dir("controls_grade_gate");
+    let source = write_source(
+        &dir,
+        "trusted_helper.mm",
+        "trusted atom trusted_helper() -> i64\n\
+         requires: true;\n\
+         ensures: result == 7;\n\
+         body: 7;\n\
+         atom caller() -> i64\n\
+         requires: true;\n\
+         ensures: result == 7;\n\
+         body: trusted_helper();\n",
+    );
+    certify(&dir, &source);
+    let out_dir = dir.join("report");
+    let out_dir_arg = out_dir.to_string_lossy().into_owned();
+    let output = claims(
+        &dir,
+        &source,
+        &[
+            "--require-discriminating",
+            "--require-grade",
+            "G4",
+            "--format",
+            "both",
+            "--out-dir",
+            &out_dir_arg,
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(out_dir.join("claimbook.json").exists());
+    assert!(out_dir.join("CLAIMBOOK.md").exists());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("trusted_helper: effective G1"), "{stderr}");
+    assert!(!stderr.contains("controls "), "{stderr}");
+}
+
+#[test]
+fn max_mutants_caps_controls_and_invalid_usage_is_rejected() {
+    let dir = fresh_dir("controls_cap");
+    let source = write_source(
+        &dir,
+        "input.mm",
+        "atom add(x: i64, y: i64) -> i64\n\
+         requires: x >= 0 && y >= 0;\n\
+         ensures: result >= 0;\n\
+         body: x + y + 1;\n",
+    );
+    let out_dir = dir.join("report");
+    let out_dir_arg = out_dir.to_string_lossy().into_owned();
+    let capped = claims(
+        &dir,
+        &source,
+        &[
+            "--controls",
+            "--max-mutants",
+            "1",
+            "--format",
+            "json",
+            "--out-dir",
+            &out_dir_arg,
+        ],
+    );
+    assert_eq!(capped.status.code(), Some(0));
+    assert_eq!(
+        atom(&json_report(&out_dir.join("claimbook.json")), "add")["discrimination"]["tested"],
+        1
+    );
+
+    let zero = claims(&dir, &source, &["--controls", "--max-mutants", "0"]);
+    assert_eq!(zero.status.code(), Some(4));
+
+    let missing_controls = claims(&dir, &source, &["--max-mutants", "1"]);
+    assert_eq!(missing_controls.status.code(), Some(2));
+}
+
+#[test]
+fn controls_reports_are_deterministic_and_read_only() {
+    let dir = fresh_dir("controls_read_only");
+    let source = write_source(
+        &dir,
+        "input.mm",
+        "atom add(x: i64, y: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x + y;\n\
+         body: x + y;\n",
+    );
+    let out_dir = dir.join("report");
+    let out_dir_arg = out_dir.to_string_lossy().into_owned();
+    let before = files_under(&dir);
+    let first = claims(
+        &dir,
+        &source,
+        &["--controls", "--format", "both", "--out-dir", &out_dir_arg],
+    );
+    assert!(
+        first.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_json = std::fs::read(out_dir.join("claimbook.json")).expect("read first JSON report");
+    let first_markdown =
+        std::fs::read(out_dir.join("CLAIMBOOK.md")).expect("read first Markdown report");
+    let second = claims(
+        &dir,
+        &source,
+        &["--controls", "--format", "both", "--out-dir", &out_dir_arg],
+    );
+    assert!(
+        second.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(!dir.join(".mumei_cache").exists());
+    assert_eq!(
+        std::fs::read(out_dir.join("claimbook.json")).expect("read second JSON report"),
+        first_json
+    );
+    assert_eq!(
+        std::fs::read(out_dir.join("CLAIMBOOK.md")).expect("read second Markdown report"),
+        first_markdown
+    );
+    assert_eq!(
+        files_under(&dir)
+            .difference(&before)
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            PathBuf::from("report/claimbook.json"),
+            PathBuf::from("report/CLAIMBOOK.md"),
+        ])
+    );
+}
+
 #[test]
 fn certified_atoms_have_grades_freshness_and_deterministic_json() {
     let dir = fresh_dir("grades");
@@ -711,7 +1145,7 @@ atom dependency_value(x: i64) -> i64 {
     let first = claims(
         &dir,
         &source,
-        &["--format", "both", "--out-dir", &out_dir_arg],
+        &["--controls", "--format", "both", "--out-dir", &out_dir_arg],
     );
     assert!(
         first.status.success(),
@@ -739,7 +1173,7 @@ atom dependency_value(x: i64) -> i64 {
     let second = claims(
         &dir,
         &source,
-        &["--format", "both", "--out-dir", &out_dir_arg],
+        &["--controls", "--format", "both", "--out-dir", &out_dir_arg],
     );
     assert!(
         second.status.success(),

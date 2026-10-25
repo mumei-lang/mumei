@@ -1,18 +1,35 @@
 use crate::pipeline::try_load_and_prepare_with_full_options_and_persistence;
-use mumei_core::claimbook::{create_claimbook, limiting_premises_text, render_markdown, SealGrade};
+use mumei_core::claimbook::{
+    attach_controls, create_claimbook, fails_discrimination_gate, limiting_premises_text,
+    render_markdown, SealGrade,
+};
 use mumei_core::parser::Item;
-use mumei_core::{parser, proof_cert};
+use mumei_core::{controls, parser, proof_cert};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub(crate) fn cmd_claims(
-    input: &str,
-    cert_arg: Option<&str>,
-    allow_lean_verified: bool,
-    format: &str,
-    out_dir: &str,
-    require_grade: Option<&str>,
-) {
+pub(crate) struct ClaimsOptions<'a> {
+    pub(crate) cert_arg: Option<&'a str>,
+    pub(crate) allow_lean_verified: bool,
+    pub(crate) format: &'a str,
+    pub(crate) out_dir: &'a str,
+    pub(crate) controls_enabled: bool,
+    pub(crate) max_mutants: usize,
+    pub(crate) require_discriminating: bool,
+    pub(crate) require_grade: Option<&'a str>,
+}
+
+pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
+    let ClaimsOptions {
+        cert_arg,
+        allow_lean_verified,
+        format,
+        out_dir,
+        controls_enabled,
+        max_mutants,
+        require_discriminating,
+        require_grade,
+    } = options;
     let cert_path = cert_arg
         .map(PathBuf::from)
         .unwrap_or_else(|| super::verify::proof_certificate_path(input, None));
@@ -31,7 +48,7 @@ pub(crate) fn cmd_claims(
         None
     };
 
-    let (items, _module_env, _imports, _source) =
+    let (items, module_env, _imports, _source) =
         match try_load_and_prepare_with_full_options_and_persistence(
             input,
             false,
@@ -44,6 +61,7 @@ pub(crate) fn cmd_claims(
                 std::process::exit(super::verify::EXIT_INPUT_ERROR);
             }
         };
+    let controls_enabled = controls_enabled || require_discriminating;
     let mut atoms: Vec<&parser::Atom> = items
         .iter()
         .filter_map(|item| {
@@ -66,13 +84,21 @@ pub(crate) fn cmd_claims(
     }
     atoms.extend(qualified_methods.iter());
 
-    let book = create_claimbook(
+    let mut book = create_claimbook(
         input,
         cert_path.display().to_string(),
         cert.as_ref(),
         &atoms,
         allow_lean_verified,
     );
+    if controls_enabled {
+        let report = controls::analyze(input, &items, &items, &module_env, None, max_mutants)
+            .unwrap_or_else(|error| {
+                eprintln!("❌ Error: {error}");
+                std::process::exit(super::verify::EXIT_INPUT_ERROR);
+            });
+        attach_controls(&mut book, &report.atoms);
+    }
     let output_dir = Path::new(out_dir);
     if let Err(error) = fs::create_dir_all(output_dir) {
         eprintln!(
@@ -123,6 +149,7 @@ pub(crate) fn cmd_claims(
         book.summary.total, grades, freshness
     );
 
+    let mut rejected = false;
     if let Some(required_grade) = require_grade {
         let required_grade = match required_grade {
             "G0" => SealGrade::G0,
@@ -133,7 +160,6 @@ pub(crate) fn cmd_claims(
             "G5" => SealGrade::G5,
             _ => unreachable!("clap restricts required grade values"),
         };
-        let mut rejected = false;
         for claim in book
             .claims
             .iter()
@@ -149,9 +175,35 @@ pub(crate) fn cmd_claims(
                 limiting_premises_text(&claim.limiting_premises)
             );
         }
-        if rejected {
-            std::process::exit(super::verify::EXIT_REJECTED);
+    }
+    if require_discriminating {
+        for claim in &book.claims {
+            let Some(discrimination) = &claim.discrimination else {
+                continue;
+            };
+            if fails_discrimination_gate(discrimination) {
+                rejected = true;
+                let surviving = if discrimination.surviving.is_empty() {
+                    "-".to_string()
+                } else {
+                    discrimination.surviving.join(", ")
+                };
+                eprintln!(
+                    "{}: controls {} (tested {}, killed {}, survived {}, unanalyzable {}); detail: {}; surviving: {}",
+                    claim.atom,
+                    discrimination.status,
+                    discrimination.tested,
+                    discrimination.killed,
+                    discrimination.survived,
+                    discrimination.unanalyzable,
+                    discrimination.detail,
+                    surviving
+                );
+            }
         }
+    }
+    if rejected {
+        std::process::exit(super::verify::EXIT_REJECTED);
     }
 }
 
