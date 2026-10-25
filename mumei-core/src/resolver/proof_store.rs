@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
 const SCHEMA: &str = "mumei.proof-store-entry/v1";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -73,7 +73,7 @@ impl ProofStore {
         create_private_dirs(&root)?;
         let store = Self { root };
         store
-            .check_root_permissions()
+            .check_directory_permissions(&store.root)
             .map_err(|reason| std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason))?;
         Ok(store)
     }
@@ -97,13 +97,13 @@ impl ProofStore {
     }
 
     pub fn lookup(&self, key: &str, proof_hash: &str, z3_version: &str) -> StoreLookup {
-        if let Err(reason) = self.check_root_permissions() {
-            return StoreLookup::Invalid(reason);
-        }
         if !valid_key(key) {
             return StoreLookup::Invalid("invalid key".to_string());
         }
         let path = self.path(key);
+        if let Err(reason) = self.check_path_permissions(&path, true) {
+            return StoreLookup::Invalid(reason);
+        }
         let expected_key = Self::key(proof_hash, z3_version);
         if key != expected_key {
             return StoreLookup::Invalid("key mismatch".to_string());
@@ -129,7 +129,7 @@ impl ProofStore {
     }
 
     pub fn validate_file(&self, path: &Path) -> Result<(), String> {
-        self.check_root_permissions()?;
+        self.check_path_permissions(path, true)?;
         self.read_valid_entry(path).map(|_| ())
     }
 
@@ -140,7 +140,7 @@ impl ProofStore {
         z3_version: &str,
         entry: &VerificationCacheEntry,
     ) -> std::io::Result<()> {
-        self.check_root_permissions()
+        self.check_directory_permissions(&self.root)
             .map_err(|reason| std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason))?;
         if entry.result != "verified" || entry.proof_hash != proof_hash {
             return Ok(());
@@ -154,7 +154,11 @@ impl ProofStore {
         }
         let path = self.path(&key);
         let parent = path.parent().expect("proof-store key has a parent");
+        self.check_path_permissions(&path, false)
+            .map_err(|reason| std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason))?;
         create_private_dirs(parent)?;
+        self.check_path_permissions(&path, false)
+            .map_err(|reason| std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason))?;
         let key_inputs = KeyInputs {
             proof_hash: proof_hash.to_string(),
             z3_version: z3_version.to_string(),
@@ -182,10 +186,16 @@ impl ProofStore {
             nanos
         ));
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temp)?;
+        #[cfg(unix)]
+        if let Err(error) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
         if let Err(error) = file.write_all(&bytes) {
             let _ = std::fs::remove_file(&temp);
             return Err(error);
@@ -234,24 +244,79 @@ impl ProofStore {
         Ok(stored)
     }
 
-    fn check_root_permissions(&self) -> Result<(), String> {
+    fn check_path_permissions(&self, path: &Path, check_file: bool) -> Result<(), String> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("invalid proof store path {}", path.display()))?;
+        self.check_directory_permissions(parent)?;
         #[cfg(unix)]
         {
-            match std::fs::metadata(&self.root) {
-                Ok(metadata) if metadata.mode() & 0o022 != 0 => Err(format!(
-                    "proof store {} is writable by other users; ignoring it",
-                    self.root.display()
-                )),
-                Ok(_) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(error.to_string()),
+            if check_file {
+                match std::fs::metadata(path) {
+                    Ok(metadata) if metadata.mode() & 0o022 != 0 => Err(shared_path_warning(path)),
+                    Ok(_) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error.to_string()),
+                }
+            } else {
+                Ok(())
             }
         }
         #[cfg(not(unix))]
         {
+            let _ = check_file;
             Ok(())
         }
     }
+
+    fn check_directory_permissions(&self, path: &Path) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            let relative = path.strip_prefix(&self.root).map_err(|_| {
+                format!(
+                    "proof store path {} is outside {}",
+                    path.display(),
+                    self.root.display()
+                )
+            })?;
+            let mut current = self.root.clone();
+            for directory in
+                std::iter::once(current.clone()).chain(relative.components().map(|component| {
+                    current.push(component);
+                    current.clone()
+                }))
+            {
+                match std::fs::metadata(&directory) {
+                    Ok(metadata) if metadata.mode() & 0o022 != 0 => {
+                        return Err(shared_path_warning(&directory));
+                    }
+                    Ok(metadata) if !metadata.is_dir() => {
+                        return Err(format!(
+                            "proof store path {} is not a directory; ignoring it",
+                            directory.display()
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            Ok(())
+        }
+    }
+}
+
+#[cfg(unix)]
+fn shared_path_warning(path: &Path) -> String {
+    format!(
+        "proof store {} is writable by other users; ignoring it",
+        path.display()
+    )
 }
 
 fn valid_key(key: &str) -> bool {

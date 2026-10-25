@@ -573,6 +573,95 @@ fn proof_store_ignores_root_writable_by_other_users_and_falls_back_to_z3() {
 
 #[cfg(unix)]
 #[test]
+fn proof_store_ignores_shared_v1_directory_and_falls_back_to_z3() {
+    let scratch = Scratch::new("shared-v1");
+    let store = scratch.0.join("store");
+    fs::create_dir_all(store.join("v1")).unwrap();
+    fs::set_permissions(store.join("v1"), fs::Permissions::from_mode(0o777)).unwrap();
+    let project = scratch.project("project", &basic_module("result == a + b"));
+
+    let verified = run(&project, &store, &["--proof-store"]);
+    let output = text(&verified);
+    assert!(verified.status.success(), "{output}");
+    assert!(
+        output.contains(&format!(
+            "proof store {} is writable by other users; ignoring it",
+            store.join("v1").display()
+        )),
+        "{output}"
+    );
+    assert!(output.contains("'add': verified"), "{output}");
+    assert!(json_files(&store).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn proof_store_ignores_shared_prefix_directory_and_falls_back_to_z3() {
+    let scratch = Scratch::new("shared-prefix");
+    let store = scratch.0.join("store");
+    let first = scratch.project("first", &basic_module("result == a + b"));
+    let verified = run(&first, &store, &["--proof-store"]);
+    assert!(verified.status.success(), "{}", text(&verified));
+    let entry = json_files(&store).into_iter().next().unwrap();
+    let prefix = entry.parent().unwrap();
+    fs::set_permissions(prefix, fs::Permissions::from_mode(0o777)).unwrap();
+
+    let second = scratch.project("second", &basic_module("result == a + b"));
+    let verified = run(&second, &store, &["--proof-store"]);
+    let output = text(&verified);
+    assert!(verified.status.success(), "{output}");
+    assert!(
+        output.contains(&format!(
+            "proof store {} is writable by other users; ignoring it",
+            prefix.display()
+        )),
+        "{output}"
+    );
+    assert!(output.contains("'add': verified"), "{output}");
+    assert_eq!(json_files(&store).len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn proof_store_ignores_writable_entry_files_and_stats_counts_them_invalid() {
+    let scratch = Scratch::new("shared-entry");
+    let store = scratch.0.join("store");
+    let first = scratch.project("first", &basic_module("result == a + b"));
+    let verified = run(&first, &store, &["--proof-store"]);
+    assert!(verified.status.success(), "{}", text(&verified));
+    let entry = json_files(&store).into_iter().next().unwrap();
+    fs::set_permissions(&entry, fs::Permissions::from_mode(0o666)).unwrap();
+
+    let stats = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args(["proof-store", "stats", "--dir"])
+        .arg(&store)
+        .args(["--json"])
+        .output()
+        .unwrap();
+    assert!(stats.status.success(), "{}", text(&stats));
+    let stats: Value = serde_json::from_slice(&stats.stdout).unwrap();
+    assert_eq!(stats["invalid"], 1);
+
+    let second = scratch.project("second", &basic_module("result == a + b"));
+    let verified = run(&second, &store, &["--proof-store"]);
+    let output = text(&verified);
+    assert!(verified.status.success(), "{output}");
+    assert!(
+        output.contains(&format!(
+            "proof store {} is writable by other users; ignoring it",
+            entry.display()
+        )),
+        "{output}"
+    );
+    assert!(output.contains("'add': verified"), "{output}");
+    assert_eq!(
+        fs::metadata(&entry).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn proof_store_creates_private_directories() {
     let scratch = Scratch::new("private-store");
     let store = scratch.0.join("store");
@@ -590,4 +679,8 @@ fn proof_store_creates_private_directories() {
             0o700
         );
     }
+    assert_eq!(
+        fs::metadata(entry).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }
