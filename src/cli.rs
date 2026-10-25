@@ -299,6 +299,20 @@ pub(crate) enum Command {
         #[arg(long, value_parser = ["G0", "G1", "G2", "G3", "G4", "G5"])]
         require_grade: Option<String>,
     },
+    /// Check whether atom contracts reject deterministic implementation mutations
+    Controls {
+        /// Input .mm file
+        input: String,
+        /// Print the structured JSON report
+        #[arg(long)]
+        json: bool,
+        /// Maximum mutants to test per atom
+        #[arg(long, default_value_t = 32)]
+        max_mutants: usize,
+        /// Analyze only the named atom
+        #[arg(long)]
+        atom: Option<String>,
+    },
     /// Lock or check human-owned charter contracts
     Charter {
         #[command(subcommand)]

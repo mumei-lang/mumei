@@ -145,6 +145,22 @@ atoms are marked `unpinned` after the grade check. A passing check exits `0`,
 a failed gate exits `1`, and an input or report I/O error exits `4`. See
 [Charter](CHARTER.md) for the file format, lock behavior, and check semantics.
 
+## `mumei controls`
+
+```bash
+mumei controls src/main.mm
+mumei controls src/main.mm --json --atom Point::get
+mumei controls src/main.mm --max-mutants 16
+```
+
+`controls` reports whether each verified atom contract rejects deterministic
+one-site implementation mutations. It defaults to 32 mutants per atom and
+supports an optional qualified atom filter. JSON reports use
+`mumei.controls-report/v1`. Exit code `0` means no atom is weak, `1` means at
+least one mutation survived, and `4` indicates missing or unparsable input or
+an unknown atom. See [Contract controls](CONTROLS.md) for statuses, outcomes,
+and the distinction from `verify --enable-vacuity-check`.
+
 ### SARIF output
 
 `mumei verify <file-or-directory> --emit sarif` writes a SARIF 2.1.0 log to

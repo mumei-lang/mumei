@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use mumei_core::parser::{Atom, Param, Span, TrustLevel};
+use mumei_core::parser::{parse_body_expr, Atom, Param, Span, TrustLevel};
 use mumei_core::verification::{
-    detect_uninterpreted_symbols, detect_unused_hypotheses, validate_counterexample, CexValue,
-    ModuleEnv,
+    detect_uninterpreted_symbols, detect_unused_hypotheses,
+    validate_counterexample as validate_counterexample_with_body, CexValue, ModuleEnv,
 };
 
 fn base_atom(name: &str) -> Atom {
@@ -47,6 +47,15 @@ fn param(name: &str, type_name: &str) -> Param {
         fn_contract_requires: None,
         fn_contract_ensures: None,
     }
+}
+
+fn validate_counterexample(
+    atom: &Atom,
+    model: &HashMap<String, CexValue>,
+    module_env: &ModuleEnv,
+) -> mumei_core::verification::CounterexampleValidationResult {
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    validate_counterexample_with_body(atom, &body_stmt, model, module_env)
 }
 
 #[test]
@@ -174,7 +183,8 @@ fn test_spurious_candidate_uninterpreted_symbol() {
 
     let model = HashMap::from([("x".to_string(), CexValue::Int(0))]);
     let validation = validate_counterexample(&atom, &model, &module_env);
-    let symbols = detect_uninterpreted_symbols(&atom, &model, &module_env);
+    let body_stmt = parse_body_expr(&atom.body_expr);
+    let symbols = detect_uninterpreted_symbols(&atom, &body_stmt, &model, &module_env);
 
     assert!(!validation.is_valid);
     assert_eq!(validation.validation_status, "spurious_candidate");

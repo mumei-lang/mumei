@@ -3,6 +3,7 @@ pub(crate) mod build;
 pub(crate) mod charter;
 pub(crate) mod check;
 pub(crate) mod claims;
+pub(crate) mod controls;
 pub(crate) mod doc;
 pub(crate) mod erosion;
 pub(crate) mod infer;

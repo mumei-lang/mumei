@@ -305,13 +305,15 @@ pub(crate) fn check_struct_invariants<'a>(
                 return Err(MumeiError::verification(format!(
                     "Struct '{}' invariant violated for {}: {}",
                     sdef.name, subject, invariant_raw
-                )));
+                ))
+                .with_verdict(crate::verification::VerdictKind::Rejected));
             }
             SatResult::Unknown => {
                 return Err(MumeiError::verification(format!(
                     "Struct '{}' invariant could not be decided for {}: {}",
                     sdef.name, subject, invariant_raw
-                )));
+                ))
+                .with_verdict(crate::verification::VerdictKind::Inconclusive));
             }
         }
     }

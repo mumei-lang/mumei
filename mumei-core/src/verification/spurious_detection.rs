@@ -110,10 +110,11 @@ fn eval_env_from_model(model: &HashMap<String, CexValue>) -> EvalEnv {
 
 pub fn validate_counterexample(
     atom: &Atom,
+    body_stmt: &Stmt,
     model: &HashMap<String, CexValue>,
     module_env: &ModuleEnv,
 ) -> CounterexampleValidationResult {
-    let symbol_provenance = detect_uninterpreted_symbols(atom, model, module_env);
+    let symbol_provenance = detect_uninterpreted_symbols(atom, body_stmt, model, module_env);
     let mut eval_env = eval_env_from_model(model);
 
     let body_requires =
@@ -138,8 +139,7 @@ pub fn validate_counterexample(
         }
     }
 
-    let body_stmt = parse_body_expr(&atom.body_expr);
-    match eval_stmt(&body_stmt, &mut eval_env, module_env, 0) {
+    match eval_stmt(body_stmt, &mut eval_env, module_env, 0) {
         Ok(
             result @ (EvalValue::Int(_)
             | EvalValue::Float(_)
@@ -227,23 +227,29 @@ fn invalid_counterexample_result(
 
 pub fn detect_uninterpreted_symbols(
     atom: &Atom,
+    body_stmt: &Stmt,
     _model: &HashMap<String, CexValue>,
     module_env: &ModuleEnv,
 ) -> Vec<SymbolProvenance> {
     let mut symbols = Vec::new();
     let mut seen = HashSet::new();
 
-    let body = parse_body_expr(&atom.body_expr);
     // `let f = |…| …` binds a real body — `f(…)`/`call(f, …)` is
     // interpreted, so the name must not be flagged as uninterpreted.
-    let lambda_names = collect_lambda_binding_names(&body);
+    let lambda_names = collect_lambda_binding_names(body_stmt);
     for expr in [
         parse_expression(&atom.requires),
         parse_expression(&atom.ensures),
     ] {
         collect_expr_symbols(&expr, module_env, &mut symbols, &mut seen, &lambda_names);
     }
-    collect_stmt_symbols(&body, module_env, &mut symbols, &mut seen, &lambda_names);
+    collect_stmt_symbols(
+        body_stmt,
+        module_env,
+        &mut symbols,
+        &mut seen,
+        &lambda_names,
+    );
 
     symbols
 }

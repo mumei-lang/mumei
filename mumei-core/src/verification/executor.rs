@@ -456,10 +456,22 @@ fn drain_pending_termination<'a>(
         solver.push();
         solver.assert(&obligation.not());
         let check = solver.check();
-        let err = if check != SatResult::Unsat {
-            Some(termination_violation_error(vc, solver, env, callee_name))
-        } else {
-            None
+        let err = match check {
+            SatResult::Sat => Some(termination_violation_error(
+                vc,
+                solver,
+                env,
+                callee_name,
+                VerdictKind::Rejected,
+            )),
+            SatResult::Unknown => Some(termination_violation_error(
+                vc,
+                solver,
+                env,
+                callee_name,
+                VerdictKind::Inconclusive,
+            )),
+            SatResult::Unsat => None,
         };
         solver.pop(1);
         if let Some(err) = err {
@@ -2580,8 +2592,12 @@ fn verify_inner_impl(
                                 ));
                             let mut validation_status = None;
                             if enable_spurious_detection {
-                                let validation =
-                                    validate_counterexample(atom, &model_values, module_env);
+                                let validation = validate_counterexample(
+                                    atom,
+                                    &hir_atom.body_stmt,
+                                    &model_values,
+                                    module_env,
+                                );
                                 validation_status = Some(validation.validation_status.clone());
                                 if validation.validation_status == "spurious_candidate" {
                                     let symbols = validation
@@ -2655,7 +2671,8 @@ fn verify_inner_impl(
                             .with_counterexample_provenance(
                                 ce_value.clone(),
                                 counterexample_provenance.clone(),
-                            ));
+                            )
+                            .with_verdict(VerdictKind::Inconclusive));
                         }
                         let constraint_mappings =
                             build_constraint_mappings_for_atom(atom, module_env);
@@ -2770,7 +2787,8 @@ fn verify_inner_impl(
                         .with_counterexample_provenance(
                             ce_value.clone(),
                             counterexample_provenance.clone(),
-                        );
+                        )
+                        .with_verdict(VerdictKind::Rejected);
                         for mapping in &constraint_mappings {
                             if mapping.span.line > 0 {
                                 let related_src_span = span_to_source_span("", &mapping.span);
@@ -2814,7 +2832,8 @@ fn verify_inner_impl(
                         } else {
                             "Z3 returned unknown while checking the postcondition.".to_string()
                         };
-                        let mut err = MumeiError::verification_at(message, atom.span.clone());
+                        let mut err = MumeiError::verification_at(message, atom.span.clone())
+                            .with_verdict(VerdictKind::Inconclusive);
                         if let Some(help) = property_based_help {
                             err = err.with_help(help);
                         }
@@ -3045,7 +3064,8 @@ fn verify_inner_impl(
         } else {
             "Z3 returned unknown during the final consistency check.".to_string()
         };
-        let mut err = MumeiError::verification_at(message, atom.span.clone());
+        let mut err = MumeiError::verification_at(message, atom.span.clone())
+            .with_verdict(VerdictKind::Inconclusive);
         if let Some(help) = property_based_help {
             err = err.with_help(help);
         }
