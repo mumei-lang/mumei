@@ -1,5 +1,5 @@
 use crate::parser::{self, Item};
-use crate::proof_cert;
+use crate::proof_cert::{self, CertificateAtomCheck};
 use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -175,18 +175,67 @@ pub fn resolve_prelude_with_persistence(
 }
 /// P5-C: Check if an atom passed certificate verification for a given module.
 /// Returns true if the atom is "proven" or "trusted" according to the certificate.
-pub(crate) fn check_cert_for_atom(cert_results: &HashMap<String, String>, atom_name: &str) -> bool {
-    cert_results.get(atom_name).is_some_and(|status| {
-        status == proof_cert::status::CERTIFICATE_PROVEN
-            || status == proof_cert::status::CERTIFICATE_TRUSTED
+pub(crate) type CertificateResults = HashMap<String, CertificateAtomCheck>;
+
+pub(crate) fn check_cert_for_atom(
+    cert_results: &CertificateResults,
+    atom_name: &str,
+    strict_imports: bool,
+) -> bool {
+    cert_results.get(atom_name).is_some_and(|check| {
+        check.status == proof_cert::status::CERTIFICATE_PROVEN
+            || check.status == proof_cert::status::CERTIFICATE_TRUSTED
+            || (!strict_imports
+                && check.status == proof_cert::status::CERTIFICATE_DEPENDENCY_UNCHECKED)
     })
 }
 
-pub(crate) fn unproven_cert_results(atom_refs: &[&parser::Atom]) -> HashMap<String, String> {
+pub(crate) fn unproven_cert_results(atom_refs: &[&parser::Atom]) -> CertificateResults {
     atom_refs
         .iter()
-        .map(|atom| (atom.name.clone(), "unproven".to_string()))
+        .map(|atom| {
+            (
+                atom.name.clone(),
+                CertificateAtomCheck {
+                    name: atom.name.clone(),
+                    status: "unproven".to_string(),
+                    changed_dependencies: Vec::new(),
+                    unchecked_dependencies: Vec::new(),
+                },
+            )
+        })
         .collect()
+}
+
+fn dependency_status_detail(check: &CertificateAtomCheck) -> Option<String> {
+    match check.status.as_str() {
+        proof_cert::status::CERTIFICATE_DEPENDENCY_CHANGED => Some(format!(
+            "certificate is stale: dependency_changed; dependency contract changed ({})",
+            check.changed_dependencies.join(", ")
+        )),
+        proof_cert::status::CERTIFICATE_DEPENDENCY_UNCHECKED => Some(format!(
+            "certificate dependency freshness is dependency_unchecked ({})",
+            check.unchecked_dependencies.join(", ")
+        )),
+        _ => None,
+    }
+}
+
+fn report_unchecked_dependencies(results: &[CertificateAtomCheck], module: &Path, strict: bool) {
+    if strict {
+        return;
+    }
+    let count = results
+        .iter()
+        .filter(|check| check.status == proof_cert::status::CERTIFICATE_DEPENDENCY_UNCHECKED)
+        .count();
+    if count > 0 {
+        eprintln!(
+            "  ⚠️  Import '{}': accepted {} atom(s) with unchecked dependency freshness; regenerate the certificate",
+            module.display(),
+            count
+        );
+    }
 }
 
 /// Collect atom references (including ImplBlock methods with qualified names)
@@ -290,7 +339,9 @@ pub(crate) fn verify_import_certificate(
     source_file: &Path,
     items: &[Item],
     allow_lean_verified: bool,
-) -> Option<HashMap<String, String>> {
+    module_env: &ModuleEnv,
+    strict_imports: bool,
+) -> Option<CertificateResults> {
     let mut qualified_methods: Vec<parser::Atom> = Vec::new();
     let atom_refs = collect_atom_refs_with_methods(items, &mut qualified_methods);
 
@@ -315,15 +366,24 @@ pub(crate) fn verify_import_certificate(
                         );
                         return Some(unproven_cert_results(&atom_refs));
                     }
-                    let results =
-                        proof_cert::verify_certificate(&cert, &atom_refs, allow_lean_verified);
+                    let checks = proof_cert::verify_certificate_in_env(
+                        &cert,
+                        &atom_refs,
+                        allow_lean_verified,
+                        Some(module_env),
+                    );
+                    report_unchecked_dependencies(&checks, source_file, strict_imports);
+                    let results = checks
+                        .iter()
+                        .map(|check| (check.name.clone(), check.status.clone()))
+                        .collect::<Vec<_>>();
                     let mut metrics = LeanEscalationMetrics::default();
                     metrics.merge(log_lean_verified_acceptance(
                         &cert,
                         &results,
                         allow_lean_verified,
                     ));
-                    return Some(results.into_iter().collect());
+                    return Some(checks.into_iter().map(|c| (c.name.clone(), c)).collect());
                 }
                 // Certificate is for a different file — fall through to the
                 // bundle fallback rather than silently returning None.
@@ -360,15 +420,24 @@ pub(crate) fn verify_import_certificate(
                             );
                             return Some(unproven_cert_results(&atom_refs));
                         }
-                        let results =
-                            proof_cert::verify_certificate(cert, &atom_refs, allow_lean_verified);
+                        let checks = proof_cert::verify_certificate_in_env(
+                            cert,
+                            &atom_refs,
+                            allow_lean_verified,
+                            Some(module_env),
+                        );
+                        report_unchecked_dependencies(&checks, source_file, strict_imports);
+                        let results = checks
+                            .iter()
+                            .map(|check| (check.name.clone(), check.status.clone()))
+                            .collect::<Vec<_>>();
                         let mut metrics = LeanEscalationMetrics::default();
                         metrics.merge(log_lean_verified_acceptance(
                             cert,
                             &results,
                             allow_lean_verified,
                         ));
-                        return Some(results.into_iter().collect());
+                        return Some(checks.into_iter().map(|c| (c.name.clone(), c)).collect());
                     }
                 }
                 Err(err) => {
@@ -396,7 +465,7 @@ pub(crate) fn verify_import_certificate(
 pub(crate) fn mark_dependency_atoms_with_cert(
     items: &[Item],
     dep_name: &str,
-    cert_results: &Option<HashMap<String, String>>,
+    cert_results: &Option<CertificateResults>,
     module_env: &mut ModuleEnv,
     strict_imports: bool,
 ) -> MumeiResult<()> {
@@ -413,7 +482,7 @@ pub(crate) fn mark_dependency_atoms_with_cert(
         match item {
             Item::Atom(atom) => {
                 let should_verify = match cert_results {
-                    Some(results) => check_cert_for_atom(results, &atom.name),
+                    Some(results) => check_cert_for_atom(results, &atom.name, strict_imports),
                     None => true, // No cert = legacy behavior (only reachable when !strict_imports)
                 };
                 if should_verify {
@@ -423,13 +492,25 @@ pub(crate) fn mark_dependency_atoms_with_cert(
                 } else {
                     if strict_imports {
                         return Err(MumeiError::verification(format!(
-                            "Strict imports: dependency '{}': atom '{}' failed certificate verification",
-                            dep_name, atom.name
+                            "Strict imports: dependency '{}': atom '{}' {}",
+                            dep_name,
+                            atom.name,
+                            cert_results
+                                .as_ref()
+                                .and_then(|results| results.get(&atom.name))
+                                .and_then(dependency_status_detail)
+                                .unwrap_or_else(|| "failed certificate verification".to_string())
                         )));
                     }
                     eprintln!(
-                        "  ⚠️  Dependency '{}': atom '{}' failed certificate verification",
-                        dep_name, atom.name
+                        "  ⚠️  Dependency '{}': atom '{}' {}",
+                        dep_name,
+                        atom.name,
+                        cert_results
+                            .as_ref()
+                            .and_then(|results| results.get(&atom.name))
+                            .and_then(dependency_status_detail)
+                            .unwrap_or_else(|| "failed certificate verification".to_string())
                     );
                     module_env.set_trust_level(&atom.name, crate::parser::TrustLevel::Unverified);
                     let fqn = format!("{}::{}", dep_name, atom.name);
@@ -440,7 +521,7 @@ pub(crate) fn mark_dependency_atoms_with_cert(
                 for method in &ib.methods {
                     let qualified = format!("{}::{}", ib.struct_name, method.name);
                     let should_verify = match cert_results {
-                        Some(results) => check_cert_for_atom(results, &qualified),
+                        Some(results) => check_cert_for_atom(results, &qualified, strict_imports),
                         None => true,
                     };
                     if should_verify {
@@ -450,13 +531,27 @@ pub(crate) fn mark_dependency_atoms_with_cert(
                     } else {
                         if strict_imports {
                             return Err(MumeiError::verification(format!(
-                                "Strict imports: dependency '{}': method '{}' failed certificate verification",
-                                dep_name, qualified
+                                "Strict imports: dependency '{}': method '{}' {}",
+                                dep_name,
+                                qualified,
+                                cert_results
+                                    .as_ref()
+                                    .and_then(|results| results.get(&qualified))
+                                    .and_then(dependency_status_detail)
+                                    .unwrap_or_else(
+                                        || "failed certificate verification".to_string()
+                                    )
                             )));
                         }
                         eprintln!(
-                            "  ⚠️  Dependency '{}': method '{}' failed certificate verification",
-                            dep_name, qualified
+                            "  ⚠️  Dependency '{}': method '{}' {}",
+                            dep_name,
+                            qualified,
+                            cert_results
+                                .as_ref()
+                                .and_then(|results| results.get(&qualified))
+                                .and_then(dependency_status_detail)
+                                .unwrap_or_else(|| "failed certificate verification".to_string())
                         );
                         module_env
                             .set_trust_level(&qualified, crate::parser::TrustLevel::Unverified);
@@ -536,6 +631,8 @@ pub(crate) fn resolve_imports_recursive(
                 &resolved_path,
                 &imported_items,
                 ctx.allow_lean_verified,
+                module_env,
+                ctx.strict_imports,
             );
 
             // P5-C: In strict mode, missing certificates are hard errors
@@ -556,7 +653,9 @@ pub(crate) fn resolve_imports_recursive(
                 match imported_item {
                     Item::Atom(atom) => {
                         let should_verify = match &cert_results {
-                            Some(results) => check_cert_for_atom(results, &atom.name),
+                            Some(results) => {
+                                check_cert_for_atom(results, &atom.name, ctx.strict_imports)
+                            }
                             None => true, // No cert = legacy behavior, trust imported atoms
                         };
                         if should_verify {
@@ -570,15 +669,29 @@ pub(crate) fn resolve_imports_recursive(
                         } else {
                             if ctx.strict_imports {
                                 return Err(MumeiError::verification(format!(
-                                    "Strict imports: import '{}': atom '{}' failed certificate verification",
+                                    "Strict imports: import '{}': atom '{}' {}",
                                     resolved_path.display(),
-                                    atom.name
+                                    atom.name,
+                                    cert_results
+                                        .as_ref()
+                                        .and_then(|results| results.get(&atom.name))
+                                        .and_then(dependency_status_detail)
+                                        .unwrap_or_else(
+                                            || "failed certificate verification".to_string()
+                                        )
                                 )));
                             }
                             eprintln!(
-                                "  ⚠️  Import '{}': atom '{}' failed certificate verification",
+                                "  ⚠️  Import '{}': atom '{}' {}",
                                 resolved_path.display(),
-                                atom.name
+                                atom.name,
+                                cert_results
+                                    .as_ref()
+                                    .and_then(|results| results.get(&atom.name))
+                                    .and_then(dependency_status_detail)
+                                    .unwrap_or_else(
+                                        || "failed certificate verification".to_string()
+                                    )
                             );
                             // P5-C: Register as unverified for taint analysis
                             module_env
@@ -604,7 +717,11 @@ pub(crate) fn resolve_imports_recursive(
                         for method in &ib.methods {
                             let qualified_name = format!("{}::{}", ib.struct_name, method.name);
                             let should_verify = match &cert_results {
-                                Some(results) => check_cert_for_atom(results, &qualified_name),
+                                Some(results) => check_cert_for_atom(
+                                    results,
+                                    &qualified_name,
+                                    ctx.strict_imports,
+                                ),
                                 None => true,
                             };
                             if should_verify {
@@ -619,15 +736,29 @@ pub(crate) fn resolve_imports_recursive(
                             } else {
                                 if ctx.strict_imports {
                                     return Err(MumeiError::verification(format!(
-                                        "Strict imports: import '{}': method '{}' failed certificate verification",
+                                        "Strict imports: import '{}': method '{}' {}",
                                         resolved_path.display(),
-                                        qualified_name
+                                        qualified_name,
+                                        cert_results
+                                            .as_ref()
+                                            .and_then(|results| results.get(&qualified_name))
+                                            .and_then(dependency_status_detail)
+                                            .unwrap_or_else(
+                                                || "failed certificate verification".to_string()
+                                            )
                                     )));
                                 }
                                 eprintln!(
-                                    "  ⚠️  Import '{}': method '{}' failed certificate verification",
+                                    "  ⚠️  Import '{}': method '{}' {}",
                                     resolved_path.display(),
-                                    qualified_name
+                                    qualified_name,
+                                    cert_results
+                                        .as_ref()
+                                        .and_then(|results| results.get(&qualified_name))
+                                        .and_then(dependency_status_detail)
+                                        .unwrap_or_else(
+                                            || "failed certificate verification".to_string()
+                                        )
                                 );
                                 module_env.set_trust_level(
                                     &qualified_name,

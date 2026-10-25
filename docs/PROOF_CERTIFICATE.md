@@ -144,6 +144,10 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
   "status": "proven",
   "proof_hash": "sha256:...",
   "dependencies": ["helper", "validate"],
+  "dependency_hashes": {
+    "atom:helper": "sha256:...",
+    "type:Natural": "sha256:..."
+  },
   "effects": ["Log"],
   "requires": "x >= 0",
   "ensures": "result >= x",
@@ -183,6 +187,7 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
 | `status` | `String` | Per-atom state: `"verified"`, `"trusted"`, `"failed"`, `"skipped"`, `"escalation_candidate"`, or `"unknown"`. A trusted entry records `z3_check_result: "skipped"` because its body was not checked. |
 | `proof_hash` | `String` | Dependency-aware hash from `compute_proof_hash()` — includes transitive callee signatures |
 | `dependencies` | `Vec<String>` | Direct callee atom names from `ModuleEnv.dependency_graph` |
+| `dependency_hashes` | `Option<BTreeMap<String, String>>` | Per-atom hashes for resolved transitive atom contracts and signature-referenced refined types / structs. New certificates store a map (including an empty map); absent maps in legacy certificates cannot establish dependency freshness. |
 | `effects` | `Vec<String>` | Declared effect names |
 | `requires` | `String` | Precondition contract text |
 | `ensures` | `String` | Postcondition contract text |
@@ -199,6 +204,10 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
 | `retry_policy_fingerprint` | `Option<String>` | SHA-256 fingerprint of the retry budget policy used by the agent/healing process |
 | `attempt_summary` | `Option<AttemptSummary>` | Total attempts, attempts by action class, and final action class before success or manual review |
 | `cost_success_metrics` | `Option<CostSuccessMetrics>` | Attempts, tokens, solver seconds, and spec drift observed before success |
+
+### Dependency freshness coverage limits
+
+Dependency hashes cover resolved transitive callee contracts, including signature unit tags and effect pre/post states, and refined types or structs referenced directly by an atom's signature, including unit tags. They do not include a callee's trust level, which is enforced by that callee's own certificate status. They do not yet cover refined types nested inside generics or struct fields, or types referenced only in bodies. If a callee cannot be resolved in the importer's environment, the atom is reported as `dependency_unchecked`, never `dependency_changed`. `proof_hash` remains an internal proof-cache fingerprint and is intentionally not compared for import freshness; per-dependency hashes provide the contract-specific comparison without changing the established proof-hash behavior.
 
 ## Retry Budget Policy Schema (P8-G)
 
@@ -325,6 +334,23 @@ SHA-256(
   type_predicates
 )
 ```
+
+`dependency_hashes` is a separate freshness record; consumers must not compare
+or recompute `proof_hash` to decide whether dependencies are current. Its
+ordered keys use `atom:<name>`, `type:<name>`, and `struct:<name>`. Atom values
+hash the same contract bytes used by the corresponding `|dep:` proof-hash
+block. Type values cover the named refined type's operand, base type, and raw
+predicate; struct values cover its fields, field constraints, and invariants.
+The dependency walk follows syntactic callees through atoms registered in the
+current `ModuleEnv`, independently of its dependency graph. Unresolved names
+are not recorded.
+
+When source content matches, `verify-cert` and import verification compare
+each certificate key against current inputs. A mismatch is
+`dependency_changed`; keys that cannot be resolved, or an absent legacy map,
+are `dependency_unchecked`. Mismatches take precedence over unchecked keys.
+Non-strict imports may accept unchecked freshness with a warning, but changed
+dependency contracts are not accepted; strict imports reject both statuses.
 
 This ensures that if any callee's contract changes, all dependent atoms' proof hashes change too, triggering re-verification.
 

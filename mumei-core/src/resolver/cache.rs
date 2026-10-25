@@ -2,7 +2,7 @@ use crate::parser::ast::Atom;
 use crate::verification::ModuleEnv;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -442,28 +442,7 @@ pub fn compute_proof_hash_with_flags(
     let mut struct_names: Vec<&String> = module_env.structs.keys().collect();
     struct_names.sort();
     for name in struct_names {
-        hasher.update(b"|struct:");
-        hasher.update(name.as_bytes());
-        for f in &module_env.structs[name].fields {
-            hasher.update(b",");
-            hasher.update(f.name.as_bytes());
-            hasher.update(b":");
-            hasher.update(f.type_name.as_bytes());
-            if let Some(constraint) = &f.constraint {
-                hasher.update(b"|field_constraint:");
-                hasher.update(name.as_bytes());
-                hasher.update(b".");
-                hasher.update(f.name.as_bytes());
-                hasher.update(b"=");
-                hasher.update(constraint.as_bytes());
-            }
-        }
-        for invariant in &module_env.structs[name].invariants {
-            hasher.update(b"|struct_invariant:");
-            hasher.update(name.as_bytes());
-            hasher.update(b"=");
-            hasher.update(invariant.as_bytes());
-        }
+        hash_struct_contract(&mut hasher, name, module_env);
     }
 
     // 3. Include callee signatures (transitive dependencies)
@@ -485,109 +464,7 @@ pub fn compute_proof_hash_with_flags(
             continue; // already visited, prevent infinite loops
         }
         if let Some(callee_atom) = module_env.get_atom(&callee_name) {
-            hasher.update(b"|dep:");
-            hasher.update(callee_atom.name.as_bytes());
-            hasher.update(b":");
-            hasher.update(callee_atom.requires.as_bytes());
-            hasher.update(b":");
-            hasher.update(callee_atom.ensures.as_bytes());
-            if let Some(ref dec) = callee_atom.decreases {
-                hasher.update(b"|decreases:");
-                hasher.update(dec.as_bytes());
-            }
-            for e in &callee_atom.effects {
-                hasher.update(b",effect:");
-                hasher.update(e.name.as_bytes());
-                if e.negated {
-                    hasher.update(b",negated");
-                }
-                for p in &e.params {
-                    hasher.update(b",param:");
-                    hasher.update(p.value.as_bytes());
-                }
-            }
-            if callee_atom.trust_level != crate::parser::TrustLevel::Verified {
-                hasher.update(b",trust:");
-                hasher.update(
-                    match callee_atom.trust_level {
-                        crate::parser::TrustLevel::Trusted => "trusted",
-                        crate::parser::TrustLevel::Unverified => "unverified",
-                        crate::parser::TrustLevel::Verified => "verified",
-                    }
-                    .as_bytes(),
-                );
-            }
-            if callee_atom.is_async {
-                hasher.update(b",async");
-            }
-            if !callee_atom.type_params.is_empty() {
-                hasher.update(b",type_params:");
-                hasher.update(callee_atom.type_params.join(",").as_bytes());
-            }
-            if !callee_atom.forall_constraints.is_empty() {
-                for q in &callee_atom.forall_constraints {
-                    let quantifier_type = match q.q_type {
-                        crate::parser::QuantifierType::ForAll => "forall",
-                        crate::parser::QuantifierType::Exists => "exists",
-                    };
-                    hasher.update(b",quantified_requires:");
-                    hasher.update(quantifier_type.as_bytes());
-                    hasher.update(b"|");
-                    hasher.update(q.var.as_bytes());
-                    hasher.update(b"|");
-                    hasher.update(q.start.as_bytes());
-                    hasher.update(b"|");
-                    hasher.update(q.end.as_bytes());
-                    hasher.update(b"|");
-                    hasher.update(q.condition.as_bytes());
-                }
-            }
-            if !callee_atom.clause_modes.is_empty() {
-                for mode in &callee_atom.clause_modes {
-                    hasher.update(b",clause_mode:");
-                    hasher.update(
-                        format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause).as_bytes(),
-                    );
-                }
-            }
-            for p in &callee_atom.params {
-                hasher.update(b",param_type:");
-                hasher.update(p.type_name.as_deref().unwrap_or("").as_bytes());
-                if let Some(refined) = p.type_name.as_deref().and_then(|t| module_env.get_type(t)) {
-                    hasher.update(b",param_refinement:");
-                    hasher.update(refined.operand.as_bytes());
-                    hasher.update(b"|");
-                    hasher.update(refined._base_type.as_bytes());
-                    hasher.update(b"|");
-                    hasher.update(refined.predicate_raw.as_bytes());
-                }
-                hasher.update(b",param_mode:");
-                let mode = if p.is_ref_mut {
-                    "ref mut"
-                } else if p.is_ref {
-                    "ref"
-                } else if p.consume
-                    || callee_atom
-                        .consumed_params
-                        .iter()
-                        .any(|consumed| consumed == &p.name)
-                {
-                    "consume"
-                } else {
-                    "owned"
-                };
-                hasher.update(mode.as_bytes());
-            }
-            hasher.update(b",return_type:");
-            hasher.update(callee_atom.return_type.as_deref().unwrap_or("").as_bytes());
-            hasher.update(b",semantics:");
-            hasher.update(
-                if crate::verification::fragment::atom_requires_bitvector_semantics(callee_atom) {
-                    b"bitvec".as_slice()
-                } else {
-                    b"default".as_slice()
-                },
-            );
+            hash_callee_contract(&mut hasher, callee_atom, module_env, true);
         }
         // Walk further dependencies
         if let Some(further_callees) = module_env.dependency_graph.get(&callee_name) {
@@ -602,6 +479,252 @@ pub fn compute_proof_hash_with_flags(
     }
 
     format!("{:x}", hasher.finalize())
+}
+
+fn hash_callee_contract(
+    hasher: &mut Sha256,
+    callee_atom: &crate::parser::Atom,
+    module_env: &ModuleEnv,
+    include_trust: bool,
+) {
+    hasher.update(b"|dep:");
+    hasher.update(callee_atom.name.as_bytes());
+    hasher.update(b":");
+    hasher.update(callee_atom.requires.as_bytes());
+    hasher.update(b":");
+    hasher.update(callee_atom.ensures.as_bytes());
+    if let Some(ref dec) = callee_atom.decreases {
+        hasher.update(b"|decreases:");
+        hasher.update(dec.as_bytes());
+    }
+    for e in &callee_atom.effects {
+        hasher.update(b",effect:");
+        hasher.update(e.name.as_bytes());
+        if e.negated {
+            hasher.update(b",negated");
+        }
+        for p in &e.params {
+            hasher.update(b",param:");
+            hasher.update(p.value.as_bytes());
+        }
+    }
+    if include_trust && callee_atom.trust_level != crate::parser::TrustLevel::Verified {
+        hasher.update(b",trust:");
+        hasher.update(
+            match callee_atom.trust_level {
+                crate::parser::TrustLevel::Trusted => "trusted",
+                crate::parser::TrustLevel::Unverified => "unverified",
+                crate::parser::TrustLevel::Verified => "verified",
+            }
+            .as_bytes(),
+        );
+    }
+    if callee_atom.is_async {
+        hasher.update(b",async");
+    }
+    if !callee_atom.type_params.is_empty() {
+        hasher.update(b",type_params:");
+        hasher.update(callee_atom.type_params.join(",").as_bytes());
+    }
+    if !callee_atom.forall_constraints.is_empty() {
+        for q in &callee_atom.forall_constraints {
+            let quantifier_type = match q.q_type {
+                crate::parser::QuantifierType::ForAll => "forall",
+                crate::parser::QuantifierType::Exists => "exists",
+            };
+            hasher.update(b",quantified_requires:");
+            hasher.update(quantifier_type.as_bytes());
+            hasher.update(b"|");
+            hasher.update(q.var.as_bytes());
+            hasher.update(b"|");
+            hasher.update(q.start.as_bytes());
+            hasher.update(b"|");
+            hasher.update(q.end.as_bytes());
+            hasher.update(b"|");
+            hasher.update(q.condition.as_bytes());
+        }
+    }
+    if !callee_atom.clause_modes.is_empty() {
+        for mode in &callee_atom.clause_modes {
+            hasher.update(b",clause_mode:");
+            hasher.update(format!("{:?}|{:?}|{}", mode.kind, mode.mode, mode.clause).as_bytes());
+        }
+    }
+    for p in &callee_atom.params {
+        hasher.update(b",param_type:");
+        hasher.update(p.type_name.as_deref().unwrap_or("").as_bytes());
+        if let Some(refined) = p.type_name.as_deref().and_then(|t| module_env.get_type(t)) {
+            hasher.update(b",param_refinement:");
+            hasher.update(refined.operand.as_bytes());
+            hasher.update(b"|");
+            hasher.update(refined._base_type.as_bytes());
+            hasher.update(b"|");
+            hasher.update(refined.predicate_raw.as_bytes());
+        }
+        hasher.update(b",param_mode:");
+        let mode = if p.is_ref_mut {
+            "ref mut"
+        } else if p.is_ref {
+            "ref"
+        } else if p.consume
+            || callee_atom
+                .consumed_params
+                .iter()
+                .any(|consumed| consumed == &p.name)
+        {
+            "consume"
+        } else {
+            "owned"
+        };
+        hasher.update(mode.as_bytes());
+    }
+    hasher.update(b",return_type:");
+    hasher.update(callee_atom.return_type.as_deref().unwrap_or("").as_bytes());
+    hasher.update(b",semantics:");
+    hasher.update(
+        if crate::verification::fragment::atom_requires_bitvector_semantics(callee_atom) {
+            b"bitvec".as_slice()
+        } else {
+            b"default".as_slice()
+        },
+    );
+}
+
+fn hash_dependency_signature_units(
+    hasher: &mut Sha256,
+    atom: &crate::parser::Atom,
+    module_env: &ModuleEnv,
+) {
+    for param in &atom.params {
+        if let Some(unit) = param
+            .type_name
+            .as_deref()
+            .and_then(|type_name| module_env.unit_of_type(type_name))
+        {
+            hasher.update(b"|param_unit:");
+            hasher.update(param.name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(unit.as_bytes());
+        }
+    }
+    if let Some(unit) = atom
+        .return_type
+        .as_deref()
+        .and_then(|type_name| module_env.unit_of_type(type_name))
+    {
+        hasher.update(b"|return_unit:");
+        hasher.update(unit.as_bytes());
+    }
+}
+
+pub fn compute_dependency_hashes(
+    atom: &crate::parser::Atom,
+    module_env: &ModuleEnv,
+) -> BTreeMap<String, String> {
+    let mut hashes = BTreeMap::new();
+    let mut pending = collect_callees_from_atom(atom)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut visited = HashSet::new();
+
+    while let Some(callee_name) = pending.pop_first() {
+        if !visited.insert(callee_name.clone()) {
+            continue;
+        }
+        let Some(callee_atom) = module_env.get_atom(&callee_name) else {
+            continue;
+        };
+
+        let mut hasher = Sha256::new();
+        hash_callee_contract(&mut hasher, callee_atom, module_env, false);
+        hash_dependency_signature_units(&mut hasher, callee_atom, module_env);
+        hash_string_map(&mut hasher, "effect_pre", &callee_atom.effect_pre);
+        hash_string_map(&mut hasher, "effect_post", &callee_atom.effect_post);
+        hashes.insert(
+            format!("atom:{}", callee_atom.name),
+            format!("{:x}", hasher.finalize()),
+        );
+        pending.extend(
+            collect_callees_from_atom(callee_atom)
+                .into_iter()
+                .filter(|name| !visited.contains(name)),
+        );
+    }
+
+    let mut type_names = BTreeSet::new();
+    let mut struct_names = BTreeSet::new();
+    for type_name in atom
+        .params
+        .iter()
+        .filter_map(|param| param.type_name.as_deref())
+        .chain(atom.return_type.as_deref())
+    {
+        let bare_name = type_name.split('<').next().unwrap_or(type_name).trim();
+        if module_env.get_type(bare_name).is_some() {
+            type_names.insert(bare_name.to_string());
+        }
+        if module_env.get_struct(bare_name).is_some() {
+            struct_names.insert(bare_name.to_string());
+        }
+    }
+    for param in &atom.params {
+        if let Some(type_ref) = &param.type_ref {
+            if module_env.get_type(&type_ref.name).is_some() {
+                type_names.insert(type_ref.name.clone());
+            }
+            if module_env.get_struct(&type_ref.name).is_some() {
+                struct_names.insert(type_ref.name.clone());
+            }
+        }
+    }
+    for name in type_names {
+        let refined = module_env.get_type(&name).expect("registered refined type");
+        let mut hasher = Sha256::new();
+        hasher.update(refined.operand.as_bytes());
+        hasher.update(b"|");
+        hasher.update(refined._base_type.as_bytes());
+        hasher.update(b"|");
+        hasher.update(refined.predicate_raw.as_bytes());
+        if let Some(unit) = module_env.unit_of_type(&name) {
+            hasher.update(b"|unit:");
+            hasher.update(unit.as_bytes());
+        }
+        hashes.insert(format!("type:{name}"), format!("{:x}", hasher.finalize()));
+    }
+    for name in struct_names {
+        let mut hasher = Sha256::new();
+        hash_struct_contract(&mut hasher, &name, module_env);
+        hashes.insert(format!("struct:{name}"), format!("{:x}", hasher.finalize()));
+    }
+
+    hashes
+}
+
+fn hash_struct_contract(hasher: &mut Sha256, name: &str, module_env: &ModuleEnv) {
+    hasher.update(b"|struct:");
+    hasher.update(name.as_bytes());
+    if let Some(struct_def) = module_env.structs.get(name) {
+        for f in &struct_def.fields {
+            hasher.update(b",");
+            hasher.update(f.name.as_bytes());
+            hasher.update(b":");
+            hasher.update(f.type_name.as_bytes());
+            if let Some(constraint) = &f.constraint {
+                hasher.update(b"|field_constraint:");
+                hasher.update(name.as_bytes());
+                hasher.update(b".");
+                hasher.update(f.name.as_bytes());
+                hasher.update(b"=");
+                hasher.update(constraint.as_bytes());
+            }
+        }
+        for invariant in &struct_def.invariants {
+            hasher.update(b"|struct_invariant:");
+            hasher.update(name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(invariant.as_bytes());
+        }
+    }
 }
 
 /// Compute a hash for the contract (specification) portion only.
@@ -864,7 +987,7 @@ pub(crate) fn save_cache(cache_path: &Path, cache: &VerificationCache) {
 #[cfg(test)]
 mod nominal_hash_tests {
     use super::*;
-    use crate::parser::{parse_module, Item};
+    use crate::parser::{parse_module, Item, TrustLevel};
 
     fn env_and_hash(source: &str) -> String {
         let items = parse_module(source);
@@ -890,6 +1013,185 @@ mod nominal_hash_tests {
             .insert("getx".to_string());
         let main = module_env.atoms.get("main").unwrap().clone();
         compute_proof_hash(&main, &module_env)
+    }
+
+    fn dependency_and_proof_hashes_for_trust(
+        trust_level: TrustLevel,
+    ) -> (BTreeMap<String, String>, String) {
+        let items = parse_module(
+            "atom f(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+        );
+        let mut module_env = ModuleEnv::default();
+        for item in items {
+            if let Item::Atom(atom) = item {
+                module_env.atoms.insert(atom.name.clone(), atom);
+            }
+        }
+        module_env
+            .dependency_graph
+            .entry("g".to_string())
+            .or_default()
+            .insert("f".to_string());
+        module_env.atoms.get_mut("f").unwrap().trust_level = trust_level;
+        let root = module_env.atoms.get("g").unwrap().clone();
+        (
+            compute_dependency_hashes(&root, &module_env),
+            compute_proof_hash(&root, &module_env),
+        )
+    }
+
+    fn dependency_hash_for(source: &str, root_name: &str, dependency_key: &str) -> String {
+        let items = parse_module(source);
+        let mut module_env = ModuleEnv::default();
+        for item in items {
+            match item {
+                Item::Atom(atom) => {
+                    module_env.atoms.insert(atom.name.clone(), atom);
+                }
+                Item::TypeDef(refined) => module_env.register_type(&refined),
+                _ => {}
+            }
+        }
+        let root = module_env.atoms.get(root_name).unwrap().clone();
+        compute_dependency_hashes(&root, &module_env)
+            .remove(dependency_key)
+            .unwrap()
+    }
+
+    #[test]
+    fn dependency_hashes_ignore_callee_trust_but_proof_hashes_include_it() {
+        let (verified_dependencies, verified_proof) =
+            dependency_and_proof_hashes_for_trust(TrustLevel::Verified);
+
+        for trust_level in [TrustLevel::Unverified, TrustLevel::Trusted] {
+            let (dependencies, proof) = dependency_and_proof_hashes_for_trust(trust_level);
+            assert_eq!(dependencies, verified_dependencies);
+            assert_ne!(proof, verified_proof);
+        }
+    }
+
+    #[test]
+    fn dependency_hash_tracks_signature_type_units() {
+        let usd = dependency_hash_for(
+            "type Money = i64 unit USD;\n\
+             atom g(x: Money) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n",
+            "g",
+            "type:Money",
+        );
+        let eur = dependency_hash_for(
+            "type Money = i64 unit EUR;\n\
+             atom g(x: Money) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n",
+            "g",
+            "type:Money",
+        );
+        assert_ne!(usd, eur);
+    }
+
+    #[test]
+    fn dependency_hash_tracks_callee_param_type_units() {
+        let usd = dependency_hash_for(
+            "type Money = i64 unit USD;\n\
+             atom f(x: Money) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+            "g",
+            "atom:f",
+        );
+        let eur = dependency_hash_for(
+            "type Money = i64 unit EUR;\n\
+             atom f(x: Money) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+            "g",
+            "atom:f",
+        );
+        assert_ne!(usd, eur);
+    }
+
+    #[test]
+    fn dependency_hash_tracks_callee_effect_pre_and_effect_post() {
+        let effect_pre_open = dependency_hash_for(
+            "atom f(x: i64) -> i64\n\
+             effect_pre: { File: Open };\n\
+             effect_post: { File: Open };\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+            "g",
+            "atom:f",
+        );
+        let effect_pre_closed = dependency_hash_for(
+            "atom f(x: i64) -> i64\n\
+             effect_pre: { File: Closed };\n\
+             effect_post: { File: Open };\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+            "g",
+            "atom:f",
+        );
+        assert_ne!(effect_pre_open, effect_pre_closed);
+
+        let effect_post_open = dependency_hash_for(
+            "atom f(x: i64) -> i64\n\
+             effect_pre: { File: Open };\n\
+             effect_post: { File: Open };\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+            "g",
+            "atom:f",
+        );
+        let effect_post_closed = dependency_hash_for(
+            "atom f(x: i64) -> i64\n\
+             effect_pre: { File: Open };\n\
+             effect_post: { File: Closed };\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+            "g",
+            "atom:f",
+        );
+        assert_ne!(effect_post_open, effect_post_closed);
     }
 
     const MAIN: &str = r#"

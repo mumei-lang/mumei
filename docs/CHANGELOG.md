@@ -7,6 +7,21 @@
   examples on `v0.6.22`, along with the Homebrew formula template and
   `install.sh` help examples.
 
+### Unreleased: certificate dependency freshness
+
+- New version-1.1 certificates record deterministic per-atom dependency
+  hashes for resolved transitive callees and signature-referenced refined
+  types and structs. The existing `proof_hash` algorithm and verifier policy
+  version are unchanged.
+- Certificate verification reports `dependency_changed` or
+  `dependency_unchecked` separately from source-content changes. Strict
+  imports reject both; non-strict imports may accept unchecked dependency
+  freshness with a per-module warning, but do not trust atoms with changed
+  dependency contracts.
+- `verify-cert` displays dependency keys and includes both statuses in its
+  result and exit-code policy. Claim Books mark changed dependencies as
+  drifted and cap their own grade at G0.
+
 ### 2026-10-11: signature `consume` and the `consume:` clause are unified
 
 - **The two `consume` spellings now mean the same thing** (follow-up to

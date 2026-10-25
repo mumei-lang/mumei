@@ -52,6 +52,10 @@ pub const VERIFICATION_STATUSES: [&str; 6] = [
 
 /// `verify_certificate` result: source content differs from the certificate.
 pub const CERTIFICATE_CHANGED: &str = "changed";
+/// `verify_certificate` result: a dependency contract changed.
+pub const CERTIFICATE_DEPENDENCY_CHANGED: &str = "dependency_changed";
+/// `verify_certificate` result: dependency freshness could not be checked.
+pub const CERTIFICATE_DEPENDENCY_UNCHECKED: &str = "dependency_unchecked";
 /// `verify_certificate` result: Lean translator metadata is no longer current.
 pub const CERTIFICATE_STALE_TRANSLATOR: &str = "stale_translator";
 /// `verify_certificate` result: certificate evidence matches current source.

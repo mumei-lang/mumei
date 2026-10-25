@@ -90,6 +90,7 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
         cert.as_ref(),
         &atoms,
         allow_lean_verified,
+        Some(&module_env),
     );
     if controls_enabled {
         let report = controls::analyze(input, &items, &items, &module_env, None, max_mutants)

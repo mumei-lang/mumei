@@ -93,6 +93,11 @@
           "type": "array",
           "items": { "type": "string" }
         },
+        "dependency_hashes": {
+          "type": ["object", "null"],
+          "description": "Per-atom SHA-256 hashes of the resolved atom, refined-type, and struct contracts used during verification. Absent on legacy certificates.",
+          "additionalProperties": { "type": "string" }
+        },
         "effects": {
           "type": "array",
           "items": { "type": "string" }

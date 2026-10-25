@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 const SCHEMA: &str = "mumei.claimbook/v1";
+const DEPENDENCY_CONTRACT_CHANGED_REASON: &str =
+    "a dependency's contract changed since the certificate was produced";
+const LEAN_TRANSLATOR_METADATA_STALE_REASON: &str =
+    "Lean translator metadata is stale; regenerate the Lean certificate";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SealGrade {
@@ -245,10 +249,13 @@ pub fn own_grade(
 
 pub fn freshness_from_verification_status(value: &str) -> Freshness {
     match value {
-        status::CERTIFICATE_CHANGED | status::CERTIFICATE_STALE_TRANSLATOR => Freshness::Drifted,
+        status::CERTIFICATE_CHANGED
+        | status::CERTIFICATE_DEPENDENCY_CHANGED
+        | status::CERTIFICATE_STALE_TRANSLATOR => Freshness::Drifted,
         status::CERTIFICATE_PROVEN
         | status::CERTIFICATE_TRUSTED
         | status::CERTIFICATE_UNPROVEN
+        | status::CERTIFICATE_DEPENDENCY_UNCHECKED
         | status::CERTIFICATE_AXIOM_REJECTED => Freshness::Fresh,
         _ => Freshness::Uncertified,
     }
@@ -551,14 +558,16 @@ pub fn create_claimbook(
     cert: Option<&ProofCertificate>,
     atoms: &[&crate::parser::Atom],
     allow_lean_verified: bool,
+    env: Option<&crate::verification::ModuleEnv>,
 ) -> ClaimBook {
     let input = input.into();
     let certificate_path = certificate_path.into();
     let integrity = certificate_integrity(cert);
-    let verification_results: BTreeMap<String, String> = cert
+    let verification_results: BTreeMap<String, proof_cert::CertificateAtomCheck> = cert
         .map(|cert| {
-            proof_cert::verify_certificate(cert, atoms, allow_lean_verified)
+            proof_cert::verify_certificate_in_env(cert, atoms, allow_lean_verified, env)
                 .into_iter()
+                .map(|check| (check.name.clone(), check))
                 .collect()
         })
         .unwrap_or_default();
@@ -577,7 +586,7 @@ pub fn create_claimbook(
         let entry = certified.get(name).copied();
         let verification_result = entry
             .and_then(|_| verification_results.get(*name))
-            .map(String::as_str);
+            .map(|check| check.status.as_str());
         let stale_lean_metadata = entry.is_some_and(|entry| {
             entry.z3_check_result == status::Z3_LEAN_VERIFIED
                 && !proof_cert::lean_translator_metadata_is_current(entry)
@@ -592,12 +601,14 @@ pub fn create_claimbook(
                 Freshness::Drifted,
                 Some("source content differs from its certificate"),
             )
+        } else if verification_result == Some(status::CERTIFICATE_DEPENDENCY_CHANGED) {
+            (Freshness::Drifted, Some(DEPENDENCY_CONTRACT_CHANGED_REASON))
         } else if stale_lean_metadata
             || verification_result == Some(status::CERTIFICATE_STALE_TRANSLATOR)
         {
             (
                 Freshness::Drifted,
-                Some("Lean translator metadata is stale; regenerate the Lean certificate"),
+                Some(LEAN_TRANSLATOR_METADATA_STALE_REASON),
             )
         } else {
             match verification_result
@@ -616,19 +627,23 @@ pub fn create_claimbook(
             }
         };
 
-        let (grade, evidence_kind, own_reason) = entry
+        let (mut grade, evidence_kind, mut own_reason) = entry
             .map(|entry| own_grade(entry, &source_atom.trust_level, allow_lean_verified))
             .unwrap_or((
                 SealGrade::G0,
                 "none".to_string(),
                 "no certificate entry exists for this atom".to_string(),
             ));
+        if verification_result == Some(status::CERTIFICATE_DEPENDENCY_CHANGED) {
+            grade = SealGrade::G0;
+            own_reason = DEPENDENCY_CONTRACT_CHANGED_REASON.to_string();
+        }
         let reason = match freshness_reason {
-            Some(reason)
-                if reason
-                    == "Lean translator metadata is stale; regenerate the Lean certificate" =>
-            {
-                reason.to_string()
+            Some(DEPENDENCY_CONTRACT_CHANGED_REASON) => {
+                DEPENDENCY_CONTRACT_CHANGED_REASON.to_string()
+            }
+            Some(LEAN_TRANSLATOR_METADATA_STALE_REASON) => {
+                LEAN_TRANSLATOR_METADATA_STALE_REASON.to_string()
             }
             Some(reason) if entry.is_some() => format!("{reason}; {own_reason}"),
             Some(reason) => reason.to_string(),
@@ -1246,10 +1261,12 @@ mod tests {
     fn freshness_maps_every_certificate_verification_result() {
         for (value, expected) in [
             (status::CERTIFICATE_CHANGED, Freshness::Drifted),
+            (status::CERTIFICATE_DEPENDENCY_CHANGED, Freshness::Drifted),
             (status::CERTIFICATE_STALE_TRANSLATOR, Freshness::Drifted),
             (status::CERTIFICATE_PROVEN, Freshness::Fresh),
             (status::CERTIFICATE_TRUSTED, Freshness::Fresh),
             (status::CERTIFICATE_UNPROVEN, Freshness::Fresh),
+            (status::CERTIFICATE_DEPENDENCY_UNCHECKED, Freshness::Fresh),
             (status::CERTIFICATE_AXIOM_REJECTED, Freshness::Fresh),
             (status::CERTIFICATE_MISSING, Freshness::Uncertified),
         ] {
@@ -1263,8 +1280,14 @@ mod tests {
         let cert = stale_lean_certificate(&source);
         let atoms = [&source];
 
-        let without_opt_in =
-            create_claimbook("sample.mm", "sample.proof.json", Some(&cert), &atoms, false);
+        let without_opt_in = create_claimbook(
+            "sample.mm",
+            "sample.proof.json",
+            Some(&cert),
+            &atoms,
+            false,
+            None,
+        );
         let without_claim = &without_opt_in.claims[0];
         assert_eq!(without_claim.freshness, Freshness::Drifted);
         assert_eq!(
@@ -1272,8 +1295,14 @@ mod tests {
             "Lean translator metadata is stale; regenerate the Lean certificate"
         );
 
-        let with_opt_in =
-            create_claimbook("sample.mm", "sample.proof.json", Some(&cert), &atoms, true);
+        let with_opt_in = create_claimbook(
+            "sample.mm",
+            "sample.proof.json",
+            Some(&cert),
+            &atoms,
+            true,
+            None,
+        );
         let with_claim = &with_opt_in.claims[0];
         assert_eq!(with_claim.freshness, Freshness::Drifted);
         assert_eq!(with_claim.reason, without_claim.reason);
@@ -1287,6 +1316,7 @@ mod tests {
             Some(&cert),
             &changed_atoms,
             false,
+            None,
         );
         assert_eq!(changed.claims[0].freshness, Freshness::Drifted);
         assert!(changed.claims[0]
@@ -1315,6 +1345,7 @@ mod tests {
                 Some(&current_audit_rejected),
                 &atoms,
                 allow_lean_verified,
+                None,
             );
             let claim = &report.claims[0];
             assert_eq!(claim.freshness, Freshness::Fresh);
@@ -1334,6 +1365,7 @@ mod tests {
                 Some(&stale_translator_audit_rejected),
                 &atoms,
                 allow_lean_verified,
+                None,
             );
             let claim = &report.claims[0];
             assert_eq!(claim.freshness, Freshness::Drifted);
@@ -1376,7 +1408,7 @@ mod tests {
         let first = source_atom("zeta");
         let second = source_atom("alpha");
         let atoms = [&first, &second];
-        let book = create_claimbook("sample.mm", "sample.proof.json", None, &atoms, false);
+        let book = create_claimbook("sample.mm", "sample.proof.json", None, &atoms, false, None);
         let first_json = serde_json::to_string_pretty(&book).expect("serialize claimbook");
         let second_json = serde_json::to_string_pretty(&book).expect("serialize claimbook again");
         assert_eq!(first_json, second_json);
@@ -1578,7 +1610,14 @@ mod tests {
             .dependencies = vec!["caller".to_string()];
         proof_cert::refresh_certificate_integrity(&mut cert);
 
-        let report = create_claimbook("sample.mm", "sample.proof.json", Some(&cert), &atoms, false);
+        let report = create_claimbook(
+            "sample.mm",
+            "sample.proof.json",
+            Some(&cert),
+            &atoms,
+            false,
+            None,
+        );
         let caller_claim = report
             .claims
             .iter()
@@ -1638,6 +1677,7 @@ mod tests {
             Some(&ambiguous_cert),
             &ambiguous_atoms,
             false,
+            None,
         );
         let ambiguous_caller = ambiguous_report
             .claims
@@ -1708,7 +1748,14 @@ mod tests {
         cert.atoms[0].assumed_clauses.clear();
         proof_cert::refresh_certificate_integrity(&mut cert);
 
-        let report = create_claimbook("sample.mm", "sample.proof.json", Some(&cert), &atoms, false);
+        let report = create_claimbook(
+            "sample.mm",
+            "sample.proof.json",
+            Some(&cert),
+            &atoms,
+            false,
+            None,
+        );
         assert_eq!(report.claims[0].assumed_clauses, vec!["requires: x > 0"]);
         assert_eq!(report.claims[0].effective_grade, SealGrade::G1);
         assert_eq!(

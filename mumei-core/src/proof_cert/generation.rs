@@ -375,6 +375,7 @@ pub fn generate_certificate_with_reconstruction_losses(
                 spec_validation_result,
                 proof_hash,
                 dependencies,
+                dependency_hashes: Some(resolver::compute_dependency_hashes(atom, module_env)),
                 effects,
                 requires: atom.requires.clone(),
                 ensures: atom.ensures.clone(),

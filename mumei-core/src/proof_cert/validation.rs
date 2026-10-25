@@ -1,7 +1,7 @@
 use super::generation::compute_atom_content_hash_for_version;
 use super::models::{AtomCertificate, LeanResultMetadata, ProofCertificate};
 use super::status;
-use crate::verification;
+use crate::verification::{self, ModuleEnv};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -163,12 +163,34 @@ pub fn verify_certificate(
     atoms: &[&crate::parser::Atom],
     allow_lean_verified: bool,
 ) -> Vec<(String, String)> {
+    verify_certificate_in_env(cert, atoms, allow_lean_verified, None)
+        .into_iter()
+        .map(|check| (check.name, check.status))
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateAtomCheck {
+    pub name: String,
+    pub status: String,
+    pub changed_dependencies: Vec<String>,
+    pub unchecked_dependencies: Vec<String>,
+}
+
+pub fn verify_certificate_in_env(
+    cert: &ProofCertificate,
+    atoms: &[&crate::parser::Atom],
+    allow_lean_verified: bool,
+    env: Option<&ModuleEnv>,
+) -> Vec<CertificateAtomCheck> {
+    let mut atoms_by_name = HashMap::with_capacity(atoms.len());
     let current_hashes: HashMap<String, Option<String>> = atoms
         .iter()
-        .map(|a| {
+        .map(|atom| {
+            atoms_by_name.insert(atom.name.clone(), *atom);
             (
-                a.name.clone(),
-                compute_atom_content_hash_for_version(&cert.version, a),
+                atom.name.clone(),
+                compute_atom_content_hash_for_version(&cert.version, atom),
             )
         })
         .collect();
@@ -176,7 +198,7 @@ pub fn verify_certificate(
     cert.atoms
         .iter()
         .map(|ac| {
-            let status = if let Some(current_hash) = current_hashes.get(&ac.name) {
+            let mut status = if let Some(current_hash) = current_hashes.get(&ac.name) {
                 if current_hash.as_deref() != Some(ac.content_hash.as_str()) {
                     status::CERTIFICATE_CHANGED.to_string()
                 } else if ac.status == status::TRUSTED {
@@ -207,7 +229,41 @@ pub fn verify_certificate(
             } else {
                 status::CERTIFICATE_MISSING.to_string()
             };
-            (ac.name.clone(), status)
+            let mut changed_dependencies = Vec::new();
+            let mut unchecked_dependencies = Vec::new();
+            if status == status::CERTIFICATE_PROVEN {
+                if let Some(env) = env {
+                    if let Some(expected) = &ac.dependency_hashes {
+                        if let Some(atom) = atoms_by_name.get(&ac.name) {
+                            let current = crate::resolver::compute_dependency_hashes(atom, env);
+                            for (key, hash) in expected {
+                                match current.get(key) {
+                                    Some(current_hash) if current_hash != hash => {
+                                        changed_dependencies.push(key.clone())
+                                    }
+                                    Some(_) => {}
+                                    None => unchecked_dependencies.push(key.clone()),
+                                }
+                            }
+                        } else {
+                            unchecked_dependencies.push(format!("atom:{}", ac.name));
+                        }
+                    } else {
+                        unchecked_dependencies.push("dependency_hashes".to_string());
+                    }
+                    if !changed_dependencies.is_empty() {
+                        status = status::CERTIFICATE_DEPENDENCY_CHANGED.to_string();
+                    } else if !unchecked_dependencies.is_empty() {
+                        status = status::CERTIFICATE_DEPENDENCY_UNCHECKED.to_string();
+                    }
+                }
+            }
+            CertificateAtomCheck {
+                name: ac.name.clone(),
+                status,
+                changed_dependencies,
+                unchecked_dependencies,
+            }
         })
         .collect()
 }
