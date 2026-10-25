@@ -30,6 +30,16 @@ fn main() {
         Some(command @ Command::Build { .. }) => commands::build::cmd_build_command(command),
         Some(command @ Command::Verify { .. }) => commands::verify::cmd_verify_command(command),
         Some(Command::Check { input }) => commands::check::cmd_check(&input),
+        Some(Command::Erosion {
+            candidate,
+            baseline,
+            json,
+        }) => {
+            let exit_code = commands::erosion::cmd_erosion(&candidate, &baseline, json);
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
         Some(Command::Init { name }) => commands::init::cmd_init(&name),
         Some(Command::Inspect { input, ai, format }) => {
             if let Some(ref file) = input {
