@@ -2,6 +2,7 @@ use crate::pipeline::{read_source_file, try_load_and_prepare_with_full_options_a
 use mumei_core::{observe, parser};
 use std::fs;
 
+/// Checks harvested examples, relations, rejections, and property observations against contracts.
 pub(crate) fn cmd_observe(input: &str, harvest: &str, json: bool, atom: Option<&str>) -> i32 {
     let (implementation, module_env, _, _) =
         match try_load_and_prepare_with_full_options_and_persistence(input, false, false, false) {
