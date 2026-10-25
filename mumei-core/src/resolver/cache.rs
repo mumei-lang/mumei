@@ -467,18 +467,18 @@ pub fn compute_proof_hash_with_flags(
     let mut visited = HashSet::new();
     let mut stack = Vec::new();
 
-    // Collect direct callees from dependency graph (sorted for deterministic hashing)
+    // Collect direct callees (sorted for deterministic hashing)
     let mut effect_names: BTreeSet<String> = atom
         .effects
         .iter()
         .map(|effect| effect.name.clone())
         .collect();
-    if let Some(callees) = module_env.dependency_graph.get(&atom.name) {
-        let mut sorted_callees: Vec<&String> = callees.iter().collect();
-        sorted_callees.sort();
-        for callee in sorted_callees {
-            stack.push(callee.clone());
-        }
+    let mut sorted_callees: Vec<String> = proof_hash_callee_names(atom, module_env)
+        .into_iter()
+        .collect();
+    sorted_callees.sort();
+    for callee in sorted_callees {
+        stack.push(callee);
     }
 
     // Walk transitive callees (sort at each level for determinism)
@@ -491,14 +491,13 @@ pub fn compute_proof_hash_with_flags(
             hash_string_map(&mut hasher, "effect_pre", &callee_atom.effect_pre);
             hash_string_map(&mut hasher, "effect_post", &callee_atom.effect_post);
             effect_names.extend(callee_atom.effects.iter().map(|effect| effect.name.clone()));
-        }
-        // Walk further dependencies
-        if let Some(further_callees) = module_env.dependency_graph.get(&callee_name) {
-            let mut sorted_further: Vec<&String> = further_callees.iter().collect();
+            let mut sorted_further: Vec<String> = proof_hash_callee_names(callee_atom, module_env)
+                .into_iter()
+                .collect();
             sorted_further.sort();
             for fc in sorted_further {
-                if !visited.contains(fc) {
-                    stack.push(fc.clone());
+                if !visited.contains(&fc) {
+                    stack.push(fc);
                 }
             }
         }
@@ -762,8 +761,25 @@ pub fn compute_dependency_hashes(
     atom: &crate::parser::Atom,
     module_env: &ModuleEnv,
 ) -> BTreeMap<String, String> {
+    compute_dependency_hashes_with_names(atom, module_env, false)
+}
+
+pub(crate) fn compute_legacy_dependency_hashes(
+    atom: &crate::parser::Atom,
+    module_env: &ModuleEnv,
+) -> BTreeMap<String, String> {
+    let mut hashes = compute_dependency_hashes_with_names(atom, module_env, true);
+    hashes.retain(|key, _| !legacy_dependency_key_conflicts(atom, key, module_env));
+    hashes
+}
+
+fn compute_dependency_hashes_with_names(
+    atom: &crate::parser::Atom,
+    module_env: &ModuleEnv,
+    legacy_names: bool,
+) -> BTreeMap<String, String> {
     let mut hashes = BTreeMap::new();
-    let mut pending = collect_callees_from_atom(atom)
+    let mut pending = dependency_callees(atom, module_env, legacy_names)
         .into_iter()
         .collect::<BTreeSet<_>>();
     let mut visited = HashSet::new();
@@ -776,17 +792,12 @@ pub fn compute_dependency_hashes(
             continue;
         };
 
-        let mut hasher = Sha256::new();
-        hash_callee_contract(&mut hasher, callee_atom, module_env, false);
-        hash_dependency_signature_units(&mut hasher, callee_atom, module_env);
-        hash_string_map(&mut hasher, "effect_pre", &callee_atom.effect_pre);
-        hash_string_map(&mut hasher, "effect_post", &callee_atom.effect_post);
         hashes.insert(
             format!("atom:{}", callee_atom.name),
-            format!("{:x}", hasher.finalize()),
+            compute_dependency_hash_for_callee(callee_atom, module_env),
         );
         pending.extend(
-            collect_callees_from_atom(callee_atom)
+            dependency_callees(callee_atom, module_env, legacy_names)
                 .into_iter()
                 .filter(|name| !visited.contains(name)),
         );
@@ -839,6 +850,85 @@ pub fn compute_dependency_hashes(
     }
 
     hashes
+}
+
+fn compute_dependency_hash_for_callee(atom: &Atom, module_env: &ModuleEnv) -> String {
+    let mut hasher = Sha256::new();
+    hash_callee_contract(&mut hasher, atom, module_env, false);
+    hash_dependency_signature_units(&mut hasher, atom, module_env);
+    hash_string_map(&mut hasher, "effect_pre", &atom.effect_pre);
+    hash_string_map(&mut hasher, "effect_post", &atom.effect_post);
+    format!("{:x}", hasher.finalize())
+}
+
+fn legacy_dependency_key_conflicts(atom: &Atom, key: &str, module_env: &ModuleEnv) -> bool {
+    let Some(bare_name) = key.strip_prefix("atom:") else {
+        return false;
+    };
+    let Some(bare_atom) = module_env.get_atom(bare_name) else {
+        return false;
+    };
+
+    collect_written_callees_from_atom(atom)
+        .into_iter()
+        .filter(|name| name.rsplit("::").next() == Some(bare_name))
+        .any(|qualified_name| {
+            if !qualified_name.contains("::") {
+                return false;
+            }
+            let Some(qualified_atom) = module_env.get_atom(&qualified_name) else {
+                return false;
+            };
+            let mut renamed = qualified_atom.clone();
+            renamed.name = bare_name.to_string();
+            compute_dependency_hash_for_callee(&renamed, module_env)
+                != compute_dependency_hash_for_callee(bare_atom, module_env)
+        })
+}
+
+fn dependency_callees(atom: &Atom, module_env: &ModuleEnv, legacy_names: bool) -> HashSet<String> {
+    if legacy_names {
+        collect_callees_from_atom(atom)
+    } else {
+        collect_written_callees_from_atom(atom)
+            .iter()
+            .map(|name| resolve_written_callee(name, module_env))
+            .collect()
+    }
+}
+
+fn resolve_written_callee(name: &str, module_env: &ModuleEnv) -> String {
+    if module_env.get_atom(name).is_some() {
+        name.to_string()
+    } else {
+        name.rsplit("::").next().unwrap_or(name).to_string()
+    }
+}
+
+fn proof_hash_callee_names(atom: &Atom, module_env: &ModuleEnv) -> HashSet<String> {
+    let mut names = module_env
+        .dependency_graph
+        .get(&atom.name)
+        .cloned()
+        .unwrap_or_default();
+    let written_names = collect_written_callees_from_atom(atom);
+    let unqualified_names = written_names
+        .iter()
+        .filter(|name| !name.contains("::"))
+        .cloned()
+        .collect::<HashSet<_>>();
+
+    for qualified in written_names
+        .into_iter()
+        .filter(|name| name.contains("::") && module_env.get_atom(name).is_some())
+    {
+        let bare_name = qualified.rsplit("::").next().unwrap_or(&qualified);
+        if !unqualified_names.contains(bare_name) {
+            names.remove(bare_name);
+        }
+        names.insert(qualified);
+    }
+    names
 }
 
 fn hash_struct_contract(hasher: &mut Sha256, name: &str, module_env: &ModuleEnv) {
@@ -999,6 +1089,73 @@ pub fn collect_callees_from_body(body_expr: &str) -> HashSet<String> {
     callees
 }
 
+/// Collect call names as written, preserving any `::` qualification.
+pub fn collect_written_callees_from_body(body_expr: &str) -> HashSet<String> {
+    let mut callees = HashSet::new();
+    let chars: Vec<char> = body_expr.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
+            let start = i;
+            while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let mut name: String = chars[start..i].iter().collect();
+            let mut qualified = false;
+            loop {
+                let mut separator = i;
+                while separator < len && chars[separator].is_ascii_whitespace() {
+                    separator += 1;
+                }
+                let mut segment = if separator < len && chars[separator] == '.' {
+                    separator + 1
+                } else if separator + 1 < len
+                    && chars[separator] == ':'
+                    && chars[separator + 1] == ':'
+                {
+                    separator + 2
+                } else {
+                    break;
+                };
+                while segment < len && chars[segment].is_ascii_whitespace() {
+                    segment += 1;
+                }
+                if segment == len
+                    || !(chars[segment].is_ascii_alphabetic() || chars[segment] == '_')
+                {
+                    break;
+                }
+                qualified = true;
+                name.push_str("::");
+                i = segment;
+                let segment_start = i;
+                while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                name.extend(chars[segment_start..i].iter());
+            }
+            let mut next = i;
+            while next < len && chars[next].is_ascii_whitespace() {
+                next += 1;
+            }
+            if next < len && chars[next] == '(' {
+                let keywords = [
+                    "if", "else", "while", "let", "match", "true", "false", "return", "acquire",
+                    "release", "perform", "async", "await", "call",
+                ];
+                if qualified || !keywords.contains(&name.as_str()) {
+                    callees.insert(name);
+                }
+            }
+            i = next;
+        } else {
+            i += 1;
+        }
+    }
+    callees
+}
+
 /// Collect callee names from every clause of an atom.
 ///
 /// A callee is a cache dependency wherever it appears, not only in the body:
@@ -1015,6 +1172,22 @@ pub fn collect_callees_from_atom(atom: &Atom) -> HashSet<String> {
     for quantifier in &atom.forall_constraints {
         for clause in [&quantifier.start, &quantifier.end, &quantifier.condition] {
             callees.extend(collect_callees_from_body(clause));
+        }
+    }
+    callees
+}
+
+/// Collect call names as written from every clause of an atom.
+pub fn collect_written_callees_from_atom(atom: &Atom) -> HashSet<String> {
+    let mut callees = collect_written_callees_from_body(&atom.body_expr);
+    callees.extend(collect_written_callees_from_body(&atom.requires));
+    callees.extend(collect_written_callees_from_body(&atom.ensures));
+    if let Some(invariant) = atom.invariant.as_deref() {
+        callees.extend(collect_written_callees_from_body(invariant));
+    }
+    for quantifier in &atom.forall_constraints {
+        for clause in [&quantifier.start, &quantifier.end, &quantifier.condition] {
+            callees.extend(collect_written_callees_from_body(clause));
         }
     }
     callees
@@ -1308,6 +1481,127 @@ mod nominal_hash_tests {
             assert_eq!(dependencies, verified_dependencies);
             assert_ne!(proof, verified_proof);
         }
+    }
+
+    #[test]
+    fn written_callee_collector_preserves_qualification_and_skips_keywords() {
+        let collect = |source: &str| collect_written_callees_from_body(source);
+        let names = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<HashSet<_>>()
+        };
+
+        assert_eq!(collect("lib::f(x)"), names(&["lib::f"]));
+        assert_eq!(collect("a::b::f (x)"), names(&["a::b::f"]));
+        assert_eq!(collect("f(x) + lib::f(y)"), names(&["f", "lib::f"]));
+        assert_eq!(collect("Point::new(1)"), names(&["Point::new"]));
+        assert_eq!(collect("lib :: f(x)"), names(&["lib::f"]));
+        assert_eq!(collect("a :: b :: f (x)"), names(&["a::b::f"]));
+        assert_eq!(collect("math.add(x)"), names(&["math::add"]));
+        assert_eq!(collect("r.hi - r.lo"), names(&[]));
+        assert_eq!(collect("a.b.c(1)"), names(&["a::b::c"]));
+        assert_eq!(collect("a . b (x)"), names(&["a::b"]));
+        assert_eq!(collect("lib::K + g(x)"), names(&["g"]));
+        assert_eq!(collect("if(cond) { while(true) { g(x) } }"), names(&["g"]));
+
+        let items = parse_module(
+            "atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: lib::f(x);\n",
+        );
+        let Item::Atom(atom) = &items[0] else {
+            panic!("expected g atom");
+        };
+        assert_eq!(collect_written_callees_from_atom(atom), names(&["lib::f"]));
+    }
+
+    #[test]
+    fn written_callee_resolution_prefers_exact_names_and_falls_back_to_last_segment() {
+        let mut module_env = ModuleEnv::default();
+        let items = parse_module(
+            "atom f(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n",
+        );
+        let Item::Atom(atom) = &items[0] else {
+            panic!("expected f atom");
+        };
+        module_env.register_atom(atom);
+        let mut aliased = atom.clone();
+        aliased.name = "lib::f".to_string();
+        module_env.register_atom(&aliased);
+
+        assert_eq!(resolve_written_callee("lib::f", &module_env), "lib::f");
+        assert_eq!(resolve_written_callee("other::f", &module_env), "f");
+        assert_eq!(resolve_written_callee("unknown", &module_env), "unknown");
+    }
+
+    #[test]
+    fn dependency_hash_uses_qualified_aliased_callee_key() {
+        let items = parse_module(
+            "atom f(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: lib::f(x);\n",
+        );
+        let mut module_env = ModuleEnv::default();
+        for item in items {
+            if let Item::Atom(atom) = item {
+                module_env.register_atom(&atom);
+                if atom.name == "f" {
+                    let mut aliased = atom;
+                    aliased.name = "lib::f".to_string();
+                    module_env.register_atom(&aliased);
+                }
+            }
+        }
+        let root = module_env.get_atom("g").unwrap().clone();
+        let hashes = compute_dependency_hashes(&root, &module_env);
+
+        assert_eq!(
+            hashes.keys().cloned().collect::<Vec<_>>(),
+            vec!["atom:lib::f".to_string()]
+        );
+    }
+
+    #[test]
+    fn proof_hash_callee_names_match_the_graph_for_unqualified_calls() {
+        let items = parse_module(
+            "atom f(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result >= 0;\n\
+             body: f(x);\n",
+        );
+        let mut module_env = ModuleEnv::default();
+        for item in items {
+            if let Item::Atom(atom) = item {
+                module_env.register_atom(&atom);
+            }
+        }
+        module_env
+            .dependency_graph
+            .entry("g".to_string())
+            .or_default()
+            .insert("f".to_string());
+        let root = module_env.get_atom("g").unwrap();
+        let graph_names = module_env.dependency_graph.get("g").unwrap().clone();
+
+        assert!(collect_written_callees_from_atom(root)
+            .iter()
+            .all(|name| !name.contains("::")));
+        assert_eq!(proof_hash_callee_names(root, &module_env), graph_names);
     }
 
     #[test]
