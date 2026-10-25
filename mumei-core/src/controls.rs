@@ -88,7 +88,7 @@ impl ControlsReport {
 }
 
 #[derive(Clone)]
-enum MutationKind {
+pub(crate) enum MutationKind {
     BinaryOp(Op),
     ConditionFlip(Op),
     ArrayIndex,
@@ -97,11 +97,11 @@ enum MutationKind {
 }
 
 #[derive(Clone)]
-struct SiteMutant {
-    id: String,
-    operator: String,
-    site: usize,
-    kind: MutationKind,
+pub(crate) struct SiteMutant {
+    pub(crate) id: String,
+    pub(crate) operator: String,
+    pub(crate) site: usize,
+    pub(crate) kind: MutationKind,
 }
 
 pub fn analyze(
@@ -355,7 +355,7 @@ fn verify_hir(
     .map(|_| ())
 }
 
-fn site_mutants(body: &Stmt) -> Vec<SiteMutant> {
+pub(crate) fn site_mutants(body: &Stmt) -> Vec<SiteMutant> {
     let mut mutants = Vec::new();
     let mut site = 0;
     collect_stmt(body, &mut site, &mut mutants);
@@ -532,7 +532,7 @@ fn is_condition_op(op: &Op) -> bool {
     )
 }
 
-fn mutate_at_site(stmt: &mut Stmt, target: usize, kind: &MutationKind) -> bool {
+pub(crate) fn mutate_at_site(stmt: &mut Stmt, target: usize, kind: &MutationKind) -> bool {
     let mut site = 0;
     let mut changed = false;
     mutate_stmt(stmt, target, kind, &mut site, &mut changed);

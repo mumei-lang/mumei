@@ -1,18 +1,14 @@
-use crate::hir::{HirAtom, HirBinOp, HirExpr, HirStmt};
-use crate::mir::MirBody;
-use crate::parser::{Atom, Expr, Op, Stmt};
-use crate::verification::module_env::{LinearityCtx, ModuleEnv};
+use crate::controls::{mutate_at_site, site_mutants, MutationKind};
+use crate::hir::{lower_stmt_with_env, HirAtom};
+use crate::mir::{lower_hir_to_mir, MirBody};
+use crate::parser::{Atom, Op};
+use crate::verification::executor::{verify_inner_for_vacuity, VerifyInnerOptions};
+use crate::verification::module_env::ModuleEnv;
 use crate::verification::mutation::{
     apply_mutation, generate_mutations, MutationOperator, MutationResult,
 };
-use crate::verification::support::EffectCtx;
-use crate::verification::translator::{
-    apply_refinement_constraint, expr_to_z3, stmt_to_z3, VCtx, DEFAULT_CONSTRAINT_BUDGET,
-};
-use crate::verification::types::Env;
+use crate::verification::types::{MumeiError, VerdictKind};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use z3::{Config, Context, SatResult, Solver};
 
 #[derive(Debug, Clone)]
 pub struct VacuityCheckResult {
@@ -20,6 +16,9 @@ pub struct VacuityCheckResult {
     pub mutation_results: Vec<MutationResult>,
     pub vacuous_mutations: Vec<MutationOperator>,
     pub total_mutations_tested: usize,
+    pub killed_mutations: usize,
+    pub survived_mutations: usize,
+    pub unanalyzable_mutations: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,34 +64,169 @@ pub fn check_spec_vacuity_for_hir(
     max_mutations: usize,
     timeout_ms: u64,
 ) -> Result<VacuityCheckResult, VacuityError> {
-    let mutations = generate_mutations(mir_body, max_mutations);
-    let mut mutation_results = Vec::new();
+    let options = VerifyInnerOptions::for_vacuity(timeout_ms);
+    check_spec_vacuity_for_hir_with_options(
+        atom,
+        hir_atom,
+        mir_body,
+        module_env,
+        max_mutations,
+        &options,
+    )
+}
+
+pub(crate) fn check_spec_vacuity_for_hir_with_options(
+    atom: &Atom,
+    hir_atom: &HirAtom,
+    _mir_body: &MirBody,
+    module_env: &ModuleEnv,
+    max_mutations: usize,
+    options: &VerifyInnerOptions<'_>,
+) -> Result<VacuityCheckResult, VacuityError> {
+    let mutants = site_mutants(&hir_atom.body_stmt)
+        .into_iter()
+        .take(max_mutations)
+        .collect::<Vec<_>>();
+    let total_mutations_tested = mutants.len();
+    let mut mutation_results = Vec::with_capacity(mutants.len());
     let mut vacuous_mutations = Vec::new();
+    let mut surviving_ids = Vec::new();
+    let mut killed_mutations = 0;
+    let mut unanalyzable_mutations = 0;
 
-    for mutation in &mutations {
-        let mut mutated_stmt = hir_atom.body_stmt.clone();
-        let stmt_changed = mutate_stmt(&mut mutated_stmt, mutation);
-        let mut mutated_hir_body = hir_atom.body.clone();
-        let hir_changed = mutate_hir_stmt(&mut mutated_hir_body, mutation);
-
-        let verification_passed = if stmt_changed || hir_changed {
-            verify_mutated_body(atom, &mutated_stmt, module_env, timeout_ms)
+    for mutant in mutants {
+        let operator = mutation_operator(&mutant.kind);
+        // Single-site mutations preserve identifiers, and spurious replay reads body_stmt.
+        let mut mutated_hir = hir_atom.clone();
+        let changed = mutate_at_site(&mut mutated_hir.body_stmt, mutant.site, &mutant.kind);
+        let mutated_body = if changed {
+            mutated_hir.body = lower_stmt_with_env(&mutated_hir.body_stmt, Some(module_env));
+            lower_hir_to_mir(&mutated_hir)
         } else {
-            false
+            lower_hir_to_mir(&mutated_hir)
+        };
+        let outcome = if !changed {
+            MutantOutcome::Unanalyzable
+        } else {
+            match tempfile::tempdir() {
+                Ok(output_dir) => classify_verification_result(verify_inner_for_vacuity(
+                    &mutated_hir,
+                    output_dir.path(),
+                    module_env,
+                    options,
+                )),
+                Err(_) => MutantOutcome::Unanalyzable,
+            }
         };
 
-        if verification_passed {
-            vacuous_mutations.push(mutation.clone());
+        match outcome {
+            MutantOutcome::Killed => killed_mutations += 1,
+            MutantOutcome::Survived => {
+                vacuous_mutations.push(operator.clone());
+                surviving_ids.push(mutant.id.clone());
+            }
+            MutantOutcome::Unanalyzable => unanalyzable_mutations += 1,
         }
         mutation_results.push(MutationResult {
-            operator: mutation.clone(),
-            location: format!("mir_body_{}", atom.name),
-            mutated_body: apply_mutation(mir_body, mutation),
-            verification_passed,
+            operator,
+            location: format!("mir_body_{}:{}", atom.name, mutant.id),
+            mutated_body,
+            verification_passed: outcome == MutantOutcome::Survived,
         });
     }
 
-    finish_vacuity_check(atom, mutations.len(), mutation_results, vacuous_mutations)
+    let result = finish_verified_mutants(
+        atom,
+        mutation_results,
+        vacuous_mutations,
+        total_mutations_tested,
+        killed_mutations,
+        surviving_ids,
+        unanalyzable_mutations,
+    );
+    if let Ok(result) = &result {
+        if let Some(warning) = inconclusive_warning(
+            &atom.name,
+            result.total_mutations_tested,
+            result.killed_mutations,
+            result.unanalyzable_mutations,
+        ) {
+            eprintln!("{warning}");
+        }
+    }
+    result
+}
+
+fn mutation_operator(kind: &MutationKind) -> MutationOperator {
+    match kind {
+        MutationKind::BinaryOp(op) => MutationOperator::BinaryOpFlip(op.clone()),
+        MutationKind::ConditionFlip(op) => MutationOperator::ConditionFlip(op.clone()),
+        MutationKind::ArrayIndex => MutationOperator::ArrayIndexOffset(1),
+        MutationKind::ConstantZero => MutationOperator::ConstantZero,
+        MutationKind::ConstantOne => MutationOperator::ConstantOne,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MutantOutcome {
+    Killed,
+    Survived,
+    Unanalyzable,
+}
+
+fn classify_verification_result(result: Result<(), MumeiError>) -> MutantOutcome {
+    match result {
+        Ok(()) => MutantOutcome::Survived,
+        Err(error) if error.verdict() == Some(VerdictKind::Rejected) => MutantOutcome::Killed,
+        Err(_) => MutantOutcome::Unanalyzable,
+    }
+}
+
+fn finish_verified_mutants(
+    atom: &Atom,
+    mutation_results: Vec<MutationResult>,
+    vacuous_mutations: Vec<MutationOperator>,
+    total_mutations_tested: usize,
+    killed_mutations: usize,
+    surviving_ids: Vec<String>,
+    unanalyzable_mutations: usize,
+) -> Result<VacuityCheckResult, VacuityError> {
+    if surviving_ids.is_empty() {
+        Ok(VacuityCheckResult {
+            is_vacuous: false,
+            mutation_results,
+            vacuous_mutations,
+            total_mutations_tested,
+            killed_mutations,
+            survived_mutations: 0,
+            unanalyzable_mutations,
+        })
+    } else {
+        Err(VacuityError {
+            atom_name: atom.name.clone(),
+            reason: format!(
+                "Specification is vacuous: surviving mutants [{}]; tested {}, killed {}, unanalyzable {}.",
+                surviving_ids.join(", "),
+                total_mutations_tested,
+                killed_mutations,
+                unanalyzable_mutations
+            ),
+            vacuous_mutations,
+        })
+    }
+}
+
+fn inconclusive_warning(
+    atom_name: &str,
+    tested: usize,
+    killed: usize,
+    unanalyzable: usize,
+) -> Option<String> {
+    (killed == 0 && unanalyzable > 0).then(|| {
+        format!(
+            "warning: vacuity check for '{atom_name}' was inconclusive: tested {tested}, killed {killed}, unanalyzable {unanalyzable}"
+        )
+    })
 }
 
 fn finish_vacuity_check(
@@ -101,132 +235,29 @@ fn finish_vacuity_check(
     mutation_results: Vec<MutationResult>,
     vacuous_mutations: Vec<MutationOperator>,
 ) -> Result<VacuityCheckResult, VacuityError> {
-    if vacuous_mutations.is_empty() {
+    let survived_mutations = vacuous_mutations.len();
+    let killed_mutations = mutation_results.len().saturating_sub(survived_mutations);
+    if survived_mutations == 0 {
         Ok(VacuityCheckResult {
             is_vacuous: false,
             mutation_results,
             vacuous_mutations,
             total_mutations_tested,
+            killed_mutations,
+            survived_mutations,
+            unanalyzable_mutations: 0,
         })
     } else {
         Err(VacuityError {
             atom_name: atom.name.clone(),
             reason: format!(
                 "Specification is vacuous: {} out of {} mutated implementations still passed verification.",
-                vacuous_mutations.len(),
+                survived_mutations,
                 total_mutations_tested
             ),
             vacuous_mutations,
         })
     }
-}
-
-fn verify_mutated_body(
-    atom: &Atom,
-    mutated_stmt: &Stmt,
-    module_env: &ModuleEnv,
-    timeout_ms: u64,
-) -> bool {
-    let mut cfg = Config::new();
-    cfg.set_timeout_msec(timeout_ms);
-    let ctx = Context::new(&cfg);
-    let solver = Solver::new(&ctx);
-    let linearity_ctx_cell = std::cell::RefCell::new(LinearityCtx::new());
-    let allowed_effects = module_env.resolve_effect_set_from_effects(&atom.effects);
-    let effect_ctx_cell = std::cell::RefCell::new(EffectCtx::new(allowed_effects));
-    let constraint_count_cell = std::cell::Cell::new(0usize);
-    let bitvec_i64 = super::fragment::atom_requires_bitvector_semantics_in_module(atom, module_env);
-    let vc = VCtx {
-        ctx: &ctx,
-        module_env,
-        current_atom: Some(atom),
-        linearity_ctx: Some(&linearity_ctx_cell),
-        inferred_invariants: None,
-        cover_obligations: None,
-        effect_ctx: Some(&effect_ctx_cell),
-        constraint_count: Some(&constraint_count_cell),
-        constraint_budget: DEFAULT_CONSTRAINT_BUDGET,
-        has_string_constraints: None,
-        path_cond_stack: std::cell::RefCell::new(Vec::new()),
-        held_resources: std::cell::RefCell::new(std::collections::HashMap::new()),
-        acquire_counter: std::cell::RefCell::new(0),
-        loop_counter: std::cell::RefCell::new(0),
-        profiler: None,
-        ieee754_f64: false,
-        bitvec_i64,
-        bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
-        bv_div_obligations: std::cell::RefCell::new(Vec::new()),
-        clause_context: std::cell::RefCell::new(Vec::new()),
-        enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
-        local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
-        local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
-        local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
-        call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
-        call_result_fields: Default::default(),
-        contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
-        recursion: Default::default(),
-        quantifier_binders: Default::default(),
-        call_result_symbols: Default::default(),
-
-        bitvec_i64_global: false,
-    };
-    let mut env: Env = HashMap::new();
-
-    for param in &atom.params {
-        env.insert(
-            param.name.clone(),
-            super::support::datatype::param_z3_value_for_vc(
-                &vc,
-                &param.name,
-                param.type_name.as_deref(),
-            ),
-        );
-    }
-
-    for param in &atom.params {
-        if let Some(type_name) = &param.type_name {
-            if let Some(refined) = module_env.get_type(type_name) {
-                if apply_refinement_constraint(&vc, &solver, &param.name, refined, &mut env)
-                    .is_err()
-                {
-                    return false;
-                }
-            }
-        }
-    }
-
-    if atom.requires.trim() != "true" {
-        let req_ast = crate::parser::parse_expression(&atom.requires);
-        let Ok(req_z3) = expr_to_z3(&vc, &req_ast, &mut env, None) else {
-            return false;
-        };
-        let Some(req_bool) = req_z3.as_bool() else {
-            return false;
-        };
-        solver.assert(&req_bool);
-    }
-
-    let Ok(body_result) = stmt_to_z3(&vc, mutated_stmt, &mut env, Some(&solver)) else {
-        return false;
-    };
-
-    if atom.ensures.trim() == "true" {
-        return true;
-    }
-
-    env.insert("result".to_string(), body_result);
-    let ens_ast = crate::parser::parse_expression(&atom.ensures);
-    let Ok(ens_z3) = expr_to_z3(&vc, &ens_ast, &mut env, None) else {
-        return false;
-    };
-    let Some(ens_bool) = ens_z3.as_bool() else {
-        return false;
-    };
-    solver.push();
-    solver.assert(&ens_bool.not());
-    let passed = crate::verification::phase_artifacts::check(&solver) == SatResult::Unsat;
-    solver.pop(1);
-    passed
 }
 
 pub(crate) fn flip_binary_op(op: &Op) -> Op {
@@ -253,423 +284,23 @@ pub(crate) fn flip_binary_op(op: &Op) -> Op {
     }
 }
 
-fn is_condition_op(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::Lt | Op::Le | Op::Gt | Op::Ge | Op::Eq | Op::Neq | Op::And | Op::Or | Op::Implies
-    )
-}
-
-fn mutate_stmt(stmt: &mut Stmt, mutation: &MutationOperator) -> bool {
-    match stmt {
-        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => mutate_expr(value, mutation),
-        Stmt::ArrayStore { index, value, .. } => {
-            let index_changed = mutate_array_index_expr(index, mutation);
-            let value_changed = mutate_expr(value, mutation);
-            index_changed || value_changed
-        }
-        Stmt::Block(stmts, _)
-        | Stmt::TaskGroup {
-            children: stmts, ..
-        } => {
-            let mut changed = false;
-            for stmt in stmts {
-                changed |= mutate_stmt(stmt, mutation);
-            }
-            changed
-        }
-        Stmt::While { cond, body, .. } => {
-            let cond_changed = mutate_condition_expr(cond, mutation);
-            let body_changed = mutate_stmt(body, mutation);
-            cond_changed || body_changed
-        }
-        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => mutate_stmt(body, mutation),
-        Stmt::Cancel { .. } => false,
-        Stmt::Expr(expr, _) => mutate_expr(expr, mutation),
-    }
-}
-
-fn mutate_expr(expr: &mut Expr, mutation: &MutationOperator) -> bool {
-    match mutation {
-        MutationOperator::BinaryOpFlip(original_op) => mutate_binary_expr(expr, original_op, false),
-        MutationOperator::ConditionFlip(original_op) => mutate_binary_expr(expr, original_op, true),
-        MutationOperator::ArrayIndexOffset(offset) => mutate_array_access_expr(expr, *offset),
-        MutationOperator::ConstantZero => mutate_constant_expr(expr, 0),
-        MutationOperator::ConstantOne => mutate_constant_expr(expr, 1),
-    }
-}
-
-fn mutate_condition_expr(expr: &mut Expr, mutation: &MutationOperator) -> bool {
-    match mutation {
-        MutationOperator::ConditionFlip(original_op) => mutate_binary_expr(expr, original_op, true),
-        _ => mutate_expr(expr, mutation),
-    }
-}
-
-fn mutate_binary_expr(expr: &mut Expr, original_op: &Op, conditions_only: bool) -> bool {
-    match expr {
-        Expr::BinaryOp(lhs, op, rhs) => {
-            let mut changed = mutate_binary_expr(lhs, original_op, conditions_only)
-                | mutate_binary_expr(rhs, original_op, conditions_only);
-            if op == original_op && (!conditions_only || is_condition_op(op)) {
-                *op = flip_binary_op(op);
-                changed = true;
-            }
-            changed
-        }
-        Expr::ArrayAccess(_, idx) | Expr::FieldAccess(idx, _) | Expr::Await { expr: idx } => {
-            mutate_binary_expr(idx, original_op, conditions_only)
-        }
-        Expr::IfThenElse {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            let mutation = if conditions_only {
-                MutationOperator::ConditionFlip(original_op.clone())
-            } else {
-                MutationOperator::BinaryOpFlip(original_op.clone())
-            };
-            mutate_binary_expr(cond, original_op, conditions_only)
-                | mutate_stmt(then_branch, &mutation)
-                | mutate_stmt(else_branch, &mutation)
-        }
-        Expr::Block(stmt) => {
-            let mutation = if conditions_only {
-                MutationOperator::ConditionFlip(original_op.clone())
-            } else {
-                MutationOperator::BinaryOpFlip(original_op.clone())
-            };
-            mutate_stmt(stmt, &mutation)
-        }
-        Expr::Call(_, args) | Expr::CallRef { args, .. } | Expr::Perform { args, .. } => args
-            .iter_mut()
-            .any(|arg| mutate_binary_expr(arg, original_op, conditions_only)),
-        Expr::ArrayLit(elements) => elements
-            .iter_mut()
-            .any(|element| mutate_binary_expr(element, original_op, conditions_only)),
-        Expr::StructInit { fields, .. } => fields
-            .iter_mut()
-            .any(|(_, expr)| mutate_binary_expr(expr, original_op, conditions_only)),
-        Expr::Match { target, arms } => {
-            let mut changed = mutate_binary_expr(target, original_op, conditions_only);
-            for arm in arms {
-                if let Some(guard) = &mut arm.guard {
-                    changed |= mutate_binary_expr(guard, original_op, conditions_only);
-                }
-                let mutation = if conditions_only {
-                    MutationOperator::ConditionFlip(original_op.clone())
-                } else {
-                    MutationOperator::BinaryOpFlip(original_op.clone())
-                };
-                changed |= mutate_stmt(&mut arm.body, &mutation);
-            }
-            changed
-        }
-        Expr::Async { body } | Expr::Lambda { body, .. } => {
-            let mutation = if conditions_only {
-                MutationOperator::ConditionFlip(original_op.clone())
-            } else {
-                MutationOperator::BinaryOpFlip(original_op.clone())
-            };
-            mutate_stmt(body, &mutation)
-        }
-        Expr::AtomRef { .. }
-        | Expr::ChanRecv { .. }
-        | Expr::ChanSend { .. }
-        | Expr::Float(_)
-        | Expr::Number(_)
-        | Expr::StringLit(_)
-        | Expr::Variable(_) => false,
-    }
-}
-
-fn mutate_array_index_expr(expr: &mut Expr, mutation: &MutationOperator) -> bool {
-    if let MutationOperator::ArrayIndexOffset(offset) = mutation {
-        mutate_array_access_expr(expr, *offset)
-    } else {
-        mutate_expr(expr, mutation)
-    }
-}
-
-fn offset_expr(index: Expr, offset: i64) -> Expr {
-    if offset >= 0 {
-        Expr::BinaryOp(Box::new(index), Op::Add, Box::new(Expr::Number(offset)))
-    } else {
-        Expr::BinaryOp(
-            Box::new(index),
-            Op::Sub,
-            Box::new(Expr::Number(offset.abs())),
-        )
-    }
-}
-
-fn mutate_array_access_expr(expr: &mut Expr, offset: i64) -> bool {
-    if offset == 0 {
-        return false;
-    }
-    match expr {
-        Expr::ArrayAccess(_, idx) => {
-            let original = (**idx).clone();
-            **idx = offset_expr(original, offset);
-            true
-        }
-        Expr::BinaryOp(lhs, _, rhs) => {
-            mutate_array_access_expr(lhs, offset) | mutate_array_access_expr(rhs, offset)
-        }
-        Expr::IfThenElse {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            mutate_array_access_expr(cond, offset)
-                | mutate_stmt(then_branch, &MutationOperator::ArrayIndexOffset(offset))
-                | mutate_stmt(else_branch, &MutationOperator::ArrayIndexOffset(offset))
-        }
-        Expr::Block(stmt) => mutate_stmt(stmt, &MutationOperator::ArrayIndexOffset(offset)),
-        Expr::Call(_, args) | Expr::CallRef { args, .. } | Expr::Perform { args, .. } => args
-            .iter_mut()
-            .any(|arg| mutate_array_access_expr(arg, offset)),
-        Expr::ArrayLit(elements) => elements
-            .iter_mut()
-            .any(|element| mutate_array_access_expr(element, offset)),
-        Expr::StructInit { fields, .. } => fields
-            .iter_mut()
-            .any(|(_, expr)| mutate_array_access_expr(expr, offset)),
-        Expr::FieldAccess(base, _) | Expr::Await { expr: base } => {
-            mutate_array_access_expr(base, offset)
-        }
-        Expr::Match { target, arms } => {
-            let mut changed = mutate_array_access_expr(target, offset);
-            for arm in arms {
-                if let Some(guard) = &mut arm.guard {
-                    changed |= mutate_array_access_expr(guard, offset);
-                }
-                changed |= mutate_stmt(&mut arm.body, &MutationOperator::ArrayIndexOffset(offset));
-            }
-            changed
-        }
-        Expr::Async { body } | Expr::Lambda { body, .. } => {
-            mutate_stmt(body, &MutationOperator::ArrayIndexOffset(offset))
-        }
-        Expr::AtomRef { .. }
-        | Expr::ChanRecv { .. }
-        | Expr::ChanSend { .. }
-        | Expr::Float(_)
-        | Expr::Number(_)
-        | Expr::StringLit(_)
-        | Expr::Variable(_) => false,
-    }
-}
-
-fn mutate_constant_expr(expr: &mut Expr, value: i64) -> bool {
-    match expr {
-        Expr::Number(current) => {
-            if *current != value {
-                *current = value;
-                true
-            } else {
-                false
-            }
-        }
-        Expr::ArrayAccess(_, idx) | Expr::FieldAccess(idx, _) | Expr::Await { expr: idx } => {
-            mutate_constant_expr(idx, value)
-        }
-        Expr::BinaryOp(lhs, _, rhs) => {
-            mutate_constant_expr(lhs, value) | mutate_constant_expr(rhs, value)
-        }
-        Expr::IfThenElse {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            let mutation = constant_mutation(value);
-            mutate_constant_expr(cond, value)
-                | mutate_stmt(then_branch, &mutation)
-                | mutate_stmt(else_branch, &mutation)
-        }
-        Expr::Block(stmt) => {
-            let mutation = constant_mutation(value);
-            mutate_stmt(stmt, &mutation)
-        }
-        Expr::Call(_, args) | Expr::CallRef { args, .. } | Expr::Perform { args, .. } => {
-            args.iter_mut().any(|arg| mutate_constant_expr(arg, value))
-        }
-        Expr::ArrayLit(elements) => elements
-            .iter_mut()
-            .any(|element| mutate_constant_expr(element, value)),
-        Expr::StructInit { fields, .. } => fields
-            .iter_mut()
-            .any(|(_, expr)| mutate_constant_expr(expr, value)),
-        Expr::Match { target, arms } => {
-            let mut changed = mutate_constant_expr(target, value);
-            for arm in arms {
-                if let Some(guard) = &mut arm.guard {
-                    changed |= mutate_constant_expr(guard, value);
-                }
-                let mutation = constant_mutation(value);
-                changed |= mutate_stmt(&mut arm.body, &mutation);
-            }
-            changed
-        }
-        Expr::Async { body } | Expr::Lambda { body, .. } => {
-            let mutation = constant_mutation(value);
-            mutate_stmt(body, &mutation)
-        }
-        Expr::AtomRef { .. }
-        | Expr::ChanRecv { .. }
-        | Expr::ChanSend { .. }
-        | Expr::Float(_)
-        | Expr::StringLit(_)
-        | Expr::Variable(_) => false,
-    }
-}
-
-fn constant_mutation(value: i64) -> MutationOperator {
-    if value == 0 {
-        MutationOperator::ConstantZero
-    } else {
-        MutationOperator::ConstantOne
-    }
-}
-
-fn mutate_hir_stmt(stmt: &mut HirStmt, mutation: &MutationOperator) -> bool {
-    match stmt {
-        HirStmt::Let { value, .. } | HirStmt::Assign { value, .. } => {
-            mutate_hir_expr(value, mutation)
-        }
-        HirStmt::ArrayStore { index, value, .. } => {
-            mutate_hir_expr(index, mutation) | mutate_hir_expr(value, mutation)
-        }
-        HirStmt::While { cond, body, .. } => {
-            mutate_hir_expr(cond, mutation) | mutate_hir_stmt(body, mutation)
-        }
-        HirStmt::Block { stmts, tail_expr } => {
-            let mut changed = false;
-            for stmt in stmts {
-                changed |= mutate_hir_stmt(stmt, mutation);
-            }
-            if let Some(tail) = tail_expr {
-                changed |= mutate_hir_expr(tail, mutation);
-            }
-            changed
-        }
-        HirStmt::Acquire { body, .. } => mutate_hir_stmt(body, mutation),
-        HirStmt::Expr(expr) => mutate_hir_expr(expr, mutation),
-    }
-}
-
-fn mutate_hir_expr(expr: &mut HirExpr, mutation: &MutationOperator) -> bool {
-    match expr {
-        HirExpr::Number(current) => match mutation {
-            MutationOperator::ConstantZero if *current != 0 => {
-                *current = 0;
-                true
-            }
-            MutationOperator::ConstantOne if *current != 1 => {
-                *current = 1;
-                true
-            }
-            _ => false,
-        },
-        HirExpr::ArrayLit(elements) => elements
-            .iter_mut()
-            .any(|element| mutate_hir_expr(element, mutation)),
-        HirExpr::ArrayAccess(_, idx) => {
-            let changed = mutate_hir_expr(idx, mutation);
-            if let MutationOperator::ArrayIndexOffset(offset) = mutation {
-                let original = (**idx).clone();
-                **idx = if *offset >= 0 {
-                    HirExpr::BinaryOp(
-                        Box::new(original),
-                        HirBinOp::Add,
-                        Box::new(HirExpr::Number(*offset)),
-                    )
-                } else {
-                    HirExpr::BinaryOp(
-                        Box::new(original),
-                        HirBinOp::Sub,
-                        Box::new(HirExpr::Number(offset.abs())),
-                    )
-                };
-                true
-            } else {
-                changed
-            }
-        }
-        HirExpr::BinaryOp(lhs, op, rhs) => {
-            let mut changed = mutate_hir_expr(lhs, mutation) | mutate_hir_expr(rhs, mutation);
-            match mutation {
-                MutationOperator::BinaryOpFlip(original_op)
-                | MutationOperator::ConditionFlip(original_op)
-                    if Op::from(*op) == *original_op =>
-                {
-                    *op = HirBinOp::from(flip_binary_op(&Op::from(*op)));
-                    changed = true;
-                }
-                _ => {}
-            }
-            changed
-        }
-        HirExpr::IfThenElse {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            mutate_hir_expr(cond, mutation)
-                | mutate_hir_stmt(then_branch, mutation)
-                | mutate_hir_stmt(else_branch, mutation)
-        }
-        HirExpr::Call { args, .. }
-        | HirExpr::CallRef { args, .. }
-        | HirExpr::Perform { args, .. } => {
-            args.iter_mut().any(|arg| mutate_hir_expr(arg, mutation))
-        }
-        HirExpr::StructInit { fields, .. } => fields
-            .iter_mut()
-            .any(|(_, expr)| mutate_hir_expr(expr, mutation)),
-        HirExpr::FieldAccess(base, _) | HirExpr::Await { expr: base } => {
-            mutate_hir_expr(base, mutation)
-        }
-        HirExpr::Match { target, arms } => {
-            let mut changed = mutate_hir_expr(target, mutation);
-            for arm in arms {
-                if let Some(guard) = &mut arm.guard {
-                    changed |= mutate_hir_expr(guard, mutation);
-                }
-                changed |= mutate_hir_stmt(&mut arm.body, mutation);
-            }
-            changed
-        }
-        HirExpr::Async { body } | HirExpr::Task { body, .. } | HirExpr::Lambda { body, .. } => {
-            mutate_hir_stmt(body, mutation)
-        }
-        HirExpr::TaskGroup { children, .. } => children
-            .iter_mut()
-            .any(|child| mutate_hir_stmt(child, mutation)),
-        HirExpr::ChanSend { channel, value } => {
-            mutate_hir_expr(channel, mutation) | mutate_hir_expr(value, mutation)
-        }
-        HirExpr::ChanRecv { channel } => mutate_hir_expr(channel, mutation),
-        HirExpr::VariantInit { fields, .. } => fields
-            .iter_mut()
-            .any(|field| mutate_hir_expr(field, mutation)),
-        HirExpr::AtomRef { .. }
-        | HirExpr::Float(_)
-        | HirExpr::StringLit(_)
-        | HirExpr::Variable(_) => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::hir::lower_atom_to_hir_with_env;
     use crate::mir::lower_hir_to_mir;
-    use crate::parser::parse_atom;
+    use crate::parser::{parse_atom, parse_body_expr};
 
     #[test]
-    fn trivial_contract_is_rejected_when_mutation_still_verifies() {
+    fn shared_site_generator_includes_array_index_mutants() {
+        let mutants = site_mutants(&parse_body_expr("items[index]"));
+        assert!(mutants
+            .iter()
+            .any(|mutant| mutant.id.starts_with("array-index:+1@")));
+    }
+
+    #[test]
+    fn trivial_contract_reports_surviving_mutant_ids_and_counts() {
         let atom = parse_atom(
             r#"
 atom evasive(x: i64) -> i64
@@ -686,11 +317,15 @@ atom evasive(x: i64) -> i64
         let err = check_spec_vacuity_for_hir(&atom, &hir_atom, &mir_body, &module_env, 10, 1000)
             .unwrap_err();
         assert_eq!(err.atom_name, "evasive");
+        assert!(err.reason.contains("constant:1->0@"));
+        assert!(err.reason.contains("tested "));
+        assert!(err.reason.contains("killed "));
+        assert!(err.reason.contains("unanalyzable "));
         assert!(!err.vacuous_mutations.is_empty());
     }
 
     #[test]
-    fn meaningful_postcondition_rejects_mutated_implementations() {
+    fn meaningful_postcondition_kills_mutated_implementations() {
         let atom = parse_atom(
             r#"
 atom increment(x: i64) -> i64
@@ -707,6 +342,39 @@ atom increment(x: i64) -> i64
         let result =
             check_spec_vacuity_for_hir(&atom, &hir_atom, &mir_body, &module_env, 10, 1000).unwrap();
         assert!(!result.is_vacuous);
-        assert_eq!(result.vacuous_mutations.len(), 0);
+        assert_eq!(result.survived_mutations, 0);
+        assert!(result.killed_mutations > 0);
+    }
+
+    #[test]
+    fn inconclusive_verdict_is_unanalyzable_and_does_not_fail() {
+        let error =
+            MumeiError::verification("solver unknown").with_verdict(VerdictKind::Inconclusive);
+        assert_eq!(
+            classify_verification_result(Err(error)),
+            MutantOutcome::Unanalyzable
+        );
+
+        let atom = parse_atom(
+            r#"
+atom unknown(x: i64) -> i64
+  requires: true;
+  ensures: true;
+  body: x;
+"#,
+        );
+        let result =
+            finish_verified_mutants(&atom, Vec::new(), Vec::new(), 2, 0, Vec::new(), 2).unwrap();
+        assert!(!result.is_vacuous);
+        assert_eq!(result.killed_mutations, 0);
+        assert_eq!(result.unanalyzable_mutations, 2);
+        assert!(inconclusive_warning(
+            &atom.name,
+            result.total_mutations_tested,
+            result.killed_mutations,
+            result.unanalyzable_mutations
+        )
+        .unwrap()
+        .contains("was inconclusive"));
     }
 }

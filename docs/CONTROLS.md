@@ -47,7 +47,10 @@ least one atom is `weak`.
 
 ## Relation to vacuity checking
 
-`verify --enable-vacuity-check` is Phase 1i's existing diagnostic and remains
-unchanged. `mumei controls` is a separate negative-control report: it uses the
-real verifier, deterministic single-site mutations, and explicit outcomes
-that keep solver uncertainty distinct from confirmed rejection.
+`verify --enable-vacuity-check` runs the same deterministic, one-site mutation
+engine as `mumei controls`, but checks up to ten mutants per atom through the
+real verifier and fails the atom if any mutant survives. Unanalyzable mutants
+are not counted as kills, and no-op mutations such as `Pow` flipped to `Pow`
+are omitted. `mumei controls` is a separate, read-only report that provides
+per-mutant outcomes and configurable limits. See the [verifier
+specification](VERIFIER_SPEC.md) and [CLI reference](CLI.md).

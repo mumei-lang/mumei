@@ -41,6 +41,13 @@ failure; the report classifies its ensures clauses as vacuous and includes a
 diagnostic. Ensures entries in `report.json` include the context reachability
 and an outcome for each non-trivial clause.
 
+The opt-in `--enable-vacuity-check` flag runs Phase 1i: up to ten
+deterministic, one-site mutants are checked through the real verifier. A
+surviving mutant fails the atom; only structured `Rejected` verdicts count as
+kills, while unknown or otherwise unanalyzable mutants do not. No-op `Pow`
+mutations are skipped. This shares the site-mutant engine with
+[`mumei controls`](CONTROLS.md), which provides a fuller per-atom report.
+
 ### Exit codes
 
 Only `0` and `1` are verdicts about the program. Every other code means the

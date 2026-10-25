@@ -697,7 +697,14 @@ A complete traceability record should include a non-empty `trace_id`, at least o
 
 ### Spec Vacuity Checking
 
-Mumei can detect specifications that are too weak using mutation testing. When enabled, the verifier mutates the MIR for an atom (for example flipping arithmetic/comparison operators, offsetting array indices, or replacing integer constants) and re-runs the postcondition proof against the original contract. If any mutated implementation still verifies, the specification is reported as vacuous and compilation is rejected.
+Mumei can detect specifications that are too weak using mutation testing. When
+enabled, Phase 1i tests up to ten deterministic, single-site changes from the
+same mutation engine used by [`mumei controls`](CONTROLS.md). Each mutant is
+checked through the real verifier against the original contract. A surviving
+mutant is reported as vacuous; only a structured rejection counts as a kill.
+Unknown, timeout, unsupported, translation, and other unmarked errors are
+unanalyzable rather than kills. No-op changes such as flipping `Pow` to itself
+are omitted.
 
 Vacuity checking is opt-in because it performs additional verification attempts:
 
