@@ -4,6 +4,7 @@ pub(crate) mod charter;
 pub(crate) mod check;
 pub(crate) mod claims;
 pub(crate) mod doc;
+pub(crate) mod erosion;
 pub(crate) mod infer;
 pub(crate) mod init;
 pub(crate) mod inspect;

@@ -8,6 +8,7 @@ pub mod claimbook;
 pub mod contract_host;
 pub mod cross_spec;
 pub mod emitter;
+pub mod erosion;
 // NOTE: ffi module contains HTTP/JSON/server FFI backends not yet wired into the public API
 #[allow(dead_code)]
 pub mod ffi;

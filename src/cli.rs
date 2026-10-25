@@ -172,6 +172,17 @@ pub(crate) enum Command {
         /// Input .mm file or directory
         input: String,
     },
+    /// Compare candidate contracts with a baseline file
+    Erosion {
+        /// Candidate .mm file
+        candidate: String,
+        /// Baseline .mm file
+        #[arg(long, value_name = "FILE")]
+        baseline: String,
+        /// Print the erosion report as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate a new Mumei project template
     Init {
         /// Project directory name
