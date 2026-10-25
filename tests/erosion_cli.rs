@@ -152,6 +152,121 @@ fn statuses_map_to_the_expected_cli_exit_codes() {
 }
 
 #[test]
+fn trust_escalation_fails_and_trust_removal_passes() {
+    let dir = TestDir::new("trust");
+    write_pair(
+        dir.path(),
+        "atom f(x: i64) -> i64 ensures: result == x; body: x;",
+        "trusted atom f(x: i64) -> i64 ensures: result == x; body: x;",
+    );
+
+    let (trust_added_output, trust_added_report) = run_json(dir.path());
+    assert_eq!(trust_added_output.status.code(), Some(1));
+    assert_eq!(trust_added_report["atoms"][0]["status"], "trust_added");
+    assert_eq!(
+        trust_added_report["atoms"][0]["detail"],
+        "candidate marks a verified baseline atom as trusted"
+    );
+
+    write_pair(
+        dir.path(),
+        "trusted atom f(x: i64) -> i64 ensures: result == x; body: x;",
+        "atom f(x: i64) -> i64 ensures: result == x; body: x;",
+    );
+    let (trust_removed_output, trust_removed_report) = run_json(dir.path());
+    assert_eq!(trust_removed_output.status.code(), Some(0));
+    assert_eq!(trust_removed_report["atoms"][0]["status"], "preserved");
+}
+
+#[test]
+fn effect_widening_fails_while_removal_reordering_and_parameter_match_are_checked() {
+    let dir = TestDir::new("effects");
+    let cases = [
+        (
+            "effect File;\neffect Network;\natom f(x: i64) -> i64 effects: [File]; body: x;",
+            "effect File;\neffect Network;\natom f(x: i64) -> i64 effects: [File, Network]; body: x;",
+            "effects_widened",
+            1,
+        ),
+        (
+            "effect File;\neffect Network;\natom f(x: i64) -> i64 effects: [File, Network]; body: x;",
+            "effect File;\neffect Network;\natom f(x: i64) -> i64 effects: [File]; body: x;",
+            "preserved",
+            0,
+        ),
+        (
+            "effect File;\neffect Network;\natom f(x: i64) -> i64 effects: [File, Network]; body: x;",
+            "effect File;\neffect Network;\natom f(x: i64) -> i64 effects: [Network, File]; body: x;",
+            "preserved",
+            0,
+        ),
+        (
+            "effect File(path: i64);\natom f(x: i64) -> i64 effects: [File(x)]; body: x;",
+            "effect File(path: i64);\natom f(x: i64) -> i64 effects: [File(y)]; body: x;",
+            "effects_widened",
+            1,
+        ),
+    ];
+
+    for (index, (baseline, candidate, expected_status, expected_exit)) in
+        cases.into_iter().enumerate()
+    {
+        write_pair(dir.path(), baseline, candidate);
+        let (output, report) = run_json(dir.path());
+        assert_eq!(output.status.code(), Some(expected_exit), "case {index}");
+        assert_eq!(
+            report["atoms"][0]["status"], expected_status,
+            "case {index}"
+        );
+    }
+}
+
+#[test]
+fn effect_contract_changes_are_inconclusive_and_unchanged_contracts_shortcut() {
+    let dir = TestDir::new("effect-contracts");
+    let effect = "effect File;\n";
+    write_pair(
+        dir.path(),
+        &format!(
+            "{effect}atom f(x: i64) -> i64 effects: [File]; \
+             effect_pre: {{ File: Open }}; effect_post: {{ File: Closed }}; body: x;"
+        ),
+        &format!(
+            "{effect}atom f(x: i64) -> i64 effects: [File]; \
+             effect_pre: {{ File: Open }}; effect_post: {{ File: Closed }}; body: x + 1;"
+        ),
+    );
+
+    let (unchanged_output, unchanged_report) = run_json(dir.path());
+    assert_eq!(unchanged_output.status.code(), Some(0));
+    assert_eq!(unchanged_report["atoms"][0]["status"], "preserved");
+    assert_eq!(
+        unchanged_report["atoms"][0]["detail"],
+        "contract text unchanged"
+    );
+
+    write_pair(
+        dir.path(),
+        &format!(
+            "{effect}atom f(x: i64) -> i64 effects: [File]; \
+             effect_pre: {{ File: Open }}; effect_post: {{ File: Closed }}; body: x;"
+        ),
+        &format!(
+            "{effect}atom f(x: i64) -> i64 effects: [File]; \
+             effect_pre: {{ File: Open }}; effect_post: {{ File: Open }}; body: x;"
+        ),
+    );
+
+    let (changed_output, changed_report) = run_json(dir.path());
+    assert_eq!(changed_output.status.code(), Some(1));
+    assert_eq!(changed_report["atoms"][0]["status"], "inconclusive");
+    assert_eq!(
+        changed_report["atoms"][0]["detail"],
+        "effect contracts differ"
+    );
+}
+
+#[test]
 fn baseline_is_parsed_without_resolving_its_imports() {
     let dir = TestDir::new("baseline-import");
     write_pair(

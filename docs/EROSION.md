@@ -34,12 +34,16 @@ Each baseline atom has one status:
 | `post_weakened` | The candidate does not establish a baseline postcondition. |
 | `missing` | No matching candidate atom exists. |
 | `signature_mismatch` | A matching atom has an incompatible signature or an ambiguous name. |
+| `trust_added` | The candidate marks a baseline atom as trusted. |
+| `effects_widened` | The candidate declares an effect absent from the baseline. |
 | `inconclusive` | A required forward comparison could not be decided. |
 
 `pre_weakened`, `post_weakened`, `missing`, `signature_mismatch`, and
-`inconclusive` are erosion statuses and make the report fail. `strengthened`
-and `refined` are informational and do not fail the report. Candidate atoms
-that have no baseline match are listed in `added` and do not affect the result.
+`inconclusive`, `trust_added`, and `effects_widened` are erosion statuses and
+make the report fail. Changed `effect_pre` or `effect_post` contracts are
+reported as `inconclusive` until they can be compared. `strengthened` and
+`refined` are informational and do not fail the report. Candidate atoms that
+have no baseline match are listed in `added` and do not affect the result.
 
 ## Exit codes
 

@@ -69,6 +69,8 @@ pub(crate) fn cmd_erosion(candidate: &str, baseline: &str, json: bool) -> i32 {
                     | "post_weakened"
                     | "missing"
                     | "signature_mismatch"
+                    | "trust_added"
+                    | "effects_widened"
                     | "inconclusive"
             )
         }) {

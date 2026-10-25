@@ -1,5 +1,5 @@
 use crate::charter;
-use crate::parser::{Atom, Item};
+use crate::parser::{Atom, Effect, Item, TrustLevel};
 use crate::verification::contract_view::{contract_view, ContractView};
 use crate::verification::ModuleEnv;
 use serde::{Deserialize, Serialize};
@@ -7,11 +7,13 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 pub const REPORT_SCHEMA: &str = "mumei.erosion-report/v1";
 
-const ERODED_STATUSES: [&str; 5] = [
+const ERODED_STATUSES: [&str; 7] = [
     "pre_weakened",
     "post_weakened",
     "missing",
     "signature_mismatch",
+    "trust_added",
+    "effects_widened",
     "inconclusive",
 ];
 
@@ -142,11 +144,43 @@ fn compare_atom(
         );
     }
 
+    if baseline.atom.trust_level != TrustLevel::Trusted
+        && candidate.atom.trust_level == TrustLevel::Trusted
+    {
+        return atom_result(
+            &baseline.name,
+            "trust_added",
+            "candidate marks a verified baseline atom as trusted",
+            None,
+            matched_candidate,
+        );
+    }
+
+    if effects_widened(baseline.atom, candidate.atom) {
+        return atom_result(
+            &baseline.name,
+            "effects_widened",
+            "candidate effects include effects not present in the baseline",
+            None,
+            matched_candidate,
+        );
+    }
+
     if contract_text_unchanged(baseline.atom, candidate.atom) {
         return atom_result(
             &baseline.name,
             "preserved",
             "contract text unchanged",
+            None,
+            matched_candidate,
+        );
+    }
+
+    if !effect_contracts_unchanged(baseline.atom, candidate.atom) {
+        return atom_result(
+            &baseline.name,
+            "inconclusive",
+            "effect contracts differ",
             None,
             matched_candidate,
         );
@@ -210,8 +244,38 @@ fn contract_text_unchanged(baseline: &Atom, candidate: &Atom) -> bool {
         && charter::normalized_forall_constraints(baseline)
             == charter::normalized_forall_constraints(candidate)
         && normalized_clause_modes(baseline) == normalized_clause_modes(candidate)
+        && effect_contracts_unchanged(baseline, candidate)
         && normalize_whitespace(&contract_view(baseline, ContractView::CallerEnsures))
             == normalize_whitespace(&contract_view(candidate, ContractView::CallerEnsures))
+}
+
+fn effects_widened(baseline: &Atom, candidate: &Atom) -> bool {
+    let baseline_effects: HashSet<String> =
+        baseline.effects.iter().map(normalized_effect).collect();
+    candidate
+        .effects
+        .iter()
+        .any(|effect| !baseline_effects.contains(&normalized_effect(effect)))
+}
+
+fn normalized_effect(effect: &Effect) -> String {
+    normalize_whitespace(&format!("{effect:?}"))
+}
+
+fn effect_contracts_unchanged(baseline: &Atom, candidate: &Atom) -> bool {
+    normalized_effect_states(&baseline.effect_pre)
+        == normalized_effect_states(&candidate.effect_pre)
+        && normalized_effect_states(&baseline.effect_post)
+            == normalized_effect_states(&candidate.effect_post)
+}
+
+fn normalized_effect_states(
+    states: &std::collections::HashMap<String, String>,
+) -> BTreeMap<String, String> {
+    states
+        .iter()
+        .map(|(effect, state)| (effect.clone(), normalize_whitespace(state)))
+        .collect()
 }
 
 fn normalized_clause_modes(atom: &Atom) -> Vec<String> {
@@ -265,6 +329,97 @@ mod tests {
              requires: unknown_predicate(x); ensures: result > x; body: 0;",
             "atom f(x: i64) -> i64 \
              requires: unknown_predicate ( x ); ensures: result > x; body: x + 1;",
+        );
+
+        assert_eq!(report.status, "pass");
+        assert_eq!(atom_status(&report, "f"), "preserved");
+        assert_eq!(report.atoms[0].detail, "contract text unchanged");
+    }
+
+    #[test]
+    fn trust_escalation_fails_but_trust_removal_is_allowed() {
+        let trust_added = compare(
+            "atom f(x: i64) -> i64 ensures: result == x; body: x;",
+            "trusted atom f(x: i64) -> i64 ensures: result == x; body: x;",
+        );
+        assert_eq!(trust_added.status, "fail");
+        assert_eq!(atom_status(&trust_added, "f"), "trust_added");
+        assert_eq!(
+            trust_added.atoms[0].detail,
+            "candidate marks a verified baseline atom as trusted"
+        );
+
+        let trust_removed = compare(
+            "trusted atom f(x: i64) -> i64 ensures: result == x; body: x;",
+            "atom f(x: i64) -> i64 ensures: result == x; body: x;",
+        );
+        assert_eq!(trust_removed.status, "pass");
+        assert_eq!(atom_status(&trust_removed, "f"), "preserved");
+    }
+
+    #[test]
+    fn effects_may_be_removed_or_reordered_but_not_widened() {
+        let widened = compare(
+            "atom f(x: i64) -> i64 effects: [File]; ensures: result == x; body: x;",
+            "atom f(x: i64) -> i64 effects: [File, Network]; ensures: result == x; body: x;",
+        );
+        assert_eq!(widened.status, "fail");
+        assert_eq!(atom_status(&widened, "f"), "effects_widened");
+
+        let removed = compare(
+            "atom f(x: i64) -> i64 effects: [File, Network]; ensures: result == x; body: x;",
+            "atom f(x: i64) -> i64 effects: [File]; ensures: result == x; body: x;",
+        );
+        assert_eq!(removed.status, "pass");
+        assert_eq!(atom_status(&removed, "f"), "preserved");
+
+        let reordered = compare(
+            "atom f(x: i64) -> i64 effects: [File, Network]; ensures: result == x; body: x;",
+            "atom f(x: i64) -> i64 effects: [Network, File]; ensures: result == x; body: x;",
+        );
+        assert_eq!(reordered.status, "pass");
+        assert_eq!(atom_status(&reordered, "f"), "preserved");
+    }
+
+    #[test]
+    fn effect_parameters_are_part_of_the_effect_identity() {
+        let report = compare(
+            "atom f(x: i64, y: i64) -> i64 effects: [File(x)]; body: x;",
+            "atom f(x: i64, y: i64) -> i64 effects: [File(y)]; body: x;",
+        );
+
+        assert_eq!(report.status, "fail");
+        assert_eq!(atom_status(&report, "f"), "effects_widened");
+    }
+
+    #[test]
+    fn changed_effect_contracts_are_inconclusive() {
+        let effect_post = compare(
+            "atom f(x: i64) -> i64 effect_pre: { File: Open }; \
+             effect_post: { File: Closed }; body: x;",
+            "atom f(x: i64) -> i64 effect_pre: { File: Open }; \
+             effect_post: { File: Open }; body: x;",
+        );
+        assert_eq!(effect_post.status, "fail");
+        assert_eq!(atom_status(&effect_post, "f"), "inconclusive");
+        assert_eq!(effect_post.atoms[0].detail, "effect contracts differ");
+
+        let effect_pre = compare(
+            "atom f(x: i64) -> i64 effect_pre: { File: Open }; body: x;",
+            "atom f(x: i64) -> i64 effect_pre: { File: Closed }; body: x;",
+        );
+        assert_eq!(effect_pre.status, "fail");
+        assert_eq!(atom_status(&effect_pre, "f"), "inconclusive");
+        assert_eq!(effect_pre.atoms[0].detail, "effect contracts differ");
+    }
+
+    #[test]
+    fn unchanged_effect_contracts_keep_the_body_only_shortcut() {
+        let report = compare(
+            "atom f(x: i64) -> i64 effects: [File]; \
+             effect_pre: { File: Open }; effect_post: { File: Closed }; body: x;",
+            "atom f(x: i64) -> i64 effects: [File]; \
+             effect_pre: { File: Open }; effect_post: { File: Closed }; body: x + 1;",
         );
 
         assert_eq!(report.status, "pass");
