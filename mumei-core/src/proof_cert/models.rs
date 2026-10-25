@@ -85,6 +85,8 @@ pub struct AtomCertificate {
     pub content_hash: String,
     /// Verification status: "verified", "failed", "skipped", "trusted"
     pub status: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reused_from_store: bool,
     /// Pre-proof specification validation and traceability result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_validation_result: Option<verification::SpecValidationResult>,

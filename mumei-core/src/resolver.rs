@@ -19,6 +19,7 @@ mod cache;
 mod dependencies;
 mod imports;
 mod metrics;
+mod proof_store;
 
 #[cfg(test)]
 use crate::parser::Item;
@@ -61,6 +62,7 @@ pub use imports::{
     PRELUDE_METADATA_KEY,
 };
 pub use metrics::{emit_escalation_bundle, LeanEscalationMetrics};
+pub use proof_store::{ProofStore, StoreLookup};
 #[cfg(test)]
 mod tests {
     use super::*;

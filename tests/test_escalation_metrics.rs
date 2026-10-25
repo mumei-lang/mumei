@@ -86,6 +86,7 @@ fn lean_verified_atom(
         retry_policy_fingerprint: None,
         attempt_summary: None,
         cost_success_metrics: None,
+        reused_from_store: false,
     }
 }
 

@@ -167,6 +167,10 @@
           "type": "array",
           "items": { "type": "object" }
         },
+        "reused_from_store": {
+          "type": "boolean",
+          "description": "True when this Z3 proof was reused from the local proof store."
+        },
         "unused_hypotheses": {
           "type": ["object", "null"],
           "additionalProperties": true

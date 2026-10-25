@@ -253,6 +253,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
         json,
         strict_imports,
         allow_lean_verified,
+        proof_store,
         cross_spec_verify,
         cross_spec_files,
         enable_spurious_detection,
@@ -406,6 +407,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
             let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 cmd_verify(VerifyOptions {
                     input: &file_str,
+                    proof_store,
                     task_id: task_id.as_deref(),
                     solver_timeout,
                     cache_scope: &cache_scope,
@@ -486,6 +488,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
         let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             cmd_verify(VerifyOptions {
                 input: &input,
+                proof_store,
                 task_id: task_id.as_deref(),
                 solver_timeout,
                 cache_scope: &cache_scope,
@@ -624,6 +627,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
 
 pub(crate) struct VerifyOptions<'a> {
     pub(crate) input: &'a str,
+    pub(crate) proof_store: bool,
     pub(crate) task_id: Option<&'a str>,
     pub(crate) solver_timeout: Option<u64>,
     pub(crate) cache_scope: &'a str,
@@ -670,6 +674,8 @@ pub(crate) struct VerifyOptions<'a> {
 struct VerifyContext<'a> {
     module_env: &'a mut verification::ModuleEnv,
     verification_cache: &'a mut std::collections::HashMap<String, resolver::VerificationCacheEntry>,
+    proof_store: Option<&'a resolver::ProofStore>,
+    reused_atoms: &'a mut std::collections::HashSet<String>,
     verification_config: &'a verification::VerificationConfig,
     output_dir: &'a Path,
     source: &'a str,
@@ -909,61 +915,93 @@ fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyCon
     }
     let proof_hash = resolver::compute_proof_hash_with_flags(atom, ctx.module_env, &proof_flags);
 
-    if let Some(cached_entry) = ctx.verification_cache.get(name) {
-        if cached_entry.proof_hash == proof_hash {
-            let skipped_clauses = cached_entry.skipped_clauses;
-            if !ctx.quiet_output {
+    let project_cache_entry = ctx
+        .verification_cache
+        .get(name)
+        .filter(|entry| entry.proof_hash == proof_hash)
+        .cloned();
+    let cached_entry = project_cache_entry.or_else(|| {
+        if matches!(
+            atom.trust_level,
+            parser::TrustLevel::Trusted | parser::TrustLevel::Unverified
+        ) || promote_outside_fragment
+        {
+            return None;
+        }
+        let store = ctx.proof_store?;
+        let z3_version = proof_cert::get_z3_version();
+        let key = resolver::ProofStore::key(&proof_hash, &z3_version);
+        match store.lookup(&key, &proof_hash, &z3_version) {
+            resolver::StoreLookup::Hit(entry) => {
+                ctx.verification_cache
+                    .insert(name.to_string(), entry.clone());
+                ctx.reused_atoms.insert(name.to_string());
+                Some(entry)
+            }
+            resolver::StoreLookup::Invalid(reason) => {
+                eprintln!("proof store entry for '{name}' ignored: {reason}");
+                None
+            }
+            resolver::StoreLookup::Miss => None,
+        }
+    });
+    if let Some(cached_entry) = cached_entry {
+        let skipped_clauses = cached_entry.skipped_clauses;
+        if !ctx.quiet_output {
+            if ctx.reused_atoms.contains(name) {
+                println!("  ⚖️  '{}': skipped (reused from proof store) ⏩", name);
+            } else {
                 println!("  ⚖️  '{}': skipped (unchanged, cached) ⏩", name);
             }
-            ctx.module_env.mark_verified(name);
-            let (z3_result, status) = if atom.trust_level == parser::TrustLevel::Trusted {
-                (
-                    proof_cert::status::Z3_SKIPPED.to_string(),
-                    proof_cert::status::TRUSTED.to_string(),
-                )
-            } else {
-                (
-                    proof_cert::status::Z3_UNSAT.to_string(),
-                    if promote_outside_fragment {
-                        proof_cert::status::ESCALATION_CANDIDATE.to_string()
-                    } else {
-                        proof_cert::status::VERIFIED.to_string()
-                    },
-                )
-            };
-            ctx.cert_results
-                .insert(name.to_string(), (z3_result, status));
-            if promote_outside_fragment {
-                *ctx.escalated += 1;
-            }
-            if !cached_entry.inferred_invariants.is_empty() {
-                ctx.inferred_invariants
-                    .insert(name.to_string(), cached_entry.inferred_invariants.clone());
-                if !ctx.quiet_output {
-                    for item in &cached_entry.inferred_invariants {
-                        println!(
-                            "   💡 inferred loop invariant (line {}): {}",
-                            item.line,
-                            item.adopted.join(" && ")
-                        );
-                    }
+        }
+        ctx.module_env.mark_verified(name);
+        let (z3_result, status) = if atom.trust_level == parser::TrustLevel::Trusted {
+            (
+                proof_cert::status::Z3_SKIPPED.to_string(),
+                proof_cert::status::TRUSTED.to_string(),
+            )
+        } else {
+            (
+                proof_cert::status::Z3_UNSAT.to_string(),
+                if promote_outside_fragment {
+                    proof_cert::status::ESCALATION_CANDIDATE.to_string()
+                } else {
+                    proof_cert::status::VERIFIED.to_string()
+                },
+            )
+        };
+        ctx.cert_results
+            .insert(name.to_string(), (z3_result, status));
+        if promote_outside_fragment {
+            *ctx.escalated += 1;
+        }
+        if !cached_entry.inferred_invariants.is_empty() {
+            ctx.inferred_invariants
+                .insert(name.to_string(), cached_entry.inferred_invariants.clone());
+            if !ctx.quiet_output {
+                for item in &cached_entry.inferred_invariants {
+                    println!(
+                        "   💡 inferred loop invariant (line {}): {}",
+                        item.line,
+                        item.adopted.join(" && ")
+                    );
                 }
             }
-            verification::phase_artifacts::record_cached_atom(&atom.span.file, name);
-            if ctx.emit_structured_feedback {
-                ctx.structured_feedbacks
-                    .push(structured_feedback_for_passed_atom(atom));
-            }
-            write_cached_success_report(
-                ctx.output_dir,
-                atom,
-                skipped_clauses,
-                &cached_entry.cover_results,
-            );
-            *ctx.skipped_clauses += skipped_clauses;
-            *ctx.skipped += 1;
-            return;
         }
+        verification::phase_artifacts::record_cached_atom(&atom.span.file, name);
+        if ctx.emit_structured_feedback {
+            ctx.structured_feedbacks
+                .push(structured_feedback_for_passed_atom(atom));
+        }
+        write_cached_success_report(
+            ctx.output_dir,
+            atom,
+            skipped_clauses,
+            &cached_entry.cover_results,
+        );
+        *ctx.skipped_clauses += skipped_clauses;
+        *ctx.skipped += 1;
+        return;
     }
 
     let deps: Vec<String> = ctx
@@ -1045,7 +1083,7 @@ fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyCon
             ctx.verification_cache.insert(
                 name.to_string(),
                 resolver::VerificationCacheEntry {
-                    proof_hash,
+                    proof_hash: proof_hash.clone(),
                     result: "verified".to_string(),
                     dependencies: deps,
                     type_deps,
@@ -1061,6 +1099,20 @@ fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyCon
                     cover_results,
                 },
             );
+            if !matches!(
+                atom.trust_level,
+                parser::TrustLevel::Trusted | parser::TrustLevel::Unverified
+            ) && !promote_outside_fragment
+            {
+                if let (Some(store), Some(entry)) =
+                    (ctx.proof_store, ctx.verification_cache.get(name))
+                {
+                    let z3_version = proof_cert::get_z3_version();
+                    if let Err(error) = store.record(name, &proof_hash, &z3_version, entry) {
+                        eprintln!("proof store write for '{name}' failed: {error}");
+                    }
+                }
+            }
             *ctx.verified += 1;
         }
         Err(e) => {
@@ -1524,6 +1576,7 @@ fn create_private_staging_dir() -> Option<PathBuf> {
 pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
     let VerifyOptions {
         input,
+        proof_store: proof_store_flag,
         task_id,
         solver_timeout,
         cache_scope,
@@ -1588,6 +1641,17 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
             manifest::BuildConfig::default(),
             manifest::ProofConfig::default(),
         )
+    };
+    let proof_store = if proof_store_flag || proof_cfg.store {
+        match resolver::ProofStore::open(None) {
+            Ok(store) => Some(store),
+            Err(error) => {
+                eprintln!("⚠️  proof store unavailable: {error}");
+                None
+            }
+        }
+    } else {
+        None
     };
     let enable_cross_spec_verification = enable_cross_spec_verification
         || proof_cfg.cross_spec_verify
@@ -1710,6 +1774,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
     // Plan 11B: Track per-atom verification results for proof certificates
     let mut cert_results: std::collections::HashMap<String, (String, String)> =
         std::collections::HashMap::new();
+    let mut reused_from_store = std::collections::HashSet::new();
     let mut lean_escalation_metrics_json: Option<serde_json::Value> = None;
     let mut proof_graph_cross_spec: Option<cross_spec::CrossSpecResult> = None;
     let mut lean_verified_atoms: Vec<String> = Vec::new();
@@ -1862,6 +1927,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                 let mut ctx = VerifyContext {
                     module_env: &mut module_env,
                     verification_cache: &mut verification_cache,
+                    proof_store: proof_store.as_ref(),
+                    reused_atoms: &mut reused_from_store,
                     verification_config: &verification_config,
                     output_dir: atom_report_dir,
                     source: &source,
@@ -1899,6 +1966,8 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
                     let mut ctx = VerifyContext {
                         module_env: &mut module_env,
                         verification_cache: &mut verification_cache,
+                        proof_store: proof_store.as_ref(),
+                        reused_atoms: &mut reused_from_store,
                         verification_config: &verification_config,
                         output_dir: atom_report_dir,
                         source: &source,
@@ -2078,6 +2147,10 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
             }),
             Some(&reconstruction_losses),
         );
+        for atom in &mut cert.atoms {
+            atom.reused_from_store = reused_from_store.contains(&atom.name);
+        }
+        proof_cert::refresh_certificate_integrity(&mut cert);
         let cert_path = proof_certificate_path(input, cert_output);
 
         if escalate_lean || emit_escalation_bundle || emit_escalation_metrics {
