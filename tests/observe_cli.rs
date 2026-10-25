@@ -453,3 +453,23 @@ fn structured_parameter_values_are_not_checked() {
         assert_eq!(result["detail"], "unsupported_value_type");
     }
 }
+
+#[test]
+fn bitvec_semantics_are_preserved_in_observation_wrappers() {
+    let fixture = Fixture::new(
+        "atom wrapping(x: i64) -> i64\n\
+         semantics: bitvec;\n\
+         requires: true;\n\
+         ensures: result == x + 1;\n\
+         body: x + 1;\n",
+        &harvest(vec![
+            example("wrapping", json!({"x": i64::MAX}), json!(i64::MIN)),
+            example("wrapping", json!({"x": i64::MAX}), json!(0)),
+        ]),
+    );
+    let output = fixture.run(&["--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let results = parse(&output)["results"].as_array().unwrap().clone();
+    assert_eq!(results[0]["verdict"], "consistent");
+    assert_eq!(results[1]["verdict"], "contradicts_ensures");
+}

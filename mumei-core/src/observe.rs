@@ -471,7 +471,6 @@ fn run_check(
     wrapper.type_params.clear();
     wrapper.where_bounds.clear();
     wrapper.trace_id = None;
-    wrapper.spec_metadata.clear();
     wrapper.requires = requires.to_string();
     wrapper.ensures = ensures.to_string();
     wrapper.clause_labels.clear();
