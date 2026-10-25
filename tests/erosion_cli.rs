@@ -201,8 +201,8 @@ fn effect_widening_fails_while_removal_reordering_and_parameter_match_are_checke
             0,
         ),
         (
-            "effect File(path: i64);\natom f(x: i64) -> i64 effects: [File(x)]; body: x;",
-            "effect File(path: i64);\natom f(x: i64) -> i64 effects: [File(y)]; body: x;",
+            "effect File(path: i64);\natom f(x: i64, y: i64) -> i64 effects: [File(x)]; body: x;",
+            "effect File(path: i64);\natom f(x: i64, y: i64) -> i64 effects: [File(y)]; body: x;",
             "effects_widened",
             1,
         ),
@@ -218,6 +218,68 @@ fn effect_widening_fails_while_removal_reordering_and_parameter_match_are_checke
             report["atoms"][0]["status"], expected_status,
             "case {index}"
         );
+    }
+}
+
+#[test]
+fn effect_hierarchy_and_negative_effects_follow_narrowing_semantics() {
+    let dir = TestDir::new("effect-hierarchy-negative");
+    let hierarchy = "effect FileRead;\neffect FileWrite;\n\
+                     effect IO includes: [FileRead, FileWrite];\n";
+    let cases = [
+        (
+            format!("{hierarchy}atom f(x: i64) -> i64 effects: [IO]; body: x;"),
+            format!("{hierarchy}atom f(x: i64) -> i64 effects: [FileRead]; body: x;"),
+            "preserved",
+            0,
+        ),
+        (
+            format!("{hierarchy}atom f(x: i64) -> i64 effects: [FileRead]; body: x;"),
+            format!("{hierarchy}atom f(x: i64) -> i64 effects: [IO]; body: x;"),
+            "effects_widened",
+            1,
+        ),
+        (
+            "effect Network;\natom f(x: i64) -> i64 effects: [!Network]; body: x;".to_string(),
+            "effect Network;\natom f(x: i64) -> i64 effects: [!Network, !FileRead]; body: x;"
+                .to_string(),
+            "preserved",
+            0,
+        ),
+        (
+            "effect Network;\natom f(x: i64) -> i64 effects: [!Network]; body: x;".to_string(),
+            "effect Network;\natom f(x: i64) -> i64 body: x;".to_string(),
+            "effects_widened",
+            1,
+        ),
+        (
+            "effect UnknownBase;\neffect UnknownCandidate;\n\
+             atom f(x: i64) -> i64 effects: [UnknownBase]; body: x;"
+                .to_string(),
+            "effect UnknownBase;\neffect UnknownCandidate;\n\
+             atom f(x: i64) -> i64 effects: [UnknownCandidate]; body: x;"
+                .to_string(),
+            "effects_widened",
+            1,
+        ),
+    ];
+
+    for (index, (baseline, candidate, expected_status, expected_exit)) in
+        cases.into_iter().enumerate()
+    {
+        write_pair(dir.path(), &baseline, &candidate);
+        let (output, report) = run_json(dir.path());
+        assert_eq!(output.status.code(), Some(expected_exit), "case {index}");
+        assert_eq!(
+            report["atoms"][0]["status"], expected_status,
+            "case {index}"
+        );
+        if index == 3 {
+            assert_eq!(
+                report["atoms"][0]["detail"],
+                "candidate drops a forbidden effect"
+            );
+        }
     }
 }
 

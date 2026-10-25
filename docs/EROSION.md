@@ -38,7 +38,7 @@ Each baseline atom has one status:
 | `missing` | No matching candidate atom exists. |
 | `signature_mismatch` | A matching atom has an incompatible signature or an ambiguous name. |
 | `trust_added` | The candidate marks a baseline atom as trusted. |
-| `effects_widened` | The candidate declares an effect absent from the baseline. |
+| `effects_widened` | The candidate adds an effect outside the baseline allowance or drops a forbidden effect. |
 | `inconclusive` | Refinement is undecidable, or clause modes, callback contracts, or effect-state contracts differ. |
 
 `pre_weakened`, `post_weakened`, `missing`, `signature_mismatch`,
@@ -48,6 +48,11 @@ make the report fail. Differences in `clause_modes`, callback contract fields
 `effect_post` maps are reported as `inconclusive`. `strengthened` and `refined`
 are informational and do not fail the report. Candidate atoms that have no
 baseline match are listed in `added` and do not affect the result.
+
+Positive effects may be narrowed to a sub-effect or to a leaf included by a
+composite effect. Effect parameters must still match. When no hierarchy can be
+resolved, effect names require an exact match. Adding a negative (forbidden)
+effect is narrowing; dropping a baseline negative effect is erosion.
 
 ## Exit codes
 

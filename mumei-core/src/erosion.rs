@@ -156,11 +156,11 @@ fn compare_atom(
         );
     }
 
-    if effects_widened(baseline.atom, candidate.atom) {
+    if let Some(detail) = effects_widened(baseline.atom, candidate.atom, module_env) {
         return atom_result(
             &baseline.name,
             "effects_widened",
-            "candidate effects include effects not present in the baseline",
+            detail,
             None,
             matched_candidate,
         );
@@ -251,17 +251,66 @@ fn contract_text_unchanged(baseline: &Atom, candidate: &Atom) -> bool {
             == normalize_whitespace(&contract_view(candidate, ContractView::CallerEnsures))
 }
 
-fn effects_widened(baseline: &Atom, candidate: &Atom) -> bool {
-    let baseline_effects: HashSet<String> =
-        baseline.effects.iter().map(normalized_effect).collect();
-    candidate
+fn effects_widened(
+    baseline: &Atom,
+    candidate: &Atom,
+    module_env: &ModuleEnv,
+) -> Option<&'static str> {
+    let baseline_negative: HashSet<String> = baseline
         .effects
         .iter()
-        .any(|effect| !baseline_effects.contains(&normalized_effect(effect)))
+        .filter(|effect| effect.negated)
+        .map(normalized_effect)
+        .collect();
+    let candidate_negative: HashSet<String> = candidate
+        .effects
+        .iter()
+        .filter(|effect| effect.negated)
+        .map(normalized_effect)
+        .collect();
+    if baseline_negative
+        .iter()
+        .any(|effect| !candidate_negative.contains(effect))
+    {
+        return Some("candidate drops a forbidden effect");
+    }
+
+    let baseline_positive: Vec<&Effect> = baseline
+        .effects
+        .iter()
+        .filter(|effect| !effect.negated)
+        .collect();
+    let candidate_widens = candidate
+        .effects
+        .iter()
+        .filter(|effect| !effect.negated)
+        .any(|candidate_effect| {
+            !baseline_positive.iter().any(|baseline_effect| {
+                effect_is_covered(candidate_effect, baseline_effect, module_env)
+            })
+        });
+    candidate_widens.then_some("candidate effects include effects not present in the baseline")
+}
+
+fn effect_is_covered(candidate: &Effect, baseline: &Effect, module_env: &ModuleEnv) -> bool {
+    if normalized_effect_parameters(candidate) != normalized_effect_parameters(baseline) {
+        return false;
+    }
+    if candidate.name == baseline.name || module_env.is_subeffect(&candidate.name, &baseline.name) {
+        return true;
+    }
+
+    let candidate_leaves = module_env.resolve_leaf_effects(std::slice::from_ref(&candidate.name));
+    let baseline_leaves = module_env.resolve_leaf_effects(std::slice::from_ref(&baseline.name));
+    candidate_leaves.is_subset(&baseline_leaves)
 }
 
 fn normalized_effect(effect: &Effect) -> String {
     normalize_whitespace(&format!("{effect:?}"))
+}
+
+fn normalized_effect_parameters(effect: &Effect) -> String {
+    normalize_whitespace(&format!("{:?}", effect.params))
 }
 
 fn effect_contracts_unchanged(baseline: &Atom, candidate: &Atom) -> bool {
@@ -355,13 +404,19 @@ mod tests {
     fn compare(baseline: &str, candidate: &str) -> super::ErosionReport {
         let baseline = parse(baseline);
         let candidate = parse(candidate);
+        let mut module_env = ModuleEnv::new();
+        for item in &candidate {
+            if let parser::Item::EffectDef(effect_def) = item {
+                module_env.register_effect(effect_def);
+            }
+        }
         compare_contracts(
             "baseline.mm",
             "candidate.mm",
             &baseline,
             &candidate,
             &candidate,
-            &ModuleEnv::new(),
+            &module_env,
         )
     }
 
@@ -411,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn effects_may_be_removed_or_reordered_but_not_widened() {
+    fn effects_may_be_removed_or_reordered_and_sub_effects_are_narrowing() {
         let widened = compare(
             "atom f(x: i64) -> i64 effects: [File]; ensures: result == x; body: x;",
             "atom f(x: i64) -> i64 effects: [File, Network]; ensures: result == x; body: x;",
@@ -432,6 +487,28 @@ mod tests {
         );
         assert_eq!(reordered.status, "pass");
         assert_eq!(atom_status(&reordered, "f"), "preserved");
+
+        let sub_effect = compare(
+            "effect IO;\n\
+             effect FileRead parent: IO;\n\
+             atom f(x: i64) -> i64 effects: [IO]; ensures: result == x; body: x;",
+            "effect IO;\n\
+             effect FileRead parent: IO;\n\
+             atom f(x: i64) -> i64 effects: [FileRead]; ensures: result == x; body: x;",
+        );
+        assert_eq!(sub_effect.status, "pass");
+        assert_eq!(atom_status(&sub_effect, "f"), "preserved");
+
+        let super_effect = compare(
+            "effect IO;\n\
+             effect FileRead parent: IO;\n\
+             atom f(x: i64) -> i64 effects: [FileRead]; ensures: result == x; body: x;",
+            "effect IO;\n\
+             effect FileRead parent: IO;\n\
+             atom f(x: i64) -> i64 effects: [IO]; ensures: result == x; body: x;",
+        );
+        assert_eq!(super_effect.status, "fail");
+        assert_eq!(atom_status(&super_effect, "f"), "effects_widened");
     }
 
     #[test]
@@ -466,6 +543,38 @@ mod tests {
 
         assert_eq!(report.status, "fail");
         assert_eq!(atom_status(&report, "f"), "effects_widened");
+    }
+
+    #[test]
+    fn adding_forbidden_effects_is_narrowing_but_dropping_one_is_not() {
+        let added = compare(
+            "atom f(x: i64) -> i64 effects: [!Network]; body: x;",
+            "atom f(x: i64) -> i64 effects: [!Network, !FileRead]; body: x;",
+        );
+        assert_eq!(added.status, "pass");
+        assert_eq!(atom_status(&added, "f"), "preserved");
+
+        let removed = compare(
+            "atom f(x: i64) -> i64 effects: [!Network]; body: x;",
+            "atom f(x: i64) -> i64 body: x;",
+        );
+        assert_eq!(removed.status, "fail");
+        assert_eq!(atom_status(&removed, "f"), "effects_widened");
+        assert_eq!(
+            removed.atoms[0].detail,
+            "candidate drops a forbidden effect"
+        );
+    }
+
+    #[test]
+    fn effects_without_a_resolvable_hierarchy_require_exact_identity() {
+        let replaced = compare(
+            "atom f(x: i64) -> i64 effects: [UnknownBase]; body: x;",
+            "atom f(x: i64) -> i64 effects: [UnknownCandidate]; body: x;",
+        );
+
+        assert_eq!(replaced.status, "fail");
+        assert_eq!(atom_status(&replaced, "f"), "effects_widened");
     }
 
     #[test]
