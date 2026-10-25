@@ -238,9 +238,6 @@ fn analyze_atom(
     }
 
     let mut reports = Vec::with_capacity(mutants.len());
-    let mut killed = 0;
-    let mut survived = 0;
-    let mut unanalyzable = 0;
     for mutant in mutants {
         let mut body_stmt = hir.body_stmt.clone();
         let changed = mutate_at_site(&mut body_stmt, mutant.site, &mutant.kind);
@@ -253,7 +250,7 @@ fn analyze_atom(
             let mut mutated_hir = hir.clone();
             mutated_hir.body_stmt = body_stmt;
             mutated_hir.body = lower_stmt_with_env(&mutated_hir.body_stmt, Some(module_env));
-            mutated_hir.atom.body_expr = stmt_source(&mutated_hir.body_stmt);
+            // Single-site mutations preserve identifiers, and replay reads body_stmt.
             match verify_hir(&mutated_hir, output_dir, module_env, config) {
                 Ok(()) => ("survived", "mutation still verifies".to_string()),
                 Err(error) if error.verdict() == Some(VerdictKind::Rejected) => {
@@ -262,11 +259,6 @@ fn analyze_atom(
                 Err(error) => ("unanalyzable", error.to_string()),
             }
         };
-        match outcome {
-            "killed" => killed += 1,
-            "survived" => survived += 1,
-            _ => unanalyzable += 1,
-        }
         reports.push(MutantReport {
             id: mutant.id,
             operator: mutant.operator,
@@ -275,7 +267,22 @@ fn analyze_atom(
             detail,
         });
     }
+    report_with_mutants(name, reports)
+}
 
+fn report_with_mutants(name: String, reports: Vec<MutantReport>) -> ControlsAtomReport {
+    let killed = reports
+        .iter()
+        .filter(|mutant| mutant.outcome == "killed")
+        .count();
+    let survived = reports
+        .iter()
+        .filter(|mutant| mutant.outcome == "survived")
+        .count();
+    let unanalyzable = reports
+        .iter()
+        .filter(|mutant| mutant.outcome == "unanalyzable")
+        .count();
     let (status, detail) = if survived > 0 {
         (
             "weak",
@@ -309,58 +316,6 @@ fn analyze_atom(
         survived,
         unanalyzable,
         mutants: reports,
-    }
-}
-
-fn stmt_source(stmt: &Stmt) -> String {
-    match stmt {
-        Stmt::Expr(expr, _) => crate::verification::support::expr_to_source_string(expr),
-        Stmt::Let { var, value, .. } => format!(
-            "let {var} = {};",
-            crate::verification::support::expr_to_source_string(value)
-        ),
-        Stmt::Assign { var, value, .. } => format!(
-            "{var} = {};",
-            crate::verification::support::expr_to_source_string(value)
-        ),
-        Stmt::ArrayStore {
-            array,
-            index,
-            value,
-            ..
-        } => format!(
-            "{array}[{}] = {};",
-            crate::verification::support::expr_to_source_string(index),
-            crate::verification::support::expr_to_source_string(value)
-        ),
-        Stmt::Block(stmts, _) => format!(
-            "{{ {} }}",
-            stmts.iter().map(stmt_source).collect::<Vec<_>>().join(" ")
-        ),
-        Stmt::While {
-            cond,
-            invariant,
-            body,
-            ..
-        } => format!(
-            "while ({}) invariant {}; {}",
-            crate::verification::support::expr_to_source_string(cond),
-            crate::verification::support::expr_to_source_string(invariant),
-            stmt_source(body)
-        ),
-        Stmt::Acquire { resource, body, .. } => {
-            format!("acquire {resource} {}", stmt_source(body))
-        }
-        Stmt::Task { body, .. } => format!("task {}", stmt_source(body)),
-        Stmt::TaskGroup { children, .. } => format!(
-            "task_group {{ {} }}",
-            children
-                .iter()
-                .map(stmt_source)
-                .collect::<Vec<_>>()
-                .join(" ")
-        ),
-        Stmt::Cancel { target, .. } => format!("cancel {target};"),
     }
 }
 
@@ -752,6 +707,46 @@ mod tests {
     }
 
     #[test]
+    fn array_index_mutant_is_generated_for_a_single_site() {
+        let stmt = parser::parse_body_expr("items[index]");
+        let mutants = site_mutants(&stmt);
+        let index_mutant = mutants
+            .iter()
+            .find(|mutant| mutant.operator == "array-index-plus-one")
+            .expect("array index mutant");
+        assert_eq!(
+            index_mutant.id,
+            format!("array-index:+1@{}", index_mutant.site)
+        );
+        let original = format!("{stmt:?}");
+        let mut changed = stmt;
+        assert!(mutate_at_site(
+            &mut changed,
+            index_mutant.site,
+            &index_mutant.kind
+        ));
+        assert_ne!(format!("{changed:?}"), original);
+    }
+
+    #[test]
+    fn all_unanalyzable_mutants_make_the_atom_inconclusive() {
+        let report = report_with_mutants(
+            "f".to_string(),
+            vec![MutantReport {
+                id: "op-flip:Add->Sub@0".to_string(),
+                operator: "binary-op-flip".to_string(),
+                site: 0,
+                outcome: "unanalyzable",
+                detail: "solver returned unknown".to_string(),
+            }],
+        );
+        assert_eq!(report.status, "inconclusive");
+        assert_eq!(report.tested, 1);
+        assert_eq!(report.killed, 0);
+        assert_eq!(report.unanalyzable, 1);
+    }
+
+    #[test]
     fn classifier_counts_only_structured_rejections() {
         let rejected = MumeiError::verification("rejected").with_verdict(VerdictKind::Rejected);
         let inconclusive =
@@ -759,5 +754,32 @@ mod tests {
         assert_eq!(rejected.verdict(), Some(VerdictKind::Rejected));
         assert_eq!(inconclusive.verdict(), Some(VerdictKind::Inconclusive));
         assert_eq!(MumeiError::verification("unmarked").verdict(), None);
+    }
+
+    fn verify_source(source: &str) -> Result<(), MumeiError> {
+        let items = parser::parse_module(source);
+        let Item::Atom(atom) = &items[0] else {
+            panic!("expected atom")
+        };
+        let module_env = ModuleEnv::default();
+        let hir = lower_atom_to_hir_with_env(atom, Some(&module_env));
+        let output_dir = tempfile::tempdir().expect("create verifier output directory");
+        verification::verify_with_config(&hir, output_dir.path(), &module_env, 10_000, 3)
+            .map(|_| ())
+    }
+
+    #[test]
+    fn real_postcondition_and_division_by_zero_failures_are_rejected() {
+        let postcondition = verify_source(
+            "atom bad(x: i64) -> i64\nrequires: true;\nensures: result > 0;\nbody: x;\n",
+        )
+        .expect_err("postcondition must fail");
+        assert_eq!(postcondition.verdict(), Some(VerdictKind::Rejected));
+
+        let division = verify_source(
+            "atom divide(x: i64) -> i64\nrequires: true;\nensures: true;\nbody: 1 / x;\n",
+        )
+        .expect_err("division by zero must fail");
+        assert_eq!(division.verdict(), Some(VerdictKind::Rejected));
     }
 }

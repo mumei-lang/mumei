@@ -2580,8 +2580,12 @@ fn verify_inner_impl(
                                 ));
                             let mut validation_status = None;
                             if enable_spurious_detection {
-                                let validation =
-                                    validate_counterexample(atom, &model_values, module_env);
+                                let validation = validate_counterexample(
+                                    atom,
+                                    &hir_atom.body_stmt,
+                                    &model_values,
+                                    module_env,
+                                );
                                 validation_status = Some(validation.validation_status.clone());
                                 if validation.validation_status == "spurious_candidate" {
                                     let symbols = validation

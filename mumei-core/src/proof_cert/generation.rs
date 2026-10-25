@@ -7,6 +7,7 @@ use super::status;
 use super::validation::{
     compute_certificate_hash, manual_lemma_reason_for_atom, parse_unsat_core_labels,
 };
+use crate::parser::parse_body_expr;
 use crate::reconstruction_loss::ReconstructionLoss;
 use crate::resolver;
 use crate::verification::{self, ModuleEnv};
@@ -324,9 +325,14 @@ pub fn generate_certificate_with_reconstruction_losses(
                 .iter()
                 .map(|binder| (binder.mumei_name.clone(), binder.lean_name.clone()))
                 .collect();
+            let replay_body = parse_body_expr(&atom.body_expr);
             let counterexample_validation = if z3_result == status::Z3_SAT {
-                let validation =
-                    verification::validate_counterexample(atom, &HashMap::new(), module_env);
+                let validation = verification::validate_counterexample(
+                    atom,
+                    &replay_body,
+                    &HashMap::new(),
+                    module_env,
+                );
                 Some(CounterexampleValidationMetadata {
                     validation_status: validation.validation_status,
                     validated_at: now.clone(),
@@ -335,8 +341,12 @@ pub fn generate_certificate_with_reconstruction_losses(
             } else {
                 None
             };
-            let symbol_provenance =
-                verification::detect_uninterpreted_symbols(atom, &HashMap::new(), module_env);
+            let symbol_provenance = verification::detect_uninterpreted_symbols(
+                atom,
+                &replay_body,
+                &HashMap::new(),
+                module_env,
+            );
             let unused_hypotheses = parse_unsat_core_labels(&z3_result).map(|unsat_core| {
                 let report = verification::detect_unused_hypotheses(atom, &unsat_core, module_env);
                 UnusedHypothesisMetadata {

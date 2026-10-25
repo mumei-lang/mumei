@@ -1135,8 +1135,10 @@ fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyCon
                 "failed"
             };
             if ctx.enable_spurious_detection && z3_result == "sat" {
+                let body_stmt = parser::parse_body_expr(&atom.body_expr);
                 let validation = verification::validate_counterexample(
                     atom,
+                    &body_stmt,
                     &counterexample_model,
                     ctx.module_env,
                 );
