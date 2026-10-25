@@ -42,6 +42,9 @@ pub(crate) enum Command {
         /// only trusts Z3-discharged (`unsat`) atoms unless this flag is set.
         #[arg(long)]
         allow_lean_verified: bool,
+        /// Reuse Z3-verified proofs from the opt-in local proof store.
+        #[arg(long)]
+        proof_store: bool,
     },
     /// Z3 formal verification only (no codegen)
     Verify {
@@ -88,6 +91,9 @@ pub(crate) enum Command {
         /// resolution. Off by default for backwards compatibility.
         #[arg(long)]
         allow_lean_verified: bool,
+        /// Reuse Z3-verified proofs from the opt-in local proof store.
+        #[arg(long)]
+        proof_store: bool,
         /// Enable cross-specification consistency verification across atoms and emit cross_spec.json with agent_artifact_mapping
         #[arg(long)]
         cross_spec_verify: bool,
@@ -166,6 +172,11 @@ pub(crate) enum Command {
         /// Path to an old proof certificate for spec drift detection
         #[arg(long)]
         detect_spec_drift: Option<String>,
+    },
+    /// Inspect or prune the local proof store
+    ProofStore {
+        #[command(subcommand)]
+        command: ProofStoreCommand,
     },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
@@ -356,6 +367,26 @@ pub(crate) enum Command {
         /// Arguments to pass to the compiled program
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ProofStoreCommand {
+    /// Show local proof-store entry counts and size
+    Stats {
+        #[arg(long)]
+        dir: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove old and/or invalid proof-store entries
+    Prune {
+        #[arg(long)]
+        dir: Option<String>,
+        #[arg(long)]
+        older_than_days: Option<u64>,
+        #[arg(long)]
+        invalid: bool,
     },
 }
 

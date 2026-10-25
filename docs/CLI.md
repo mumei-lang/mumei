@@ -33,6 +33,8 @@ mumei run src/main.mm --emit llvm-ir -o dist/app
 mumei verify src/main.mm
 mumei verify src/            # every .mm file under the directory
 mumei verify src/main.mm --json --proof-cert
+mumei verify src/main.mm --proof-store
+mumei build src/main.mm --proof-store
 ```
 
 Postcondition verification checks whether the requires and body constraints
@@ -47,6 +49,25 @@ surviving mutant fails the atom; only structured `Rejected` verdicts count as
 kills, while unknown or otherwise unanalyzable mutants do not. No-op `Pow`
 mutations are skipped. This shares the site-mutant engine with
 [`mumei controls`](CONTROLS.md), which provides a fuller per-atom report.
+
+The local proof store is opt-in with `--proof-store` or `[proof] store = true`
+in `mumei.toml`. `MUMEI_PROOF_STORE` selects its directory; otherwise it uses
+`$HOME/.mumei/proof-store`. Setting the environment variable does not enable
+the store. In `build`, `[proof] cache = false` disables it; an explicit
+`--proof-store` then prints a warning. Only successful Z3 proofs are stored.
+Trusted atoms, Lean-verified results, escalation candidates, failures, and
+inconclusive results are never stored or reused.
+
+### `mumei proof-store`
+
+```bash
+mumei proof-store stats [--dir <directory>] [--json]
+mumei proof-store prune [--dir <directory>] [--older-than-days <N>] [--invalid]
+```
+
+`stats` reports the entry count, total bytes, and invalid-entry count.
+`prune` removes entries selected by age and/or invalidity; at least one
+selector is required (otherwise the command exits with code 4).
 
 ### Exit codes
 

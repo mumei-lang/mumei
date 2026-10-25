@@ -19,6 +19,7 @@ pub(crate) fn cmd_build_command(command: Command) {
         emit,
         strict_imports,
         allow_lean_verified,
+        proof_store,
     } = command
     else {
         unreachable!("cmd_build_command called with non-build command");
@@ -30,11 +31,19 @@ pub(crate) fn cmd_build_command(command: Command) {
         &emit_target,
         strict_imports,
         allow_lean_verified,
+        proof_store,
     );
 }
 
 pub(crate) fn cmd_build_default(input: &str, output: &str) {
-    cmd_build(input, output, &emitter::EmitTarget::LlvmIr, false, false);
+    cmd_build(
+        input,
+        output,
+        &emitter::EmitTarget::LlvmIr,
+        false,
+        false,
+        false,
+    );
 }
 
 fn emit_target_from_cli(emit: &str) -> emitter::EmitTarget {
@@ -65,6 +74,36 @@ fn build_proof_flags(
         flags.push("bitvec_i64");
     }
     flags
+}
+
+fn lookup_proof_store(
+    store: Option<&resolver::ProofStore>,
+    atom: &parser::Atom,
+    module_env: &verification::ModuleEnv,
+    proof_hash: &str,
+) -> Option<resolver::VerificationCacheEntry> {
+    if atom.trust_level == parser::TrustLevel::Trusted
+        || verification::classify_atom_for_lean_escalation(
+            atom,
+            module_env,
+            proof_cert::status::Z3_UNSAT,
+            proof_cert::status::VERIFIED,
+        )
+        .should_escalate
+    {
+        return None;
+    }
+    let store = store?;
+    let z3_version = proof_cert::get_z3_version();
+    let key = resolver::ProofStore::key(proof_hash, &z3_version);
+    match store.lookup(&key, proof_hash, &z3_version) {
+        resolver::StoreLookup::Hit(entry) => Some(entry),
+        resolver::StoreLookup::Invalid(reason) => {
+            eprintln!("proof store entry for '{}' ignored: {reason}", atom.name);
+            None
+        }
+        resolver::StoreLookup::Miss => None,
+    }
 }
 
 /// Artifacts touched by the current `mumei build` invocation.
@@ -122,6 +161,7 @@ pub(crate) fn cmd_build(
     emit_target: &emitter::EmitTarget,
     strict_imports: bool,
     allow_lean_verified: bool,
+    proof_store_flag: bool,
 ) {
     let external_emitter = match emit_target {
         emitter::EmitTarget::External(name) => match emitter::load_external_emitter(name) {
@@ -157,6 +197,20 @@ pub(crate) fn cmd_build(
             manifest::BuildConfig::default(),
             manifest::ProofConfig::default(),
         )
+    };
+    if proof_store_flag && !proof_cfg.cache {
+        eprintln!("⚠️  --proof-store ignored because proof cache is disabled.");
+    }
+    let proof_store = if proof_cfg.cache && (proof_store_flag || proof_cfg.store) {
+        match resolver::ProofStore::open(None) {
+            Ok(store) => Some(store),
+            Err(error) => {
+                eprintln!("⚠️  proof store unavailable: {error}");
+                None
+            }
+        }
+    } else {
+        None
     };
 
     let (items, mut module_env, _imports, source) =
@@ -218,6 +272,7 @@ pub(crate) fn cmd_build(
     };
     let mut escalation_cert_results: std::collections::HashMap<String, (String, String)> =
         std::collections::HashMap::new();
+    let mut reused_store_atoms = std::collections::HashSet::new();
 
     let mut atom_count = 0;
     let mut artifacts_journal = ArtifactJournal::default();
@@ -450,12 +505,33 @@ pub(crate) fn cmd_build(
                             &proof_flags,
                         );
 
-                        let cache_hit = verification_cache
+                        let project_cache_hit = verification_cache
                             .get(&qualified_name)
                             .is_some_and(|entry| entry.proof_hash == proof_hash);
+                        let store_entry = if project_cache_hit {
+                            None
+                        } else {
+                            lookup_proof_store(
+                                proof_store.as_ref(),
+                                &qualified_method,
+                                &module_env,
+                                &proof_hash,
+                            )
+                        };
+                        let cache_hit = project_cache_hit || store_entry.is_some();
+                        if let Some(entry) = &store_entry {
+                            verification_cache_new.insert(qualified_name.clone(), entry.clone());
+                            reused_store_atoms.insert(qualified_name.clone());
+                        }
 
                         if cache_hit {
-                            println!("  ⚖️  [2/3] Verification: Skipped (unchanged, cached) ⏩");
+                            if store_entry.is_some() {
+                                println!("  ⚖️  [2/3] Verification: Skipped (reused from proof store) ⏩");
+                            } else {
+                                println!(
+                                    "  ⚖️  [2/3] Verification: Skipped (unchanged, cached) ⏩"
+                                );
+                            }
                             module_env.mark_verified(&qualified_name);
                         } else {
                             match verification::verify_with_verification_config(
@@ -501,6 +577,32 @@ pub(crate) fn cmd_build(
                                             cover_results,
                                         },
                                     );
+                                    if qualified_method.trust_level != parser::TrustLevel::Trusted
+                                        && !verification::classify_atom_for_lean_escalation(
+                                            &qualified_method,
+                                            &module_env,
+                                            proof_cert::status::Z3_UNSAT,
+                                            proof_cert::status::VERIFIED,
+                                        )
+                                        .should_escalate
+                                    {
+                                        if let (Some(store), Some(entry)) = (
+                                            proof_store.as_ref(),
+                                            verification_cache_new.get(&qualified_name),
+                                        ) {
+                                            let z3_version = proof_cert::get_z3_version();
+                                            if let Err(error) = store.record(
+                                                &qualified_name,
+                                                &entry.proof_hash,
+                                                &z3_version,
+                                                entry,
+                                            ) {
+                                                eprintln!(
+                                                    "proof store write for '{qualified_name}' failed: {error}"
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     let error_text = format!("{e}");
@@ -644,12 +746,28 @@ pub(crate) fn cmd_build(
                     let proof_hash =
                         resolver::compute_proof_hash_with_flags(atom, &module_env, &proof_flags);
 
-                    let cache_hit = verification_cache
+                    let project_cache_hit = verification_cache
                         .get(&atom.name)
                         .is_some_and(|entry| entry.proof_hash == proof_hash);
+                    let store_entry = if project_cache_hit {
+                        None
+                    } else {
+                        lookup_proof_store(proof_store.as_ref(), atom, &module_env, &proof_hash)
+                    };
+                    let cache_hit = project_cache_hit || store_entry.is_some();
+                    if let Some(entry) = &store_entry {
+                        verification_cache_new.insert(atom.name.clone(), entry.clone());
+                        reused_store_atoms.insert(atom.name.clone());
+                    }
 
                     if cache_hit {
-                        println!("  ⚖️  [2/3] Verification: Skipped (unchanged, cached) ⏩");
+                        if store_entry.is_some() {
+                            println!(
+                                "  ⚖️  [2/3] Verification: Skipped (reused from proof store) ⏩"
+                            );
+                        } else {
+                            println!("  ⚖️  [2/3] Verification: Skipped (unchanged, cached) ⏩");
+                        }
                         module_env.mark_verified(&atom.name);
                     } else {
                         match verification::verify_with_verification_config(
@@ -694,6 +812,33 @@ pub(crate) fn cmd_build(
                                         cover_results,
                                     },
                                 );
+                                if atom.trust_level != parser::TrustLevel::Trusted
+                                    && !verification::classify_atom_for_lean_escalation(
+                                        atom,
+                                        &module_env,
+                                        proof_cert::status::Z3_UNSAT,
+                                        proof_cert::status::VERIFIED,
+                                    )
+                                    .should_escalate
+                                {
+                                    if let (Some(store), Some(entry)) = (
+                                        proof_store.as_ref(),
+                                        verification_cache_new.get(&atom.name),
+                                    ) {
+                                        let z3_version = proof_cert::get_z3_version();
+                                        if let Err(error) = store.record(
+                                            &atom.name,
+                                            &entry.proof_hash,
+                                            &z3_version,
+                                            entry,
+                                        ) {
+                                            eprintln!(
+                                                "proof store write for '{}' failed: {error}",
+                                                atom.name
+                                            );
+                                        }
+                                    }
+                                }
                             }
                             Err(e) => {
                                 let error_text = format!("{e}");
@@ -924,7 +1069,7 @@ pub(crate) fn cmd_build(
             (None, None)
         };
 
-        let cert = proof_cert::generate_certificate(
+        let mut cert = proof_cert::generate_certificate(
             input,
             &cert_atoms,
             &cert_results,
@@ -938,6 +1083,10 @@ pub(crate) fn cmd_build(
                 budget_policy_fingerprint: proof_cert::budget_policy_fingerprint_from_env(),
             }),
         );
+        for atom in &mut cert.atoms {
+            atom.reused_from_store = reused_store_atoms.contains(&atom.name);
+        }
+        proof_cert::refresh_certificate_integrity(&mut cert);
 
         let cert_path = output_dir.join(format!("{}.proof-cert.json", file_stem));
         if matches!(emit_target, emitter::EmitTarget::ProofCert) {

@@ -1,3 +1,9 @@
+### Unreleased: opt-in local proof store
+
+- Added an opt-in per-user proof store for reusing verified Z3 obligations across projects, enabled by `--proof-store` or `[proof] store = true`.
+- Added `mumei proof-store stats` and `prune`; certificates and Claim Book evidence identify proofs reused from the local store.
+- Trusted, failed, Lean-verified, escalation-candidate, and inconclusive results are not stored or reused.
+
 ### 2026-10-24: v0.6.22 release version bump
 
 - **Workspace and member crate versions**: bumped versions from `0.6.21` to

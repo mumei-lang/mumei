@@ -372,6 +372,7 @@ pub fn generate_certificate_with_reconstruction_losses(
                 z3_check_result: z3_result,
                 content_hash,
                 status,
+                reused_from_store: false,
                 spec_validation_result,
                 proof_hash,
                 dependencies,

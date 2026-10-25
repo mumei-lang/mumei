@@ -634,6 +634,11 @@ pub fn create_claimbook(
                 "none".to_string(),
                 "no certificate entry exists for this atom".to_string(),
             ));
+        let evidence_kind = if entry.is_some_and(|atom| atom.reused_from_store) {
+            format!("{evidence_kind} (reused from local proof store)")
+        } else {
+            evidence_kind
+        };
         if verification_result == Some(status::CERTIFICATE_DEPENDENCY_CHANGED) {
             grade = SealGrade::G0;
             own_reason = DEPENDENCY_CONTRACT_CHANGED_REASON.to_string();

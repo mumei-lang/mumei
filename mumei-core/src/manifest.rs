@@ -6,7 +6,7 @@
 //! - `[package]`: プロジェクトメタデータ（name, version, authors, description）
 //! - `[dependencies]`: パッケージ依存（path / git / version）
 //! - `[build]`: ビルド設定（verify, max_unroll）
-//! - `[proof]`: 検証設定（cache, timeout_ms, cross_spec_verify）
+//! - `[proof]`: 検証設定（cache, timeout_ms, cross_spec_verify, store）
 //! - `[effects]`: エフェクト境界設定（allowed, denied）
 //! - `[registry]`: リモートパッケージレジストリ設定（url, timeout_ms）
 use serde::Deserialize;
@@ -95,6 +95,9 @@ pub struct ProofConfig {
     /// 複数仕様間の契約整合性検証を実行するか（デフォルト: true）
     #[serde(default = "default_true")]
     pub cross_spec_verify: bool,
+    /// Share verified Z3 proofs through the per-user local proof store (default: false).
+    #[serde(default)]
+    pub store: bool,
 }
 impl Default for ProofConfig {
     fn default() -> Self {
@@ -102,6 +105,7 @@ impl Default for ProofConfig {
             cache: true,
             timeout_ms: 10000,
             cross_spec_verify: true,
+            store: false,
         }
     }
 }

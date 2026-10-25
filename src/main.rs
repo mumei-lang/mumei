@@ -94,6 +94,7 @@ fn main() {
             allow_lean_verified,
             strict,
         }) => commands::verify_cert::cmd_verify_cert(&cert, &input, allow_lean_verified, strict),
+        Some(Command::ProofStore { command }) => commands::proof_store::cmd_proof_store(command),
         Some(Command::Claims {
             input,
             cert,
