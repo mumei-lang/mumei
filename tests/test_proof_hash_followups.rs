@@ -177,6 +177,43 @@ fn qualified_callee_contract_change_invalidates_caller_cache() {
 }
 
 #[test]
+fn dot_call_uses_qualified_dependency_hash_key() {
+    let fixture = Fixture::new();
+    let (a, _, g) = collision_project(&fixture, "result >= x", "result >= 0");
+    let source = std::fs::read_to_string(&g).expect("read caller source");
+    std::fs::write(&g, source.replace("lib::f(x)", "lib.f(x)")).expect("write dot-call caller");
+
+    let cert_path = fixture.root.join("dot-call.proof.json");
+    assert_success(&fixture.certify(&g, &cert_path), "certify dot-call caller");
+    let cert: Value =
+        serde_json::from_slice(&std::fs::read(&cert_path).unwrap()).expect("parse certificate");
+    assert!(
+        cert["atoms"][0]["dependency_hashes"]["atom:lib::f"].is_string(),
+        "{cert}"
+    );
+
+    let source = std::fs::read_to_string(&a).expect("read aliased callee source");
+    std::fs::write(
+        &a,
+        source.replace("ensures: result >= x;", "ensures: result >= 0;"),
+    )
+    .expect("weaken aliased callee contract");
+    let changed = fixture.verify(&g, &[]);
+    let text = output_text(&changed);
+    assert!(!changed.status.success(), "{text}");
+    assert!(!text.contains("'g': skipped (unchanged, cached)"), "{text}");
+
+    let checked = fixture.verify_cert(&cert_path, &g, false);
+    let checked_text = output_text(&checked);
+    assert_eq!(checked.status.code(), Some(1), "{checked_text}");
+    assert!(
+        checked_text.contains("g: dependency_changed"),
+        "{checked_text}"
+    );
+    assert!(checked_text.contains("atom:lib::f"), "{checked_text}");
+}
+
+#[test]
 fn qualified_callee_certificate_reports_qualified_key_deterministically() {
     let fixture = Fixture::new();
     let (a, _, g) = collision_project(&fixture, "result >= x", "result >= 0");
@@ -364,4 +401,80 @@ fn legacy_bare_dependency_key_remains_verifiable_for_aliased_call() {
     assert_eq!(checked.status.code(), Some(0), "{text}");
     assert!(text.contains("g: proven"), "{text}");
     assert!(a.exists());
+}
+
+#[test]
+fn legacy_bare_key_is_unchecked_when_another_import_owns_the_bare_name() {
+    let fixture = Fixture::new();
+    let (a, _, aliased) = collision_project(&fixture, "result >= x", "result == x");
+    let bare = fixture.write(
+        "bare.mm",
+        "import \"a/f.mm\";\n\
+         atom g(x: i64) -> i64\n\
+         requires: x >= 0;\n\
+         ensures: result >= x;\n\
+         body: f(x);\n",
+    );
+    let bare_cert_path = fixture.root.join("bare.proof.json");
+    let alias_cert_path = fixture.root.join("alias-collision.proof.json");
+    assert_success(
+        &fixture.certify(&bare, &bare_cert_path),
+        "certify bare caller",
+    );
+    assert_success(
+        &fixture.certify(&aliased, &alias_cert_path),
+        "certify aliased caller with colliding imports",
+    );
+
+    let bare_cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&bare_cert_path).unwrap())
+            .expect("parse bare certificate");
+    let bare_hash = bare_cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "g")
+        .and_then(|atom| atom.dependency_hashes.as_ref())
+        .and_then(|hashes| hashes.get("atom:f"))
+        .expect("bare dependency hash")
+        .clone();
+    let mut alias_cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&alias_cert_path).unwrap())
+            .expect("parse aliased certificate");
+    let g = alias_cert
+        .atoms
+        .iter_mut()
+        .find(|atom| atom.name == "g")
+        .expect("aliased g certificate");
+    g.dependency_hashes = Some(BTreeMap::from([("atom:f".to_string(), bare_hash)]));
+    refresh_certificate_integrity(&mut alias_cert);
+    std::fs::write(
+        &alias_cert_path,
+        serde_json::to_vec_pretty(&alias_cert).unwrap(),
+    )
+    .expect("write legacy-key certificate");
+
+    let source = std::fs::read_to_string(&a).expect("read aliased callee source");
+    std::fs::write(
+        &a,
+        source.replace("ensures: result >= x;", "ensures: result >= 0;"),
+    )
+    .expect("weaken aliased callee contract");
+
+    let unchecked = fixture.verify_cert(&alias_cert_path, &aliased, false);
+    let unchecked_text = output_text(&unchecked);
+    assert_eq!(unchecked.status.code(), Some(0), "{unchecked_text}");
+    assert!(
+        unchecked_text.contains("g: dependency_unchecked"),
+        "{unchecked_text}"
+    );
+    assert!(!unchecked_text.contains("g: proven"), "{unchecked_text}");
+
+    let strict = fixture.verify_cert(&alias_cert_path, &aliased, true);
+    let strict_text = output_text(&strict);
+    assert_eq!(strict.status.code(), Some(1), "{strict_text}");
+    assert!(
+        strict_text.contains("g: dependency_unchecked"),
+        "{strict_text}"
+    );
+    assert!(!strict_text.contains("g: proven"), "{strict_text}");
 }

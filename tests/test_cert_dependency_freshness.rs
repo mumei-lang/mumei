@@ -1125,6 +1125,81 @@ fn package_name_alias_does_not_override_declared_dependency_name() {
 }
 
 #[test]
+fn duplicate_package_names_do_not_register_an_ambiguous_alias() {
+    let fixture = Fixture::new();
+    let package_root = fixture.root.join("packages");
+    let x_dir = package_root.join("x");
+    let y_dir = package_root.join("y");
+    for dir in [&x_dir, &y_dir] {
+        std::fs::create_dir_all(dir.join("src")).expect("create package source directory");
+        std::fs::write(
+            dir.join("mumei.toml"),
+            "[package]\nname = \"common\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write dependency manifest");
+    }
+    std::fs::write(
+        x_dir.join("src/main.mm"),
+        "atom f(x: i64) -> i64\n\
+         requires: x >= 0;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write x dependency source");
+    std::fs::write(
+        y_dir.join("src/main.mm"),
+        "atom f(x: i64) -> i64\n\
+         requires: x >= 0;\n\
+         ensures: result == x + 1;\n\
+         body: x + 1;\n",
+    )
+    .expect("write y dependency source");
+
+    let consumer = fixture.root.join("consumer");
+    std::fs::create_dir_all(consumer.join("src")).expect("create consumer directory");
+    std::fs::write(
+        consumer.join("mumei.toml"),
+        format!(
+            "[package]\nname = \"duplicate_package_names_consumer\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nx = {{ path = \"{}\" }}\ny = {{ path = \"{}\" }}\n",
+            x_dir.display(),
+            y_dir.display(),
+        ),
+    )
+    .expect("write consumer manifest");
+    let source = consumer.join("src/main.mm");
+    std::fs::write(
+        &source,
+        "atom g(x: i64) -> i64\n\
+         requires: x >= 0;\n\
+         ensures: result == x;\n\
+         body: x::f(x);\n",
+    )
+    .expect("write consumer source");
+
+    for _ in 0..3 {
+        let result = fixture.run_in_directory(&consumer, &["verify", "src/main.mm"]);
+        assert_success(
+            &result,
+            "verify a qualified dependency with duplicate package names",
+        );
+    }
+
+    std::fs::write(
+        &source,
+        "atom g(x: i64) -> i64\n\
+         requires: x >= 0;\n\
+         ensures: result >= 0;\n\
+         body: common::f(x);\n",
+    )
+    .expect("write consumer source using ambiguous package name");
+    let missing_alias = fixture.run_in_directory(&consumer, &["verify", "src/main.mm"]);
+    let text = output_text(&missing_alias);
+    assert!(!missing_alias.status.success(), "{text}");
+    assert!(text.contains("Unknown function: common::f"), "{text}");
+}
+
+#[test]
 fn standard_library_bundle_imports_are_dependency_fresh() {
     let fixture = Fixture::new();
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

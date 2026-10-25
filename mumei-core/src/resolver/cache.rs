@@ -629,7 +629,9 @@ pub(crate) fn compute_legacy_dependency_hashes(
     atom: &crate::parser::Atom,
     module_env: &ModuleEnv,
 ) -> BTreeMap<String, String> {
-    compute_dependency_hashes_with_names(atom, module_env, true)
+    let mut hashes = compute_dependency_hashes_with_names(atom, module_env, true);
+    hashes.retain(|key, _| !legacy_dependency_key_conflicts(atom, key, module_env));
+    hashes
 }
 
 fn compute_dependency_hashes_with_names(
@@ -651,14 +653,9 @@ fn compute_dependency_hashes_with_names(
             continue;
         };
 
-        let mut hasher = Sha256::new();
-        hash_callee_contract(&mut hasher, callee_atom, module_env, false);
-        hash_dependency_signature_units(&mut hasher, callee_atom, module_env);
-        hash_string_map(&mut hasher, "effect_pre", &callee_atom.effect_pre);
-        hash_string_map(&mut hasher, "effect_post", &callee_atom.effect_post);
         hashes.insert(
             format!("atom:{}", callee_atom.name),
-            format!("{:x}", hasher.finalize()),
+            compute_dependency_hash_for_callee(callee_atom, module_env),
         );
         pending.extend(
             dependency_callees(callee_atom, module_env, legacy_names)
@@ -714,6 +711,40 @@ fn compute_dependency_hashes_with_names(
     }
 
     hashes
+}
+
+fn compute_dependency_hash_for_callee(atom: &Atom, module_env: &ModuleEnv) -> String {
+    let mut hasher = Sha256::new();
+    hash_callee_contract(&mut hasher, atom, module_env, false);
+    hash_dependency_signature_units(&mut hasher, atom, module_env);
+    hash_string_map(&mut hasher, "effect_pre", &atom.effect_pre);
+    hash_string_map(&mut hasher, "effect_post", &atom.effect_post);
+    format!("{:x}", hasher.finalize())
+}
+
+fn legacy_dependency_key_conflicts(atom: &Atom, key: &str, module_env: &ModuleEnv) -> bool {
+    let Some(bare_name) = key.strip_prefix("atom:") else {
+        return false;
+    };
+    let Some(bare_atom) = module_env.get_atom(bare_name) else {
+        return false;
+    };
+
+    collect_written_callees_from_atom(atom)
+        .into_iter()
+        .filter(|name| name.rsplit("::").next() == Some(bare_name))
+        .any(|qualified_name| {
+            if !qualified_name.contains("::") {
+                return false;
+            }
+            let Some(qualified_atom) = module_env.get_atom(&qualified_name) else {
+                return false;
+            };
+            let mut renamed = qualified_atom.clone();
+            renamed.name = bare_name.to_string();
+            compute_dependency_hash_for_callee(&renamed, module_env)
+                != compute_dependency_hash_for_callee(bare_atom, module_env)
+        })
 }
 
 fn dependency_callees(atom: &Atom, module_env: &ModuleEnv, legacy_names: bool) -> HashSet<String> {
@@ -938,10 +969,16 @@ pub fn collect_written_callees_from_body(body_expr: &str) -> HashSet<String> {
                 while separator < len && chars[separator].is_ascii_whitespace() {
                     separator += 1;
                 }
-                if separator + 1 >= len || chars[separator] != ':' || chars[separator + 1] != ':' {
+                let mut segment = if separator < len && chars[separator] == '.' {
+                    separator + 1
+                } else if separator + 1 < len
+                    && chars[separator] == ':'
+                    && chars[separator + 1] == ':'
+                {
+                    separator + 2
+                } else {
                     break;
-                }
-                let mut segment = separator + 2;
+                };
                 while segment < len && chars[segment].is_ascii_whitespace() {
                     segment += 1;
                 }
@@ -1247,6 +1284,10 @@ mod nominal_hash_tests {
         assert_eq!(collect("Point::new(1)"), names(&["Point::new"]));
         assert_eq!(collect("lib :: f(x)"), names(&["lib::f"]));
         assert_eq!(collect("a :: b :: f (x)"), names(&["a::b::f"]));
+        assert_eq!(collect("math.add(x)"), names(&["math::add"]));
+        assert_eq!(collect("r.hi - r.lo"), names(&[]));
+        assert_eq!(collect("a.b.c(1)"), names(&["a::b::c"]));
+        assert_eq!(collect("a . b (x)"), names(&["a::b"]));
         assert_eq!(collect("lib::K + g(x)"), names(&["g"]));
         assert_eq!(collect("if(cond) { while(true) { g(x) } }"), names(&["g"]));
 

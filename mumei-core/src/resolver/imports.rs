@@ -877,93 +877,30 @@ pub(crate) fn register_imported_items_with_source(
             None => module_env.register_atom(atom),
         };
     };
-    let register_aliased_atom =
-        |module_env: &mut ModuleEnv, atom: &parser::Atom, prefix: &str, fqn: String| {
-            let mut fqn_atom = atom.clone();
-            fqn_atom.name = fqn;
-            fqn_atom
-                .spec_metadata
-                .insert(IMPORT_ALIAS_METADATA_KEY.to_string(), prefix.to_string());
-            register_atom(module_env, &fqn_atom);
-        };
 
     for item in items {
         match item {
-            Item::TypeDef(refined_type) => {
-                module_env.register_type(refined_type);
-                if let Some(prefix) = alias {
-                    let mut fqn_type = refined_type.clone();
-                    fqn_type.name = format!("{}::{}", prefix, refined_type.name);
-                    module_env.register_type(&fqn_type);
-                }
-            }
-            Item::StructDef(struct_def) => {
-                module_env.register_struct(struct_def);
-                if let Some(prefix) = alias {
-                    let mut fqn_struct = struct_def.clone();
-                    fqn_struct.name = format!("{}::{}", prefix, struct_def.name);
-                    module_env.register_struct(&fqn_struct);
-                }
-            }
-            Item::Atom(atom) => {
-                register_atom(module_env, atom);
-                if let Some(prefix) = alias {
-                    let fqn = format!("{}::{}", prefix, atom.name);
-                    register_aliased_atom(module_env, atom, prefix, fqn);
-                }
-            }
-            Item::EnumDef(enum_def) => {
-                module_env.register_enum(enum_def);
-                if let Some(prefix) = alias {
-                    let mut fqn_enum = enum_def.clone();
-                    fqn_enum.name = format!("{}::{}", prefix, enum_def.name);
-                    module_env.register_enum(&fqn_enum);
-                }
-            }
+            Item::TypeDef(refined_type) => module_env.register_type(refined_type),
+            Item::StructDef(struct_def) => module_env.register_struct(struct_def),
+            Item::Atom(atom) => register_atom(module_env, atom),
+            Item::EnumDef(enum_def) => module_env.register_enum(enum_def),
             Item::TraitDef(trait_def) => {
                 module_env.register_trait(trait_def);
                 // トレイトは FQN 登録不要（トレイト名はグローバルに一意と仮定）
             }
-            Item::ImplDef(impl_def) => {
-                module_env.register_impl(impl_def);
-            }
-            Item::ResourceDef(resource_def) => {
-                module_env.register_resource(resource_def);
-                if let Some(prefix) = alias {
-                    let mut fqn_resource = resource_def.clone();
-                    fqn_resource.name = format!("{}::{}", prefix, resource_def.name);
-                    module_env.register_resource(&fqn_resource);
-                }
-            }
+            Item::ImplDef(impl_def) => module_env.register_impl(impl_def),
+            Item::ResourceDef(resource_def) => module_env.register_resource(resource_def),
             Item::Import(_) => {
                 // 再帰的に処理済み
             }
-            Item::EffectDef(effect_def) => {
-                module_env.register_effect(effect_def);
-                if let Some(prefix) = alias {
-                    let mut fqn_effect = effect_def.clone();
-                    fqn_effect.name = format!("{}::{}", prefix, effect_def.name);
-                    module_env.register_effect(&fqn_effect);
-                }
-            }
-            Item::CapabilityDef(capability_def) => {
-                module_env.register_capability(capability_def);
-                if let Some(prefix) = alias {
-                    let mut fqn_capability = capability_def.clone();
-                    fqn_capability.name = format!("{}::{}", prefix, capability_def.name);
-                    module_env.register_capability(&fqn_capability);
-                }
-            }
+            Item::EffectDef(effect_def) => module_env.register_effect(effect_def),
+            Item::CapabilityDef(capability_def) => module_env.register_capability(capability_def),
             Item::ExternBlock(extern_block) => {
                 module_env.register_extern_block(extern_block);
                 // ExternBlock 内の関数を trusted atom として ModuleEnv に登録
                 for ext_fn in &extern_block.functions {
                     let atom = crate::trust_boundary::extern_fn_as_trusted_atom(ext_fn);
                     register_atom(module_env, &atom);
-                    if let Some(prefix) = alias {
-                        let fqn = format!("{}::{}", prefix, ext_fn.name);
-                        register_aliased_atom(module_env, &atom, prefix, fqn);
-                    }
                 }
             }
             Item::ImplBlock(impl_block) => {
@@ -971,13 +908,88 @@ pub(crate) fn register_imported_items_with_source(
                     let mut qualified = method.clone();
                     qualified.name = format!("{}::{}", impl_block.struct_name, method.name);
                     register_atom(module_env, &qualified);
-                    if let Some(prefix) = alias {
-                        let fqn =
-                            format!("{}::{}::{}", prefix, impl_block.struct_name, method.name);
-                        register_aliased_atom(module_env, method, prefix, fqn);
-                    }
                 }
             }
+        }
+    }
+
+    if let Some(prefix) = alias {
+        register_imported_alias_names(items, prefix, module_env, source_file);
+    }
+}
+
+pub(crate) fn register_imported_alias_names(
+    items: &[Item],
+    alias: &str,
+    module_env: &mut ModuleEnv,
+    source_file: Option<&str>,
+) {
+    let register_atom = |module_env: &mut ModuleEnv, atom: &parser::Atom| {
+        match source_file {
+            Some(file) => module_env.register_atom(&with_source_file(atom, file)),
+            None => module_env.register_atom(atom),
+        };
+    };
+    let register_aliased_atom = |module_env: &mut ModuleEnv, atom: &parser::Atom, fqn: String| {
+        let mut fqn_atom = atom.clone();
+        fqn_atom.name = fqn;
+        fqn_atom
+            .spec_metadata
+            .insert(IMPORT_ALIAS_METADATA_KEY.to_string(), alias.to_string());
+        register_atom(module_env, &fqn_atom);
+    };
+
+    for item in items {
+        match item {
+            Item::TypeDef(refined_type) => {
+                let mut fqn_type = refined_type.clone();
+                fqn_type.name = format!("{}::{}", alias, refined_type.name);
+                module_env.register_type(&fqn_type);
+            }
+            Item::StructDef(struct_def) => {
+                let mut fqn_struct = struct_def.clone();
+                fqn_struct.name = format!("{}::{}", alias, struct_def.name);
+                module_env.register_struct(&fqn_struct);
+            }
+            Item::Atom(atom) => {
+                register_aliased_atom(module_env, atom, format!("{}::{}", alias, atom.name));
+            }
+            Item::EnumDef(enum_def) => {
+                let mut fqn_enum = enum_def.clone();
+                fqn_enum.name = format!("{}::{}", alias, enum_def.name);
+                module_env.register_enum(&fqn_enum);
+            }
+            Item::ResourceDef(resource_def) => {
+                let mut fqn_resource = resource_def.clone();
+                fqn_resource.name = format!("{}::{}", alias, resource_def.name);
+                module_env.register_resource(&fqn_resource);
+            }
+            Item::EffectDef(effect_def) => {
+                let mut fqn_effect = effect_def.clone();
+                fqn_effect.name = format!("{}::{}", alias, effect_def.name);
+                module_env.register_effect(&fqn_effect);
+            }
+            Item::CapabilityDef(capability_def) => {
+                let mut fqn_capability = capability_def.clone();
+                fqn_capability.name = format!("{}::{}", alias, capability_def.name);
+                module_env.register_capability(&fqn_capability);
+            }
+            Item::ExternBlock(extern_block) => {
+                for ext_fn in &extern_block.functions {
+                    let atom = crate::trust_boundary::extern_fn_as_trusted_atom(ext_fn);
+                    register_aliased_atom(module_env, &atom, format!("{}::{}", alias, ext_fn.name));
+                }
+            }
+            Item::ImplBlock(impl_block) => {
+                for method in &impl_block.methods {
+                    register_aliased_atom(
+                        module_env,
+                        method,
+                        format!("{}::{}::{}", alias, impl_block.struct_name, method.name),
+                    );
+                }
+            }
+            Item::TraitDef(_) | Item::ImplDef(_) | Item::Import(_) => {}
         }
     }
 }
