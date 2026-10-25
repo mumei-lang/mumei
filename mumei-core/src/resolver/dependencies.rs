@@ -1,20 +1,36 @@
 use crate::parser;
 use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::cache::{load_cache, save_cache};
 use super::imports::{
-    mark_dependency_atoms_with_cert, register_imported_items_with_source,
-    resolve_imports_recursive, verify_import_certificate, ResolverContext,
+    mark_dependency_atoms_with_cert, register_imported_alias_names,
+    register_imported_items_with_source, resolve_imports_recursive, verify_import_certificate,
+    ResolverContext,
 };
 
 struct DeferredCertificateCheck {
     dependency_name: String,
+    package_alias: Option<String>,
     module_dir: PathBuf,
     entry_path: PathBuf,
     items: Vec<parser::Item>,
     load_message: Option<String>,
+}
+
+fn package_name_alias(
+    package_dir: &Path,
+    dependency_name: &str,
+    manifest: &crate::manifest::Manifest,
+) -> Option<String> {
+    crate::manifest::load(&package_dir.join("mumei.toml"))
+        .ok()
+        .map(|manifest| manifest.package.name)
+        .filter(|package_name| {
+            package_name != dependency_name && !manifest.dependencies.contains_key(package_name)
+        })
 }
 
 /// mumei.toml の [dependencies] セクションを処理し、
@@ -114,6 +130,7 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                 if persist_cache {
                     save_cache(&cache_path, &cache);
                 }
+                let package_alias = package_name_alias(&abs_path, dep_name, manifest);
                 register_imported_items_with_source(
                     &items,
                     Some(dep_name),
@@ -122,6 +139,7 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                 );
                 deferred_certificates.push(DeferredCertificateCheck {
                     dependency_name: dep_name.clone(),
+                    package_alias,
                     module_dir: abs_path,
                     entry_path: entry_path.to_path_buf(),
                     items,
@@ -226,6 +244,7 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                 if persist_cache {
                     save_cache(&cache_path, &cache);
                 }
+                let package_alias = package_name_alias(&clone_dir, dep_name, manifest);
                 register_imported_items_with_source(
                     &items,
                     Some(dep_name),
@@ -234,6 +253,7 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                 );
                 deferred_certificates.push(DeferredCertificateCheck {
                     dependency_name: dep_name.clone(),
+                    package_alias,
                     module_dir: clone_dir,
                     entry_path: entry_path.to_path_buf(),
                     items,
@@ -297,6 +317,7 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                     if persist_cache {
                         save_cache(&cache_path, &cache);
                     }
+                    let package_alias = package_name_alias(&pkg_dir, dep_name, manifest);
                     register_imported_items_with_source(
                         &items,
                         Some(dep_name),
@@ -305,6 +326,7 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                     );
                     deferred_certificates.push(DeferredCertificateCheck {
                         dependency_name: dep_name.clone(),
+                        package_alias,
                         module_dir: pkg_dir.clone(),
                         entry_path: entry_path.to_path_buf(),
                         items,
@@ -332,6 +354,33 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
     }
 
     deferred_certificates.sort_by(|a, b| a.dependency_name.cmp(&b.dependency_name));
+    let mut package_alias_claims = HashMap::new();
+    for deferred in &deferred_certificates {
+        if let Some(package_alias) = &deferred.package_alias {
+            *package_alias_claims
+                .entry(package_alias.clone())
+                .or_insert(0usize) += 1;
+        }
+    }
+    for deferred in &mut deferred_certificates {
+        if deferred
+            .package_alias
+            .as_ref()
+            .is_some_and(|alias| package_alias_claims.get(alias) != Some(&1))
+        {
+            deferred.package_alias = None;
+        }
+    }
+    for deferred in &deferred_certificates {
+        if let Some(package_alias) = &deferred.package_alias {
+            register_imported_alias_names(
+                &deferred.items,
+                package_alias,
+                module_env,
+                deferred.entry_path.to_str(),
+            );
+        }
+    }
     let verified_certificates = deferred_certificates
         .into_iter()
         .map(|deferred| {
@@ -347,9 +396,15 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
         })
         .collect::<Vec<_>>();
     for (deferred, cert_results) in verified_certificates {
+        let package_aliases = deferred
+            .package_alias
+            .as_deref()
+            .into_iter()
+            .collect::<Vec<_>>();
         mark_dependency_atoms_with_cert(
             &deferred.items,
             &deferred.dependency_name,
+            &package_aliases,
             &cert_results,
             module_env,
             strict_imports,
