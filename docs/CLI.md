@@ -186,6 +186,22 @@ least one mutation survived, and `4` indicates missing or unparsable input or
 an unknown atom. See [Contract controls](CONTROLS.md) for statuses, outcomes,
 and the distinction from `verify --enable-vacuity-check`.
 
+## `mumei observe`
+
+```bash
+mumei observe src/main.mm test-harvest.json
+mumei observe src/main.mm test-harvest.json --json --atom Point::get
+```
+
+`observe` checks `mumei.test-harvest/v1` examples, relations, and expected
+rejections against atom contracts using the verifier. JSON output uses
+`mumei.observation-check/v1`; each observation is `consistent`,
+`contradicts_ensures`, `outside_requires`, `rejection_explained`,
+`requires_admits_rejected`, `inconclusive`, or `not_checked`. Exit code `1`
+indicates a contradiction or a rejected input admitted by `requires`; code `4`
+indicates invalid input or an unparsable source file. `--atom` filters by the
+observation's target name.
+
 ### SARIF output
 
 `mumei verify <file-or-directory> --emit sarif` writes a SARIF 2.1.0 log to
