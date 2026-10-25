@@ -118,6 +118,22 @@ itself fail the gate. When `mumei.toml` has a `[charter]` section, its
 with `--charter`. A Charter symlink that resolves outside the project is
 rejected.
 
+## `mumei controls`
+
+```bash
+mumei controls src/main.mm
+mumei controls src/main.mm --json --atom Point::get
+mumei controls src/main.mm --max-mutants 16
+```
+
+`controls` reports whether each verified atom contract rejects deterministic
+one-site implementation mutations. It defaults to 32 mutants per atom and
+supports an optional qualified atom filter. JSON reports use
+`mumei.controls-report/v1`. Exit code `0` means no atom is weak, `1` means at
+least one mutation survived, and `4` indicates missing or unparsable input or
+an unknown atom. See [Contract controls](CONTROLS.md) for statuses, outcomes,
+and the distinction from `verify --enable-vacuity-check`.
+
 The check writes `charter_report.json`; `--json` also prints the report to
 standard output. Its top-level `status` is `pass` or `fail`, and every atom
 result identifies its relative Charter path. When a matching claim exists,

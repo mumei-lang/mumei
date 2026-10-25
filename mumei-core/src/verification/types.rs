@@ -1,6 +1,13 @@
 use super::module_env::ModuleEnv;
 use super::*;
 use crate::lowering::{lower, LoweredType};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VerdictKind {
+    Rejected,
+    Inconclusive,
+}
 
 /// Word-boundary-aware replacement of the placeholder `v` in constraint strings.
 /// Uses regex `\bv\b` to avoid corrupting identifiers like "value" or "divisor".
@@ -147,6 +154,7 @@ pub enum MumeiError {
         /// エディタや LSP がインライン装飾用に取り出して表示する。
         counterexample: Option<serde_json::Value>,
         counterexample_provenance: Option<serde_json::Value>,
+        verdict: Option<VerdictKind>,
     },
     #[error("Contract Mutation: atom '{atom_name}' contract hash changed from {expected_hash} to {actual_hash}")]
     #[diagnostic(code(mumei::contract_mutation))]
@@ -206,6 +214,7 @@ impl MumeiError {
             related: Vec::new(),
             counterexample: None,
             counterexample_provenance: None,
+            verdict: None,
         }
     }
     pub fn contract_mutation(
@@ -252,6 +261,7 @@ impl MumeiError {
             related: Vec::new(),
             counterexample: None,
             counterexample_provenance: None,
+            verdict: None,
         }
     }
     /// ソースコード付きで VerificationError を生成（リッチ出力対応）
@@ -279,6 +289,7 @@ impl MumeiError {
             related: Vec::new(),
             counterexample: None,
             counterexample_provenance: None,
+            verdict: None,
         }
     }
     /// Span なしで CodegenError を生成
@@ -418,6 +429,20 @@ impl MumeiError {
         self
     }
 
+    pub fn with_verdict(mut self, kind: VerdictKind) -> Self {
+        if let MumeiError::VerificationError { verdict, .. } = &mut self {
+            *verdict = Some(kind);
+        }
+        self
+    }
+
+    pub fn verdict(&self) -> Option<VerdictKind> {
+        match self {
+            MumeiError::VerificationError { verdict, .. } => *verdict,
+            _ => None,
+        }
+    }
+
     pub fn with_raised_counterexample(
         mut self,
         raised: &crate::verification::RaisedCounterexample,
@@ -485,6 +510,7 @@ impl MumeiError {
                 related,
                 counterexample,
                 counterexample_provenance,
+                verdict,
                 ..
             } => {
                 // Propagate source to related diagnostics that share the same file.
@@ -515,6 +541,7 @@ impl MumeiError {
                     related: updated_related,
                     counterexample,
                     counterexample_provenance,
+                    verdict,
                 }
             }
             MumeiError::ContractMutation {
@@ -612,6 +639,7 @@ impl MumeiError {
                 related,
                 counterexample,
                 counterexample_provenance,
+                verdict,
                 ..
             } => MumeiError::VerificationError {
                 msg,
@@ -622,6 +650,7 @@ impl MumeiError {
                 related,
                 counterexample,
                 counterexample_provenance,
+                verdict,
             },
             MumeiError::ContractMutation {
                 atom_name,
@@ -708,6 +737,26 @@ impl From<String> for MumeiError {
 impl From<&str> for MumeiError {
     fn from(s: &str) -> Self {
         MumeiError::verification(s)
+    }
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::{MumeiError, VerdictKind};
+
+    #[test]
+    fn verdict_builder_is_structured_and_preserves_display() {
+        let display = MumeiError::verification("failed").to_string();
+        let rejected = MumeiError::verification("failed").with_verdict(VerdictKind::Rejected);
+        assert_eq!(rejected.verdict(), Some(VerdictKind::Rejected));
+        assert_eq!(rejected.to_string(), display);
+        assert_eq!(
+            MumeiError::verification("unknown")
+                .with_verdict(VerdictKind::Inconclusive)
+                .verdict(),
+            Some(VerdictKind::Inconclusive)
+        );
+        assert_eq!(MumeiError::codegen("unsupported").verdict(), None);
     }
 }
 

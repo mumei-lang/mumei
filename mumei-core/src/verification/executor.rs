@@ -2655,7 +2655,8 @@ fn verify_inner_impl(
                             .with_counterexample_provenance(
                                 ce_value.clone(),
                                 counterexample_provenance.clone(),
-                            ));
+                            )
+                            .with_verdict(VerdictKind::Inconclusive));
                         }
                         let constraint_mappings =
                             build_constraint_mappings_for_atom(atom, module_env);
@@ -2770,7 +2771,8 @@ fn verify_inner_impl(
                         .with_counterexample_provenance(
                             ce_value.clone(),
                             counterexample_provenance.clone(),
-                        );
+                        )
+                        .with_verdict(VerdictKind::Rejected);
                         for mapping in &constraint_mappings {
                             if mapping.span.line > 0 {
                                 let related_src_span = span_to_source_span("", &mapping.span);
@@ -2814,7 +2816,8 @@ fn verify_inner_impl(
                         } else {
                             "Z3 returned unknown while checking the postcondition.".to_string()
                         };
-                        let mut err = MumeiError::verification_at(message, atom.span.clone());
+                        let mut err = MumeiError::verification_at(message, atom.span.clone())
+                            .with_verdict(VerdictKind::Inconclusive);
                         if let Some(help) = property_based_help {
                             err = err.with_help(help);
                         }
@@ -3045,7 +3048,8 @@ fn verify_inner_impl(
         } else {
             "Z3 returned unknown during the final consistency check.".to_string()
         };
-        let mut err = MumeiError::verification_at(message, atom.span.clone());
+        let mut err = MumeiError::verification_at(message, atom.span.clone())
+            .with_verdict(VerdictKind::Inconclusive);
         if let Some(help) = property_based_help {
             err = err.with_help(help);
         }

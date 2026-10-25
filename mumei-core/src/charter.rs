@@ -62,9 +62,9 @@ pub struct CharterReport {
 }
 
 #[derive(Debug)]
-struct NamedAtom<'a> {
-    name: String,
-    atom: &'a Atom,
+pub(crate) struct NamedAtom<'a> {
+    pub(crate) name: String,
+    pub(crate) atom: &'a Atom,
 }
 
 #[derive(Debug)]
@@ -540,7 +540,7 @@ fn canonical_lock_path(root: &Path, path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn implementation_atoms(items: &[Item]) -> Vec<NamedAtom<'_>> {
+pub(crate) fn implementation_atoms(items: &[Item]) -> Vec<NamedAtom<'_>> {
     let mut atoms = Vec::new();
     for item in items {
         match item {
@@ -560,7 +560,7 @@ fn implementation_atoms(items: &[Item]) -> Vec<NamedAtom<'_>> {
     atoms
 }
 
-fn generic_implementation_atoms(items: &[Item]) -> Vec<NamedAtom<'_>> {
+pub(crate) fn generic_implementation_atoms(items: &[Item]) -> Vec<NamedAtom<'_>> {
     implementation_atoms(items)
         .into_iter()
         .filter(|candidate| !candidate.atom.type_params.is_empty())

@@ -99,6 +99,18 @@ fn main() {
             &out_dir,
             require_grade.as_deref(),
         ),
+        Some(Command::Controls {
+            input,
+            json,
+            max_mutants,
+            atom,
+        }) => {
+            let exit_code =
+                commands::controls::cmd_controls(&input, json, max_mutants, atom.as_deref());
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
         Some(Command::Charter { command }) => commands::charter::cmd_charter(command),
         Some(Command::Run {
             input,

@@ -660,7 +660,8 @@ pub(crate) fn stmt_to_z3<'a>(
                     ))
                     .with_help(
                         "requires にストアインデックスの範囲制約 (0 <= idx < len) を追加してください",
-                    ));
+                    )
+                    .with_verdict(crate::verification::VerdictKind::Rejected));
                 }
                 solver.pop(1);
             }
@@ -821,7 +822,8 @@ pub(crate) fn stmt_to_z3<'a>(
                 solver.assert(&Bool::and(ctx, &[&path_cond, &inv.not()]));
                 if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                     solver.pop(1);
-                    return Err(MumeiError::verification("Invariant fails initially"));
+                    return Err(MumeiError::verification("Invariant fails initially")
+                        .with_verdict(crate::verification::VerdictKind::Rejected));
                 }
                 solver.pop(1);
 
@@ -854,7 +856,8 @@ pub(crate) fn stmt_to_z3<'a>(
                     solver.assert(&inv_after.not());
                     if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                         solver.pop(1);
-                        return Err(MumeiError::verification("Invariant not preserved"));
+                        return Err(MumeiError::verification("Invariant not preserved")
+                            .with_verdict(crate::verification::VerdictKind::Rejected));
                     }
                     solver.pop(1);
                     *env = env_snapshot;
@@ -897,7 +900,8 @@ pub(crate) fn stmt_to_z3<'a>(
                         *vc.local_lambdas.borrow_mut() = lambdas_snapshot.clone();
                         return Err(MumeiError::verification(
                             "Termination check failed: decreases expression may be negative",
-                        ));
+                        )
+                        .with_verdict(crate::verification::VerdictKind::Rejected));
                     }
                     solver.pop(1);
                     solver.push();
@@ -916,7 +920,8 @@ pub(crate) fn stmt_to_z3<'a>(
                         *vc.local_lambdas.borrow_mut() = lambdas_snapshot.clone();
                         return Err(MumeiError::verification(
                             "Termination check failed: decreases expression does not strictly decrease"
-                        ));
+                        )
+                        .with_verdict(crate::verification::VerdictKind::Rejected));
                     }
                     solver.pop(1);
                     *env = env_snapshot;
@@ -1018,14 +1023,16 @@ pub(crate) fn stmt_to_z3<'a>(
                                     "shared invariant of resource '{}' not re-established at unlock: {}",
                                     resource,
                                     crate::verification::support::expr_to_source_string(invariant)
-                                )));
+                                ))
+                                .with_verdict(crate::verification::VerdictKind::Rejected));
                             }
                             z3::SatResult::Unknown => {
                                 return Err(MumeiError::verification(format!(
                                     "shared invariant of resource '{}' not re-established at unlock: {} (solver returned unknown)",
                                     resource,
                                     crate::verification::support::expr_to_source_string(invariant)
-                                )));
+                                ))
+                                .with_verdict(crate::verification::VerdictKind::Inconclusive));
                             }
                             z3::SatResult::Unsat => {}
                         }

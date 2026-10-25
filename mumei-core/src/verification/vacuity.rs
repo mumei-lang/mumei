@@ -229,7 +229,7 @@ fn verify_mutated_body(
     passed
 }
 
-fn flip_binary_op(op: &Op) -> Op {
+pub(crate) fn flip_binary_op(op: &Op) -> Op {
     match op {
         Op::Add => Op::Sub,
         Op::Sub => Op::Add,
