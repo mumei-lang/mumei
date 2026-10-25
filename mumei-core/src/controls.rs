@@ -355,6 +355,18 @@ fn verify_hir(
     .map(|_| ())
 }
 
+fn is_trivially_equivalent_binary_flip(op: &Op, right: &Expr) -> bool {
+    match op {
+        Op::Add | Op::Sub => {
+            matches!(right, Expr::Number(0)) || matches!(right, Expr::Float(value) if *value == 0.0)
+        }
+        Op::Mul | Op::Div => {
+            matches!(right, Expr::Number(1)) || matches!(right, Expr::Float(value) if *value == 1.0)
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn site_mutants(body: &Stmt) -> Vec<SiteMutant> {
     let mut mutants = Vec::new();
     let mut site = 0;
@@ -453,7 +465,7 @@ fn collect_expr(expr: &Expr, site: &mut usize, mutants: &mut Vec<SiteMutant>) {
             let current = *site;
             *site += 1;
             let flipped = crate::verification::vacuity::flip_binary_op(op);
-            if flipped != *op {
+            if flipped != *op && !is_trivially_equivalent_binary_flip(op, right) {
                 mutants.push(SiteMutant {
                     id: format!("op-flip:{op:?}->{flipped:?}@{current}"),
                     operator: "binary-op-flip".to_string(),
@@ -723,6 +735,15 @@ mod tests {
     fn per_site_ids_and_mutation_are_stable() {
         let stmt = parser::parse_body_expr("x + (y + 1)");
         let mutants = site_mutants(&stmt);
+        let ids = mutants
+            .iter()
+            .map(|mutant| mutant.id.clone())
+            .collect::<Vec<_>>();
+        let repeated_ids = site_mutants(&stmt)
+            .into_iter()
+            .map(|mutant| mutant.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, repeated_ids);
         let adds = mutants
             .iter()
             .filter(|mutant| mutant.id.starts_with("op-flip:Add"))
@@ -738,6 +759,40 @@ mod tests {
             &adds[1].kind
         ));
         assert_ne!(format!("{changed:?}"), format!("{changed_twice:?}"));
+    }
+
+    #[test]
+    fn skips_trivially_equivalent_arithmetic_flips() {
+        let stmt = parser::parse_body_expr("x + 0 + 1");
+        let mutants = site_mutants(&stmt);
+        let ids = mutants
+            .iter()
+            .map(|mutant| mutant.id.clone())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"op-flip:Add->Sub@0".to_string()));
+        assert!(!ids.contains(&"op-flip:Add->Sub@1".to_string()));
+        assert_eq!(
+            ids,
+            site_mutants(&stmt)
+                .into_iter()
+                .map(|mutant| mutant.id)
+                .collect::<Vec<_>>()
+        );
+
+        let multiplication = site_mutants(&parser::parse_body_expr("x * 1"));
+        assert!(!multiplication
+            .iter()
+            .any(|mutant| mutant.id == "op-flip:Mul->Div@0"));
+
+        for source in ["x + 0.0", "x - 0.0", "x * 1.0", "x / 1.0"] {
+            let mutants = site_mutants(&parser::parse_body_expr(source));
+            assert!(
+                !mutants
+                    .iter()
+                    .any(|mutant| mutant.operator == "binary-op-flip"),
+                "{source}"
+            );
+        }
     }
 
     #[test]

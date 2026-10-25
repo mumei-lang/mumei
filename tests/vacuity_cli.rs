@@ -124,6 +124,29 @@ fn strong_spec_reports_kills_and_no_survivors() {
 }
 
 #[test]
+fn equivalent_addition_mutant_does_not_fail_a_correct_contract() {
+    let fixture = Fixture::new(
+        "atom add_one(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x + 1;\n\
+         body: x + 0 + 1;\n",
+    );
+    let output = run(
+        &fixture.input(),
+        &args(&["--enable-vacuity-check", "--json"]),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("survived 0"), "{stderr}");
+}
+
+#[test]
 fn weak_spec_reports_the_surviving_constant_mutant() {
     let fixture = Fixture::new(
         "atom add(x: i64, y: i64) -> i64\n\

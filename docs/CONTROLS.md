@@ -16,6 +16,11 @@ and integer constants changed to zero or one. No-op mutations are omitted.
 Methods are reported with qualified names such as `Point::get`. Trusted,
 generic, and originally unverifiable atoms are reported as `not_checked`.
 
+The generator skips a small set of syntactically obvious equivalent operator
+flips, such as `x + 0` to `x - 0` and `x * 1` to `x / 1`, including float
+literal equivalents. This check is intentionally limited: other semantically
+equivalent mutants can still survive and need human judgment.
+
 ## Outcomes
 
 | Status | Meaning |

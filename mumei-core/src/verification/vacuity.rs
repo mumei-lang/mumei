@@ -1,6 +1,6 @@
 use crate::controls::{mutate_at_site, site_mutants, MutationKind};
 use crate::hir::{lower_stmt_with_env, HirAtom};
-use crate::mir::{lower_hir_to_mir, MirBody};
+use crate::mir::{lower_hir_to_mir_with_env, MirBody};
 use crate::parser::{Atom, Op};
 use crate::verification::executor::{verify_inner_for_vacuity, VerifyInnerOptions};
 use crate::verification::module_env::ModuleEnv;
@@ -99,12 +99,10 @@ pub(crate) fn check_spec_vacuity_for_hir_with_options(
         // Single-site mutations preserve identifiers, and spurious replay reads body_stmt.
         let mut mutated_hir = hir_atom.clone();
         let changed = mutate_at_site(&mut mutated_hir.body_stmt, mutant.site, &mutant.kind);
-        let mutated_body = if changed {
+        if changed {
             mutated_hir.body = lower_stmt_with_env(&mutated_hir.body_stmt, Some(module_env));
-            lower_hir_to_mir(&mutated_hir)
-        } else {
-            lower_hir_to_mir(&mutated_hir)
-        };
+        }
+        let mutated_body = lower_hir_to_mir_with_env(&mutated_hir, Some(module_env));
         let outcome = if !changed {
             MutantOutcome::Unanalyzable
         } else {
@@ -288,8 +286,8 @@ pub(crate) fn flip_binary_op(op: &Op) -> Op {
 mod tests {
     use super::*;
     use crate::hir::lower_atom_to_hir_with_env;
-    use crate::mir::lower_hir_to_mir;
-    use crate::parser::{parse_atom, parse_body_expr};
+    use crate::mir::{lower_hir_to_mir, lower_hir_to_mir_with_env};
+    use crate::parser::{parse_atom, parse_body_expr, parse_module, Item};
 
     #[test]
     fn shared_site_generator_includes_array_index_mutants() {
@@ -344,6 +342,61 @@ atom increment(x: i64) -> i64
         assert!(!result.is_vacuous);
         assert_eq!(result.survived_mutations, 0);
         assert!(result.killed_mutations > 0);
+    }
+
+    #[test]
+    fn returned_mutated_mir_resolves_type_alias_parameters() {
+        let items = parse_module(
+            r#"
+type Quantity = i64;
+atom increment(x: Quantity) -> Quantity
+  requires: true;
+  ensures: result == x + 1;
+  body: x + 1;
+"#,
+        );
+        let atom = items
+            .iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) => Some(atom),
+                _ => None,
+            })
+            .expect("atom");
+        let mut module_env = ModuleEnv::new();
+        for item in &items {
+            match item {
+                Item::Atom(atom) => module_env.register_atom(atom),
+                Item::TypeDef(alias) => module_env.register_type(alias),
+                _ => {}
+            }
+        }
+        let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
+        let original_mir = lower_hir_to_mir_with_env(&hir_atom, Some(&module_env));
+        let mutant = site_mutants(&hir_atom.body_stmt)
+            .into_iter()
+            .next()
+            .expect("site mutant");
+        let mutant_id = mutant.id.clone();
+        let mut expected_hir = hir_atom.clone();
+        assert!(mutate_at_site(
+            &mut expected_hir.body_stmt,
+            mutant.site,
+            &mutant.kind
+        ));
+        expected_hir.body = lower_stmt_with_env(&expected_hir.body_stmt, Some(&module_env));
+        let expected_mir = lower_hir_to_mir_with_env(&expected_hir, Some(&module_env));
+        assert_ne!(expected_mir, lower_hir_to_mir(&expected_hir));
+
+        let result =
+            check_spec_vacuity_for_hir(atom, &hir_atom, &original_mir, &module_env, 10, 1000)
+                .expect("verified mutants");
+        let returned_mir = &result
+            .mutation_results
+            .iter()
+            .find(|result| result.location.ends_with(&mutant_id))
+            .expect("matching mutation result")
+            .mutated_body;
+        assert_eq!(returned_mir, &expected_mir);
     }
 
     #[test]
