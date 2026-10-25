@@ -9,11 +9,35 @@ mumei claims src/main.mm
 mumei claims src/main.mm --cert src/main.proof.json --format json
 mumei claims src/main.mm --allow-lean-verified --out-dir build/claims
 mumei claims src/main.mm --require-grade G1
+mumei claims src/main.mm --controls --max-mutants 16
+mumei claims src/main.mm --require-discriminating
 ```
 
 The default format is `both`, writing `claimbook.json` and `CLAIMBOOK.md` in the current directory. `--format` accepts `json`, `md`, or `both`; `--out-dir` selects the output directory. The default certificate path is the same path used by `mumei verify --proof-cert`. If that derived path is absent, every current atom is `uncertified`; an explicitly supplied but missing `--cert` path is an input error. The command prints a short grade and freshness summary.
 
 `mumei claims` does not write the resolver cache, though manifest dependencies that have not been fetched yet may still be fetched into the dependency store.
+
+## Negative controls
+
+`--controls` adds per-claim negative-control results using the same mutation
+engine as [`mumei controls`](CONTROLS.md). `--max-mutants N` sets the
+per-atom limit (default 32) and is valid only with `--controls`. The
+`--require-discriminating` gate enables controls automatically and exits 1 if
+any claim is `weak` or `inconclusive`. `discriminating`, `no_mutants`, and
+`not_checked` pass this gate; trusted atoms and generic templates remain the
+responsibility of the grade gate.
+
+Controls are orthogonal to Seal Grade: enabling them does not change grades,
+effective grades, freshness, or the Claim Book schema. JSON adds optional
+`discrimination` fields on claims and `summary.by_discrimination`; Markdown
+adds a Controls column and status-count summary. Both optional outputs are
+omitted when `--controls` is not requested, preserving the existing report
+bytes. Controls analysis remains read-only and writes no cache.
+
+A `weak` result identifies a surviving mutant, not necessarily a real
+specification weakness. The generator skips a small set of obvious equivalent
+mutations, but other semantically equivalent mutants may survive and need
+human judgment; see [Contract controls](CONTROLS.md).
 
 ## Seal Grade
 
@@ -50,14 +74,17 @@ Dependencies not present in the claim set do not lower the grade. `limiting_prem
 
 The `trusted_base` section lists the solver and generator versions, translator versions, bridge lemma hashes, kernel axioms, trusted atoms, and assumed clauses represented by the report. Certificate-backed values come only from entries matching current source claims; source declarations contribute trusted atoms and assume-mode clauses. Assumed clauses retain the `requires:` or `ensures:` kind, so identical expressions of different kinds remain distinct. Lists are sorted and unique. Without a certificate, versions are null and the trusted atoms and assumed clauses are read from the source declarations.
 
-## Grade gate and exit codes
+## Gates and exit codes
 
 `--require-grade G0` through `--require-grade G5` requires every claim to meet the requested effective grade. The report files are written before the gate is evaluated. A failing claim is printed to standard error with its limiting premises. The gate checks grade only; CI that needs full dependency coverage should also check `effective_grade_complete` in `claimbook.json`.
 
+`--require-discriminating` can be combined with `--require-grade`; reports are
+written before either gate is evaluated, and either failure produces exit 1.
+
 | Exit code | Meaning |
 |---|---|
-| 0 | Reports written; every claim meets the requested grade, or no gate was requested. |
-| 1 | At least one claim is below `--require-grade`. |
+| 0 | Reports written; every requested gate passes, or no gate was requested. |
+| 1 | A claim is below `--require-grade`, or has weak/inconclusive controls when required. |
 | 2 | Command-line arguments are invalid, including an unsupported grade. |
 | 4 | Input or certificate could not be loaded. |
 | 5 | An output artifact could not be written. |

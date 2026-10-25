@@ -1,0 +1,97 @@
+{
+  "schema": "mumei.claimbook/v1",
+  "input": "main.mm",
+  "certificate": "main.proof.json",
+  "certificate_integrity": "absent",
+  "generator": {
+    "mumei_version": null,
+    "z3_version": null
+  },
+  "trusted_base": {
+    "solver_version": null,
+    "mumei_version": null,
+    "translator_versions": [],
+    "bridge_lemma_hashes": [],
+    "kernel_axioms": [],
+    "trusted_atoms": [
+      "trusted_value"
+    ],
+    "assumed_clauses": []
+  },
+  "summary": {
+    "by_effective_grade": {
+      "G0": 3,
+      "G1": 0,
+      "G2": 0,
+      "G3": 0,
+      "G4": 0,
+      "G5": 0
+    },
+    "by_freshness": {
+      "fresh": 0,
+      "drifted": 0,
+      "uncertified": 3
+    },
+    "total": 3
+  },
+  "claims": [
+    {
+      "atom": "failing_value",
+      "grade": "G0",
+      "grade_label": "open",
+      "effective_grade": "G0",
+      "effective_grade_label": "open",
+      "effective_grade_complete": true,
+      "evidence_kind": "none",
+      "freshness": "uncertified",
+      "reason": "no current certificate entry exists",
+      "requires": "true",
+      "ensures": "result == x + 1",
+      "assumed_clauses": [],
+      "dependencies": [],
+      "unresolved_dependencies": [],
+      "limiting_premises": [],
+      "content_hash": null,
+      "proof_hash": null
+    },
+    {
+      "atom": "trusted_value",
+      "grade": "G0",
+      "grade_label": "open",
+      "effective_grade": "G0",
+      "effective_grade_label": "open",
+      "effective_grade_complete": true,
+      "evidence_kind": "none",
+      "freshness": "uncertified",
+      "reason": "no current certificate entry exists",
+      "requires": "true",
+      "ensures": "result == x",
+      "assumed_clauses": [],
+      "dependencies": [],
+      "unresolved_dependencies": [],
+      "limiting_premises": [],
+      "content_hash": null,
+      "proof_hash": null
+    },
+    {
+      "atom": "verified_value",
+      "grade": "G0",
+      "grade_label": "open",
+      "effective_grade": "G0",
+      "effective_grade_label": "open",
+      "effective_grade_complete": true,
+      "evidence_kind": "none",
+      "freshness": "uncertified",
+      "reason": "no current certificate entry exists",
+      "requires": "true",
+      "ensures": "result == x",
+      "assumed_clauses": [],
+      "dependencies": [],
+      "unresolved_dependencies": [],
+      "limiting_premises": [],
+      "content_hash": null,
+      "proof_hash": null
+    }
+  ],
+  "orphaned_entries": []
+}

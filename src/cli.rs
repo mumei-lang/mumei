@@ -295,6 +295,15 @@ pub(crate) enum Command {
         /// Directory for claimbook.json and CLAIMBOOK.md (default: current directory)
         #[arg(long, default_value = ".")]
         out_dir: String,
+        /// Attach negative-control results to claims
+        #[arg(long)]
+        controls: bool,
+        /// Maximum mutants to test per atom (requires --controls)
+        #[arg(long, default_value_t = 32, requires = "controls")]
+        max_mutants: usize,
+        /// Fail if any checked claim has weak or inconclusive controls
+        #[arg(long)]
+        require_discriminating: bool,
         /// Require every claim to meet this Seal Grade
         #[arg(long, value_parser = ["G0", "G1", "G2", "G3", "G4", "G5"])]
         require_grade: Option<String>,

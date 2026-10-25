@@ -1,3 +1,4 @@
+use crate::controls::ControlsAtomReport;
 use crate::parser::{ClauseTrustMode, TrustLevel};
 use crate::proof_cert::{self, status, AtomCertificate, ProofCertificate};
 use serde::{Deserialize, Serialize};
@@ -74,6 +75,19 @@ pub struct Claim {
     pub limiting_premises: Vec<LimitingPremise>,
     pub content_hash: Option<String>,
     pub proof_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discrimination: Option<ClaimDiscrimination>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaimDiscrimination {
+    pub status: String,
+    pub detail: String,
+    pub tested: usize,
+    pub killed: usize,
+    pub survived: usize,
+    pub unanalyzable: usize,
+    pub surviving: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -114,6 +128,8 @@ pub struct ClaimBookSummary {
     pub by_effective_grade: BTreeMap<SealGrade, usize>,
     pub by_freshness: BTreeMap<Freshness, usize>,
     pub total: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_discrimination: Option<BTreeMap<String, usize>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -659,6 +675,7 @@ pub fn create_claimbook(
             limiting_premises: Vec::new(),
             content_hash: entry.map(|entry| entry.content_hash.clone()),
             proof_hash: entry.map(|entry| entry.proof_hash.clone()),
+            discrimination: None,
         };
         claims.insert((*name).to_string(), claim);
     }
@@ -709,10 +726,57 @@ pub fn create_claimbook(
             by_effective_grade,
             by_freshness,
             total: claims.len(),
+            by_discrimination: None,
         },
         claims: claims.into_values().collect(),
         orphaned_entries,
     }
+}
+
+pub fn attach_controls(book: &mut ClaimBook, controls: &[ControlsAtomReport]) {
+    let controls_by_name = controls
+        .iter()
+        .map(|report| (report.name.as_str(), report))
+        .collect::<BTreeMap<_, _>>();
+    let mut by_discrimination = BTreeMap::new();
+
+    for claim in &mut book.claims {
+        let discrimination = controls_by_name
+            .get(claim.atom.as_str())
+            .map(|report| ClaimDiscrimination {
+                status: report.status.to_string(),
+                detail: report.detail.clone(),
+                tested: report.tested,
+                killed: report.killed,
+                survived: report.survived,
+                unanalyzable: report.unanalyzable,
+                surviving: report
+                    .mutants
+                    .iter()
+                    .filter(|mutant| mutant.outcome == "survived")
+                    .map(|mutant| mutant.id.clone())
+                    .collect(),
+            })
+            .unwrap_or_else(|| ClaimDiscrimination {
+                status: "not_checked".to_string(),
+                detail: "no controls entry".to_string(),
+                tested: 0,
+                killed: 0,
+                survived: 0,
+                unanalyzable: 0,
+                surviving: Vec::new(),
+            });
+        *by_discrimination
+            .entry(discrimination.status.clone())
+            .or_insert(0) += 1;
+        claim.discrimination = Some(discrimination);
+    }
+
+    book.summary.by_discrimination = Some(by_discrimination);
+}
+
+pub fn fails_discrimination_gate(discrimination: &ClaimDiscrimination) -> bool {
+    matches!(discrimination.status.as_str(), "weak" | "inconclusive")
 }
 
 pub fn render_markdown(book: &ClaimBook) -> String {
@@ -742,6 +806,14 @@ pub fn render_markdown(book: &ClaimBook) -> String {
             .unwrap_or(0);
         markdown.push_str(&format!("| {} | {} |\n", freshness_name(freshness), count));
     }
+    if let Some(by_discrimination) = &book.summary.by_discrimination {
+        let counts = by_discrimination
+            .iter()
+            .map(|(status, count)| format!("{status}={count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        markdown.push_str(&format!("\nControls: {counts}\n"));
+    }
 
     markdown.push_str("\n## Drifted or uncertified\n\n");
     append_claim_table(
@@ -749,6 +821,7 @@ pub fn render_markdown(book: &ClaimBook) -> String {
         book.claims
             .iter()
             .filter(|claim| claim.freshness != Freshness::Fresh),
+        book.summary.by_discrimination.is_some(),
     );
 
     for grade in SealGrade::all().into_iter().rev() {
@@ -762,6 +835,7 @@ pub fn render_markdown(book: &ClaimBook) -> String {
             book.claims
                 .iter()
                 .filter(|claim| claim.effective_grade == grade),
+            book.summary.by_discrimination.is_some(),
         );
     }
 
@@ -776,14 +850,26 @@ pub fn render_markdown(book: &ClaimBook) -> String {
     markdown
 }
 
-fn append_claim_table<'a>(markdown: &mut String, claims: impl Iterator<Item = &'a Claim>) {
-    markdown.push_str("| Atom | Own grade | Freshness | Evidence | Reason | Limiting premises |\n");
-    markdown.push_str("|---|---|---|---|---|---|\n");
+fn append_claim_table<'a>(
+    markdown: &mut String,
+    claims: impl Iterator<Item = &'a Claim>,
+    include_controls: bool,
+) {
+    if include_controls {
+        markdown.push_str(
+            "| Atom | Own grade | Freshness | Evidence | Reason | Limiting premises | Controls |\n",
+        );
+        markdown.push_str("|---|---|---|---|---|---|---|\n");
+    } else {
+        markdown
+            .push_str("| Atom | Own grade | Freshness | Evidence | Reason | Limiting premises |\n");
+        markdown.push_str("|---|---|---|---|---|---|\n");
+    }
     let mut count = 0;
     for claim in claims {
         count += 1;
-        markdown.push_str(&format!(
-            "| `{}` | {} ({}) | {} | {} | {} | {} |\n",
+        let row = format!(
+            "| `{}` | {} ({}) | {} | {} | {} | {}",
             claim.atom,
             claim.grade_label,
             grade_code(claim.grade),
@@ -791,10 +877,33 @@ fn append_claim_table<'a>(markdown: &mut String, claims: impl Iterator<Item = &'
             claim.evidence_kind,
             claim.reason.replace('|', "\\|"),
             limiting_premises_text(&claim.limiting_premises)
-        ));
+        );
+        if include_controls {
+            let controls = claim
+                .discrimination
+                .as_ref()
+                .map(|discrimination| match discrimination.status.as_str() {
+                    "weak" => format!("weak ({} survived)", discrimination.survived),
+                    "discriminating" => {
+                        format!(
+                            "discriminating {}/{}",
+                            discrimination.killed, discrimination.tested
+                        )
+                    }
+                    _ => discrimination.status.clone(),
+                })
+                .unwrap_or_else(|| "not_checked".to_string());
+            markdown.push_str(&format!("{row} | {controls} |\n"));
+        } else {
+            markdown.push_str(&format!("{row} |\n"));
+        }
     }
     if count == 0 {
-        markdown.push_str("| — | — | — | — | — | — |\n");
+        markdown.push_str(if include_controls {
+            "| — | — | — | — | — | — | — |\n"
+        } else {
+            "| — | — | — | — | — | — |\n"
+        });
     }
 }
 
@@ -1018,6 +1127,7 @@ mod tests {
             limiting_premises: Vec::new(),
             content_hash: None,
             proof_hash: None,
+            discrimination: None,
         }
     }
 
@@ -1811,6 +1921,7 @@ mod tests {
                     (Freshness::Uncertified, 0),
                 ]),
                 total: 1,
+                by_discrimination: None,
             },
             claims: vec![claim],
             orphaned_entries: Vec::new(),
@@ -1820,5 +1931,110 @@ mod tests {
         assert!(markdown.contains("## Trusted base"));
         assert!(markdown.contains("Limiting premises"));
         assert!(markdown.contains("assumed_clause x \\| y (G1)"));
+    }
+
+    #[test]
+    fn controls_merge_matches_claim_names_and_handles_missing_or_extra_entries() {
+        let mut book = ClaimBook {
+            schema: SCHEMA.to_string(),
+            input: "sample.mm".to_string(),
+            certificate: "sample.proof.json".to_string(),
+            certificate_integrity: CertificateIntegrity::Absent,
+            generator: ClaimBookGenerator {
+                mumei_version: None,
+                z3_version: None,
+            },
+            trusted_base: trusted_base(None, &[]),
+            summary: ClaimBookSummary {
+                by_effective_grade: BTreeMap::new(),
+                by_freshness: BTreeMap::new(),
+                total: 2,
+                by_discrimination: None,
+            },
+            claims: vec![
+                claim("Point::get", SealGrade::G4, Freshness::Fresh, &[], &[]),
+                claim("missing", SealGrade::G0, Freshness::Uncertified, &[], &[]),
+            ],
+            orphaned_entries: Vec::new(),
+        };
+        let controls = [
+            ControlsAtomReport {
+                name: "Point::get".to_string(),
+                status: "weak",
+                detail: "one mutant survived".to_string(),
+                tested: 2,
+                killed: 1,
+                survived: 1,
+                unanalyzable: 0,
+                mutants: vec![crate::controls::MutantReport {
+                    id: "constant:1->0@2".to_string(),
+                    operator: "constant".to_string(),
+                    site: 2,
+                    outcome: "survived",
+                    detail: String::new(),
+                }],
+            },
+            ControlsAtomReport {
+                name: "monomorphized<i64>".to_string(),
+                status: "discriminating",
+                detail: "all mutants were killed".to_string(),
+                tested: 1,
+                killed: 1,
+                survived: 0,
+                unanalyzable: 0,
+                mutants: Vec::new(),
+            },
+        ];
+
+        attach_controls(&mut book, &controls);
+
+        let method = book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "Point::get")
+            .expect("qualified method claim")
+            .discrimination
+            .as_ref()
+            .expect("matched controls report");
+        assert_eq!(method.status, "weak");
+        assert_eq!(method.tested, 2);
+        assert_eq!(method.surviving, ["constant:1->0@2"]);
+        let missing = book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "missing")
+            .expect("missing controls claim")
+            .discrimination
+            .as_ref()
+            .expect("default discrimination");
+        assert_eq!(missing.status, "not_checked");
+        assert_eq!(missing.detail, "no controls entry");
+        assert_eq!(book.claims.len(), 2);
+        assert_eq!(
+            book.summary.by_discrimination,
+            Some(BTreeMap::from([
+                ("not_checked".to_string(), 1),
+                ("weak".to_string(), 1),
+            ]))
+        );
+    }
+
+    #[test]
+    fn discrimination_gate_rejects_weak_and_inconclusive_only() {
+        let discrimination = |status: &str| ClaimDiscrimination {
+            status: status.to_string(),
+            detail: String::new(),
+            tested: 0,
+            killed: 0,
+            survived: 0,
+            unanalyzable: 0,
+            surviving: Vec::new(),
+        };
+
+        assert!(fails_discrimination_gate(&discrimination("weak")));
+        assert!(fails_discrimination_gate(&discrimination("inconclusive")));
+        for status in ["discriminating", "no_mutants", "not_checked"] {
+            assert!(!fails_discrimination_gate(&discrimination(status)));
+        }
     }
 }
