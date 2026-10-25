@@ -262,7 +262,73 @@ fn effect_contract_changes_are_inconclusive_and_unchanged_contracts_shortcut() {
     assert_eq!(changed_report["atoms"][0]["status"], "inconclusive");
     assert_eq!(
         changed_report["atoms"][0]["detail"],
-        "effect contracts differ"
+        "effect contracts differ: effect_post"
+    );
+}
+
+#[test]
+fn clause_mode_changes_are_inconclusive_in_both_directions() {
+    let dir = TestDir::new("clause-modes");
+    let cases = [
+        (
+            "atom f(x: i64) -> i64 requires assume: x > 0; body: x;",
+            "atom f(x: i64) -> i64 requires: x > 0; body: x;",
+        ),
+        (
+            "atom f(x: i64) -> i64 requires: x > 0; body: x;",
+            "atom f(x: i64) -> i64 requires assume: x > 0; body: x;",
+        ),
+    ];
+
+    for (baseline, candidate) in cases {
+        write_pair(dir.path(), baseline, candidate);
+        let (output, report) = run_json(dir.path());
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(report["atoms"][0]["status"], "inconclusive");
+        assert_eq!(report["atoms"][0]["detail"], "clause modes differ");
+    }
+}
+
+#[test]
+fn callback_contract_changes_fail_and_unchanged_body_edits_pass() {
+    let dir = TestDir::new("callback-contract");
+    let callback_contract = "contract(f): requires: x >= 0, ensures: result >= 0;";
+    write_pair(
+        dir.path(),
+        &format!(
+            "atom apply(x: i64, f: atom_ref(i64) -> i64) -> i64 \
+             requires: x >= 0; ensures: result >= 0; {callback_contract} body: x;"
+        ),
+        "atom apply(x: i64, f: atom_ref(i64) -> i64) -> i64 \
+         requires: x >= 0; ensures: result >= 0; body: x;",
+    );
+
+    let (changed_output, changed_report) = run_json(dir.path());
+    assert_eq!(changed_output.status.code(), Some(1));
+    assert_eq!(changed_report["atoms"][0]["status"], "inconclusive");
+    assert_eq!(
+        changed_report["atoms"][0]["detail"],
+        "callback contract differs: fn_contract_requires"
+    );
+
+    write_pair(
+        dir.path(),
+        &format!(
+            "atom apply(x: i64, f: atom_ref(i64) -> i64) -> i64 \
+             requires: x >= 0; ensures: result >= 0; {callback_contract} body: x;"
+        ),
+        &format!(
+            "atom apply(x: i64, f: atom_ref(i64) -> i64) -> i64 \
+             requires: x >= 0; ensures: result >= 0; {callback_contract} body: x + 1;"
+        ),
+    );
+
+    let (body_only_output, body_only_report) = run_json(dir.path());
+    assert_eq!(body_only_output.status.code(), Some(0));
+    assert_eq!(body_only_report["atoms"][0]["status"], "preserved");
+    assert_eq!(
+        body_only_report["atoms"][0]["detail"],
+        "contract text unchanged"
     );
 }
 

@@ -176,23 +176,24 @@ fn compare_atom(
         );
     }
 
-    if !effect_contracts_unchanged(baseline.atom, candidate.atom) {
+    if let Some(detail) = contract_field_difference(baseline.atom, candidate.atom) {
         return atom_result(
             &baseline.name,
             "inconclusive",
-            "effect contracts differ",
+            detail,
             None,
             matched_candidate,
         );
     }
 
-    let (forward, _) = charter::check_atom("", baseline.atom, candidate_atoms, module_env);
-    if forward.status != "ok" {
+    if let Err((status, detail, counterexample)) =
+        charter::check_refinement(baseline.atom, candidate.atom, module_env)
+    {
         return atom_result(
             &baseline.name,
-            &forward.status,
-            &forward.detail,
-            forward.counterexample,
+            &status,
+            &detail,
+            counterexample,
             matched_candidate,
         );
     }
@@ -244,6 +245,7 @@ fn contract_text_unchanged(baseline: &Atom, candidate: &Atom) -> bool {
         && charter::normalized_forall_constraints(baseline)
             == charter::normalized_forall_constraints(candidate)
         && normalized_clause_modes(baseline) == normalized_clause_modes(candidate)
+        && callback_contracts_unchanged(baseline, candidate)
         && effect_contracts_unchanged(baseline, candidate)
         && normalize_whitespace(&contract_view(baseline, ContractView::CallerEnsures))
             == normalize_whitespace(&contract_view(candidate, ContractView::CallerEnsures))
@@ -269,6 +271,57 @@ fn effect_contracts_unchanged(baseline: &Atom, candidate: &Atom) -> bool {
             == normalized_effect_states(&candidate.effect_post)
 }
 
+fn contract_field_difference(baseline: &Atom, candidate: &Atom) -> Option<&'static str> {
+    if normalized_clause_modes(baseline) != normalized_clause_modes(candidate) {
+        return Some("clause modes differ");
+    }
+    if normalized_effect_states(&baseline.effect_pre)
+        != normalized_effect_states(&candidate.effect_pre)
+    {
+        return Some("effect contracts differ: effect_pre");
+    }
+    if normalized_effect_states(&baseline.effect_post)
+        != normalized_effect_states(&candidate.effect_post)
+    {
+        return Some("effect contracts differ: effect_post");
+    }
+    callback_contract_difference(baseline, candidate)
+}
+
+fn callback_contracts_unchanged(baseline: &Atom, candidate: &Atom) -> bool {
+    baseline.params.len() == candidate.params.len()
+        && baseline
+            .params
+            .iter()
+            .zip(&candidate.params)
+            .all(|(baseline, candidate)| {
+                normalize_optional_contract(baseline.fn_contract_requires.as_deref())
+                    == normalize_optional_contract(candidate.fn_contract_requires.as_deref())
+                    && normalize_optional_contract(baseline.fn_contract_ensures.as_deref())
+                        == normalize_optional_contract(candidate.fn_contract_ensures.as_deref())
+            })
+}
+
+fn callback_contract_difference(baseline: &Atom, candidate: &Atom) -> Option<&'static str> {
+    for (baseline, candidate) in baseline.params.iter().zip(&candidate.params) {
+        if normalize_optional_contract(baseline.fn_contract_requires.as_deref())
+            != normalize_optional_contract(candidate.fn_contract_requires.as_deref())
+        {
+            return Some("callback contract differs: fn_contract_requires");
+        }
+        if normalize_optional_contract(baseline.fn_contract_ensures.as_deref())
+            != normalize_optional_contract(candidate.fn_contract_ensures.as_deref())
+        {
+            return Some("callback contract differs: fn_contract_ensures");
+        }
+    }
+    None
+}
+
+fn normalize_optional_contract(value: Option<&str>) -> Option<String> {
+    value.map(normalize_whitespace)
+}
+
 fn normalized_effect_states(
     states: &std::collections::HashMap<String, String>,
 ) -> BTreeMap<String, String> {
@@ -286,7 +339,7 @@ fn normalized_clause_modes(atom: &Atom) -> Vec<String> {
 }
 
 fn normalize_whitespace(value: &str) -> String {
-    value.split_whitespace().collect()
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -382,6 +435,29 @@ mod tests {
     }
 
     #[test]
+    fn matched_methods_are_refined_without_rematching_unqualified_names() {
+        let report = compare(
+            "impl Point { trusted atom get(self: Point) -> i64 \
+             ensures: result >= 0; body: 0; }\n\
+             impl Other { trusted atom get(self: Other) -> i64 \
+             ensures: result >= 0; body: 0; }\n\
+             trusted atom get(x: i64) -> i64 ensures: result >= 0; body: 0;",
+            "impl Point { atom get(self: Point) -> i64 body: 0; }\n\
+             impl Other { atom get(self: Other) -> i64 \
+             ensures: result >= 0; body: 0; }\n\
+             atom get(x: i64) -> i64 ensures: result >= 0; body: 0;",
+        );
+
+        assert_eq!(atom_status(&report, "Point::get"), "post_weakened");
+        assert_eq!(atom_status(&report, "Other::get"), "preserved");
+        assert_eq!(atom_status(&report, "get"), "preserved");
+        assert!(!report
+            .atoms
+            .iter()
+            .any(|atom| atom.detail.contains("ambiguous")));
+    }
+
+    #[test]
     fn effect_parameters_are_part_of_the_effect_identity() {
         let report = compare(
             "atom f(x: i64, y: i64) -> i64 effects: [File(x)]; body: x;",
@@ -402,7 +478,10 @@ mod tests {
         );
         assert_eq!(effect_post.status, "fail");
         assert_eq!(atom_status(&effect_post, "f"), "inconclusive");
-        assert_eq!(effect_post.atoms[0].detail, "effect contracts differ");
+        assert_eq!(
+            effect_post.atoms[0].detail,
+            "effect contracts differ: effect_post"
+        );
 
         let effect_pre = compare(
             "atom f(x: i64) -> i64 effect_pre: { File: Open }; body: x;",
@@ -410,7 +489,70 @@ mod tests {
         );
         assert_eq!(effect_pre.status, "fail");
         assert_eq!(atom_status(&effect_pre, "f"), "inconclusive");
-        assert_eq!(effect_pre.atoms[0].detail, "effect contracts differ");
+        assert_eq!(
+            effect_pre.atoms[0].detail,
+            "effect contracts differ: effect_pre"
+        );
+    }
+
+    #[test]
+    fn clause_mode_changes_are_inconclusive_in_both_directions() {
+        for (baseline, candidate) in [
+            (
+                "atom f(x: i64) -> i64 requires assume: x > 0; body: x;",
+                "atom f(x: i64) -> i64 requires: x > 0; body: x;",
+            ),
+            (
+                "atom f(x: i64) -> i64 requires: x > 0; body: x;",
+                "atom f(x: i64) -> i64 requires assume: x > 0; body: x;",
+            ),
+        ] {
+            let report = compare(baseline, candidate);
+            assert_eq!(report.status, "fail");
+            assert_eq!(atom_status(&report, "f"), "inconclusive");
+            assert_eq!(report.atoms[0].detail, "clause modes differ");
+        }
+    }
+
+    #[test]
+    fn callback_contract_changes_fail_closed_but_body_edits_shortcut() {
+        let callback_contract = "contract(f): requires: x >= 0, ensures: result >= 0;";
+        let baseline = format!(
+            "atom apply(x: i64, f: atom_ref(i64) -> i64) -> i64 \
+             requires: x >= 0; ensures: result >= 0; {callback_contract} body: x;"
+        );
+        let removed_callback = compare(
+            &baseline,
+            "atom apply(x: i64, f: atom_ref(i64) -> i64) -> i64 \
+             requires: x >= 0; ensures: result >= 0; body: x;",
+        );
+        assert_eq!(removed_callback.status, "fail");
+        assert_eq!(atom_status(&removed_callback, "apply"), "inconclusive");
+        assert_eq!(
+            removed_callback.atoms[0].detail,
+            "callback contract differs: fn_contract_requires"
+        );
+
+        let body_only = compare(
+            &baseline,
+            &format!(
+                "atom apply(x: i64, f: atom_ref(i64) -> i64) -> i64 \
+                 requires: x >= 0; ensures: result >= 0; {callback_contract} body: x + 1;"
+            ),
+        );
+        assert_eq!(body_only.status, "pass");
+        assert_eq!(atom_status(&body_only, "apply"), "preserved");
+        assert_eq!(body_only.atoms[0].detail, "contract text unchanged");
+    }
+
+    #[test]
+    fn whitespace_normalization_preserves_token_boundaries() {
+        let report = compare(
+            "trusted atom f() -> Str ensures: result == \"a b\"; body: \"a b\";",
+            "atom f() -> Str ensures: result == \"ab\"; body: \"ab\";",
+        );
+
+        assert_ne!(report.atoms[0].detail, "contract text unchanged");
     }
 
     #[test]
@@ -559,13 +701,14 @@ mod tests {
     }
 
     #[test]
-    fn ensures_check_clause_is_not_a_caller_postcondition() {
+    fn ensures_check_mode_change_is_inconclusive() {
         let report = compare(
             "trusted atom f(x: i64) -> i64 ensures: result >= x + 1; body: 0;",
             "atom f(x: i64) -> i64 ensures check: result >= x + 1; body: 0;",
         );
 
-        assert_eq!(atom_status(&report, "f"), "post_weakened");
+        assert_eq!(atom_status(&report, "f"), "inconclusive");
+        assert_eq!(report.atoms[0].detail, "clause modes differ");
     }
 
     #[test]

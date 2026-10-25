@@ -9,8 +9,11 @@ methods are reported by qualified name.
 
 The candidate is loaded for comparison, while the baseline is parsed without
 resolving its imports. Contract text that is unchanged after whitespace
-normalization is preserved directly; other contracts are compared in both
-directions. The command is read-only and does not write cache or report files.
+normalization is preserved directly; normalization keeps token boundaries.
+Other contracts are compared in both directions. Changes to clause modes,
+callback contracts, or effect-state contracts are reported as inconclusive
+rather than assumed equivalent. The command is read-only and does not write
+cache or report files.
 
 ## Usage
 
@@ -36,14 +39,15 @@ Each baseline atom has one status:
 | `signature_mismatch` | A matching atom has an incompatible signature or an ambiguous name. |
 | `trust_added` | The candidate marks a baseline atom as trusted. |
 | `effects_widened` | The candidate declares an effect absent from the baseline. |
-| `inconclusive` | A required forward comparison could not be decided. |
+| `inconclusive` | Refinement is undecidable, or clause modes, callback contracts, or effect-state contracts differ. |
 
-`pre_weakened`, `post_weakened`, `missing`, `signature_mismatch`, and
-`inconclusive`, `trust_added`, and `effects_widened` are erosion statuses and
-make the report fail. Changed `effect_pre` or `effect_post` contracts are
-reported as `inconclusive` until they can be compared. `strengthened` and
-`refined` are informational and do not fail the report. Candidate atoms that
-have no baseline match are listed in `added` and do not affect the result.
+`pre_weakened`, `post_weakened`, `missing`, `signature_mismatch`,
+`trust_added`, `effects_widened`, and `inconclusive` are erosion statuses and
+make the report fail. Differences in `clause_modes`, callback contract fields
+(`fn_contract_requires` and `fn_contract_ensures`), or the `effect_pre` and
+`effect_post` maps are reported as `inconclusive`. `strengthened` and `refined`
+are informational and do not fail the report. Candidate atoms that have no
+baseline match are listed in `added` and do not affect the result.
 
 ## Exit codes
 
