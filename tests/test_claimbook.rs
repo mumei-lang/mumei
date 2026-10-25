@@ -111,6 +111,20 @@ fn atom<'a>(report: &'a Value, name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("claim {name:?} missing from {report}"))
 }
 
+fn without_discrimination(mut report: Value) -> Value {
+    for claim in report["claims"].as_array_mut().expect("claims array") {
+        claim
+            .as_object_mut()
+            .expect("claim object")
+            .remove("discrimination");
+    }
+    report["summary"]
+        .as_object_mut()
+        .expect("summary object")
+        .remove("by_discrimination");
+    report
+}
+
 fn write_source(dir: &Path, name: &str, contents: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, contents).expect("write source fixture");
@@ -162,6 +176,21 @@ fn controls_results_attach_to_claims_and_render_summary() {
          ensures: result >= 0;\n\
          body: x + y + 1;\n",
     );
+    let plain_out_dir = dir.join("plain");
+    let plain_out_dir_arg = plain_out_dir.to_string_lossy().into_owned();
+    let plain_output = claims(
+        &dir,
+        &source,
+        &["--format", "json", "--out-dir", &plain_out_dir_arg],
+    );
+    assert!(
+        plain_output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&plain_output.stdout),
+        String::from_utf8_lossy(&plain_output.stderr)
+    );
+    let plain_report = json_report(&plain_out_dir.join("claimbook.json"));
+
     let out_dir = dir.join("report");
     let out_dir_arg = out_dir.to_string_lossy().into_owned();
     let output = claims(
@@ -177,6 +206,7 @@ fn controls_results_attach_to_claims_and_render_summary() {
     );
 
     let report = json_report(&out_dir.join("claimbook.json"));
+    assert_eq!(without_discrimination(report.clone()), plain_report);
     let strong = atom(&report, "strong")["discrimination"].clone();
     assert_eq!(strong["status"], "discriminating");
     assert_eq!(strong["survived"], 0);
@@ -254,7 +284,7 @@ fn require_discriminating_gates_weak_and_accepts_strong_claims() {
 }
 
 #[test]
-fn trusted_generic_and_method_claims_attach_controls_by_name() {
+fn trusted_and_method_claims_attach_controls_by_name() {
     let trusted_dir = fresh_dir("controls_trusted");
     let trusted_source = write_source(
         &trusted_dir,
@@ -305,34 +335,75 @@ fn trusted_generic_and_method_claims_attach_controls_by_name() {
         atom(&method_report, "Point::get")["discrimination"]["status"],
         Value::Null
     );
+}
 
-    let generic_dir = fresh_dir("controls_generic");
-    let generic_source = write_source(
-        &generic_dir,
+#[test]
+fn generic_instances_do_not_add_claims_when_controls_are_enabled() {
+    let dir = fresh_dir("controls_generic_instance");
+    let source = write_source(
+        &dir,
         "generic.mm",
-        "atom identity<T>(x: T) -> T\n\
+        "atom id<T>(x: T) -> T\n\
          requires: true;\n\
-         ensures: result == x;\n\
-         body: x;\n",
+         ensures: result == x + 1;\n\
+         body: x + 1;\n\
+         atom main() -> i64\n\
+         requires: true;\n\
+         ensures: result == 4;\n\
+         body: id<i64>(3);\n",
     );
-    let generic_out = generic_dir.join("report");
-    let generic_out_arg = generic_out.to_string_lossy().into_owned();
-    let generic = claims(
-        &generic_dir,
-        &generic_source,
+    let plain_out_dir = dir.join("plain");
+    let plain_out_dir_arg = plain_out_dir.to_string_lossy().into_owned();
+    let plain = claims(
+        &dir,
+        &source,
+        &["--format", "json", "--out-dir", &plain_out_dir_arg],
+    );
+    assert!(
+        plain.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&plain.stdout),
+        String::from_utf8_lossy(&plain.stderr)
+    );
+
+    let controls_out_dir = dir.join("controls");
+    let controls_out_dir_arg = controls_out_dir.to_string_lossy().into_owned();
+    let with_controls = claims(
+        &dir,
+        &source,
         &[
-            "--require-discriminating",
+            "--controls",
             "--format",
             "json",
             "--out-dir",
-            &generic_out_arg,
+            &controls_out_dir_arg,
         ],
     );
-    assert_eq!(generic.status.code(), Some(0));
-    let generic_report = json_report(&generic_out.join("claimbook.json"));
+    assert!(
+        with_controls.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&with_controls.stdout),
+        String::from_utf8_lossy(&with_controls.stderr)
+    );
+
+    let plain_report = json_report(&plain_out_dir.join("claimbook.json"));
+    let controls_report = json_report(&controls_out_dir.join("claimbook.json"));
+    let claim_names = |report: &Value| {
+        report["claims"]
+            .as_array()
+            .expect("claims array")
+            .iter()
+            .map(|claim| claim["atom"].as_str().expect("claim name").to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(claim_names(&controls_report), claim_names(&plain_report));
     assert_eq!(
-        atom(&generic_report, "identity")["discrimination"]["status"],
-        "not_checked"
+        controls_report["summary"]["total"],
+        plain_report["summary"]["total"]
+    );
+    assert_eq!(
+        controls_report["summary"]["by_effective_grade"],
+        plain_report["summary"]["by_effective_grade"]
     );
 }
 

@@ -5,7 +5,6 @@ use mumei_core::claimbook::{
 };
 use mumei_core::parser::Item;
 use mumei_core::{controls, parser, proof_cert};
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -49,7 +48,7 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
         None
     };
 
-    let (items, module_env, _imports, source) =
+    let (items, module_env, _imports, _source) =
         match try_load_and_prepare_with_full_options_and_persistence(
             input,
             false,
@@ -85,53 +84,6 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
     }
     atoms.extend(qualified_methods.iter());
 
-    let generic_items = if controls_enabled {
-        Some(
-            parser::parse_module_checked(&source).unwrap_or_else(|errors| {
-                eprintln!(
-                    "❌ Could not parse implementation '{input}': {}",
-                    errors.join("\n")
-                );
-                std::process::exit(super::verify::EXIT_INPUT_ERROR);
-            }),
-        )
-    } else {
-        None
-    };
-    let mut generic_qualified_methods = Vec::new();
-    if let Some(generic_items) = &generic_items {
-        let mut atom_names = atoms
-            .iter()
-            .map(|atom| atom.name.clone())
-            .collect::<HashSet<_>>();
-        let mut generic_atoms = Vec::new();
-        for item in generic_items {
-            match item {
-                Item::Atom(atom)
-                    if !atom.type_params.is_empty() && atom_names.insert(atom.name.clone()) =>
-                {
-                    generic_atoms.push(atom);
-                }
-                Item::ImplBlock(block) => {
-                    for method in &block.methods {
-                        if method.type_params.is_empty() {
-                            continue;
-                        }
-                        let name = format!("{}::{}", block.struct_name, method.name);
-                        if atom_names.insert(name.clone()) {
-                            let mut qualified = method.clone();
-                            qualified.name = name;
-                            generic_qualified_methods.push(qualified);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        atoms.extend(generic_atoms);
-        atoms.extend(generic_qualified_methods.iter());
-    }
-
     let mut book = create_claimbook(
         input,
         cert_path.display().to_string(),
@@ -139,13 +91,12 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
         &atoms,
         allow_lean_verified,
     );
-    if let Some(generic_items) = &generic_items {
-        let report =
-            controls::analyze(input, &items, generic_items, &module_env, None, max_mutants)
-                .unwrap_or_else(|error| {
-                    eprintln!("❌ Error: {error}");
-                    std::process::exit(super::verify::EXIT_INPUT_ERROR);
-                });
+    if controls_enabled {
+        let report = controls::analyze(input, &items, &items, &module_env, None, max_mutants)
+            .unwrap_or_else(|error| {
+                eprintln!("❌ Error: {error}");
+                std::process::exit(super::verify::EXIT_INPUT_ERROR);
+            });
         attach_controls(&mut book, &report.atoms);
     }
     let output_dir = Path::new(out_dir);

@@ -24,8 +24,7 @@ engine as [`mumei controls`](CONTROLS.md). `--max-mutants N` sets the
 per-atom limit (default 32) and is valid only with `--controls`. The
 `--require-discriminating` gate enables controls automatically and exits 1 if
 any claim is `weak` or `inconclusive`. `discriminating`, `no_mutants`, and
-`not_checked` pass this gate; trusted atoms and generic templates remain the
-responsibility of the grade gate.
+`not_checked` pass this gate; trusted atoms remain subject to the grade gate.
 
 Controls are orthogonal to Seal Grade: enabling them does not change grades,
 effective grades, freshness, or the Claim Book schema. JSON adds optional
