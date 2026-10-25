@@ -999,10 +999,60 @@ fn property_atom_filter_and_unsupported_atom_kinds_work() {
     let output = fixture.run(&["--json"]);
     assert_eq!(output.status.code(), Some(0));
     let results = parse(&output)["results"].as_array().unwrap().clone();
-    assert_eq!(results[0]["detail"], "trusted_atom");
+    assert_eq!(results[0]["verdict"], "entailed");
     assert_eq!(results[1]["detail"], "refinement_parameter");
     assert_eq!(results[2]["detail"], "no_atom");
     assert_eq!(results[3]["verdict"], "entailed");
+}
+
+#[test]
+fn trusted_property_observations_are_checked_against_contracts() {
+    let fixture = Fixture::new(
+        "trusted atom add(a: i64, b: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == a + b;\n\
+         body: 0;\n",
+        &harvest(vec![
+            property(
+                "add",
+                json!({"a": {"var": "x"}, "b": {"var": "y"}}),
+                json!([
+                    {"name": "x", "type": "i64", "min": 0, "max": 3},
+                    {"name": "y", "type": "i64", "min": 0, "max": 3}
+                ]),
+                "result == x + y",
+            ),
+            property(
+                "add",
+                json!({"a": {"var": "x"}, "b": {"var": "y"}}),
+                json!([
+                    {"name": "x", "type": "i64", "min": 0, "max": 3},
+                    {"name": "y", "type": "i64", "min": 0, "max": 3}
+                ]),
+                "result == x",
+            ),
+            property(
+                "add",
+                json!({"a": {"var": "x"}, "b": {"var": "y"}}),
+                json!([
+                    {"name": "x", "type": "i64", "min": 0, "max": 3},
+                    {"name": "y", "type": "i64", "min": 0, "max": 3}
+                ]),
+                "result == x + y + 1",
+            ),
+        ]),
+    );
+    let output = fixture.run(&["--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let results = parse(&output)["results"].as_array().unwrap().clone();
+    assert_eq!(results[0]["verdict"], "entailed");
+    assert_eq!(results[1]["verdict"], "not_entailed");
+    assert_eq!(results[2]["verdict"], "contradicts_ensures");
 }
 
 #[test]

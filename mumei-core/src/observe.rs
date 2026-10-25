@@ -542,9 +542,7 @@ fn is_identifier(value: &str) -> bool {
 }
 
 fn unsupported_property_atom_detail(atom: &Atom, module_env: &ModuleEnv) -> Option<&'static str> {
-    if matches!(&atom.trust_level, TrustLevel::Trusted) {
-        Some("trusted_atom")
-    } else if atom.params.iter().any(|param| {
+    if atom.params.iter().any(|param| {
         param
             .type_name
             .as_deref()
