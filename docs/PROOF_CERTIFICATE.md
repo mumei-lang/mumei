@@ -205,6 +205,10 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
 | `attempt_summary` | `Option<AttemptSummary>` | Total attempts, attempts by action class, and final action class before success or manual review |
 | `cost_success_metrics` | `Option<CostSuccessMetrics>` | Attempts, tokens, solver seconds, and spec drift observed before success |
 
+### Dependency freshness coverage limits
+
+Dependency hashes cover resolved transitive callees and refined types or structs referenced directly by an atom's signature. They do not yet cover refined types nested inside generics or struct fields, or types referenced only in bodies. If a callee cannot be resolved in the importer's environment, its expected key is `dependency_unchecked`, never `dependency_changed`. `proof_hash` remains an internal proof-cache fingerprint and is intentionally not compared for import freshness; per-dependency hashes provide the contract-specific comparison without changing the established proof-hash behavior.
+
 ## Retry Budget Policy Schema (P8-G)
 
 Retry budget metadata makes self-healing and Lean escalation auditable. Policies are intentionally fingerprinted and embedded indirectly so certificates can prove which retry boundary governed an atom without storing full agent logs.

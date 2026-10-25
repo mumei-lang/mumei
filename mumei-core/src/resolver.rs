@@ -808,6 +808,11 @@ atom add(x: i64) -> i64
 
         // The atom should NOT be marked as verified
         assert!(!module_env.is_verified("add"));
+        assert!(!module_env.is_verified("dep::add"));
+        assert_eq!(
+            module_env.get_atom("dep::add").unwrap().trust_level,
+            parser::TrustLevel::Unverified
+        );
     }
 
     /// P5-C: mark_dependency_atoms_with_cert with None cert (legacy) verifies all

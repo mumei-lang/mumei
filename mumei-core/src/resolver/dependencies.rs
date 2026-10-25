@@ -332,15 +332,21 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
     }
 
     deferred_certificates.sort_by(|a, b| a.dependency_name.cmp(&b.dependency_name));
-    for deferred in deferred_certificates {
-        let cert_results = verify_import_certificate(
-            &deferred.module_dir,
-            &deferred.entry_path,
-            &deferred.items,
-            allow_lean_verified,
-            module_env,
-            strict_imports,
-        );
+    let verified_certificates = deferred_certificates
+        .into_iter()
+        .map(|deferred| {
+            let cert_results = verify_import_certificate(
+                &deferred.module_dir,
+                &deferred.entry_path,
+                &deferred.items,
+                allow_lean_verified,
+                module_env,
+                strict_imports,
+            );
+            (deferred, cert_results)
+        })
+        .collect::<Vec<_>>();
+    for (deferred, cert_results) in verified_certificates {
         mark_dependency_atoms_with_cert(
             &deferred.items,
             &deferred.dependency_name,

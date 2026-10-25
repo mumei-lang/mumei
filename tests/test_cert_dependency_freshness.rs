@@ -238,7 +238,7 @@ fn stale_transitive_contract_is_rejected_and_claimbook_marks_drift() {
     assert_success(&fixture.certify(&a_source, &a_cert), "re-certify changed A");
 
     let changed = verify_cert(&fixture, &b_cert, &b_source, false);
-    assert!(!changed.status.success(), "{}", output_text(&changed));
+    assert_eq!(changed.status.code(), Some(1), "{}", output_text(&changed));
     let changed_text = output_text(&changed);
     assert!(
         changed_text.contains("dependency_changed"),
@@ -246,10 +246,19 @@ fn stale_transitive_contract_is_rejected_and_claimbook_marks_drift() {
     );
     assert!(changed_text.contains("atom:f"), "{changed_text}");
     let changed_strict = verify_cert(&fixture, &b_cert, &b_source, true);
+    let changed_strict_text = output_text(&changed_strict);
+    assert_eq!(
+        changed_strict.status.code(),
+        Some(1),
+        "{changed_strict_text}"
+    );
     assert!(
-        !changed_strict.status.success(),
-        "{}",
-        output_text(&changed_strict)
+        changed_strict_text.contains("dependency_changed"),
+        "{changed_strict_text}"
+    );
+    assert!(
+        changed_strict_text.contains("atom:f"),
+        "{changed_strict_text}"
     );
 
     let strict_import = fixture.verify(&c_source, &["--strict-imports"]);
@@ -261,8 +270,16 @@ fn stale_transitive_contract_is_rejected_and_claimbook_marks_drift() {
 
     let non_strict_import = fixture.verify(&c_source, &[]);
     let non_strict_text = output_text(&non_strict_import);
+    assert_success(
+        &non_strict_import,
+        "non-strict import with changed dependencies",
+    );
     assert!(
-        non_strict_text.contains("dependency_changed"),
+        non_strict_text.lines().any(|line| {
+            line.contains("atom 'g'")
+                && line.contains("dependency_changed")
+                && line.contains("atom:f")
+        }),
         "{non_strict_text}"
     );
 
@@ -292,7 +309,7 @@ fn stale_transitive_contract_is_rejected_and_claimbook_marks_drift() {
         g["reason"],
         "a dependency's contract changed since the certificate was produced"
     );
-    assert_ne!(g["grade"], "G4");
+    assert_eq!(g["grade"], "G0");
 }
 
 #[test]
@@ -311,13 +328,18 @@ fn legacy_dependency_hashes_are_unchecked_with_strict_policy_and_warning() {
 
     let unchecked = verify_cert(&fixture, &b_cert, &b_source, false);
     let unchecked_text = output_text(&unchecked);
-    assert!(unchecked.status.success(), "{unchecked_text}");
+    assert_eq!(unchecked.status.code(), Some(0), "{unchecked_text}");
     assert!(
         unchecked_text.contains("dependency_unchecked"),
         "{unchecked_text}"
     );
     let strict = verify_cert(&fixture, &b_cert, &b_source, true);
-    assert!(!strict.status.success(), "{}", output_text(&strict));
+    let strict_text = output_text(&strict);
+    assert_eq!(strict.status.code(), Some(1), "{strict_text}");
+    assert!(
+        strict_text.contains("dependency_unchecked"),
+        "{strict_text}"
+    );
 
     let non_strict_import = fixture.verify(&c_source, &[]);
     let warning = output_text(&non_strict_import);
@@ -357,6 +379,7 @@ fn legacy_dependency_hashes_are_unchecked_with_strict_policy_and_warning() {
         .find(|claim| claim["atom"] == "g")
         .expect("g claim");
     assert_eq!(g["freshness"], "fresh");
+    assert_eq!(g["grade"], "G4");
 }
 
 #[test]
@@ -702,6 +725,68 @@ fn strict_manifest_import_checks_path_dependency_freshness() {
         &["verify", "--strict-imports", "src/main.mm"],
     );
     assert_success(&b_first, "strictly verify consumer with B sorting before A");
+
+    let a_certificate = [
+        published_a.join(".proof-cert.json"),
+        published_a.join("proof_certificate.json"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.exists())
+    .expect("published A certificate");
+    let a_certificate_contents =
+        std::fs::read(&a_certificate).expect("read A certificate before removal");
+    std::fs::remove_file(&a_certificate).expect("remove A certificate");
+    for (directory, b_name, a_name) in [
+        ("consumer_missing_a_first", "z_dep", "a_dep"),
+        ("consumer_missing_b_first", "a_dep", "z_dep"),
+    ] {
+        let consumer = write_consumer(directory, b_name, Some((a_name, &published_a)));
+        let result = fixture.run_in_directory(&consumer, &["verify", "src/main.mm"]);
+        let text = output_text(&result);
+        assert_success(
+            &result,
+            "non-strict manifest import with missing A certificate",
+        );
+        assert!(
+            !text
+                .lines()
+                .any(|line| { line.contains(format!("Dependency '{b_name}': atom 'g'").as_str()) }),
+            "g must remain proven in both dependency-name orders:\n{text}"
+        );
+    }
+    std::fs::write(&a_certificate, a_certificate_contents)
+        .expect("restore A certificate for the stale-certificate case");
+
+    std::fs::write(
+        published_a.join("src/main.mm"),
+        "atom f(x: i64) -> i64\n  requires: x >= 0;\n  ensures: result == x;\n  body: x + 0;\n",
+    )
+    .expect("change A body without refreshing its certificate");
+    for (directory, b_name, a_name) in [
+        ("consumer_stale_a_first", "z_dep", "a_dep"),
+        ("consumer_stale_b_first", "a_dep", "z_dep"),
+    ] {
+        let consumer = write_consumer(directory, b_name, Some((a_name, &published_a)));
+        let result = fixture.run_in_directory(&consumer, &["verify", "src/main.mm"]);
+        let text = output_text(&result);
+        assert_success(
+            &result,
+            "non-strict manifest import with stale A certificate",
+        );
+        assert!(
+            text.lines().any(|line| {
+                line.contains(format!("Dependency '{a_name}': atom 'f'").as_str())
+                    && line.contains("failed certificate verification")
+            }),
+            "{text}"
+        );
+        assert!(
+            !text
+                .lines()
+                .any(|line| { line.contains(format!("Dependency '{b_name}': atom 'g'").as_str()) }),
+            "g must remain proven in both dependency-name orders:\n{text}"
+        );
+    }
 
     let consumer_without_a = write_consumer("consumer_without_a", "z_dep", None);
     let without_a = fixture.run_in_directory(

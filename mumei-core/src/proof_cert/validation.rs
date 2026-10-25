@@ -183,12 +183,14 @@ pub fn verify_certificate_in_env(
     allow_lean_verified: bool,
     env: Option<&ModuleEnv>,
 ) -> Vec<CertificateAtomCheck> {
+    let mut atoms_by_name = HashMap::with_capacity(atoms.len());
     let current_hashes: HashMap<String, Option<String>> = atoms
         .iter()
-        .map(|a| {
+        .map(|atom| {
+            atoms_by_name.insert(atom.name.clone(), *atom);
             (
-                a.name.clone(),
-                compute_atom_content_hash_for_version(&cert.version, a),
+                atom.name.clone(),
+                compute_atom_content_hash_for_version(&cert.version, atom),
             )
         })
         .collect();
@@ -232,22 +234,19 @@ pub fn verify_certificate_in_env(
             if status == status::CERTIFICATE_PROVEN {
                 if let Some(env) = env {
                     if let Some(expected) = &ac.dependency_hashes {
-                        let current = crate::resolver::compute_dependency_hashes(
-                            atoms
-                                .iter()
-                                .find(|atom| atom.name == ac.name)
-                                .copied()
-                                .unwrap(),
-                            env,
-                        );
-                        for (key, hash) in expected {
-                            match current.get(key) {
-                                Some(current_hash) if current_hash != hash => {
-                                    changed_dependencies.push(key.clone())
+                        if let Some(atom) = atoms_by_name.get(&ac.name) {
+                            let current = crate::resolver::compute_dependency_hashes(atom, env);
+                            for (key, hash) in expected {
+                                match current.get(key) {
+                                    Some(current_hash) if current_hash != hash => {
+                                        changed_dependencies.push(key.clone())
+                                    }
+                                    Some(_) => {}
+                                    None => unchecked_dependencies.push(key.clone()),
                                 }
-                                Some(_) => {}
-                                None => unchecked_dependencies.push(key.clone()),
                             }
+                        } else {
+                            unchecked_dependencies.push(format!("atom:{}", ac.name));
                         }
                     } else {
                         unchecked_dependencies.push("dependency_hashes".to_string());

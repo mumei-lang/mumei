@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 const SCHEMA: &str = "mumei.claimbook/v1";
+const DEPENDENCY_CONTRACT_CHANGED_REASON: &str =
+    "a dependency's contract changed since the certificate was produced";
+const LEAN_TRANSLATOR_METADATA_STALE_REASON: &str =
+    "Lean translator metadata is stale; regenerate the Lean certificate";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SealGrade {
@@ -598,16 +602,13 @@ pub fn create_claimbook(
                 Some("source content differs from its certificate"),
             )
         } else if verification_result == Some(status::CERTIFICATE_DEPENDENCY_CHANGED) {
-            (
-                Freshness::Drifted,
-                Some("a dependency's contract changed since the certificate was produced"),
-            )
+            (Freshness::Drifted, Some(DEPENDENCY_CONTRACT_CHANGED_REASON))
         } else if stale_lean_metadata
             || verification_result == Some(status::CERTIFICATE_STALE_TRANSLATOR)
         {
             (
                 Freshness::Drifted,
-                Some("Lean translator metadata is stale; regenerate the Lean certificate"),
+                Some(LEAN_TRANSLATOR_METADATA_STALE_REASON),
             )
         } else {
             match verification_result
@@ -635,21 +636,14 @@ pub fn create_claimbook(
             ));
         if verification_result == Some(status::CERTIFICATE_DEPENDENCY_CHANGED) {
             grade = SealGrade::G0;
-            own_reason =
-                "a dependency's contract changed since the certificate was produced".to_string();
+            own_reason = DEPENDENCY_CONTRACT_CHANGED_REASON.to_string();
         }
         let reason = match freshness_reason {
-            Some(reason)
-                if reason
-                    == "a dependency's contract changed since the certificate was produced" =>
-            {
-                reason.to_string()
+            Some(DEPENDENCY_CONTRACT_CHANGED_REASON) => {
+                DEPENDENCY_CONTRACT_CHANGED_REASON.to_string()
             }
-            Some(reason)
-                if reason
-                    == "Lean translator metadata is stale; regenerate the Lean certificate" =>
-            {
-                reason.to_string()
+            Some(LEAN_TRANSLATOR_METADATA_STALE_REASON) => {
+                LEAN_TRANSLATOR_METADATA_STALE_REASON.to_string()
             }
             Some(reason) if entry.is_some() => format!("{reason}; {own_reason}"),
             Some(reason) => reason.to_string(),
