@@ -54,10 +54,15 @@ Z3-discharged obligations are G4. Lean evidence is G4 only when explicitly enabl
 ## Freshness
 
 - `fresh`: the source still matches its certificate; proof failures remain fresh evidence about the current source.
-- `drifted`: the atom content changed, Lean translator metadata is stale, or a comparable certificate integrity mismatch was found.
+- `drifted`: the atom content or a recorded dependency contract changed, Lean translator metadata is stale, or a comparable certificate integrity mismatch was found.
 - `uncertified`: the source atom has no certificate entry.
 
 An integrity mismatch marks every claim as drifted. An integrity mismatch from a different generator version is shown as `incomparable_version` without changing grades on that basis. Certificate atoms absent from the source are listed in `orphaned_entries`.
+
+When a dependency contract changed, the claim is `drifted`, its reason is
+`a dependency's contract changed since the certificate was produced`, and its
+own grade is capped at G0. Certificates without dependency hashes retain the
+current freshness grade because the dependency check is unavailable.
 
 ## Effective grade and limiting premises
 

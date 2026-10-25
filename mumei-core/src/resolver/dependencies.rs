@@ -9,6 +9,14 @@ use super::imports::{
     resolve_imports_recursive, verify_import_certificate, ResolverContext,
 };
 
+struct DeferredCertificateCheck {
+    dependency_name: String,
+    module_dir: PathBuf,
+    entry_path: PathBuf,
+    items: Vec<parser::Item>,
+    load_message: Option<String>,
+}
+
 /// mumei.toml の [dependencies] セクションを処理し、
 /// パス依存・Git 依存のモジュールを ModuleEnv に登録する。
 ///
@@ -74,6 +82,8 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
     allow_lean_verified: bool,
     persist_cache: bool,
 ) -> MumeiResult<()> {
+    let mut deferred_certificates = Vec::new();
+
     for (dep_name, dep) in &manifest.dependencies {
         // パス依存
         if let Some(dep_path) = dep.as_path() {
@@ -110,21 +120,17 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                     module_env,
                     entry_path.to_str(),
                 );
-                // P5-C: Check for proof certificate before marking atoms as verified
-                let cert_results =
-                    verify_import_certificate(&abs_path, entry_path, &items, allow_lean_verified);
-                mark_dependency_atoms_with_cert(
-                    &items,
-                    dep_name,
-                    &cert_results,
-                    module_env,
-                    strict_imports,
-                )?;
-                println!(
-                    "  📦 Dependency '{}': loaded from {}",
-                    dep_name,
-                    entry_path.display()
-                );
+                deferred_certificates.push(DeferredCertificateCheck {
+                    dependency_name: dep_name.clone(),
+                    module_dir: abs_path,
+                    entry_path: entry_path.to_path_buf(),
+                    items,
+                    load_message: Some(format!(
+                        "  📦 Dependency '{}': loaded from {}",
+                        dep_name,
+                        entry_path.display()
+                    )),
+                });
             } else {
                 eprintln!(
                     "  ⚠️  Dependency '{}': no entry file found in '{}'",
@@ -226,18 +232,13 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                     module_env,
                     entry_path.to_str(),
                 );
-                // P5-C: Check for proof certificate before marking atoms as verified
-                // Use clone_dir (package root) instead of dep_base_dir (entry file parent)
-                // because cmd_publish saves certificates to the package root.
-                let cert_results =
-                    verify_import_certificate(&clone_dir, entry_path, &items, allow_lean_verified);
-                mark_dependency_atoms_with_cert(
-                    &items,
-                    dep_name,
-                    &cert_results,
-                    module_env,
-                    strict_imports,
-                )?;
+                deferred_certificates.push(DeferredCertificateCheck {
+                    dependency_name: dep_name.clone(),
+                    module_dir: clone_dir,
+                    entry_path: entry_path.to_path_buf(),
+                    items,
+                    load_message: None,
+                });
             } else {
                 eprintln!(
                     "  ⚠️  Dependency '{}': no entry file found in cloned repo",
@@ -302,27 +303,17 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                         module_env,
                         entry_path.to_str(),
                     );
-                    // P5-C: Check for proof certificate before marking atoms as verified
-                    // Use pkg_dir (package root) instead of dep_base_dir (entry file parent)
-                    // because cmd_publish saves certificates to the package root.
-                    let cert_results = verify_import_certificate(
-                        &pkg_dir,
-                        entry_path,
-                        &items,
-                        allow_lean_verified,
-                    );
-                    mark_dependency_atoms_with_cert(
-                        &items,
-                        dep_name,
-                        &cert_results,
-                        module_env,
-                        strict_imports,
-                    )?;
-                    println!(
-                        "  📦 Dependency '{}': loaded from registry ({})",
-                        dep_name,
-                        pkg_dir.display()
-                    );
+                    deferred_certificates.push(DeferredCertificateCheck {
+                        dependency_name: dep_name.clone(),
+                        module_dir: pkg_dir.clone(),
+                        entry_path: entry_path.to_path_buf(),
+                        items,
+                        load_message: Some(format!(
+                            "  📦 Dependency '{}': loaded from registry ({})",
+                            dep_name,
+                            pkg_dir.display()
+                        )),
+                    });
                 } else {
                     eprintln!(
                         "  ⚠️  Dependency '{}': found in registry but no entry file in '{}'",
@@ -339,5 +330,28 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
             }
         }
     }
+
+    deferred_certificates.sort_by(|a, b| a.dependency_name.cmp(&b.dependency_name));
+    for deferred in deferred_certificates {
+        let cert_results = verify_import_certificate(
+            &deferred.module_dir,
+            &deferred.entry_path,
+            &deferred.items,
+            allow_lean_verified,
+            module_env,
+            strict_imports,
+        );
+        mark_dependency_atoms_with_cert(
+            &deferred.items,
+            &deferred.dependency_name,
+            &cert_results,
+            module_env,
+            strict_imports,
+        )?;
+        if let Some(message) = deferred.load_message {
+            println!("{message}");
+        }
+    }
+
     Ok(())
 }

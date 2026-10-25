@@ -94,6 +94,9 @@ pub struct AtomCertificate {
     /// Direct callee atom names from dependency graph (P5-A)
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// Per-atom hashes for the dependency contracts used during verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_hashes: Option<BTreeMap<String, String>>,
     /// Declared effect names (P5-A)
     #[serde(default)]
     pub effects: Vec<String>,

@@ -333,6 +333,7 @@ fn lookup_in_certificate(
     source_file: &Path,
     name_candidates: &[String],
     allow_lean_verified: bool,
+    env: Option<&ModuleEnv>,
 ) -> SiblingLookup {
     if !certificate_owns_source(cert, source_file) {
         return SiblingLookup::NotListed;
@@ -347,11 +348,13 @@ fn lookup_in_certificate(
         name: certified_name.clone(),
         ..atom.clone()
     };
-    let results = proof_cert::verify_certificate(cert, &[&certified_atom], allow_lean_verified);
+    // Without a ModuleEnv, sibling lookup keeps its content-only behavior.
+    let results =
+        proof_cert::verify_certificate_in_env(cert, &[&certified_atom], allow_lean_verified, env);
     let decision = match results
         .iter()
-        .find(|(name, _)| name == &certified_atom.name)
-        .map(|(_, status)| status.as_str())
+        .find(|check| check.name == certified_atom.name)
+        .map(|check| check.status.as_str())
     {
         Some(proof_cert::status::CERTIFICATE_PROVEN) => {
             SiblingCertificateDecision::Accepted("verified")
@@ -426,6 +429,7 @@ pub fn backfill_verification_status_from_sibling_certificates(
                 &source_file,
                 &name_candidates,
                 allow_lean_verified,
+                Some(module_env),
             ) {
                 SiblingLookup::NotListed => continue,
                 // The first certificate that lists the atom decides; a stale
@@ -445,6 +449,7 @@ pub fn backfill_verification_status_from_sibling_certificates(
                     &source_file,
                     &name_candidates,
                     allow_lean_verified,
+                    Some(module_env),
                 ) {
                     decided = Some(decision);
                 }

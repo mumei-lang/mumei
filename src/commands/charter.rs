@@ -168,6 +168,7 @@ fn cmd_check(
             Some(cert),
             &atoms,
             allow_lean_verified,
+            Some(&module_env),
         );
         let required_grade = parse_grade(require_grade.unwrap_or("G4"));
         for (atom, implementation_name) in report.atoms.iter_mut().zip(matched_implementations) {
