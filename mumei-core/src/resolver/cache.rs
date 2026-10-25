@@ -473,6 +473,8 @@ pub fn compute_proof_hash_with_flags(
         .iter()
         .map(|effect| effect.name.clone())
         .collect();
+    effect_names.extend(atom.effect_pre.keys().cloned());
+    effect_names.extend(atom.effect_post.keys().cloned());
     let mut sorted_callees: Vec<String> = proof_hash_callee_names(atom, module_env)
         .into_iter()
         .collect();
@@ -491,6 +493,8 @@ pub fn compute_proof_hash_with_flags(
             hash_string_map(&mut hasher, "effect_pre", &callee_atom.effect_pre);
             hash_string_map(&mut hasher, "effect_post", &callee_atom.effect_post);
             effect_names.extend(callee_atom.effects.iter().map(|effect| effect.name.clone()));
+            effect_names.extend(callee_atom.effect_pre.keys().cloned());
+            effect_names.extend(callee_atom.effect_post.keys().cloned());
             let mut sorted_further: Vec<String> = proof_hash_callee_names(callee_atom, module_env)
                 .into_iter()
                 .collect();
@@ -571,37 +575,35 @@ pub fn compute_proof_hash_with_flags(
             for parent in parents {
                 hash_field(&mut hasher, "effect_def.parent", &parent);
             }
-            let mut states = effect_def.states.clone();
-            states.sort();
             hash_field(
                 &mut hasher,
                 "effect_def.states.len",
-                &states.len().to_string(),
+                &effect_def.states.len().to_string(),
             );
-            for state in states {
-                hash_field(&mut hasher, "effect_def.state", &state);
+            for state in &effect_def.states {
+                hash_field(&mut hasher, "effect_def.state", state);
             }
-            let mut transitions: Vec<(&str, &str, &str)> = effect_def
-                .transitions
-                .iter()
-                .map(|transition| {
-                    (
-                        transition.operation.as_str(),
-                        transition.from_state.as_str(),
-                        transition.to_state.as_str(),
-                    )
-                })
-                .collect();
-            transitions.sort();
             hash_field(
                 &mut hasher,
                 "effect_def.transitions.len",
-                &transitions.len().to_string(),
+                &effect_def.transitions.len().to_string(),
             );
-            for (operation, from_state, to_state) in transitions {
-                hash_field(&mut hasher, "effect_def.transition.operation", operation);
-                hash_field(&mut hasher, "effect_def.transition.from", from_state);
-                hash_field(&mut hasher, "effect_def.transition.to", to_state);
+            for transition in &effect_def.transitions {
+                hash_field(
+                    &mut hasher,
+                    "effect_def.transition.operation",
+                    &transition.operation,
+                );
+                hash_field(
+                    &mut hasher,
+                    "effect_def.transition.from",
+                    &transition.from_state,
+                );
+                hash_field(
+                    &mut hasher,
+                    "effect_def.transition.to",
+                    &transition.to_state,
+                );
             }
             hash_field(
                 &mut hasher,
@@ -1955,6 +1957,112 @@ body: { p.a };\n";
             "main",
         );
         assert_ne!(quantified, changed_quantifier);
+    }
+
+    #[test]
+    fn proof_hash_tracks_effect_state_declaration_order() {
+        let source = "effect File\n\
+             states: [Closed, Open];\n\
+             transition open: Closed -> Open;\n\
+             transition close: Open -> Closed;\n\
+             atom main(x: i64) -> i64\n\
+             effects: [File];\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: { perform File.open(x); x };\n";
+        let baseline = proof_hash_for(source, "main");
+        let reordered = proof_hash_for(
+            &source.replace("states: [Closed, Open]", "states: [Open, Closed]"),
+            "main",
+        );
+
+        assert_ne!(baseline, reordered);
+    }
+
+    #[test]
+    fn proof_hash_tracks_transition_declaration_order() {
+        let source = "effect File\n\
+             states: [Closed, Open, Ready];\n\
+             transition advance: Closed -> Open;\n\
+             transition advance: Closed -> Ready;\n\
+             atom main(x: i64) -> i64\n\
+             effects: [File];\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n";
+        let baseline = proof_hash_for(source, "main");
+        let reordered = proof_hash_for(
+            &source.replace(
+                "transition advance: Closed -> Open;\ntransition advance: Closed -> Ready;",
+                "transition advance: Closed -> Ready;\ntransition advance: Closed -> Open;",
+            ),
+            "main",
+        );
+
+        assert_ne!(baseline, reordered);
+    }
+
+    #[test]
+    fn proof_hash_tracks_definitions_named_only_by_effect_state_contracts() {
+        let sources = [
+            (
+                "effect File\n\
+                 states: [Closed, Open];\n\
+                 atom main(x: i64) -> i64\n\
+                 effect_pre: { File: Open };\n\
+                 requires: true;\n\
+                 ensures: result == x;\n\
+                 body: x;\n",
+                "main",
+            ),
+            (
+                "effect File\n\
+                 states: [Closed, Open];\n\
+                 atom main(x: i64) -> i64\n\
+                 effect_post: { File: Open };\n\
+                 requires: true;\n\
+                 ensures: result == x;\n\
+                 body: x;\n",
+                "main",
+            ),
+            (
+                "effect File\n\
+                 states: [Closed, Open];\n\
+                 atom f(x: i64) -> i64\n\
+                 effect_pre: { File: Open };\n\
+                 requires: true;\n\
+                 ensures: result == x;\n\
+                 body: x;\n\
+                 atom main(x: i64) -> i64\n\
+                 requires: true;\n\
+                 ensures: result == x;\n\
+                 body: f(x);\n",
+                "main",
+            ),
+            (
+                "effect File\n\
+                 states: [Closed, Open];\n\
+                 atom f(x: i64) -> i64\n\
+                 effect_post: { File: Open };\n\
+                 requires: true;\n\
+                 ensures: result == x;\n\
+                 body: x;\n\
+                 atom main(x: i64) -> i64\n\
+                 requires: true;\n\
+                 ensures: result == x;\n\
+                 body: f(x);\n",
+                "main",
+            ),
+        ];
+
+        for (source, atom_name) in sources {
+            let baseline = proof_hash_for(source, atom_name);
+            let changed = proof_hash_for(
+                &source.replace("states: [Closed, Open]", "states: [Closed, Ready]"),
+                atom_name,
+            );
+            assert_ne!(baseline, changed, "effect-state reference was not hashed");
+        }
     }
 
     #[test]

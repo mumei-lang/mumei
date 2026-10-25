@@ -146,6 +146,101 @@ fn own_effect_post_change_reverifies_and_fails() {
     );
 }
 
+const EFFECT_STATE_ORDER_SOURCE: &str = r#"
+effect File
+    states: [Closed, Open];
+    transition open: Closed -> Open;
+    transition close: Open -> Closed;
+
+atom gs(x: i64) -> i64
+    effects: [File];
+    requires: true;
+    ensures: result == x;
+    body: {
+        perform File.open(x);
+        x
+    };
+"#;
+
+#[test]
+fn effect_state_order_change_reverifies_and_fails() {
+    let module = TempModule::new("effect_state_order");
+    module.write(EFFECT_STATE_ORDER_SOURCE);
+    assert_initial_verification(&module, "gs");
+
+    let changed =
+        EFFECT_STATE_ORDER_SOURCE.replace("states: [Closed, Open]", "states: [Open, Closed]");
+    assert_ne!(changed, EFFECT_STATE_ORDER_SOURCE);
+    module.write(&changed);
+    assert_cached_and_fresh_failure(
+        &module,
+        "gs",
+        "operation 'open' requires state 'Closed' but current state is 'Open'",
+    );
+}
+
+const OWN_EFFECT_PRE_ONLY_SOURCE: &str = r#"
+effect File
+    states: [Closed, Open];
+    initial: Closed;
+
+atom gp(x: i64) -> i64
+    effect_pre: { File: Open };
+    requires: true;
+    ensures: result == x;
+    body: x;
+"#;
+
+#[test]
+fn effect_definition_named_only_by_own_effect_pre_reverifies_and_fails() {
+    let module = TempModule::new("own_effect_pre_only");
+    module.write(OWN_EFFECT_PRE_ONLY_SOURCE);
+    assert_initial_verification(&module, "gp");
+
+    let changed =
+        OWN_EFFECT_PRE_ONLY_SOURCE.replace("states: [Closed, Open]", "states: [Closed, Ready]");
+    assert_ne!(changed, OWN_EFFECT_PRE_ONLY_SOURCE);
+    module.write(&changed);
+    assert_cached_and_fresh_failure(
+        &module,
+        "gp",
+        "effect_pre: state 'Open' is not a valid state for effect 'File'",
+    );
+}
+
+const CALLEE_EFFECT_PRE_ONLY_SOURCE: &str = r#"
+effect File
+    states: [Open, Closed];
+
+atom f(x: i64) -> i64
+    effect_pre: { File: Open };
+    requires: true;
+    ensures: result == x;
+    body: x;
+
+atom gc(x: i64) -> i64
+    requires: true;
+    ensures: result == x;
+    body: f(x);
+"#;
+
+#[test]
+fn effect_definition_named_only_by_callee_effect_pre_reverifies_and_fails() {
+    let module = TempModule::new("callee_effect_pre_only");
+    module.write(CALLEE_EFFECT_PRE_ONLY_SOURCE);
+    assert_initial_verification(&module, "gc");
+
+    let changed =
+        CALLEE_EFFECT_PRE_ONLY_SOURCE.replace("states: [Open, Closed]", "states: [Closed, Ready]");
+    assert_ne!(changed, CALLEE_EFFECT_PRE_ONLY_SOURCE);
+    module.write(&changed);
+    assert_cached_and_fresh_failure(
+        &module,
+        "gc",
+        "effect_pre: state 'Open' is not a valid state for effect 'File'",
+    );
+}
+
 const QUANTIFIED_SOURCE: &str = r#"
 atom qg(arr: [i64], n: i64) -> i64
     requires: n >= 1 && len(arr) >= n && forall(i, 0, n, arr[i] > 0);
