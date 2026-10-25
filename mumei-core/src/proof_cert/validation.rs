@@ -235,7 +235,17 @@ pub fn verify_certificate_in_env(
                 if let Some(env) = env {
                     if let Some(expected) = &ac.dependency_hashes {
                         if let Some(atom) = atoms_by_name.get(&ac.name) {
-                            let current = crate::resolver::compute_dependency_hashes(atom, env);
+                            let mut current = crate::resolver::compute_dependency_hashes(atom, env);
+                            if expected
+                                .keys()
+                                .any(|key| key.starts_with("atom:") && !current.contains_key(key))
+                            {
+                                for (key, hash) in
+                                    crate::resolver::compute_legacy_dependency_hashes(atom, env)
+                                {
+                                    current.entry(key).or_insert(hash);
+                                }
+                            }
                             for (key, hash) in expected {
                                 match current.get(key) {
                                     Some(current_hash) if current_hash != hash => {

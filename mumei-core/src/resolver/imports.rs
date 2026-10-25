@@ -465,6 +465,7 @@ pub(crate) fn verify_import_certificate(
 pub(crate) fn mark_dependency_atoms_with_cert(
     items: &[Item],
     dep_name: &str,
+    additional_aliases: &[&str],
     cert_results: &Option<CertificateResults>,
     module_env: &mut ModuleEnv,
     strict_imports: bool,
@@ -487,8 +488,10 @@ pub(crate) fn mark_dependency_atoms_with_cert(
                 };
                 if should_verify {
                     module_env.mark_verified(&atom.name);
-                    let fqn = format!("{}::{}", dep_name, atom.name);
-                    module_env.mark_verified(&fqn);
+                    for alias in std::iter::once(dep_name).chain(additional_aliases.iter().copied())
+                    {
+                        module_env.mark_verified(&format!("{alias}::{}", atom.name));
+                    }
                 } else {
                     if strict_imports {
                         return Err(MumeiError::verification(format!(
@@ -513,8 +516,13 @@ pub(crate) fn mark_dependency_atoms_with_cert(
                             .unwrap_or_else(|| "failed certificate verification".to_string())
                     );
                     module_env.set_trust_level(&atom.name, crate::parser::TrustLevel::Unverified);
-                    let fqn = format!("{}::{}", dep_name, atom.name);
-                    module_env.set_trust_level(&fqn, crate::parser::TrustLevel::Unverified);
+                    for alias in std::iter::once(dep_name).chain(additional_aliases.iter().copied())
+                    {
+                        module_env.set_trust_level(
+                            &format!("{alias}::{}", atom.name),
+                            crate::parser::TrustLevel::Unverified,
+                        );
+                    }
                 }
             }
             Item::ImplBlock(ib) => {
@@ -526,8 +534,14 @@ pub(crate) fn mark_dependency_atoms_with_cert(
                     };
                     if should_verify {
                         module_env.mark_verified(&qualified);
-                        let fqn = format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
-                        module_env.mark_verified(&fqn);
+                        for alias in
+                            std::iter::once(dep_name).chain(additional_aliases.iter().copied())
+                        {
+                            module_env.mark_verified(&format!(
+                                "{alias}::{}::{}",
+                                ib.struct_name, method.name
+                            ));
+                        }
                     } else {
                         if strict_imports {
                             return Err(MumeiError::verification(format!(
@@ -555,8 +569,14 @@ pub(crate) fn mark_dependency_atoms_with_cert(
                         );
                         module_env
                             .set_trust_level(&qualified, crate::parser::TrustLevel::Unverified);
-                        let fqn = format!("{}::{}::{}", dep_name, ib.struct_name, method.name);
-                        module_env.set_trust_level(&fqn, crate::parser::TrustLevel::Unverified);
+                        for alias in
+                            std::iter::once(dep_name).chain(additional_aliases.iter().copied())
+                        {
+                            module_env.set_trust_level(
+                                &format!("{alias}::{}::{}", ib.struct_name, method.name),
+                                crate::parser::TrustLevel::Unverified,
+                            );
+                        }
                     }
                 }
             }

@@ -1,3 +1,9 @@
+### Unreleased
+
+- Proof hashes now include callee effect pre/post states, and dependency
+  hashes preserve qualified callee names to avoid cache and certificate
+  collisions between same-named imports.
+
 ### 2026-10-24: v0.6.22 release version bump
 
 - **Workspace and member crate versions**: bumped versions from `0.6.21` to

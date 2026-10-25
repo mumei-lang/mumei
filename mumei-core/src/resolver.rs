@@ -35,6 +35,7 @@ use std::path::Path;
 
 #[cfg(test)]
 pub(crate) use cache::compute_hash;
+pub(crate) use cache::compute_legacy_dependency_hashes;
 #[cfg(test)]
 pub(crate) use imports::{
     check_cert_for_atom, mark_dependency_atoms_with_cert, register_imported_items,
@@ -42,7 +43,8 @@ pub(crate) use imports::{
 };
 
 pub use cache::{
-    collect_callees_from_atom, collect_callees_from_body, compute_atom_hash, compute_contract_hash,
+    collect_callees_from_atom, collect_callees_from_body, collect_written_callees_from_atom,
+    collect_written_callees_from_body, compute_atom_hash, compute_contract_hash,
     compute_dependency_hashes, compute_proof_hash, compute_proof_hash_with_flags,
     invalidate_dependents, load_build_cache, load_verification_cache, migrate_old_cache,
     save_build_cache, save_verification_cache, VerificationCacheEntry,
@@ -777,8 +779,15 @@ atom add(x: i64) -> i64
         let mut cert_results = HashMap::new();
         cert_results.insert("add".to_string(), certificate_check("proven"));
 
-        mark_dependency_atoms_with_cert(&items, "dep", &Some(cert_results), &mut module_env, false)
-            .unwrap();
+        mark_dependency_atoms_with_cert(
+            &items,
+            "dep",
+            &[],
+            &Some(cert_results),
+            &mut module_env,
+            false,
+        )
+        .unwrap();
 
         // The atom should be marked as verified
         assert!(module_env.is_verified("add"));
@@ -803,8 +812,15 @@ atom add(x: i64) -> i64
         let mut cert_results = HashMap::new();
         cert_results.insert("add".to_string(), certificate_check("changed"));
 
-        mark_dependency_atoms_with_cert(&items, "dep", &Some(cert_results), &mut module_env, false)
-            .unwrap();
+        mark_dependency_atoms_with_cert(
+            &items,
+            "dep",
+            &[],
+            &Some(cert_results),
+            &mut module_env,
+            false,
+        )
+        .unwrap();
 
         // The atom should NOT be marked as verified
         assert!(!module_env.is_verified("add"));
@@ -830,7 +846,7 @@ atom foo(x: i64) -> i64
         let mut module_env = ModuleEnv::new();
         register_imported_items(&items, Some("legacy_dep"), &mut module_env);
 
-        mark_dependency_atoms_with_cert(&items, "legacy_dep", &None, &mut module_env, false)
+        mark_dependency_atoms_with_cert(&items, "legacy_dep", &[], &None, &mut module_env, false)
             .unwrap();
 
         // Legacy behavior: no cert = all verified
