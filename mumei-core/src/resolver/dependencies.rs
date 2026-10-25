@@ -18,11 +18,17 @@ struct DeferredCertificateCheck {
     load_message: Option<String>,
 }
 
-fn package_name_alias(package_dir: &Path, dependency_name: &str) -> Option<String> {
+fn package_name_alias(
+    package_dir: &Path,
+    dependency_name: &str,
+    manifest: &crate::manifest::Manifest,
+) -> Option<String> {
     crate::manifest::load(&package_dir.join("mumei.toml"))
         .ok()
         .map(|manifest| manifest.package.name)
-        .filter(|package_name| package_name != dependency_name)
+        .filter(|package_name| {
+            package_name != dependency_name && !manifest.dependencies.contains_key(package_name)
+        })
 }
 
 /// mumei.toml の [dependencies] セクションを処理し、
@@ -122,7 +128,7 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                 if persist_cache {
                     save_cache(&cache_path, &cache);
                 }
-                let package_alias = package_name_alias(&abs_path, dep_name);
+                let package_alias = package_name_alias(&abs_path, dep_name, manifest);
                 register_imported_items_with_source(
                     &items,
                     Some(dep_name),
@@ -244,7 +250,7 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                 if persist_cache {
                     save_cache(&cache_path, &cache);
                 }
-                let package_alias = package_name_alias(&clone_dir, dep_name);
+                let package_alias = package_name_alias(&clone_dir, dep_name, manifest);
                 register_imported_items_with_source(
                     &items,
                     Some(dep_name),
@@ -325,7 +331,7 @@ pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
                     if persist_cache {
                         save_cache(&cache_path, &cache);
                     }
-                    let package_alias = package_name_alias(&pkg_dir, dep_name);
+                    let package_alias = package_name_alias(&pkg_dir, dep_name, manifest);
                     register_imported_items_with_source(
                         &items,
                         Some(dep_name),

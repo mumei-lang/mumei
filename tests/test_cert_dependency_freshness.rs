@@ -1057,6 +1057,74 @@ fn strict_manifest_import_checks_path_dependency_freshness() {
 }
 
 #[test]
+fn package_name_alias_does_not_override_declared_dependency_name() {
+    let fixture = Fixture::new();
+    let package_root = fixture.root.join("packages");
+    let alpha_dir = package_root.join("alpha");
+    let selected_dir = package_root.join("selected");
+    for dir in [&alpha_dir, &selected_dir] {
+        std::fs::create_dir_all(dir.join("src")).expect("create package source directory");
+    }
+
+    std::fs::write(
+        alpha_dir.join("mumei.toml"),
+        "[package]\nname = \"fresh_a\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write alpha manifest");
+    std::fs::write(
+        alpha_dir.join("src/main.mm"),
+        "atom f(x: i64) -> i64\n\
+         requires: x >= 0;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    )
+    .expect("write alpha source");
+
+    std::fs::write(
+        selected_dir.join("mumei.toml"),
+        "[package]\nname = \"selected_package\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write selected dependency manifest");
+    std::fs::write(
+        selected_dir.join("src/main.mm"),
+        "atom f(x: i64) -> i64\n\
+         requires: x >= 0;\n\
+         ensures: result == x + 1;\n\
+         body: x + 1;\n",
+    )
+    .expect("write selected dependency source");
+
+    let consumer = fixture.root.join("consumer");
+    std::fs::create_dir_all(consumer.join("src")).expect("create consumer directory");
+    std::fs::write(
+        consumer.join("mumei.toml"),
+        format!(
+            "[package]\nname = \"alias_collision_consumer\"\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nalpha = {{ path = \"{}\" }}\nfresh_a = {{ path = \"{}\" }}\n",
+            alpha_dir.display(),
+            selected_dir.display(),
+        ),
+    )
+    .expect("write consumer manifest");
+    std::fs::write(
+        consumer.join("src/main.mm"),
+        "atom g(x: i64) -> i64\n\
+         requires: x >= 0;\n\
+         ensures: result == x + 1;\n\
+         body: fresh_a::f(x);\n",
+    )
+    .expect("write consumer source");
+
+    let result = fixture.run_in_directory(&consumer, &["verify", "src/main.mm"]);
+    let text = output_text(&result);
+    assert_success(&result, "verify package-name alias collision");
+    assert!(
+        text.lines().any(|line| line.contains("'g': verified")),
+        "{text}"
+    );
+}
+
+#[test]
 fn standard_library_bundle_imports_are_dependency_fresh() {
     let fixture = Fixture::new();
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
