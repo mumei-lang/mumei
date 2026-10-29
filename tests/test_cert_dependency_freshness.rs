@@ -219,6 +219,25 @@ fn verify_cert_with_lean_opt_in(
     fixture.run(&args)
 }
 
+fn effect_dependency_source(transition: &str) -> String {
+    format!(
+        "effect Work\n\
+         states: [Idle, Busy];\n\
+         initial: Idle;\n\
+         transition {transition};\n\
+         atom f(x: i64) -> i64\n\
+         effects: [Work];\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n\
+         atom g(x: i64) -> i64\n\
+         effects: [Work];\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: f(x);\n"
+    )
+}
+
 #[test]
 fn stale_transitive_contract_is_rejected_and_claimbook_marks_drift() {
     let fixture = Fixture::new();
@@ -233,6 +252,10 @@ fn stale_transitive_contract_is_rejected_and_claimbook_marks_drift() {
         .as_ref()
         .expect("generated dependency hashes");
     assert!(hashes.contains_key("atom:f"), "keys: {hashes:?}");
+    assert!(
+        hashes.keys().all(|key| !key.starts_with("effect:")),
+        "effect-free dependencies should not emit effect keys: {hashes:?}"
+    );
     let second_cert_path = fixture.root.join("b-second.proof-cert.json");
     assert_success(
         &fixture.certify(&b_source, &second_cert_path),
@@ -256,7 +279,7 @@ fn stale_transitive_contract_is_rejected_and_claimbook_marks_drift() {
     assert_success(&fixture.certify(&a_source, &a_cert), "re-certify changed A");
 
     let changed = verify_cert(&fixture, &b_cert, &b_source, false);
-    assert_eq!(changed.status.code(), Some(1), "{}", output_text(&changed));
+    assert_eq!(changed.status.code(), Some(0), "{}", output_text(&changed));
     let changed_text = output_text(&changed);
     assert!(
         changed_text.contains("dependency_changed"),
@@ -401,6 +424,94 @@ fn legacy_dependency_hashes_are_unchecked_with_strict_policy_and_warning() {
 }
 
 #[test]
+fn effect_definition_drift_is_non_strict_warning_and_strict_failure() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("effectful.mm");
+    let certificate = fixture.root.join(".effectful.proof-cert.json");
+    std::fs::write(&source, effect_dependency_source("start: Idle -> Busy"))
+        .expect("write effectful source");
+    assert_success(
+        &fixture.certify(&source, &certificate),
+        "certify effectful source",
+    );
+
+    let cert: ProofCertificate = serde_json::from_slice(&std::fs::read(&certificate).unwrap())
+        .expect("parse effectful certificate");
+    let g = cert
+        .atoms
+        .iter()
+        .find(|atom| atom.name == "g")
+        .expect("g certificate");
+    assert!(g
+        .dependency_hashes
+        .as_ref()
+        .unwrap()
+        .contains_key("effect:Work"));
+
+    std::fs::write(&source, effect_dependency_source("start: Idle -> Idle"))
+        .expect("change only the effect definition");
+    let changed = verify_cert(&fixture, &certificate, &source, false);
+    let changed_text = output_text(&changed);
+    assert_eq!(changed.status.code(), Some(0), "{changed_text}");
+    assert!(
+        changed_text.contains("g: dependency_changed"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("effect:Work"), "{changed_text}");
+
+    let strict = verify_cert(&fixture, &certificate, &source, true);
+    let strict_text = output_text(&strict);
+    assert_eq!(strict.status.code(), Some(1), "{strict_text}");
+    assert!(
+        strict_text.contains("g: dependency_changed"),
+        "{strict_text}"
+    );
+    assert!(strict_text.contains("effect:Work"), "{strict_text}");
+}
+
+#[test]
+fn legacy_effect_dependency_hashes_are_unchecked_with_strict_policy() {
+    let fixture = Fixture::new();
+    let source = fixture.root.join("effectful.mm");
+    let certificate = fixture.root.join(".effectful.proof-cert.json");
+    std::fs::write(&source, effect_dependency_source("start: Idle -> Busy"))
+        .expect("write effectful source");
+    assert_success(
+        &fixture.certify(&source, &certificate),
+        "certify effectful source",
+    );
+
+    let mut cert: ProofCertificate = serde_json::from_slice(&std::fs::read(&certificate).unwrap())
+        .expect("parse effectful certificate");
+    for atom in &mut cert.atoms {
+        if let Some(dependency_hashes) = &mut atom.dependency_hashes {
+            dependency_hashes.retain(|key, _| !key.starts_with("effect:"));
+        }
+    }
+    refresh_certificate_integrity(&mut cert);
+    std::fs::write(&certificate, serde_json::to_vec_pretty(&cert).unwrap())
+        .expect("write certificate without effect hashes");
+
+    let unchecked = verify_cert(&fixture, &certificate, &source, false);
+    let unchecked_text = output_text(&unchecked);
+    assert_eq!(unchecked.status.code(), Some(0), "{unchecked_text}");
+    assert!(
+        unchecked_text.contains("g: dependency_unchecked"),
+        "{unchecked_text}"
+    );
+    assert!(unchecked_text.contains("effect:Work"), "{unchecked_text}");
+
+    let strict = verify_cert(&fixture, &certificate, &source, true);
+    let strict_text = output_text(&strict);
+    assert_eq!(strict.status.code(), Some(1), "{strict_text}");
+    assert!(
+        strict_text.contains("g: dependency_unchecked"),
+        "{strict_text}"
+    );
+    assert!(strict_text.contains("effect:Work"), "{strict_text}");
+}
+
+#[test]
 fn changed_requires_and_refined_types_are_dependency_changes() {
     let fixture = Fixture::new();
     let (a_source, b_source, _, a_cert, b_cert) = setup_modules(&fixture);
@@ -421,6 +532,12 @@ fn changed_requires_and_refined_types_are_dependency_changes() {
         "re-certify A with stronger requires",
     );
     let changed_requires = verify_cert(&fixture, &b_cert, &b_source, false);
+    assert_eq!(
+        changed_requires.status.code(),
+        Some(0),
+        "{}",
+        output_text(&changed_requires)
+    );
     let requires_text = output_text(&changed_requires);
     assert!(
         requires_text.contains("dependency_changed"),
@@ -447,7 +564,7 @@ fn changed_requires_and_refined_types_are_dependency_changes() {
     .expect("change refined-type predicate");
     let changed_type = verify_cert(&type_fixture, &certificate, &source, false);
     let type_text = output_text(&changed_type);
-    assert!(!changed_type.status.success(), "{type_text}");
+    assert!(changed_type.status.success(), "{type_text}");
     assert!(type_text.contains("dependency_changed"), "{type_text}");
     assert!(type_text.contains("type:Positive"), "{type_text}");
 }

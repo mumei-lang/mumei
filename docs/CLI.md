@@ -123,10 +123,21 @@ and do not fail `--strict`.
 | `proven` | The source matches and the certificate records solver-proven evidence. |
 | `trusted` | The source matches and the certificate records a trusted atom; its body was not checked. |
 | `changed` | The source content hash differs from the certificate. |
+| `dependency_changed` | A resolved dependency contract or effect definition differs from the certificate. |
+| `dependency_unchecked` | One or more dependency hashes are absent or could not be resolved. |
 | `stale_translator` | Lean translator metadata does not match the current version. |
 | `unproven` | The source matches, but the certificate does not establish the contract. |
 | `axiom_rejected` | The Lean axiom audit rejected the certificate evidence. |
 | `missing` | The source contains no matching certificate entry. |
+
+Dependency freshness includes resolved effect definitions under
+`effect:<name>` keys, including definitions reached through `parent` and
+`includes`.
+
+The command exits 1 for a tampered certificate, `unproven`, `axiom_rejected`,
+or `missing`. With `--strict`, it also exits 1 for `changed`,
+`dependency_changed`, `dependency_unchecked`, or an absent
+`certificate_hash`. It exits 0 otherwise.
 
 ## `mumei claims`
 

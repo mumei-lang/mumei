@@ -1,3 +1,11 @@
+### Unreleased: effect-definition dependency freshness
+
+- Dependency hashes now include referenced effect definitions as
+  `effect:<name>`, including their `parent` and `includes` closure; older
+  certificates without those keys are reported as `dependency_unchecked`.
+- `verify-cert` exits successfully for dependency drift in non-strict mode;
+  `--strict` rejects changed or unchecked dependencies.
+
 ### Unreleased: proof-store owner check
 
 - On Unix, proof-store directories and entry files must be owned by the current effective user; foreign-owned paths are ignored with a warning.

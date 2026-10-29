@@ -468,13 +468,7 @@ pub fn compute_proof_hash_with_flags(
     let mut stack = Vec::new();
 
     // Collect direct callees (sorted for deterministic hashing)
-    let mut effect_names: BTreeSet<String> = atom
-        .effects
-        .iter()
-        .map(|effect| effect.name.clone())
-        .collect();
-    effect_names.extend(atom.effect_pre.keys().cloned());
-    effect_names.extend(atom.effect_post.keys().cloned());
+    let mut effect_names = atom_effect_names(atom);
     let mut sorted_callees: Vec<String> = proof_hash_callee_names(atom, module_env)
         .into_iter()
         .collect();
@@ -492,9 +486,7 @@ pub fn compute_proof_hash_with_flags(
             hash_callee_contract(&mut hasher, callee_atom, module_env, true);
             hash_string_map(&mut hasher, "effect_pre", &callee_atom.effect_pre);
             hash_string_map(&mut hasher, "effect_post", &callee_atom.effect_post);
-            effect_names.extend(callee_atom.effects.iter().map(|effect| effect.name.clone()));
-            effect_names.extend(callee_atom.effect_pre.keys().cloned());
-            effect_names.extend(callee_atom.effect_post.keys().cloned());
+            effect_names.extend(atom_effect_names(callee_atom));
             let mut sorted_further: Vec<String> = proof_hash_callee_names(callee_atom, module_env)
                 .into_iter()
                 .collect();
@@ -507,8 +499,30 @@ pub fn compute_proof_hash_with_flags(
         }
     }
 
+    for name in collect_effect_def_closure(effect_names, module_env) {
+        if let Some(effect_def) = module_env.effect_defs.get(&name) {
+            hash_effect_def(&mut hasher, effect_def);
+        }
+    }
+
+    format!("{:x}", hasher.finalize())
+}
+
+fn atom_effect_names(atom: &Atom) -> BTreeSet<String> {
+    atom.effects
+        .iter()
+        .map(|effect| effect.name.clone())
+        .chain(atom.effect_pre.keys().cloned())
+        .chain(atom.effect_post.keys().cloned())
+        .collect()
+}
+
+fn collect_effect_def_closure(
+    names: impl IntoIterator<Item = String>,
+    module_env: &ModuleEnv,
+) -> BTreeSet<String> {
     let mut effect_def_names = BTreeSet::new();
-    let mut effect_def_stack: Vec<String> = effect_names.into_iter().collect();
+    let mut effect_def_stack: Vec<String> = names.into_iter().collect();
     while let Some(name) = effect_def_stack.pop() {
         if !effect_def_names.insert(name.clone()) {
             continue;
@@ -518,109 +532,95 @@ pub fn compute_proof_hash_with_flags(
             effect_def_stack.extend(effect_def.parent.iter().cloned());
         }
     }
-    for name in effect_def_names {
-        if let Some(effect_def) = module_env.effect_defs.get(&name) {
-            hasher.update(b"|effect_def:");
-            hash_field(&mut hasher, "effect_def.name", &effect_def.name);
-            hash_field(
-                &mut hasher,
-                "effect_def.params.len",
-                &effect_def.params.len().to_string(),
-            );
-            for param in &effect_def.params {
-                hash_field(&mut hasher, "effect_def.param.name", &param.name);
-                hash_field(&mut hasher, "effect_def.param.type", &param.type_name);
-            }
-            hash_field(
-                &mut hasher,
-                "effect_def.constraint.present",
-                if effect_def.constraint.is_some() {
-                    "true"
-                } else {
-                    "false"
-                },
-            );
-            if let Some(constraint) = &effect_def.constraint {
-                hash_field(&mut hasher, "effect_def.constraint", constraint);
-            }
-            let mut includes = effect_def.includes.clone();
-            includes.sort();
-            hash_field(
-                &mut hasher,
-                "effect_def.includes.len",
-                &includes.len().to_string(),
-            );
-            for included in includes {
-                hash_field(&mut hasher, "effect_def.include", &included);
-            }
-            hash_field(
-                &mut hasher,
-                "effect_def.refinement.present",
-                if effect_def.refinement.is_some() {
-                    "true"
-                } else {
-                    "false"
-                },
-            );
-            if let Some(refinement) = &effect_def.refinement {
-                hash_field(&mut hasher, "effect_def.refinement", refinement);
-            }
-            let mut parents = effect_def.parent.clone();
-            parents.sort();
-            hash_field(
-                &mut hasher,
-                "effect_def.parents.len",
-                &parents.len().to_string(),
-            );
-            for parent in parents {
-                hash_field(&mut hasher, "effect_def.parent", &parent);
-            }
-            hash_field(
-                &mut hasher,
-                "effect_def.states.len",
-                &effect_def.states.len().to_string(),
-            );
-            for state in &effect_def.states {
-                hash_field(&mut hasher, "effect_def.state", state);
-            }
-            hash_field(
-                &mut hasher,
-                "effect_def.transitions.len",
-                &effect_def.transitions.len().to_string(),
-            );
-            for transition in &effect_def.transitions {
-                hash_field(
-                    &mut hasher,
-                    "effect_def.transition.operation",
-                    &transition.operation,
-                );
-                hash_field(
-                    &mut hasher,
-                    "effect_def.transition.from",
-                    &transition.from_state,
-                );
-                hash_field(
-                    &mut hasher,
-                    "effect_def.transition.to",
-                    &transition.to_state,
-                );
-            }
-            hash_field(
-                &mut hasher,
-                "effect_def.initial_state.present",
-                if effect_def.initial_state.is_some() {
-                    "true"
-                } else {
-                    "false"
-                },
-            );
-            if let Some(initial_state) = &effect_def.initial_state {
-                hash_field(&mut hasher, "effect_def.initial_state", initial_state);
-            }
-        }
-    }
+    effect_def_names
+}
 
-    format!("{:x}", hasher.finalize())
+fn hash_effect_def(hasher: &mut Sha256, effect_def: &crate::parser::ast::EffectDef) {
+    hasher.update(b"|effect_def:");
+    hash_field(hasher, "effect_def.name", &effect_def.name);
+    hash_field(
+        hasher,
+        "effect_def.params.len",
+        &effect_def.params.len().to_string(),
+    );
+    for param in &effect_def.params {
+        hash_field(hasher, "effect_def.param.name", &param.name);
+        hash_field(hasher, "effect_def.param.type", &param.type_name);
+    }
+    hash_field(
+        hasher,
+        "effect_def.constraint.present",
+        if effect_def.constraint.is_some() {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    if let Some(constraint) = &effect_def.constraint {
+        hash_field(hasher, "effect_def.constraint", constraint);
+    }
+    let mut includes = effect_def.includes.clone();
+    includes.sort();
+    hash_field(
+        hasher,
+        "effect_def.includes.len",
+        &includes.len().to_string(),
+    );
+    for included in includes {
+        hash_field(hasher, "effect_def.include", &included);
+    }
+    hash_field(
+        hasher,
+        "effect_def.refinement.present",
+        if effect_def.refinement.is_some() {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    if let Some(refinement) = &effect_def.refinement {
+        hash_field(hasher, "effect_def.refinement", refinement);
+    }
+    let mut parents = effect_def.parent.clone();
+    parents.sort();
+    hash_field(hasher, "effect_def.parents.len", &parents.len().to_string());
+    for parent in parents {
+        hash_field(hasher, "effect_def.parent", &parent);
+    }
+    hash_field(
+        hasher,
+        "effect_def.states.len",
+        &effect_def.states.len().to_string(),
+    );
+    for state in &effect_def.states {
+        hash_field(hasher, "effect_def.state", state);
+    }
+    hash_field(
+        hasher,
+        "effect_def.transitions.len",
+        &effect_def.transitions.len().to_string(),
+    );
+    for transition in &effect_def.transitions {
+        hash_field(
+            hasher,
+            "effect_def.transition.operation",
+            &transition.operation,
+        );
+        hash_field(hasher, "effect_def.transition.from", &transition.from_state);
+        hash_field(hasher, "effect_def.transition.to", &transition.to_state);
+    }
+    hash_field(
+        hasher,
+        "effect_def.initial_state.present",
+        if effect_def.initial_state.is_some() {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    if let Some(initial_state) = &effect_def.initial_state {
+        hash_field(hasher, "effect_def.initial_state", initial_state);
+    }
 }
 
 fn hash_callee_contract(
@@ -781,6 +781,11 @@ fn compute_dependency_hashes_with_names(
     legacy_names: bool,
 ) -> BTreeMap<String, String> {
     let mut hashes = BTreeMap::new();
+    let mut effect_names = if legacy_names {
+        BTreeSet::new()
+    } else {
+        atom_effect_names(atom)
+    };
     let mut pending = dependency_callees(atom, module_env, legacy_names)
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -798,11 +803,24 @@ fn compute_dependency_hashes_with_names(
             format!("atom:{}", callee_atom.name),
             compute_dependency_hash_for_callee(callee_atom, module_env),
         );
+        if !legacy_names {
+            effect_names.extend(atom_effect_names(callee_atom));
+        }
         pending.extend(
             dependency_callees(callee_atom, module_env, legacy_names)
                 .into_iter()
                 .filter(|name| !visited.contains(name)),
         );
+    }
+
+    if !legacy_names {
+        for name in collect_effect_def_closure(effect_names, module_env) {
+            if let Some(effect_def) = module_env.effect_defs.get(&name) {
+                let mut hasher = Sha256::new();
+                hash_effect_def(&mut hasher, effect_def);
+                hashes.insert(format!("effect:{name}"), format!("{:x}", hasher.finalize()));
+            }
+        }
     }
 
     let mut type_names = BTreeSet::new();
@@ -1451,6 +1469,28 @@ mod nominal_hash_tests {
         compute_proof_hash(&root, &module_env)
     }
 
+    fn dependency_hashes_with_effect_defs(
+        source: &str,
+        root_name: &str,
+        effect_defs: Vec<EffectDef>,
+    ) -> BTreeMap<String, String> {
+        let items = parse_module(source);
+        let mut module_env = ModuleEnv::default();
+        for item in items {
+            match item {
+                Item::Atom(atom) => module_env.register_atom(&atom),
+                Item::TypeDef(refined) => module_env.register_type(&refined),
+                Item::EffectDef(effect_def) => module_env.register_effect(&effect_def),
+                _ => {}
+            }
+        }
+        for effect_def in effect_defs {
+            module_env.register_effect(&effect_def);
+        }
+        let root = module_env.get_atom(root_name).unwrap().clone();
+        compute_dependency_hashes(&root, &module_env)
+    }
+
     fn base_effect_def() -> EffectDef {
         EffectDef {
             name: "Work".to_string(),
@@ -1473,6 +1513,20 @@ mod nominal_hash_tests {
         }
     }
 
+    fn bare_effect_def(name: &str) -> EffectDef {
+        let mut effect_def = base_effect_def();
+        effect_def.name = name.to_string();
+        effect_def.params.clear();
+        effect_def.constraint = None;
+        effect_def.includes.clear();
+        effect_def.refinement = None;
+        effect_def.parent.clear();
+        effect_def.states.clear();
+        effect_def.transitions.clear();
+        effect_def.initial_state = None;
+        effect_def
+    }
+
     #[test]
     fn dependency_hashes_ignore_callee_trust_but_proof_hashes_include_it() {
         let (verified_dependencies, verified_proof) =
@@ -1483,6 +1537,194 @@ mod nominal_hash_tests {
             assert_eq!(dependencies, verified_dependencies);
             assert_ne!(proof, verified_proof);
         }
+    }
+
+    #[test]
+    fn dependency_hashes_include_caller_callee_and_effect_definition_closure() {
+        let source = "atom callee(x: i64) -> i64\n\
+             effects: [CalleeWork];\n\
+             effect_pre: { CalleePre: Idle };\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n\
+             atom root(x: i64) -> i64\n\
+             effects: [RootWork];\n\
+             effect_pre: { CallerPre: Idle };\n\
+             effect_post: { CallerPost: Done };\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: callee(x);\n";
+        let mut root_effect = bare_effect_def("RootWork");
+        root_effect.includes = vec!["IncludeOne".to_string()];
+        root_effect.parent = vec!["ParentOne".to_string()];
+        let mut include_one = bare_effect_def("IncludeOne");
+        include_one.includes = vec!["IncludeDeep".to_string()];
+        let mut parent_one = bare_effect_def("ParentOne");
+        parent_one.parent = vec!["ParentDeep".to_string()];
+        let hashes = dependency_hashes_with_effect_defs(
+            source,
+            "root",
+            vec![
+                bare_effect_def("CalleeWork"),
+                bare_effect_def("CalleePre"),
+                bare_effect_def("CallerPre"),
+                bare_effect_def("CallerPost"),
+                root_effect,
+                include_one,
+                bare_effect_def("IncludeDeep"),
+                parent_one,
+                bare_effect_def("ParentDeep"),
+            ],
+        );
+
+        let effect_keys = hashes
+            .keys()
+            .filter(|key| key.starts_with("effect:"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            effect_keys,
+            vec![
+                "effect:CalleePre",
+                "effect:CalleeWork",
+                "effect:CallerPost",
+                "effect:CallerPre",
+                "effect:IncludeDeep",
+                "effect:IncludeOne",
+                "effect:ParentDeep",
+                "effect:ParentOne",
+                "effect:RootWork",
+            ]
+        );
+        assert!(hashes.contains_key("atom:callee"));
+    }
+
+    #[test]
+    fn dependency_hashes_ignore_unreferenced_effect_definitions() {
+        let source = "atom callee(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n\
+             atom root(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: callee(x);\n";
+        let baseline =
+            dependency_hashes_with_effect_defs(source, "root", vec![bare_effect_def("Orphan")]);
+        let mut changed_orphan = bare_effect_def("Orphan");
+        changed_orphan.states.push("Changed".to_string());
+        let changed = dependency_hashes_with_effect_defs(source, "root", vec![changed_orphan]);
+
+        assert_eq!(baseline, changed);
+        assert!(baseline.keys().all(|key| !key.starts_with("effect:")));
+    }
+
+    #[test]
+    fn dependency_hash_tracks_every_hashed_effect_definition_field() {
+        let source = "atom root(x: i64) -> i64\n\
+             effects: [Work];\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n";
+        let base = base_effect_def();
+        let baseline = dependency_hashes_with_effect_defs(source, "root", vec![base.clone()]);
+        assert_eq!(
+            baseline.keys().cloned().collect::<Vec<_>>(),
+            vec!["effect:Work"]
+        );
+
+        let mut changed_defs = Vec::new();
+        let mut changed = base.clone();
+        changed.params[0].name = "resource".to_string();
+        changed_defs.push(("param name", changed));
+        let mut changed = base.clone();
+        changed.params[0].type_name = "Path".to_string();
+        changed_defs.push(("param type", changed));
+        let mut changed = base.clone();
+        changed.params.push(EffectDefParam {
+            name: "mode".to_string(),
+            type_name: "Mode".to_string(),
+        });
+        changed_defs.push(("param count", changed));
+        let mut changed = base.clone();
+        changed.constraint = Some("path == \"/tmp\"".to_string());
+        changed_defs.push(("constraint", changed));
+        let mut changed = base.clone();
+        changed.constraint = None;
+        changed_defs.push(("constraint presence", changed));
+        let mut changed = base.clone();
+        changed.includes = vec!["OtherLeaf".to_string()];
+        changed_defs.push(("includes", changed));
+        let mut changed = base.clone();
+        changed.includes.push("OtherLeaf".to_string());
+        changed_defs.push(("include count", changed));
+        let mut changed = base.clone();
+        changed.refinement = Some("path == \"/tmp\"".to_string());
+        changed_defs.push(("refinement", changed));
+        let mut changed = base.clone();
+        changed.refinement = None;
+        changed_defs.push(("refinement presence", changed));
+        let mut changed = base.clone();
+        changed.parent = vec!["OtherParent".to_string()];
+        changed_defs.push(("parent", changed));
+        let mut changed = base.clone();
+        changed.parent.clear();
+        changed_defs.push(("parent count", changed));
+        let mut changed = base.clone();
+        changed.states[0] = "Ready".to_string();
+        changed_defs.push(("state", changed));
+        let mut changed = base.clone();
+        changed.states.push("Ready".to_string());
+        changed_defs.push(("state count", changed));
+        let mut changed = base.clone();
+        changed.transitions[0].operation = "finish".to_string();
+        changed_defs.push(("transition operation", changed));
+        let mut changed = base.clone();
+        changed.transitions[0].from_state = "Busy".to_string();
+        changed_defs.push(("transition from state", changed));
+        let mut changed = base.clone();
+        changed.transitions[0].to_state = "Idle".to_string();
+        changed_defs.push(("transition to state", changed));
+        let mut changed = base.clone();
+        changed.transitions.push(EffectTransition {
+            operation: "finish".to_string(),
+            from_state: "Busy".to_string(),
+            to_state: "Idle".to_string(),
+        });
+        changed_defs.push(("transition count", changed));
+        let mut changed = base.clone();
+        changed.initial_state = Some("Busy".to_string());
+        changed_defs.push(("initial state", changed));
+        let mut changed = base.clone();
+        changed.initial_state = None;
+        changed_defs.push(("initial state presence", changed));
+
+        for (field, changed_def) in changed_defs {
+            let changed = dependency_hashes_with_effect_defs(source, "root", vec![changed_def]);
+            assert_eq!(
+                baseline.keys().collect::<Vec<_>>(),
+                changed.keys().collect::<Vec<_>>(),
+                "changing effect definition {field} must keep the dependency keys stable"
+            );
+            assert_ne!(
+                baseline["effect:Work"], changed["effect:Work"],
+                "changing effect definition {field} must change only its effect hash"
+            );
+        }
+
+        let mut renamed = base;
+        renamed.name = "RenamedWork".to_string();
+        let renamed_source = source.replace("[Work]", "[RenamedWork]");
+        let renamed_hashes =
+            dependency_hashes_with_effect_defs(&renamed_source, "root", vec![renamed]);
+        assert_eq!(
+            renamed_hashes.keys().cloned().collect::<Vec<_>>(),
+            vec!["effect:RenamedWork"]
+        );
+        assert_ne!(
+            baseline["effect:Work"],
+            renamed_hashes["effect:RenamedWork"]
+        );
     }
 
     #[test]
@@ -2182,6 +2424,10 @@ body: { p.a };\n";
                  ensures: result == x;\n\
                  body: h(x);\n";
         let baseline = proof_hash_for(source, "g");
+        assert_eq!(
+            baseline,
+            "e6866e0e716c21536d04504143c8f6ee524351ddbadbed6c7f6e7ecd71d505ee"
+        );
         let changed = proof_hash_for(
             &source.replace(
                 "transition start: Idle -> Busy;",
