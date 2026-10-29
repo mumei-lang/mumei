@@ -47,7 +47,7 @@ Every PR in this area should review this file together with the local roadmap it
 
 ## 現状サマリ
 
-**mumei (コンパイラ)**: P1〜P34 を実装済み。P34 Claim Book / Seal Grade に続き、charter、erosion、negative controls / vacuity、test observations、certificate dependency freshness、opt-in local proof store を実装（P35〜P39）。エフェクトシステム、MIR、temporal verification、modular verification、LSP、concurrency codegen、proof certificate / proof graph、capability Stage 1、nlsat 先行経路まで到達。 v0.6.22 リリース済み（P34〜P39 は Unreleased）。
+**mumei (コンパイラ)**: P1〜P34 を実装済み。P34 Claim Book / Seal Grade に続き、charter、erosion、negative controls / vacuity、test observations、certificate dependency freshness、opt-in local proof store を実装（P35〜P39）。エフェクトシステム、MIR、temporal verification、modular verification、LSP、concurrency codegen、proof certificate / proof graph、capability Stage 1、nlsat 先行経路まで到達。 v0.6.23 リリース済み（P34〜P39 を含む）。
 
 **mumei-agent**: V1-A〜V1-E（spec health / 監査 / 双方向整合 / 人向け UX）全項目実装済み。Track A データフロー層（A-1〜A-6）、Lean AI 証明生成（B-4〜B-6、`--external-proofs` 経路）、`language_patterns` レジストリ（tree-sitter scope-aware、confidence フィールド付き）まで到達。Forge Mode は Infrastructure Complete / Expansion In Progress（cron 稼働中）。2026-10-24〜26 の #616〜#627 で trusted atom の satisfiability-aware `all_verified`、charter / erosion / controls guard、test harvesting と observation-feedback spec extraction、dependency-aware proliferation を追加。共有する sibling claim は machine-verified G4 に限定。
 
@@ -57,9 +57,9 @@ Every PR in this area should review this file together with the local roadmap it
 
 ---
 
-## 次の計画（すべて Planned）
+## 次の計画
 
-1. **Planned** — v0.6.23 lockstep release。
+1. **Done** — v0.6.23 lockstep release。
 2. **Planned** — proof-store owner check。
 3. **Planned** — no-LLM specimen re-measure。
 4. **Planned** — Seal Grade G3（vacuity + controls pass）と G2（`entailed` を observe し counterexample がないこと）。G5 は Lean dual-check まで待つ。
