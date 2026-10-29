@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       mumei-version:
-        description: Release version to install; empty selects the latest release.
+        description: Release version to install; empty selects latest, and an optional leading v is accepted.
         required: false
         type: string
         default: ""
@@ -64,14 +64,21 @@ jobs:
           MUMEI_VERSION: ${{ inputs.mumei-version }}
         run: |
           set -euo pipefail
-          install_args=()
+
           if [[ -n "$MUMEI_VERSION" ]]; then
-            install_args+=(--version "$MUMEI_VERSION")
+            version="v${MUMEI_VERSION#v}"
+            asset_url="https://github.com/mumei-lang/mumei/releases/download/${version}/mumei-x86_64-unknown-linux-gnu.tar.gz"
+          else
+            asset_url="https://github.com/mumei-lang/mumei/releases/latest/download/mumei-x86_64-unknown-linux-gnu.tar.gz"
           fi
-          curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- "${install_args[@]}"
-          echo "$MUMEI_HOME/bin" >> "$GITHUB_PATH"
+
+          archive="$RUNNER_TEMP/mumei-release.tar.gz"
+          curl -fsSL --retry 3 "$asset_url" -o "$archive"
+          mkdir -p "$MUMEI_HOME"
+          tar -xzf "$archive" -C "$MUMEI_HOME"
+          echo "$MUMEI_HOME" >> "$GITHUB_PATH"
           echo "MUMEI_STD_PATH=$MUMEI_HOME/std" >> "$GITHUB_ENV"
-          export PATH="$MUMEI_HOME/bin:$PATH"
+          export PATH="$MUMEI_HOME:$PATH"
           export MUMEI_STD_PATH="$MUMEI_HOME/std"
           mumei --version
 

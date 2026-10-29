@@ -137,7 +137,7 @@ Inputs:
 
 | Input | Type | Default | Meaning |
 |---|---|---|---|
-| `mumei-version` | string | `""` | Empty installs the latest release; otherwise passes the version to the installer. |
+| `mumei-version` | string | `""` | Empty downloads the latest release; otherwise downloads that release, accepting a version with or without a leading `v`. |
 | `working-directory` | string | `"."` | Project directory containing the sources and optional `mumei.toml`. |
 | `sources` | string | required | Whitespace-separated `.mm` paths relative to `working-directory`. |
 | `require-grade` | string | `""` | Empty reports grades without gating; otherwise requires `G0` through `G5`. |
