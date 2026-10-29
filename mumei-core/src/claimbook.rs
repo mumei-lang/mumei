@@ -871,11 +871,14 @@ pub fn attach_observations(book: &mut ClaimBook, results: &[ObservationResult]) 
                     .cloned(),
             );
             claim.dependencies = dependencies.into_iter().collect();
-            book.recomputation
-                .method_name_matches
-                .entry(claim.atom.clone())
-                .or_default()
-                .extend(resolve_claim_dependencies_for_claim(claim, &claim_names));
+            let method_name_matches = resolve_claim_dependencies_for_claim(claim, &claim_names);
+            if !method_name_matches.is_empty() {
+                book.recomputation
+                    .method_name_matches
+                    .entry(claim.atom.clone())
+                    .or_default()
+                    .extend(method_name_matches);
+            }
             let previous_reason = format!(
                 "current test observations agree with the contract (previously {} {}: {})",
                 grade_code(claim.grade),
@@ -1517,6 +1520,7 @@ mod tests {
         for name in ["unproven", "uncertified", "drifted"] {
             let claim = book.claims.iter().find(|claim| claim.atom == name).unwrap();
             assert_eq!(claim.grade, SealGrade::G2, "{name}");
+            assert!(claim.effective_grade_complete, "{name}");
             assert_eq!(claim.evidence_kind, "observation", "{name}");
             assert_eq!(
                 claim.reason,
@@ -1577,7 +1581,12 @@ mod tests {
             .unwrap();
         assert_eq!(caller.grade, SealGrade::G2);
         assert_eq!(caller.effective_grade, SealGrade::G0);
+        assert!(caller.effective_grade_complete);
         assert_eq!(caller.dependencies, vec!["callee"]);
+        assert!(!caller_only
+            .recomputation
+            .method_name_matches
+            .contains_key("caller"));
         assert_eq!(
             caller.limiting_premises,
             vec![LimitingPremise {
@@ -1608,7 +1617,35 @@ mod tests {
         for claim in &both_supported.claims {
             assert_eq!(claim.grade, SealGrade::G2, "{}", claim.atom);
             assert_eq!(claim.effective_grade, SealGrade::G2, "{}", claim.atom);
+            assert!(claim.effective_grade_complete, "{}", claim.atom);
         }
+
+        let mut method_caller = source_atom("method_caller");
+        method_caller.body_expr = "get(x)".to_string();
+        let point_get = source_atom("Point::get");
+        let mut method_book = create_claimbook(
+            "sample.mm",
+            "sample.proof.json",
+            None,
+            &[&method_caller, &point_get],
+            false,
+            None,
+        );
+        attach_observations(
+            &mut method_book,
+            &[observation_result("method_caller", "consistent")],
+        );
+        let method_caller_claim = method_book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "method_caller")
+            .unwrap();
+        assert_eq!(method_caller_claim.dependencies, vec!["Point::get"]);
+        assert!(!method_caller_claim.effective_grade_complete);
+        assert!(method_book
+            .recomputation
+            .method_name_matches
+            .contains_key("method_caller"));
     }
 
     #[test]
