@@ -918,6 +918,65 @@ fn observations_lift_g2_gate_claims_and_reject_invalid_harvests() {
 }
 
 #[test]
+fn uncertified_caller_observation_respects_unobserved_callee_grade_gate() {
+    let dir = fresh_dir("observed_dependency");
+    let source = write_source(
+        &dir,
+        "dependency.mm",
+        "atom callee(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n\
+         atom caller(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: callee(x);\n",
+    );
+    let harvest = write_harvest(&dir, "caller.json", "caller", 3);
+    let harvest_arg = harvest.to_string_lossy().into_owned();
+    let output_dir = dir.join("report");
+    let output_dir_arg = output_dir.to_string_lossy().into_owned();
+    let output = claims(
+        &dir,
+        &source,
+        &[
+            "--observations",
+            &harvest_arg,
+            "--require-grade",
+            "G2",
+            "--format",
+            "json",
+            "--out-dir",
+            &output_dir_arg,
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = json_report(&output_dir.join("claimbook.json"));
+    let caller = atom(&report, "caller");
+    assert_eq!(caller["grade"], "G2");
+    assert_eq!(caller["effective_grade"], "G0");
+    assert_eq!(caller["observation"]["status"], "supported");
+    assert_eq!(caller["dependencies"], serde_json::json!(["callee"]));
+    assert_eq!(
+        caller["limiting_premises"],
+        serde_json::json!([{
+            "kind": "dependency",
+            "name": "callee",
+            "grade": "G0"
+        }])
+    );
+    let callee = atom(&report, "callee");
+    assert_eq!(callee["grade"], "G0");
+    assert_eq!(callee["effective_grade"], "G0");
+}
+
+#[test]
 fn an_explicit_missing_certificate_returns_exit_four() {
     let dir = fresh_dir("missing_explicit_cert");
     let source = copy_fixture(&dir, "claimbook_atoms.mm", "main.mm");

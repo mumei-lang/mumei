@@ -174,6 +174,7 @@ pub struct ClaimBook {
 struct ClaimBookRecomputation {
     unsatisfiable_specs: BTreeSet<String>,
     method_name_matches: BTreeMap<String, BTreeMap<String, String>>,
+    source_dependencies: BTreeMap<String, Vec<String>>,
 }
 
 pub fn own_grade(
@@ -401,33 +402,40 @@ fn resolve_claim_dependencies(
     let claim_names = claims.keys().cloned().collect::<BTreeSet<_>>();
     let mut method_name_matches = BTreeMap::new();
     for (claim_name, claim) in claims.iter_mut() {
-        let mut claim_method_name_matches = BTreeMap::new();
-        claim.dependencies = claim
-            .dependencies
-            .iter()
-            .map(|dependency| {
-                if claim_names.contains(dependency) {
-                    return dependency.clone();
-                }
-
-                let suffix = format!("::{dependency}");
-                let mut qualified_matches =
-                    claim_names.iter().filter(|name| name.ends_with(&suffix));
-                match (qualified_matches.next(), qualified_matches.next()) {
-                    (Some(match_name), None) => {
-                        claim_method_name_matches.insert(match_name.clone(), dependency.clone());
-                        match_name.clone()
-                    }
-                    _ => dependency.clone(),
-                }
-            })
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let claim_method_name_matches = resolve_claim_dependencies_for_claim(claim, &claim_names);
         if !claim_method_name_matches.is_empty() {
             method_name_matches.insert(claim_name.clone(), claim_method_name_matches);
         }
     }
+    method_name_matches
+}
+
+fn resolve_claim_dependencies_for_claim(
+    claim: &mut Claim,
+    claim_names: &BTreeSet<String>,
+) -> BTreeMap<String, String> {
+    let mut method_name_matches = BTreeMap::new();
+    claim.dependencies = claim
+        .dependencies
+        .iter()
+        .map(|dependency| {
+            if claim_names.contains(dependency) {
+                return dependency.clone();
+            }
+
+            let suffix = format!("::{dependency}");
+            let mut qualified_matches = claim_names.iter().filter(|name| name.ends_with(&suffix));
+            match (qualified_matches.next(), qualified_matches.next()) {
+                (Some(match_name), None) => {
+                    method_name_matches.insert(match_name.clone(), dependency.clone());
+                    match_name.clone()
+                }
+                _ => dependency.clone(),
+            }
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     method_name_matches
 }
 
@@ -605,6 +613,16 @@ pub fn create_claimbook(
         .iter()
         .map(|atom| (atom.name.as_str(), *atom))
         .collect();
+    let source_dependencies: BTreeMap<String, Vec<String>> = atoms
+        .iter()
+        .map(|atom| {
+            let mut dependencies = crate::resolver::collect_callees_from_atom(atom)
+                .into_iter()
+                .collect::<Vec<_>>();
+            dependencies.sort();
+            (atom.name.clone(), dependencies)
+        })
+        .collect();
 
     let mut claims = BTreeMap::new();
     let mut unsatisfiable_specs = BTreeSet::new();
@@ -769,6 +787,7 @@ pub fn create_claimbook(
         recomputation: ClaimBookRecomputation {
             unsatisfiable_specs,
             method_name_matches,
+            source_dependencies,
         },
     };
     recompute_claimbook_derived_fields(&mut book);
@@ -807,6 +826,11 @@ fn recompute_claimbook_derived_fields(book: &mut ClaimBook) {
 
 pub fn attach_observations(book: &mut ClaimBook, results: &[ObservationResult]) {
     let mut by_observation = BTreeMap::new();
+    let claim_names = book
+        .claims
+        .iter()
+        .map(|claim| claim.atom.clone())
+        .collect::<BTreeSet<_>>();
     for claim in &mut book.claims {
         let mut observation = ClaimObservation {
             status: String::new(),
@@ -836,6 +860,21 @@ pub fn attach_observations(book: &mut ClaimBook, results: &[ObservationResult]) 
             && (claim.grade == SealGrade::G0 || claim.freshness != Freshness::Fresh)
             && !book.recomputation.unsatisfiable_specs.contains(&claim.atom)
         {
+            let mut dependencies = claim.dependencies.iter().cloned().collect::<BTreeSet<_>>();
+            dependencies.extend(
+                book.recomputation
+                    .source_dependencies
+                    .get(&claim.atom)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+            claim.dependencies = dependencies.into_iter().collect();
+            book.recomputation
+                .method_name_matches
+                .entry(claim.atom.clone())
+                .or_default()
+                .extend(resolve_claim_dependencies_for_claim(claim, &claim_names));
             let previous_grade = claim.grade;
             claim.grade = SealGrade::G2;
             claim.grade_label = SealGrade::G2.label().to_string();
@@ -1337,6 +1376,7 @@ mod tests {
             recomputation: ClaimBookRecomputation {
                 unsatisfiable_specs: BTreeSet::new(),
                 method_name_matches,
+                source_dependencies: BTreeMap::new(),
             },
         };
         recompute_claimbook_derived_fields(&mut book);
@@ -1507,6 +1547,68 @@ mod tests {
             &[observation_result("unverified_source", "consistent")],
         );
         assert_eq!(unverified.claims[0].grade, SealGrade::G2);
+    }
+
+    #[test]
+    fn lifted_uncertified_claims_use_current_source_dependencies() {
+        let create_book = || {
+            let mut caller = source_atom("caller");
+            caller.body_expr = "callee(x)".to_string();
+            let callee = source_atom("callee");
+            create_claimbook(
+                "sample.mm",
+                "sample.proof.json",
+                None,
+                &[&caller, &callee],
+                false,
+                None,
+            )
+        };
+
+        let mut caller_only = create_book();
+        attach_observations(
+            &mut caller_only,
+            &[observation_result("caller", "consistent")],
+        );
+        let caller = caller_only
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "caller")
+            .unwrap();
+        assert_eq!(caller.grade, SealGrade::G2);
+        assert_eq!(caller.effective_grade, SealGrade::G0);
+        assert_eq!(caller.dependencies, vec!["callee"]);
+        assert_eq!(
+            caller.limiting_premises,
+            vec![LimitingPremise {
+                kind: "dependency".to_string(),
+                name: "callee".to_string(),
+                matched_from: None,
+                grade: SealGrade::G0,
+            }]
+        );
+        assert_eq!(
+            caller_only
+                .claims
+                .iter()
+                .find(|claim| claim.atom == "callee")
+                .unwrap()
+                .effective_grade,
+            SealGrade::G0
+        );
+
+        let mut both_supported = create_book();
+        attach_observations(
+            &mut both_supported,
+            &[
+                observation_result("caller", "consistent"),
+                observation_result("callee", "consistent"),
+            ],
+        );
+        for claim in &both_supported.claims {
+            assert_eq!(claim.grade, SealGrade::G2, "{}", claim.atom);
+            assert_eq!(claim.effective_grade, SealGrade::G2, "{}", claim.atom);
+        }
     }
 
     #[test]
