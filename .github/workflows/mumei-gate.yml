@@ -105,6 +105,20 @@ jobs:
             exit 1
           fi
 
+          source_slugs=()
+          for source in "${sources[@]}"; do
+            slug="${source%.mm}"
+            slug="${slug//\//__}"
+            for seen_index in "${!source_slugs[@]}"; do
+              if [[ "${source_slugs[$seen_index]}" == "$slug" ]]; then
+                printf 'Sources %q and %q map to the same report directory %q.\n' \
+                  "${sources[$seen_index]}" "$source" "$slug" >&2
+                exit 1
+              fi
+            done
+            source_slugs+=("$slug")
+          done
+
           gate_dir="$RUNNER_TEMP/mumei-gate"
           mkdir -p "$gate_dir"
           cd "$WORKING_DIRECTORY"
@@ -126,9 +140,9 @@ jobs:
             fi
           }
 
-          for source in "${sources[@]}"; do
-            slug="${source%.mm}"
-            slug="${slug//\//__}"
+          for source_index in "${!sources[@]}"; do
+            source="${sources[$source_index]}"
+            slug="${source_slugs[$source_index]}"
             out="$gate_dir/$slug"
             cert="$out/$slug.proof.json"
             mkdir -p "$out"
