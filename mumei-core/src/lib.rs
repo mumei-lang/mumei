@@ -3,9 +3,13 @@
 #![allow(clippy::new_without_default)]
 
 pub mod ast;
+pub mod charter;
+pub mod claimbook;
 pub mod contract_host;
+pub mod controls;
 pub mod cross_spec;
 pub mod emitter;
+pub mod erosion;
 // NOTE: ffi module contains HTTP/JSON/server FFI backends not yet wired into the public API
 #[allow(dead_code)]
 pub mod ffi;
@@ -15,6 +19,7 @@ pub mod lowering;
 pub mod manifest;
 pub mod mir;
 pub mod mir_analysis;
+pub mod observe;
 pub mod parser;
 pub mod proof_cert;
 pub mod proof_graph;

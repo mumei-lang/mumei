@@ -19,6 +19,22 @@ atom clamp_low(x: i64) -> i64
   body: x;
 "#;
 
+const TRUSTED_SOURCE: &str = r#"
+trusted atom trusted_top() -> i64
+  requires: true;
+  ensures: result == 7;
+  body: 7;
+
+struct TrustedBox { value: i64 }
+
+impl TrustedBox {
+  trusted atom get(self: TrustedBox) -> i64
+    requires: true;
+    ensures: result == self.value;
+    body: self.value;
+}
+"#;
+
 fn fixture_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "mumei_verify_cert_strict_{}_{}",
@@ -147,6 +163,74 @@ fn strict_accepts_a_certificate_that_still_matches_its_source() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn trusted_top_level_and_impl_atoms_are_reported_without_strict_failure() {
+    let dir = fixture_dir("trusted");
+    let source = dir.join("main.mm");
+    let cert = dir.join("main.proof.json");
+    std::fs::write(&source, TRUSTED_SOURCE).expect("write trusted source");
+    certify(&source, &cert);
+
+    let generated: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&cert).expect("read certificate"))
+            .expect("parse certificate");
+    for name in ["trusted_top", "TrustedBox::get"] {
+        let atom = generated
+            .atoms
+            .iter()
+            .find(|atom| atom.name == name)
+            .unwrap_or_else(|| panic!("missing certificate entry for {name}"));
+        assert_eq!(atom.z3_check_result, "skipped");
+        assert_eq!(atom.status, "trusted");
+    }
+
+    let output = verify_cert(&cert, &source, false, true);
+    assert!(
+        output.status.success(),
+        "--strict must accept trusted certificate entries\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("trusted_top: trusted (body not checked)"));
+    assert!(stdout.contains("TrustedBox::get: trusted (body not checked)"));
+    assert!(stdout.contains("2 trusted (body not checked)"));
+
+    let output_dir = dir.join("claimbook");
+    let claims = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .arg("claims")
+        .arg(&source)
+        .arg("--cert")
+        .arg(&cert)
+        .arg("--format")
+        .arg("json")
+        .arg("--out-dir")
+        .arg(&output_dir)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run mumei claims");
+    assert!(
+        claims.status.success(),
+        "claims failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&claims.stdout),
+        String::from_utf8_lossy(&claims.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(output_dir.join("claimbook.json")).expect("read Claim Book"),
+    )
+    .expect("parse Claim Book");
+    for name in ["trusted_top", "TrustedBox::get"] {
+        let claim = report["claims"]
+            .as_array()
+            .expect("claims array")
+            .iter()
+            .find(|claim| claim["atom"] == name)
+            .unwrap_or_else(|| panic!("missing Claim Book entry for {name}"));
+        assert_eq!(claim["grade"], "G1");
+        assert_eq!(claim["freshness"], "fresh");
+    }
 }
 
 #[test]

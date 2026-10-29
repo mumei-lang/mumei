@@ -2,9 +2,9 @@
 """Verify packaged std/ certificates against the committed std baseline.
 
 The verifier accepts the known, certificate-derived exceptions recorded in
-``scripts/std_proof_baseline.json``.  A certificate that fails for any other
-reason, gains or loses a non-proven atom, or has a hash/integrity failure is a
-hard failure.
+``scripts/std_proof_baseline.json``. A certificate that fails for any other
+reason, gains or loses a non-proven or trusted atom, or has a hash/integrity
+failure is a hard failure.
 """
 from __future__ import annotations
 
@@ -42,12 +42,24 @@ def _non_proven_atoms(cert: dict) -> list[dict[str, str]]:
     pairs = {
         (str(atom.get("name", "")), str(atom.get("z3_check_result", "")))
         for atom in atoms
-        if atom.get("z3_check_result") not in PROVEN_RESULTS
+        if atom.get("status") != "trusted"
+        and atom.get("z3_check_result") not in PROVEN_RESULTS
     }
     return [
         {"name": name, "z3_check_result": result}
         for name, result in sorted(pairs)
     ]
+
+
+def _trusted_atoms(cert: dict) -> list[str]:
+    atoms = cert.get("atoms", [])
+    if not isinstance(atoms, list):
+        raise ValueError("certificate atoms must be a list")
+    return sorted({
+        str(atom.get("name", ""))
+        for atom in atoms
+        if atom.get("status") == "trusted"
+    })
 
 
 def _baseline_modules(baseline: dict) -> dict[str, list[dict[str, str]]]:
@@ -68,6 +80,22 @@ def _baseline_modules(baseline: dict) -> dict[str, list[dict[str, str]]]:
             ],
             key=lambda item: (item["name"], item["z3_check_result"]),
         )
+    return normalized
+
+
+def _baseline_trusted_atoms(baseline: dict) -> dict[str, list[str]]:
+    modules = baseline.get("trusted", {})
+    if not isinstance(modules, dict):
+        raise ValueError("baseline trusted must be an object")
+    normalized: dict[str, list[str]] = {}
+    for module, names in modules.items():
+        if (
+            not isinstance(module, str)
+            or not isinstance(names, list)
+            or not all(isinstance(name, str) for name in names)
+        ):
+            raise ValueError("baseline trusted entries must be lists of atom names")
+        normalized[module] = sorted(set(names))
     return normalized
 
 
@@ -97,10 +125,12 @@ def verify(
     certs_dir = root / "std" / "certs"
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     baseline_modules = _baseline_modules(baseline)
+    baseline_trusted = _baseline_trusted_atoms(baseline)
     certs = sorted(certs_dir.rglob("*.proof.json")) if certs_dir.is_dir() else []
     failures: list[str] = []
     observed_modules: set[str] = set()
     observed_non_proven: dict[str, list[dict[str, str]]] = {}
+    observed_trusted: dict[str, list[str]] = {}
     total_atoms = 0
     proven_atoms = 0
     lean_verified_atoms = 0
@@ -123,9 +153,10 @@ def verify(
             lean_verified_atoms += sum(
                 atom.get("z3_check_result") == "lean_verified" for atom in atoms
             )
-            trusted_atoms += sum(
-                atom.get("status") == "trusted" for atom in atoms
-            )
+            trusted_names = _trusted_atoms(certificate)
+            trusted_atoms += len(trusted_names)
+            if trusted_names:
+                observed_trusted[module] = trusted_names
             if non_proven:
                 observed_non_proven[module] = non_proven
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
@@ -183,6 +214,7 @@ def verify(
             "lean_verified_atoms": lean_verified_atoms,
             "trusted_atoms": trusted_atoms,
             "modules": observed_non_proven,
+            "trusted": observed_trusted,
         }
         for module in sorted(improved_modules):
             failures.append(
@@ -190,6 +222,35 @@ def verify(
                 "scripts/std_proof_baseline.json with:\n"
                 f"{_format_baseline_update(observed_baseline)}"
             )
+
+    changed_trusted_modules = sorted(
+        module
+        for module in baseline_trusted.keys() | observed_trusted.keys()
+        if baseline_trusted.get(module, []) != observed_trusted.get(module, [])
+    )
+    if changed_trusted_modules:
+        observed_baseline = {
+            "total_modules": len(certs),
+            "total_atoms": total_atoms,
+            "proven_atoms": proven_atoms,
+            "lean_verified_atoms": lean_verified_atoms,
+            "trusted_atoms": trusted_atoms,
+            "modules": observed_non_proven,
+            "trusted": observed_trusted,
+        }
+        for module in changed_trusted_modules:
+            failures.append(
+                f"{module}: changed trusted atoms; observed trusted atoms:\n"
+                f"{json.dumps(observed_trusted.get(module, []), indent=2, ensure_ascii=False)}\n"
+                "update scripts/std_proof_baseline.json with:\n"
+                f"{_format_baseline_update(observed_baseline)}"
+            )
+
+    if trusted_atoms:
+        print(f"trusted atoms (body not checked): {trusted_atoms}")
+        for module, names in sorted(observed_trusted.items()):
+            for name in names:
+                print(f"  {module}: {name}")
 
     return len(certs), len(failures), failures
 

@@ -244,13 +244,15 @@ pub(crate) fn check_contract_subsumption<'a>(
             return Err(MumeiError::verification(format!(
                 "Contract subsumption failed: atom_ref({}) passed to {}.{} — contract requires '{}' does not imply concrete requires '{}'",
                 concrete_atom.name, callee_name, param_name, contract_req, concrete_req
-            )));
+            ))
+            .with_verdict(crate::verification::VerdictKind::Rejected));
         }
         if sat_result == SatResult::Unknown {
             return Err(MumeiError::verification(format!(
                 "Contract subsumption for atom_ref({}) passed to {}.{} — contract requires '{}' could not be decided (Z3 unknown)",
                 concrete_atom.name, callee_name, param_name, contract_req
-            )));
+            ))
+            .with_verdict(crate::verification::VerdictKind::Inconclusive));
         }
     }
 
@@ -313,13 +315,15 @@ pub(crate) fn check_contract_subsumption<'a>(
         return Err(MumeiError::verification(format!(
             "Contract subsumption failed: atom_ref({}) passed to {}.{} — concrete ensures '{}' does not imply contract ensures '{}'",
             concrete_atom.name, callee_name, param_name, concrete_ensures, contract_ensures
-        )));
+        ))
+        .with_verdict(crate::verification::VerdictKind::Rejected));
     }
     if sat_result == SatResult::Unknown {
         return Err(MumeiError::verification(format!(
             "Contract subsumption for atom_ref({}) passed to {}.{} could not be decided (Z3 unknown)",
             concrete_atom.name, callee_name, param_name
-        )));
+        ))
+        .with_verdict(crate::verification::VerdictKind::Inconclusive));
     }
     Ok(())
 }

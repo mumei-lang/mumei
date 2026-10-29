@@ -1,13 +1,37 @@
 use crate::parser;
 use crate::verification::{ModuleEnv, MumeiError, MumeiResult};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::cache::{load_cache, save_cache};
 use super::imports::{
-    mark_dependency_atoms_with_cert, register_imported_items_with_source,
-    resolve_imports_recursive, verify_import_certificate, ResolverContext,
+    mark_dependency_atoms_with_cert, register_imported_alias_names,
+    register_imported_items_with_source, resolve_imports_recursive, verify_import_certificate,
+    ResolverContext,
 };
+
+struct DeferredCertificateCheck {
+    dependency_name: String,
+    package_alias: Option<String>,
+    module_dir: PathBuf,
+    entry_path: PathBuf,
+    items: Vec<parser::Item>,
+    load_message: Option<String>,
+}
+
+fn package_name_alias(
+    package_dir: &Path,
+    dependency_name: &str,
+    manifest: &crate::manifest::Manifest,
+) -> Option<String> {
+    crate::manifest::load(&package_dir.join("mumei.toml"))
+        .ok()
+        .map(|manifest| manifest.package.name)
+        .filter(|package_name| {
+            package_name != dependency_name && !manifest.dependencies.contains_key(package_name)
+        })
+}
 
 /// mumei.toml の [dependencies] セクションを処理し、
 /// パス依存・Git 依存のモジュールを ModuleEnv に登録する。
@@ -56,6 +80,26 @@ pub fn resolve_manifest_dependencies_with_full_options(
     strict_imports: bool,
     allow_lean_verified: bool,
 ) -> MumeiResult<()> {
+    resolve_manifest_dependencies_with_full_options_and_persistence(
+        manifest,
+        project_dir,
+        module_env,
+        strict_imports,
+        allow_lean_verified,
+        true,
+    )
+}
+
+pub fn resolve_manifest_dependencies_with_full_options_and_persistence(
+    manifest: &crate::manifest::Manifest,
+    project_dir: &Path,
+    module_env: &mut ModuleEnv,
+    strict_imports: bool,
+    allow_lean_verified: bool,
+    persist_cache: bool,
+) -> MumeiResult<()> {
+    let mut deferred_certificates = Vec::new();
+
     for (dep_name, dep) in &manifest.dependencies {
         // パス依存
         if let Some(dep_path) = dep.as_path() {
@@ -83,28 +127,28 @@ pub fn resolve_manifest_dependencies_with_full_options(
                 ctx.allow_lean_verified = allow_lean_verified;
                 ctx.strict_imports = strict_imports;
                 resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
-                save_cache(&cache_path, &cache);
+                if persist_cache {
+                    save_cache(&cache_path, &cache);
+                }
+                let package_alias = package_name_alias(&abs_path, dep_name, manifest);
                 register_imported_items_with_source(
                     &items,
                     Some(dep_name),
                     module_env,
                     entry_path.to_str(),
                 );
-                // P5-C: Check for proof certificate before marking atoms as verified
-                let cert_results =
-                    verify_import_certificate(&abs_path, entry_path, &items, allow_lean_verified);
-                mark_dependency_atoms_with_cert(
-                    &items,
-                    dep_name,
-                    &cert_results,
-                    module_env,
-                    strict_imports,
-                )?;
-                println!(
-                    "  📦 Dependency '{}': loaded from {}",
-                    dep_name,
-                    entry_path.display()
-                );
+                deferred_certificates.push(DeferredCertificateCheck {
+                    dependency_name: dep_name.clone(),
+                    package_alias,
+                    module_dir: abs_path,
+                    entry_path: entry_path.to_path_buf(),
+                    items,
+                    load_message: Some(format!(
+                        "  📦 Dependency '{}': loaded from {}",
+                        dep_name,
+                        entry_path.display()
+                    )),
+                });
             } else {
                 eprintln!(
                     "  ⚠️  Dependency '{}': no entry file found in '{}'",
@@ -197,25 +241,24 @@ pub fn resolve_manifest_dependencies_with_full_options(
                 ctx.allow_lean_verified = allow_lean_verified;
                 ctx.strict_imports = strict_imports;
                 resolve_imports_recursive(&items, dep_base_dir, &mut ctx, &mut cache, module_env)?;
-                save_cache(&cache_path, &cache);
+                if persist_cache {
+                    save_cache(&cache_path, &cache);
+                }
+                let package_alias = package_name_alias(&clone_dir, dep_name, manifest);
                 register_imported_items_with_source(
                     &items,
                     Some(dep_name),
                     module_env,
                     entry_path.to_str(),
                 );
-                // P5-C: Check for proof certificate before marking atoms as verified
-                // Use clone_dir (package root) instead of dep_base_dir (entry file parent)
-                // because cmd_publish saves certificates to the package root.
-                let cert_results =
-                    verify_import_certificate(&clone_dir, entry_path, &items, allow_lean_verified);
-                mark_dependency_atoms_with_cert(
-                    &items,
-                    dep_name,
-                    &cert_results,
-                    module_env,
-                    strict_imports,
-                )?;
+                deferred_certificates.push(DeferredCertificateCheck {
+                    dependency_name: dep_name.clone(),
+                    package_alias,
+                    module_dir: clone_dir,
+                    entry_path: entry_path.to_path_buf(),
+                    items,
+                    load_message: None,
+                });
             } else {
                 eprintln!(
                     "  ⚠️  Dependency '{}': no entry file found in cloned repo",
@@ -271,34 +314,28 @@ pub fn resolve_manifest_dependencies_with_full_options(
                         &mut cache,
                         module_env,
                     )?;
-                    save_cache(&cache_path, &cache);
+                    if persist_cache {
+                        save_cache(&cache_path, &cache);
+                    }
+                    let package_alias = package_name_alias(&pkg_dir, dep_name, manifest);
                     register_imported_items_with_source(
                         &items,
                         Some(dep_name),
                         module_env,
                         entry_path.to_str(),
                     );
-                    // P5-C: Check for proof certificate before marking atoms as verified
-                    // Use pkg_dir (package root) instead of dep_base_dir (entry file parent)
-                    // because cmd_publish saves certificates to the package root.
-                    let cert_results = verify_import_certificate(
-                        &pkg_dir,
-                        entry_path,
-                        &items,
-                        allow_lean_verified,
-                    );
-                    mark_dependency_atoms_with_cert(
-                        &items,
-                        dep_name,
-                        &cert_results,
-                        module_env,
-                        strict_imports,
-                    )?;
-                    println!(
-                        "  📦 Dependency '{}': loaded from registry ({})",
-                        dep_name,
-                        pkg_dir.display()
-                    );
+                    deferred_certificates.push(DeferredCertificateCheck {
+                        dependency_name: dep_name.clone(),
+                        package_alias,
+                        module_dir: pkg_dir.clone(),
+                        entry_path: entry_path.to_path_buf(),
+                        items,
+                        load_message: Some(format!(
+                            "  📦 Dependency '{}': loaded from registry ({})",
+                            dep_name,
+                            pkg_dir.display()
+                        )),
+                    });
                 } else {
                     eprintln!(
                         "  ⚠️  Dependency '{}': found in registry but no entry file in '{}'",
@@ -315,5 +352,67 @@ pub fn resolve_manifest_dependencies_with_full_options(
             }
         }
     }
+
+    deferred_certificates.sort_by(|a, b| a.dependency_name.cmp(&b.dependency_name));
+    let mut package_alias_claims = HashMap::new();
+    for deferred in &deferred_certificates {
+        if let Some(package_alias) = &deferred.package_alias {
+            *package_alias_claims
+                .entry(package_alias.clone())
+                .or_insert(0usize) += 1;
+        }
+    }
+    for deferred in &mut deferred_certificates {
+        if deferred
+            .package_alias
+            .as_ref()
+            .is_some_and(|alias| package_alias_claims.get(alias) != Some(&1))
+        {
+            deferred.package_alias = None;
+        }
+    }
+    for deferred in &deferred_certificates {
+        if let Some(package_alias) = &deferred.package_alias {
+            register_imported_alias_names(
+                &deferred.items,
+                package_alias,
+                module_env,
+                deferred.entry_path.to_str(),
+            );
+        }
+    }
+    let verified_certificates = deferred_certificates
+        .into_iter()
+        .map(|deferred| {
+            let cert_results = verify_import_certificate(
+                &deferred.module_dir,
+                &deferred.entry_path,
+                &deferred.items,
+                allow_lean_verified,
+                module_env,
+                strict_imports,
+            );
+            (deferred, cert_results)
+        })
+        .collect::<Vec<_>>();
+    for (deferred, cert_results) in verified_certificates {
+        let package_aliases = deferred
+            .package_alias
+            .as_deref()
+            .into_iter()
+            .collect::<Vec<_>>();
+        mark_dependency_atoms_with_cert(
+            &deferred.items,
+            &deferred.dependency_name,
+            &package_aliases,
+            &cert_results,
+            module_env,
+            strict_imports,
+        )?;
+        if let Some(message) = deferred.load_message {
+            println!("{message}");
+        }
+    }
+
     Ok(())
 }

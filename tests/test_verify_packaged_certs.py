@@ -39,6 +39,7 @@ def _write_case(
     stub_result: str = "pass",
     source: bool = True,
     baseline_atoms: list[dict[str, str]] | None = None,
+    baseline_trusted: dict[str, list[str]] | None = None,
 ) -> tuple[Path, Path, Path]:
     root = tmp_path / "package"
     cert_dir = root / "std" / "certs"
@@ -53,30 +54,24 @@ def _write_case(
     if source:
         (root / "std" / "example.mm").write_text("atom example {}\n", encoding="utf-8")
     baseline = root / "baseline.json"
-    baseline.write_text(
-        json.dumps(
-            {
-                "total_modules": 1,
-                "total_atoms": len(atoms),
-                "proven_atoms": sum(
-                    atom["z3_check_result"] in {"unsat", "lean_verified"}
-                    for atom in atoms
-                ),
-                "lean_verified_atoms": sum(
-                    atom["z3_check_result"] == "lean_verified" for atom in atoms
-                ),
-                "trusted_atoms": sum(
-                    atom.get("status") == "trusted" for atom in atoms
-                ),
-                "modules": (
-                    {"std/example": baseline_atoms}
-                    if baseline_atoms is not None
-                    else {}
-                ),
-            }
+    baseline_data = {
+        "total_modules": 1,
+        "total_atoms": len(atoms),
+        "proven_atoms": sum(
+            atom["z3_check_result"] in {"unsat", "lean_verified"}
+            for atom in atoms
         ),
-        encoding="utf-8",
-    )
+        "lean_verified_atoms": sum(
+            atom["z3_check_result"] == "lean_verified" for atom in atoms
+        ),
+        "trusted_atoms": sum(atom.get("status") == "trusted" for atom in atoms),
+        "modules": (
+            {"std/example": baseline_atoms} if baseline_atoms is not None else {}
+        ),
+    }
+    if baseline_trusted is not None:
+        baseline_data["trusted"] = baseline_trusted
+    baseline.write_text(json.dumps(baseline_data), encoding="utf-8")
     return root, _stub_binary(tmp_path), baseline
 
 
@@ -124,6 +119,83 @@ def test_baseline_tolerated_failure(tmp_path: Path) -> None:
     )
     result = _run(root, binary, baseline)
     assert result.returncode == 0
+
+
+def test_trusted_atoms_are_listed_separately_from_non_proven_atoms(
+    tmp_path: Path,
+) -> None:
+    non_proven = [{"name": "unknown", "z3_check_result": "unknown"}]
+    root, binary, baseline = _write_case(
+        tmp_path,
+        atoms=[
+            {
+                "name": "trusted_value",
+                "status": "trusted",
+                "z3_check_result": "skipped",
+            },
+            {
+                "name": "unknown",
+                "status": "failed",
+                "z3_check_result": "unknown",
+            },
+        ],
+        stub_result="fail",
+        baseline_atoms=non_proven,
+        baseline_trusted={"std/example": ["trusted_value"]},
+    )
+    result = _run(root, binary, baseline)
+    assert result.returncode == 0
+    assert "trusted atoms (body not checked): 1" in result.stdout
+    assert "std/example: trusted_value" in result.stdout
+    assert "new non-proven atoms" not in result.stderr
+
+
+def test_added_trusted_atom_fails_with_baseline_update(tmp_path: Path) -> None:
+    root, binary, baseline = _write_case(
+        tmp_path,
+        atoms=[
+            {
+                "name": "trusted_value",
+                "status": "trusted",
+                "z3_check_result": "skipped",
+            }
+        ],
+    )
+    result = _run(root, binary, baseline)
+    assert result.returncode == 1
+    assert "std/example: changed trusted atoms" in result.stderr
+    assert '"trusted": {' in result.stderr
+    assert '"std/example": [\n      "trusted_value"' in result.stderr
+
+
+def test_matching_trusted_atom_baseline_passes(tmp_path: Path) -> None:
+    root, binary, baseline = _write_case(
+        tmp_path,
+        atoms=[
+            {
+                "name": "trusted_value",
+                "status": "trusted",
+                "z3_check_result": "skipped",
+            }
+        ],
+        baseline_trusted={"std/example": ["trusted_value"]},
+    )
+    result = _run(root, binary, baseline)
+    assert result.returncode == 0
+    assert "checked=1 failed=0" in result.stdout
+
+
+def test_removed_trusted_atom_fails_with_baseline_update(tmp_path: Path) -> None:
+    root, binary, baseline = _write_case(
+        tmp_path,
+        atoms=[{"name": "verified", "status": "verified", "z3_check_result": "unsat"}],
+        baseline_trusted={"std/example": ["trusted_value"]},
+    )
+    result = _run(root, binary, baseline)
+    assert result.returncode == 1
+    assert "std/example: changed trusted atoms" in result.stderr
+    assert "update scripts/std_proof_baseline.json with:" in result.stderr
+    assert '"trusted": {}' in result.stderr
 
 
 def test_new_unproven_atom_fails(tmp_path: Path) -> None:

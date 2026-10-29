@@ -1,7 +1,7 @@
 use super::generation::compute_atom_content_hash_for_version;
 use super::models::{AtomCertificate, LeanResultMetadata, ProofCertificate};
 use super::status;
-use crate::verification;
+use crate::verification::{self, ModuleEnv};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -140,14 +140,15 @@ pub(crate) fn parse_unsat_core_labels(z3_result: &str) -> Option<Vec<String>> {
 
 /// Verify a proof certificate against the current source file.
 /// Returns a list of (atom_name, status) where status is:
-/// - "proven" if content_hash matches and z3_check_result was "unsat"
-///   (or `"lean_verified"` when `allow_lean_verified` is enabled — see below).
+/// - "proven" if content_hash matches and z3_check_result was "unsat", or
+///   `"lean_verified"` when `allow_lean_verified` is enabled.
+/// - "trusted" if content_hash matches and status is `TRUSTED`.
 /// - "changed" if content_hash differs (re-verification needed). The hash is
 ///   recomputed with the algorithm the certificate's `version` declares
 ///   (`"1.0"` legacy name/requires/ensures/body, `"1.1"` full signature and
 ///   spec metadata), so older certificates stay verifiable until regenerated.
 ///   A `version` this build does not know marks every atom "changed".
-/// - "unproven" if z3_check_result was not "unsat"
+/// - "unproven" if the matching entry does not establish the contract.
 ///
 /// `allow_lean_verified` controls how `z3_check_result == "lean_verified"`
 /// values are treated. mumei-lean (the external Lean 4 proof backend) emits
@@ -162,12 +163,34 @@ pub fn verify_certificate(
     atoms: &[&crate::parser::Atom],
     allow_lean_verified: bool,
 ) -> Vec<(String, String)> {
+    verify_certificate_in_env(cert, atoms, allow_lean_verified, None)
+        .into_iter()
+        .map(|check| (check.name, check.status))
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateAtomCheck {
+    pub name: String,
+    pub status: String,
+    pub changed_dependencies: Vec<String>,
+    pub unchecked_dependencies: Vec<String>,
+}
+
+pub fn verify_certificate_in_env(
+    cert: &ProofCertificate,
+    atoms: &[&crate::parser::Atom],
+    allow_lean_verified: bool,
+    env: Option<&ModuleEnv>,
+) -> Vec<CertificateAtomCheck> {
+    let mut atoms_by_name = HashMap::with_capacity(atoms.len());
     let current_hashes: HashMap<String, Option<String>> = atoms
         .iter()
-        .map(|a| {
+        .map(|atom| {
+            atoms_by_name.insert(atom.name.clone(), *atom);
             (
-                a.name.clone(),
-                compute_atom_content_hash_for_version(&cert.version, a),
+                atom.name.clone(),
+                compute_atom_content_hash_for_version(&cert.version, atom),
             )
         })
         .collect();
@@ -175,21 +198,23 @@ pub fn verify_certificate(
     cert.atoms
         .iter()
         .map(|ac| {
-            let status = if let Some(current_hash) = current_hashes.get(&ac.name) {
+            let mut status = if let Some(current_hash) = current_hashes.get(&ac.name) {
                 if current_hash.as_deref() != Some(ac.content_hash.as_str()) {
-                    "changed".to_string()
+                    status::CERTIFICATE_CHANGED.to_string()
+                } else if ac.status == status::TRUSTED {
+                    status::CERTIFICATE_TRUSTED.to_string()
                 } else if ac.z3_check_result == status::Z3_UNSAT {
-                    "proven".to_string()
+                    status::CERTIFICATE_PROVEN.to_string()
                 } else if allow_lean_verified && ac.z3_check_result == status::Z3_LEAN_VERIFIED {
                     if !lean_translator_metadata_is_current(ac) {
-                        "stale_translator".to_string()
+                        status::CERTIFICATE_STALE_TRANSLATOR.to_string()
                     } else if matches!(
                         lean_axiom_audit(ac),
                         LeanAxiomAudit::Rejected { .. } | LeanAxiomAudit::Error
                     ) {
-                        "axiom_rejected".to_string()
+                        status::CERTIFICATE_AXIOM_REJECTED.to_string()
                     } else {
-                        "proven".to_string()
+                        status::CERTIFICATE_PROVEN.to_string()
                     }
                 } else if allow_lean_verified
                     && matches!(
@@ -197,14 +222,58 @@ pub fn verify_certificate(
                         LeanAxiomAudit::Rejected { .. } | LeanAxiomAudit::Error
                     )
                 {
-                    "axiom_rejected".to_string()
+                    status::CERTIFICATE_AXIOM_REJECTED.to_string()
                 } else {
-                    "unproven".to_string()
+                    status::CERTIFICATE_UNPROVEN.to_string()
                 }
             } else {
-                "missing".to_string()
+                status::CERTIFICATE_MISSING.to_string()
             };
-            (ac.name.clone(), status)
+            let mut changed_dependencies = Vec::new();
+            let mut unchecked_dependencies = Vec::new();
+            if status == status::CERTIFICATE_PROVEN {
+                if let Some(env) = env {
+                    if let Some(expected) = &ac.dependency_hashes {
+                        if let Some(atom) = atoms_by_name.get(&ac.name) {
+                            let mut current = crate::resolver::compute_dependency_hashes(atom, env);
+                            if expected
+                                .keys()
+                                .any(|key| key.starts_with("atom:") && !current.contains_key(key))
+                            {
+                                for (key, hash) in
+                                    crate::resolver::compute_legacy_dependency_hashes(atom, env)
+                                {
+                                    current.entry(key).or_insert(hash);
+                                }
+                            }
+                            for (key, hash) in expected {
+                                match current.get(key) {
+                                    Some(current_hash) if current_hash != hash => {
+                                        changed_dependencies.push(key.clone())
+                                    }
+                                    Some(_) => {}
+                                    None => unchecked_dependencies.push(key.clone()),
+                                }
+                            }
+                        } else {
+                            unchecked_dependencies.push(format!("atom:{}", ac.name));
+                        }
+                    } else {
+                        unchecked_dependencies.push("dependency_hashes".to_string());
+                    }
+                    if !changed_dependencies.is_empty() {
+                        status = status::CERTIFICATE_DEPENDENCY_CHANGED.to_string();
+                    } else if !unchecked_dependencies.is_empty() {
+                        status = status::CERTIFICATE_DEPENDENCY_UNCHECKED.to_string();
+                    }
+                }
+            }
+            CertificateAtomCheck {
+                name: ac.name.clone(),
+                status,
+                changed_dependencies,
+                unchecked_dependencies,
+            }
         })
         .collect()
 }
@@ -244,7 +313,7 @@ pub fn lean_certificate_metadata_is_current(atom: &AtomCertificate) -> bool {
         )
 }
 
-fn lean_translator_metadata_is_current(atom: &AtomCertificate) -> bool {
+pub fn lean_translator_metadata_is_current(atom: &AtomCertificate) -> bool {
     if atom.translator_version != verification::LEAN_TRANSLATOR_VERSION
         || atom.bridge_lemma_hash != verification::LEAN_BRIDGE_LEMMA_HASH
     {

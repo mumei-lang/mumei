@@ -19,6 +19,7 @@ mod cache;
 mod dependencies;
 mod imports;
 mod metrics;
+mod proof_store;
 
 #[cfg(test)]
 use crate::parser::Item;
@@ -35,6 +36,7 @@ use std::path::Path;
 
 #[cfg(test)]
 pub(crate) use cache::compute_hash;
+pub(crate) use cache::compute_legacy_dependency_hashes;
 #[cfg(test)]
 pub(crate) use imports::{
     check_cert_for_atom, mark_dependency_atoms_with_cert, register_imported_items,
@@ -42,20 +44,25 @@ pub(crate) use imports::{
 };
 
 pub use cache::{
-    collect_callees_from_atom, collect_callees_from_body, compute_atom_hash, compute_contract_hash,
-    compute_proof_hash, compute_proof_hash_with_flags, invalidate_dependents, load_build_cache,
-    load_verification_cache, migrate_old_cache, save_build_cache, save_verification_cache,
-    VerificationCacheEntry,
+    collect_callees_from_atom, collect_callees_from_body, collect_written_callees_from_atom,
+    collect_written_callees_from_body, compute_atom_hash, compute_contract_hash,
+    compute_dependency_hashes, compute_proof_hash, compute_proof_hash_with_flags,
+    invalidate_dependents, load_build_cache, load_verification_cache, migrate_old_cache,
+    save_build_cache, save_verification_cache, VerificationCacheEntry,
 };
 pub use dependencies::{
     resolve_manifest_dependencies, resolve_manifest_dependencies_with_full_options,
+    resolve_manifest_dependencies_with_full_options_and_persistence,
     resolve_manifest_dependencies_with_options,
 };
 pub use imports::{
-    resolve_imports, resolve_imports_with_full_options, resolve_imports_with_options,
-    resolve_prelude, IMPORT_ALIAS_METADATA_KEY, PRELUDE_METADATA_KEY,
+    resolve_imports, resolve_imports_with_full_options,
+    resolve_imports_with_full_options_and_persistence, resolve_imports_with_options,
+    resolve_prelude, resolve_prelude_with_persistence, IMPORT_ALIAS_METADATA_KEY,
+    PRELUDE_METADATA_KEY,
 };
 pub use metrics::{emit_escalation_bundle, LeanEscalationMetrics};
+pub use proof_store::{ProofStore, StoreLookup};
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +295,37 @@ atom add(x: i64, y: i64) -> i64
                 assert_eq!(hash1, hash2, "same atom should produce same proof hash");
             }
         }
+    }
+
+    #[test]
+    fn dependency_hashes_are_transitive_sorted_and_deterministic_without_graph() {
+        let source = r#"
+atom f0(x: i64) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: x;
+
+atom f1(x: i64) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: f0(x);
+
+atom g(x: i64) -> i64
+  requires: true;
+  ensures: result >= 0;
+  body: f1(x);
+"#;
+        let items = parser::parse_module(source);
+        let mut env = ModuleEnv::new();
+        register_imported_items(&items, None, &mut env);
+        let g = env.get_atom("g").expect("g registered");
+        let first = compute_dependency_hashes(g, &env);
+        let second = compute_dependency_hashes(g, &env);
+        assert_eq!(first, second);
+        assert_eq!(
+            first.keys().cloned().collect::<Vec<_>>(),
+            vec!["atom:f0".to_string(), "atom:f1".to_string()]
+        );
     }
 
     #[test]
@@ -598,31 +636,66 @@ atom caller(n: i64) -> i64
     #[test]
     fn test_check_cert_for_atom_proven() {
         let mut results = HashMap::new();
-        results.insert("my_atom".to_string(), "proven".to_string());
-        assert!(check_cert_for_atom(&results, "my_atom"));
+        results.insert("my_atom".to_string(), certificate_check("proven"));
+        assert!(check_cert_for_atom(&results, "my_atom", true));
+    }
+
+    #[test]
+    fn test_check_cert_for_atom_trusted() {
+        let mut results = HashMap::new();
+        results.insert(
+            "my_atom".to_string(),
+            certificate_check(proof_cert::status::CERTIFICATE_TRUSTED),
+        );
+        assert!(check_cert_for_atom(&results, "my_atom", true));
     }
 
     /// P5-C: check_cert_for_atom returns false for "changed" status
     #[test]
     fn test_check_cert_for_atom_changed() {
         let mut results = HashMap::new();
-        results.insert("my_atom".to_string(), "changed".to_string());
-        assert!(!check_cert_for_atom(&results, "my_atom"));
+        results.insert("my_atom".to_string(), certificate_check("changed"));
+        assert!(!check_cert_for_atom(&results, "my_atom", true));
     }
 
     /// P5-C: check_cert_for_atom returns false for "unproven" status
     #[test]
     fn test_check_cert_for_atom_unproven() {
         let mut results = HashMap::new();
-        results.insert("my_atom".to_string(), "unproven".to_string());
-        assert!(!check_cert_for_atom(&results, "my_atom"));
+        results.insert("my_atom".to_string(), certificate_check("unproven"));
+        assert!(!check_cert_for_atom(&results, "my_atom", true));
+    }
+
+    #[test]
+    fn test_check_cert_for_atom_dependency_status_policy() {
+        let mut unchecked = certificate_check(proof_cert::status::CERTIFICATE_DEPENDENCY_UNCHECKED);
+        unchecked.unchecked_dependencies = vec!["atom:f".to_string()];
+        let results = HashMap::from([("my_atom".to_string(), unchecked)]);
+        assert!(check_cert_for_atom(&results, "my_atom", false));
+        assert!(!check_cert_for_atom(&results, "my_atom", true));
+
+        let changed = HashMap::from([(
+            "my_atom".to_string(),
+            certificate_check(proof_cert::status::CERTIFICATE_DEPENDENCY_CHANGED),
+        )]);
+        assert!(!check_cert_for_atom(&changed, "my_atom", false));
+        assert!(!check_cert_for_atom(&changed, "my_atom", true));
     }
 
     /// P5-C: check_cert_for_atom returns false for missing atom
     #[test]
     fn test_check_cert_for_atom_missing() {
         let results = HashMap::new();
-        assert!(!check_cert_for_atom(&results, "nonexistent"));
+        assert!(!check_cert_for_atom(&results, "nonexistent", true));
+    }
+
+    fn certificate_check(status: &str) -> proof_cert::CertificateAtomCheck {
+        proof_cert::CertificateAtomCheck {
+            name: "my_atom".to_string(),
+            status: status.to_string(),
+            changed_dependencies: Vec::new(),
+            unchecked_dependencies: Vec::new(),
+        }
     }
 
     /// Package dependencies must attribute their entry-file atoms, otherwise
@@ -706,10 +779,17 @@ atom add(x: i64) -> i64
         register_imported_items(&items, Some("dep"), &mut module_env);
 
         let mut cert_results = HashMap::new();
-        cert_results.insert("add".to_string(), "proven".to_string());
+        cert_results.insert("add".to_string(), certificate_check("proven"));
 
-        mark_dependency_atoms_with_cert(&items, "dep", &Some(cert_results), &mut module_env, false)
-            .unwrap();
+        mark_dependency_atoms_with_cert(
+            &items,
+            "dep",
+            &[],
+            &Some(cert_results),
+            &mut module_env,
+            false,
+        )
+        .unwrap();
 
         // The atom should be marked as verified
         assert!(module_env.is_verified("add"));
@@ -732,13 +812,25 @@ atom add(x: i64) -> i64
         register_imported_items(&items, Some("dep"), &mut module_env);
 
         let mut cert_results = HashMap::new();
-        cert_results.insert("add".to_string(), "changed".to_string());
+        cert_results.insert("add".to_string(), certificate_check("changed"));
 
-        mark_dependency_atoms_with_cert(&items, "dep", &Some(cert_results), &mut module_env, false)
-            .unwrap();
+        mark_dependency_atoms_with_cert(
+            &items,
+            "dep",
+            &[],
+            &Some(cert_results),
+            &mut module_env,
+            false,
+        )
+        .unwrap();
 
         // The atom should NOT be marked as verified
         assert!(!module_env.is_verified("add"));
+        assert!(!module_env.is_verified("dep::add"));
+        assert_eq!(
+            module_env.get_atom("dep::add").unwrap().trust_level,
+            parser::TrustLevel::Unverified
+        );
     }
 
     /// P5-C: mark_dependency_atoms_with_cert with None cert (legacy) verifies all
@@ -756,7 +848,7 @@ atom foo(x: i64) -> i64
         let mut module_env = ModuleEnv::new();
         register_imported_items(&items, Some("legacy_dep"), &mut module_env);
 
-        mark_dependency_atoms_with_cert(&items, "legacy_dep", &None, &mut module_env, false)
+        mark_dependency_atoms_with_cert(&items, "legacy_dep", &[], &None, &mut module_env, false)
             .unwrap();
 
         // Legacy behavior: no cert = all verified
@@ -970,11 +1062,21 @@ atom add(x: i64, y: i64) -> i64
         fs::write(&logical_source, source).unwrap();
 
         std::env::set_var("MUMEI_PROOF_BUNDLE", &bundle_path);
-        let result = verify_import_certificate(&std_root, &logical_source, &items, false);
+        let result = verify_import_certificate(
+            &std_root,
+            &logical_source,
+            &items,
+            false,
+            &ModuleEnv::default(),
+            false,
+        );
         std::env::remove_var("MUMEI_PROOF_BUNDLE");
 
         let result = result.expect("bundle fallback should produce cert results");
-        assert_eq!(result.get("add").map(|s| s.as_str()), Some("proven"));
+        assert_eq!(
+            result.get("add").map(|check| check.status.as_str()),
+            Some("proven")
+        );
 
         let _ = fs::remove_file(&bundle_path);
         let _ = fs::remove_dir_all(&module_dir);
@@ -1030,11 +1132,21 @@ atom add(x: i64, y: i64) -> i64
             .unwrap();
 
         std::env::set_var("MUMEI_PROOF_BUNDLE", &bundle_path);
-        let result = verify_import_certificate(&std_root, &logical_source, &items, false);
+        let result = verify_import_certificate(
+            &std_root,
+            &logical_source,
+            &items,
+            false,
+            &ModuleEnv::default(),
+            false,
+        );
         std::env::remove_var("MUMEI_PROOF_BUNDLE");
 
         let result = result.expect("unmatched local cert should fall through to bundle fallback");
-        assert_eq!(result.get("add").map(|s| s.as_str()), Some("proven"));
+        assert_eq!(
+            result.get("add").map(|check| check.status.as_str()),
+            Some("proven")
+        );
 
         let _ = fs::remove_file(&bundle_path);
         let _ = fs::remove_dir_all(std_root.parent().unwrap());
@@ -1064,7 +1176,14 @@ atom sub(x: i64, y: i64) -> i64
         fs::write(&source_file, source).unwrap();
 
         std::env::set_var("MUMEI_PROOF_BUNDLE", &bogus);
-        let result = verify_import_certificate(&module_dir, &source_file, &items, false);
+        let result = verify_import_certificate(
+            &module_dir,
+            &source_file,
+            &items,
+            false,
+            &ModuleEnv::default(),
+            false,
+        );
         std::env::remove_var("MUMEI_PROOF_BUNDLE");
 
         assert!(
@@ -1121,13 +1240,20 @@ atom mul(x: i64, y: i64) -> i64
         proof_cert::save_certificate(&local_cert, &local_cert_path).unwrap();
 
         std::env::set_var("MUMEI_PROOF_BUNDLE", &bundle_path);
-        let result = verify_import_certificate(&std_root, &logical_source, &items, false);
+        let result = verify_import_certificate(
+            &std_root,
+            &logical_source,
+            &items,
+            false,
+            &ModuleEnv::default(),
+            false,
+        );
         std::env::remove_var("MUMEI_PROOF_BUNDLE");
 
         let result = result.expect("local cert should produce results");
         // Local cert marked mul as failed → status should not be "proven".
         assert_ne!(
-            result.get("mul").map(|s| s.as_str()),
+            result.get("mul").map(|check| check.status.as_str()),
             Some("proven"),
             "local cert must take precedence over the bundle",
         );
@@ -1178,10 +1304,17 @@ atom hard_lemma(x: i64) -> i64
         proof_cert::save_certificate(&cert, &module_dir.join(".proof-cert.json"))
             .expect("write stale cert");
 
-        let result = verify_import_certificate(&module_dir, &source_file, &items, true)
-            .expect("invalid cert should produce unproven results");
+        let result = verify_import_certificate(
+            &module_dir,
+            &source_file,
+            &items,
+            true,
+            &ModuleEnv::default(),
+            false,
+        )
+        .expect("invalid cert should produce unproven results");
         assert_eq!(
-            result.get("hard_lemma").map(|s| s.as_str()),
+            result.get("hard_lemma").map(|check| check.status.as_str()),
             Some("unproven"),
             "stale translator metadata must reject the cert"
         );
@@ -1257,19 +1390,37 @@ atom hard_lemma(x: i64) -> i64
         std::env::set_var("MUMEI_PROOF_BUNDLE", &bundle_path);
 
         // Default (allow_lean_verified=false): hard_lemma is NOT proven.
-        let default_result = verify_import_certificate(&std_root, &logical_source, &items, false)
-            .expect("bundle fallback should produce cert results");
+        let default_result = verify_import_certificate(
+            &std_root,
+            &logical_source,
+            &items,
+            false,
+            &ModuleEnv::default(),
+            false,
+        )
+        .expect("bundle fallback should produce cert results");
         assert_eq!(
-            default_result.get("hard_lemma").map(|s| s.as_str()),
+            default_result
+                .get("hard_lemma")
+                .map(|check| check.status.as_str()),
             Some("unproven"),
             "lean_verified must be 'unproven' without --allow-lean-verified",
         );
 
         // Opt-in (allow_lean_verified=true): hard_lemma IS proven.
-        let opt_in_result = verify_import_certificate(&std_root, &logical_source, &items, true)
-            .expect("bundle fallback should produce cert results");
+        let opt_in_result = verify_import_certificate(
+            &std_root,
+            &logical_source,
+            &items,
+            true,
+            &ModuleEnv::default(),
+            false,
+        )
+        .expect("bundle fallback should produce cert results");
         assert_eq!(
-            opt_in_result.get("hard_lemma").map(|s| s.as_str()),
+            opt_in_result
+                .get("hard_lemma")
+                .map(|check| check.status.as_str()),
             Some("proven"),
             "lean_verified must be 'proven' with --allow-lean-verified",
         );

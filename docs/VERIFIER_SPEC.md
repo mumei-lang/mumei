@@ -134,9 +134,15 @@ Rules:
   reports every conjunct that Phase 5 classified as `proved` as `vacuous`
   instead and adds a "vacuous verification context" diagnostic, so the reader
   can see why the proof meant nothing. `executor.rs::verify_inner` (Phase 6).
-  Phase 1i additionally flags vacuous specifications when vacuity checking is
-  enabled
-  (`vacuity.rs::check_spec_vacuity_for_hir`).
+  When enabled, Phase 1i verifies up to ten deterministic, one-site mutations
+  with the same site-mutant engine used by [`mumei controls`](CONTROLS.md), and
+  checks each through the real verifier with Phase 1i disabled for the nested
+  run. A surviving mutation makes the atom fail and its stable identifier is
+  reported. Only a structured `Rejected` verdict counts as a kill; unknown,
+  timeout, unsupported, translation, and other unmarked errors are
+  unanalyzable, not kills. No-op mutations such as `Pow` flipped to `Pow` are
+  omitted. See [Contract controls](CONTROLS.md).
+  `vacuity.rs::check_spec_vacuity_for_hir`.
 - **E4 (spurious counterexamples are not failures of `Q`).** When spurious
   detection is enabled and a Sat refutation's model does not reproduce the
   violation under Mumei semantics, the conjunct's outcome is `unknown`, not one

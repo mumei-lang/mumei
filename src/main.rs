@@ -30,6 +30,16 @@ fn main() {
         Some(command @ Command::Build { .. }) => commands::build::cmd_build_command(command),
         Some(command @ Command::Verify { .. }) => commands::verify::cmd_verify_command(command),
         Some(Command::Check { input }) => commands::check::cmd_check(&input),
+        Some(Command::Erosion {
+            candidate,
+            baseline,
+            json,
+        }) => {
+            let exit_code = commands::erosion::cmd_erosion(&candidate, &baseline, json);
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
         Some(Command::Init { name }) => commands::init::cmd_init(&name),
         Some(Command::Inspect { input, ai, format }) => {
             if let Some(ref file) = input {
@@ -84,6 +94,54 @@ fn main() {
             allow_lean_verified,
             strict,
         }) => commands::verify_cert::cmd_verify_cert(&cert, &input, allow_lean_verified, strict),
+        Some(Command::ProofStore { command }) => commands::proof_store::cmd_proof_store(command),
+        Some(Command::Claims {
+            input,
+            cert,
+            allow_lean_verified,
+            format,
+            out_dir,
+            controls,
+            max_mutants,
+            require_discriminating,
+            require_grade,
+        }) => commands::claims::cmd_claims(
+            &input,
+            commands::claims::ClaimsOptions {
+                cert_arg: cert.as_deref(),
+                allow_lean_verified,
+                format: &format,
+                out_dir: &out_dir,
+                controls_enabled: controls,
+                max_mutants,
+                require_discriminating,
+                require_grade: require_grade.as_deref(),
+            },
+        ),
+        Some(Command::Controls {
+            input,
+            json,
+            max_mutants,
+            atom,
+        }) => {
+            let exit_code =
+                commands::controls::cmd_controls(&input, json, max_mutants, atom.as_deref());
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
+        Some(Command::Observe {
+            input,
+            harvest,
+            json,
+            atom,
+        }) => {
+            let exit_code = commands::observe::cmd_observe(&input, &harvest, json, atom.as_deref());
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
+        Some(Command::Charter { command }) => commands::charter::cmd_charter(command),
         Some(Command::Run {
             input,
             emit,

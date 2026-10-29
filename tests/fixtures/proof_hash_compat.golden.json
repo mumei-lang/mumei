@@ -1,0 +1,46 @@
+{
+  "atoms": [
+    {
+      "name": "ext_clamp",
+      "status": "trusted",
+      "content_hash": "2de8ef0ff52930e7956f92d5f6d00b041d62fe81b0ed977c7c76266d0cccf335",
+      "proof_hash": "aaf5176efb194dabd3daf7f6ae0723126ba5210b3a6631b883c578a10e8b5de5"
+    },
+    {
+      "name": "leaf",
+      "status": "verified",
+      "content_hash": "4a5f04b565b52cc4e485e8b2661ecf2969ca8cb66fb4716644168f337d9aed10",
+      "proof_hash": "d5ae02922c7367c7c894956859c9550cb375cb4b2dbf80ebef3d3195bd15b04b"
+    },
+    {
+      "name": "mid",
+      "status": "verified",
+      "content_hash": "708c8a06b242cc28e7a1f073e777d790be75707298bdcda3b350c8996b8cb397",
+      "proof_hash": "4c66d6a8dd4fbb23986e96e9989b8b5e87e0e9ad8c5a8fd2a71b6abf694581f4"
+    },
+    {
+      "name": "top",
+      "status": "verified",
+      "content_hash": "b0da5bb9293305444220f29ce011a69df8a45b8074564201a7d198fd8a078eb5",
+      "proof_hash": "0b8d052f6ab1d4e7ba4be85ec1ca837f2cf9295a934d3c31fd176281dbc57f9e"
+    },
+    {
+      "name": "span",
+      "status": "verified",
+      "content_hash": "639c5fa4a212c3f1841ae677d7ad929c8223ef4500afecc59aa60e991a8d55e8",
+      "proof_hash": "e1438d4a67b01aaa296fd2ad7dc5c3244228d56e5a1b2165093244e961358ab0"
+    },
+    {
+      "name": "price",
+      "status": "verified",
+      "content_hash": "9bf6f4b2cfc40d83a98cf4e68d646058afa930af28e234ae3ccb136053106620",
+      "proof_hash": "9a5dc16caa845b61e0387d8086ca87d30415a210593a7dfd8bafb2059d55c4ab"
+    },
+    {
+      "name": "safe",
+      "status": "verified",
+      "content_hash": "1e90c946c98e5aea81f9a3722233babb379dc35f86de9ef21c92b1882adf4ddf",
+      "proof_hash": "fc7e16047c67f45b122846c4be0d2010c8894a81f582026572068ebe74e38737"
+    }
+  ]
+}

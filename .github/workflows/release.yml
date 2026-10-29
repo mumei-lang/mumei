@@ -66,7 +66,7 @@ jobs:
             os: macos-latest
             name: mumei-aarch64-apple-darwin
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             name: mumei-x86_64-unknown-linux-gnu
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm

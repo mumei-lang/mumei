@@ -1,11 +1,17 @@
 pub(crate) mod add;
 pub(crate) mod build;
+pub(crate) mod charter;
 pub(crate) mod check;
+pub(crate) mod claims;
+pub(crate) mod controls;
 pub(crate) mod doc;
+pub(crate) mod erosion;
 pub(crate) mod infer;
 pub(crate) mod init;
 pub(crate) mod inspect;
 pub(crate) mod list;
+pub(crate) mod observe;
+pub(crate) mod proof_store;
 pub(crate) mod publish;
 pub(crate) mod repl;
 pub(crate) mod run;

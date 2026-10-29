@@ -55,6 +55,7 @@ fn lean_verified_atom(
         spec_validation_result: None,
         proof_hash: format!("{name}-proof"),
         dependencies: Vec::new(),
+        dependency_hashes: None,
         effects: Vec::new(),
         requires: "true".to_string(),
         ensures: "result >= 0".to_string(),
@@ -85,6 +86,7 @@ fn lean_verified_atom(
         retry_policy_fingerprint: None,
         attempt_summary: None,
         cost_success_metrics: None,
+        reused_from_store: false,
     }
 }
 

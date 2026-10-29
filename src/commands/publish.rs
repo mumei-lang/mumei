@@ -54,10 +54,18 @@ pub(crate) fn cmd_publish(proof_only: bool, allow_lean_verified: bool) {
             Item::Atom(atom) => {
                 if module_env.is_verified(&atom.name) {
                     atom_count += 1;
-                    verification_results.insert(
-                        atom.name.clone(),
-                        ("unsat".to_string(), "verified".to_string()),
-                    );
+                    let result = if atom.trust_level == parser::TrustLevel::Trusted {
+                        (
+                            proof_cert::status::Z3_SKIPPED.to_string(),
+                            proof_cert::status::TRUSTED.to_string(),
+                        )
+                    } else {
+                        (
+                            proof_cert::status::Z3_UNSAT.to_string(),
+                            proof_cert::status::VERIFIED.to_string(),
+                        )
+                    };
+                    verification_results.insert(atom.name.clone(), result);
                     continue;
                 }
                 let hir_atom = lower_atom_to_hir_with_env(atom, Some(&module_env));
@@ -66,10 +74,18 @@ pub(crate) fn cmd_publish(proof_only: bool, allow_lean_verified: bool) {
                         println!("  ⚖️  '{}': verified ✅", atom.name);
                         module_env.mark_verified(&atom.name);
                         atom_count += 1;
-                        verification_results.insert(
-                            atom.name.clone(),
-                            ("unsat".to_string(), "verified".to_string()),
-                        );
+                        let result = if atom.trust_level == parser::TrustLevel::Trusted {
+                            (
+                                proof_cert::status::Z3_SKIPPED.to_string(),
+                                proof_cert::status::TRUSTED.to_string(),
+                            )
+                        } else {
+                            (
+                                proof_cert::status::Z3_UNSAT.to_string(),
+                                proof_cert::status::VERIFIED.to_string(),
+                            )
+                        };
+                        verification_results.insert(atom.name.clone(), result);
                     }
                     Err(e) => {
                         let resolved = resolve_source_for_span(&source, &atom.span);
@@ -86,10 +102,18 @@ pub(crate) fn cmd_publish(proof_only: bool, allow_lean_verified: bool) {
                     let qualified_name = format!("{}::{}", impl_block.struct_name, method.name);
                     if module_env.is_verified(&qualified_name) {
                         atom_count += 1;
-                        verification_results.insert(
-                            qualified_name.clone(),
-                            ("unsat".to_string(), "verified".to_string()),
-                        );
+                        let result = if method.trust_level == parser::TrustLevel::Trusted {
+                            (
+                                proof_cert::status::Z3_SKIPPED.to_string(),
+                                proof_cert::status::TRUSTED.to_string(),
+                            )
+                        } else {
+                            (
+                                proof_cert::status::Z3_UNSAT.to_string(),
+                                proof_cert::status::VERIFIED.to_string(),
+                            )
+                        };
+                        verification_results.insert(qualified_name.clone(), result);
                         continue;
                     }
                     let mut qualified_method = method.clone();
@@ -100,10 +124,18 @@ pub(crate) fn cmd_publish(proof_only: bool, allow_lean_verified: bool) {
                             println!("  ⚖️  '{}': verified ✅", qualified_name);
                             module_env.mark_verified(&qualified_name);
                             atom_count += 1;
-                            verification_results.insert(
-                                qualified_name.clone(),
-                                ("unsat".to_string(), "verified".to_string()),
-                            );
+                            let result = if method.trust_level == parser::TrustLevel::Trusted {
+                                (
+                                    proof_cert::status::Z3_SKIPPED.to_string(),
+                                    proof_cert::status::TRUSTED.to_string(),
+                                )
+                            } else {
+                                (
+                                    proof_cert::status::Z3_UNSAT.to_string(),
+                                    proof_cert::status::VERIFIED.to_string(),
+                                )
+                            };
+                            verification_results.insert(qualified_name.clone(), result);
                         }
                         Err(e) => {
                             let resolved = resolve_source_for_span(&source, &method.span);

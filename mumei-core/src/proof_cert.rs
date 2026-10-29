@@ -43,10 +43,11 @@ pub use review::{generate_escalation_bundle, generate_human_review_queue};
 
 pub use validation::{
     check_certificate_hash, get_required_lowering_rules, lean_axiom_audit,
-    lean_certificate_metadata_is_current, refresh_certificate_integrity,
-    validate_certificate_translator_versions, validate_translator_version,
-    validate_translator_version_with_semantics, verify_certificate, CertificateHashCheck,
-    LeanAxiomAudit, LEAN_STANDARD_KERNEL_AXIOMS,
+    lean_certificate_metadata_is_current, lean_translator_metadata_is_current,
+    refresh_certificate_integrity, validate_certificate_translator_versions,
+    validate_translator_version, validate_translator_version_with_semantics, verify_certificate,
+    verify_certificate_in_env, CertificateAtomCheck, CertificateHashCheck, LeanAxiomAudit,
+    LEAN_STANDARD_KERNEL_AXIOMS,
 };
 
 #[cfg(test)]
@@ -583,6 +584,182 @@ mod tests {
         let status2 = verify_certificate(&cert, &modified_atoms, false);
         assert_eq!(status2.len(), 1);
         assert_eq!(status2[0], ("add".to_string(), "changed".to_string()));
+    }
+
+    fn dependency_fixture(
+        result: &str,
+    ) -> (ProofCertificate, parser::Atom, parser::Atom, ModuleEnv) {
+        let callee = make_test_atom("f", "true", "result >= 0", "x");
+        let root = make_test_atom("g", "true", "result >= 0", "f(1)");
+        let atoms = [&root];
+        let mut env = ModuleEnv::new();
+        env.register_atom(&callee);
+        env.register_atom(&root);
+        let mut results = HashMap::new();
+        results.insert(
+            root.name.clone(),
+            (result.to_string(), status::VERIFIED.to_string()),
+        );
+        let cert = generate_certificate("test.mm", &atoms, &results, &env, None, None, None);
+        (cert, root, callee, env)
+    }
+
+    #[test]
+    fn verify_certificate_in_env_checks_dependency_hashes_and_unresolved_keys() {
+        let (mut cert, root, _callee, env) = dependency_fixture(status::Z3_UNSAT);
+        let atoms = [&root];
+        assert_eq!(
+            verify_certificate_in_env(&cert, &atoms, false, None)[0].status,
+            status::CERTIFICATE_PROVEN
+        );
+
+        cert.atoms[0].dependency_hashes = None;
+        assert_eq!(
+            verify_certificate_in_env(&cert, &atoms, false, Some(&env))[0].status,
+            status::CERTIFICATE_DEPENDENCY_UNCHECKED
+        );
+
+        let (mut cert, root, _, _) = dependency_fixture(status::Z3_UNSAT);
+        cert.atoms[0]
+            .dependency_hashes
+            .as_mut()
+            .unwrap()
+            .insert("atom:missing".to_string(), "stale".to_string());
+        let mut unresolved_env = ModuleEnv::new();
+        unresolved_env.register_atom(&root);
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&unresolved_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_UNCHECKED);
+        assert_eq!(
+            check[0].unchecked_dependencies,
+            vec!["atom:f", "atom:missing"]
+        );
+
+        let (mut cert, root, _, _) = dependency_fixture(status::Z3_UNSAT);
+        cert.atoms[0]
+            .dependency_hashes
+            .as_mut()
+            .unwrap()
+            .insert("atom:missing".to_string(), "stale".to_string());
+        let changed_callee = make_test_atom("f", "true", "result > 0", "h(x)");
+        let extra_callee = make_test_atom("h", "true", "result >= 0", "x");
+        let mut changed_env = ModuleEnv::new();
+        changed_env.register_atom(&changed_callee);
+        changed_env.register_atom(&extra_callee);
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert!(check[0]
+            .changed_dependencies
+            .contains(&"atom:f".to_string()));
+        assert!(check[0]
+            .unchecked_dependencies
+            .contains(&"atom:missing".to_string()));
+    }
+
+    #[test]
+    fn verify_certificate_in_env_ignores_new_current_keys_and_trusted_dependencies() {
+        let (cert, root, _, _) = dependency_fixture(status::Z3_UNSAT);
+        let transitive_f = make_test_atom("f", "true", "result >= 0", "h(x)");
+        let transitive_h = make_test_atom("h", "true", "result >= 0", "x");
+        let mut env = ModuleEnv::new();
+        env.register_atom(&transitive_f);
+        env.register_atom(&transitive_h);
+        assert_eq!(
+            verify_certificate_in_env(&cert, &[&root], false, Some(&env))[0].status,
+            status::CERTIFICATE_PROVEN
+        );
+
+        let trusted = make_test_atom("g", "true", "result >= 0", "f(1)");
+        let mut trusted = trusted;
+        trusted.trust_level = parser::TrustLevel::Trusted;
+        let mut trusted_results = HashMap::new();
+        trusted_results.insert(
+            "g".to_string(),
+            (status::Z3_SKIPPED.to_string(), status::TRUSTED.to_string()),
+        );
+        let trusted_cert = generate_certificate(
+            "test.mm",
+            &[&trusted],
+            &trusted_results,
+            &env,
+            None,
+            None,
+            None,
+        );
+        let changed_f = make_test_atom("f", "true", "result > 1", "x");
+        env.register_atom(&changed_f);
+        assert_eq!(
+            verify_certificate_in_env(&trusted_cert, &[&trusted], false, Some(&env))[0].status,
+            status::CERTIFICATE_TRUSTED
+        );
+    }
+
+    #[test]
+    fn verify_certificate_in_env_checks_lean_verified_dependency_freshness() {
+        let (mut cert, root, _, mut env) = dependency_fixture(status::Z3_LEAN_VERIFIED);
+        cert.atoms[0].translator_version = verification::LEAN_TRANSLATOR_VERSION.to_string();
+        cert.atoms[0].bridge_lemma_hash = verification::LEAN_BRIDGE_LEMMA_HASH.to_string();
+        cert.atoms[0].lean_metadata = Some(current_lean_metadata());
+        refresh_certificate_integrity(&mut cert);
+        assert_eq!(
+            verify_certificate_in_env(&cert, &[&root], true, Some(&env))[0].status,
+            status::CERTIFICATE_PROVEN
+        );
+        env.register_atom(&make_test_atom("f", "true", "result > 1", "x"));
+        let check = verify_certificate_in_env(&cert, &[&root], true, Some(&env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["atom:f"]);
+    }
+
+    #[test]
+    fn verify_certificate_distinguishes_trusted_entries_and_preserves_legacy_proven() {
+        let mut atom = make_test_atom("trusted_atom", "true", "result == 7", "7");
+        atom.trust_level = parser::TrustLevel::Trusted;
+        let atoms = vec![&atom];
+        let mut trusted_results = HashMap::new();
+        trusted_results.insert(
+            atom.name.clone(),
+            (status::Z3_SKIPPED.to_string(), status::TRUSTED.to_string()),
+        );
+        let trusted_cert = generate_certificate(
+            "test.mm",
+            &atoms,
+            &trusted_results,
+            &ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            verify_certificate(&trusted_cert, &atoms, false)[0].1,
+            status::CERTIFICATE_TRUSTED
+        );
+
+        let mut changed_atom = atom.clone();
+        changed_atom.body_expr = "8".to_string();
+        let changed_atoms = vec![&changed_atom];
+        assert_eq!(
+            verify_certificate(&trusted_cert, &changed_atoms, false)[0].1,
+            status::CERTIFICATE_CHANGED
+        );
+
+        let mut legacy_results = HashMap::new();
+        legacy_results.insert(
+            atom.name.clone(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        );
+        let legacy_cert = generate_certificate(
+            "test.mm",
+            &atoms,
+            &legacy_results,
+            &ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            verify_certificate(&legacy_cert, &atoms, false)[0].1,
+            status::CERTIFICATE_PROVEN
+        );
     }
 
     fn unsat_results(name: &str) -> HashMap<String, (String, String)> {

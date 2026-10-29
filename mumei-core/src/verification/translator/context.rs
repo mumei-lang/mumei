@@ -441,7 +441,8 @@ pub(crate) fn check_constraint_budget(vc: &VCtx, atom_name: &str) -> MumeiResult
             return Err(MumeiError::verification(format!(
                 "Constraint budget exceeded for atom '{}': {} constraints (limit: {})",
                 atom_name, new_count, vc.constraint_budget
-            )));
+            ))
+            .with_verdict(crate::verification::VerdictKind::Inconclusive));
         }
     }
     Ok(())

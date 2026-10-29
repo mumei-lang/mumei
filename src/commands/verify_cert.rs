@@ -25,7 +25,7 @@ pub(crate) fn cmd_verify_cert(
         }
     };
 
-    let (items, _module_env, _imports, _source) =
+    let (items, module_env, _imports, _source) =
         load_and_prepare_with_full_options(input, false, allow_lean_verified);
 
     let mut atom_refs: Vec<&parser::Atom> = items
@@ -53,29 +53,51 @@ pub(crate) fn cmd_verify_cert(
         atom_refs.push(qm);
     }
 
-    let results = proof_cert::verify_certificate(&cert, &atom_refs, allow_lean_verified);
+    let results = proof_cert::verify_certificate_in_env(
+        &cert,
+        &atom_refs,
+        allow_lean_verified,
+        Some(&module_env),
+    );
 
     let mut proven = 0;
+    let mut trusted = 0;
     let mut changed = 0;
+    let mut dependency_changed = 0;
+    let mut dependency_unchecked = 0;
     let mut unproven = 0;
     let mut axiom_rejected = 0;
     let mut missing = 0;
 
-    for (name, status) in &results {
+    for check in &results {
+        let name = &check.name;
+        let status = &check.status;
         let icon = match status.as_str() {
-            "proven" => {
+            proof_cert::status::CERTIFICATE_PROVEN => {
                 proven += 1;
                 "✅"
             }
-            "changed" => {
+            proof_cert::status::CERTIFICATE_TRUSTED => {
+                trusted += 1;
+                "🛡️"
+            }
+            proof_cert::status::CERTIFICATE_CHANGED => {
                 changed += 1;
                 "⚠️"
             }
-            "unproven" => {
+            proof_cert::status::CERTIFICATE_DEPENDENCY_CHANGED => {
+                dependency_changed += 1;
+                "⚠️"
+            }
+            proof_cert::status::CERTIFICATE_DEPENDENCY_UNCHECKED => {
+                dependency_unchecked += 1;
+                "⚠️"
+            }
+            proof_cert::status::CERTIFICATE_UNPROVEN => {
                 unproven += 1;
                 "❓"
             }
-            "axiom_rejected" => {
+            proof_cert::status::CERTIFICATE_AXIOM_REJECTED => {
                 axiom_rejected += 1;
                 "❌"
             }
@@ -84,7 +106,23 @@ pub(crate) fn cmd_verify_cert(
                 "❌"
             }
         };
-        println!("  {} {}: {}", icon, name, status);
+        if status == proof_cert::status::CERTIFICATE_TRUSTED {
+            println!("  {} {}: trusted (body not checked)", icon, name);
+        } else {
+            println!("  {} {}: {}", icon, name, status);
+        }
+        if !check.changed_dependencies.is_empty() {
+            println!(
+                "      changed_dependencies: [{}]",
+                check.changed_dependencies.join(", ")
+            );
+        }
+        if !check.unchecked_dependencies.is_empty() {
+            println!(
+                "      unchecked_dependencies: [{}]",
+                check.unchecked_dependencies.join(", ")
+            );
+        }
 
         // P5-A: Print extended fields for each atom certificate
         if let Some(ac) = cert.atoms.iter().find(|a| a.name == *name) {
@@ -188,8 +226,8 @@ pub(crate) fn cmd_verify_cert(
     }
     println!("All verified: {}", cert.all_verified);
     println!(
-        "Results: {} proven, {} changed, {} unproven, {} axiom_rejected, {} missing",
-        proven, changed, unproven, axiom_rejected, missing
+        "Results: {} proven, {} trusted (body not checked), {} changed, {} dependency_changed, {} dependency_unchecked, {} unproven, {} axiom_rejected, {} missing",
+        proven, trusted, changed, dependency_changed, dependency_unchecked, unproven, axiom_rejected, missing
     );
 
     if changed > 0 {
@@ -199,19 +237,18 @@ pub(crate) fn cmd_verify_cert(
     let unaudited_lean_atoms: Vec<&str> = if strict && allow_lean_verified {
         results
             .iter()
-            .filter_map(|(name, status)| {
-                if status != "proven" {
+            .filter_map(|check| {
+                if check.status != "proven" {
                     return None;
                 }
-                let atom = cert
-                    .atoms
-                    .iter()
-                    .find(|atom| atom.name == *name && atom.z3_check_result == "lean_verified")?;
+                let atom = cert.atoms.iter().find(|atom| {
+                    atom.name == check.name && atom.z3_check_result == "lean_verified"
+                })?;
                 if matches!(
                     proof_cert::lean_axiom_audit(atom),
                     proof_cert::LeanAxiomAudit::Unaudited
                 ) {
-                    Some(name.as_str())
+                    Some(check.name.as_str())
                 } else {
                     None
                 }
@@ -221,24 +258,36 @@ pub(crate) fn cmd_verify_cert(
         Vec::new()
     };
     let strict_unaudited_failure = !unaudited_lean_atoms.is_empty();
-    let strict_failure = strict && (changed > 0 || unhashed || strict_unaudited_failure);
+    let strict_dependency_failure = strict && dependency_unchecked > 0;
+    let strict_failure = strict
+        && (changed > 0
+            || dependency_changed > 0
+            || strict_dependency_failure
+            || unhashed
+            || strict_unaudited_failure);
     if strict_unaudited_failure {
         eprintln!(
             "❌ --strict: --allow-lean-verified accepted unaudited Lean atom(s): {}. Re-run mumei-lean to attach kernel axiom audit metadata.",
             unaudited_lean_atoms.join(", ")
         );
     }
-    if strict && (changed > 0 || unhashed) {
+    if strict && (changed > 0 || dependency_changed > 0 || strict_dependency_failure || unhashed) {
         println!();
         eprintln!(
             "❌ --strict: certificate '{}' no longer matches '{}' ({} changed atom(s), certificate_hash {}).",
             cert_path,
             input,
-            changed,
+            changed + dependency_changed + dependency_unchecked,
             if unhashed { "absent" } else { "present" }
         );
     }
-    if tampered || strict_failure || unproven > 0 || axiom_rejected > 0 || missing > 0 {
+    if tampered
+        || strict_failure
+        || dependency_changed > 0
+        || unproven > 0
+        || axiom_rejected > 0
+        || missing > 0
+    {
         std::process::exit(1);
     }
 }

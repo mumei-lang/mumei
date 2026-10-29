@@ -6,7 +6,7 @@
 //! - `[package]`: プロジェクトメタデータ（name, version, authors, description）
 //! - `[dependencies]`: パッケージ依存（path / git / version）
 //! - `[build]`: ビルド設定（verify, max_unroll）
-//! - `[proof]`: 検証設定（cache, timeout_ms, cross_spec_verify）
+//! - `[proof]`: 検証設定（cache, timeout_ms, cross_spec_verify, store）
 //! - `[effects]`: エフェクト境界設定（allowed, denied）
 //! - `[registry]`: リモートパッケージレジストリ設定（url, timeout_ms）
 use serde::Deserialize;
@@ -30,6 +30,8 @@ pub struct Manifest {
     pub effects: EffectsConfig,
     #[serde(default)]
     pub registry: RegistryConfig,
+    #[serde(default)]
+    pub charter: Option<CharterConfig>,
 }
 /// [package] セクション
 #[derive(Debug, Clone, Deserialize)]
@@ -93,6 +95,9 @@ pub struct ProofConfig {
     /// 複数仕様間の契約整合性検証を実行するか（デフォルト: true）
     #[serde(default = "default_true")]
     pub cross_spec_verify: bool,
+    /// Share verified Z3 proofs through the per-user local proof store (default: false).
+    #[serde(default)]
+    pub store: bool,
 }
 impl Default for ProofConfig {
     fn default() -> Self {
@@ -100,6 +105,7 @@ impl Default for ProofConfig {
             cache: true,
             timeout_ms: 10000,
             cross_spec_verify: true,
+            store: false,
         }
     }
 }
@@ -127,6 +133,28 @@ pub struct RegistryConfig {
     #[serde(default = "default_registry_timeout")]
     pub timeout_ms: u64,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CharterConfig {
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default = "default_charter_lock")]
+    pub lock: String,
+}
+
+impl Default for CharterConfig {
+    fn default() -> Self {
+        Self {
+            files: Vec::new(),
+            lock: default_charter_lock(),
+        }
+    }
+}
+
+fn default_charter_lock() -> String {
+    "charter.lock".to_string()
+}
+
 impl Default for RegistryConfig {
     fn default() -> Self {
         Self {
@@ -256,7 +284,7 @@ impl std::error::Error for ManifestError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Manifest, ProofConfig};
+    use super::{CharterConfig, Manifest, ProofConfig};
 
     #[test]
     fn proof_config_default_enables_cross_spec_verify() {
@@ -298,5 +326,25 @@ cross_spec_verify = false
         .expect("manifest parses");
 
         assert!(!manifest.proof.cross_spec_verify);
+    }
+
+    #[test]
+    fn charter_manifest_defaults_lock_path() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[charter]
+files = ["specs/core.charter.mm"]
+"#,
+        )
+        .expect("manifest parses");
+        let charter = manifest.charter.expect("charter config");
+
+        assert_eq!(charter.files, ["specs/core.charter.mm"]);
+        assert_eq!(charter.lock, "charter.lock");
+        assert_eq!(CharterConfig::default().lock, "charter.lock");
     }
 }

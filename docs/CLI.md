@@ -33,6 +33,8 @@ mumei run src/main.mm --emit llvm-ir -o dist/app
 mumei verify src/main.mm
 mumei verify src/            # every .mm file under the directory
 mumei verify src/main.mm --json --proof-cert
+mumei verify src/main.mm --proof-store
+mumei build src/main.mm --proof-store
 ```
 
 Postcondition verification checks whether the requires and body constraints
@@ -40,6 +42,35 @@ form a reachable context. An unreachable context remains a contradiction
 failure; the report classifies its ensures clauses as vacuous and includes a
 diagnostic. Ensures entries in `report.json` include the context reachability
 and an outcome for each non-trivial clause.
+
+The opt-in `--enable-vacuity-check` flag runs Phase 1i: up to ten
+deterministic, one-site mutants are checked through the real verifier. A
+surviving mutant fails the atom; only structured `Rejected` verdicts count as
+kills, while unknown or otherwise unanalyzable mutants do not. No-op `Pow`
+mutations are skipped. This shares the site-mutant engine with
+[`mumei controls`](CONTROLS.md), which provides a fuller per-atom report.
+
+The local proof store is opt-in with `--proof-store` or `[proof] store = true`
+in `mumei.toml`. `MUMEI_PROOF_STORE` selects its directory; otherwise it uses
+`$HOME/.mumei/proof-store`. Setting the environment variable does not enable
+the store. In `build`, `[proof] cache = false` disables it; an explicit
+`--proof-store` then prints a warning. Only successful Z3 proofs are stored.
+Trusted atoms, Lean-verified results, escalation candidates, failures, and
+inconclusive results are never stored or reused.
+On Unix, store directories are created with mode `0700` and entry files with
+mode `0600`; existing group- or other-writable directories and entries are
+refused. Ownership checks are not implemented yet.
+
+### `mumei proof-store`
+
+```bash
+mumei proof-store stats [--dir <directory>] [--json]
+mumei proof-store prune [--dir <directory>] [--older-than-days <N>] [--invalid]
+```
+
+`stats` reports the entry count, total bytes, and invalid-entry count.
+`prune` removes entries selected by age and/or invalidity; at least one
+selector is required (otherwise the command exits with code 4).
 
 ### Exit codes
 
@@ -79,6 +110,131 @@ JSON. `--emit loss-vector` / `--emit structured-feedback` print the emitted
 artifact to stdout as a second JSON document ahead of the summary. A directory
 run with `--json` prints one payload per file followed by the text summary;
 parse it line-oriented or verify files individually.
+
+## `mumei verify-cert`
+
+`mumei verify-cert <certificate> <input>` checks certificate entries against
+the current source. Trusted entries remain distinct from solver-proven entries
+and do not fail `--strict`.
+
+| Result | Meaning |
+|---|---|
+| `proven` | The source matches and the certificate records solver-proven evidence. |
+| `trusted` | The source matches and the certificate records a trusted atom; its body was not checked. |
+| `changed` | The source content hash differs from the certificate. |
+| `stale_translator` | Lean translator metadata does not match the current version. |
+| `unproven` | The source matches, but the certificate does not establish the contract. |
+| `axiom_rejected` | The Lean axiom audit rejected the certificate evidence. |
+| `missing` | The source contains no matching certificate entry. |
+
+## `mumei claims`
+
+```bash
+mumei claims <input.mm> [--cert <path>] [--format json|md|both]
+  [--out-dir <directory>] [--controls] [--max-mutants <N>]
+  [--require-discriminating] [--require-grade <G0..G5>]
+```
+
+`claims` writes a read-only Claim Book report. `--controls` attaches negative
+control results to claims; `--max-mutants` sets the per-atom cap (default 32)
+and requires `--controls`. `--require-discriminating` enables controls and
+fails with exit 1 if any claim is weak or inconclusive. It may be combined
+with `--require-grade`; reports are written before either gate is evaluated.
+Controls do not affect grades or freshness. Without `--controls`, JSON and
+Markdown output are unchanged. Equivalent mutants beyond the generator's
+small syntactic filter can still survive and require human judgment; see
+[Contract controls](CONTROLS.md) and the [Claim Book guide](CLAIMBOOK.md).
+
+## `mumei erosion`
+
+```bash
+mumei erosion <candidate.mm> --baseline <baseline.mm> [--json]
+```
+
+Compares the contracts in a candidate file with the same atoms in a baseline
+file. A result distinguishes preserved, strengthened, and refined contracts
+from missing or weakened contracts. The command checks top-level atoms and
+implementation methods; newly added atoms are reported for information.
+`--json` prints the deterministic `mumei.erosion-report/v1` report to standard
+output. The command does not write report files.
+
+Exit codes are `0` when no erosion is found, `1` when at least one baseline
+contract is missing, mismatched, weakened, or inconclusive, and `4` for an
+input or candidate-loading error. See [Contract Erosion](EROSION.md) for the
+report schema and status definitions.
+
+## `mumei charter`
+
+```bash
+mumei charter lock [--charter <file>]... [--lock <path>]
+mumei charter check <impl.mm> [--charter <file>]... [--lock <path>] [--cert <path>] [--require-grade <G0..G5>] [--allow-lean-verified] [--json]
+```
+
+`charter lock` writes deterministic hashes for the selected Charter files.
+`charter check` verifies the lock, checks that implementation atoms have the
+same signatures as the Charter atoms, and proves that their contracts refine
+the Charter contracts. With `--cert`, it also requires each otherwise-passing
+atom to meet the certificate's effective Seal Grade, defaulting to G4.
+`--require-grade` selects a threshold from G0 through G5, and
+`--allow-lean-verified` accepts current Lean-verified certificate evidence.
+The grade gate builds a read-only Claim Book from the current implementation
+and certificate; incomplete dependency coverage is reported but does not by
+itself fail the gate. When `mumei.toml` has a `[charter]` section, its
+`files` and `lock` values supply defaults; the lock path defaults to
+`charter.lock`. A check covers every Charter in the lock plus any files passed
+with `--charter`. A Charter symlink that resolves outside the project is
+rejected.
+
+The check writes `charter_report.json`; `--json` also prints the report to
+standard output. Its top-level `status` is `pass` or `fail`, and every atom
+result identifies its relative Charter path. When a matching claim exists,
+certificate-backed results include `effective_grade` and
+`effective_grade_complete`. If the lock is mismatched, otherwise-passing
+atoms are marked `unpinned` after the grade check. A passing check exits `0`,
+a failed gate exits `1`, and an input or report I/O error exits `4`. See
+[Charter](CHARTER.md) for the file format, lock behavior, and check semantics.
+
+## `mumei controls`
+
+```bash
+mumei controls src/main.mm
+mumei controls src/main.mm --json --atom Point::get
+mumei controls src/main.mm --max-mutants 16
+```
+
+`controls` reports whether each verified atom contract rejects deterministic
+one-site implementation mutations. It defaults to 32 mutants per atom and
+supports an optional qualified atom filter. JSON reports use
+`mumei.controls-report/v1`. Exit code `0` means no atom is weak, `1` means at
+least one mutation survived, and `4` indicates missing or unparsable input or
+an unknown atom. See [Contract controls](CONTROLS.md) for statuses, outcomes,
+and the distinction from `verify --enable-vacuity-check`.
+
+## `mumei observe`
+
+```bash
+mumei observe src/main.mm test-harvest.json
+mumei observe src/main.mm test-harvest.json --json --atom Point::get
+```
+
+`observe` checks `mumei.test-harvest/v1` examples, relations, expected
+rejections, and property-test observations against atom contracts using the
+verifier. A property observation declares its generator `variables` (with
+optional inclusive `min`/`max` bounds), `assumptions`, `args` that pin atom
+parameters to literals or generator variables, and a `predicate` over those
+variables and `result`.
+
+JSON output uses `mumei.observation-check/v1`; each observation is `consistent`,
+`contradicts_ensures`, `outside_requires`, `rejection_explained`,
+`requires_admits_rejected`, `entailed`, `not_entailed`,
+`domain_exceeds_requires`, `inconclusive`, or `not_checked`. Property checks
+distinguish a contract that entails the predicate from one that does not, and
+report when the generator domain extends beyond `requires`. Exit code `1`
+indicates a contradiction or a rejected input admitted by `requires`;
+`outside_requires` and `rejection_explained` never fail the run. For a relation,
+`contradicts_ensures` means no result the contract allows satisfies the tested
+predicate. Code `4` indicates invalid input or an unparsable source file.
+`--atom` filters by the observation's target name.
 
 ### SARIF output
 

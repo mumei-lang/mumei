@@ -136,6 +136,7 @@ fn bv_shift_out_of_range<'a>(ctx: &'a Context, amount: &BV<'a>) -> Bool<'a> {
 fn out_of_range_shift_error() -> MumeiError {
     MumeiError::verification("Shift amount may be outside 0..64".to_string())
         .with_help("Add `n >= 0 && n < 64` for the shift amount to requires")
+        .with_verdict(crate::verification::VerdictKind::Rejected)
 }
 
 fn undecided_shift_error() -> MumeiError {
@@ -145,6 +146,7 @@ fn undecided_shift_error() -> MumeiError {
     .with_help(
         "State `n >= 0 && n < 64` for the shift amount in requires, or raise --solver-timeout",
     )
+    .with_verdict(crate::verification::VerdictKind::Inconclusive)
 }
 
 /// True when the callee's contract was proved in the same `i64` encoding the
@@ -743,6 +745,7 @@ pub(crate) fn termination_violation_error<'a>(
     solver: &Solver<'a>,
     env: &Env<'a>,
     callee_name: &str,
+    verdict: VerdictKind,
 ) -> MumeiError {
     let atom_name = vc.current_atom.map(|a| a.name.as_str()).unwrap_or("?");
     let measure_text = vc
@@ -755,6 +758,7 @@ pub(crate) fn termination_violation_error<'a>(
         atom_name, callee_name, measure_text
     ))
     .with_counterexample(ce)
+    .with_verdict(verdict)
 }
 
 /// Whether `callee` is a member of the current atom's SCC and the call sits
@@ -822,10 +826,22 @@ fn termination_obligation_at_call<'a>(
         }
         solver.assert(&obligation.not());
         let check = solver.check();
-        let err = if check != SatResult::Unsat {
-            Some(termination_violation_error(vc, solver, env, &callee.name))
-        } else {
-            None
+        let err = match check {
+            SatResult::Sat => Some(termination_violation_error(
+                vc,
+                solver,
+                env,
+                &callee.name,
+                VerdictKind::Rejected,
+            )),
+            SatResult::Unknown => Some(termination_violation_error(
+                vc,
+                solver,
+                env,
+                &callee.name,
+                VerdictKind::Inconclusive,
+            )),
+            SatResult::Unsat => None,
         };
         solver.pop(1);
         if let Some(err) = err {
@@ -1082,18 +1098,21 @@ pub(crate) fn discharge_bv_div_obligations<'a>(
         DivSafetyStatus::DivisionByZero => Err(MumeiError::verification(
             "Potential division by zero.".to_string(),
         )
-        .with_help("Add a condition divisor != 0 to requires")),
+        .with_help("Add a condition divisor != 0 to requires")
+        .with_verdict(crate::verification::VerdictKind::Rejected)),
         DivSafetyStatus::Overflow => Err(MumeiError::verification(
             "Division may overflow (i64::MIN / -1).".to_string(),
         )
         .with_help(
             "Add a condition ruling out the pair, e.g. `divisor != 0 - 1` \
              or `dividend != 0 - 9223372036854775807 - 1`, to requires",
-        )),
+        )
+        .with_verdict(crate::verification::VerdictKind::Rejected)),
         DivSafetyStatus::Undecided => Err(MumeiError::verification(
             "Z3 could not decide division safety (divisor != 0, no overflow).".to_string(),
         )
-        .with_help("Strengthen requires so the divisor is provably nonzero")),
+        .with_help("Strengthen requires so the divisor is provably nonzero")
+        .with_verdict(crate::verification::VerdictKind::Inconclusive)),
     }
 }
 
@@ -1162,7 +1181,8 @@ fn bv_binary_op<'a>(
                     return Err(MumeiError::verification(
                         "Potential division by zero.".to_string(),
                     )
-                    .with_help("Add a condition divisor != 0 to requires"));
+                    .with_help("Add a condition divisor != 0 to requires")
+                    .with_verdict(crate::verification::VerdictKind::Rejected));
                 }
                 // `bvsdiv` gives `i64::MIN / -1` the value `i64::MIN`, while
                 // the emitted `sdiv` is undefined there, so a proof about that
@@ -1184,7 +1204,8 @@ fn bv_binary_op<'a>(
                     .with_help(
                         "Add a condition ruling out the pair, e.g. `divisor != 0 - 1` \
                          or `dividend != 0 - 9223372036854775807 - 1`, to requires",
-                    ));
+                    )
+                    .with_verdict(crate::verification::VerdictKind::Rejected));
                 }
             } else {
                 // Contract clauses are lowered without a solver; defer the
@@ -2244,7 +2265,8 @@ pub(crate) fn expr_to_z3<'a>(
                                             return Err(MumeiError::verification(
                                                 format!("Call to '{}': precondition (requires) not satisfied at call site", name)
                                             ).with_help("呼び出し元で事前条件を満たしていません。引数の制約を確認してください")
-                                            .with_counterexample_provenance(ce_value, provenance));
+                                            .with_counterexample_provenance(ce_value, provenance)
+                                            .with_verdict(crate::verification::VerdictKind::Rejected));
                                         }
                                         solver.pop(1);
                                     }
@@ -2322,7 +2344,7 @@ pub(crate) fn expr_to_z3<'a>(
                                                                 )
                                                             ).with_help(
                                                                 "トレイトメソッドのパラメータ制約が満たされていません。引数の値を確認してください"
-                                                            ));
+                                                            ).with_verdict(crate::verification::VerdictKind::Rejected));
                                                         }
                                                             solver.pop(1);
                                                         }
@@ -2946,7 +2968,8 @@ pub(crate) fn expr_to_z3<'a>(
                     ))
                     .with_help(
                         "requires にインデックスの範囲制約 (0 <= idx < len) を追加してください",
-                    ));
+                    )
+                    .with_verdict(crate::verification::VerdictKind::Rejected));
                 }
                 solver.pop(1);
             }
@@ -3272,7 +3295,8 @@ pub(crate) fn expr_to_z3<'a>(
                                     ce_hint, feedback_hint
                                 ))
                                 .with_help("Add a condition divisor != 0 to requires")
-                                .with_counterexample_provenance(ce_value, provenance));
+                                .with_counterexample_provenance(ce_value, provenance)
+                                .with_verdict(crate::verification::VerdictKind::Rejected));
                             }
                             solver.pop(1);
                         }
@@ -3422,7 +3446,8 @@ pub(crate) fn expr_to_z3<'a>(
                                         return Err(MumeiError::verification(format!(
                                             "Struct '{}' field '{}' constraint violated: {}",
                                             type_name, field_name, constraint_raw
-                                        )));
+                                        ))
+                                        .with_verdict(crate::verification::VerdictKind::Rejected));
                                     }
                                     solver.pop(1);
                                 }
@@ -3570,12 +3595,14 @@ pub(crate) fn expr_to_z3<'a>(
                             counterexample_provenance
                                 .as_ref()
                                 .map(RaisedCounterexample::provenance_json),
-                        ));
+                        )
+                        .with_verdict(crate::verification::VerdictKind::Rejected));
                     }
                     check_solver.pop(1);
                     return Err(MumeiError::verification(
                         "Match is not exhaustive: there exist values not covered by any arm.",
-                    ));
+                    )
+                    .with_verdict(crate::verification::VerdictKind::Inconclusive));
                 }
             }
 
@@ -3889,7 +3916,10 @@ pub(crate) fn expr_to_z3<'a>(
                                             "Constraint budget exceeded for effect '{}' \
                                              string constraint: {} constraints (limit: {})",
                                             effect, current, vc.constraint_budget
-                                        )));
+                                        ))
+                                        .with_verdict(
+                                            crate::verification::VerdictKind::Inconclusive,
+                                        ));
                                     }
                                     count.set(current + 1);
                                 }
@@ -4189,7 +4219,8 @@ pub(crate) fn expr_to_z3<'a>(
                                     ))
                                     .with_help(
                                         "呼び出し元で事前条件を満たしていません。引数の制約を確認してください",
-                                    ));
+                                    )
+                                    .with_verdict(crate::verification::VerdictKind::Rejected));
                                 }
                                 solver.pop(1);
                             }
@@ -4516,13 +4547,15 @@ pub(crate) fn expr_to_z3<'a>(
                                                 ))
                                                 .with_help(
                                                     "関数パラメータの事前条件を満たしていません。引数の制約を確認してください",
-                                                ));
+                                                )
+                                                .with_verdict(crate::verification::VerdictKind::Rejected));
                                             }
                                             if sat_result == SatResult::Unknown {
                                                 return Err(MumeiError::verification(format!(
                                                     "call_with_contract({}): precondition '{}' could not be decided (Z3 unknown)",
                                                     callee_var_name, fn_requires
-                                                )));
+                                                ))
+                                                .with_verdict(crate::verification::VerdictKind::Inconclusive));
                                             }
                                         }
                                     }

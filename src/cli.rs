@@ -42,6 +42,9 @@ pub(crate) enum Command {
         /// only trusts Z3-discharged (`unsat`) atoms unless this flag is set.
         #[arg(long)]
         allow_lean_verified: bool,
+        /// Reuse Z3-verified proofs from the opt-in local proof store.
+        #[arg(long)]
+        proof_store: bool,
     },
     /// Z3 formal verification only (no codegen)
     Verify {
@@ -88,6 +91,9 @@ pub(crate) enum Command {
         /// resolution. Off by default for backwards compatibility.
         #[arg(long)]
         allow_lean_verified: bool,
+        /// Reuse Z3-verified proofs from the opt-in local proof store.
+        #[arg(long)]
+        proof_store: bool,
         /// Enable cross-specification consistency verification across atoms and emit cross_spec.json with agent_artifact_mapping
         #[arg(long)]
         cross_spec_verify: bool,
@@ -167,10 +173,26 @@ pub(crate) enum Command {
         #[arg(long)]
         detect_spec_drift: Option<String>,
     },
+    /// Inspect or prune the local proof store
+    ProofStore {
+        #[command(subcommand)]
+        command: ProofStoreCommand,
+    },
     /// Parse + resolve + monomorphize only (no Z3, fast syntax check)
     Check {
         /// Input .mm file or directory
         input: String,
+    },
+    /// Compare candidate contracts with a baseline file
+    Erosion {
+        /// Candidate .mm file
+        candidate: String,
+        /// Baseline .mm file
+        #[arg(long, value_name = "FILE")]
+        baseline: String,
+        /// Print the erosion report as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Generate a new Mumei project template
     Init {
@@ -268,6 +290,67 @@ pub(crate) enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Summarize atom evidence and its freshness in a Claim Book
+    Claims {
+        /// Input .mm file
+        input: String,
+        /// Proof certificate path (defaults to the path written by `mumei verify --proof-cert`)
+        #[arg(long)]
+        cert: Option<String>,
+        /// Accept current Lean-verified certificate evidence
+        #[arg(long)]
+        allow_lean_verified: bool,
+        /// Output format: json, md, or both
+        #[arg(long, default_value = "both", value_parser = ["json", "md", "both"])]
+        format: String,
+        /// Directory for claimbook.json and CLAIMBOOK.md (default: current directory)
+        #[arg(long, default_value = ".")]
+        out_dir: String,
+        /// Attach negative-control results to claims
+        #[arg(long)]
+        controls: bool,
+        /// Maximum mutants to test per atom (requires --controls)
+        #[arg(long, default_value_t = 32, requires = "controls")]
+        max_mutants: usize,
+        /// Fail if any checked claim has weak or inconclusive controls
+        #[arg(long)]
+        require_discriminating: bool,
+        /// Require every claim to meet this Seal Grade
+        #[arg(long, value_parser = ["G0", "G1", "G2", "G3", "G4", "G5"])]
+        require_grade: Option<String>,
+    },
+    /// Check whether atom contracts reject deterministic implementation mutations
+    Controls {
+        /// Input .mm file
+        input: String,
+        /// Print the structured JSON report
+        #[arg(long)]
+        json: bool,
+        /// Maximum mutants to test per atom
+        #[arg(long, default_value_t = 32)]
+        max_mutants: usize,
+        /// Analyze only the named atom
+        #[arg(long)]
+        atom: Option<String>,
+    },
+    /// Check harvested examples, relations, rejections, and property tests against atom contracts
+    Observe {
+        /// Input .mm file
+        input: String,
+        /// mumei.test-harvest/v1 JSON file, including property observations
+        harvest: String,
+        /// Print the structured JSON report
+        #[arg(long)]
+        json: bool,
+        /// Analyze only observations for the named atom
+        #[arg(long)]
+        atom: Option<String>,
+    },
+    /// Lock or check human-owned charter contracts
+    Charter {
+        #[command(subcommand)]
+        command: CharterCommand,
+    },
     /// P7-B: Build and run a mumei program as a native binary
     Run {
         /// Input .mm file
@@ -284,5 +367,61 @@ pub(crate) enum Command {
         /// Arguments to pass to the compiled program
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ProofStoreCommand {
+    /// Show local proof-store entry counts and size
+    Stats {
+        #[arg(long)]
+        dir: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove old and/or invalid proof-store entries
+    Prune {
+        #[arg(long)]
+        dir: Option<String>,
+        #[arg(long)]
+        older_than_days: Option<u64>,
+        #[arg(long)]
+        invalid: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum CharterCommand {
+    /// Write deterministic hashes for the selected charter files
+    Lock {
+        /// Charter file path; may be repeated
+        #[arg(long = "charter", action = clap::ArgAction::Append)]
+        charter: Vec<String>,
+        /// Lock file path
+        #[arg(long)]
+        lock: Option<String>,
+    },
+    /// Check an implementation against the locked charter contracts
+    Check {
+        /// Implementation .mm file
+        input: String,
+        /// Charter file path; may be repeated
+        #[arg(long = "charter", action = clap::ArgAction::Append)]
+        charter: Vec<String>,
+        /// Lock file path
+        #[arg(long)]
+        lock: Option<String>,
+        /// Proof certificate for the implementation
+        #[arg(long)]
+        cert: Option<String>,
+        /// Minimum effective Seal Grade required for each chartered atom
+        #[arg(long, value_parser = ["G0", "G1", "G2", "G3", "G4", "G5"])]
+        require_grade: Option<String>,
+        /// Accept current Lean-verified certificate evidence
+        #[arg(long)]
+        allow_lean_verified: bool,
+        /// Print the JSON report to standard output
+        #[arg(long)]
+        json: bool,
     },
 }
