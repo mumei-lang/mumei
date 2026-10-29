@@ -1,4 +1,5 @@
 use crate::controls::ControlsAtomReport;
+use crate::observe::ObservationResult;
 use crate::parser::{ClauseTrustMode, TrustLevel};
 use crate::proof_cert::{self, status, AtomCertificate, ProofCertificate};
 use serde::{Deserialize, Serialize};
@@ -81,6 +82,16 @@ pub struct Claim {
     pub proof_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discrimination: Option<ClaimDiscrimination>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<ClaimObservation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaimObservation {
+    pub status: String,
+    pub supporting: usize,
+    pub contradicting: usize,
+    pub neutral: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -134,6 +145,8 @@ pub struct ClaimBookSummary {
     pub total: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by_discrimination: Option<BTreeMap<String, usize>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_observation: Option<BTreeMap<String, usize>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -153,6 +166,15 @@ pub struct ClaimBook {
     pub summary: ClaimBookSummary,
     pub claims: Vec<Claim>,
     pub orphaned_entries: Vec<OrphanedEntry>,
+    #[serde(skip)]
+    recomputation: ClaimBookRecomputation,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ClaimBookRecomputation {
+    unsatisfiable_specs: BTreeSet<String>,
+    method_name_matches: BTreeMap<String, BTreeMap<String, String>>,
+    source_dependencies: BTreeMap<String, Vec<String>>,
 }
 
 pub fn own_grade(
@@ -278,7 +300,8 @@ pub fn compute_effective_grades(claims: &BTreeMap<String, Claim>) -> BTreeMap<St
     let mut effective_grades = claims
         .iter()
         .map(|(name, claim)| {
-            let fresh_grade = if claim.freshness == Freshness::Fresh {
+            let fresh_grade = if claim.grade == SealGrade::G2 || claim.freshness == Freshness::Fresh
+            {
                 claim.grade
             } else {
                 SealGrade::G0
@@ -379,33 +402,40 @@ fn resolve_claim_dependencies(
     let claim_names = claims.keys().cloned().collect::<BTreeSet<_>>();
     let mut method_name_matches = BTreeMap::new();
     for (claim_name, claim) in claims.iter_mut() {
-        let mut claim_method_name_matches = BTreeMap::new();
-        claim.dependencies = claim
-            .dependencies
-            .iter()
-            .map(|dependency| {
-                if claim_names.contains(dependency) {
-                    return dependency.clone();
-                }
-
-                let suffix = format!("::{dependency}");
-                let mut qualified_matches =
-                    claim_names.iter().filter(|name| name.ends_with(&suffix));
-                match (qualified_matches.next(), qualified_matches.next()) {
-                    (Some(match_name), None) => {
-                        claim_method_name_matches.insert(match_name.clone(), dependency.clone());
-                        match_name.clone()
-                    }
-                    _ => dependency.clone(),
-                }
-            })
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let claim_method_name_matches = resolve_claim_dependencies_for_claim(claim, &claim_names);
         if !claim_method_name_matches.is_empty() {
             method_name_matches.insert(claim_name.clone(), claim_method_name_matches);
         }
     }
+    method_name_matches
+}
+
+fn resolve_claim_dependencies_for_claim(
+    claim: &mut Claim,
+    claim_names: &BTreeSet<String>,
+) -> BTreeMap<String, String> {
+    let mut method_name_matches = BTreeMap::new();
+    claim.dependencies = claim
+        .dependencies
+        .iter()
+        .map(|dependency| {
+            if claim_names.contains(dependency) {
+                return dependency.clone();
+            }
+
+            let suffix = format!("::{dependency}");
+            let mut qualified_matches = claim_names.iter().filter(|name| name.ends_with(&suffix));
+            match (qualified_matches.next(), qualified_matches.next()) {
+                (Some(match_name), None) => {
+                    method_name_matches.insert(match_name.clone(), dependency.clone());
+                    match_name.clone()
+                }
+                _ => dependency.clone(),
+            }
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     method_name_matches
 }
 
@@ -420,7 +450,10 @@ fn limiting_premises(
     }
 
     let mut premises = BTreeSet::new();
-    if claim.freshness != Freshness::Fresh && claim.grade > SealGrade::G0 {
+    if claim.freshness != Freshness::Fresh
+        && claim.grade > SealGrade::G0
+        && claim.grade != SealGrade::G2
+    {
         premises.insert(LimitingPremise {
             kind: "freshness".to_string(),
             name: freshness_name(claim.freshness).to_string(),
@@ -429,7 +462,7 @@ fn limiting_premises(
         });
     }
 
-    let fresh_grade = if claim.freshness == Freshness::Fresh {
+    let fresh_grade = if claim.grade == SealGrade::G2 || claim.freshness == Freshness::Fresh {
         claim.grade
     } else {
         SealGrade::G0
@@ -580,10 +613,27 @@ pub fn create_claimbook(
         .iter()
         .map(|atom| (atom.name.as_str(), *atom))
         .collect();
+    let source_dependencies: BTreeMap<String, Vec<String>> = atoms
+        .iter()
+        .map(|atom| {
+            let mut dependencies = crate::resolver::collect_callees_from_atom(atom)
+                .into_iter()
+                .collect::<Vec<_>>();
+            dependencies.sort();
+            (atom.name.clone(), dependencies)
+        })
+        .collect();
 
     let mut claims = BTreeMap::new();
+    let mut unsatisfiable_specs = BTreeSet::new();
     for (name, source_atom) in &source_atoms {
         let entry = certified.get(name).copied();
+        if entry
+            .and_then(|entry| entry.spec_validation_result.as_ref())
+            .is_some_and(|result| !result.is_satisfiable)
+        {
+            unsatisfiable_specs.insert((*name).to_string());
+        }
         let verification_result = entry
             .and_then(|_| verification_results.get(*name))
             .map(|check| check.status.as_str());
@@ -696,12 +746,60 @@ pub fn create_claimbook(
             content_hash: entry.map(|entry| entry.content_hash.clone()),
             proof_hash: entry.map(|entry| entry.proof_hash.clone()),
             discrimination: None,
+            observation: None,
         };
         claims.insert((*name).to_string(), claim);
     }
 
     let method_name_matches = resolve_claim_dependencies(&mut claims);
-    apply_effective_grades(&mut claims, &method_name_matches);
+
+    let mut orphaned_entries = cert
+        .into_iter()
+        .flat_map(|cert| cert.atoms.iter())
+        .filter(|entry| !source_atoms.contains_key(entry.name.as_str()))
+        .map(|entry| OrphanedEntry {
+            atom: entry.name.clone(),
+            content_hash: entry.content_hash.clone(),
+            proof_hash: entry.proof_hash.clone(),
+        })
+        .collect::<Vec<_>>();
+    orphaned_entries.sort_by(|left, right| left.atom.cmp(&right.atom));
+
+    let mut book = ClaimBook {
+        schema: SCHEMA.to_string(),
+        input,
+        certificate: certificate_path,
+        certificate_integrity: integrity,
+        generator: ClaimBookGenerator {
+            mumei_version: cert.map(|cert| cert.mumei_version.clone()),
+            z3_version: cert.map(|cert| cert.z3_version.clone()),
+        },
+        trusted_base: trusted_base(cert, atoms),
+        summary: ClaimBookSummary {
+            by_effective_grade: BTreeMap::new(),
+            by_freshness: BTreeMap::new(),
+            total: 0,
+            by_discrimination: None,
+            by_observation: None,
+        },
+        claims: claims.into_values().collect(),
+        orphaned_entries,
+        recomputation: ClaimBookRecomputation {
+            unsatisfiable_specs,
+            method_name_matches,
+            source_dependencies,
+        },
+    };
+    recompute_claimbook_derived_fields(&mut book);
+    book
+}
+
+fn recompute_claimbook_derived_fields(book: &mut ClaimBook) {
+    let mut claims = std::mem::take(&mut book.claims)
+        .into_iter()
+        .map(|claim| (claim.atom.clone(), claim))
+        .collect::<BTreeMap<_, _>>();
+    apply_effective_grades(&mut claims, &book.recomputation.method_name_matches);
 
     let mut by_effective_grade = SealGrade::all()
         .into_iter()
@@ -720,37 +818,86 @@ pub fn create_claimbook(
             .expect("all freshness values are initialized") += 1;
     }
 
-    let mut orphaned_entries = cert
-        .into_iter()
-        .flat_map(|cert| cert.atoms.iter())
-        .filter(|entry| !source_atoms.contains_key(entry.name.as_str()))
-        .map(|entry| OrphanedEntry {
-            atom: entry.name.clone(),
-            content_hash: entry.content_hash.clone(),
-            proof_hash: entry.proof_hash.clone(),
-        })
-        .collect::<Vec<_>>();
-    orphaned_entries.sort_by(|left, right| left.atom.cmp(&right.atom));
+    book.summary.by_effective_grade = by_effective_grade;
+    book.summary.by_freshness = by_freshness;
+    book.summary.total = claims.len();
+    book.claims = claims.into_values().collect();
+}
 
-    ClaimBook {
-        schema: SCHEMA.to_string(),
-        input,
-        certificate: certificate_path,
-        certificate_integrity: integrity,
-        generator: ClaimBookGenerator {
-            mumei_version: cert.map(|cert| cert.mumei_version.clone()),
-            z3_version: cert.map(|cert| cert.z3_version.clone()),
-        },
-        trusted_base: trusted_base(cert, atoms),
-        summary: ClaimBookSummary {
-            by_effective_grade,
-            by_freshness,
-            total: claims.len(),
-            by_discrimination: None,
-        },
-        claims: claims.into_values().collect(),
-        orphaned_entries,
+pub fn attach_observations(book: &mut ClaimBook, results: &[ObservationResult]) {
+    let mut by_observation = BTreeMap::new();
+    let claim_names = book
+        .claims
+        .iter()
+        .map(|claim| claim.atom.clone())
+        .collect::<BTreeSet<_>>();
+    for claim in &mut book.claims {
+        let mut observation = ClaimObservation {
+            status: String::new(),
+            supporting: 0,
+            contradicting: 0,
+            neutral: 0,
+        };
+        for result in results.iter().filter(|result| result.target == claim.atom) {
+            match result.verdict {
+                "consistent" | "entailed" => observation.supporting += 1,
+                "contradicts_ensures" | "not_entailed" => observation.contradicting += 1,
+                _ => observation.neutral += 1,
+            }
+        }
+        observation.status = if observation.contradicting > 0 {
+            "contradicted"
+        } else if observation.supporting > 0 {
+            "supported"
+        } else if observation.neutral > 0 {
+            "inconclusive"
+        } else {
+            "not_observed"
+        }
+        .to_string();
+
+        if observation.status == "supported"
+            && (claim.grade == SealGrade::G0 || claim.freshness != Freshness::Fresh)
+            && (claim.freshness != Freshness::Fresh
+                || !book.recomputation.unsatisfiable_specs.contains(&claim.atom))
+        {
+            let mut dependencies = claim.dependencies.iter().cloned().collect::<BTreeSet<_>>();
+            dependencies.extend(
+                book.recomputation
+                    .source_dependencies
+                    .get(&claim.atom)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+            claim.dependencies = dependencies.into_iter().collect();
+            let method_name_matches = resolve_claim_dependencies_for_claim(claim, &claim_names);
+            if !method_name_matches.is_empty() {
+                book.recomputation
+                    .method_name_matches
+                    .entry(claim.atom.clone())
+                    .or_default()
+                    .extend(method_name_matches);
+            }
+            let previous_reason = format!(
+                "current test observations agree with the contract (previously {} {}: {})",
+                grade_code(claim.grade),
+                claim.evidence_kind,
+                claim.reason
+            );
+            claim.grade = SealGrade::G2;
+            claim.grade_label = SealGrade::G2.label().to_string();
+            claim.evidence_kind = "observation".to_string();
+            claim.reason = previous_reason;
+        }
+
+        *by_observation
+            .entry(observation.status.clone())
+            .or_insert(0) += 1;
+        claim.observation = Some(observation);
     }
+    book.summary.by_observation = Some(by_observation);
+    recompute_claimbook_derived_fields(book);
 }
 
 pub fn attach_controls(book: &mut ClaimBook, controls: &[ControlsAtomReport]) {
@@ -826,6 +973,12 @@ pub fn render_markdown(book: &ClaimBook) -> String {
             .unwrap_or(0);
         markdown.push_str(&format!("| {} | {} |\n", freshness_name(freshness), count));
     }
+    if let Some(by_observation) = &book.summary.by_observation {
+        markdown.push_str("\n| Observation | Count |\n|---|---:|\n");
+        for (status, count) in by_observation {
+            markdown.push_str(&format!("| {status} | {count} |\n"));
+        }
+    }
     if let Some(by_discrimination) = &book.summary.by_discrimination {
         let counts = by_discrimination
             .iter()
@@ -842,6 +995,7 @@ pub fn render_markdown(book: &ClaimBook) -> String {
             .iter()
             .filter(|claim| claim.freshness != Freshness::Fresh),
         book.summary.by_discrimination.is_some(),
+        book.summary.by_observation.is_some(),
     );
 
     for grade in SealGrade::all().into_iter().rev() {
@@ -856,6 +1010,7 @@ pub fn render_markdown(book: &ClaimBook) -> String {
                 .iter()
                 .filter(|claim| claim.effective_grade == grade),
             book.summary.by_discrimination.is_some(),
+            book.summary.by_observation.is_some(),
         );
     }
 
@@ -874,16 +1029,31 @@ fn append_claim_table<'a>(
     markdown: &mut String,
     claims: impl Iterator<Item = &'a Claim>,
     include_controls: bool,
+    include_observations: bool,
 ) {
-    if include_controls {
-        markdown.push_str(
-            "| Atom | Own grade | Freshness | Evidence | Reason | Limiting premises | Controls |\n",
-        );
-        markdown.push_str("|---|---|---|---|---|---|---|\n");
-    } else {
-        markdown
-            .push_str("| Atom | Own grade | Freshness | Evidence | Reason | Limiting premises |\n");
-        markdown.push_str("|---|---|---|---|---|---|\n");
+    match (include_controls, include_observations) {
+        (true, true) => {
+            markdown.push_str("| Atom | Own grade | Freshness | Evidence | Reason | Limiting premises | Controls | Observation |\n");
+            markdown.push_str("|---|---|---|---|---|---|---|---|\n");
+        }
+        (true, false) => {
+            markdown.push_str(
+                "| Atom | Own grade | Freshness | Evidence | Reason | Limiting premises | Controls |\n",
+            );
+            markdown.push_str("|---|---|---|---|---|---|---|\n");
+        }
+        (false, true) => {
+            markdown.push_str(
+                "| Atom | Own grade | Freshness | Evidence | Reason | Limiting premises | Observation |\n",
+            );
+            markdown.push_str("|---|---|---|---|---|---|---|\n");
+        }
+        (false, false) => {
+            markdown.push_str(
+                "| Atom | Own grade | Freshness | Evidence | Reason | Limiting premises |\n",
+            );
+            markdown.push_str("|---|---|---|---|---|---|\n");
+        }
     }
     let mut count = 0;
     for claim in claims {
@@ -898,8 +1068,8 @@ fn append_claim_table<'a>(
             claim.reason.replace('|', "\\|"),
             limiting_premises_text(&claim.limiting_premises)
         );
-        if include_controls {
-            let controls = claim
+        let controls = include_controls.then(|| {
+            claim
                 .discrimination
                 .as_ref()
                 .map(|discrimination| match discrimination.status.as_str() {
@@ -912,18 +1082,36 @@ fn append_claim_table<'a>(
                     }
                     _ => discrimination.status.clone(),
                 })
-                .unwrap_or_else(|| "not_checked".to_string());
-            markdown.push_str(&format!("{row} | {controls} |\n"));
-        } else {
-            markdown.push_str(&format!("{row} |\n"));
+                .unwrap_or_else(|| "not_checked".to_string())
+        });
+        if let Some(controls) = controls {
+            markdown.push_str(&format!("{row} | {controls}"));
         }
+        if include_observations {
+            let observation = claim
+                .observation
+                .as_ref()
+                .map(|observation| observation.status.as_str())
+                .unwrap_or("not_observed");
+            if include_controls {
+                markdown.push_str(&format!(" | {observation}"));
+            } else {
+                markdown.push_str(&format!("{row} | {observation}"));
+            }
+        } else if !include_controls {
+            markdown.push_str(&row);
+        }
+        markdown.push_str(" |\n");
     }
     if count == 0 {
-        markdown.push_str(if include_controls {
-            "| — | — | — | — | — | — | — |\n"
-        } else {
-            "| — | — | — | — | — | — |\n"
-        });
+        let mut cells = vec!["—"; 6];
+        if include_controls {
+            cells.push("—");
+        }
+        if include_observations {
+            cells.push("—");
+        }
+        markdown.push_str(&format!("| {} |\n", cells.join(" | ")));
     }
 }
 
@@ -1148,6 +1336,7 @@ mod tests {
             content_hash: None,
             proof_hash: None,
             discrimination: None,
+            observation: None,
         }
     }
 
@@ -1159,6 +1348,605 @@ mod tests {
         let method_name_matches = resolve_claim_dependencies(&mut claims);
         apply_effective_grades(&mut claims, &method_name_matches);
         claims
+    }
+
+    fn claimbook_with_claims(claims: Vec<Claim>) -> ClaimBook {
+        let mut claims = claims
+            .into_iter()
+            .map(|claim| (claim.atom.clone(), claim))
+            .collect::<BTreeMap<_, _>>();
+        let method_name_matches = resolve_claim_dependencies(&mut claims);
+        let mut book = ClaimBook {
+            schema: SCHEMA.to_string(),
+            input: "sample.mm".to_string(),
+            certificate: "sample.proof.json".to_string(),
+            certificate_integrity: CertificateIntegrity::Absent,
+            generator: ClaimBookGenerator {
+                mumei_version: None,
+                z3_version: None,
+            },
+            trusted_base: trusted_base(None, &[]),
+            summary: ClaimBookSummary {
+                by_effective_grade: BTreeMap::new(),
+                by_freshness: BTreeMap::new(),
+                total: 0,
+                by_discrimination: None,
+                by_observation: None,
+            },
+            claims: claims.into_values().collect(),
+            orphaned_entries: Vec::new(),
+            recomputation: ClaimBookRecomputation {
+                unsatisfiable_specs: BTreeSet::new(),
+                method_name_matches,
+                source_dependencies: BTreeMap::new(),
+            },
+        };
+        recompute_claimbook_derived_fields(&mut book);
+        book
+    }
+
+    fn observation_result(target: &str, verdict: &'static str) -> ObservationResult {
+        ObservationResult {
+            kind: "example".to_string(),
+            target: target.to_string(),
+            test: "observed_test".to_string(),
+            file: "tests.mm".to_string(),
+            line: 1,
+            args: json!({}),
+            result: None,
+            predicate: None,
+            verdict,
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn observation_verdicts_are_classified_into_support_contradiction_and_neutral() {
+        for (verdict, expected_status, supporting, contradicting, neutral) in [
+            ("consistent", "supported", 1, 0, 0),
+            ("contradicts_ensures", "contradicted", 0, 1, 0),
+            ("outside_requires", "inconclusive", 0, 0, 1),
+            ("inconclusive", "inconclusive", 0, 0, 1),
+            ("rejection_explained", "inconclusive", 0, 0, 1),
+            ("requires_admits_rejected", "inconclusive", 0, 0, 1),
+            ("not_checked", "inconclusive", 0, 0, 1),
+            ("entailed", "supported", 1, 0, 0),
+            ("not_entailed", "contradicted", 0, 1, 0),
+            ("domain_exceeds_requires", "inconclusive", 0, 0, 1),
+        ] {
+            let mut book = claimbook_with_claims(vec![claim(
+                "sample",
+                SealGrade::G0,
+                Freshness::Uncertified,
+                &[],
+                &[],
+            )]);
+            attach_observations(&mut book, &[observation_result("sample", verdict)]);
+            let observation = book.claims[0]
+                .observation
+                .as_ref()
+                .expect("observation attached");
+            assert_eq!(observation.status, expected_status, "{verdict}");
+            assert_eq!(observation.supporting, supporting, "{verdict}");
+            assert_eq!(observation.contradicting, contradicting, "{verdict}");
+            assert_eq!(observation.neutral, neutral, "{verdict}");
+        }
+
+        let mut mixed = claimbook_with_claims(vec![claim(
+            "sample",
+            SealGrade::G0,
+            Freshness::Uncertified,
+            &[],
+            &[],
+        )]);
+        attach_observations(
+            &mut mixed,
+            &[
+                observation_result("sample", "consistent"),
+                observation_result("sample", "contradicts_ensures"),
+            ],
+        );
+        assert_eq!(
+            mixed.claims[0].observation.as_ref().unwrap().status,
+            "contradicted"
+        );
+        assert_eq!(mixed.claims[0].grade, SealGrade::G0);
+
+        let mut neutral = claimbook_with_claims(vec![claim(
+            "sample",
+            SealGrade::G0,
+            Freshness::Uncertified,
+            &[],
+            &[],
+        )]);
+        attach_observations(&mut neutral, &[observation_result("sample", "not_checked")]);
+        assert_eq!(
+            neutral.claims[0].observation.as_ref().unwrap().status,
+            "inconclusive"
+        );
+
+        let mut unmatched = claimbook_with_claims(vec![claim(
+            "sample",
+            SealGrade::G0,
+            Freshness::Uncertified,
+            &[],
+            &[],
+        )]);
+        attach_observations(&mut unmatched, &[]);
+        assert_eq!(
+            unmatched.claims[0].observation.as_ref().unwrap().status,
+            "not_observed"
+        );
+
+        let mut method = claimbook_with_claims(vec![claim(
+            "Point::get",
+            SealGrade::G0,
+            Freshness::Uncertified,
+            &[],
+            &[],
+        )]);
+        attach_observations(
+            &mut method,
+            &[observation_result("Point::get", "consistent")],
+        );
+        assert_eq!(method.claims[0].grade, SealGrade::G2);
+        assert_eq!(
+            method.claims[0].observation.as_ref().unwrap().status,
+            "supported"
+        );
+    }
+
+    #[test]
+    fn supporting_observations_lift_unproven_uncertified_and_drifted_g0_claims() {
+        let mut book = claimbook_with_claims(vec![
+            claim("unproven", SealGrade::G0, Freshness::Fresh, &[], &[]),
+            claim(
+                "uncertified",
+                SealGrade::G0,
+                Freshness::Uncertified,
+                &[],
+                &[],
+            ),
+            claim("drifted", SealGrade::G0, Freshness::Drifted, &[], &[]),
+        ]);
+        attach_observations(
+            &mut book,
+            &[
+                observation_result("unproven", "consistent"),
+                observation_result("uncertified", "entailed"),
+                observation_result("drifted", "consistent"),
+            ],
+        );
+        for name in ["unproven", "uncertified", "drifted"] {
+            let claim = book.claims.iter().find(|claim| claim.atom == name).unwrap();
+            assert_eq!(claim.grade, SealGrade::G2, "{name}");
+            assert!(claim.effective_grade_complete, "{name}");
+            assert_eq!(claim.evidence_kind, "observation", "{name}");
+            assert_eq!(
+                claim.reason,
+                "current test observations agree with the contract (previously G0 test: )",
+                "{name}"
+            );
+        }
+        let drifted = book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "drifted")
+            .unwrap();
+        assert_eq!(drifted.effective_grade, SealGrade::G2);
+        assert!(drifted.limiting_premises.is_empty());
+
+        let mut unverified_source = source_atom("unverified_source");
+        unverified_source.trust_level = TrustLevel::Unverified;
+        let mut unverified = create_claimbook(
+            "sample.mm",
+            "sample.proof.json",
+            None,
+            &[&unverified_source],
+            false,
+            None,
+        );
+        attach_observations(
+            &mut unverified,
+            &[observation_result("unverified_source", "consistent")],
+        );
+        assert_eq!(unverified.claims[0].grade, SealGrade::G2);
+    }
+
+    #[test]
+    fn lifted_uncertified_claims_use_current_source_dependencies() {
+        let create_book = || {
+            let mut caller = source_atom("caller");
+            caller.body_expr = "callee(x)".to_string();
+            let callee = source_atom("callee");
+            create_claimbook(
+                "sample.mm",
+                "sample.proof.json",
+                None,
+                &[&caller, &callee],
+                false,
+                None,
+            )
+        };
+
+        let mut caller_only = create_book();
+        attach_observations(
+            &mut caller_only,
+            &[observation_result("caller", "consistent")],
+        );
+        let caller = caller_only
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "caller")
+            .unwrap();
+        assert_eq!(caller.grade, SealGrade::G2);
+        assert_eq!(caller.effective_grade, SealGrade::G0);
+        assert!(caller.effective_grade_complete);
+        assert_eq!(caller.dependencies, vec!["callee"]);
+        assert!(!caller_only
+            .recomputation
+            .method_name_matches
+            .contains_key("caller"));
+        assert_eq!(
+            caller.limiting_premises,
+            vec![LimitingPremise {
+                kind: "dependency".to_string(),
+                name: "callee".to_string(),
+                matched_from: None,
+                grade: SealGrade::G0,
+            }]
+        );
+        assert_eq!(
+            caller_only
+                .claims
+                .iter()
+                .find(|claim| claim.atom == "callee")
+                .unwrap()
+                .effective_grade,
+            SealGrade::G0
+        );
+
+        let mut both_supported = create_book();
+        attach_observations(
+            &mut both_supported,
+            &[
+                observation_result("caller", "consistent"),
+                observation_result("callee", "consistent"),
+            ],
+        );
+        for claim in &both_supported.claims {
+            assert_eq!(claim.grade, SealGrade::G2, "{}", claim.atom);
+            assert_eq!(claim.effective_grade, SealGrade::G2, "{}", claim.atom);
+            assert!(claim.effective_grade_complete, "{}", claim.atom);
+        }
+
+        let mut method_caller = source_atom("method_caller");
+        method_caller.body_expr = "get(x)".to_string();
+        let point_get = source_atom("Point::get");
+        let mut method_book = create_claimbook(
+            "sample.mm",
+            "sample.proof.json",
+            None,
+            &[&method_caller, &point_get],
+            false,
+            None,
+        );
+        attach_observations(
+            &mut method_book,
+            &[observation_result("method_caller", "consistent")],
+        );
+        let method_caller_claim = method_book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "method_caller")
+            .unwrap();
+        assert_eq!(method_caller_claim.dependencies, vec!["Point::get"]);
+        assert!(!method_caller_claim.effective_grade_complete);
+        assert!(method_book
+            .recomputation
+            .method_name_matches
+            .contains_key("method_caller"));
+    }
+
+    #[test]
+    fn supported_observations_replace_stale_g1_and_g4_but_not_fresh_g4() {
+        let mut drifted_g4 = claim("drifted_g4", SealGrade::G4, Freshness::Drifted, &[], &[]);
+        drifted_g4.evidence_kind = "z3".to_string();
+        drifted_g4.reason = "source content differs from its certificate".to_string();
+        let mut book = claimbook_with_claims(vec![
+            drifted_g4,
+            claim(
+                "uncertified_g1",
+                SealGrade::G1,
+                Freshness::Uncertified,
+                &[],
+                &[],
+            ),
+            claim(
+                "contradicted_g4",
+                SealGrade::G4,
+                Freshness::Drifted,
+                &[],
+                &[],
+            ),
+            claim("fresh_g4", SealGrade::G4, Freshness::Fresh, &[], &[]),
+        ]);
+        attach_observations(
+            &mut book,
+            &[
+                observation_result("drifted_g4", "consistent"),
+                observation_result("uncertified_g1", "entailed"),
+                observation_result("contradicted_g4", "contradicts_ensures"),
+                observation_result("fresh_g4", "consistent"),
+            ],
+        );
+
+        let drifted_g4 = book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "drifted_g4")
+            .unwrap();
+        assert_eq!(drifted_g4.grade, SealGrade::G2);
+        assert_eq!(drifted_g4.effective_grade, SealGrade::G2);
+        assert_eq!(
+            drifted_g4.reason,
+            "current test observations agree with the contract (previously G4 z3: source content differs from its certificate)"
+        );
+        assert!(drifted_g4
+            .limiting_premises
+            .iter()
+            .all(|premise| premise.kind != "freshness"));
+
+        let uncertified_g1 = book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "uncertified_g1")
+            .unwrap();
+        assert_eq!(uncertified_g1.grade, SealGrade::G2);
+        assert_eq!(
+            uncertified_g1.reason,
+            "current test observations agree with the contract (previously G1 test: )"
+        );
+
+        let contradicted_g4 = book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "contradicted_g4")
+            .unwrap();
+        assert_eq!(contradicted_g4.grade, SealGrade::G4);
+        assert_eq!(contradicted_g4.effective_grade, SealGrade::G0);
+        assert_eq!(
+            contradicted_g4.limiting_premises,
+            vec![LimitingPremise {
+                kind: "freshness".to_string(),
+                name: "drifted".to_string(),
+                matched_from: None,
+                grade: SealGrade::G0,
+            }]
+        );
+
+        let fresh_g4 = book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "fresh_g4")
+            .unwrap();
+        assert_eq!(fresh_g4.grade, SealGrade::G4);
+        assert_eq!(fresh_g4.effective_grade, SealGrade::G4);
+    }
+
+    #[test]
+    fn observations_do_not_lift_unsatisfiable_contradicted_or_inconclusive_g0_or_g1_g4() {
+        let source = source_atom("sample");
+        let results = std::collections::HashMap::from([(
+            source.name.clone(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        )]);
+        let mut certificate = proof_cert::generate_certificate(
+            "sample.mm",
+            &[&source],
+            &results,
+            &verification::ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        set_spec_satisfiable(&mut certificate.atoms[0], false);
+        proof_cert::refresh_certificate_integrity(&mut certificate);
+        let mut fresh_unsatisfiable_book = create_claimbook(
+            "sample.mm",
+            "sample.proof.json",
+            Some(&certificate),
+            &[&source],
+            false,
+            None,
+        );
+        attach_observations(
+            &mut fresh_unsatisfiable_book,
+            &[observation_result("sample", "consistent")],
+        );
+        assert_eq!(
+            fresh_unsatisfiable_book.claims[0].freshness,
+            Freshness::Fresh
+        );
+        assert_eq!(fresh_unsatisfiable_book.claims[0].grade, SealGrade::G0);
+        assert!(fresh_unsatisfiable_book
+            .recomputation
+            .unsatisfiable_specs
+            .contains("sample"));
+
+        let mut drifted_source = source_atom("sample");
+        drifted_source.body_expr = "1".to_string();
+        let mut drifted_unsatisfiable_book = create_claimbook(
+            "sample.mm",
+            "sample.proof.json",
+            Some(&certificate),
+            &[&drifted_source],
+            false,
+            None,
+        );
+        assert_eq!(
+            drifted_unsatisfiable_book.claims[0].freshness,
+            Freshness::Drifted
+        );
+        attach_observations(
+            &mut drifted_unsatisfiable_book,
+            &[observation_result("sample", "consistent")],
+        );
+        assert_eq!(drifted_unsatisfiable_book.claims[0].grade, SealGrade::G2);
+
+        let mut book = claimbook_with_claims(vec![
+            claim(
+                "contradicted",
+                SealGrade::G0,
+                Freshness::Uncertified,
+                &[],
+                &[],
+            ),
+            claim(
+                "inconclusive",
+                SealGrade::G0,
+                Freshness::Uncertified,
+                &[],
+                &[],
+            ),
+            claim("trusted", SealGrade::G1, Freshness::Fresh, &[], &[]),
+            claim("machine", SealGrade::G4, Freshness::Fresh, &[], &[]),
+        ]);
+        attach_observations(
+            &mut book,
+            &[
+                observation_result("contradicted", "not_entailed"),
+                observation_result("inconclusive", "not_checked"),
+                observation_result("trusted", "consistent"),
+                observation_result("machine", "contradicts_ensures"),
+            ],
+        );
+        assert_eq!(
+            book.claims
+                .iter()
+                .find(|claim| claim.atom == "contradicted")
+                .unwrap()
+                .grade,
+            SealGrade::G0
+        );
+        assert_eq!(
+            book.claims
+                .iter()
+                .find(|claim| claim.atom == "inconclusive")
+                .unwrap()
+                .grade,
+            SealGrade::G0
+        );
+        assert_eq!(
+            book.claims
+                .iter()
+                .find(|claim| claim.atom == "trusted")
+                .unwrap()
+                .grade,
+            SealGrade::G1
+        );
+        assert_eq!(
+            book.claims
+                .iter()
+                .find(|claim| claim.atom == "machine")
+                .unwrap()
+                .grade,
+            SealGrade::G4
+        );
+    }
+
+    #[test]
+    fn observed_g2_assumptions_cap_at_g1_and_g2_dependencies_propagate() {
+        let mut book = claimbook_with_claims(vec![
+            claim(
+                "assumed",
+                SealGrade::G2,
+                Freshness::Uncertified,
+                &[],
+                &["requires: x > 0"],
+            ),
+            claim("caller", SealGrade::G4, Freshness::Fresh, &["callee"], &[]),
+            claim("callee", SealGrade::G0, Freshness::Uncertified, &[], &[]),
+        ]);
+        attach_observations(
+            &mut book,
+            &[
+                observation_result("caller", "consistent"),
+                observation_result("callee", "consistent"),
+            ],
+        );
+
+        let assumed = book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "assumed")
+            .unwrap();
+        assert_eq!(assumed.effective_grade, SealGrade::G1);
+        assert_eq!(
+            assumed.limiting_premises,
+            vec![LimitingPremise {
+                kind: "assumed_clause".to_string(),
+                name: "x > 0".to_string(),
+                matched_from: None,
+                grade: SealGrade::G1,
+            }]
+        );
+
+        let caller = book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "caller")
+            .unwrap();
+        assert_eq!(caller.effective_grade, SealGrade::G2);
+        assert_eq!(
+            caller.limiting_premises,
+            vec![LimitingPremise {
+                kind: "dependency".to_string(),
+                name: "callee".to_string(),
+                matched_from: None,
+                grade: SealGrade::G2,
+            }]
+        );
+    }
+
+    #[test]
+    fn observation_summary_and_json_order_are_deterministic() {
+        let mut book = claimbook_with_claims(vec![
+            claim("alpha", SealGrade::G0, Freshness::Uncertified, &[], &[]),
+            claim(
+                "Point::get",
+                SealGrade::G0,
+                Freshness::Uncertified,
+                &[],
+                &[],
+            ),
+            claim("zeta", SealGrade::G0, Freshness::Uncertified, &[], &[]),
+        ]);
+        attach_observations(
+            &mut book,
+            &[
+                observation_result("alpha", "consistent"),
+                observation_result("Point::get", "contradicts_ensures"),
+            ],
+        );
+        assert_eq!(
+            book.summary.by_observation,
+            Some(BTreeMap::from([
+                ("contradicted".to_string(), 1),
+                ("not_observed".to_string(), 1),
+                ("supported".to_string(), 1),
+            ]))
+        );
+        let markdown = render_markdown(&book);
+        assert!(markdown.contains("| Observation | Count |"));
+
+        let first = serde_json::to_string_pretty(&book).unwrap();
+        let second = serde_json::to_string_pretty(&book).unwrap();
+        assert_eq!(first, second);
+        let contradicted = first.find("\"contradicted\"").unwrap();
+        let not_observed = first.find("\"not_observed\"").unwrap();
+        let supported = first.find("\"supported\"").unwrap();
+        assert!(contradicted < not_observed && not_observed < supported);
     }
 
     #[test]
@@ -1974,9 +2762,11 @@ mod tests {
                 ]),
                 total: 1,
                 by_discrimination: None,
+                by_observation: None,
             },
             claims: vec![claim],
             orphaned_entries: Vec::new(),
+            recomputation: ClaimBookRecomputation::default(),
         };
 
         let markdown = render_markdown(&book);
@@ -2002,12 +2792,14 @@ mod tests {
                 by_freshness: BTreeMap::new(),
                 total: 2,
                 by_discrimination: None,
+                by_observation: None,
             },
             claims: vec![
                 claim("Point::get", SealGrade::G4, Freshness::Fresh, &[], &[]),
                 claim("missing", SealGrade::G0, Freshness::Uncertified, &[], &[]),
             ],
             orphaned_entries: Vec::new(),
+            recomputation: ClaimBookRecomputation::default(),
         };
         let controls = [
             ControlsAtomReport {
