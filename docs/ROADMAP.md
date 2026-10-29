@@ -2749,16 +2749,38 @@ templates are:
 
 ---
 
-## P34: Claim Book（主張台帳）と Seal Grade — 🚧 In progress (PR-2)
+## P34: Claim Book（主張台帳）と Seal Grade — ✅ Implemented（PR #734〜#736）
 
-- `mumei claims` を追加し、既存の proof certificate と現在のソースだけから読み取り専用レポートを生成する。
-- atom ごとに machine checker による証拠、`trusted` による reviewed assumption、証拠なしを Seal Grade G4 / G1 / G0 で区別する。
-- ソース変更、Lean translator metadata の古さ、certificate integrity を freshness として示す。
-- `claimbook.json` は順序・出力を決定的にし、`CLAIMBOOK.md` は grade と freshness を一覧できる形にする。
-- PR-1 は atom 自身の grade と freshness を扱い、drifted / uncertified の base grade は G0 とする。
-- PR-2 は assumed clause と依存 atom の grade を effective grade に伝播し、limiting premise と unresolved dependency を示す。
-- PR-2 は trusted base をまとめ、`--require-grade` gate と対応する exit code を追加する。
-- G5 / G3 / G2 は対応する証拠ソースが存在するまで予約し、現時点では出力しない。
+- `mumei claims` は既存の proof certificate と現在のソースから読み取り専用レポートを生成し、atom ごとの証拠、freshness、依存関係を決定的な `claimbook.json` / `CLAIMBOOK.md` にまとめる。
+- PR-1 は atom 自身の grade と freshness を扱い、drifted / uncertified の base grade は G0 とする。PR-2 は assumed clause と依存 atom の grade を effective grade に伝播し、limiting premise、unresolved dependency、trusted base を示す。
+- `--require-grade G0..G5` は最低 grade を gate する。回帰ゲートは `cargo test --test test_claimbook`。
+- G5 / G3 / G2 は対応する証拠ソースが実装されるまで予約し、現時点では出力しない。
+
+## P35: Charter Gate — ✅ Implemented（PR #737 / #739）
+
+- 人間が所有する Charter のファイルハッシュを `mumei charter lock` で固定し、`mumei charter check` で実装の署名と契約 refinement を検査する。証明書を渡した場合は effective Seal Grade も gate できる。
+- 回帰ゲートは `cargo test --test charter_cli`。Charter 本文は trusted な reviewed contract であり、その placeholder body は検証しない。非対応 clause / solver uncertainty は fail closed、top-level quantified constraint の差分は inconclusive とする。
+
+## P36: Contract Erosion — ✅ Implemented（PR #740）
+
+- `mumei erosion <candidate> --baseline <file>` は baseline の契約と候補を比較し、弱化・欠落・signature drift・effect の拡張を報告する。回帰ゲートは `cargo test --test erosion_cli`。
+- baseline は import 解決せずに parse する。clause mode、callback contract、effect-state contract の差分や決定不能な refinement は inconclusive とし、新規 atom は情報表示のみで erosion 判定に影響しない。
+
+## P37: Negative Controls / Vacuity — ✅ Implemented（PR #741〜#743）
+
+- `mumei controls` は atom ごとの deterministic one-site mutation 結果を報告し、`verify --enable-vacuity-check` と `mumei claims --controls --require-discriminating` はそれぞれ verify / Claim Book の gate を提供する。
+- 回帰ゲートは `cargo test --test controls_cli` と `cargo test --test test_claimbook`。mutation は限定的で、意味的に等価な mutation が残る可能性があるため surviving mutant は人手確認が必要。trusted / generic / 元から検証不能な atom は controls で not_checked となる。
+
+## P38: Test Observations — ✅ Implemented（PR #744 / #745）
+
+- `mumei observe <input.mm> <test-harvest.json>` は harvested examples、relations、expected rejections、property observations を atom 契約と照合する。agent 側の `harvest-tests` / `observe-tests` / `extract-spec --from-tests` と接続する。
+- 回帰ゲートは `mumei-agent` の test-harvest / observation regression tests と、mumei の observation checker tests。対応できない observation は not_checked / inconclusive として残し、単体のテスト観測を証明と扱わない。
+
+## P39: Certificate Dependency Freshness と Local Proof Store — ✅ Implemented（PR #746〜#750）
+
+- version 1.1 certificate は atom の依存先 contract hash を記録し、import 時に dependency freshness を検査する。`dependency_changed` と `dependency_unchecked` は source-content drift と区別され、strict import は両方を拒否する。回帰ゲートは `cargo test --test test_cert_dependency_freshness`。
+- `--proof-store` は成功した Z3 proof の再利用を opt-in で有効にし、`mumei proof-store stats` / `prune` で管理する。Unix では directory を mode 0700、entry file を mode 0600 で作成し、group / other writable な既存 directory と entry を拒否する。回帰ゲートは `cargo test --test proof_store_cli`。
+- dependency coverage がない旧証明書は non-strict import で warning 付き unchecked になり得る。proof store に owner check はまだなく、trusted / failed / Lean-verified / escalation-candidate / inconclusive の結果は保存・再利用しない。
 
 ## Related Documents
 
