@@ -876,18 +876,16 @@ pub fn attach_observations(book: &mut ClaimBook, results: &[ObservationResult]) 
                 .entry(claim.atom.clone())
                 .or_default()
                 .extend(resolve_claim_dependencies_for_claim(claim, &claim_names));
-            let previous_grade = claim.grade;
+            let previous_reason = format!(
+                "current test observations agree with the contract (previously {} {}: {})",
+                grade_code(claim.grade),
+                claim.evidence_kind,
+                claim.reason
+            );
             claim.grade = SealGrade::G2;
             claim.grade_label = SealGrade::G2.label().to_string();
             claim.evidence_kind = "observation".to_string();
-            claim.reason = if previous_grade > SealGrade::G0 {
-                format!(
-                    "current test observations agree with the contract (stale certificate grade: {})",
-                    grade_code(previous_grade)
-                )
-            } else {
-                "current test observations agree with the contract".to_string()
-            };
+            claim.reason = previous_reason;
         }
 
         *by_observation
@@ -1521,7 +1519,8 @@ mod tests {
             assert_eq!(claim.grade, SealGrade::G2, "{name}");
             assert_eq!(claim.evidence_kind, "observation", "{name}");
             assert_eq!(
-                claim.reason, "current test observations agree with the contract",
+                claim.reason,
+                "current test observations agree with the contract (previously G0 test: )",
                 "{name}"
             );
         }
@@ -1614,8 +1613,11 @@ mod tests {
 
     #[test]
     fn supported_observations_replace_stale_g1_and_g4_but_not_fresh_g4() {
+        let mut drifted_g4 = claim("drifted_g4", SealGrade::G4, Freshness::Drifted, &[], &[]);
+        drifted_g4.evidence_kind = "z3".to_string();
+        drifted_g4.reason = "source content differs from its certificate".to_string();
         let mut book = claimbook_with_claims(vec![
-            claim("drifted_g4", SealGrade::G4, Freshness::Drifted, &[], &[]),
+            drifted_g4,
             claim(
                 "uncertified_g1",
                 SealGrade::G1,
@@ -1651,7 +1653,7 @@ mod tests {
         assert_eq!(drifted_g4.effective_grade, SealGrade::G2);
         assert_eq!(
             drifted_g4.reason,
-            "current test observations agree with the contract (stale certificate grade: G4)"
+            "current test observations agree with the contract (previously G4 z3: source content differs from its certificate)"
         );
         assert!(drifted_g4
             .limiting_premises
@@ -1666,7 +1668,7 @@ mod tests {
         assert_eq!(uncertified_g1.grade, SealGrade::G2);
         assert_eq!(
             uncertified_g1.reason,
-            "current test observations agree with the contract (stale certificate grade: G1)"
+            "current test observations agree with the contract (previously G1 test: )"
         );
 
         let contradicted_g4 = book

@@ -851,7 +851,7 @@ fn observations_lift_g2_gate_claims_and_reject_invalid_harvests() {
     assert_eq!(identity["evidence_kind"], "observation");
     assert_eq!(
         identity["reason"],
-        "current test observations agree with the contract"
+        "current test observations agree with the contract (previously G0 none: no current certificate entry exists)"
     );
     assert_eq!(identity["observation"]["status"], "supported");
     assert_eq!(report["summary"]["by_observation"]["supported"], 1);
