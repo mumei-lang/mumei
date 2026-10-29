@@ -221,11 +221,32 @@ pub fn own_grade(
     }
 
     if atom.status == status::VERIFIED && atom.z3_check_result == status::Z3_UNSAT {
-        return (
-            SealGrade::G4,
-            "z3".to_string(),
-            "Z3 discharged the obligation".to_string(),
-        );
+        let dual_check = proof_cert::lean_dual_check_status(atom);
+        if allow_lean_verified && dual_check == proof_cert::LeanDualCheck::Passed {
+            return (
+                SealGrade::G5,
+                "z3+lean".to_string(),
+                "Z3 discharged the obligation and an independent Lean proof passed its axiom audit"
+                    .to_string(),
+            );
+        }
+        let reason = if atom.lean_dual_check.is_some() {
+            let cause = if !allow_lean_verified {
+                "requires --allow-lean-verified"
+            } else {
+                match dual_check {
+                    proof_cert::LeanDualCheck::Stale => "stale translator",
+                    proof_cert::LeanDualCheck::NotVerified => "Lean result is not verified",
+                    proof_cert::LeanDualCheck::AxiomRejected => "axiom audit did not pass",
+                    proof_cert::LeanDualCheck::Absent => "metadata is absent",
+                    proof_cert::LeanDualCheck::Passed => "requires --allow-lean-verified",
+                }
+            };
+            format!("Z3 discharged the obligation; Lean dual check not counted: {cause}")
+        } else {
+            "Z3 discharged the obligation".to_string()
+        };
+        return (SealGrade::G4, "z3".to_string(), reason);
     }
 
     if atom.status == status::VERIFIED
@@ -2000,6 +2021,165 @@ mod tests {
                 SealGrade::G0
             );
         }
+    }
+
+    #[test]
+    fn z3_dual_check_matrix_requires_current_explicitly_audited_lean_evidence_and_opt_in() {
+        use crate::proof_cert::{lean_dual_check_status, LeanDualCheck, LeanResultMetadata};
+
+        let cases = [
+            ("absent", None, LeanDualCheck::Absent),
+            ("passed", Some("passed"), LeanDualCheck::Passed),
+            (
+                "stale translator",
+                Some("stale_translator"),
+                LeanDualCheck::Stale,
+            ),
+            ("stale bridge", Some("stale_bridge"), LeanDualCheck::Stale),
+            (
+                "wrong status",
+                Some("wrong_status"),
+                LeanDualCheck::NotVerified,
+            ),
+            (
+                "empty theorem",
+                Some("empty_theorem"),
+                LeanDualCheck::NotVerified,
+            ),
+            ("rejected", Some("rejected"), LeanDualCheck::AxiomRejected),
+            ("error", Some("error"), LeanDualCheck::AxiomRejected),
+            ("unaudited", Some("unaudited"), LeanDualCheck::AxiomRejected),
+        ];
+        for (name, mutation, expected_status) in cases {
+            let mut atom = atom_certificate(status::Z3_UNSAT, status::VERIFIED);
+            if let Some(mutation) = mutation {
+                let mut metadata = LeanResultMetadata {
+                    status: status::LEAN_STATUS_VERIFIED.to_string(),
+                    theorem_name: "sample_correct".to_string(),
+                    translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+                    bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+                    kernel_axioms: Some(vec!["propext".to_string()]),
+                    axiom_audit: Some("passed".to_string()),
+                    ..Default::default()
+                };
+                match mutation {
+                    "stale_translator" => metadata.translator_version = "old".to_string(),
+                    "stale_bridge" => metadata.bridge_lemma_hash = "old".to_string(),
+                    "wrong_status" => metadata.status = "error".to_string(),
+                    "empty_theorem" => metadata.theorem_name.clear(),
+                    "rejected" => metadata.axiom_audit = Some("rejected".to_string()),
+                    "error" => metadata.axiom_audit = Some("error".to_string()),
+                    "unaudited" => {
+                        metadata.axiom_audit = None;
+                        metadata.kernel_axioms = None;
+                    }
+                    "passed" => {}
+                    other => panic!("unknown dual-check case: {other}"),
+                }
+                atom.lean_dual_check = Some(metadata);
+            }
+            assert_eq!(lean_dual_check_status(&atom), expected_status, "{name}");
+            for allow in [false, true] {
+                let (grade, evidence, reason) = own_grade(&atom, &TrustLevel::Verified, allow);
+                assert_eq!(
+                    grade,
+                    if expected_status == LeanDualCheck::Passed && allow {
+                        SealGrade::G5
+                    } else {
+                        SealGrade::G4
+                    },
+                    "{name}, allow={allow}"
+                );
+                assert_eq!(
+                    evidence,
+                    if expected_status == LeanDualCheck::Passed && allow {
+                        "z3+lean"
+                    } else {
+                        "z3"
+                    },
+                    "{name}, allow={allow}"
+                );
+                if atom.lean_dual_check.is_some() && !allow {
+                    assert!(reason.contains("--allow-lean-verified"), "{reason}");
+                } else if atom.lean_dual_check.is_some() && expected_status != LeanDualCheck::Passed
+                {
+                    assert!(reason.contains("Lean dual check not counted"), "{reason}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dual_check_does_not_upgrade_lean_only_sat_unknown_or_trusted_atoms() {
+        let mut dual_metadata = crate::proof_cert::LeanResultMetadata {
+            status: status::LEAN_STATUS_VERIFIED.to_string(),
+            theorem_name: "sample_correct".to_string(),
+            translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+            bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+            kernel_axioms: Some(vec!["propext".to_string()]),
+            axiom_audit: Some("passed".to_string()),
+            ..Default::default()
+        };
+        dual_metadata.proof_path = "Generated/Sample.lean".to_string();
+
+        let mut lean_only = atom_certificate(status::Z3_LEAN_VERIFIED, status::VERIFIED);
+        lean_only.translator_version = verification::LEAN_TRANSLATOR_VERSION.to_string();
+        lean_only.bridge_lemma_hash = verification::LEAN_BRIDGE_LEMMA_HASH.to_string();
+        lean_only.lean_result_metadata = Some(dual_metadata.clone());
+        lean_only.lean_dual_check = Some(dual_metadata.clone());
+        assert_eq!(
+            own_grade(&lean_only, &TrustLevel::Verified, true).0,
+            SealGrade::G4
+        );
+
+        for result in [status::Z3_SAT, status::Z3_UNKNOWN] {
+            let mut atom = atom_certificate(result, status::VERIFIED);
+            atom.lean_dual_check = Some(dual_metadata.clone());
+            assert_eq!(
+                own_grade(&atom, &TrustLevel::Verified, true).0,
+                SealGrade::G0
+            );
+        }
+
+        let mut trusted = atom_certificate(status::Z3_UNSAT, status::VERIFIED);
+        trusted.lean_dual_check = Some(dual_metadata);
+        assert_eq!(
+            own_grade(&trusted, &TrustLevel::Trusted, true).0,
+            SealGrade::G1
+        );
+    }
+
+    #[test]
+    fn effective_g5_is_capped_by_dependencies_assumptions_and_freshness() {
+        let claims = propagated_claims(vec![
+            claim("callee", SealGrade::G5, Freshness::Fresh, &[], &[]),
+            claim("caller", SealGrade::G4, Freshness::Fresh, &["callee"], &[]),
+        ]);
+        assert_eq!(claims["caller"].effective_grade, SealGrade::G4);
+
+        let claims = propagated_claims(vec![claim(
+            "assumed",
+            SealGrade::G5,
+            Freshness::Fresh,
+            &[],
+            &["x > 0"],
+        )]);
+        assert_eq!(claims["assumed"].effective_grade, SealGrade::G1);
+
+        let claims = propagated_claims(vec![claim(
+            "drifted",
+            SealGrade::G5,
+            Freshness::Drifted,
+            &[],
+            &[],
+        )]);
+        assert_eq!(claims["drifted"].effective_grade, SealGrade::G0);
+
+        let claims = propagated_claims(vec![
+            claim("callee", SealGrade::G5, Freshness::Fresh, &[], &[]),
+            claim("caller", SealGrade::G5, Freshness::Fresh, &["callee"], &[]),
+        ]);
+        assert_eq!(claims["caller"].effective_grade, SealGrade::G5);
     }
 
     #[test]

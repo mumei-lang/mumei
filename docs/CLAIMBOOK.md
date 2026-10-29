@@ -62,14 +62,14 @@ human judgment; see [Contract controls](CONTROLS.md).
 
 | Grade | Label | Meaning |
 |---|---|---|
-| G5 | dual-sealed | Reserved; emitted only when its evidence sources exist. |
+| G5 | dual-sealed | Z3 returned `unsat` and a current Lean dual-check passed its axiom audit; requires `--allow-lean-verified`. Evidence: `z3+lean`. |
 | G4 | machine-sealed | Closed by a machine checker. |
 | G3 | range-sealed | Reserved until a bounded-proof evidence source exists. |
 | G2 | observed | No machine proof; current test observations agree with the contract (`--observations`). |
 | G1 | vouched | Rests on a reviewed assumption (`trusted`). |
 | G0 | open | No current evidence. |
 
-Z3-discharged obligations are G4. Lean evidence is G4 only when explicitly enabled, its translator metadata is current, and the axiom audit passed. A `trusted` source declaration is G1, and a `trusted` certificate entry is also G1. Other evidence is G0. An unsatisfiable specification is G0. Trust is read from the source declaration because certificates for trusted atoms record the solver result of the contract-only check.
+Z3-discharged obligations are G4 unless an explicitly enabled, current Lean dual-check also passes its axiom audit, which yields G5. Lean-only evidence remains G4. A `trusted` source declaration is G1, and a `trusted` certificate entry is also G1. Other evidence is G0. An unsatisfiable specification is G0. Trust is read from the source declaration because certificates for trusted atoms record the solver result of the contract-only check.
 
 ## Freshness
 
