@@ -392,7 +392,7 @@ mumei verify-cert path/to/.proof-cert.json
    - **changed**: content hash differs — atom has been modified
    - **unproven**: atom exists in cert but could not be matched
    - **missing**: atom exists in source but not in cert
-6. Exit code 0 if all atoms are "proven", exit code 1 otherwise
+6. Exit code 1 for a tampered certificate, `unproven`, `axiom_rejected`, or `missing`; with `--strict`, also for `changed`, `dependency_changed`, `dependency_unchecked`, or an absent `certificate_hash`; exit code 0 otherwise (see [CLI.md](CLI.md))
 
 ## Import Verification (P5-C)
 
