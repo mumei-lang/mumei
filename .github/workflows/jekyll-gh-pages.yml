@@ -36,6 +36,8 @@ jobs:
         with:
           source: ./
           destination: ./_site
+      - name: Copy installer into the Pages site
+        run: sudo cp -p scripts/install.sh _site/install.sh
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
 

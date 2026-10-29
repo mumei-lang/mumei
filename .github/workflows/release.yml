@@ -11,7 +11,6 @@ on:
         default: true
 permissions:
   contents: write
-  pages: write
 
 # z3-sys v0.8.1 vendors a Z3 CMake project with an old minimum policy version.
 env:
@@ -534,194 +533,19 @@ jobs:
             artifacts/**/*.zip
           generate_release_notes: true
 
-  # --- GitHub Pages: install.sh を公開 ---
-  deploy-installer:
+  redeploy-pages:
     needs: release
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
+    permissions:
+      actions: write
     steps:
-      - uses: actions/checkout@v4
-      - name: Prepare GitHub Pages content
-        run: |
-          mkdir -p gh-pages-dist
-          cp scripts/install.sh gh-pages-dist/install.sh
-          # Disable Jekyll processing (static site)
-          touch gh-pages-dist/.nojekyll
-          cat > gh-pages-dist/index.html <<'HTMLEOF'
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>Mumei — Mathematical Proof-Driven Programming Language</title>
-            <meta name="description" content="Mumei (無銘) is a mathematical proof-driven programming language. Formally verified with Z3, compiled to LLVM IR.">
-            <link rel="canonical" href="https://mumei-lang.github.io/mumei/">
-            <!-- Open Graph -->
-            <meta property="og:title" content="Mumei — Mathematical Proof-Driven Programming Language">
-            <meta property="og:description" content="Formally verified with Z3, compiled to LLVM IR.">
-            <meta property="og:url" content="https://mumei-lang.github.io/mumei/">
-            <meta property="og:type" content="website">
-            <meta property="og:site_name" content="Mumei">
-            <!-- Twitter Card -->
-            <meta name="twitter:card" content="summary">
-            <meta name="twitter:title" content="Mumei — Mathematical Proof-Driven Programming Language">
-            <meta name="twitter:description" content="Formally verified with Z3, compiled to LLVM IR.">
-            <!-- Additional SEO -->
-            <meta name="keywords" content="mumei, programming language, formal verification, Z3, LLVM, proof-driven, mathematical verification">
-            <meta name="author" content="mumei-lang">
-            <meta name="robots" content="index, follow">
-            <link rel="sitemap" type="application/xml" href="/mumei/sitemap.xml">
-            <link rel="alternate" type="application/atom+xml" href="/mumei/feed.xml">
-            <style>
-              :root { --bg: #0d1117; --fg: #c9d1d9; --accent: #58a6ff; --code-bg: #161b22; --border: #30363d; }
-              * { margin: 0; padding: 0; box-sizing: border-box; }
-              body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--fg); line-height: 1.6; padding: 2rem 1rem; max-width: 720px; margin: 0 auto; }
-              h1 { color: #f0f6fc; font-size: 2rem; margin-bottom: 0.25rem; }
-              h1 span { font-weight: 300; color: var(--fg); }
-              .tagline { color: #8b949e; margin-bottom: 1rem; }
-              .github-link { display: inline-flex; align-items: center; gap: 0.5rem; background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 1rem; margin-bottom: 2rem; font-size: 0.9rem; color: var(--fg); transition: border-color 0.2s; }
-              .github-link:hover { border-color: var(--accent); text-decoration: none; }
-              .github-link svg { fill: var(--fg); flex-shrink: 0; }
-              h2 { color: #f0f6fc; font-size: 1.25rem; margin: 2rem 0 0.75rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
-              pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; overflow-x: auto; margin: 0.75rem 0; position: relative; }
-              code { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 0.875rem; }
-              .copy-btn { position: absolute; top: 0.5rem; right: 0.5rem; background: var(--border); color: var(--fg); border: none; border-radius: 4px; padding: 0.25rem 0.5rem; cursor: pointer; font-size: 0.75rem; }
-              .copy-btn:hover { background: #484f58; }
-              a { color: var(--accent); text-decoration: none; }
-              a:hover { text-decoration: underline; }
-              .steps { display: flex; flex-direction: column; gap: 0.5rem; margin: 1rem 0; }
-              .step { display: flex; gap: 0.75rem; align-items: baseline; }
-              .step-num { background: var(--accent); color: var(--bg); border-radius: 50%; width: 1.5rem; height: 1.5rem; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: 700; flex-shrink: 0; }
-              .or { color: #8b949e; text-align: center; margin: 0.5rem 0; font-size: 0.875rem; }
-              .footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: #8b949e; font-size: 0.875rem; }
-            </style>
-          </head>
-          <body>
-            <h1>Mumei <span>(無銘)</span></h1>
-            <p class="tagline">Mathematical Proof-Driven Programming Language — verified by Z3, compiled to LLVM IR.</p>
-            <a class="github-link" href="https://github.com/mumei-lang/mumei"><svg height="20" width="20" viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>GitHub</a>
-
-            <h2>Install</h2>
-            <pre><code id="cmd-curl">curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash</code><button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('cmd-curl').textContent)">Copy</button></pre>
-            <p class="or">or</p>
-            <pre><code id="cmd-brew">brew install mumei-lang/mumei/mumei</code><button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('cmd-brew').textContent)">Copy</button></pre>
-            <p style="color:#8b949e; font-size:0.875rem; margin-top:0.5rem;">No Rust toolchain required. Detects OS/arch automatically. By default the latest tagged release is installed; pin a specific version with <code>--version v0.5.6</code>.</p>
-
-            <h2>Quick Start</h2>
-            <div class="steps">
-              <div class="step"><span class="step-num">1</span><span>Create a project</span></div>
-            </div>
-            <pre><code>mumei init my_app && cd my_app</code></pre>
-            <div class="steps">
-              <div class="step"><span class="step-num">2</span><span>Build (verify + codegen)</span></div>
-            </div>
-            <pre><code>mumei build src/main.mm -o dist/output</code></pre>
-            <div class="steps">
-              <div class="step"><span class="step-num">3</span><span>Check your environment</span></div>
-            </div>
-            <pre><code>mumei inspect</code></pre>
-
-            <h2>Links</h2>
-            <ul style="list-style:none; padding:0;">
-              <li><a href="https://github.com/mumei-lang/mumei">GitHub Repository</a></li>
-              <li><a href="https://github.com/mumei-lang/mumei/releases">Releases &amp; Pre-built Binaries</a></li>
-              <li><a href="https://github.com/mumei-lang/mumei/blob/develop/docs/LANGUAGE.md">Language Reference</a></li>
-              <li><a href="https://github.com/mumei-lang/mumei/blob/develop/docs/STDLIB.md">Standard Library</a></li>
-              <li><a href="https://github.com/mumei-lang/mumei/blob/develop/docs/CHANGELOG.md">Changelog</a></li>
-              <li><a href="https://github.com/mumei-lang/mumei-agent">mumei-agent (AI + Z3 self-healing loop)</a></li>
-            </ul>
-
-            <div class="footer">
-              <p>Apache-2.0 License &middot; <a href="https://github.com/mumei-lang/mumei">mumei-lang/mumei</a></p>
-            </div>
-          </body>
-          </html>
-          HTMLEOF
-      - name: Generate sitemap.xml and robots.txt
-        run: |
-          TODAY=$(date -u +%Y-%m-%d)
-          cat > gh-pages-dist/sitemap.xml <<SITEMAPEOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-            <url>
-              <loc>https://mumei-lang.github.io/mumei/</loc>
-              <lastmod>${TODAY}</lastmod>
-              <changefreq>monthly</changefreq>
-              <priority>1.0</priority>
-            </url>
-            <url>
-              <loc>https://mumei-lang.github.io/mumei/install.sh</loc>
-              <lastmod>${TODAY}</lastmod>
-              <changefreq>monthly</changefreq>
-              <priority>0.5</priority>
-            </url>
-          </urlset>
-          SITEMAPEOF
-          cat > gh-pages-dist/robots.txt <<'ROBOTSEOF'
-          User-agent: *
-          Allow: /
-          Sitemap: https://mumei-lang.github.io/mumei/sitemap.xml
-          ROBOTSEOF
-      - name: Generate Atom feeds
-        run: |
-          UPDATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          mkdir -p gh-pages-dist/paper
-          cat > gh-pages-dist/feed.xml <<ATOMEOF
-          <?xml version="1.0" encoding="utf-8"?>
-          <feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
-            <title>Mumei Language</title>
-            <subtitle>Mathematical proof-driven programming language</subtitle>
-            <link href="https://mumei-lang.github.io/mumei/feed.xml" rel="self" type="application/atom+xml" />
-            <link href="https://mumei-lang.github.io/mumei/" rel="alternate" type="text/html" />
-            <id>https://mumei-lang.github.io/mumei/feed.xml</id>
-            <updated>${UPDATED}</updated>
-            <author>
-              <name>mumei-lang</name>
-            </author>
-            <entry>
-              <title>Mumei Language</title>
-              <link href="https://mumei-lang.github.io/mumei/" rel="alternate" type="text/html" />
-              <id>https://mumei-lang.github.io/mumei/</id>
-              <updated>${UPDATED}</updated>
-              <summary>Mathematical proof-driven programming language.</summary>
-            </entry>
-            <entry>
-              <title>Mumei Language Technical Paper</title>
-              <link href="https://mumei-lang.github.io/mumei/paper/" rel="alternate" type="text/html" />
-              <id>https://mumei-lang.github.io/mumei/paper/</id>
-              <updated>${UPDATED}</updated>
-              <summary>Technical paper for the Mumei mathematical proof-driven programming language.</summary>
-            </entry>
-          </feed>
-          ATOMEOF
-          cat > gh-pages-dist/paper/feed.xml <<ATOMEOF
-          <?xml version="1.0" encoding="utf-8"?>
-          <feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
-            <title>Mumei Language Technical Paper</title>
-            <subtitle>Technical paper for the Mumei mathematical proof-driven programming language.</subtitle>
-            <link href="https://mumei-lang.github.io/mumei/paper/feed.xml" rel="self" type="application/atom+xml" />
-            <link href="https://mumei-lang.github.io/mumei/paper/" rel="alternate" type="text/html" />
-            <id>https://mumei-lang.github.io/mumei/paper/feed.xml</id>
-            <updated>${UPDATED}</updated>
-            <author>
-              <name>mumei-lang</name>
-            </author>
-            <entry>
-              <title>Mumei Language Technical Paper</title>
-              <link href="https://mumei-lang.github.io/mumei/paper/" rel="alternate" type="text/html" />
-              <id>https://mumei-lang.github.io/mumei/paper/</id>
-              <updated>${UPDATED}</updated>
-              <summary>Technical paper for the Mumei mathematical proof-driven programming language.</summary>
-            </entry>
-          </feed>
-          ATOMEOF
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./gh-pages-dist
-          publish_branch: gh-pages
+      - name: Dispatch Jekyll deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run jekyll-gh-pages.yml --ref develop
 
   # --- Homebrew Formula auto-update ---
   update-homebrew:

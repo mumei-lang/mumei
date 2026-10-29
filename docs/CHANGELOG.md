@@ -1,3 +1,8 @@
+### Unreleased: preserve the installer on GitHub Pages
+
+- Jekyll deployments now include `scripts/install.sh`, and releases trigger a
+  Jekyll redeployment instead of replacing the documentation site.
+
 ### Unreleased: observation-backed Claim Book G2
 
 - Added `mumei claims --observations` to attach current test-harvest verdicts
