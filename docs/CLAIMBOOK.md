@@ -113,6 +113,48 @@ written before either gate is evaluated, and either failure produces exit 1.
 | 4 | Input or certificate could not be loaded. |
 | 5 | An output artifact could not be written. |
 
+## Running the gate in CI
+
+Call the reusable workflow from a repository workflow:
+
+```yaml
+name: Mumei gate
+
+on: pull_request
+
+jobs:
+  gate:
+    uses: mumei-lang/mumei/.github/workflows/mumei-gate.yml@develop
+    with:
+      working-directory: .
+      sources: |
+        src/main.mm
+      require-grade: G4
+      charter: true
+```
+
+Inputs:
+
+| Input | Type | Default | Meaning |
+|---|---|---|---|
+| `mumei-version` | string | `""` | Empty installs the latest release; otherwise passes the version to the installer. |
+| `working-directory` | string | `"."` | Project directory containing the sources and optional `mumei.toml`. |
+| `sources` | string | required | Whitespace-separated `.mm` paths relative to `working-directory`. |
+| `require-grade` | string | `""` | Empty reports grades without gating; otherwise requires `G0` through `G5`. |
+| `require-discriminating` | boolean | `false` | Require the Claim Book negative-control gate to pass. |
+| `observations` | string | `""` | Test-harvest path relative to `working-directory`, passed to `mumei claims --observations`. |
+| `charter` | boolean | `false` | Run `mumei charter check` using the `[charter]` configuration in `mumei.toml`. |
+| `artifact-name` | string | `mumei-gate-reports` | Uploaded artifact name. |
+| `runs-on` | string | `ubuntu-24.04` | Runner image; the GNU release binary needs glibc 2.39. |
+
+Each run appends per-source command exit codes, Charter status, and the
+`CLAIMBOOK.md` report to the GitHub Actions job summary. The
+`mumei-gate-reports` artifact (or the configured artifact name) contains each
+source's proof certificate and generated reports.
+
+`observations` requires a Mumei release newer than v0.6.23, which does not
+support `mumei claims --observations`.
+
 ## JSON
 
 The deterministic JSON schema is `mumei.claimbook/v1`. A compact example:

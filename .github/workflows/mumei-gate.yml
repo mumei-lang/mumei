@@ -1,0 +1,191 @@
+name: Mumei Claim Book and Charter gate
+
+on:
+  workflow_call:
+    inputs:
+      mumei-version:
+        description: Release version to install; empty selects the latest release.
+        required: false
+        type: string
+        default: ""
+      working-directory:
+        description: Project directory containing the sources and mumei.toml.
+        required: false
+        type: string
+        default: "."
+      sources:
+        description: Whitespace-separated .mm paths relative to working-directory.
+        required: true
+        type: string
+      require-grade:
+        description: Optional minimum effective Seal Grade, G0 through G5.
+        required: false
+        type: string
+        default: ""
+      require-discriminating:
+        description: Require negative controls to discriminate the contracts.
+        required: false
+        type: boolean
+        default: false
+      observations:
+        description: Optional test-harvest path relative to working-directory.
+        required: false
+        type: string
+        default: ""
+      charter:
+        description: Run the configured Charter check for each source.
+        required: false
+        type: boolean
+        default: false
+      artifact-name:
+        description: Name of the report artifact.
+        required: false
+        type: string
+        default: mumei-gate-reports
+      runs-on:
+        description: GitHub runner image; GNU releases require glibc 2.39.
+        required: false
+        type: string
+        default: ubuntu-24.04
+
+jobs:
+  gate:
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Mumei
+        shell: bash
+        env:
+          MUMEI_HOME: ${{ runner.temp }}/mumei
+          MUMEI_VERSION: ${{ inputs.mumei-version }}
+        run: |
+          set -euo pipefail
+          install_args=()
+          if [[ -n "$MUMEI_VERSION" ]]; then
+            install_args+=(--version "$MUMEI_VERSION")
+          fi
+          curl -fsSL https://mumei-lang.github.io/mumei/install.sh | bash -s -- "${install_args[@]}"
+          echo "$MUMEI_HOME/bin" >> "$GITHUB_PATH"
+          echo "MUMEI_STD_PATH=$MUMEI_HOME/std" >> "$GITHUB_ENV"
+          export PATH="$MUMEI_HOME/bin:$PATH"
+          export MUMEI_STD_PATH="$MUMEI_HOME/std"
+          mumei --version
+
+      - name: Run Claim Book and Charter gates
+        shell: bash
+        env:
+          MUMEI_VERSION: ${{ inputs.mumei-version }}
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          SOURCES: ${{ inputs.sources }}
+          REQUIRE_GRADE: ${{ inputs.require-grade }}
+          REQUIRE_DISCRIMINATING: ${{ inputs.require-discriminating }}
+          OBSERVATIONS: ${{ inputs.observations }}
+          CHARTER: ${{ inputs.charter }}
+          ARTIFACT_NAME: ${{ inputs.artifact-name }}
+          RUNS_ON: ${{ inputs.runs-on }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$REQUIRE_GRADE" && ! "$REQUIRE_GRADE" =~ ^G[0-5]$ ]]; then
+            printf 'Invalid require-grade %q; expected G0 through G5.\n' "$REQUIRE_GRADE" >&2
+            exit 1
+          fi
+
+          read -r -a sources <<< "$SOURCES"
+          if (( ${#sources[@]} == 0 )); then
+            printf 'At least one source is required.\n' >&2
+            exit 1
+          fi
+
+          gate_dir="$RUNNER_TEMP/mumei-gate"
+          mkdir -p "$gate_dir"
+          cd "$WORKING_DIRECTORY"
+          project_directory="$PWD"
+          failed=0
+
+          run_gate_command() {
+            local label="$1"
+            shift
+            local command_status
+            if "$@"; then
+              command_status=0
+            else
+              command_status=$?
+            fi
+            printf -- "- \`%s\`: exit code \`%s\`\n" "$label" "$command_status" >> "$GITHUB_STEP_SUMMARY"
+            if (( command_status != 0 )); then
+              failed=1
+            fi
+          }
+
+          for source in "${sources[@]}"; do
+            slug="${source%.mm}"
+            slug="${slug//\//__}"
+            out="$gate_dir/$slug"
+            cert="$out/$slug.proof.json"
+            mkdir -p "$out"
+
+            printf '### %s\n\n' "$source" >> "$GITHUB_STEP_SUMMARY"
+            run_gate_command "mumei verify" mumei verify "$source" --proof-cert --output "$cert"
+            for report in cross_spec.json report.json; do
+              if [[ -f "$project_directory/$report" ]]; then
+                mv "$project_directory/$report" "$out/$report"
+              fi
+            done
+
+            claims_args=(mumei claims "$source" --cert "$cert" --format both --out-dir "$out")
+            if [[ -n "$REQUIRE_GRADE" ]]; then
+              claims_args+=(--require-grade "$REQUIRE_GRADE")
+            fi
+            if [[ "$REQUIRE_DISCRIMINATING" == "true" ]]; then
+              claims_args+=(--require-discriminating)
+            fi
+            if [[ -n "$OBSERVATIONS" ]]; then
+              claims_args+=(--observations "$OBSERVATIONS")
+            fi
+            run_gate_command "mumei claims" "${claims_args[@]}"
+
+            charter_status="not enabled"
+            if [[ "$CHARTER" == "true" ]]; then
+              charter_args=(mumei charter check "$source" --cert "$cert")
+              if [[ -n "$REQUIRE_GRADE" ]]; then
+                charter_args+=(--require-grade "$REQUIRE_GRADE")
+              fi
+              charter_args+=(--json)
+              run_gate_command "mumei charter check" "${charter_args[@]}"
+              if [[ -f "$project_directory/charter_report.json" ]]; then
+                mv "$project_directory/charter_report.json" "$out/charter_report.json"
+              fi
+              if [[ -f "$out/charter_report.json" ]]; then
+                charter_status="$(
+                  python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", "unknown"))' \
+                    "$out/charter_report.json" 2>/dev/null || printf 'unavailable'
+                )"
+              else
+                charter_status="unavailable"
+              fi
+            fi
+            printf -- "- Charter status: \`%s\`\n\n" "$charter_status" >> "$GITHUB_STEP_SUMMARY"
+
+            printf '#### Claim Book\n\n' >> "$GITHUB_STEP_SUMMARY"
+            if [[ -f "$out/CLAIMBOOK.md" ]]; then
+              cat "$out/CLAIMBOOK.md" >> "$GITHUB_STEP_SUMMARY"
+              printf '\n' >> "$GITHUB_STEP_SUMMARY"
+            else
+              printf '_CLAIMBOOK.md was not generated._\n\n' >> "$GITHUB_STEP_SUMMARY"
+            fi
+            printf '%s\n\n' '---' >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          exit "$failed"
+
+      - name: Upload gate reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ runner.temp }}/mumei-gate
+          if-no-files-found: ignore
