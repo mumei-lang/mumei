@@ -77,15 +77,12 @@ jobs:
       - name: Run Claim Book and Charter gates
         shell: bash
         env:
-          MUMEI_VERSION: ${{ inputs.mumei-version }}
           WORKING_DIRECTORY: ${{ inputs.working-directory }}
           SOURCES: ${{ inputs.sources }}
           REQUIRE_GRADE: ${{ inputs.require-grade }}
           REQUIRE_DISCRIMINATING: ${{ inputs.require-discriminating }}
           OBSERVATIONS: ${{ inputs.observations }}
           CHARTER: ${{ inputs.charter }}
-          ARTIFACT_NAME: ${{ inputs.artifact-name }}
-          RUNS_ON: ${{ inputs.runs-on }}
         run: |
           set -euo pipefail
 
