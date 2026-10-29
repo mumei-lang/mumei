@@ -536,16 +536,51 @@ jobs:
   redeploy-pages:
     needs: release
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 45
     if: github.event_name != 'workflow_dispatch' || inputs.dry_run != true
     permissions:
       actions: write
     steps:
-      - name: Dispatch Jekyll deployment
+      - name: Dispatch Jekyll deployment and wait for it
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh workflow run jekyll-gh-pages.yml --ref develop
+        run: |
+          set -euo pipefail
+          dispatched_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run jekyll-gh-pages.yml --ref develop
+
+          run_id=""
+          for _ in $(seq 1 30); do
+            run_id="$(gh run list --workflow jekyll-gh-pages.yml --branch develop --event workflow_dispatch \
+              --json databaseId,createdAt \
+              --jq "map(select(.createdAt >= \"$dispatched_at\")) | sort_by(.createdAt) | first | .databaseId // empty")"
+            if [[ -n "$run_id" ]]; then
+              break
+            fi
+            sleep 10
+          done
+          if [[ -z "$run_id" ]]; then
+            echo "::error::The dispatched Jekyll deployment run did not appear within five minutes."
+            exit 1
+          fi
+
+          echo "Watching Jekyll deployment run $run_id"
+          gh run watch "$run_id" --exit-status --interval 15
+
+      - name: Check the published installer
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 10); do
+            if curl -fsSIL https://mumei-lang.github.io/mumei/install.sh > /dev/null; then
+              echo "install.sh is published."
+              exit 0
+            fi
+            echo "install.sh is not reachable yet (attempt $attempt)."
+            sleep 15
+          done
+          echo "::error::https://mumei-lang.github.io/mumei/install.sh is not reachable after the Jekyll deployment."
+          exit 1
 
   # --- Homebrew Formula auto-update ---
   update-homebrew:
