@@ -3,33 +3,44 @@
 - On Unix, proof-store directories and entry files must be owned by the current effective user; foreign-owned paths are ignored with a warning.
 - Foreign-owned entries are not reused, and opening or recording in a foreign-owned store fails with permission denied.
 
-### Unreleased: Claim Book and Seal Grade (#734–#736)
+### 2026-10-29: v0.6.23 release version bump
+
+- **Workspace and member crate versions**: bumped versions from `0.6.22` to
+  `0.6.23` so `mumei --version`, `mumei inspect`, and proof-certificate
+  `mumei_version` match the release tag before tagging.
+- **Install references**: synced the README and README_JA pinned install
+  examples on `v0.6.23`, along with the Homebrew formula template and
+  `install.sh` help examples.
+- Release ships certificate format 1.1 (`dependency_hashes`) and the opt-in
+  local proof store.
+
+### v0.6.23: Claim Book and Seal Grade (#734–#736)
 
 - Added `mumei claims` with deterministic JSON and Markdown reports for atom evidence, freshness, dependency grades, assumed clauses, and the trusted base.
 - Added `--require-grade`; G4, G1, and G0 describe machine-verified, trusted, and unsupported evidence respectively. G5, G3, and G2 remain reserved.
 
-### Unreleased: charter contract gate (#737, #739)
+### v0.6.23: charter contract gate (#737, #739)
 
 - Added `mumei charter lock` to pin reviewed Charter files and `mumei charter check` to check implementation signatures, contract refinement, and optional certificate grade.
 - Charter checks fail closed for unsupported or inconclusive comparisons; they do not verify placeholder Charter bodies.
 
-### Unreleased: contract erosion report (#740)
+### v0.6.23: contract erosion report (#740)
 
 - Added `mumei erosion` to compare candidate contracts with a baseline and report weakened, missing, mismatched, or inconclusive contracts.
 - Added structured JSON output and a distinct status for added candidate atoms, which are informational.
 
-### Unreleased: negative controls and vacuity gates (#741–#743)
+### v0.6.23: negative controls and vacuity gates (#741–#743)
 
 - Added `mumei controls` for per-atom deterministic mutation reports and `mumei claims --controls --require-discriminating` for a Claim Book discrimination gate.
 - Added `verify --enable-vacuity-check`; surviving mutants fail the check, while unknown or unanalyzable mutations do not count as kills.
 - Equivalent mutations may still survive and require human review.
 
-### Unreleased: test observation checks (#744–#745)
+### v0.6.23: test observation checks (#744–#745)
 
 - Added `mumei observe` to check harvested examples, relations, expected rejections, and property observations against atom contracts.
 - Added trusted-atom support to observation checks; an observation is evidence from tests, not a proof of the contract.
 
-### Unreleased: certificate dependency freshness (#746)
+### v0.6.23: certificate dependency freshness (#746)
 
 - New version-1.1 certificates record deterministic per-atom dependency
   hashes for resolved transitive callees and signature-referenced refined
@@ -44,7 +55,7 @@
   result and exit-code policy. Claim Books mark changed dependencies as
   drifted and cap their own grade at G0.
 
-### Unreleased: proof-hash callee coverage (#747, #748, #750)
+### v0.6.23: proof-hash callee coverage (#747, #748, #750)
 
 - **Qualified calls**: calls such as `lib::f` and `Point::get` are hashed and
   keyed by their qualified name, while legacy `atom:f` keys still validate.
@@ -56,7 +67,7 @@
 Proof-cache entries for atoms with qualified callees are recomputed once after
 upgrading.
 
-### Unreleased: opt-in local proof store (#749)
+### v0.6.23: opt-in local proof store (#749)
 
 - Added an opt-in per-user proof store for reusing verified Z3 obligations across projects, enabled by `--proof-store` or `[proof] store = true`.
 - Added `mumei proof-store stats` and `prune`; certificates and Claim Book evidence identify proofs reused from the local store.
@@ -277,7 +288,7 @@ upgrading.
   `recursive_contract_needs_decreases` / `recursive_contract_unsupported`
   hint diagnostic; the call semantics and verdict are unchanged.
 - **Verifier policy version**: bumped to 7 so cached proofs are re-derived.
-### Unreleased: call-arity checking at call sites
+### v0.6.23: call-arity checking at call sites
 
 - Calls whose argument count differs from the callee's parameter count are
   rejected with `expected N argument(s), got M` at every call path — direct
@@ -286,7 +297,7 @@ upgrading.
   satisfied` failure.
 - `VERIFIER_POLICY_VERSION` bumped to 9 so cached proofs are re-derived.
 
-### Unreleased: quantified `requires` checked at call sites
+### v0.6.23: quantified `requires` checked at call sites
 
 - Quantified `requires` conjuncts (`forall`/`exists` at the top level of
   the clause) are now part of the callee obligation checked at every call
