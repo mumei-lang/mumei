@@ -1,3 +1,8 @@
+### Unreleased: proof-store owner check
+
+- On Unix, proof-store directories and entry files must be owned by the current effective user; foreign-owned paths are ignored with a warning.
+- Foreign-owned entries are not reused, and opening or recording in a foreign-owned store fails with permission denied.
+
 ### Unreleased: Claim Book and Seal Grade (#734–#736)
 
 - Added `mumei claims` with deterministic JSON and Markdown reports for atom evidence, freshness, dependency grades, assumed clauses, and the trusted base.

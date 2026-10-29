@@ -59,7 +59,8 @@ Trusted atoms, Lean-verified results, escalation candidates, failures, and
 inconclusive results are never stored or reused.
 On Unix, store directories are created with mode `0700` and entry files with
 mode `0600`; existing group- or other-writable directories and entries are
-refused. Ownership checks are not implemented yet.
+refused. Store directories and entry files must be owned by the current
+effective user; stores owned by another user are ignored with a warning.
 
 ### `mumei proof-store`
 
