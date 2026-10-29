@@ -30,6 +30,11 @@ def test_jekyll_copies_installer_before_uploading_pages_artifact() -> None:
 
 
 def test_only_jekyll_workflow_deploys_pages() -> None:
+    publisher_prefixes = (
+        "actions/deploy-pages@",
+        "actions/upload-pages-artifact@",
+        "peaceiris/actions-gh-pages@",
+    )
     workflow_files = sorted(
         {*_WORKFLOWS_DIR.glob("*.yml"), *_WORKFLOWS_DIR.glob("*.yaml")}
     )
@@ -41,6 +46,6 @@ def test_only_jekyll_workflow_deploys_pages() -> None:
         workflow = yaml.safe_load(workflow_file.read_text(encoding="utf-8")) or {}
         for job_name, job in workflow.get("jobs", {}).items():
             for step in job.get("steps", []):
-                assert not step.get("uses", "").startswith("actions/deploy-pages@"), (
+                assert not step.get("uses", "").startswith(publisher_prefixes), (
                     f"{workflow_file.name} job {job_name!r} deploys Pages"
                 )
