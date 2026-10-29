@@ -99,7 +99,7 @@ jobs:
             exit 1
           fi
 
-          read -r -a sources <<< "$SOURCES"
+          read -r -d '' -a sources <<< "$SOURCES" || true
           if (( ${#sources[@]} == 0 )); then
             printf 'At least one source is required.\n' >&2
             exit 1
