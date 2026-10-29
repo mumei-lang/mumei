@@ -57,9 +57,9 @@ Every PR in this area should review this file together with the local roadmap it
 
 ---
 
-## 次の計画（すべて Planned）
+## 次の計画
 
-1. **Planned** — v0.6.23 lockstep release。
+1. **Done** — v0.6.23 lockstep release。
 2. **Planned** — proof-store owner check。
 3. **Planned** — no-LLM specimen re-measure。
 4. **Planned** — Seal Grade G3（vacuity + controls pass）と G2（`entailed` を observe し counterexample がないこと）。G5 は Lean dual-check まで待つ。
