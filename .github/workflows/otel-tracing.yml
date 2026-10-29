@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   otel-tracing:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Cap the job so a hung solver/build or a stuck runtime step surfaces as a
     # timeout (flake diagnostic) instead of silently consuming the default
     # 6-hour budget.
