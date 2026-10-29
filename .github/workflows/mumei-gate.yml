@@ -51,6 +51,7 @@ on:
 jobs:
   gate:
     runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
