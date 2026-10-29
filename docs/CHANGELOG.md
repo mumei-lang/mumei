@@ -1,3 +1,9 @@
+### Unreleased: reusable Claim Book and Charter CI gate
+
+- Added a reusable GitHub Actions workflow for Claim Book grade and Charter
+  gates, with per-source reports, job summaries, and uploaded artifacts.
+- Added a self-test workflow and fixture for the Charter-enabled gate.
+
 ### Unreleased: preserve the installer on GitHub Pages
 
 - Jekyll deployments now include `scripts/install.sh`, and releases trigger a

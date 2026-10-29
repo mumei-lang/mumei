@@ -1,0 +1,7 @@
+[package]
+name = "charter-gate-demo"
+version = "0.1.0"
+
+[charter]
+files = ["specs/dosage.charter.mm"]
+lock = "charter.lock"
