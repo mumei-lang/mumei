@@ -2759,7 +2759,7 @@ templates are:
 ## P35: Charter Gate — ✅ Implemented（PR #737 / #739）
 
 - 人間が所有する Charter のファイルハッシュを `mumei charter lock` で固定し、`mumei charter check` で実装の署名と契約 refinement を検査する。証明書を渡した場合は effective Seal Grade も gate できる。
-- `.github/workflows/mumei-gate.yml` が Claim Book / Charter の再利用可能な CI gate を提供する。mumei-demo での dogfood は未完了。
+- `.github/workflows/mumei-gate.yml` が Claim Book / Charter の再利用可能な CI gate を提供する。mumei-demo は `charter_gate_demo` の `correct.mm` を G4 + Charter でこの gate に通す dogfood を PR と週次 cron で実行している（mumei-demo#85）。
 - 回帰ゲートは `cargo test --test charter_cli`。Charter 本文は trusted な reviewed contract であり、その placeholder body は検証しない。非対応 clause / solver uncertainty は fail closed、top-level quantified constraint の差分は inconclusive とする。
 
 ## P36: Contract Erosion — ✅ Implemented（PR #740）
