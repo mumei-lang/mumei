@@ -1,0 +1,21 @@
+name: Mumei gate self-test
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+    paths:
+      - .github/workflows/mumei-gate.yml
+      - .github/workflows/mumei-gate-selftest.yml
+      - tests/fixtures/mumei-gate/**
+  workflow_dispatch:
+
+jobs:
+  gate:
+    uses: ./.github/workflows/mumei-gate.yml
+    with:
+      working-directory: tests/fixtures/mumei-gate
+      sources: correct.mm
+      require-grade: G4
+      charter: true

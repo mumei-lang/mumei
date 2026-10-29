@@ -62,7 +62,7 @@ Every PR in this area should review this file together with the local roadmap it
 1. **Done** — v0.6.23 lockstep release。
 2. **Done** — no-LLM specimen re-measure（mumei-demo #84、10/171 で score change なし）。
 3. **Done** — Seal Grade G2 は observation-backed に実装済み（`consistent` / `entailed` があり、`contradicts_ensures` / `not_entailed` がない場合）。G3 は bounded-proof evidence source ができるまで予約。controls は discrimination / `--require-discriminating` を通じて grade と直交。G5 は Lean dual-check まで待つ。
-4. **Planned** — charter / Claim Book CI reusable workflow を作成し、mumei-demo で dogfood。
+4. **Done (mumei)** — charter / Claim Book CI reusable workflow を実装。mumei-demo での dogfood は未完了。
 5. **Planned** — Lean dual-check gate を `lean_verified` とは別 field に記録する（trust boundary は変更しない）。
 6. **Planned** — erosion / controls を使った agent heal ranking。
 7. **Planned** — observation-feedback re-extraction を real LLM で測定。
