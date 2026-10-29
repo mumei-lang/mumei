@@ -604,6 +604,40 @@ mod tests {
         (cert, root, callee, env)
     }
 
+    fn effect_dependency_fixture(transition: &str) -> (ProofCertificate, parser::Atom, ModuleEnv) {
+        let source = format!(
+            "effect Work\n\
+             states: [Idle, Busy];\n\
+             initial: Idle;\n\
+             transition {transition};\n\
+             atom f(x: i64) -> i64\n\
+             effects: [Work];\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: x;\n\
+             atom g(x: i64) -> i64\n\
+             requires: true;\n\
+             ensures: result == x;\n\
+             body: f(x);\n"
+        );
+        let mut env = ModuleEnv::new();
+        for item in parser::parse_module(&source) {
+            match item {
+                parser::Item::Atom(atom) => env.register_atom(&atom),
+                parser::Item::EffectDef(effect_def) => env.register_effect(&effect_def),
+                _ => {}
+            }
+        }
+        let root = env.get_atom("g").unwrap().clone();
+        let mut results = HashMap::new();
+        results.insert(
+            root.name.clone(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        );
+        let cert = generate_certificate("test.mm", &[&root], &results, &env, None, None, None);
+        (cert, root, env)
+    }
+
     #[test]
     fn verify_certificate_in_env_checks_dependency_hashes_and_unresolved_keys() {
         let (mut cert, root, _callee, env) = dependency_fixture(status::Z3_UNSAT);
@@ -625,13 +659,18 @@ mod tests {
             .as_mut()
             .unwrap()
             .insert("atom:missing".to_string(), "stale".to_string());
+        cert.atoms[0]
+            .dependency_hashes
+            .as_mut()
+            .unwrap()
+            .insert("effect:missing".to_string(), "stale".to_string());
         let mut unresolved_env = ModuleEnv::new();
         unresolved_env.register_atom(&root);
         let check = verify_certificate_in_env(&cert, &[&root], false, Some(&unresolved_env));
         assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_UNCHECKED);
         assert_eq!(
             check[0].unchecked_dependencies,
-            vec!["atom:f", "atom:missing"]
+            vec!["atom:f", "atom:missing", "effect:missing"]
         );
 
         let (mut cert, root, _, _) = dependency_fixture(status::Z3_UNSAT);
@@ -653,6 +692,30 @@ mod tests {
         assert!(check[0]
             .unchecked_dependencies
             .contains(&"atom:missing".to_string()));
+    }
+
+    #[test]
+    fn verify_certificate_in_env_detects_changed_callee_effect_definition() {
+        let (cert, root, _) = effect_dependency_fixture("start: Idle -> Busy");
+        let (_, _, changed_env) = effect_dependency_fixture("start: Idle -> Idle");
+
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&changed_env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_CHANGED);
+        assert_eq!(check[0].changed_dependencies, vec!["effect:Work"]);
+    }
+
+    #[test]
+    fn verify_certificate_in_env_marks_legacy_effect_hashes_unchecked() {
+        let (mut cert, root, env) = effect_dependency_fixture("start: Idle -> Busy");
+        cert.atoms[0]
+            .dependency_hashes
+            .as_mut()
+            .unwrap()
+            .retain(|key, _| !key.starts_with("effect:"));
+
+        let check = verify_certificate_in_env(&cert, &[&root], false, Some(&env));
+        assert_eq!(check[0].status, status::CERTIFICATE_DEPENDENCY_UNCHECKED);
+        assert_eq!(check[0].unchecked_dependencies, vec!["effect:Work"]);
     }
 
     #[test]

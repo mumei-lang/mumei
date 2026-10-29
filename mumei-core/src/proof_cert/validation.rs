@@ -255,6 +255,14 @@ pub fn verify_certificate_in_env(
                                     None => unchecked_dependencies.push(key.clone()),
                                 }
                             }
+                            unchecked_dependencies.extend(
+                                current
+                                    .keys()
+                                    .filter(|key| {
+                                        key.starts_with("effect:") && !expected.contains_key(*key)
+                                    })
+                                    .cloned(),
+                            );
                         } else {
                             unchecked_dependencies.push(format!("atom:{}", ac.name));
                         }

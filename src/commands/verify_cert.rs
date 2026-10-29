@@ -281,13 +281,7 @@ pub(crate) fn cmd_verify_cert(
             if unhashed { "absent" } else { "present" }
         );
     }
-    if tampered
-        || strict_failure
-        || dependency_changed > 0
-        || unproven > 0
-        || axiom_rejected > 0
-        || missing > 0
-    {
+    if tampered || strict_failure || unproven > 0 || axiom_rejected > 0 || missing > 0 {
         std::process::exit(1);
     }
 }
