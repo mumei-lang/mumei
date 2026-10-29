@@ -1,3 +1,8 @@
+### Unreleased: proof-store owner check
+
+- On Unix, proof-store directories and entry files must be owned by the current effective user; foreign-owned paths are ignored with a warning.
+- Foreign-owned entries are not reused, and opening or recording in a foreign-owned store fails with permission denied.
+
 ### 2026-10-29: v0.6.23 release version bump
 
 - **Workspace and member crate versions**: bumped versions from `0.6.22` to

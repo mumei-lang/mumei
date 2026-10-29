@@ -60,13 +60,12 @@ Every PR in this area should review this file together with the local roadmap it
 ## 次の計画
 
 1. **Done** — v0.6.23 lockstep release。
-2. **Planned** — proof-store owner check。
-3. **Planned** — no-LLM specimen re-measure。
-4. **Planned** — Seal Grade G3（vacuity + controls pass）と G2（`entailed` を observe し counterexample がないこと）。G5 は Lean dual-check まで待つ。
-5. **Planned** — charter / Claim Book CI reusable workflow を作成し、mumei-demo で dogfood。
-6. **Planned** — Lean dual-check gate を `lean_verified` とは別 field に記録する（trust boundary は変更しない）。
-7. **Planned** — erosion / controls を使った agent heal ranking。
-8. **Planned** — observation-feedback re-extraction を real LLM で測定。
+2. **Planned** — no-LLM specimen re-measure。
+3. **Planned** — Seal Grade G3（vacuity + controls pass）と G2（`entailed` を observe し counterexample がないこと）。G5 は Lean dual-check まで待つ。
+4. **Planned** — charter / Claim Book CI reusable workflow を作成し、mumei-demo で dogfood。
+5. **Planned** — Lean dual-check gate を `lean_verified` とは別 field に記録する（trust boundary は変更しない）。
+6. **Planned** — erosion / controls を使った agent heal ranking。
+7. **Planned** — observation-feedback re-extraction を real LLM で測定。
 
 ## Priority 1: mumei-agent の実用化（"AI → 検証済み資産" パイプラインの完成）
 

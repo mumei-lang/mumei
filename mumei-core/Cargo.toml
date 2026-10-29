@@ -26,6 +26,9 @@ libloading = "0.8"
 ed25519-dalek = "2"
 tracing = { version = "0.1", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 static-link-z3 = ["z3/static-link-z3"]
 otel = ["dep:tracing"]

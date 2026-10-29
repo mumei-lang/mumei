@@ -2780,7 +2780,7 @@ templates are:
 
 - version 1.1 certificate は atom の依存先 contract hash を記録し、import 時に dependency freshness を検査する。`dependency_changed` と `dependency_unchecked` は source-content drift と区別され、strict import は両方を拒否する。回帰ゲートは `cargo test --test test_cert_dependency_freshness`。
 - `--proof-store` は成功した Z3 proof の再利用を opt-in で有効にし、`mumei proof-store stats` / `prune` で管理する。Unix では directory を mode 0700、entry file を mode 0600 で作成し、group / other writable な既存 directory と entry を拒否する。回帰ゲートは `cargo test --test proof_store_cli`。
-- dependency coverage がない旧証明書は non-strict import で warning 付き unchecked になり得る。proof store に owner check はまだなく、trusted / failed / Lean-verified / escalation-candidate / inconclusive の結果は保存・再利用しない。
+- dependency coverage がない旧証明書は non-strict import で warning 付き unchecked になり得る。trusted / failed / Lean-verified / escalation-candidate / inconclusive の結果は proof store に保存・再利用しない。
 
 ## Related Documents
 

@@ -14,6 +14,8 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Debug)]
 pub struct ProofStore {
     root: PathBuf,
+    #[cfg(unix)]
+    owner_uid: u32,
 }
 
 #[derive(Debug)]
@@ -71,11 +73,21 @@ impl ProofStore {
             ));
         };
         create_private_dirs(&root)?;
-        let store = Self { root };
+        let store = Self {
+            root,
+            #[cfg(unix)]
+            owner_uid: unsafe { libc::geteuid() },
+        };
         store
             .check_directory_permissions(&store.root)
             .map_err(|reason| std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason))?;
         Ok(store)
+    }
+
+    #[cfg(all(test, unix))]
+    fn with_owner_uid(mut self, uid: u32) -> Self {
+        self.owner_uid = uid;
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -254,6 +266,9 @@ impl ProofStore {
             if check_file {
                 match std::fs::metadata(path) {
                     Ok(metadata) if metadata.mode() & 0o022 != 0 => Err(shared_path_warning(path)),
+                    Ok(metadata) if metadata.uid() != self.owner_uid => {
+                        Err(foreign_owner_warning(path))
+                    }
                     Ok(_) => Ok(()),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
                     Err(error) => Err(error.to_string()),
@@ -290,6 +305,9 @@ impl ProofStore {
                     Ok(metadata) if metadata.mode() & 0o022 != 0 => {
                         return Err(shared_path_warning(&directory));
                     }
+                    Ok(metadata) if metadata.uid() != self.owner_uid => {
+                        return Err(foreign_owner_warning(&directory));
+                    }
                     Ok(metadata) if !metadata.is_dir() => {
                         return Err(format!(
                             "proof store path {} is not a directory; ignoring it",
@@ -315,6 +333,14 @@ impl ProofStore {
 fn shared_path_warning(path: &Path) -> String {
     format!(
         "proof store {} is writable by other users; ignoring it",
+        path.display()
+    )
+}
+
+#[cfg(unix)]
+fn foreign_owner_warning(path: &Path) -> String {
+    format!(
+        "proof store {} is owned by another user; ignoring it",
         path.display()
     )
 }
@@ -378,6 +404,223 @@ mod tests {
             inferred_invariants: Vec::new(),
             cover_results: Vec::new(),
         }
+    }
+
+    #[cfg(unix)]
+    fn foreign_owner_uid() -> u32 {
+        unsafe { libc::geteuid() }.wrapping_add(1)
+    }
+
+    #[cfg(unix)]
+    fn skip_unless_root(test_name: &str) -> bool {
+        if unsafe { libc::geteuid() } == 0 {
+            true
+        } else {
+            eprintln!("skipping {test_name}: requires effective UID 0");
+            false
+        }
+    }
+
+    #[cfg(unix)]
+    fn proof_store_artifact_files(root: &Path) -> Vec<PathBuf> {
+        let mut pending = vec![root.to_path_buf()];
+        let mut artifacts = Vec::new();
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension == "json" || extension == "tmp")
+                {
+                    artifacts.push(path);
+                }
+            }
+        }
+        artifacts
+    }
+
+    #[cfg(unix)]
+    fn assert_private_modes(store: &ProofStore, key: &str) {
+        let prefix = store.root().join("v1").join(&key[..2]);
+        assert_eq!(
+            std::fs::metadata(store.root()).unwrap().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(store.root().join("v1")).unwrap().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(std::fs::metadata(prefix).unwrap().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(store.path(key)).unwrap().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proof_store_lookup_rejects_foreign_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProofStore::open(Some(dir.path()))
+            .unwrap()
+            .with_owner_uid(foreign_owner_uid());
+        let proof_hash = "proof-hash";
+        let z3_version = "z3-test";
+        let key = ProofStore::key(proof_hash, z3_version);
+
+        match store.lookup(&key, proof_hash, z3_version) {
+            StoreLookup::Invalid(reason) => {
+                assert!(reason.contains("owned by another user"), "{reason}");
+            }
+            other => panic!("expected foreign-owner lookup to be invalid, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proof_store_record_rejects_foreign_owner_without_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProofStore::open(Some(dir.path()))
+            .unwrap()
+            .with_owner_uid(foreign_owner_uid());
+        let proof_hash = "proof-hash";
+
+        let error = store
+            .record("atom", proof_hash, "z3-test", &cache_entry(proof_hash))
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(proof_store_artifact_files(store.root()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proof_store_validate_file_rejects_foreign_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProofStore::open(Some(dir.path())).unwrap();
+        let proof_hash = "proof-hash";
+        let z3_version = "z3-test";
+        let key = ProofStore::key(proof_hash, z3_version);
+        store
+            .record("atom", proof_hash, z3_version, &cache_entry(proof_hash))
+            .unwrap();
+        let path = store.path(&key);
+        let foreign_store = store.with_owner_uid(foreign_owner_uid());
+
+        let reason = foreign_store.validate_file(&path).unwrap_err();
+        assert!(reason.contains("owned by another user"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proof_store_reuses_entries_with_matching_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProofStore::open(Some(dir.path())).unwrap();
+        let proof_hash = "proof-hash";
+        let z3_version = "z3-test";
+        let key = ProofStore::key(proof_hash, z3_version);
+        store
+            .record("atom", proof_hash, z3_version, &cache_entry(proof_hash))
+            .unwrap();
+
+        assert!(matches!(
+            store.lookup(&key, proof_hash, z3_version),
+            StoreLookup::Hit(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proof_store_lookup_rejects_foreign_owned_prefix_directory() {
+        if !skip_unless_root("proof_store_lookup_rejects_foreign_owned_prefix_directory") {
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("store");
+        let store = ProofStore::open(Some(&root)).unwrap();
+        let proof_hash = "proof-hash";
+        let z3_version = "z3-test";
+        let key = ProofStore::key(proof_hash, z3_version);
+        store
+            .record("atom", proof_hash, z3_version, &cache_entry(proof_hash))
+            .unwrap();
+        assert_private_modes(&store, &key);
+
+        let prefix = store.root().join("v1").join(&key[..2]);
+        std::os::unix::fs::chown(&prefix, Some(65534), None).unwrap();
+        let metadata = std::fs::metadata(&prefix).unwrap();
+        assert_eq!(metadata.uid(), 65534);
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+
+        match store.lookup(&key, proof_hash, z3_version) {
+            StoreLookup::Invalid(reason) => {
+                assert!(reason.contains("owned by another user"), "{reason}");
+            }
+            other => panic!("expected foreign-owner lookup to be invalid, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proof_store_lookup_and_validation_reject_foreign_owned_entry() {
+        if !skip_unless_root("proof_store_lookup_and_validation_reject_foreign_owned_entry") {
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("store");
+        let store = ProofStore::open(Some(&root)).unwrap();
+        let proof_hash = "proof-hash";
+        let z3_version = "z3-test";
+        let key = ProofStore::key(proof_hash, z3_version);
+        store
+            .record("atom", proof_hash, z3_version, &cache_entry(proof_hash))
+            .unwrap();
+        assert_private_modes(&store, &key);
+
+        let path = store.path(&key);
+        std::os::unix::fs::chown(&path, Some(65534), None).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(metadata.uid(), 65534);
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+
+        match store.lookup(&key, proof_hash, z3_version) {
+            StoreLookup::Invalid(reason) => {
+                assert!(reason.contains("owned by another user"), "{reason}");
+            }
+            other => panic!("expected foreign-owner lookup to be invalid, got {other:?}"),
+        }
+        let reason = store.validate_file(&path).unwrap_err();
+        assert!(reason.contains("owned by another user"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proof_store_open_rejects_foreign_owned_root() {
+        if !skip_unless_root("proof_store_open_rejects_foreign_owned_root") {
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("store");
+        let store = ProofStore::open(Some(&root)).unwrap();
+        let proof_hash = "proof-hash";
+        let z3_version = "z3-test";
+        let key = ProofStore::key(proof_hash, z3_version);
+        store
+            .record("atom", proof_hash, z3_version, &cache_entry(proof_hash))
+            .unwrap();
+        assert_private_modes(&store, &key);
+
+        std::os::unix::fs::chown(&root, Some(65534), None).unwrap();
+        let metadata = std::fs::metadata(&root).unwrap();
+        assert_eq!(metadata.uid(), 65534);
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+
+        let error = ProofStore::open(Some(&root)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[test]
