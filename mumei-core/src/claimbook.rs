@@ -858,7 +858,8 @@ pub fn attach_observations(book: &mut ClaimBook, results: &[ObservationResult]) 
 
         if observation.status == "supported"
             && (claim.grade == SealGrade::G0 || claim.freshness != Freshness::Fresh)
-            && !book.recomputation.unsatisfiable_specs.contains(&claim.atom)
+            && (claim.freshness != Freshness::Fresh
+                || !book.recomputation.unsatisfiable_specs.contains(&claim.atom))
         {
             let mut dependencies = claim.dependencies.iter().cloned().collect::<BTreeSet<_>>();
             dependencies.extend(
@@ -1696,12 +1697,23 @@ mod tests {
 
     #[test]
     fn observations_do_not_lift_unsatisfiable_contradicted_or_inconclusive_g0_or_g1_g4() {
-        let mut unsatisfiable = atom_certificate(status::Z3_UNSAT, status::VERIFIED);
-        set_spec_satisfiable(&mut unsatisfiable, false);
-        let mut certificate = proof_certificate();
-        certificate.atoms.push(unsatisfiable);
         let source = source_atom("sample");
-        let mut unsatisfiable_book = create_claimbook(
+        let results = std::collections::HashMap::from([(
+            source.name.clone(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        )]);
+        let mut certificate = proof_cert::generate_certificate(
+            "sample.mm",
+            &[&source],
+            &results,
+            &verification::ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        set_spec_satisfiable(&mut certificate.atoms[0], false);
+        proof_cert::refresh_certificate_integrity(&mut certificate);
+        let mut fresh_unsatisfiable_book = create_claimbook(
             "sample.mm",
             "sample.proof.json",
             Some(&certificate),
@@ -1710,14 +1722,38 @@ mod tests {
             None,
         );
         attach_observations(
-            &mut unsatisfiable_book,
+            &mut fresh_unsatisfiable_book,
             &[observation_result("sample", "consistent")],
         );
-        assert_eq!(unsatisfiable_book.claims[0].grade, SealGrade::G0);
-        assert!(unsatisfiable_book
+        assert_eq!(
+            fresh_unsatisfiable_book.claims[0].freshness,
+            Freshness::Fresh
+        );
+        assert_eq!(fresh_unsatisfiable_book.claims[0].grade, SealGrade::G0);
+        assert!(fresh_unsatisfiable_book
             .recomputation
             .unsatisfiable_specs
             .contains("sample"));
+
+        let mut drifted_source = source_atom("sample");
+        drifted_source.body_expr = "1".to_string();
+        let mut drifted_unsatisfiable_book = create_claimbook(
+            "sample.mm",
+            "sample.proof.json",
+            Some(&certificate),
+            &[&drifted_source],
+            false,
+            None,
+        );
+        assert_eq!(
+            drifted_unsatisfiable_book.claims[0].freshness,
+            Freshness::Drifted
+        );
+        attach_observations(
+            &mut drifted_unsatisfiable_book,
+            &[observation_result("sample", "consistent")],
+        );
+        assert_eq!(drifted_unsatisfiable_book.claims[0].grade, SealGrade::G2);
 
         let mut book = claimbook_with_claims(vec![
             claim(
