@@ -833,13 +833,21 @@ pub fn attach_observations(book: &mut ClaimBook, results: &[ObservationResult]) 
         .to_string();
 
         if observation.status == "supported"
-            && claim.grade == SealGrade::G0
+            && (claim.grade == SealGrade::G0 || claim.freshness != Freshness::Fresh)
             && !book.recomputation.unsatisfiable_specs.contains(&claim.atom)
         {
+            let previous_grade = claim.grade;
             claim.grade = SealGrade::G2;
             claim.grade_label = SealGrade::G2.label().to_string();
             claim.evidence_kind = "observation".to_string();
-            claim.reason = "current test observations agree with the contract".to_string();
+            claim.reason = if previous_grade > SealGrade::G0 {
+                format!(
+                    "current test observations agree with the contract (stale certificate grade: {})",
+                    grade_code(previous_grade)
+                )
+            } else {
+                "current test observations agree with the contract".to_string()
+            };
         }
 
         *by_observation
@@ -1499,6 +1507,89 @@ mod tests {
             &[observation_result("unverified_source", "consistent")],
         );
         assert_eq!(unverified.claims[0].grade, SealGrade::G2);
+    }
+
+    #[test]
+    fn supported_observations_replace_stale_g1_and_g4_but_not_fresh_g4() {
+        let mut book = claimbook_with_claims(vec![
+            claim("drifted_g4", SealGrade::G4, Freshness::Drifted, &[], &[]),
+            claim(
+                "uncertified_g1",
+                SealGrade::G1,
+                Freshness::Uncertified,
+                &[],
+                &[],
+            ),
+            claim(
+                "contradicted_g4",
+                SealGrade::G4,
+                Freshness::Drifted,
+                &[],
+                &[],
+            ),
+            claim("fresh_g4", SealGrade::G4, Freshness::Fresh, &[], &[]),
+        ]);
+        attach_observations(
+            &mut book,
+            &[
+                observation_result("drifted_g4", "consistent"),
+                observation_result("uncertified_g1", "entailed"),
+                observation_result("contradicted_g4", "contradicts_ensures"),
+                observation_result("fresh_g4", "consistent"),
+            ],
+        );
+
+        let drifted_g4 = book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "drifted_g4")
+            .unwrap();
+        assert_eq!(drifted_g4.grade, SealGrade::G2);
+        assert_eq!(drifted_g4.effective_grade, SealGrade::G2);
+        assert_eq!(
+            drifted_g4.reason,
+            "current test observations agree with the contract (stale certificate grade: G4)"
+        );
+        assert!(drifted_g4
+            .limiting_premises
+            .iter()
+            .all(|premise| premise.kind != "freshness"));
+
+        let uncertified_g1 = book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "uncertified_g1")
+            .unwrap();
+        assert_eq!(uncertified_g1.grade, SealGrade::G2);
+        assert_eq!(
+            uncertified_g1.reason,
+            "current test observations agree with the contract (stale certificate grade: G1)"
+        );
+
+        let contradicted_g4 = book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "contradicted_g4")
+            .unwrap();
+        assert_eq!(contradicted_g4.grade, SealGrade::G4);
+        assert_eq!(contradicted_g4.effective_grade, SealGrade::G0);
+        assert_eq!(
+            contradicted_g4.limiting_premises,
+            vec![LimitingPremise {
+                kind: "freshness".to_string(),
+                name: "drifted".to_string(),
+                matched_from: None,
+                grade: SealGrade::G0,
+            }]
+        );
+
+        let fresh_g4 = book
+            .claims
+            .iter()
+            .find(|claim| claim.atom == "fresh_g4")
+            .unwrap();
+        assert_eq!(fresh_g4.grade, SealGrade::G4);
+        assert_eq!(fresh_g4.effective_grade, SealGrade::G4);
     }
 
     #[test]

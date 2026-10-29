@@ -25,10 +25,12 @@ contradicts it, `supported` if at least one supports it and none contradicts
 it, `inconclusive` if it has only neutral observations, and `not_observed` if
 there is no matching observation.
 
-A `supported` observation lifts an own-grade G0 claim to G2 unless its
-certificate records an unsatisfiable specification. This uses observations
-checked against current source, so certificate absence or drift does not block
-the lift. G1 and G4 grades do not change. With the flag, JSON adds each claim's
+A `supported` observation lifts a claim whose current base grade is G0 (own
+grade G0, or a non-fresh certificate) to G2 unless its certificate records an
+unsatisfiable specification. This uses observations checked against current
+source, so certificate absence or drift does not block the lift; fresh G1 and
+G4 claims do not change. A lifted stale claim records its previous certificate
+grade in the reason. With the flag, JSON adds each claim's
 `observation` (`status`, `supporting`, `contradicting`, and `neutral`) and
 `summary.by_observation`; Markdown adds an Observation column and status-count
 table. Without the flag, these fields and Markdown additions are omitted.
