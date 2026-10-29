@@ -1,3 +1,10 @@
+### Unreleased: observation-backed Claim Book G2
+
+- Added `mumei claims --observations` to attach current test-harvest verdicts
+  to claims and lift eligible G0 claims to G2 (`observed`).
+- G3 remains reserved until a bounded-proof evidence source exists; controls
+  remain orthogonal to Claim Book grades.
+
 ### Unreleased: effect-definition dependency freshness
 
 - Dependency hashes now include referenced effect definitions as

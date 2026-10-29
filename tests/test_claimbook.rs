@@ -2,7 +2,7 @@ use mumei_core::proof_cert::{
     refresh_certificate_integrity, status, LeanResultMetadata, ProofCertificate,
 };
 use mumei_core::verification;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -128,6 +128,28 @@ fn without_discrimination(mut report: Value) -> Value {
 fn write_source(dir: &Path, name: &str, contents: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, contents).expect("write source fixture");
+    path
+}
+
+fn write_harvest(dir: &Path, name: &str, target: &str, result: i64) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "schema": "mumei.test-harvest/v1",
+            "observations": [{
+                "kind": "example",
+                "target": target,
+                "test": "observed_test",
+                "file": "tests/test_claimbook.py",
+                "line": 1,
+                "args": {"x": 3},
+                "result": result
+            }]
+        }))
+        .expect("serialize harvest"),
+    )
+    .expect("write harvest");
     path
 }
 
@@ -784,6 +806,115 @@ fn formats_output_directories_and_missing_certificates_are_handled() {
     assert!(both_output.status.success());
     assert!(both_dir.join("CLAIMBOOK.md").exists());
     assert!(both_dir.join("claimbook.json").exists());
+}
+
+#[test]
+fn observations_lift_g2_gate_claims_and_reject_invalid_harvests() {
+    let dir = fresh_dir("observations");
+    let source = write_source(
+        &dir,
+        "observed.mm",
+        "atom identity(x: i64) -> i64\n\
+         requires: true;\n\
+         ensures: result == x;\n\
+         body: x;\n",
+    );
+    let harvest = write_harvest(&dir, "consistent.json", "identity", 3);
+    let harvest_arg = harvest.to_string_lossy().into_owned();
+    let output_dir = dir.join("observed-report");
+    let output_dir_arg = output_dir.to_string_lossy().into_owned();
+    let output = claims(
+        &dir,
+        &source,
+        &[
+            "--observations",
+            &harvest_arg,
+            "--require-grade",
+            "G2",
+            "--format",
+            "json",
+            "--out-dir",
+            &output_dir_arg,
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = json_report(&output_dir.join("claimbook.json"));
+    let identity = atom(&report, "identity");
+    assert_eq!(identity["grade"], "G2");
+    assert_eq!(identity["effective_grade"], "G2");
+    assert_eq!(identity["evidence_kind"], "observation");
+    assert_eq!(
+        identity["reason"],
+        "current test observations agree with the contract"
+    );
+    assert_eq!(identity["observation"]["status"], "supported");
+    assert_eq!(report["summary"]["by_observation"]["supported"], 1);
+
+    let markdown_dir = dir.join("markdown-report");
+    let markdown_dir_arg = markdown_dir.to_string_lossy().into_owned();
+    let markdown = claims(
+        &dir,
+        &source,
+        &[
+            "--observations",
+            &harvest_arg,
+            "--format",
+            "md",
+            "--out-dir",
+            &markdown_dir_arg,
+        ],
+    );
+    assert!(markdown.status.success());
+    let markdown = std::fs::read_to_string(markdown_dir.join("CLAIMBOOK.md"))
+        .expect("read Claim Book Markdown");
+    assert!(markdown.contains(
+        "| Atom | Own grade | Freshness | Evidence | Reason | Limiting premises | Observation |"
+    ));
+    assert!(markdown.contains("| supported |"));
+    assert!(markdown.contains("| Observation | Count |"));
+
+    let contradicting_harvest = write_harvest(&dir, "contradicting.json", "identity", 5);
+    let contradicting_harvest_arg = contradicting_harvest.to_string_lossy().into_owned();
+    let rejected_dir = dir.join("rejected-report");
+    let rejected_dir_arg = rejected_dir.to_string_lossy().into_owned();
+    let rejected = claims(
+        &dir,
+        &source,
+        &[
+            "--observations",
+            &contradicting_harvest_arg,
+            "--require-grade",
+            "G2",
+            "--format",
+            "json",
+            "--out-dir",
+            &rejected_dir_arg,
+        ],
+    );
+    assert_eq!(rejected.status.code(), Some(1));
+    let rejected_report = json_report(&rejected_dir.join("claimbook.json"));
+    let identity = atom(&rejected_report, "identity");
+    assert_eq!(identity["grade"], "G0");
+    assert_eq!(identity["observation"]["status"], "contradicted");
+
+    let missing_harvest = dir.join("missing.json");
+    let missing_harvest_arg = missing_harvest.to_string_lossy().into_owned();
+    let missing = claims(&dir, &source, &["--observations", &missing_harvest_arg]);
+    assert_eq!(missing.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("❌"));
+
+    let invalid_harvest = dir.join("invalid.json");
+    std::fs::write(&invalid_harvest, "{").expect("write invalid harvest");
+    let invalid_harvest_arg = invalid_harvest.to_string_lossy().into_owned();
+    let invalid = claims(&dir, &source, &["--observations", &invalid_harvest_arg]);
+    assert_eq!(invalid.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("❌"));
 }
 
 #[test]

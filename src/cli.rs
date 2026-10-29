@@ -306,6 +306,9 @@ pub(crate) enum Command {
         /// Directory for claimbook.json and CLAIMBOOK.md (default: current directory)
         #[arg(long, default_value = ".")]
         out_dir: String,
+        /// Attach observations from a mumei.test-harvest/v1 file
+        #[arg(long)]
+        observations: Option<String>,
         /// Attach negative-control results to claims
         #[arg(long)]
         controls: bool,

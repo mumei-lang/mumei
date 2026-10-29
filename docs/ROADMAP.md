@@ -2754,7 +2754,7 @@ templates are:
 - `mumei claims` は既存の proof certificate と現在のソースから読み取り専用レポートを生成し、atom ごとの証拠、freshness、依存関係を決定的な `claimbook.json` / `CLAIMBOOK.md` にまとめる。
 - PR-1 は atom 自身の grade と freshness を扱い、drifted / uncertified の base grade は G0 とする。PR-2 は assumed clause と依存 atom の grade を effective grade に伝播し、limiting premise、unresolved dependency、trusted base を示す。
 - `--require-grade G0..G5` は最低 grade を gate する。回帰ゲートは `cargo test --test test_claimbook`。
-- G5 / G3 / G2 は対応する証拠ソースが実装されるまで予約し、現時点では出力しない。
+- G2 は observation-backed に実装済み（`consistent` / `entailed` があり、`contradicts_ensures` / `not_entailed` がない場合）。G3 は bounded-proof evidence source が実装されるまで予約する。controls は discrimination / `--require-discriminating` を通じて grade と直交し、G5 は Lean dual-check まで予約する。
 
 ## P35: Charter Gate — ✅ Implemented（PR #737 / #739）
 

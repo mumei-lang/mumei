@@ -1,10 +1,10 @@
 use crate::pipeline::try_load_and_prepare_with_full_options_and_persistence;
 use mumei_core::claimbook::{
-    attach_controls, create_claimbook, fails_discrimination_gate, limiting_premises_text,
-    render_markdown, SealGrade,
+    attach_controls, attach_observations, create_claimbook, fails_discrimination_gate,
+    limiting_premises_text, render_markdown, SealGrade,
 };
 use mumei_core::parser::Item;
-use mumei_core::{controls, parser, proof_cert};
+use mumei_core::{controls, observe, parser, proof_cert};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -13,6 +13,7 @@ pub(crate) struct ClaimsOptions<'a> {
     pub(crate) allow_lean_verified: bool,
     pub(crate) format: &'a str,
     pub(crate) out_dir: &'a str,
+    pub(crate) observations: Option<&'a str>,
     pub(crate) controls_enabled: bool,
     pub(crate) max_mutants: usize,
     pub(crate) require_discriminating: bool,
@@ -25,6 +26,7 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
         allow_lean_verified,
         format,
         out_dir,
+        observations,
         controls_enabled,
         max_mutants,
         require_discriminating,
@@ -92,6 +94,26 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
         allow_lean_verified,
         Some(&module_env),
     );
+    if let Some(observations_path) = observations {
+        let harvest_json = fs::read_to_string(observations_path).unwrap_or_else(|error| {
+            eprintln!("❌ Error: could not read harvest '{observations_path}': {error}");
+            std::process::exit(super::verify::EXIT_INPUT_ERROR);
+        });
+        let report = observe::analyze(
+            input,
+            observations_path,
+            &harvest_json,
+            &items,
+            &items,
+            &module_env,
+            None,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("❌ Error: {error}");
+            std::process::exit(super::verify::EXIT_INPUT_ERROR);
+        });
+        attach_observations(&mut book, &report.results);
+    }
     if controls_enabled {
         let report = controls::analyze(input, &items, &items, &module_env, None, max_mutants)
             .unwrap_or_else(|error| {

@@ -144,6 +144,7 @@ or `missing`. With `--strict`, it also exits 1 for `changed`,
 ```bash
 mumei claims <input.mm> [--cert <path>] [--format json|md|both]
   [--out-dir <directory>] [--controls] [--max-mutants <N>]
+  [--observations <harvest.json>]
   [--require-discriminating] [--require-grade <G0..G5>]
 ```
 
@@ -152,6 +153,11 @@ control results to claims; `--max-mutants` sets the per-atom cap (default 32)
 and requires `--controls`. `--require-discriminating` enables controls and
 fails with exit 1 if any claim is weak or inconclusive. It may be combined
 with `--require-grade`; reports are written before either gate is evaluated.
+`--observations` accepts the `mumei.test-harvest/v1` JSON file used by
+`mumei observe` and attaches its verdict counts to Claim Book claims. Supporting
+observations can lift eligible G0 claims to G2; contradictions never lift a
+grade. Controls remain orthogonal to grades. Without `--observations`, its
+optional JSON and Markdown output is omitted.
 Controls do not affect grades or freshness. Without `--controls`, JSON and
 Markdown output are unchanged. Equivalent mutants beyond the generator's
 small syntactic filter can still survive and require human judgment; see
