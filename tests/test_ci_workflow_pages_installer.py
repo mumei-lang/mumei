@@ -49,3 +49,28 @@ def test_only_jekyll_workflow_deploys_pages() -> None:
                 assert not step.get("uses", "").startswith(publisher_prefixes), (
                     f"{workflow_file.name} job {job_name!r} deploys Pages"
                 )
+
+
+def test_release_waits_for_jekyll_deployment_and_published_installer() -> None:
+    workflow_file = _WORKFLOWS_DIR / "release.yml"
+    workflow = yaml.safe_load(workflow_file.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["redeploy-pages"]["steps"]
+    run_text = "\n".join(step.get("run", "") for step in steps)
+
+    dispatch_index = run_text.index("gh workflow run jekyll-gh-pages.yml")
+    watch_index = run_text.index("gh run watch")
+    exit_status_index = run_text.index("--exit-status")
+    assert dispatch_index < watch_index < exit_status_index
+
+    dispatch_step_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Dispatch Jekyll deployment and wait for it"
+    )
+    installer_check_index = next(
+        index
+        for index, step in enumerate(steps)
+        if "curl -fsSIL https://mumei-lang.github.io/mumei/install.sh"
+        in step.get("run", "")
+    )
+    assert installer_check_index > dispatch_step_index

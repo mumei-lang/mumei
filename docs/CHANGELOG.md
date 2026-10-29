@@ -8,6 +8,8 @@
 
 - Jekyll deployments now include `scripts/install.sh`, and releases trigger a
   Jekyll redeployment instead of replacing the documentation site.
+- Releases now wait for the dispatched Jekyll deployment and fail if it fails
+  or `install.sh` is not reachable afterwards.
 
 ### Unreleased: observation-backed Claim Book G2
 
