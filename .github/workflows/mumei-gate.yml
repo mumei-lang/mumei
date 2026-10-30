@@ -22,6 +22,16 @@ on:
         required: false
         type: string
         default: ""
+      allow-lean-verified:
+        description: Accept current Lean evidence for imports and Claim Book grades; required for G5.
+        required: false
+        type: boolean
+        default: false
+      certificates:
+        description: Optional whitespace-separated proof certificates, one per source in the same order, relative to working-directory; claims and charter read these instead of the fresh certificate.
+        required: false
+        type: string
+        default: ""
       require-discriminating:
         description: Require negative controls to discriminate the contracts.
         required: false
@@ -57,6 +67,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate gate sources and certificates
+        shell: bash
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          SOURCES: ${{ inputs.sources }}
+          CERTIFICATES: ${{ inputs.certificates }}
+        run: |
+          set -euo pipefail
+
+          read -r -d '' -a sources <<< "$SOURCES" || true
+          if (( ${#sources[@]} == 0 )); then
+            printf 'At least one source is required.\n' >&2
+            exit 1
+          fi
+
+          read -r -d '' -a certificates <<< "$CERTIFICATES" || true
+          cd "$WORKING_DIRECTORY"
+          project_directory="$PWD"
+
+          if [[ -n "$CERTIFICATES" ]]; then
+            if (( ${#certificates[@]} != ${#sources[@]} )); then
+              printf 'Certificate count (%s) must match source count (%s).\n' \
+                "${#certificates[@]}" "${#sources[@]}" >&2
+              exit 1
+            fi
+            for certificate in "${certificates[@]}"; do
+              if [[ "$certificate" == /* ]]; then
+                certificate_path="$certificate"
+              else
+                certificate_path="$project_directory/$certificate"
+              fi
+              if [[ ! -f "$certificate_path" ]]; then
+                printf 'Certificate %q does not exist or is not a file.\n' \
+                  "$certificate" >&2
+                exit 1
+              fi
+            done
+          fi
+
       - name: Install Mumei
         shell: bash
         env:
@@ -88,6 +137,8 @@ jobs:
           WORKING_DIRECTORY: ${{ inputs.working-directory }}
           SOURCES: ${{ inputs.sources }}
           REQUIRE_GRADE: ${{ inputs.require-grade }}
+          ALLOW_LEAN_VERIFIED: ${{ inputs.allow-lean-verified }}
+          CERTIFICATES: ${{ inputs.certificates }}
           REQUIRE_DISCRIMINATING: ${{ inputs.require-discriminating }}
           OBSERVATIONS: ${{ inputs.observations }}
           CHARTER: ${{ inputs.charter }}
@@ -104,6 +155,8 @@ jobs:
             printf 'At least one source is required.\n' >&2
             exit 1
           fi
+
+          read -r -d '' -a certificates <<< "$CERTIFICATES" || true
 
           source_slugs=()
           for source in "${sources[@]}"; do
@@ -123,6 +176,29 @@ jobs:
           mkdir -p "$gate_dir"
           cd "$WORKING_DIRECTORY"
           project_directory="$PWD"
+
+          certificate_paths=()
+          if [[ -n "$CERTIFICATES" ]]; then
+            if (( ${#certificates[@]} != ${#sources[@]} )); then
+              printf 'Certificate count (%s) must match source count (%s).\n' \
+                "${#certificates[@]}" "${#sources[@]}" >&2
+              exit 1
+            fi
+            for certificate in "${certificates[@]}"; do
+              if [[ "$certificate" == /* ]]; then
+                certificate_path="$certificate"
+              else
+                certificate_path="$project_directory/$certificate"
+              fi
+              if [[ ! -f "$certificate_path" ]]; then
+                printf 'Certificate %q does not exist or is not a file.\n' \
+                  "$certificate" >&2
+                exit 1
+              fi
+              certificate_paths+=("$certificate_path")
+            done
+          fi
+
           failed=0
 
           run_gate_command() {
@@ -148,14 +224,33 @@ jobs:
             mkdir -p "$out"
 
             printf '### %s\n\n' "$source" >> "$GITHUB_STEP_SUMMARY"
-            run_gate_command "mumei verify" mumei verify "$source" --proof-cert --output "$cert"
+            verify_args=(mumei verify "$source" --proof-cert --output "$cert")
+            if [[ "$ALLOW_LEAN_VERIFIED" == "true" ]]; then
+              verify_args+=(--allow-lean-verified)
+            fi
+            run_gate_command "mumei verify" "${verify_args[@]}"
             for report in cross_spec.json report.json; do
               if [[ -f "$project_directory/$report" ]]; then
                 mv "$project_directory/$report" "$out/$report"
               fi
             done
 
-            claims_args=(mumei claims "$source" --cert "$cert" --format both --out-dir "$out")
+            claim_cert="$cert"
+            claim_cert_summary="fresh"
+            if (( ${#certificate_paths[@]} > 0 )); then
+              supplied_cert="${certificate_paths[$source_index]}"
+              supplied_cert_copy="$out/$slug.supplied.proof.json"
+              cp "$supplied_cert" "$supplied_cert_copy"
+              claim_cert="$supplied_cert_copy"
+              claim_cert_summary="supplied: ${certificates[$source_index]}"
+            fi
+            printf -- "- Claim Book certificate: \`%s\`\n" "$claim_cert_summary" \
+              >> "$GITHUB_STEP_SUMMARY"
+
+            claims_args=(mumei claims "$source" --cert "$claim_cert" --format both --out-dir "$out")
+            if [[ "$ALLOW_LEAN_VERIFIED" == "true" ]]; then
+              claims_args+=(--allow-lean-verified)
+            fi
             if [[ -n "$REQUIRE_GRADE" ]]; then
               claims_args+=(--require-grade "$REQUIRE_GRADE")
             fi
@@ -169,7 +264,10 @@ jobs:
 
             charter_status="not enabled"
             if [[ "$CHARTER" == "true" ]]; then
-              charter_args=(mumei charter check "$source" --cert "$cert")
+              charter_args=(mumei charter check "$source" --cert "$claim_cert")
+              if [[ "$ALLOW_LEAN_VERIFIED" == "true" ]]; then
+                charter_args+=(--allow-lean-verified)
+              fi
               if [[ -n "$REQUIRE_GRADE" ]]; then
                 charter_args+=(--require-grade "$REQUIRE_GRADE")
               fi

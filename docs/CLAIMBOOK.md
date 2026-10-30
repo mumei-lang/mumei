@@ -140,7 +140,9 @@ Inputs:
 | `mumei-version` | string | `""` | Empty downloads the latest release; otherwise downloads that release, accepting a version with or without a leading `v`. |
 | `working-directory` | string | `"."` | Project directory containing the sources and optional `mumei.toml`. |
 | `sources` | string | required | Whitespace-separated `.mm` paths relative to `working-directory`. |
-| `require-grade` | string | `""` | Empty reports grades without gating; otherwise requires `G0` through `G5`. The reusable gate's fresh certificates can reach at most G4. |
+| `require-grade` | string | `""` | Empty reports grades without gating; otherwise requires `G0` through `G5`. G5 also requires `allow-lean-verified: true` and matching upgraded `certificates`; stale supplied certificates are G0. |
+| `allow-lean-verified` | boolean | `false` | Accept current Lean evidence for imports and Claim Book grades; required for G5. |
+| `certificates` | string | `""` | Optional whitespace-separated proof certificates, one per source in the same order, relative to `working-directory`; Claim Book and Charter use these instead of the fresh certificate. |
 | `require-discriminating` | boolean | `false` | Require the Claim Book negative-control gate to pass. |
 | `observations` | string | `""` | Test-harvest path relative to `working-directory`, passed to `mumei claims --observations`. |
 | `charter` | boolean | `false` | Run `mumei charter check` using the `[charter]` configuration in `mumei.toml`. |
@@ -152,15 +154,21 @@ Each run appends per-source command exit codes, Charter status, and the
 `mumei-gate-reports` artifact (or the configured artifact name) contains each
 source's proof certificate and generated reports.
 
-`observations` requires a Mumei release newer than v0.6.23, which does not
-support `mumei claims --observations`.
+`observations`, `allow-lean-verified`, and supplied `certificates` require a
+Mumei release newer than v0.6.23.
 
-The reusable gate builds fresh Z3 certificates, which do not carry Lean
-evidence, so it cannot reach G5. To gate on G5, upgrade a certificate with
-mumei-lean's `bridge.py --dual-check`, then run:
+G5 requires `allow-lean-verified: true` and `certificates` pointing at proof
+certificates upgraded by mumei-lean's `bridge.py --dual-check` and present in
+the checked-out repository. Fresh verification still runs for each source;
+Claim Book and Charter use the supplied certificate instead. Claims checks
+freshness against the current source, so a stale supplied certificate is G0
+and fails closed. For example:
 
-```bash
-mumei claims <src> --cert <upgraded cert> --allow-lean-verified --require-grade G5
+```yaml
+with:
+  allow-lean-verified: true
+  certificates: src/main.proof.json
+  require-grade: G5
 ```
 
 ## JSON
