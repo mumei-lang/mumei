@@ -22,6 +22,11 @@ on:
         required: false
         type: string
         default: ""
+      allow-lean-verified:
+        description: Opt in to Lean evidence; required for Claim Book G5 gates.
+        required: false
+        type: boolean
+        default: false
       require-discriminating:
         description: Require negative controls to discriminate the contracts.
         required: false
@@ -88,6 +93,7 @@ jobs:
           WORKING_DIRECTORY: ${{ inputs.working-directory }}
           SOURCES: ${{ inputs.sources }}
           REQUIRE_GRADE: ${{ inputs.require-grade }}
+          ALLOW_LEAN_VERIFIED: ${{ inputs.allow-lean-verified }}
           REQUIRE_DISCRIMINATING: ${{ inputs.require-discriminating }}
           OBSERVATIONS: ${{ inputs.observations }}
           CHARTER: ${{ inputs.charter }}
@@ -148,7 +154,11 @@ jobs:
             mkdir -p "$out"
 
             printf '### %s\n\n' "$source" >> "$GITHUB_STEP_SUMMARY"
-            run_gate_command "mumei verify" mumei verify "$source" --proof-cert --output "$cert"
+            verify_args=(mumei verify "$source" --proof-cert --output "$cert")
+            if [[ "$ALLOW_LEAN_VERIFIED" == "true" ]]; then
+              verify_args+=(--allow-lean-verified)
+            fi
+            run_gate_command "mumei verify" "${verify_args[@]}"
             for report in cross_spec.json report.json; do
               if [[ -f "$project_directory/$report" ]]; then
                 mv "$project_directory/$report" "$out/$report"
@@ -158,6 +168,9 @@ jobs:
             claims_args=(mumei claims "$source" --cert "$cert" --format both --out-dir "$out")
             if [[ -n "$REQUIRE_GRADE" ]]; then
               claims_args+=(--require-grade "$REQUIRE_GRADE")
+            fi
+            if [[ "$ALLOW_LEAN_VERIFIED" == "true" ]]; then
+              claims_args+=(--allow-lean-verified)
             fi
             if [[ "$REQUIRE_DISCRIMINATING" == "true" ]]; then
               claims_args+=(--require-discriminating)
@@ -172,6 +185,9 @@ jobs:
               charter_args=(mumei charter check "$source" --cert "$cert")
               if [[ -n "$REQUIRE_GRADE" ]]; then
                 charter_args+=(--require-grade "$REQUIRE_GRADE")
+              fi
+              if [[ "$ALLOW_LEAN_VERIFIED" == "true" ]]; then
+                charter_args+=(--allow-lean-verified)
               fi
               charter_args+=(--json)
               run_gate_command "mumei charter check" "${charter_args[@]}"
