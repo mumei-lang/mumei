@@ -570,10 +570,19 @@ fn trusted_base(cert: Option<&ProofCertificate>, atoms: &[&crate::parser::Atom])
             if !entry.bridge_lemma_hash.is_empty() {
                 bridge_lemma_hashes.insert(entry.bridge_lemma_hash.clone());
             }
+            if let Some(metadata) = &entry.lean_dual_check {
+                if !metadata.translator_version.is_empty() {
+                    translator_versions.insert(metadata.translator_version.clone());
+                }
+                if !metadata.bridge_lemma_hash.is_empty() {
+                    bridge_lemma_hashes.insert(metadata.bridge_lemma_hash.clone());
+                }
+            }
             for metadata in entry
                 .lean_metadata
                 .iter()
                 .chain(entry.lean_result_metadata.iter())
+                .chain(entry.lean_dual_check.iter())
             {
                 for axiom in metadata
                     .kernel_axioms
@@ -2879,6 +2888,47 @@ mod tests {
             serde_json::to_string(&trusted_base(Some(&cert), &[&beta, &alpha]))
                 .expect("serialize trusted base again")
         );
+    }
+
+    #[test]
+    fn trusted_base_includes_dual_check_metadata_and_preserves_absent_case() {
+        let source = source_atom("sample");
+        let mut entry = atom_certificate(status::Z3_UNSAT, status::VERIFIED);
+        entry.name = "sample".to_string();
+        let mut cert = proof_certificate();
+        cert.atoms = vec![entry];
+
+        let without_dual_check = trusted_base(Some(&cert), &[&source]);
+        cert.atoms[0].lean_dual_check = Some(crate::proof_cert::LeanResultMetadata {
+            status: status::LEAN_STATUS_VERIFIED.to_string(),
+            theorem_name: "sample_correct".to_string(),
+            translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+            bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+            kernel_axioms: Some(vec!["propext".to_string(), "Quot.sound".to_string()]),
+            axiom_audit: Some("passed".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            crate::proof_cert::lean_dual_check_status(&cert.atoms[0]),
+            crate::proof_cert::LeanDualCheck::Passed
+        );
+        let with_dual_check = trusted_base(Some(&cert), &[&source]);
+        assert_eq!(
+            with_dual_check.kernel_axioms,
+            vec!["Quot.sound".to_string(), "propext".to_string()]
+        );
+        assert_eq!(
+            with_dual_check.translator_versions,
+            vec![verification::LEAN_TRANSLATOR_VERSION.to_string()]
+        );
+        assert_eq!(
+            with_dual_check.bridge_lemma_hashes,
+            vec![verification::LEAN_BRIDGE_LEMMA_HASH.to_string()]
+        );
+
+        cert.atoms[0].lean_dual_check = None;
+        assert_eq!(trusted_base(Some(&cert), &[&source]), without_dual_check);
     }
 
     #[test]
