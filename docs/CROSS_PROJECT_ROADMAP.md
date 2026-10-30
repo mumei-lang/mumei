@@ -49,7 +49,7 @@ Every PR in this area should review this file together with the local roadmap it
 
 **mumei (コンパイラ)**: P1〜P34 を実装済み。P34 Claim Book / Seal Grade に続き、charter、erosion、negative controls / vacuity、test observations、certificate dependency freshness、opt-in local proof store を実装（P35〜P39）。エフェクトシステム、MIR、temporal verification、modular verification、LSP、concurrency codegen、proof certificate / proof graph、capability Stage 1、nlsat 先行経路まで到達。 v0.6.23 リリース済み（P34〜P39 を含む）。
 
-**mumei-agent**: V1-A〜V1-E（spec health / 監査 / 双方向整合 / 人向け UX）全項目実装済み。Track A データフロー層（A-1〜A-6）、Lean AI 証明生成（B-4〜B-6、`--external-proofs` 経路）、`language_patterns` レジストリ（tree-sitter scope-aware、confidence フィールド付き）まで到達。Forge Mode は Infrastructure Complete / Expansion In Progress（cron 稼働中）。2026-10-24〜26 の #616〜#627 で trusted atom の satisfiability-aware `all_verified`、charter / erosion / controls guard、test harvesting と observation-feedback spec extraction、dependency-aware proliferation を追加。共有する sibling claim は machine-verified G4 に限定。
+**mumei-agent**: V1-A〜V1-E（spec health / 監査 / 双方向整合 / 人向け UX）全項目実装済み。Track A データフロー層（A-1〜A-6）、Lean AI 証明生成（B-4〜B-6、`--external-proofs` 経路）、`language_patterns` レジストリ（tree-sitter scope-aware、confidence フィールド付き）まで到達。Forge Mode は Infrastructure Complete / Expansion In Progress（cron 稼働中）。2026-10-24〜26 の #616〜#627 で trusted atom の satisfiability-aware `all_verified`、charter / erosion / controls guard、test harvesting と observation-feedback spec extraction、dependency-aware proliferation を追加。#630 で classic heal に negative-controls による修正案の順位付け（`--controls-gate`、既定 off）を追加。共有する sibling claim は machine-verified G4 に限定。
 
 **mumei-lean**: live generated theorem path 20 本、obligation class 9 種（P31 で `concurrency_obligation` 追加）。B-1 群 1 全 4 構文 lowering 完了、`task`/`task_group:all`/`any` の並行意味論 bridge lemma と seq 中段 `task_group` lowering（P31 完結、2026-09-22）も実装済み。B-2/B-3 external-proof 受理面と群 3 loop-VC（B-4 経由）で全 3 atom `lean_verified` 実証済み。`bridge_lemma_hash = 5716cfdd…`（3 repo lockstep）。2026-10-24 の PR #136 で Python exporter と native Lean `CertWriter.lean` の `all_verified` 判定を一致させた。trusted atom は spec が satisfiable のときに限り verified に数える（satisfiability 欠落時は satisfiable 扱い）。
 
@@ -64,7 +64,7 @@ Every PR in this area should review this file together with the local roadmap it
 3. **Done** — Seal Grade G2 は observation-backed に実装済み（`consistent` / `entailed` があり、`contradicts_ensures` / `not_entailed` がない場合）。G3 は bounded-proof evidence source ができるまで予約。controls は discrimination / `--require-discriminating` を通じて grade と直交。G5 は Lean dual-check で実装済み（項目 5）。
 4. **Done** — charter / Claim Book CI reusable workflow を実装（mumei#758）。mumei-demo の `.github/workflows/mumei-gate.yml` が `charter_gate_demo` の `correct.mm` を G4 + Charter で検査する dogfood を PR と週次 cron で実行（mumei-demo#85）。
 5. **Done** — Lean dual-check を `lean_verified` とは別 field（`lean_dual_check`）に記録し、Claim Book の G5 gate を実装（mumei#762、trust boundary は変更しない）。mumei-lean の `bridge.py --dual-check` が Z3-unsat atom を Lean で再証明して書き込む（mumei-lean#138）。
-6. **Planned** — erosion / controls を使った agent heal ranking。
+6. **Done** — erosion / controls を使った agent heal ranking（mumei-agent#630）。classic `heal --controls-gate off|warn|require`（既定 off）が verify・Charter・erosion を通過した修正案に negative controls を実行する。`warn` は weak な候補で止めずに再試行し、予算が尽きたら `(malformed, weak atom 数, survived mutant 数, attempt)` の順で最良候補を採用して `Heal candidate ranking` を出力する。`require` は weak / malformed / unavailable を採用しない。
 7. **Planned** — observation-feedback re-extraction を real LLM で測定。
 
 ## Priority 1: mumei-agent の実用化（"AI → 検証済み資産" パイプラインの完成）
