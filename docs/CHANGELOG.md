@@ -1,3 +1,10 @@
+### Unreleased: Lean evidence in the reusable gate
+
+- The reusable Claim Book and Charter gate can accept current Lean evidence
+  and per-source certificates upgraded by mumei-lean for G5 checks. Fresh
+  verification still runs, and a stale supplied certificate keeps only the G0
+  grade (G2 with supporting observations).
+
 ### Unreleased: Lean dual check and G5
 
 - Added separate Lean dual-check certificate metadata and opted-in G5
