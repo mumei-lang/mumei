@@ -151,6 +151,11 @@
           "type": ["object", "null"],
           "additionalProperties": true
         },
+        "lean_dual_check": {
+          "type": ["object", "null"],
+          "description": "Independent Lean re-proof of an obligation Z3 already discharged. This metadata does not affect certificate proof status.",
+          "additionalProperties": true
+        },
         "counterexample_validation": {
           "type": ["object", "null"],
           "additionalProperties": true

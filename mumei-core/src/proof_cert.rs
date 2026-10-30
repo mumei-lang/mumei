@@ -43,10 +43,11 @@ pub use review::{generate_escalation_bundle, generate_human_review_queue};
 
 pub use validation::{
     check_certificate_hash, get_required_lowering_rules, lean_axiom_audit,
-    lean_certificate_metadata_is_current, lean_translator_metadata_is_current,
-    refresh_certificate_integrity, validate_certificate_translator_versions,
-    validate_translator_version, validate_translator_version_with_semantics, verify_certificate,
-    verify_certificate_in_env, CertificateAtomCheck, CertificateHashCheck, LeanAxiomAudit,
+    lean_certificate_metadata_is_current, lean_dual_check_status,
+    lean_translator_metadata_is_current, refresh_certificate_integrity,
+    validate_certificate_translator_versions, validate_translator_version,
+    validate_translator_version_with_semantics, verify_certificate, verify_certificate_in_env,
+    CertificateAtomCheck, CertificateHashCheck, LeanAxiomAudit, LeanDualCheck,
     LEAN_STANDARD_KERNEL_AXIOMS,
 };
 
@@ -1215,6 +1216,121 @@ mod tests {
         assert_eq!(
             verify_certificate(&stale_cert, &[&stale_atom], true)[0],
             ("hard_lemma".to_string(), "stale_translator".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dual_check_metadata_does_not_change_certificate_verification_status() {
+        let atom = make_test_atom("hard_lemma", "true", "true", "42");
+        let atoms = [&atom];
+        for z3_result in [status::Z3_UNSAT, status::Z3_LEAN_VERIFIED] {
+            let mut results = HashMap::new();
+            results.insert(
+                "hard_lemma".to_string(),
+                (z3_result.to_string(), status::VERIFIED.to_string()),
+            );
+            let mut cert = generate_certificate(
+                "test.mm",
+                &atoms,
+                &results,
+                &ModuleEnv::new(),
+                None,
+                None,
+                None,
+            );
+            if z3_result == status::Z3_LEAN_VERIFIED {
+                let mut metadata = current_lean_metadata();
+                metadata.kernel_axioms = Some(vec!["propext".to_string()]);
+                metadata.axiom_audit = Some("passed".to_string());
+                cert.atoms[0].lean_result_metadata = Some(metadata);
+            }
+
+            for allow_lean_verified in [false, true] {
+                let expected = verify_certificate_in_env(&cert, &atoms, allow_lean_verified, None);
+                for dual_check in [
+                    None,
+                    Some({
+                        let mut metadata = current_lean_metadata();
+                        metadata.kernel_axioms = Some(vec!["propext".to_string()]);
+                        metadata.axiom_audit = Some("passed".to_string());
+                        metadata
+                    }),
+                    Some({
+                        let mut metadata = current_lean_metadata();
+                        metadata.kernel_axioms = Some(vec!["propext".to_string()]);
+                        metadata.axiom_audit = Some("error".to_string());
+                        metadata
+                    }),
+                ] {
+                    let mut with_dual_check = cert.clone();
+                    with_dual_check.atoms[0].lean_dual_check = dual_check;
+                    assert_eq!(
+                        verify_certificate_in_env(
+                            &with_dual_check,
+                            &atoms,
+                            allow_lean_verified,
+                            None
+                        ),
+                        expected,
+                        "{z3_result}, allow_lean_verified={allow_lean_verified}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_lean_dual_check_serde_compatibility_and_certificate_hash() {
+        let atom = make_test_atom("hard_lemma", "true", "true", "42");
+        let atoms = [&atom];
+        let results = HashMap::from([(
+            "hard_lemma".to_string(),
+            (status::Z3_UNSAT.to_string(), status::VERIFIED.to_string()),
+        )]);
+        let mut cert = generate_certificate(
+            "test.mm",
+            &atoms,
+            &results,
+            &ModuleEnv::new(),
+            None,
+            None,
+            None,
+        );
+        let legacy_json = serde_json::to_vec(&cert).expect("serialize without dual check");
+        assert!(!String::from_utf8_lossy(&legacy_json).contains("\"lean_dual_check\""));
+        assert_eq!(check_certificate_hash(&cert), CertificateHashCheck::Match);
+        let round_trip: ProofCertificate =
+            serde_json::from_slice(&legacy_json).expect("deserialize legacy certificate");
+        assert_eq!(
+            serde_json::to_vec(&round_trip).expect("re-serialize legacy certificate"),
+            legacy_json
+        );
+        assert_eq!(round_trip.certificate_hash, cert.certificate_hash);
+        assert_eq!(
+            check_certificate_hash(&round_trip),
+            CertificateHashCheck::Match
+        );
+
+        let mut metadata = current_lean_metadata();
+        metadata.kernel_axioms = Some(vec!["propext".to_string()]);
+        metadata.axiom_audit = Some("passed".to_string());
+        cert.atoms[0].lean_dual_check = Some(metadata);
+        refresh_certificate_integrity(&mut cert);
+        let encoded = serde_json::to_vec(&cert).expect("serialize dual check");
+        let value: Value = serde_json::from_slice(&encoded).expect("parse serialized certificate");
+        assert_eq!(
+            value["atoms"][0]["lean_dual_check"]["theorem_name"],
+            "hard_lemma_correct"
+        );
+        let decoded: ProofCertificate =
+            serde_json::from_slice(&encoded).expect("deserialize dual check");
+        assert_eq!(
+            serde_json::to_value(decoded.atoms[0].lean_dual_check.as_ref().unwrap()).unwrap(),
+            value["atoms"][0]["lean_dual_check"]
+        );
+        assert_eq!(
+            check_certificate_hash(&decoded),
+            CertificateHashCheck::Match
         );
     }
 

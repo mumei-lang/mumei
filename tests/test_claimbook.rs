@@ -1293,6 +1293,128 @@ fn lean_verified_evidence_requires_opt_in_and_current_audit() {
 }
 
 #[test]
+fn z3_lean_dual_check_gates_g5_and_rejects_stale_metadata() {
+    let dir = fresh_dir("lean_dual_check");
+    let source = write_source(
+        &dir,
+        "main.mm",
+        "atom verified_value(x: i64) -> i64 requires: true; ensures: result == x; body: x;",
+    );
+    let cert_path = certify(&dir, &source);
+    let mut cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&cert_path).expect("read generated certificate"))
+            .expect("parse generated certificate");
+    let atom_cert = cert
+        .atoms
+        .iter_mut()
+        .find(|atom| atom.name == "verified_value")
+        .expect("verified atom certificate");
+    assert_eq!(atom_cert.z3_check_result, status::Z3_UNSAT);
+    atom_cert.lean_dual_check = Some(LeanResultMetadata {
+        status: status::LEAN_STATUS_VERIFIED.to_string(),
+        theorem_name: "verified_value_dual".to_string(),
+        translator_version: verification::LEAN_TRANSLATOR_VERSION.to_string(),
+        bridge_lemma_hash: verification::LEAN_BRIDGE_LEMMA_HASH.to_string(),
+        proof_path: "Generated/ClaimBookDual.lean".to_string(),
+        kernel_axioms: Some(vec!["propext".to_string()]),
+        axiom_audit: Some("passed".to_string()),
+        ..Default::default()
+    });
+    refresh_certificate_integrity(&mut cert);
+    std::fs::write(
+        &cert_path,
+        serde_json::to_vec_pretty(&cert).expect("serialize dual-check certificate"),
+    )
+    .expect("write dual-check certificate");
+
+    let out_dir = dir.join("report");
+    let out_dir_arg = out_dir.to_string_lossy().into_owned();
+    let without_opt_in = claims(
+        &dir,
+        &source,
+        &[
+            "--require-grade",
+            "G5",
+            "--format",
+            "json",
+            "--out-dir",
+            &out_dir_arg,
+        ],
+    );
+    assert_eq!(without_opt_in.status.code(), Some(1));
+    let report = json_report(&out_dir.join("claimbook.json"));
+    let claim = atom(&report, "verified_value");
+    assert_eq!(claim["grade"], "G4");
+    assert!(claim["reason"]
+        .as_str()
+        .unwrap()
+        .contains("--allow-lean-verified"));
+
+    let with_opt_in = claims(
+        &dir,
+        &source,
+        &[
+            "--allow-lean-verified",
+            "--require-grade",
+            "G5",
+            "--format",
+            "json",
+            "--out-dir",
+            &out_dir_arg,
+        ],
+    );
+    assert_eq!(
+        with_opt_in.status.code(),
+        Some(0),
+        "{}\n{}",
+        String::from_utf8_lossy(&with_opt_in.stdout),
+        String::from_utf8_lossy(&with_opt_in.stderr)
+    );
+    let report = json_report(&out_dir.join("claimbook.json"));
+    let claim = atom(&report, "verified_value");
+    assert_eq!(claim["grade"], "G5");
+    assert_eq!(claim["evidence_kind"], "z3+lean");
+
+    let atom_cert = cert
+        .atoms
+        .iter_mut()
+        .find(|atom| atom.name == "verified_value")
+        .unwrap();
+    atom_cert
+        .lean_dual_check
+        .as_mut()
+        .unwrap()
+        .translator_version = "stale-translator".to_string();
+    refresh_certificate_integrity(&mut cert);
+    std::fs::write(
+        &cert_path,
+        serde_json::to_vec_pretty(&cert).expect("serialize stale dual-check certificate"),
+    )
+    .expect("write stale dual-check certificate");
+    let stale = claims(
+        &dir,
+        &source,
+        &[
+            "--allow-lean-verified",
+            "--require-grade",
+            "G5",
+            "--format",
+            "json",
+            "--out-dir",
+            &out_dir_arg,
+        ],
+    );
+    assert_eq!(stale.status.code(), Some(1));
+    let report = json_report(&out_dir.join("claimbook.json"));
+    let claim = atom(&report, "verified_value");
+    assert_eq!(claim["grade"], "G4");
+    assert!(claim["reason"]
+        .as_str()
+        .unwrap()
+        .contains("stale translator"));
+}
+
+#[test]
 fn claims_with_import_does_not_persist_resolver_cache_or_create_unrequested_files() {
     let dir = fresh_dir("read_only_import");
     let source = dir.join("main.mm");

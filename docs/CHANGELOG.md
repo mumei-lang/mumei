@@ -1,3 +1,9 @@
+### Unreleased: Lean dual check and G5
+
+- Added separate Lean dual-check certificate metadata and opted-in G5
+  (`dual-sealed`) Claim Book evidence for Z3-unsat obligations with a current
+  Lean proof and an explicitly passed axiom audit.
+
 ### Unreleased: reusable Claim Book and Charter CI gate
 
 - Added a reusable GitHub Actions workflow for Claim Book grade and Charter

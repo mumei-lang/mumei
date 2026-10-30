@@ -15,10 +15,23 @@ pub enum LeanAxiomAudit {
     Unaudited,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeanDualCheck {
+    Absent,
+    Passed,
+    Stale,
+    AxiomRejected,
+    NotVerified,
+}
+
 pub fn lean_axiom_audit(atom: &AtomCertificate) -> LeanAxiomAudit {
     let Some(metadata) = lean_result_metadata(atom) else {
         return LeanAxiomAudit::Unaudited;
     };
+    lean_axiom_audit_for_metadata(metadata)
+}
+
+fn lean_axiom_audit_for_metadata(metadata: &LeanResultMetadata) -> LeanAxiomAudit {
     let disallowed = metadata
         .kernel_axioms
         .as_deref()
@@ -330,10 +343,38 @@ pub fn lean_translator_metadata_is_current(atom: &AtomCertificate) -> bool {
     let Some(metadata) = lean_result_metadata(atom) else {
         return false;
     };
+    lean_result_metadata_is_current(metadata)
+}
+
+fn lean_result_metadata_is_current(metadata: &LeanResultMetadata) -> bool {
     metadata.status == status::LEAN_STATUS_VERIFIED
         && !metadata.theorem_name.is_empty()
         && metadata.translator_version == verification::LEAN_TRANSLATOR_VERSION
         && metadata.bridge_lemma_hash == verification::LEAN_BRIDGE_LEMMA_HASH
+}
+
+pub fn lean_dual_check_status(atom: &AtomCertificate) -> LeanDualCheck {
+    let Some(metadata) = atom.lean_dual_check.as_ref() else {
+        return LeanDualCheck::Absent;
+    };
+    if metadata.status != status::LEAN_STATUS_VERIFIED || metadata.theorem_name.is_empty() {
+        return LeanDualCheck::NotVerified;
+    }
+    if !lean_result_metadata_is_current(metadata) {
+        return LeanDualCheck::Stale;
+    }
+    match lean_axiom_audit_for_metadata(metadata) {
+        LeanAxiomAudit::Passed { .. }
+            if metadata.axiom_audit.as_deref() == Some("passed")
+                && metadata.kernel_axioms.is_some() =>
+        {
+            LeanDualCheck::Passed
+        }
+        LeanAxiomAudit::Passed { .. }
+        | LeanAxiomAudit::Rejected { .. }
+        | LeanAxiomAudit::Error
+        | LeanAxiomAudit::Unaudited => LeanDualCheck::AxiomRejected,
+    }
 }
 
 /// Validate that an atom certificate matches the expected Lean translator bridge.

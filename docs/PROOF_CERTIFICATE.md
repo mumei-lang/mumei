@@ -22,6 +22,10 @@ keywords: "mumei proof certificate, formal verification, verified imports, Z3, L
    `propext`, `Classical.choice`, and `Quot.sound`; certificates without audit
    fields remain accepted as legacy `Unaudited` evidence.
 
+`lean_dual_check` records an independent Lean re-proof beside the Z3 result.
+It is separate from `lean_result_metadata` and does not affect certificate
+proof status, `--strict`, or `all_verified`.
+
 If translator metadata is missing or stale, certificate verification returns
 `stale_translator` when `--allow-lean-verified` is enabled. A rejected or
 errored kernel-axiom audit returns `axiom_rejected` instead. `verify-cert
@@ -203,6 +207,7 @@ CLI values take precedence over environment values. `--intent-fidelity` accepts 
 | `manual_lemma_reason` | `Option<String>` | Reason partial translation must be completed by a manual lemma |
 | `translator_ir` | `TranslatorIRMetadata` | Typed intermediate metadata: obligation sort, binders, theorem goal, provenance span, and lowering rules |
 | `lean_metadata` | `Option<LeanResultMetadata>` | Lean result metadata emitted by mumei-lean (`status`, theorem name, translator version, bridge lemma hash, proof path, diagnostics) |
+| `lean_dual_check` | `Option<LeanResultMetadata>` | Independent Lean re-proof for an obligation already discharged by Z3; recorded separately and never changes proof status, strict checks, or `all_verified` |
 | `retry_policy_fingerprint` | `Option<String>` | SHA-256 fingerprint of the retry budget policy used by the agent/healing process |
 | `attempt_summary` | `Option<AttemptSummary>` | Total attempts, attempts by action class, and final action class before success or manual review |
 | `cost_success_metrics` | `Option<CostSuccessMetrics>` | Attempts, tokens, solver seconds, and spec drift observed before success |

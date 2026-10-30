@@ -419,6 +419,7 @@ pub fn generate_certificate_with_reconstruction_losses(
                 translator_ir,
                 lean_metadata: None,
                 lean_result_metadata: None,
+                lean_dual_check: None,
                 counterexample_validation,
                 reconstruction_loss,
                 self_correction_metadata,
