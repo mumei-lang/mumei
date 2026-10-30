@@ -140,7 +140,7 @@ Inputs:
 | `mumei-version` | string | `""` | Empty downloads the latest release; otherwise downloads that release, accepting a version with or without a leading `v`. |
 | `working-directory` | string | `"."` | Project directory containing the sources and optional `mumei.toml`. |
 | `sources` | string | required | Whitespace-separated `.mm` paths relative to `working-directory`. |
-| `require-grade` | string | `""` | Empty reports grades without gating; otherwise requires `G0` through `G5`. |
+| `require-grade` | string | `""` | Empty reports grades without gating; otherwise requires `G0` through `G5`. The reusable gate's fresh certificates can reach at most G4. |
 | `require-discriminating` | boolean | `false` | Require the Claim Book negative-control gate to pass. |
 | `observations` | string | `""` | Test-harvest path relative to `working-directory`, passed to `mumei claims --observations`. |
 | `charter` | boolean | `false` | Run `mumei charter check` using the `[charter]` configuration in `mumei.toml`. |
@@ -154,6 +154,14 @@ source's proof certificate and generated reports.
 
 `observations` requires a Mumei release newer than v0.6.23, which does not
 support `mumei claims --observations`.
+
+The reusable gate builds fresh Z3 certificates, which do not carry Lean
+evidence, so it cannot reach G5. To gate on G5, upgrade a certificate with
+mumei-lean's `bridge.py --dual-check`, then run:
+
+```bash
+mumei claims <src> --cert <upgraded cert> --allow-lean-verified --require-grade G5
+```
 
 ## JSON
 
