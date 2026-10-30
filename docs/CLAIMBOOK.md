@@ -141,7 +141,6 @@ Inputs:
 | `working-directory` | string | `"."` | Project directory containing the sources and optional `mumei.toml`. |
 | `sources` | string | required | Whitespace-separated `.mm` paths relative to `working-directory`. |
 | `require-grade` | string | `""` | Empty reports grades without gating; otherwise requires `G0` through `G5`. |
-| `allow-lean-verified` | boolean | `false` | Opt in to Lean evidence for Claim Book and Charter; required for G5 gates. |
 | `require-discriminating` | boolean | `false` | Require the Claim Book negative-control gate to pass. |
 | `observations` | string | `""` | Test-harvest path relative to `working-directory`, passed to `mumei claims --observations`. |
 | `charter` | boolean | `false` | Run `mumei charter check` using the `[charter]` configuration in `mumei.toml`. |
@@ -155,9 +154,6 @@ source's proof certificate and generated reports.
 
 `observations` requires a Mumei release newer than v0.6.23, which does not
 support `mumei claims --observations`.
-
-G5 gates require `allow-lean-verified: true` and a Mumei release containing
-Claim Book dual-check support; older releases cannot gate G5.
 
 ## JSON
 
