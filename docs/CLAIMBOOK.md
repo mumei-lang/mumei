@@ -161,8 +161,8 @@ G5 requires `allow-lean-verified: true` and `certificates` pointing at proof
 certificates upgraded by mumei-lean's `bridge.py --dual-check` and present in
 the checked-out repository. Fresh verification still runs for each source;
 Claim Book and Charter use the supplied certificate instead. Claims checks
-freshness against the current source, so a stale supplied certificate is G0
-and fails closed. For example:
+freshness against the current source, so a stale supplied certificate is G0;
+the gate fails on it only when `require-grade` is set above G0. For example:
 
 ```yaml
 with:
