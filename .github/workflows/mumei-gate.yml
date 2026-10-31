@@ -37,6 +37,11 @@ on:
         required: false
         type: boolean
         default: false
+      require-complete:
+        description: Require non-empty claims with complete dependency coverage for each source.
+        required: false
+        type: boolean
+        default: false
       observations:
         description: Optional test-harvest path relative to working-directory.
         required: false
@@ -140,6 +145,7 @@ jobs:
           ALLOW_LEAN_VERIFIED: ${{ inputs.allow-lean-verified }}
           CERTIFICATES: ${{ inputs.certificates }}
           REQUIRE_DISCRIMINATING: ${{ inputs.require-discriminating }}
+          REQUIRE_COMPLETE: ${{ inputs.require-complete }}
           OBSERVATIONS: ${{ inputs.observations }}
           CHARTER: ${{ inputs.charter }}
         run: |
@@ -256,6 +262,9 @@ jobs:
             fi
             if [[ "$REQUIRE_DISCRIMINATING" == "true" ]]; then
               claims_args+=(--require-discriminating)
+            fi
+            if [[ "$REQUIRE_COMPLETE" == "true" ]]; then
+              claims_args+=(--require-complete)
             fi
             if [[ -n "$OBSERVATIONS" ]]; then
               claims_args+=(--observations "$OBSERVATIONS")

@@ -145,14 +145,18 @@ or `missing`. With `--strict`, it also exits 1 for `changed`,
 mumei claims <input.mm> [--cert <path>] [--format json|md|both]
   [--out-dir <directory>] [--controls] [--max-mutants <N>]
   [--observations <harvest.json>]
-  [--require-discriminating] [--require-grade <G0..G5>]
+  [--require-discriminating] [--require-complete] [--require-grade <G0..G5>]
 ```
 
 `claims` writes a read-only Claim Book report. `--controls` attaches negative
 control results to claims; `--max-mutants` sets the per-atom cap (default 32)
 and requires `--controls`. `--require-discriminating` enables controls and
 fails with exit 1 if any claim is weak or inconclusive. It may be combined
-with `--require-grade`; reports are written before either gate is evaluated.
+with `--require-grade` and `--require-complete`; reports are written before any
+requested gate is evaluated. `--require-complete` requires non-empty claims and
+complete dependency coverage, independently of grades and controls. It exits 1
+on missing direct/transitive dependencies or ambiguous method-name resolution;
+without the flag, existing completeness reporting does not cause rejection.
 `--observations` accepts the `mumei.test-harvest/v1` JSON file used by
 `mumei observe` and attaches its verdict counts to Claim Book claims. Supporting
 observations can lift eligible G0 claims to G2; contradictions never lift a

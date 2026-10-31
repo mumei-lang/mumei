@@ -22,6 +22,13 @@ Current priority after the completed P11/P14 integration is docs-sync and harnes
 
 ## No-`.mm` front door and V1 order
 
+Claim Book's opt-in `--require-complete` gate complements grade requirements:
+it requires non-empty claims with complete dependency coverage without changing
+Seal Grade semantics or default CLI behavior. The reusable gate exposes the
+same optional check as `require-complete`; scenario consumers must continue to
+distinguish dependency coverage from proof, observations, and runtime assumptions.
+See [Claim Book](CLAIMBOOK.md#gates-and-exit-codes) for the contract.
+
 The canonical no-`.mm` route is `mumei-agent audit --code-file ... --auto-migrate --auto-heal` and MCP `scan_and_fix`. Both names describe the same contract and must keep the gate order `audit -> migrate-suggest -> heal`:
 
 Language coverage for this front door is Python, Rust, TypeScript, Go, and Solidity. The language selector only changes the parser path; it must not rename or alias the eight no-`.mm` result keys. The fixed artifact keys and gate order do not vary by language: Rust overflow/bounds, TypeScript null/undefined, Go bounds/nil/overflow, and Solidity reentrancy/CEI/access-control findings are normalized into `verification_violations`, while spec/code drift remains `cross_validation_gaps` and human review still starts only at `next_steps`.
