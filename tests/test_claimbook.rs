@@ -1437,7 +1437,7 @@ fn complete_gate_preserves_input_and_output_error_exit_codes() {
         (&source, vec!["--cert", missing_cert.to_str().unwrap()], 4),
         (&invalid_source, vec![], 4),
         (&missing_source, vec![], 4),
-        (&source, vec!["--out-dir", invalid_out.to_str().unwrap()], 3),
+        (&source, vec!["--out-dir", invalid_out.to_str().unwrap()], 5),
         (&source, vec!["--require-grade", "G6"], 2),
     ] {
         let mut flags = args;
@@ -1463,7 +1463,7 @@ fn complete_gate_preserves_input_and_output_error_exit_codes() {
             &empty,
             &["--require-complete", "--out-dir", out.to_str().unwrap()],
         );
-        assert_eq!(output.status.code(), Some(3));
+        assert_eq!(output.status.code(), Some(5));
         assert!(String::from_utf8_lossy(&output.stderr).contains("Could not write"));
         assert!(!String::from_utf8_lossy(&output.stderr).contains("requires at least one claim"));
     }
@@ -1552,7 +1552,55 @@ fn method_name_dependency_keeps_qualified_premise_name() {
     );
     assert_eq!(complete_gate.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&complete_gate.stderr)
-        .contains("caller: dependency coverage is incomplete; ambiguous dependency resolution"));
+        .contains("caller: dependency coverage is incomplete; method-name resolution is not exact; resolved dependencies: Point::get"));
+}
+
+#[test]
+fn complete_gate_distinguishes_ambiguous_and_exact_qualified_method_names() {
+    let dir = fresh_dir("complete_ambiguous_methods");
+    let method = include_str!("fixtures/claimbook_impl.mm");
+    let source = write_source(
+        &dir,
+        "main.mm",
+        &format!(
+        "{method}\n{}\natom caller() -> i64\nrequires: true;\nensures: result == 7;\nbody: 7;\n",
+        method.replace("Point", "Other")
+    ),
+    );
+    let cert_path = certify(&dir, &source);
+    let original: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&cert_path).unwrap()).unwrap();
+    for (dependency, exit) in [("get", 1), ("Point::get", 0)] {
+        let mut cert = original.clone();
+        cert.atoms
+            .iter_mut()
+            .find(|entry| entry.name == "caller")
+            .unwrap()
+            .dependencies = vec![dependency.to_string()];
+        refresh_certificate_integrity(&mut cert);
+        std::fs::write(&cert_path, serde_json::to_vec_pretty(&cert).unwrap()).unwrap();
+        let output = claims(&dir, &source, &["--require-complete"]);
+        assert_eq!(
+            output.status.code(),
+            Some(exit),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report = json_report(&dir.join("claimbook.json"));
+        assert_eq!(
+            atom(&report, "caller")["effective_grade_complete"],
+            exit == 0
+        );
+        if exit == 1 {
+            assert_eq!(
+                atom(&report, "caller")["unresolved_dependencies"],
+                json!(["get"])
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("unresolved dependencies: get")
+            );
+        }
+    }
 }
 
 #[test]

@@ -39,6 +39,7 @@ def _run_gate(
     observations: str = "",
     charter: bool = False,
     fail_claims_source: str = "",
+    reject_complete_flag: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]], str, Path, Path]:
     project = tmp_path / "project"
     project.mkdir()
@@ -70,6 +71,9 @@ def _run_gate(
         "argv = sys.argv[1:]\n"
         "with Path(os.environ['MUMEI_LOG']).open('a', encoding='utf-8') as log:\n"
         "    log.write(json.dumps(argv) + '\\n')\n"
+        "if '--require-complete' in argv and os.environ.get('REJECT_COMPLETE_FLAG') == 'true':\n"
+        "    print('unexpected argument --require-complete', file=sys.stderr)\n"
+        "    sys.exit(2)\n"
         "if argv[0] == 'verify':\n"
         "    output = Path(argv[argv.index('--output') + 1])\n"
         "    output.parent.mkdir(parents=True, exist_ok=True)\n"
@@ -98,6 +102,7 @@ def _run_gate(
             "CERTIFICATES": certificates,
             "MUMEI_LOG": str(log_path),
             "FAIL_CLAIMS_SOURCE": fail_claims_source,
+            "REJECT_COMPLETE_FLAG": str(reject_complete_flag).lower(),
         }
     )
     result = subprocess.run(
@@ -414,3 +419,21 @@ def test_workflow_declares_and_wires_new_inputs() -> None:
     assert preflight_index < install_index
     assert "Certificate count" in preflight["run"]
     assert '[[ ! -f "$certificate_path" ]]' in preflight["run"]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_binary_without_complete_option_fails_only_when_gate_enabled(
+    tmp_path: Path, enabled: bool
+) -> None:
+    result, calls, summary, _, _ = _run_gate(
+        tmp_path,
+        sources="a.mm sub/b.mm",
+        charter=True,
+        require_complete=enabled,
+        reject_complete_flag=True,
+    )
+    assert result.returncode == int(enabled)
+    assert len(calls) == 6
+    if enabled:
+        assert "unexpected argument --require-complete" in result.stderr
+        assert "`mumei claims`: exit code `2`" in summary

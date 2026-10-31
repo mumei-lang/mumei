@@ -215,7 +215,10 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
                 ));
             }
             if reasons.is_empty() {
-                reasons.push("ambiguous dependency resolution".to_string());
+                reasons.push(format!(
+                    "method-name resolution is not exact; resolved dependencies: {}",
+                    claim.dependencies.join(", ")
+                ));
             }
             eprintln!(
                 "{}: dependency coverage is incomplete; {}",

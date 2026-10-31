@@ -105,10 +105,11 @@ The `trusted_base` section lists the solver and generator versions, translator v
 
 `--require-complete` additionally requires at least one claim and every claim's
 `effective_grade_complete` to be true. Coverage refers to dependencies recorded
-in the Claim Book, not an additional analysis of all calls. It rejects direct or transitive unresolved
-dependencies and method-name matches, even when the effective grade meets the
-requested minimum. Diagnostics list incomplete claims and their unresolved or
-incomplete dependencies; an ambiguous leaf resolution is identified separately.
+in the Claim Book, not an additional analysis of all calls. It rejects direct or
+transitive unresolved dependencies and method-name matches, even when the
+effective grade meets the requested minimum. Diagnostics list incomplete claims
+and their unresolved or incomplete dependencies; non-exact method-name resolution
+is identified separately.
 Complete dependency coverage does not establish proof, remove assumptions, or
 verify external services. Combine this flag with a grade requirement when both
 are needed. Unresolved built-ins or imported claims are not exempted by name.
