@@ -35,9 +35,11 @@ def _run_gate(
     allow_lean_verified: bool = False,
     require_grade: str = "",
     require_discriminating: bool = False,
+    require_complete: bool = False,
     observations: str = "",
     charter: bool = False,
     fail_claims_source: str = "",
+    reject_complete_flag: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]], str, Path, Path]:
     project = tmp_path / "project"
     project.mkdir()
@@ -69,6 +71,9 @@ def _run_gate(
         "argv = sys.argv[1:]\n"
         "with Path(os.environ['MUMEI_LOG']).open('a', encoding='utf-8') as log:\n"
         "    log.write(json.dumps(argv) + '\\n')\n"
+        "if '--require-complete' in argv and os.environ.get('REJECT_COMPLETE_FLAG') == 'true':\n"
+        "    print('unexpected argument --require-complete', file=sys.stderr)\n"
+        "    sys.exit(2)\n"
         "if argv[0] == 'verify':\n"
         "    output = Path(argv[argv.index('--output') + 1])\n"
         "    output.parent.mkdir(parents=True, exist_ok=True)\n"
@@ -90,12 +95,14 @@ def _run_gate(
             "SOURCES": sources,
             "REQUIRE_GRADE": require_grade,
             "REQUIRE_DISCRIMINATING": str(require_discriminating).lower(),
+            "REQUIRE_COMPLETE": str(require_complete).lower(),
             "OBSERVATIONS": observations,
             "CHARTER": str(charter).lower(),
             "ALLOW_LEAN_VERIFIED": str(allow_lean_verified).lower(),
             "CERTIFICATES": certificates,
             "MUMEI_LOG": str(log_path),
             "FAIL_CLAIMS_SOURCE": fail_claims_source,
+            "REJECT_COMPLETE_FLAG": str(reject_complete_flag).lower(),
         }
     )
     result = subprocess.run(
@@ -190,6 +197,28 @@ def test_allow_lean_verified_is_added_to_enabled_commands(
         assert "--allow-lean-verified" in commands["charter"]
     else:
         assert "charter" not in commands
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("other_gates", [False, True])
+def test_dependency_coverage_gate_is_opt_in_and_only_changes_claims(
+    tmp_path: Path, enabled: bool, other_gates: bool
+) -> None:
+    result, calls, _, _, _ = _run_gate(
+        tmp_path,
+        sources="a.mm sub/b.mm",
+        require_complete=enabled,
+        require_grade="G4" if other_gates else "",
+        require_discriminating=other_gates,
+        charter=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for call in calls:
+        assert ("--require-complete" in call) == (enabled and call[0] == "claims")
+        if call[0] == "claims":
+            assert ("--require-grade" in call) == other_gates
+            assert ("--require-discriminating" in call) == other_gates
 
 
 def test_supplied_certificate_is_copied_and_used_without_lean_opt_in(
@@ -330,6 +359,7 @@ def test_claims_failure_does_not_stop_processing_later_sources(
         tmp_path,
         sources="a.mm sub/b.mm",
         charter=True,
+        require_complete=True,
         fail_claims_source="a.mm",
     )
 
@@ -343,6 +373,7 @@ def test_claims_failure_does_not_stop_processing_later_sources(
         "charter",
     ]
     assert calls[-2][1] == "sub/b.mm"
+    assert "--require-complete" in calls[-2]
 
 
 def test_workflow_declares_and_wires_new_inputs() -> None:
@@ -368,6 +399,11 @@ def test_workflow_declares_and_wires_new_inputs() -> None:
         "${{ inputs.allow-lean-verified }}"
     )
     assert gate_step["env"]["CERTIFICATES"] == "${{ inputs.certificates }}"
+    assert inputs["require-complete"]["type"] == "boolean"
+    assert inputs["require-complete"]["default"] is False
+    assert gate_step["env"]["REQUIRE_COMPLETE"] == "${{ inputs.require-complete }}"
+    upload = next(step for step in steps if "upload-artifact" in step.get("uses", ""))
+    assert upload["if"] == "always()"
 
     preflight_index = next(
         index
@@ -383,3 +419,21 @@ def test_workflow_declares_and_wires_new_inputs() -> None:
     assert preflight_index < install_index
     assert "Certificate count" in preflight["run"]
     assert '[[ ! -f "$certificate_path" ]]' in preflight["run"]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_binary_without_complete_option_fails_only_when_gate_enabled(
+    tmp_path: Path, enabled: bool
+) -> None:
+    result, calls, summary, _, _ = _run_gate(
+        tmp_path,
+        sources="a.mm sub/b.mm",
+        charter=True,
+        require_complete=enabled,
+        reject_complete_flag=True,
+    )
+    assert result.returncode == int(enabled)
+    assert len(calls) == 6
+    if enabled:
+        assert "unexpected argument --require-complete" in result.stderr
+        assert "`mumei claims`: exit code `2`" in summary

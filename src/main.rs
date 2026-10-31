@@ -105,6 +105,7 @@ fn main() {
             controls,
             max_mutants,
             require_discriminating,
+            require_complete,
             require_grade,
         }) => commands::claims::cmd_claims(
             &input,
@@ -117,6 +118,7 @@ fn main() {
                 controls_enabled: controls,
                 max_mutants,
                 require_discriminating,
+                require_complete,
                 require_grade: require_grade.as_deref(),
             },
         ),

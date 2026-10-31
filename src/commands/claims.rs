@@ -5,6 +5,7 @@ use mumei_core::claimbook::{
 };
 use mumei_core::parser::Item;
 use mumei_core::{controls, observe, parser, proof_cert};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +18,7 @@ pub(crate) struct ClaimsOptions<'a> {
     pub(crate) controls_enabled: bool,
     pub(crate) max_mutants: usize,
     pub(crate) require_discriminating: bool,
+    pub(crate) require_complete: bool,
     pub(crate) require_grade: Option<&'a str>,
 }
 
@@ -30,6 +32,7 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
         controls_enabled,
         max_mutants,
         require_discriminating,
+        require_complete,
         require_grade,
     } = options;
     let cert_path = cert_arg
@@ -173,6 +176,57 @@ pub(crate) fn cmd_claims(input: &str, options: ClaimsOptions<'_>) {
     );
 
     let mut rejected = false;
+    if require_complete {
+        if book.claims.is_empty() {
+            rejected = true;
+            eprintln!("No claims found; --require-complete requires at least one claim");
+        }
+        let incomplete_claims = book
+            .claims
+            .iter()
+            .filter(|claim| !claim.effective_grade_complete)
+            .map(|claim| claim.atom.as_str())
+            .collect::<BTreeSet<_>>();
+        for claim in book
+            .claims
+            .iter()
+            .filter(|claim| !claim.effective_grade_complete)
+        {
+            rejected = true;
+            let mut reasons = Vec::new();
+            if !claim.unresolved_dependencies.is_empty() {
+                reasons.push(format!(
+                    "unresolved dependencies: {}",
+                    claim.unresolved_dependencies.join(", ")
+                ));
+            }
+            let incomplete_dependencies = claim
+                .dependencies
+                .iter()
+                .filter(|dependency| incomplete_claims.contains(dependency.as_str()))
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            if !incomplete_dependencies.is_empty() {
+                reasons.push(format!(
+                    "incomplete dependencies: {}",
+                    incomplete_dependencies.join(", ")
+                ));
+            }
+            if reasons.is_empty() {
+                reasons.push(format!(
+                    "method-name resolution is not exact; resolved dependencies: {}",
+                    claim.dependencies.join(", ")
+                ));
+            }
+            eprintln!(
+                "{}: dependency coverage is incomplete; {}",
+                claim.atom,
+                reasons.join("; ")
+            );
+        }
+    }
     if let Some(required_grade) = require_grade {
         let required_grade = match required_grade {
             "G0" => SealGrade::G0,

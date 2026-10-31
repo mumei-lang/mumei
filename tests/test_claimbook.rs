@@ -1149,6 +1149,327 @@ fn impl_methods_use_qualified_atom_names() {
 }
 
 #[test]
+fn complete_gate_preserves_certified_claims_and_report_bytes() {
+    let dir = fresh_dir("complete_real_chain");
+    let source = write_source(
+        &dir,
+        "main.mm",
+        "atom leaf(x: i64) -> i64\nrequires: true;\nensures: result == x;\nbody: x;\n\
+         atom middle(x: i64) -> i64\nrequires: true;\nensures: result == x;\nbody: leaf(x);\n\
+         atom root(x: i64) -> i64\nrequires: true;\nensures: result == x;\nbody: middle(x);\n",
+    );
+    certify(&dir, &source);
+    let plain = dir.join("plain");
+    let gated = dir.join("gated");
+    for (out, flags) in [
+        (&plain, vec!["--require-grade", "G4"]),
+        (&gated, vec!["--require-grade", "G4", "--require-complete"]),
+    ] {
+        let mut args = flags;
+        args.extend(["--out-dir", out.to_str().unwrap()]);
+        let output = claims(&dir, &source, &args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let report = json_report(&gated.join("claimbook.json"));
+    assert_eq!(atom(&report, "root")["dependencies"], json!(["middle"]));
+    assert_eq!(atom(&report, "middle")["dependencies"], json!(["leaf"]));
+    for file in ["claimbook.json", "CLAIMBOOK.md"] {
+        assert_eq!(
+            std::fs::read(plain.join(file)).unwrap(),
+            std::fs::read(gated.join(file)).unwrap()
+        );
+    }
+    let all_gates = claims(
+        &dir,
+        &source,
+        &[
+            "--require-grade",
+            "G4",
+            "--require-discriminating",
+            "--require-complete",
+            "--out-dir",
+            gated.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        all_gates.status.success(),
+        "{}",
+        String::from_utf8_lossy(&all_gates.stderr)
+    );
+}
+
+#[test]
+fn complete_gate_follows_existing_dependency_closure_without_lowering_grades() {
+    let dir = fresh_dir("complete_graphs");
+    let source = write_source(
+        &dir,
+        "main.mm",
+        "atom a() -> i64\nrequires: true;\nensures: result == 7;\nbody: 7;\n\
+         atom b() -> i64\nrequires: true;\nensures: result == 7;\nbody: 7;\n\
+         atom c() -> i64\nrequires: true;\nensures: result == 7;\nbody: 7;\n",
+    );
+    let cert_path = certify(&dir, &source);
+    let original: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&cert_path).unwrap()).unwrap();
+    for (label, graph, expected_incomplete) in [
+        ("closed_chain", [vec!["b"], vec!["c"], vec![]], vec![]),
+        ("direct", [vec!["missing"], vec![], vec![]], vec!["a"]),
+        (
+            "transitive",
+            [vec!["b"], vec!["missing"], vec![]],
+            vec!["a", "b"],
+        ),
+        ("cycle", [vec!["b"], vec!["a"], vec![]], vec![]),
+        (
+            "cycle_missing",
+            [vec!["b"], vec!["a", "missing"], vec![]],
+            vec!["a", "b"],
+        ),
+        ("self", [vec!["a"], vec![], vec![]], vec![]),
+        (
+            "self_missing",
+            [vec!["a", "missing"], vec![], vec![]],
+            vec!["a"],
+        ),
+        ("builtin_name", [vec!["len"], vec![], vec![]], vec!["a"]),
+    ] {
+        let mut cert = original.clone();
+        for (name, dependencies) in ["a", "b", "c"].into_iter().zip(graph) {
+            cert.atoms
+                .iter_mut()
+                .find(|entry| entry.name == name)
+                .unwrap()
+                .dependencies = dependencies.into_iter().map(str::to_string).collect();
+        }
+        refresh_certificate_integrity(&mut cert);
+        std::fs::write(&cert_path, serde_json::to_vec_pretty(&cert).unwrap()).unwrap();
+        let plain = dir.join(format!("{label}_plain"));
+        let gated = dir.join(format!("{label}_gated"));
+        let baseline = claims(
+            &dir,
+            &source,
+            &[
+                "--require-grade",
+                "G4",
+                "--out-dir",
+                plain.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            baseline.status.success(),
+            "{label}: {}",
+            String::from_utf8_lossy(&baseline.stderr)
+        );
+        let output = claims(
+            &dir,
+            &source,
+            &[
+                "--require-grade",
+                "G4",
+                "--require-complete",
+                "--out-dir",
+                gated.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(!expected_incomplete.is_empty())),
+            "{label}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report = json_report(&gated.join("claimbook.json"));
+        for name in ["a", "b", "c"] {
+            assert_eq!(
+                atom(&report, name)["effective_grade"],
+                "G4",
+                "{label}/{name}"
+            );
+            assert_eq!(
+                atom(&report, name)["effective_grade_complete"],
+                !expected_incomplete.contains(&name),
+                "{label}/{name}"
+            );
+        }
+        for file in ["claimbook.json", "CLAIMBOOK.md"] {
+            assert_eq!(
+                std::fs::read(plain.join(file)).unwrap(),
+                std::fs::read(gated.join(file)).unwrap(),
+                "{label}/{file}"
+            );
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if label == "transitive" {
+            assert!(
+                stderr.contains("a: dependency coverage is incomplete; incomplete dependencies: b")
+            );
+            assert!(stderr.contains(
+                "b: dependency coverage is incomplete; unresolved dependencies: missing"
+            ));
+        }
+        if label == "builtin_name" {
+            assert!(stderr.contains("unresolved dependencies: len"));
+        }
+    }
+}
+
+#[test]
+fn complete_gate_rejects_empty_claims_only_when_requested_and_writes_each_format() {
+    for format in ["json", "md", "both"] {
+        let dir = fresh_dir("complete_empty");
+        let source = write_source(&dir, "empty.mm", "// No claims in this source.\n");
+        let plain = claims(
+            &dir,
+            &source,
+            &["--require-grade", "G4", "--format", format],
+        );
+        assert!(
+            plain.status.success(),
+            "{}",
+            String::from_utf8_lossy(&plain.stderr)
+        );
+        let out = dir.join("gated");
+        let output = claims(
+            &dir,
+            &source,
+            &[
+                "--require-complete",
+                "--format",
+                format,
+                "--out-dir",
+                out.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("requires at least one claim"));
+        assert_eq!(out.join("claimbook.json").exists(), format != "md");
+        assert_eq!(out.join("CLAIMBOOK.md").exists(), format != "json");
+    }
+}
+
+#[test]
+fn complete_gate_does_not_imply_grade_or_discriminating_controls() {
+    let dir = fresh_dir("complete_other_gates");
+    let source = write_source(
+        &dir,
+        "weak.mm",
+        "atom weak(x: i64) -> i64\nrequires: x >= 0 && x <= 10;\nensures: result >= 0;\nbody: x + 1;\n",
+    );
+    for (flags, expected) in [
+        (vec!["--require-complete"], 0),
+        (vec!["--require-complete", "--require-grade", "G4"], 1),
+        (vec!["--require-complete", "--require-discriminating"], 1),
+        (
+            vec![
+                "--require-complete",
+                "--require-grade",
+                "G4",
+                "--require-discriminating",
+            ],
+            1,
+        ),
+    ] {
+        let output = claims(&dir, &source, &flags);
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report = json_report(&dir.join("claimbook.json"));
+        assert_eq!(atom(&report, "weak")["effective_grade_complete"], true);
+        assert_eq!(atom(&report, "weak")["effective_grade"], "G0");
+        if flags.contains(&"--require-grade") {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("effective G0"));
+        }
+        if flags.contains(&"--require-discriminating") {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("controls weak"));
+        }
+    }
+    let cert_path = certify(&dir, &source);
+    let mut cert: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&cert_path).unwrap()).unwrap();
+    cert.atoms
+        .iter_mut()
+        .find(|entry| entry.name == "weak")
+        .unwrap()
+        .dependencies = vec!["missing".to_string()];
+    refresh_certificate_integrity(&mut cert);
+    std::fs::write(&cert_path, serde_json::to_vec_pretty(&cert).unwrap()).unwrap();
+    let output = claims(
+        &dir,
+        &source,
+        &[
+            "--require-complete",
+            "--require-grade",
+            "G5",
+            "--require-discriminating",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for diagnostic in [
+        "unresolved dependencies: missing",
+        "required G5",
+        "controls weak",
+    ] {
+        assert!(
+            stderr.contains(diagnostic),
+            "missing {diagnostic}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn complete_gate_preserves_input_and_output_error_exit_codes() {
+    let dir = fresh_dir("complete_errors");
+    let source = copy_fixture(&dir, "claimbook_atoms.mm", "main.mm");
+    let invalid_cert = write_source(&dir, "invalid.json", "{");
+    let invalid_source = write_source(&dir, "invalid.mm", "atom");
+    let missing_source = dir.join("missing.mm");
+    let missing_cert = dir.join("missing.json");
+    let invalid_out = write_source(&dir, "not_a_directory", "file");
+    for (input, args, expected) in [
+        (&source, vec!["--cert", invalid_cert.to_str().unwrap()], 4),
+        (&source, vec!["--cert", missing_cert.to_str().unwrap()], 4),
+        (&invalid_source, vec![], 4),
+        (&missing_source, vec![], 4),
+        (&source, vec!["--out-dir", invalid_out.to_str().unwrap()], 5),
+        (&source, vec!["--require-grade", "G6"], 2),
+    ] {
+        let mut flags = args;
+        flags.push("--require-complete");
+        let output = claims(&dir, input, &flags);
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(!dir.join("claimbook.json").exists());
+    assert!(!dir.join("CLAIMBOOK.md").exists());
+
+    let empty = write_source(&dir, "empty.mm", "// Empty claims.\n");
+    for report_file in ["claimbook.json", "CLAIMBOOK.md"] {
+        let out = dir.join(format!("blocked_{report_file}"));
+        std::fs::create_dir(&out).unwrap();
+        std::fs::create_dir(out.join(report_file)).unwrap();
+        let output = claims(
+            &dir,
+            &empty,
+            &["--require-complete", "--out-dir", out.to_str().unwrap()],
+        );
+        assert_eq!(output.status.code(), Some(5));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Could not write"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("requires at least one claim"));
+    }
+}
+
+#[test]
 fn method_name_dependency_keeps_qualified_premise_name() {
     let dir = fresh_dir("method-name-premise");
     let source = copy_fixture(&dir, "claimbook_impl.mm", "impl.mm");
@@ -1223,6 +1544,63 @@ fn method_name_dependency_keeps_qualified_premise_name() {
     assert_eq!(gate.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&gate.stderr)
         .contains("dependency `Point::get` (matched from `get` by method name) (G1)"));
+
+    let complete_gate = claims(
+        &dir,
+        &source,
+        &["--require-complete", "--out-dir", &out_dir_arg],
+    );
+    assert_eq!(complete_gate.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&complete_gate.stderr)
+        .contains("caller: dependency coverage is incomplete; method-name resolution is not exact; resolved dependencies: Point::get"));
+}
+
+#[test]
+fn complete_gate_distinguishes_ambiguous_and_exact_qualified_method_names() {
+    let dir = fresh_dir("complete_ambiguous_methods");
+    let method = include_str!("fixtures/claimbook_impl.mm");
+    let source = write_source(
+        &dir,
+        "main.mm",
+        &format!(
+        "{method}\n{}\natom caller() -> i64\nrequires: true;\nensures: result == 7;\nbody: 7;\n",
+        method.replace("Point", "Other")
+    ),
+    );
+    let cert_path = certify(&dir, &source);
+    let original: ProofCertificate =
+        serde_json::from_slice(&std::fs::read(&cert_path).unwrap()).unwrap();
+    for (dependency, exit) in [("get", 1), ("Point::get", 0)] {
+        let mut cert = original.clone();
+        cert.atoms
+            .iter_mut()
+            .find(|entry| entry.name == "caller")
+            .unwrap()
+            .dependencies = vec![dependency.to_string()];
+        refresh_certificate_integrity(&mut cert);
+        std::fs::write(&cert_path, serde_json::to_vec_pretty(&cert).unwrap()).unwrap();
+        let output = claims(&dir, &source, &["--require-complete"]);
+        assert_eq!(
+            output.status.code(),
+            Some(exit),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report = json_report(&dir.join("claimbook.json"));
+        assert_eq!(
+            atom(&report, "caller")["effective_grade_complete"],
+            exit == 0
+        );
+        if exit == 1 {
+            assert_eq!(
+                atom(&report, "caller")["unresolved_dependencies"],
+                json!(["get"])
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("unresolved dependencies: get")
+            );
+        }
+    }
 }
 
 #[test]

@@ -318,6 +318,9 @@ pub(crate) enum Command {
         /// Fail if any checked claim has weak or inconclusive controls
         #[arg(long)]
         require_discriminating: bool,
+        /// Require non-empty claims with complete dependency coverage
+        #[arg(long)]
+        require_complete: bool,
         /// Require every claim to meet this Seal Grade
         #[arg(long, value_parser = ["G0", "G1", "G2", "G3", "G4", "G5"])]
         require_grade: Option<String>,
