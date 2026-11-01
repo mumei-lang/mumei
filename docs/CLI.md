@@ -55,6 +55,22 @@ kills, while unknown or otherwise unanalyzable mutants do not. No-op `Pow`
 mutations are skipped. This shares the site-mutant engine with
 [`mumei controls`](CONTROLS.md), which provides a fuller per-atom report.
 
+### Profiles
+
+`--profile strict` enables `--strict-imports`, `--strict-array-types`, and
+`--warn-fragment`. `--profile audit` enables those checks plus
+`--warn-untyped-arrays`, `--enable-vacuity-check`, and `--detect-loops`.
+
+| Profile | Enabled flags |
+|---|---|
+| `strict` | `--strict-imports`, `--strict-array-types`, `--warn-fragment` |
+| `audit` | All `strict` flags, `--warn-untyped-arrays`, `--enable-vacuity-check`, `--detect-loops` |
+
+An explicit `--profile` overrides `[verify].profile` in `mumei.toml`; otherwise
+the manifest profile is used. Explicit flags still apply, and a profile never
+turns a flag off. `--suggest-cegis` still requires an explicit
+`--detect-loops`, because clap's `requires` check only sees CLI flags.
+
 The local proof store is opt-in with `--proof-store` or `[proof] store = true`
 in `mumei.toml`. `MUMEI_PROOF_STORE` selects its directory; otherwise it uses
 `$HOME/.mumei/proof-store`. Setting the environment variable does not enable

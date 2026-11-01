@@ -27,12 +27,21 @@ pub struct Manifest {
     #[serde(default)]
     pub proof: ProofConfig,
     #[serde(default)]
+    pub verify: VerifyConfig,
+    #[serde(default)]
     pub effects: EffectsConfig,
     #[serde(default)]
     pub registry: RegistryConfig,
     #[serde(default)]
     pub charter: Option<CharterConfig>,
 }
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VerifyConfig {
+    #[serde(default)]
+    pub profile: Option<String>,
+}
+
 /// [package] セクション
 #[derive(Debug, Clone, Deserialize)]
 pub struct Package {
@@ -285,6 +294,53 @@ impl std::error::Error for ManifestError {}
 #[cfg(test)]
 mod tests {
     use super::{CharterConfig, Manifest, ProofConfig};
+
+    #[test]
+    fn absent_verify_section_defaults_to_no_profile() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+[package]
+name = "demo"
+version = "0.1.0"
+"#,
+        )
+        .expect("manifest parses");
+
+        assert!(manifest.verify.profile.is_none());
+    }
+
+    #[test]
+    fn verify_section_without_profile_defaults_to_none() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[verify]
+"#,
+        )
+        .expect("manifest parses");
+
+        assert!(manifest.verify.profile.is_none());
+    }
+
+    #[test]
+    fn verify_profile_is_deserialized_without_validation() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+[package]
+name = "demo"
+version = "0.1.0"
+
+[verify]
+profile = "custom"
+"#,
+        )
+        .expect("manifest parses");
+
+        assert_eq!(manifest.verify.profile.as_deref(), Some("custom"));
+    }
 
     #[test]
     fn proof_config_default_enables_cross_spec_verify() {

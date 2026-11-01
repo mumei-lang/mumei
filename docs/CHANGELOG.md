@@ -1,3 +1,10 @@
+### Unreleased: verify profiles
+
+- Added opt-in `strict` and `audit` profiles for `mumei verify`, configurable
+  through `--profile` or `[verify].profile` in `mumei.toml`.
+- CLI profiles take precedence over manifest profiles and only add checks;
+  explicit flags are never disabled.
+
 ### Unreleased: generated CLI and environment references
 
 - Added generated references for visible CLI options and environment variables.
