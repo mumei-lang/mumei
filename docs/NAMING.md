@@ -30,4 +30,4 @@ Mumei has no flag with the same meaning as mumei-agent's `--allow-contract-erosi
 
 ## Cross-layer consistency
 
-Use the same concept stem across layers: `--enable-cache`, `MUMEI_ENABLE_CACHE`, and `cache` in a configuration file. Use `--allow-*` only to relax a safety check. Default-on features use a paired `--disable-X` or `--no-X`. Never rename an existing flag or variable in place; add an alias and keep the old name with a deprecation note until the next major release.
+Use the same concept stem across layers: `--enable-cache`, `MUMEI_ENABLE_CACHE`, and `cache` in a configuration file. Use `--allow-*` only to relax a safety check. Default-on features use a paired `--disable-X` or `--no-X`. Never rename an existing flag or variable in place; add an alias and keep the old name with a deprecation note. Adding an alias is not a breaking change and can happen at any time; removing the old name is, so it waits for the 1.0 release (after 1.0, for the next major release).

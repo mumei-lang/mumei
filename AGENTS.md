@@ -28,7 +28,7 @@ When a change adds or widens an output surface, check it against the rules above
 ## Adding or renaming flags and environment variables
 
 - Read [`docs/NAMING.md`](docs/NAMING.md) before choosing a flag or environment-variable name.
-- Never rename an existing name in place; add an alias and deprecate the old name through the next major release.
+- Never rename an existing name in place; add an alias and deprecate the old name; remove it only at 1.0 (after 1.0, at the next major release).
 - Register every environment variable in `src/env_registry.rs`, including category, default, description, and `sensitive` classification; regenerate references with `MUMEI_UPDATE_REFERENCE_DOCS=1 cargo test --bin mumei reference_docs`.
 - Run `cargo test --bin mumei naming`, `cargo test --bin mumei cli_reference`, and `cargo test --test config_cli`.
 - Use the [adding CLI flags and environment variables skill](.agents/skills/adding-cli-flags-and-env-vars/SKILL.md).
