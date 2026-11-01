@@ -1,5 +1,5 @@
-use crate::cli_reference::{EnvVar, ENV_VARS};
 use crate::commands::verify::{resolve_verify_profile, EXIT_USAGE_ERROR};
+use crate::env_registry::{EnvVar, ENV_VARS};
 use mumei_core::manifest;
 
 struct EnvironmentEntry<'a> {

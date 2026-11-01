@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use clap::{Arg, ArgAction, Command as ClapCommand, CommandFactory};
 use regex::Regex;
 use std::collections::BTreeMap;
@@ -8,61 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::cli::Cli;
-
-#[derive(Clone, Copy)]
-pub(crate) struct EnvVar {
-    pub(crate) name: &'static str,
-    pub(crate) category: &'static str,
-    pub(crate) default: &'static str,
-    pub(crate) description: &'static str,
-}
-
-pub(crate) const ENV_VARS: &[EnvVar] = &[
-    EnvVar { name: "ENABLE_RECONSTRUCTION_LOSS", category: "user", default: "off", description: "Adds reconstruction-loss details to `mumei verify` failure reports when the value is non-empty and is not `0` or `false` after trimming and lowercasing." },
-    EnvVar { name: "ENABLE_SELF_CORRECTION", category: "user", default: "off", description: "Adds self-correction feedback instructions to `mumei verify` loss-vector reports when the value is non-empty and is not `0` or `false` after trimming and lowercasing." },
-    EnvVar { name: "MUMEI_ENABLE_VACUITY_CHECK", category: "user", default: "off", description: "Enables vacuity checks only for `mumei build` when set exactly to `1`; `mumei verify` uses `--enable-vacuity-check` instead." },
-    EnvVar { name: "MUMEI_LEAN_PATH", category: "user", default: "auto-detected when unset", description: "Overrides `mumei verify`'s bridge discovery and accepts `bridge.py` itself or a checkout with `scripts/bridge.py`; unset searches current and adjacent checkouts plus `$HOME/repos/mumei-lean`." },
-    EnvVar { name: "MUMEI_PROOF_STORE", category: "user", default: "$HOME/.mumei/proof-store", description: "Selects the proof-store directory when a store is opened without an explicit path; it does not enable store use, and the fallback requires `HOME` to be set." },
-    EnvVar { name: "MUMEI_PROOF_BUNDLE", category: "integration", default: "unset", description: "Fallback proof-certificate bundle used when resolving imported modules." },
-    EnvVar { name: "MUMEI_REGISTRY_ALLOW_PLAINTEXT", category: "user", default: "off", description: "Allows non-loopback registry URLs using HTTP only when set exactly to `1` or case-insensitively to `true` without surrounding whitespace; loopback HTTP is allowed without it." },
-    EnvVar { name: "MUMEI_REGISTRY_URL", category: "user", default: "unset", description: "Overrides the remote package registry URL from mumei.toml when non-empty." },
-    EnvVar { name: "MUMEI_STD_PATH", category: "user", default: "unset", description: "Additional directory searched for Mumei standard-library modules." },
-    EnvVar { name: "MUMEI_CANCEL_REASON", category: "integration", default: "unset", description: "Cancellation reason included in generated proof-certificate provenance." },
-    EnvVar { name: "MUMEI_GENERATION_ID", category: "integration", default: "unset", description: "Generation identifier included in proof-certificate provenance." },
-    EnvVar { name: "MUMEI_SELF_CORRECTION_METADATA", category: "integration", default: "unset", description: "JSON metadata from self-correction included in proof-certificate provenance." },
-    EnvVar { name: "MUMEI_SOLVER_CONFIG_FINGERPRINT", category: "integration", default: "computed when unset", description: "Optional explicit solver-configuration fingerprint for provenance and cache identity." },
-    EnvVar { name: "MUMEI_SPEC_METADATA", category: "integration", default: "unset", description: "Specification metadata attached to verification results." },
-    EnvVar { name: "MUMEI_TASK_ID", category: "integration", default: "unset", description: "Task identifier propagated to verification and proof-certificate provenance." },
-    EnvVar { name: "MUMEI_TRACE_ID", category: "integration", default: "unset", description: "Trace identifier attached to verification metadata." },
-    EnvVar { name: "MUMEI_VERIFICATION_TIMEOUT_MS", category: "integration", default: "unset", description: "Timeout in milliseconds propagated to verification workers and proof certificates." },
-    EnvVar { name: "MUMEI_SOLVER_CACHE_KEY", category: "integration", default: "computed when unset", description: "Optional explicit solver-cache key recorded in proof-certificate provenance." },
-    EnvVar { name: "MUMEI_SOLVER_PROCESS_START_TIME", category: "integration", default: "unset", description: "Solver process start timestamp included in proof-certificate provenance." },
-    EnvVar { name: "MUMEI_HARNESS_CONTRACT", category: "integration", default: "unset", description: "Harness contract path recorded in proof-certificate provenance." },
-    EnvVar { name: "MUMEI_INTENT_PROMPT_HASH", category: "integration", default: "unset", description: "Natural-language intent prompt hash recorded in proof-certificate provenance." },
-    EnvVar { name: "MUMEI_SPEC_TRACEABILITY_SCORE", category: "integration", default: "unset", description: "Specification traceability score recorded in proof-certificate provenance." },
-    EnvVar { name: "MUMEI_SEMANTIC_DRIFT_DETECTED", category: "integration", default: "unset", description: "Semantic-drift result recorded in proof-certificate provenance." },
-    EnvVar { name: "MUMEI_MANUAL_REVIEW_REQUIRED", category: "integration", default: "unset", description: "Manual-review requirement recorded in proof-certificate provenance." },
-    EnvVar { name: "MUMEI_ARTIFACT_PATHS", category: "integration", default: "unset", description: "Comma-separated artifact paths recorded in proof-certificate provenance." },
-    EnvVar { name: "MUMEI_BUDGET_POLICY_FINGERPRINT", category: "integration", default: "unset", description: "Budget-policy fingerprint recorded in proof-certificate provenance." },
-    EnvVar { name: "OTEL_ENABLED", category: "integration", default: "off", description: "Enables tracing only in builds with the `otel` feature and only when set case-insensitively to `true`, `1`, `yes`, or `on` without surrounding whitespace." },
-    EnvVar { name: "OTEL_EXPORTER_OTLP_ENDPOINT", category: "integration", default: "OpenTelemetry SDK default", description: "OTLP endpoint read by the OpenTelemetry SDK when tracing is enabled and the `otel` feature is compiled in." },
-    EnvVar { name: "TRACEPARENT", category: "integration", default: "unset", description: "W3C trace context propagated into verification spans." },
-    EnvVar { name: "TRACESTATE", category: "integration", default: "unset", description: "W3C trace state propagated with TRACEPARENT." },
-    EnvVar { name: "MUMEI_HOME", category: "install", default: "$HOME/.mumei", description: "Installation directory selected by scripts/install.sh." },
-    EnvVar { name: "MUMEI_INSTALL_EXPECTED_SHA256", category: "install", default: "unset", description: "Expected installer download SHA-256; when set, the downloaded artifact is verified before use." },
-    EnvVar { name: "MUMEI_SETUP_EXPECTED_SHA256", category: "install", default: "unset", description: "Expected setup archive SHA-256; when set, the downloaded archive is verified before use." },
-    EnvVar { name: "CPATH", category: "build", default: "existing value or unset", description: "C compiler include search paths; setup instructions prepend Z3 headers." },
-    EnvVar { name: "CPPFLAGS", category: "build", default: "existing value or unset", description: "C preprocessor flags; setup instructions add LLVM and Z3 include directories." },
-    EnvVar { name: "DYLD_FALLBACK_LIBRARY_PATH", category: "build", default: "existing value or unset", description: "macOS dynamic-library search path emitted by setup instructions for Z3." },
-    EnvVar { name: "LD_LIBRARY_PATH", category: "build", default: "existing value or unset", description: "Dynamic-library search path emitted by setup instructions for Z3 on Linux." },
-    EnvVar { name: "LDFLAGS", category: "build", default: "existing value or unset", description: "Linker flags; setup instructions add LLVM library directories." },
-    EnvVar { name: "LIBRARY_PATH", category: "build", default: "existing value or unset", description: "Native linker library search path emitted by setup instructions for Z3." },
-    EnvVar { name: "LLVM_SYS_170_PREFIX", category: "build", default: "system LLVM discovery", description: "LLVM 17 installation prefix used by llvm-sys and the native linker." },
-    EnvVar { name: "LIBCLANG_PATH", category: "build", default: "system libclang discovery", description: "libclang library directory passed through to nested Cargo builds that use bindgen." },
-    EnvVar { name: "Z3_SYS_Z3_HEADER", category: "build", default: "system Z3 discovery", description: "Path to z3.h used by z3-sys when compiling against a custom Z3 installation." },
-    EnvVar { name: "Z3_SYS_Z3_LIB_DIR", category: "build", default: "system Z3 discovery", description: "Library directory used by z3-sys when linking a custom Z3 installation." },
-    EnvVar { name: "MUMEI_UPDATE_REFERENCE_DOCS", category: "development", default: "off", description: "Set exactly to `1` when running the reference-docs test to regenerate the committed CLI and environment reference pages." },
-];
+use crate::env_registry::ENV_VARS;
 
 const GENERATED_HEADER: &str = "<!-- Generated by `MUMEI_UPDATE_REFERENCE_DOCS=1 cargo test --bin mumei reference_docs`; do not edit by hand. -->";
 
