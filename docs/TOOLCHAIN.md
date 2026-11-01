@@ -73,6 +73,9 @@ max_unroll = 3                          # BMC unroll depth
 [proof]
 cache = true         # incremental build cache
 timeout_ms = 10000   # Z3 solver timeout
+
+[verify]
+profile = "strict"   # optional: "strict" or "audit"
 ```
 
 `mumei verify` may override proof runtime settings for orchestration:

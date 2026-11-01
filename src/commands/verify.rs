@@ -34,6 +34,87 @@ pub(crate) const EXIT_INCONCLUSIVE: i32 = 3;
 pub(crate) const EXIT_INPUT_ERROR: i32 = 4;
 pub(crate) const EXIT_INTERNAL_ERROR: i32 = 5;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerifyProfile {
+    Strict,
+    Audit,
+}
+
+impl VerifyProfile {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "strict" => Some(Self::Strict),
+            "audit" => Some(Self::Audit),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Audit => "audit",
+        }
+    }
+
+    fn apply(self, flags: &mut ProfileFlags) {
+        flags.strict_imports = true;
+        flags.strict_array_types = true;
+        flags.warn_fragment = true;
+        if self == Self::Audit {
+            flags.warn_untyped_arrays = true;
+            flags.enable_vacuity_check = true;
+            flags.detect_loops = true;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileSource {
+    Cli,
+    Manifest,
+}
+
+impl ProfileSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Cli => "--profile",
+            Self::Manifest => "mumei.toml",
+        }
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ProfileFlags {
+    strict_imports: bool,
+    strict_array_types: bool,
+    warn_fragment: bool,
+    warn_untyped_arrays: bool,
+    enable_vacuity_check: bool,
+    detect_loops: bool,
+}
+
+fn resolve_verify_profile(
+    cli: Option<&str>,
+    manifest: Option<(&Path, &str)>,
+) -> Result<Option<(VerifyProfile, ProfileSource)>, String> {
+    if let Some(value) = cli {
+        let profile = VerifyProfile::parse(value)
+            .ok_or_else(|| format!("invalid --profile '{value}'; allowed values: strict, audit"))?;
+        return Ok(Some((profile, ProfileSource::Cli)));
+    }
+
+    let Some((path, value)) = manifest else {
+        return Ok(None);
+    };
+    let profile = VerifyProfile::parse(value).ok_or_else(|| {
+        format!(
+            "invalid verify profile '{value}' in {}; allowed values: strict, audit",
+            path.display()
+        )
+    })?;
+    Ok(Some((profile, ProfileSource::Manifest)))
+}
+
 /// Outcome of verifying one input, ordered by severity for directory runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum VerifyOutcome {
@@ -240,6 +321,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
 
     let Command::Verify {
         input,
+        profile,
         task_id,
         solver_timeout,
         cache_scope,
@@ -280,6 +362,49 @@ pub(crate) fn cmd_verify_command(command: Command) {
     else {
         unreachable!("cmd_verify_command called with non-verify command");
     };
+    let manifest_config = manifest::find_and_load();
+    let manifest_profile = manifest_config.as_ref().and_then(|(directory, config)| {
+        config
+            .verify
+            .profile
+            .as_deref()
+            .map(|profile| (directory.join("mumei.toml"), profile))
+    });
+    let resolved_profile = resolve_verify_profile(
+        profile.as_deref(),
+        manifest_profile
+            .as_ref()
+            .map(|(path, value)| (path.as_path(), *value)),
+    );
+    let resolved_profile = match resolved_profile {
+        Ok(profile) => profile,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(EXIT_USAGE_ERROR);
+        }
+    };
+    let mut profile_flags = ProfileFlags {
+        strict_imports,
+        strict_array_types,
+        warn_fragment,
+        warn_untyped_arrays,
+        enable_vacuity_check,
+        detect_loops,
+    };
+    if let Some((profile, source)) = resolved_profile {
+        profile.apply(&mut profile_flags);
+        eprintln!(
+            "verify profile: {} (from {})",
+            profile.name(),
+            source.label()
+        );
+    }
+    let strict_imports = profile_flags.strict_imports;
+    let strict_array_types = profile_flags.strict_array_types;
+    let warn_fragment = profile_flags.warn_fragment;
+    let warn_untyped_arrays = profile_flags.warn_untyped_arrays;
+    let enable_vacuity_check = profile_flags.enable_vacuity_check;
+    let detect_loops = profile_flags.detect_loops;
     if !verification::solver_timeout_is_hard() {
         LINKED_Z3_WARNING.call_once(|| {
             let (major, minor, build, _) = verification::linked_z3_version();
@@ -407,6 +532,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
             let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 cmd_verify(VerifyOptions {
                     input: &file_str,
+                    manifest_config: manifest_config.clone(),
                     proof_store,
                     task_id: task_id.as_deref(),
                     solver_timeout,
@@ -488,6 +614,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
         let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             cmd_verify(VerifyOptions {
                 input: &input,
+                manifest_config: manifest_config.clone(),
                 proof_store,
                 task_id: task_id.as_deref(),
                 solver_timeout,
@@ -627,6 +754,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
 
 pub(crate) struct VerifyOptions<'a> {
     pub(crate) input: &'a str,
+    pub(crate) manifest_config: Option<(PathBuf, manifest::Manifest)>,
     pub(crate) proof_store: bool,
     pub(crate) task_id: Option<&'a str>,
     pub(crate) solver_timeout: Option<u64>,
@@ -1576,6 +1704,7 @@ fn create_private_staging_dir() -> Option<PathBuf> {
 pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
     let VerifyOptions {
         input,
+        manifest_config,
         proof_store: proof_store_flag,
         task_id,
         solver_timeout,
@@ -1633,7 +1762,6 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         }
         return early_outcome(VerifyOutcome::InternalError, &message, json_output);
     }
-    let manifest_config = manifest::find_and_load();
     let (build_cfg, proof_cfg) = if let Some((_, ref m)) = manifest_config {
         (m.build.clone(), m.proof.clone())
     } else {
@@ -2807,6 +2935,114 @@ pub(crate) fn save_cross_spec_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verify_profile_resolution_accepts_cli_profile() {
+        assert_eq!(
+            resolve_verify_profile(Some("strict"), None),
+            Ok(Some((VerifyProfile::Strict, ProfileSource::Cli)))
+        );
+    }
+
+    #[test]
+    fn verify_profile_resolution_accepts_manifest_profile() {
+        assert_eq!(
+            resolve_verify_profile(None, Some((Path::new("/project/mumei.toml"), "audit"))),
+            Ok(Some((VerifyProfile::Audit, ProfileSource::Manifest)))
+        );
+    }
+
+    #[test]
+    fn cli_strict_profile_overrides_manifest_audit() {
+        assert_eq!(
+            resolve_verify_profile(
+                Some("strict"),
+                Some((Path::new("/project/mumei.toml"), "audit"))
+            ),
+            Ok(Some((VerifyProfile::Strict, ProfileSource::Cli)))
+        );
+    }
+
+    #[test]
+    fn cli_audit_profile_overrides_manifest_strict() {
+        assert_eq!(
+            resolve_verify_profile(
+                Some("audit"),
+                Some((Path::new("/project/mumei.toml"), "strict"))
+            ),
+            Ok(Some((VerifyProfile::Audit, ProfileSource::Cli)))
+        );
+    }
+
+    #[test]
+    fn verify_profile_resolution_returns_none_when_unset() {
+        assert_eq!(resolve_verify_profile(None, None), Ok(None));
+    }
+
+    #[test]
+    fn invalid_manifest_profile_error_names_path_value_and_choices() {
+        let error =
+            resolve_verify_profile(None, Some((Path::new("/project/mumei.toml"), "relaxed")))
+                .expect_err("invalid manifest profile");
+
+        assert!(error.contains("/project/mumei.toml"));
+        assert!(error.contains("relaxed"));
+        assert!(error.contains("strict, audit"));
+    }
+
+    #[test]
+    fn strict_profile_applies_only_strict_flags() {
+        let mut flags = ProfileFlags::default();
+
+        VerifyProfile::Strict.apply(&mut flags);
+
+        assert_eq!(
+            flags,
+            ProfileFlags {
+                strict_imports: true,
+                strict_array_types: true,
+                warn_fragment: true,
+                warn_untyped_arrays: false,
+                enable_vacuity_check: false,
+                detect_loops: false,
+            }
+        );
+    }
+
+    #[test]
+    fn audit_profile_applies_all_audit_flags() {
+        let mut flags = ProfileFlags::default();
+
+        VerifyProfile::Audit.apply(&mut flags);
+
+        assert_eq!(
+            flags,
+            ProfileFlags {
+                strict_imports: true,
+                strict_array_types: true,
+                warn_fragment: true,
+                warn_untyped_arrays: true,
+                enable_vacuity_check: true,
+                detect_loops: true,
+            }
+        );
+    }
+
+    #[test]
+    fn strict_profile_does_not_turn_off_explicit_flags() {
+        let mut flags = ProfileFlags {
+            warn_untyped_arrays: true,
+            enable_vacuity_check: true,
+            detect_loops: true,
+            ..ProfileFlags::default()
+        };
+
+        VerifyProfile::Strict.apply(&mut flags);
+
+        assert!(flags.warn_untyped_arrays);
+        assert!(flags.enable_vacuity_check);
+        assert!(flags.detect_loops);
+    }
 
     fn atom_item(span_file: &str, source_file: Option<&str>) -> Item {
         atom_named_item("shared", span_file, source_file)

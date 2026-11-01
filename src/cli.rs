@@ -50,6 +50,9 @@ pub(crate) enum Command {
     Verify {
         /// Input .mm file or directory
         input: String,
+        /// Opt-in preset that turns on a group of verify checks (strict, audit); explicit flags still apply and a profile never turns a flag off
+        #[arg(long, value_name = "PROFILE", value_parser = ["strict", "audit"])]
+        profile: Option<String>,
         /// Verification task ID for MCP/CI provenance
         #[arg(long)]
         task_id: Option<String>,

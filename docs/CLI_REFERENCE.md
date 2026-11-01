@@ -12,7 +12,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 |---|---:|---|
 | `mumei` | 1 | Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) |
 | `mumei build` | 5 | Verify + compile to LLVM IR (default) |
-| `mumei verify` | 36 | Z3 formal verification only (no codegen) |
+| `mumei verify` | 37 | Z3 formal verification only (no codegen) |
 | `mumei proof-store` | 0 | Inspect or prune the local proof store |
 | `mumei proof-store stats` | 2 | Show local proof-store entry counts and size |
 | `mumei proof-store prune` | 3 | Remove old and/or invalid proof-store entries |
@@ -106,6 +106,7 @@ Usage: mumei verify [OPTIONS] <INPUT>
 
 | Option | Default | Possible values | Description |
 |---|---|---|---|
+| `--profile <PROFILE>` | — | strict, audit | Opt-in preset that turns on a group of verify checks (strict, audit); explicit flags still apply and a profile never turns a flag off |
 | `--task-id <TASK_ID>` | — | — | Verification task ID for MCP/CI provenance |
 | `--solver-timeout <SOLVER_TIMEOUT>` | — | — | Override Z3 solver timeout in milliseconds |
 | `--cache-scope <CACHE_SCOPE>` | module | module, global | Verification cache scope: module (input directory) or global (current workspace) |
