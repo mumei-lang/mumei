@@ -102,6 +102,21 @@ fn manifest_without_verify_section_reports_manifest_and_no_profile() {
 }
 
 #[test]
+fn malformed_manifest_exits_with_error_in_text_and_json_modes() {
+    let project = Scratch::new(Some("[package\nname = \"broken\"\n"));
+    for args in [&["config"][..], &["config", "--json"][..]] {
+        let output = project.run(args, &[]);
+        let message = stderr(&output);
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(message.contains("Failed to parse"));
+        assert!(message.contains(&project.root().join("mumei.toml").display().to_string()));
+        assert!(message.contains("could not be parsed"));
+        assert!(stdout(&output).is_empty());
+    }
+}
+
+#[test]
 fn strict_manifest_profile_lists_exact_enabled_flags() {
     let project = Scratch::new(Some(&verify_manifest("strict")));
     let output = project.run(&["config"], &[]);

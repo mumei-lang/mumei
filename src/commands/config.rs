@@ -35,7 +35,14 @@ pub(crate) fn cmd_config(json: bool, all: bool) {
     let manifest_config = manifest::find_and_load();
     let manifest_path = manifest_config
         .as_ref()
-        .map(|(directory, _)| directory.join("mumei.toml"));
+        .map(|(directory, _)| directory.join("mumei.toml"))
+        .or_else(manifest::find_manifest_path);
+    if manifest_config.is_none() {
+        if let Some(path) = &manifest_path {
+            eprintln!("error: {} could not be parsed", path.display());
+            std::process::exit(EXIT_USAGE_ERROR);
+        }
+    }
     let manifest_profile = manifest_config.as_ref().and_then(|(directory, config)| {
         config
             .verify
