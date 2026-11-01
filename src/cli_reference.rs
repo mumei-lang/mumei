@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
 use clap::{Arg, ArgAction, Command as ClapCommand, CommandFactory};
 use regex::Regex;
 use std::collections::BTreeMap;
@@ -8,14 +10,14 @@ use std::sync::OnceLock;
 use crate::cli::Cli;
 
 #[derive(Clone, Copy)]
-struct EnvVar {
-    name: &'static str,
-    category: &'static str,
-    default: &'static str,
-    description: &'static str,
+pub(crate) struct EnvVar {
+    pub(crate) name: &'static str,
+    pub(crate) category: &'static str,
+    pub(crate) default: &'static str,
+    pub(crate) description: &'static str,
 }
 
-const ENV_VARS: &[EnvVar] = &[
+pub(crate) const ENV_VARS: &[EnvVar] = &[
     EnvVar { name: "ENABLE_RECONSTRUCTION_LOSS", category: "user", default: "off", description: "Adds reconstruction-loss details to `mumei verify` failure reports when the value is non-empty and is not `0` or `false` after trimming and lowercasing." },
     EnvVar { name: "ENABLE_SELF_CORRECTION", category: "user", default: "off", description: "Adds self-correction feedback instructions to `mumei verify` loss-vector reports when the value is non-empty and is not `0` or `false` after trimming and lowercasing." },
     EnvVar { name: "MUMEI_ENABLE_VACUITY_CHECK", category: "user", default: "off", description: "Enables vacuity checks only for `mumei build` when set exactly to `1`; `mumei verify` uses `--enable-vacuity-check` instead." },

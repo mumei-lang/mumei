@@ -35,13 +35,13 @@ pub(crate) const EXIT_INPUT_ERROR: i32 = 4;
 pub(crate) const EXIT_INTERNAL_ERROR: i32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VerifyProfile {
+pub(crate) enum VerifyProfile {
     Strict,
     Audit,
 }
 
 impl VerifyProfile {
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "strict" => Some(Self::Strict),
             "audit" => Some(Self::Audit),
@@ -49,7 +49,7 @@ impl VerifyProfile {
         }
     }
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Strict => "strict",
             Self::Audit => "audit",
@@ -66,16 +66,34 @@ impl VerifyProfile {
             flags.detect_loops = true;
         }
     }
+
+    pub(crate) fn enabled_flags(self) -> &'static [&'static str] {
+        match self {
+            Self::Strict => &[
+                "--strict-imports",
+                "--strict-array-types",
+                "--warn-fragment",
+            ],
+            Self::Audit => &[
+                "--strict-imports",
+                "--strict-array-types",
+                "--warn-fragment",
+                "--warn-untyped-arrays",
+                "--enable-vacuity-check",
+                "--detect-loops",
+            ],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProfileSource {
+pub(crate) enum ProfileSource {
     Cli,
     Manifest,
 }
 
 impl ProfileSource {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Cli => "--profile",
             Self::Manifest => "mumei.toml",
@@ -93,7 +111,7 @@ struct ProfileFlags {
     detect_loops: bool,
 }
 
-fn resolve_verify_profile(
+pub(crate) fn resolve_verify_profile(
     cli: Option<&str>,
     manifest: Option<(&Path, &str)>,
 ) -> Result<Option<(VerifyProfile, ProfileSource)>, String> {
@@ -3026,6 +3044,27 @@ mod tests {
                 detect_loops: true,
             }
         );
+    }
+
+    #[test]
+    fn profile_enabled_flags_match_every_flag_apply_enables() {
+        for profile in [VerifyProfile::Strict, VerifyProfile::Audit] {
+            let mut flags = ProfileFlags::default();
+            profile.apply(&mut flags);
+            let enabled = [
+                ("--strict-imports", flags.strict_imports),
+                ("--strict-array-types", flags.strict_array_types),
+                ("--warn-fragment", flags.warn_fragment),
+                ("--warn-untyped-arrays", flags.warn_untyped_arrays),
+                ("--enable-vacuity-check", flags.enable_vacuity_check),
+                ("--detect-loops", flags.detect_loops),
+            ]
+            .into_iter()
+            .filter_map(|(name, enabled)| enabled.then_some(name))
+            .collect::<Vec<_>>();
+
+            assert_eq!(enabled, profile.enabled_flags());
+        }
     }
 
     #[test]

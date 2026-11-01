@@ -71,6 +71,14 @@ the manifest profile is used. Explicit flags still apply, and a profile never
 turns a flag off. `--suggest-cegis` still requires an explicit
 `--detect-loops`, because clap's `requires` check only sees CLI flags.
 
+### Effective settings with `mumei config`
+
+`mumei config` reports the discovered `mumei.toml`, its verify profile, and
+registered environment variables. Use `--all` to include unset variables and
+`--json` for machine-readable output. Sensitive environment values are
+redacted. The CLI `--profile` is per-invocation, so this command reports only
+the manifest profile.
+
 The local proof store is opt-in with `--proof-store` or `[proof] store = true`
 in `mumei.toml`. `MUMEI_PROOF_STORE` selects its directory; otherwise it uses
 `$HOME/.mumei/proof-store`. Setting the environment variable does not enable

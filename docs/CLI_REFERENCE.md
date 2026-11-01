@@ -13,6 +13,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei` | 1 | Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) |
 | `mumei build` | 5 | Verify + compile to LLVM IR (default) |
 | `mumei verify` | 37 | Z3 formal verification only (no codegen) |
+| `mumei config` | 2 | Show effective settings and where each value comes from. The CLI `--profile` is per-invocation; `mumei config` only reports the manifest source. |
 | `mumei proof-store` | 0 | Inspect or prune the local proof store |
 | `mumei proof-store stats` | 2 | Show local proof-store entry counts and size |
 | `mumei proof-store prune` | 3 | Remove old and/or invalid proof-store entries |
@@ -143,6 +144,22 @@ Usage: mumei verify [OPTIONS] <INPUT>
 | `--detect-loops` | false | — | Detect loops that may need stronger invariants |
 | `--suggest-cegis` | false | — | Include CEGIS loop-invariant suggestions in JSON/report output |
 | `--detect-spec-drift <DETECT_SPEC_DRIFT>` | — | — | Path to an old proof certificate for spec drift detection |
+
+## `mumei config`
+
+Show effective settings and where each value comes from. The CLI `--profile` is per-invocation; `mumei config` only reports the manifest source.
+
+Usage:
+
+```text
+Usage: mumei config [OPTIONS]
+```
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--json` | false | — | — |
+| `--all` | false | — | — |
 
 ## `mumei proof-store`
 

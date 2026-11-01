@@ -1,3 +1,9 @@
+### Unreleased: effective configuration report
+
+- Added `mumei config` to report the manifest verify profile and registered
+  environment variables, with text and JSON output.
+- Sensitive environment values are redacted; `--all` includes unset variables.
+
 ### Unreleased: verify profiles
 
 - Added opt-in `strict` and `audit` profiles for `mumei verify`, configurable
