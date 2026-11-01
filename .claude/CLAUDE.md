@@ -1,5 +1,7 @@
 # mumei Claude Code Guide
 
+Repository-wide rules for agents, including secret handling, are in [AGENTS.md](../AGENTS.md).
+
 ## Overview
 
 mumei is a mathematical proof-driven programming language that verifies uncertain AI-generated code with formal proofs before treating it as a trusted asset: 「AIが生成した不確実なコードを数学的証明で検証する言語」. The toolchain parses `.mm` source, proves contracts with Z3, and can emit LLVM IR and structured verification artifacts.
