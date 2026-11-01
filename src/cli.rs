@@ -195,6 +195,16 @@ pub(crate) enum Command {
         #[arg(long, help_heading = "Harness metadata")]
         budget_policy_fingerprint: Option<String>,
     },
+    /// Show effective settings and where each value comes from
+    #[command(
+        long_about = "Show effective settings and where each value comes from.\n\nThe CLI `--profile` is per-invocation; `mumei config` only reports the manifest source."
+    )]
+    Config {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        all: bool,
+    },
     /// Inspect or prune the local proof store
     ProofStore {
         #[command(subcommand)]

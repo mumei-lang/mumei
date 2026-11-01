@@ -6,6 +6,7 @@ mod cli;
 mod cli_reference;
 mod codegen;
 mod commands;
+mod env_registry;
 mod feedback;
 mod linker;
 mod lsp;
@@ -31,6 +32,7 @@ fn main() {
     match cli.command {
         Some(command @ Command::Build { .. }) => commands::build::cmd_build_command(command),
         Some(command @ Command::Verify { .. }) => commands::verify::cmd_verify_command(command),
+        Some(Command::Config { json, all }) => commands::config::cmd_config(json, all),
         Some(Command::Check { input }) => commands::check::cmd_check(&input),
         Some(Command::Erosion {
             candidate,

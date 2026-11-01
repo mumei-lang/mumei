@@ -216,24 +216,35 @@ pub fn load(path: &Path) -> Result<Manifest, ManifestError> {
 }
 /// カレントディレクトリから上方向に mumei.toml を探索して読み込む
 /// 見つかった場合は (mumei.toml のあるディレクトリ, Manifest) を返す
-pub fn find_and_load() -> Option<(PathBuf, Manifest)> {
-    let mut dir = std::env::current_dir().ok()?;
+fn find_manifest_path_from(mut dir: PathBuf) -> Option<PathBuf> {
     loop {
         let manifest_path = dir.join("mumei.toml");
         if manifest_path.exists() {
-            match load(&manifest_path) {
-                Ok(manifest) => return Some((dir, manifest)),
-                Err(e) => {
-                    eprintln!("  ⚠️  Failed to parse {}: {}", manifest_path.display(), e);
-                    return None;
-                }
-            }
+            return Some(manifest_path);
         }
         if !dir.pop() {
             break;
         }
     }
     None
+}
+
+pub fn find_manifest_path() -> Option<PathBuf> {
+    find_manifest_path_from(std::env::current_dir().ok()?)
+}
+
+/// カレントディレクトリから上方向に mumei.toml を探索して読み込む
+/// 見つかった場合は (mumei.toml のあるディレクトリ, Manifest) を返す
+pub fn find_and_load() -> Option<(PathBuf, Manifest)> {
+    let manifest_path = find_manifest_path()?;
+    let dir = manifest_path.parent()?.to_path_buf();
+    match load(&manifest_path) {
+        Ok(manifest) => Some((dir, manifest)),
+        Err(e) => {
+            eprintln!("  ⚠️  Failed to parse {}: {}", manifest_path.display(), e);
+            None
+        }
+    }
 }
 /// ~/.mumei/ のパスを返す
 pub fn mumei_home() -> PathBuf {
@@ -294,6 +305,26 @@ impl std::error::Error for ManifestError {}
 #[cfg(test)]
 mod tests {
     use super::{CharterConfig, Manifest, ProofConfig};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn find_manifest_path_walks_up_from_nested_directory() {
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("mumei-manifest-path-{}-{id}", std::process::id()));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("create nested directory");
+        let path = root.join("mumei.toml");
+        fs::write(&path, "[package]\n").expect("write manifest");
+
+        assert_eq!(super::find_manifest_path_from(nested), Some(path));
+
+        fs::remove_dir_all(root).expect("remove scratch directory");
+    }
 
     #[test]
     fn absent_verify_section_defaults_to_no_profile() {
