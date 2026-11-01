@@ -231,6 +231,38 @@ fn registry_url_credentials_and_metadata_are_stripped_in_text_and_json() {
 }
 
 #[test]
+fn padded_registry_url_credentials_are_stripped_in_text_and_json() {
+    let project = Scratch::new(None);
+    let urls = [
+        " https://whitespace-user:whitespace-secret@h/x?t=1 ",
+        "\t\nhttps://whitespace-user:whitespace-secret@h/x?t=1\r\n\t",
+    ];
+
+    for url in urls {
+        let text_output = project.run(&["config"], &[("MUMEI_REGISTRY_URL", url)]);
+        let text = stdout(&text_output);
+        assert!(text_output.status.success(), "{}", stderr(&text_output));
+        assert!(text.contains("MUMEI_REGISTRY_URL=https://h/x  (user)"));
+        assert!(!text.contains("whitespace-user"));
+        assert!(!text.contains("whitespace-secret"));
+
+        let json_result = project.run(&["config", "--json"], &[("MUMEI_REGISTRY_URL", url)]);
+        let payload = json_output(&json_result);
+        assert!(json_result.status.success(), "{}", stderr(&json_result));
+        let registry_url = payload["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == "MUMEI_REGISTRY_URL")
+            .expect("registered registry URL");
+        assert_eq!(registry_url["value"], "https://h/x");
+        let json = stdout(&json_result);
+        assert!(!json.contains("whitespace-user"));
+        assert!(!json.contains("whitespace-secret"));
+    }
+}
+
+#[test]
 fn json_value_with_embedded_url_is_not_sanitized() {
     let project = Scratch::new(None);
     let metadata = r#"{"u":"https://h/x?y"}"#;

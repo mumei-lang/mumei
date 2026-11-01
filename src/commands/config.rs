@@ -141,27 +141,28 @@ pub(crate) fn cmd_config(json: bool, all: bool) {
 }
 
 fn sanitize_url_value(value: &str) -> String {
-    let Some(scheme_end) = value.find("://") else {
-        return value.to_owned();
-    };
-    if !is_standalone_url(value) {
+    let trimmed_value = value.trim();
+    if !is_standalone_url(trimmed_value) {
         return value.to_owned();
     }
+    let scheme_end = trimmed_value
+        .find("://")
+        .expect("standalone URL has a scheme separator");
     let authority_start = scheme_end + 3;
-    let authority_end = value[authority_start..]
+    let authority_end = trimmed_value[authority_start..]
         .find(['/', '?', '#'])
         .map(|offset| authority_start + offset)
-        .unwrap_or(value.len());
-    let authority = &value[authority_start..authority_end];
+        .unwrap_or(trimmed_value.len());
+    let authority = &trimmed_value[authority_start..authority_end];
     let host = authority
         .rsplit_once('@')
         .map(|(_, host)| host)
         .unwrap_or(authority);
-    let suffix = &value[authority_end..];
+    let suffix = &trimmed_value[authority_end..];
     let suffix_end = suffix.find(['?', '#']).unwrap_or(suffix.len());
     format!(
         "{}{}{}",
-        &value[..authority_start],
+        &trimmed_value[..authority_start],
         host,
         &suffix[..suffix_end]
     )
@@ -176,7 +177,6 @@ fn is_standalone_url(value: &str) -> bool {
         && chars.all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '+' | '.' | '-')
         })
-        && !value.chars().any(char::is_whitespace)
 }
 
 fn text_default(default: &str) -> &str {
@@ -240,7 +240,13 @@ mod tests {
         assert_eq!(sanitize_url_value("key=https://u:p@h"), "key=https://u:p@h");
         assert_eq!(
             sanitize_url_value("https://u:p@h/path with-space"),
-            "https://u:p@h/path with-space"
+            "https://h/path with-space"
+        );
+        assert_eq!(sanitize_url_value("https://u:p@h/a b?t=1"), "https://h/a b");
+        assert_eq!(sanitize_url_value(" https://u:p@h/x?t=1 "), "https://h/x");
+        assert_eq!(
+            sanitize_url_value("\t\nhttps://u:p@h/x?t=1\r\n\t"),
+            "https://h/x"
         );
     }
 }
