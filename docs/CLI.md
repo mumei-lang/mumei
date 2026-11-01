@@ -7,6 +7,11 @@ keywords: "mumei CLI, formal verification CLI, LLVM, Z3, mumei run"
 
 # Mumei CLI
 
+For the exhaustive generated command, positional-argument, option, default, and
+accepted-value list, see the [CLI Option Reference](CLI_REFERENCE.md). The
+[Environment Variable Reference](ENV_REFERENCE.md) covers the complete set of
+environment variables; this page remains the narrative guide.
+
 ## `mumei run`
 
 ```bash

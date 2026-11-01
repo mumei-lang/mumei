@@ -106,6 +106,8 @@ mumei setup && source ~/.mumei/env
 
 | ドキュメント | 内容 |
 |--------------|------|
+| [CLI Option Reference](docs/CLI_REFERENCE.md) | command、argument、option、default、accepted value の網羅的な自動生成リファレンス |
+| [Environment Variable Reference](docs/ENV_REFERENCE.md) | environment variable の category、default、description の自動生成リファレンス |
 | [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) | 自然言語仕様の検証、外部コード検証、仕様↔コード整合性、人間向け操作ガイド |
 | [MCP Integration](docs/MCP.md) | MCP tools、setup、multi-agent collaboration |
 | [Language Reference](docs/LANGUAGE.md) | 型、generics、trait、ownership、async |

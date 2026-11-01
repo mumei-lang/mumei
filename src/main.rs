@@ -2,6 +2,8 @@
 
 mod agent;
 mod cli;
+#[cfg(test)]
+mod cli_reference;
 mod codegen;
 mod commands;
 mod feedback;
