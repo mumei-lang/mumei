@@ -104,45 +104,72 @@ Usage: mumei verify [OPTIONS] <INPUT>
 
 ### Options
 
+#### Profile and strictness
+
 | Option | Default | Possible values | Description |
 |---|---|---|---|
 | `--profile <PROFILE>` | — | strict, audit | Opt-in preset that turns on a group of verify checks (strict, audit); explicit flags still apply and a profile never turns a flag off |
-| `--task-id <TASK_ID>` | — | — | Verification task ID for MCP/CI provenance |
+| `--strict-imports` | false | — | P5-C: Strict import mode — missing/invalid certificates cause hard errors |
+| `--strict-array-types` | false | — | Opt-in strict mode: treat unannotated array accesses (which default to the `i64` element sort) as errors instead of warnings. Off by default, preserving the backward-compatible `i64` fallback |
+| `--warn-fragment` | false | — | Emit outside_decidable_fragment warnings for atoms outside the Z3-stable fragment |
+| `--warn-untyped-arrays` | false | — | Emit `untyped_array_access` warnings when an array is accessed as `arr[i]` without an explicit `[i64]`/`[f64]`/`[bool]` element-type annotation (which silently falls back to `i64`). Warning-only; does not change the verification encoding |
+
+#### Solver and proof
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
 | `--solver-timeout <SOLVER_TIMEOUT>` | — | — | Override Z3 solver timeout in milliseconds |
 | `--cache-scope <CACHE_SCOPE>` | module | module, global | Verification cache scope: module (input directory) or global (current workspace) |
-| `--proof-cert` | false | — | Generate Z3 proof certificate (.proof.json) |
+| `--proof-store` | false | — | Reuse Z3-verified proofs from the opt-in local proof store |
 | `--escalate-lean` | false | — | Escalate Z3 unknown obligations to Lean 4 via mumei-lean bridge |
+| `--allow-lean-verified` | false | — | PR 2: Accept mumei-lean-emitted certificates (`z3_check_result == "lean_verified"`) as proven during import resolution. Off by default for backwards compatibility |
+| `--proof-cert` | false | — | Generate Z3 proof certificate (.proof.json) |
+| `--ieee754-f64` | false | — | Opt-in IEEE 754 (binary64) verification for `f64`: encode `f64` as Z3 `Float(11,53)` with round-nearest-even FP arithmetic instead of the default exact-rational `Real` encoding. Models rounding so e.g. `0.1 + 0.2 != 0.3` holds. Default off (keeps `Real` semantics) |
+| `--bitvec-i64` | false | — | Opt-in bit-vector verification for `i64`: encode `i64` as Z3 `BV(64)` so `&`, `\|`, `^`, `<<`, `>>` have real bit semantics and `+`, `-`, `*` wrap in two's complement like machine arithmetic, instead of the default unbounded `Int` encoding. Default off (keeps `Int` semantics and existing proof certificates) |
+
+#### Diagnostics
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--enable-spurious-detection` | false | — | Enable P8-A spurious counterexample detection |
+| `--disable-spurious-detection` | false | — | Disable P8-A spurious counterexample detection |
+| `--enable-vacuity-check` | false | — | Enable spec vacuity checking via mutation testing |
+| `--detect-loops` | false | — | Detect loops that may need stronger invariants |
+| `--suggest-cegis` | false | — | Include CEGIS loop-invariant suggestions in JSON/report output |
+| `--detect-spec-drift <DETECT_SPEC_DRIFT>` | — | — | Path to an old proof certificate for spec drift detection |
+| `--cross-spec-verify` | false | — | Enable cross-specification consistency verification across atoms and emit cross_spec.json with agent_artifact_mapping |
+| `--cross-spec-files <CROSS_SPEC_FILES>` | — | — | Additional .mm files to include in cross-specification verification; contract_consistency/global_invariant_conflicts/circular_dependencies map to mumei-agent missing_constraints/divergences/drift_issues |
+
+#### Property-based testing
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--property-based-test` | false | — | Run property-based validation synthesized from refinement types |
+| `--property-based-test-count <PROPERTY_BASED_TEST_COUNT>` | 100 | — | Number of generated property-based inputs per atom |
+| `--property-based-test-seed <PROPERTY_BASED_TEST_SEED>` | — | — | Seed for deterministic property-based input generation |
+| `--property-based-test-max-shrink-steps <PROPERTY_BASED_TEST_MAX_SHRINK_STEPS>` | 64 | — | Maximum property-based shrinking steps per counterexample |
+
+#### Output and artifacts
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--json` | false | — | Output verification report as JSON to stdout |
 | `--emit <FORMAT>` | — | — | Emit format: "sarif" writes report.sarif; "loss-vector" prints P9-E Loss Vector JSON; "escalation-bundle" writes .escalation-bundle.json; "proof-graph" writes proof_graph.json for the interactive visualizer |
 | `--no-emit <NO_EMIT>` | — | — | Disable verify-only output targets: escalation-metrics |
 | `--output <OUTPUT>` | — | — | Output path for proof certificate or escalation bundle |
 | `--report-dir <REPORT_DIR>` | — | — | Directory to write report.json into (default: current directory) |
 | `--keep-phase-artifacts <DIR>` | — | — | Preserve per-atom SMT queries and verification phase outcomes |
-| `--json` | false | — | Output verification report as JSON to stdout |
-| `--strict-imports` | false | — | P5-C: Strict import mode — missing/invalid certificates cause hard errors |
-| `--allow-lean-verified` | false | — | PR 2: Accept mumei-lean-emitted certificates (`z3_check_result == "lean_verified"`) as proven during import resolution. Off by default for backwards compatibility |
-| `--proof-store` | false | — | Reuse Z3-verified proofs from the opt-in local proof store |
-| `--cross-spec-verify` | false | — | Enable cross-specification consistency verification across atoms and emit cross_spec.json with agent_artifact_mapping |
-| `--cross-spec-files <CROSS_SPEC_FILES>` | — | — | Additional .mm files to include in cross-specification verification; contract_consistency/global_invariant_conflicts/circular_dependencies map to mumei-agent missing_constraints/divergences/drift_issues |
-| `--enable-spurious-detection` | false | — | Enable P8-A spurious counterexample detection |
-| `--disable-spurious-detection` | false | — | Disable P8-A spurious counterexample detection |
-| `--property-based-test` | false | — | Run property-based validation synthesized from refinement types |
-| `--warn-fragment` | false | — | Emit outside_decidable_fragment warnings for atoms outside the Z3-stable fragment |
-| `--ieee754-f64` | false | — | Opt-in IEEE 754 (binary64) verification for `f64`: encode `f64` as Z3 `Float(11,53)` with round-nearest-even FP arithmetic instead of the default exact-rational `Real` encoding. Models rounding so e.g. `0.1 + 0.2 != 0.3` holds. Default off (keeps `Real` semantics) |
-| `--bitvec-i64` | false | — | Opt-in bit-vector verification for `i64`: encode `i64` as Z3 `BV(64)` so `&`, `\|`, `^`, `<<`, `>>` have real bit semantics and `+`, `-`, `*` wrap in two's complement like machine arithmetic, instead of the default unbounded `Int` encoding. Default off (keeps `Int` semantics and existing proof certificates) |
-| `--warn-untyped-arrays` | false | — | Emit `untyped_array_access` warnings when an array is accessed as `arr[i]` without an explicit `[i64]`/`[f64]`/`[bool]` element-type annotation (which silently falls back to `i64`). Warning-only; does not change the verification encoding |
-| `--strict-array-types` | false | — | Opt-in strict mode: treat unannotated array accesses (which default to the `i64` element sort) as errors instead of warnings. Off by default, preserving the backward-compatible `i64` fallback |
-| `--property-based-test-count <PROPERTY_BASED_TEST_COUNT>` | 100 | — | Number of generated property-based inputs per atom |
-| `--property-based-test-seed <PROPERTY_BASED_TEST_SEED>` | — | — | Seed for deterministic property-based input generation |
-| `--property-based-test-max-shrink-steps <PROPERTY_BASED_TEST_MAX_SHRINK_STEPS>` | 64 | — | Maximum property-based shrinking steps per counterexample |
+| `--emit-contract-manifest` | false | — | Emit a contract manifest containing per-atom specification hashes |
+| `--task-id <TASK_ID>` | — | — | Verification task ID for MCP/CI provenance |
+
+#### Harness metadata
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
 | `--harness-contract <HARNESS_CONTRACT>` | — | — | Harness contract path or identifier to embed in generated proof certificates |
 | `--intent-fidelity <INTENT_FIDELITY>` | — | — | Intent fidelity metadata JSON to embed in generated proof certificates |
 | `--artifact-paths <ARTIFACT_PATHS>` | — | — | Comma-separated artifact paths to embed in generated proof certificates |
 | `--budget-policy-fingerprint <BUDGET_POLICY_FINGERPRINT>` | — | — | Budget policy fingerprint to embed in generated proof certificates |
-| `--emit-contract-manifest` | false | — | Emit a contract manifest containing per-atom specification hashes |
-| `--enable-vacuity-check` | false | — | Enable spec vacuity checking via mutation testing |
-| `--detect-loops` | false | — | Detect loops that may need stronger invariants |
-| `--suggest-cegis` | false | — | Include CEGIS loop-invariant suggestions in JSON/report output |
-| `--detect-spec-drift <DETECT_SPEC_DRIFT>` | — | — | Path to an old proof certificate for spec drift detection |
 
 ## `mumei proof-store`
 
