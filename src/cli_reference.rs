@@ -1,5 +1,6 @@
 use clap::{Arg, Command as ClapCommand, CommandFactory};
 use regex::Regex;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -15,22 +16,24 @@ struct EnvVar {
 }
 
 const ENV_VARS: &[EnvVar] = &[
-    EnvVar { name: "MUMEI_ENABLE_VACUITY_CHECK", category: "user", default: "off", description: "Enables the build pipeline's vacuity checks when set to a truthy value." },
-    EnvVar { name: "MUMEI_LEAN_PATH", category: "user", default: "auto-detected", description: "Path to a mumei-lean checkout used for Lean escalation; the bridge script is resolved beneath this path." },
-    EnvVar { name: "MUMEI_PROOF_STORE", category: "user", default: "$HOME/.mumei/proof-store", description: "Selects the local proof-store directory. Setting this variable does not enable proof-store use." },
+    EnvVar { name: "ENABLE_RECONSTRUCTION_LOSS", category: "user", default: "off", description: "Adds reconstruction-loss details to `mumei verify` failure reports when the value is non-empty and is not `0` or `false` after trimming and lowercasing." },
+    EnvVar { name: "ENABLE_SELF_CORRECTION", category: "user", default: "off", description: "Adds self-correction feedback instructions to `mumei verify` loss-vector reports when the value is non-empty and is not `0` or `false` after trimming and lowercasing." },
+    EnvVar { name: "MUMEI_ENABLE_VACUITY_CHECK", category: "user", default: "off", description: "Enables vacuity checks only for `mumei build` when set exactly to `1`; `mumei verify` uses `--enable-vacuity-check` instead." },
+    EnvVar { name: "MUMEI_LEAN_PATH", category: "user", default: "auto-detected when unset", description: "Overrides `mumei verify`'s bridge discovery and accepts `bridge.py` itself or a checkout with `scripts/bridge.py`; unset searches current and adjacent checkouts plus `$HOME/repos/mumei-lean`." },
+    EnvVar { name: "MUMEI_PROOF_STORE", category: "user", default: "$HOME/.mumei/proof-store", description: "Selects the proof-store directory when a store is opened without an explicit path; it does not enable store use, and the fallback requires `HOME` to be set." },
     EnvVar { name: "MUMEI_PROOF_BUNDLE", category: "integration", default: "unset", description: "Fallback proof-certificate bundle used when resolving imported modules." },
-    EnvVar { name: "MUMEI_REGISTRY_ALLOW_PLAINTEXT", category: "user", default: "off", description: "Explicitly permits a configured remote package registry to use plaintext HTTP." },
+    EnvVar { name: "MUMEI_REGISTRY_ALLOW_PLAINTEXT", category: "user", default: "off", description: "Allows non-loopback registry URLs using HTTP only when set exactly to `1` or case-insensitively to `true` without surrounding whitespace; loopback HTTP is allowed without it." },
     EnvVar { name: "MUMEI_REGISTRY_URL", category: "user", default: "unset", description: "Overrides the remote package registry URL from mumei.toml when non-empty." },
     EnvVar { name: "MUMEI_STD_PATH", category: "user", default: "unset", description: "Additional directory searched for Mumei standard-library modules." },
     EnvVar { name: "MUMEI_CANCEL_REASON", category: "integration", default: "unset", description: "Cancellation reason included in generated proof-certificate provenance." },
     EnvVar { name: "MUMEI_GENERATION_ID", category: "integration", default: "unset", description: "Generation identifier included in proof-certificate provenance." },
     EnvVar { name: "MUMEI_SELF_CORRECTION_METADATA", category: "integration", default: "unset", description: "JSON metadata from self-correction included in proof-certificate provenance." },
-    EnvVar { name: "MUMEI_SOLVER_CONFIG_FINGERPRINT", category: "integration", default: "computed", description: "Optional explicit solver-configuration fingerprint for provenance and cache identity." },
+    EnvVar { name: "MUMEI_SOLVER_CONFIG_FINGERPRINT", category: "integration", default: "computed when unset", description: "Optional explicit solver-configuration fingerprint for provenance and cache identity." },
     EnvVar { name: "MUMEI_SPEC_METADATA", category: "integration", default: "unset", description: "Specification metadata attached to verification results." },
     EnvVar { name: "MUMEI_TASK_ID", category: "integration", default: "unset", description: "Task identifier propagated to verification and proof-certificate provenance." },
     EnvVar { name: "MUMEI_TRACE_ID", category: "integration", default: "unset", description: "Trace identifier attached to verification metadata." },
     EnvVar { name: "MUMEI_VERIFICATION_TIMEOUT_MS", category: "integration", default: "unset", description: "Timeout in milliseconds propagated to verification workers and proof certificates." },
-    EnvVar { name: "MUMEI_SOLVER_CACHE_KEY", category: "integration", default: "computed", description: "Optional explicit solver-cache key recorded in proof-certificate provenance." },
+    EnvVar { name: "MUMEI_SOLVER_CACHE_KEY", category: "integration", default: "computed when unset", description: "Optional explicit solver-cache key recorded in proof-certificate provenance." },
     EnvVar { name: "MUMEI_SOLVER_PROCESS_START_TIME", category: "integration", default: "unset", description: "Solver process start timestamp included in proof-certificate provenance." },
     EnvVar { name: "MUMEI_HARNESS_CONTRACT", category: "integration", default: "unset", description: "Harness contract path recorded in proof-certificate provenance." },
     EnvVar { name: "MUMEI_INTENT_PROMPT_HASH", category: "integration", default: "unset", description: "Natural-language intent prompt hash recorded in proof-certificate provenance." },
@@ -39,8 +42,8 @@ const ENV_VARS: &[EnvVar] = &[
     EnvVar { name: "MUMEI_MANUAL_REVIEW_REQUIRED", category: "integration", default: "unset", description: "Manual-review requirement recorded in proof-certificate provenance." },
     EnvVar { name: "MUMEI_ARTIFACT_PATHS", category: "integration", default: "unset", description: "Comma-separated artifact paths recorded in proof-certificate provenance." },
     EnvVar { name: "MUMEI_BUDGET_POLICY_FINGERPRINT", category: "integration", default: "unset", description: "Budget-policy fingerprint recorded in proof-certificate provenance." },
-    EnvVar { name: "OTEL_ENABLED", category: "integration", default: "off", description: "Enables OpenTelemetry tracing when set to a truthy value." },
-    EnvVar { name: "OTEL_EXPORTER_OTLP_ENDPOINT", category: "integration", default: "OpenTelemetry SDK default", description: "OTLP endpoint used by the tracing exporter when telemetry is enabled." },
+    EnvVar { name: "OTEL_ENABLED", category: "integration", default: "off", description: "Enables tracing only in builds with the `otel` feature and only when set case-insensitively to `true`, `1`, `yes`, or `on` without surrounding whitespace." },
+    EnvVar { name: "OTEL_EXPORTER_OTLP_ENDPOINT", category: "integration", default: "OpenTelemetry SDK default", description: "OTLP endpoint read by the OpenTelemetry SDK when tracing is enabled and the `otel` feature is compiled in." },
     EnvVar { name: "TRACEPARENT", category: "integration", default: "unset", description: "W3C trace context propagated into verification spans." },
     EnvVar { name: "TRACESTATE", category: "integration", default: "unset", description: "W3C trace state propagated with TRACEPARENT." },
     EnvVar { name: "MUMEI_HOME", category: "install", default: "$HOME/.mumei", description: "Installation directory selected by scripts/install.sh." },
@@ -56,7 +59,7 @@ const ENV_VARS: &[EnvVar] = &[
     EnvVar { name: "LIBCLANG_PATH", category: "build", default: "system libclang discovery", description: "libclang library directory passed through to nested Cargo builds that use bindgen." },
     EnvVar { name: "Z3_SYS_Z3_HEADER", category: "build", default: "system Z3 discovery", description: "Path to z3.h used by z3-sys when compiling against a custom Z3 installation." },
     EnvVar { name: "Z3_SYS_Z3_LIB_DIR", category: "build", default: "system Z3 discovery", description: "Library directory used by z3-sys when linking a custom Z3 installation." },
-    EnvVar { name: "MUMEI_UPDATE_REFERENCE_DOCS", category: "development", default: "off", description: "Set to 1 when running the reference-docs test to regenerate the committed CLI and environment reference pages." },
+    EnvVar { name: "MUMEI_UPDATE_REFERENCE_DOCS", category: "development", default: "off", description: "Set exactly to `1` when running the reference-docs test to regenerate the committed CLI and environment reference pages." },
 ];
 
 const GENERATED_HEADER: &str = "<!-- Generated by `MUMEI_UPDATE_REFERENCE_DOCS=1 cargo test --bin mumei reference_docs`; do not edit by hand. -->";
@@ -327,6 +330,243 @@ fn literal_rust_env_reads(source: &str) -> Vec<String> {
         .collect()
 }
 
+fn rust_env_call_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(
+            r#"(?s)(?:std\s*::\s*)?env\s*::\s*var(?:_os)?\s*\(\s*("(?:\\.|[^"\\])*"|[A-Za-z_][A-Za-z0-9_]*)"#,
+        )
+        .expect("valid Rust environment-call scanner")
+    })
+}
+
+fn rust_const_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(
+            r#"(?s)\bconst\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*&\s*str\s*=\s*"([A-Za-z_][A-Za-z0-9_]*)"\s*;"#,
+        )
+        .expect("valid Rust environment-constant scanner")
+    })
+}
+
+fn rust_helper_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(
+            r#"(?s)\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*&\s*str\s*\)\s*(?:->[^{]+)?\{"#,
+        )
+        .expect("valid Rust environment-helper scanner")
+    })
+}
+
+fn rust_helper_call_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(
+            r#"(?s)\b([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*("(?:\\.|[^"\\])*"|[A-Za-z_][A-Za-z0-9_]*)"#,
+        )
+        .expect("valid Rust helper call scanner")
+    })
+}
+
+fn rust_string_literal_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(r#""([A-Za-z_][A-Za-z0-9_]*)""#)
+            .expect("valid Rust environment-name literal scanner")
+    })
+}
+
+fn rust_array_loop_pattern() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(r#"(?s)\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s*\[([^\]]*)\]\s*\{"#)
+            .expect("valid Rust environment-array scanner")
+    })
+}
+
+fn matching_rust_brace(source: &str, open: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut index = open;
+    let mut depth = 0usize;
+    let mut block_comment_depth = 0usize;
+    let mut in_line_comment = false;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut raw_string_hashes = None;
+
+    while index < bytes.len() {
+        if in_line_comment {
+            if bytes[index] == b'\n' {
+                in_line_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if block_comment_depth > 0 {
+            if bytes.get(index..index + 2) == Some(b"/*") {
+                block_comment_depth += 1;
+                index += 2;
+            } else if bytes.get(index..index + 2) == Some(b"*/") {
+                block_comment_depth -= 1;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if let Some(hashes) = raw_string_hashes {
+            if bytes[index] == b'"'
+                && bytes
+                    .get(index + 1..index + 1 + hashes)
+                    .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+            {
+                index += 1 + hashes;
+                raw_string_hashes = None;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if in_string || in_char {
+            let closing = if in_string { b'"' } else { b'\'' };
+            if bytes[index] == b'\\' {
+                index += 2;
+            } else if bytes[index] == closing {
+                in_string = false;
+                in_char = false;
+                index += 1;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+
+        if bytes.get(index..index + 2) == Some(b"//") {
+            in_line_comment = true;
+            index += 2;
+            continue;
+        }
+        if bytes.get(index..index + 2) == Some(b"/*") {
+            block_comment_depth = 1;
+            index += 2;
+            continue;
+        }
+
+        let raw_start = if bytes.get(index..index + 2) == Some(b"br") {
+            Some(index + 2)
+        } else if bytes[index] == b'r' {
+            Some(index + 1)
+        } else {
+            None
+        };
+        if let Some(mut delimiter) = raw_start {
+            let mut hashes = 0;
+            while bytes.get(delimiter) == Some(&b'#') {
+                hashes += 1;
+                delimiter += 1;
+            }
+            if bytes.get(delimiter) == Some(&b'"') {
+                raw_string_hashes = Some(hashes);
+                index = delimiter + 1;
+                continue;
+            }
+        }
+
+        if bytes[index] == b'"' {
+            in_string = true;
+            index += 1;
+            continue;
+        }
+        if bytes[index] == b'\'' {
+            let mut cursor = index + 1;
+            if bytes.get(cursor) == Some(&b'\\') {
+                cursor += 2;
+            } else {
+                cursor += 1;
+            }
+            if bytes.get(cursor) == Some(&b'\'') {
+                in_char = true;
+                index += 1;
+                continue;
+            }
+        }
+        if bytes[index] == b'{' {
+            depth += 1;
+        } else if bytes[index] == b'}' {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn rust_env_call_uses(source: &str, argument: &str) -> bool {
+    rust_env_call_pattern()
+        .captures_iter(source)
+        .any(|capture| &capture[1] == argument)
+}
+
+fn rust_env_reads(source: &str) -> Vec<String> {
+    let constants = rust_const_pattern()
+        .captures_iter(source)
+        .map(|capture| (capture[1].to_owned(), capture[2].to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    let helpers = rust_helper_pattern()
+        .captures_iter(source)
+        .filter_map(|capture| {
+            let body_open = capture.get(0)?.end() - 1;
+            let body_end = matching_rust_brace(source, body_open)?;
+            let helper_name = capture[1].to_owned();
+            let parameter = &capture[2];
+            rust_env_call_uses(&source[body_open + 1..body_end], parameter).then_some(helper_name)
+        })
+        .collect::<Vec<_>>();
+
+    let mut reads = literal_rust_env_reads(source);
+    for capture in rust_env_call_pattern().captures_iter(source) {
+        if let Some(name) = constants.get(&capture[1]) {
+            reads.push(name.clone());
+        }
+    }
+
+    for capture in rust_helper_call_pattern().captures_iter(source) {
+        if !helpers.iter().any(|helper| helper == &capture[1]) {
+            continue;
+        }
+        let argument = &capture[2];
+        if let Some(name) = rust_string_literal_pattern()
+            .captures(argument)
+            .map(|literal| literal[1].to_owned())
+            .or_else(|| constants.get(argument).cloned())
+        {
+            reads.push(name);
+        }
+    }
+
+    for capture in rust_array_loop_pattern().captures_iter(source) {
+        let body_open = capture.get(0).unwrap().end() - 1;
+        let Some(body_end) = matching_rust_brace(source, body_open) else {
+            continue;
+        };
+        if rust_env_call_uses(&source[body_open + 1..body_end], &capture[1]) {
+            reads.extend(
+                rust_string_literal_pattern()
+                    .captures_iter(&capture[2])
+                    .map(|literal| literal[1].to_owned()),
+            );
+        }
+    }
+
+    reads.sort();
+    reads.dedup();
+    reads
+}
+
 fn workspace_source_dirs(root: &Path) -> Vec<PathBuf> {
     let manifest = fs::read_to_string(root.join("Cargo.toml")).expect("read workspace manifest");
     let parsed: toml::Value = toml::from_str(&manifest).expect("parse workspace manifest");
@@ -428,7 +668,7 @@ mod tests {
         for path in &files {
             let source = fs::read_to_string(path).expect("read scanned source");
             if path.extension().is_some_and(|extension| extension == "rs") {
-                reads.extend(literal_rust_env_reads(&source));
+                reads.extend(rust_env_reads(&source));
             } else {
                 reads.extend(
                     mumei_name_pattern
@@ -505,6 +745,46 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(literal_rust_env_reads(&source), ["ONE", "TWO", "COMMENTED"]);
+    }
+
+    #[test]
+    fn scanner_resolves_const_aliases_helpers_and_literal_array_reads() {
+        let mut source = format!("const ENV_NAME: &str = {:?};\n", "CONST_READ");
+        source.push_str(&format!("std::env::var({});\n", "ENV_NAME"));
+        source.push_str(&format!(
+            "{}{}(name: &str) -> Option<String> {{ std::env::var(name).ok() }}\n",
+            "fn ", "env_nonempty"
+        ));
+        source.push_str(&format!("{}({:?});\n", "env_nonempty", "HELPER_LITERAL"));
+        source.push_str(&format!(
+            "const HELPER_NAME: &str = {:?};\n",
+            "HELPER_CONST"
+        ));
+        source.push_str(&format!("{}({});\n", "env_nonempty", "HELPER_NAME"));
+        source.push_str(&format!(
+            "for variable in [{:?}, {:?}] {{ std::env::var(variable); }}\n",
+            "ARRAY_ONE", "ARRAY_TWO"
+        ));
+
+        assert_eq!(
+            rust_env_reads(&source),
+            [
+                "ARRAY_ONE",
+                "ARRAY_TWO",
+                "CONST_READ",
+                "HELPER_CONST",
+                "HELPER_LITERAL"
+            ]
+        );
+    }
+
+    #[test]
+    fn scanner_ignores_helpers_that_do_not_read_the_environment() {
+        let source = format!(
+            "{}{}(name: &str) {{ let _ = name; }}\n{}({:?});",
+            "fn ", "unused_helper", "unused_helper", "NOT_AN_ENV_READ"
+        );
+        assert!(rust_env_reads(&source).is_empty());
     }
 
     #[test]

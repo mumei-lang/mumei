@@ -1,3 +1,8 @@
+### Unreleased: generated CLI and environment references
+
+- Added generated references for visible CLI options and environment variables.
+- Regenerate with `MUMEI_UPDATE_REFERENCE_DOCS=1 cargo test --bin mumei reference_docs`; `core-tests` fails when the references drift.
+
 ### Unreleased: Lean evidence in the reusable gate
 
 - The reusable Claim Book and Charter gate can accept current Lean evidence

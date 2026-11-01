@@ -14,10 +14,12 @@ Variables are grouped by how they are used. Integration and build variables are 
 
 | Variable | Default | Description |
 |---|---|---|
-| `MUMEI_ENABLE_VACUITY_CHECK` | off | Enables the build pipeline's vacuity checks when set to a truthy value. |
-| `MUMEI_LEAN_PATH` | auto-detected | Path to a mumei-lean checkout used for Lean escalation; the bridge script is resolved beneath this path. |
-| `MUMEI_PROOF_STORE` | $HOME/.mumei/proof-store | Selects the local proof-store directory. Setting this variable does not enable proof-store use. |
-| `MUMEI_REGISTRY_ALLOW_PLAINTEXT` | off | Explicitly permits a configured remote package registry to use plaintext HTTP. |
+| `ENABLE_RECONSTRUCTION_LOSS` | off | Adds reconstruction-loss details to `mumei verify` failure reports when the value is non-empty and is not `0` or `false` after trimming and lowercasing. |
+| `ENABLE_SELF_CORRECTION` | off | Adds self-correction feedback instructions to `mumei verify` loss-vector reports when the value is non-empty and is not `0` or `false` after trimming and lowercasing. |
+| `MUMEI_ENABLE_VACUITY_CHECK` | off | Enables vacuity checks only for `mumei build` when set exactly to `1`; `mumei verify` uses `--enable-vacuity-check` instead. |
+| `MUMEI_LEAN_PATH` | auto-detected when unset | Overrides `mumei verify`'s bridge discovery and accepts `bridge.py` itself or a checkout with `scripts/bridge.py`; unset searches current and adjacent checkouts plus `$HOME/repos/mumei-lean`. |
+| `MUMEI_PROOF_STORE` | $HOME/.mumei/proof-store | Selects the proof-store directory when a store is opened without an explicit path; it does not enable store use, and the fallback requires `HOME` to be set. |
+| `MUMEI_REGISTRY_ALLOW_PLAINTEXT` | off | Allows non-loopback registry URLs using HTTP only when set exactly to `1` or case-insensitively to `true` without surrounding whitespace; loopback HTTP is allowed without it. |
 | `MUMEI_REGISTRY_URL` | unset | Overrides the remote package registry URL from mumei.toml when non-empty. |
 | `MUMEI_STD_PATH` | unset | Additional directory searched for Mumei standard-library modules. |
 
@@ -29,12 +31,12 @@ Variables are grouped by how they are used. Integration and build variables are 
 | `MUMEI_CANCEL_REASON` | unset | Cancellation reason included in generated proof-certificate provenance. |
 | `MUMEI_GENERATION_ID` | unset | Generation identifier included in proof-certificate provenance. |
 | `MUMEI_SELF_CORRECTION_METADATA` | unset | JSON metadata from self-correction included in proof-certificate provenance. |
-| `MUMEI_SOLVER_CONFIG_FINGERPRINT` | computed | Optional explicit solver-configuration fingerprint for provenance and cache identity. |
+| `MUMEI_SOLVER_CONFIG_FINGERPRINT` | computed when unset | Optional explicit solver-configuration fingerprint for provenance and cache identity. |
 | `MUMEI_SPEC_METADATA` | unset | Specification metadata attached to verification results. |
 | `MUMEI_TASK_ID` | unset | Task identifier propagated to verification and proof-certificate provenance. |
 | `MUMEI_TRACE_ID` | unset | Trace identifier attached to verification metadata. |
 | `MUMEI_VERIFICATION_TIMEOUT_MS` | unset | Timeout in milliseconds propagated to verification workers and proof certificates. |
-| `MUMEI_SOLVER_CACHE_KEY` | computed | Optional explicit solver-cache key recorded in proof-certificate provenance. |
+| `MUMEI_SOLVER_CACHE_KEY` | computed when unset | Optional explicit solver-cache key recorded in proof-certificate provenance. |
 | `MUMEI_SOLVER_PROCESS_START_TIME` | unset | Solver process start timestamp included in proof-certificate provenance. |
 | `MUMEI_HARNESS_CONTRACT` | unset | Harness contract path recorded in proof-certificate provenance. |
 | `MUMEI_INTENT_PROMPT_HASH` | unset | Natural-language intent prompt hash recorded in proof-certificate provenance. |
@@ -43,8 +45,8 @@ Variables are grouped by how they are used. Integration and build variables are 
 | `MUMEI_MANUAL_REVIEW_REQUIRED` | unset | Manual-review requirement recorded in proof-certificate provenance. |
 | `MUMEI_ARTIFACT_PATHS` | unset | Comma-separated artifact paths recorded in proof-certificate provenance. |
 | `MUMEI_BUDGET_POLICY_FINGERPRINT` | unset | Budget-policy fingerprint recorded in proof-certificate provenance. |
-| `OTEL_ENABLED` | off | Enables OpenTelemetry tracing when set to a truthy value. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OpenTelemetry SDK default | OTLP endpoint used by the tracing exporter when telemetry is enabled. |
+| `OTEL_ENABLED` | off | Enables tracing only in builds with the `otel` feature and only when set case-insensitively to `true`, `1`, `yes`, or `on` without surrounding whitespace. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OpenTelemetry SDK default | OTLP endpoint read by the OpenTelemetry SDK when tracing is enabled and the `otel` feature is compiled in. |
 | `TRACEPARENT` | unset | W3C trace context propagated into verification spans. |
 | `TRACESTATE` | unset | W3C trace state propagated with TRACEPARENT. |
 
@@ -75,4 +77,4 @@ Variables are grouped by how they are used. Integration and build variables are 
 
 | Variable | Default | Description |
 |---|---|---|
-| `MUMEI_UPDATE_REFERENCE_DOCS` | off | Set to 1 when running the reference-docs test to regenerate the committed CLI and environment reference pages. |
+| `MUMEI_UPDATE_REFERENCE_DOCS` | off | Set exactly to `1` when running the reference-docs test to regenerate the committed CLI and environment reference pages. |
