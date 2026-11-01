@@ -13,6 +13,8 @@ on:
       - 'mumei-emit-*/**'
       - 'src/**'
       - 'tests/**'
+      - 'docs/CLI_REFERENCE.md'
+      - 'docs/ENV_REFERENCE.md'
       - 'std/**'
       - 'Cargo.toml'
       - 'Cargo.lock'

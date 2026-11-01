@@ -113,6 +113,8 @@ The complete CLI command table is in [`docs/TOOLCHAIN.md`](docs/TOOLCHAIN.md), M
 
 | Document | Content |
 |----------|---------|
+| [CLI Option Reference](docs/CLI_REFERENCE.md) | Generated exhaustive command, argument, option, default, and accepted-value reference |
+| [Environment Variable Reference](docs/ENV_REFERENCE.md) | Generated environment variable categories, defaults, and descriptions |
 | [Verification Workflow Guide](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/VERIFICATION_WORKFLOW_GUIDE.md) | Natural-language spec validation, existing-code verification, spec↔code alignment, and human-friendly operation guide |
 | [MCP Integration](docs/MCP.md) | MCP tools, setup, and multi-agent collaboration |
 | [Language Reference](docs/LANGUAGE.md) | Types, generics, traits, ownership, async |
