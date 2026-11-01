@@ -628,7 +628,7 @@ mod tests {
             }
             if path
                 .file_name()
-                .is_some_and(|name| name != "cli_reference.rs")
+                .is_some_and(|name| name != "cli_reference.rs" && name != "env_registry.rs")
             {
                 all_source.push_str(&source);
             } else if let Some(start) = source.find("const ENV_VARS:") {
@@ -652,15 +652,28 @@ mod tests {
             "unregistered environment reads: {missing:?}"
         );
 
-        let stale = ENV_VARS
-            .iter()
-            .filter(|var| !all_source.contains(var.name))
-            .map(|var| var.name)
-            .collect::<Vec<_>>();
+        let stale = unused_registry_entries(ENV_VARS.iter().map(|var| var.name), &all_source);
         assert!(
             stale.is_empty(),
             "unreferenced environment registry entries: {stale:?}"
         );
+
+        let fake_name = ["MUMEI_UNUSED", "FAKE", "REGISTRY_ENTRY"].join("_");
+        let with_fake = unused_registry_entries(
+            ENV_VARS
+                .iter()
+                .map(|var| var.name)
+                .chain(std::iter::once(fake_name.as_str())),
+            &all_source,
+        );
+        assert_eq!(with_fake, vec![fake_name.as_str()]);
+    }
+
+    fn unused_registry_entries<'a>(
+        names: impl Iterator<Item = &'a str>,
+        all_source: &str,
+    ) -> Vec<&'a str> {
+        names.filter(|name| !all_source.contains(*name)).collect()
     }
 
     #[test]
