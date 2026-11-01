@@ -10,6 +10,8 @@ mod env_registry;
 mod feedback;
 mod linker;
 mod lsp;
+#[cfg(test)]
+mod naming;
 mod pipeline;
 mod setup;
 mod telemetry;
