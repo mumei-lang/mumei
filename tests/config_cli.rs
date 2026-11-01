@@ -157,6 +157,39 @@ fn text_lists_set_registered_variables_but_omits_unset_and_unknown_names() {
 }
 
 #[test]
+fn registry_url_userinfo_is_redacted_in_text_and_json() {
+    let project = Scratch::new(None);
+    let url = "https://registry-user:registry-password@example.test/packages";
+    let text_output = project.run(&["config"], &[("MUMEI_REGISTRY_URL", url)]);
+    let text = stdout(&text_output);
+    assert!(text_output.status.success(), "{}", stderr(&text_output));
+    assert!(text.contains("MUMEI_REGISTRY_URL=https://example.test/packages  (user)"));
+    assert!(!text.contains("registry-password"));
+    assert!(!text.contains("***"));
+
+    let json_result = project.run(&["config", "--json"], &[("MUMEI_REGISTRY_URL", url)]);
+    let payload = json_output(&json_result);
+    assert!(json_result.status.success(), "{}", stderr(&json_result));
+    let registry_url = payload["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "MUMEI_REGISTRY_URL")
+        .expect("registered registry URL");
+    assert_eq!(registry_url["value"], "https://example.test/packages");
+    assert_eq!(registry_url["sensitive"], false);
+    assert!(!stdout(&json_result).contains("registry-password"));
+    assert!(!stdout(&json_result).contains("***"));
+
+    let all_output = project.run(&["config", "--all"], &[("MUMEI_REGISTRY_URL", url)]);
+    let all_text = stdout(&all_output);
+    assert!(all_output.status.success(), "{}", stderr(&all_output));
+    assert!(all_text.contains("MUMEI_REGISTRY_URL=https://example.test/packages  (user)"));
+    assert!(!all_text.contains("registry-password"));
+    assert!(!all_text.contains("***"));
+}
+
+#[test]
 fn all_text_includes_unset_registered_variables_and_their_defaults() {
     let project = Scratch::new(None);
     let output = project.run(&["config", "--all"], &[]);
@@ -229,11 +262,23 @@ fn json_reports_manifest_profile_schema_and_set_registered_environment() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         entry_keys,
-        BTreeSet::from(["default", "description", "name", "set", "value"])
+        BTreeSet::from([
+            "default",
+            "description",
+            "name",
+            "sensitive",
+            "set",
+            "value"
+        ])
     );
     assert!(env.iter().all(|entry| {
         entry["set"].as_bool().is_some()
-            && (entry["value"].is_string() || entry["value"].is_null())
+            && entry["sensitive"].as_bool().is_some()
+            && if entry["sensitive"] == true {
+                entry.get("value").is_none()
+            } else {
+                entry["value"].is_string() || entry["value"].is_null()
+            }
             && (entry["default"].is_string() || entry["default"].is_null())
             && entry["description"].is_string()
     }));

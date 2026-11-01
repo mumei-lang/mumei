@@ -2,7 +2,8 @@
 
 - Added `mumei config` to report the manifest verify profile and registered
   environment variables, with text and JSON output.
-- Sensitive environment values are redacted; `--all` includes unset variables.
+- Values of sensitive variables are never printed; only whether they are set.
+  Credentials embedded in URLs are stripped; `--all` includes unset variables.
 
 ### Unreleased: verify profiles
 
