@@ -144,6 +144,9 @@ fn sanitize_url_value(value: &str) -> String {
     let Some(scheme_end) = value.find("://") else {
         return value.to_owned();
     };
+    if !is_standalone_url(value) {
+        return value.to_owned();
+    }
     let authority_start = scheme_end + 3;
     let authority_end = value[authority_start..]
         .find(['/', '?', '#'])
@@ -162,6 +165,18 @@ fn sanitize_url_value(value: &str) -> String {
         host,
         &suffix[..suffix_end]
     )
+}
+
+fn is_standalone_url(value: &str) -> bool {
+    let Some((scheme, _)) = value.split_once("://") else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic())
+        && chars.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '+' | '.' | '-')
+        })
+        && !value.chars().any(char::is_whitespace)
 }
 
 fn text_default(default: &str) -> &str {
@@ -218,5 +233,14 @@ mod tests {
             "https://host/path"
         );
         assert_eq!(sanitize_url_value("not-a-url@host"), "not-a-url@host");
+        assert_eq!(
+            sanitize_url_value(r#"{"u":"https://h/x?y"}"#),
+            r#"{"u":"https://h/x?y"}"#
+        );
+        assert_eq!(sanitize_url_value("key=https://u:p@h"), "key=https://u:p@h");
+        assert_eq!(
+            sanitize_url_value("https://u:p@h/path with-space"),
+            "https://u:p@h/path with-space"
+        );
     }
 }

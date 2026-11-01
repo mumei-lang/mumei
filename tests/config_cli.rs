@@ -231,6 +231,23 @@ fn registry_url_credentials_and_metadata_are_stripped_in_text_and_json() {
 }
 
 #[test]
+fn json_value_with_embedded_url_is_not_sanitized() {
+    let project = Scratch::new(None);
+    let metadata = r#"{"u":"https://h/x?y"}"#;
+    let output = project.run(&["config", "--json"], &[("MUMEI_SPEC_METADATA", metadata)]);
+    let payload = json_output(&output);
+    let entry = payload["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "MUMEI_SPEC_METADATA")
+        .expect("registered specification metadata");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(entry["value"], metadata);
+}
+
+#[test]
 fn all_text_includes_unset_registered_variables_and_their_defaults() {
     let project = Scratch::new(None);
     let output = project.run(&["config", "--all"], &[]);
