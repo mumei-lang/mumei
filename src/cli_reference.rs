@@ -207,47 +207,84 @@ fn render_command_section(command: &mut ClapCommand, path: &str, output: &mut St
         .filter(|arg| !arg.is_positional())
         .collect::<Vec<_>>();
     if !options.is_empty() {
-        output.push_str("### Options\n\n| Option | Default | Possible values | Description |\n|---|---|---|---|\n");
-        for arg in options {
-            let name = option_name(arg);
-            let defaults = arg
-                .get_default_values()
-                .iter()
-                .map(|value| value.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let possible_values = if arg.get_action().takes_values() {
-                arg.get_value_parser()
-                    .possible_values()
-                    .map(|values| {
-                        values
-                            .filter(|value| !value.is_hide_set())
-                            .map(|value| value.get_name().to_owned())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .filter(|values| !values.is_empty())
-                    .unwrap_or_else(|| "—".to_owned())
-            } else {
-                "—".to_owned()
-            };
-            let description = arg
-                .get_long_help()
-                .or_else(|| arg.get_help())
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "—".to_owned());
-            output.push_str(&format!(
-                "| `{}` | {} | {} | {} |\n",
-                markdown_cell(&name),
-                markdown_cell(if defaults.is_empty() {
-                    "—"
-                } else {
-                    &defaults
-                }),
-                markdown_cell(&possible_values),
-                markdown_cell(&description)
-            ));
+        output.push_str("### Options\n\n");
+        let unheaded = options
+            .iter()
+            .copied()
+            .filter(|arg| arg.get_help_heading().is_none())
+            .collect::<Vec<_>>();
+        let mut headings = Vec::new();
+        for arg in &options {
+            if let Some(heading) = arg.get_help_heading() {
+                if !headings.contains(&heading) {
+                    headings.push(heading);
+                }
+            }
         }
+        if headings.is_empty() {
+            render_option_table(&options, output);
+        } else {
+            if !unheaded.is_empty() {
+                render_option_table(&unheaded, output);
+                output.push('\n');
+            }
+            for (index, heading) in headings.iter().enumerate() {
+                if index > 0 {
+                    output.push('\n');
+                }
+                output.push_str(&format!("#### {heading}\n\n"));
+                let headed = options
+                    .iter()
+                    .copied()
+                    .filter(|arg| arg.get_help_heading() == Some(*heading))
+                    .collect::<Vec<_>>();
+                render_option_table(&headed, output);
+            }
+        }
+    }
+}
+
+fn render_option_table(options: &[&Arg], output: &mut String) {
+    output.push_str("| Option | Default | Possible values | Description |\n|---|---|---|---|\n");
+    for arg in options {
+        let name = option_name(arg);
+        let defaults = arg
+            .get_default_values()
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let possible_values = if arg.get_action().takes_values() {
+            arg.get_value_parser()
+                .possible_values()
+                .map(|values| {
+                    values
+                        .filter(|value| !value.is_hide_set())
+                        .map(|value| value.get_name().to_owned())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .filter(|values| !values.is_empty())
+                .unwrap_or_else(|| "—".to_owned())
+        } else {
+            "—".to_owned()
+        };
+        let description = arg
+            .get_long_help()
+            .or_else(|| arg.get_help())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "—".to_owned());
+        output.push_str(&format!(
+            "| `{}` | {} | {} | {} |\n",
+            markdown_cell(&name),
+            markdown_cell(if defaults.is_empty() {
+                "—"
+            } else {
+                &defaults
+            }),
+            markdown_cell(&possible_values),
+            markdown_cell(&description)
+        ));
     }
 }
 
@@ -738,6 +775,63 @@ mod tests {
     }
 
     #[test]
+    fn renderer_groups_headed_options_after_unheaded_options_in_first_appearance_order() {
+        let mut command = ClapCommand::new("fixture")
+            .arg(
+                Arg::new("plain")
+                    .long("plain")
+                    .action(ArgAction::SetTrue)
+                    .help("An unheaded option"),
+            )
+            .arg(
+                Arg::new("alpha")
+                    .long("alpha")
+                    .action(ArgAction::SetTrue)
+                    .help("An alpha option")
+                    .help_heading("First group"),
+            )
+            .arg(
+                Arg::new("beta")
+                    .long("beta")
+                    .action(ArgAction::SetTrue)
+                    .help("A beta option")
+                    .help_heading("Second group"),
+            );
+        command.build();
+        let mut output = String::new();
+        render_command_section(&mut command, "fixture", &mut output);
+
+        let plain = output.find("| `--plain` |").unwrap();
+        let first_heading = output.find("#### First group").unwrap();
+        let alpha = output.find("| `--alpha` |").unwrap();
+        let second_heading = output.find("#### Second group").unwrap();
+        let beta = output.find("| `--beta` |").unwrap();
+        assert!(plain < first_heading);
+        assert!(first_heading < alpha);
+        assert!(alpha < second_heading);
+        assert!(second_heading < beta);
+        assert!(!output.contains("#### Options"));
+    }
+
+    #[test]
+    fn renderer_keeps_unheaded_options_table_unchanged() {
+        let mut command = ClapCommand::new("fixture").arg(
+            Arg::new("verbose")
+                .long("verbose")
+                .action(ArgAction::SetTrue)
+                .help("Show additional output"),
+        );
+        command.build();
+        let mut output = String::new();
+        render_command_section(&mut command, "fixture", &mut output);
+
+        assert_eq!(
+            output,
+            "\n## `mumei fixture`\n\nUsage:\n\n```text\nUsage: fixture [OPTIONS]\n```\n### Options\n\n| Option | Default | Possible values | Description |\n|---|---|---|---|\n| `--verbose` | false | — | Show additional output |\n"
+        );
+    }
+
+    #[test]
     fn scanner_finds_single_line_multiline_var_os_and_comment_mentions() {
         let source = [
             format!("{}{:?});", "env::var(", "ONE"),
@@ -880,6 +974,68 @@ mod tests {
         assert!(add_section.contains("| `--version <VERSION>` |"));
         assert!(rendered.contains("proof-store prune"));
         assert!(rendered.contains("charter check"));
+    }
+
+    #[test]
+    fn every_visible_verify_option_has_a_heading_in_the_requested_order() {
+        let mut command = Cli::command();
+        command.build();
+        let verify = command.find_subcommand_mut("verify").unwrap();
+        let expected = [
+            ("profile", "Profile and strictness"),
+            ("strict_imports", "Profile and strictness"),
+            ("strict_array_types", "Profile and strictness"),
+            ("warn_fragment", "Profile and strictness"),
+            ("warn_untyped_arrays", "Profile and strictness"),
+            ("solver_timeout", "Solver and proof"),
+            ("cache_scope", "Solver and proof"),
+            ("proof_store", "Solver and proof"),
+            ("escalate_lean", "Solver and proof"),
+            ("allow_lean_verified", "Solver and proof"),
+            ("proof_cert", "Solver and proof"),
+            ("ieee754_f64", "Solver and proof"),
+            ("bitvec_i64", "Solver and proof"),
+            ("enable_spurious_detection", "Diagnostics"),
+            ("disable_spurious_detection", "Diagnostics"),
+            ("enable_vacuity_check", "Diagnostics"),
+            ("detect_loops", "Diagnostics"),
+            ("suggest_cegis", "Diagnostics"),
+            ("detect_spec_drift", "Diagnostics"),
+            ("cross_spec_verify", "Diagnostics"),
+            ("cross_spec_files", "Diagnostics"),
+            ("property_based_test", "Property-based testing"),
+            ("property_based_test_count", "Property-based testing"),
+            ("property_based_test_seed", "Property-based testing"),
+            (
+                "property_based_test_max_shrink_steps",
+                "Property-based testing",
+            ),
+            ("json", "Output and artifacts"),
+            ("emit", "Output and artifacts"),
+            ("no_emit", "Output and artifacts"),
+            ("output", "Output and artifacts"),
+            ("report_dir", "Output and artifacts"),
+            ("keep_phase_artifacts", "Output and artifacts"),
+            ("emit_contract_manifest", "Output and artifacts"),
+            ("task_id", "Output and artifacts"),
+            ("harness_contract", "Harness metadata"),
+            ("intent_fidelity", "Harness metadata"),
+            ("artifact_paths", "Harness metadata"),
+            ("budget_policy_fingerprint", "Harness metadata"),
+        ];
+        let visible = visible_arguments(verify)
+            .filter(|arg| !arg.is_positional())
+            .collect::<Vec<_>>();
+        assert_eq!(visible.len(), expected.len());
+        for (arg, (id, heading)) in visible.iter().zip(expected) {
+            assert_eq!(arg.get_id().as_str(), id);
+            assert_eq!(arg.get_help_heading(), Some(heading));
+        }
+        assert!(verify.get_arguments().any(|arg| {
+            arg.is_positional()
+                && arg.get_id().as_str() == "input"
+                && arg.get_help_heading().is_none()
+        }));
     }
 
     #[test]
