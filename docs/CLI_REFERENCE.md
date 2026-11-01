@@ -21,7 +21,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei init` | 0 | Generate a new Mumei project template |
 | `mumei inspect` | 2 | Inspect development environment (Z3, LLVM, std library) |
 | `mumei setup` | 1 | Download and configure Z3 + LLVM toolchain into ~/.mumei/ |
-| `mumei add` | 3 | Add a dependency to mumei.toml, or install an emitter plugin |
+| `mumei add` | 4 | Add a dependency to mumei.toml, or install an emitter plugin |
 | `mumei publish` | 2 | Publish package to local registry (~/.mumei/packages/) |
 | `mumei list` | 0 | List available packages in the local registry |
 | `mumei lsp` | 0 | Start Language Server Protocol server (stdio mode) |
@@ -301,6 +301,7 @@ Usage: mumei add [OPTIONS] [DEP]
 
 | Option | Default | Possible values | Description |
 |---|---|---|---|
+| `--version <VERSION>` | — | — | P5-B: Specify version for registry dependency |
 | `--emitter <NAME>` | — | — | Emitter Plugin Phase 3: install an external emitter plugin as `<name>`, making `mumei build --emit <name>` resolve it |
 | `--path <PATH>` | — | — | Compiled cdylib to install, or a directory/cargo project containing it (default: the current directory) |
 | `--force` | false | — | Overwrite an already installed plugin with the same name |

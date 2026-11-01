@@ -1,4 +1,4 @@
-use clap::{Arg, Command as ClapCommand, CommandFactory};
+use clap::{Arg, ArgAction, Command as ClapCommand, CommandFactory};
 use regex::Regex;
 use std::collections::BTreeMap;
 use std::fs;
@@ -144,9 +144,13 @@ fn find_command_mut<'a>(command: &'a mut ClapCommand, path: &str) -> Option<&'a 
 }
 
 fn visible_arguments(command: &ClapCommand) -> impl Iterator<Item = &Arg> {
-    command
-        .get_arguments()
-        .filter(|arg| !arg.is_hide_set() && !matches!(arg.get_id().as_str(), "help" | "version"))
+    command.get_arguments().filter(|arg| {
+        !arg.is_hide_set()
+            && !matches!(
+                arg.get_action(),
+                ArgAction::Help | ArgAction::HelpShort | ArgAction::HelpLong | ArgAction::Version
+            )
+    })
 }
 
 fn render_command_section(command: &mut ClapCommand, path: &str, output: &mut String) {
@@ -818,6 +822,25 @@ mod tests {
     }
 
     #[test]
+    fn renderer_keeps_user_version_option_and_skips_generated_help_flag() {
+        let mut fixture = ClapCommand::new("mumei").subcommand(
+            ClapCommand::new("fixture").arg(
+                Arg::new("version")
+                    .long("version")
+                    .value_name("VERSION")
+                    .action(ArgAction::Set),
+            ),
+        );
+        fixture.build();
+        let command = fixture.find_subcommand_mut("fixture").unwrap();
+        let mut output = String::new();
+        render_command_section(command, "fixture", &mut output);
+
+        assert!(output.contains("| `--version <VERSION>` |"));
+        assert!(!output.contains("--help"));
+    }
+
+    #[test]
     fn every_visible_cli_subcommand_has_a_section_and_verify_lists_all_options() {
         let rendered = render_cli_reference();
         let mut command = Cli::command();
@@ -841,6 +864,20 @@ mod tests {
             .filter(|line| line.starts_with("| `--") || line.starts_with("| `-"))
             .count();
         assert_eq!(listed, verify.2);
+
+        let add = rows.iter().find(|(path, _, _)| path == "add").unwrap();
+        let add_start = rendered.find("## `mumei add`").unwrap();
+        let add_end = rendered[add_start + 1..]
+            .find("\n## `")
+            .map(|offset| add_start + 1 + offset)
+            .unwrap_or(rendered.len());
+        let add_section = &rendered[add_start..add_end];
+        let listed = add_section
+            .lines()
+            .filter(|line| line.starts_with("| `--") || line.starts_with("| `-"))
+            .count();
+        assert_eq!(listed, add.2);
+        assert!(add_section.contains("| `--version <VERSION>` |"));
         assert!(rendered.contains("proof-store prune"));
         assert!(rendered.contains("charter check"));
     }
