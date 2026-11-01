@@ -6,6 +6,11 @@
   printed, only whether they are set. URLs are shown without credentials,
   query, or fragment; `--all` includes unset variables.
 
+### Unreleased: grouped verify help options
+
+- Grouped `mumei verify --help` options into headings and rendered those groups
+  in the generated CLI reference.
+
 ### Unreleased: verify profiles
 
 - Added opt-in `strict` and `audit` profiles for `mumei verify`, configurable

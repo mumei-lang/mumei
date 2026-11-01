@@ -51,130 +51,149 @@ pub(crate) enum Command {
         /// Input .mm file or directory
         input: String,
         /// Opt-in preset that turns on a group of verify checks (strict, audit); explicit flags still apply and a profile never turns a flag off
-        #[arg(long, value_name = "PROFILE", value_parser = ["strict", "audit"])]
+        #[arg(
+            long,
+            value_name = "PROFILE",
+            value_parser = ["strict", "audit"],
+            help_heading = "Profile and strictness"
+        )]
         profile: Option<String>,
-        /// Verification task ID for MCP/CI provenance
-        #[arg(long)]
-        task_id: Option<String>,
+        /// P5-C: Strict import mode — missing/invalid certificates cause hard errors
+        #[arg(long, help_heading = "Profile and strictness")]
+        strict_imports: bool,
+        /// Opt-in strict mode: treat unannotated array accesses (which default
+        /// to the `i64` element sort) as errors instead of warnings. Off by
+        /// default, preserving the backward-compatible `i64` fallback.
+        #[arg(long, help_heading = "Profile and strictness")]
+        strict_array_types: bool,
+        /// Emit outside_decidable_fragment warnings for atoms outside the Z3-stable fragment
+        #[arg(long, help_heading = "Profile and strictness")]
+        warn_fragment: bool,
+        /// Emit `untyped_array_access` warnings when an array is accessed as
+        /// `arr[i]` without an explicit `[i64]`/`[f64]`/`[bool]` element-type
+        /// annotation (which silently falls back to `i64`). Warning-only; does
+        /// not change the verification encoding.
+        #[arg(long, help_heading = "Profile and strictness")]
+        warn_untyped_arrays: bool,
+
         /// Override Z3 solver timeout in milliseconds
-        #[arg(long)]
+        #[arg(long, help_heading = "Solver and proof")]
         solver_timeout: Option<u64>,
         /// Verification cache scope: module (input directory) or global (current workspace)
-        #[arg(long, default_value = "module", value_parser = ["module", "global"])]
+        #[arg(
+            long,
+            default_value = "module",
+            value_parser = ["module", "global"],
+            help_heading = "Solver and proof"
+        )]
         cache_scope: String,
-        /// Generate Z3 proof certificate (.proof.json)
-        #[arg(long)]
-        proof_cert: bool,
+        /// Reuse Z3-verified proofs from the opt-in local proof store.
+        #[arg(long, help_heading = "Solver and proof")]
+        proof_store: bool,
         /// Escalate Z3 unknown obligations to Lean 4 via mumei-lean bridge.
-        #[arg(long)]
+        #[arg(long, help_heading = "Solver and proof")]
         escalate_lean: bool,
-        /// Emit format: "sarif" writes report.sarif; "loss-vector" prints P9-E Loss Vector JSON; "escalation-bundle" writes .escalation-bundle.json; "proof-graph" writes proof_graph.json for the interactive visualizer
-        #[arg(long, value_name = "FORMAT")]
-        emit: Option<String>,
-        /// Disable verify-only output targets: escalation-metrics
-        #[arg(long = "no-emit")]
-        no_emit: Vec<String>,
-        /// Output path for proof certificate or escalation bundle
-        #[arg(long, alias = "out")]
-        output: Option<String>,
-        /// Directory to write report.json into (default: current directory)
-        #[arg(long)]
-        report_dir: Option<String>,
-        /// Preserve per-atom SMT queries and verification phase outcomes
-        #[arg(long, value_name = "DIR")]
-        keep_phase_artifacts: Option<String>,
-        /// Output verification report as JSON to stdout
-        #[arg(long)]
-        json: bool,
-        /// P5-C: Strict import mode — missing/invalid certificates cause hard errors
-        #[arg(long)]
-        strict_imports: bool,
         /// PR 2: Accept mumei-lean-emitted certificates
         /// (`z3_check_result == "lean_verified"`) as proven during import
         /// resolution. Off by default for backwards compatibility.
-        #[arg(long)]
+        #[arg(long, help_heading = "Solver and proof")]
         allow_lean_verified: bool,
-        /// Reuse Z3-verified proofs from the opt-in local proof store.
-        #[arg(long)]
-        proof_store: bool,
-        /// Enable cross-specification consistency verification across atoms and emit cross_spec.json with agent_artifact_mapping
-        #[arg(long)]
-        cross_spec_verify: bool,
-        /// Additional .mm files to include in cross-specification verification; contract_consistency/global_invariant_conflicts/circular_dependencies map to mumei-agent missing_constraints/divergences/drift_issues
-        #[arg(long, value_delimiter = ',')]
-        cross_spec_files: Vec<String>,
-        /// Enable P8-A spurious counterexample detection
-        #[arg(long, conflicts_with = "disable_spurious_detection")]
-        enable_spurious_detection: bool,
-        /// Disable P8-A spurious counterexample detection
-        #[arg(long)]
-        disable_spurious_detection: bool,
-        /// Run property-based validation synthesized from refinement types
-        #[arg(long)]
-        property_based_test: bool,
-        /// Emit outside_decidable_fragment warnings for atoms outside the Z3-stable fragment
-        #[arg(long)]
-        warn_fragment: bool,
+        /// Generate Z3 proof certificate (.proof.json)
+        #[arg(long, help_heading = "Solver and proof")]
+        proof_cert: bool,
         /// Opt-in IEEE 754 (binary64) verification for `f64`: encode `f64` as
         /// Z3 `Float(11,53)` with round-nearest-even FP arithmetic instead of
         /// the default exact-rational `Real` encoding. Models rounding so e.g.
         /// `0.1 + 0.2 != 0.3` holds. Default off (keeps `Real` semantics).
-        #[arg(long)]
+        #[arg(long, help_heading = "Solver and proof")]
         ieee754_f64: bool,
         /// Opt-in bit-vector verification for `i64`: encode `i64` as Z3
         /// `BV(64)` so `&`, `|`, `^`, `<<`, `>>` have real bit semantics and
         /// `+`, `-`, `*` wrap in two's complement like machine arithmetic,
         /// instead of the default unbounded `Int` encoding. Default off
         /// (keeps `Int` semantics and existing proof certificates).
-        #[arg(long)]
+        #[arg(long, help_heading = "Solver and proof")]
         bitvec_i64: bool,
-        /// Emit `untyped_array_access` warnings when an array is accessed as
-        /// `arr[i]` without an explicit `[i64]`/`[f64]`/`[bool]` element-type
-        /// annotation (which silently falls back to `i64`). Warning-only; does
-        /// not change the verification encoding.
-        #[arg(long)]
-        warn_untyped_arrays: bool,
-        /// Opt-in strict mode: treat unannotated array accesses (which default
-        /// to the `i64` element sort) as errors instead of warnings. Off by
-        /// default, preserving the backward-compatible `i64` fallback.
-        #[arg(long)]
-        strict_array_types: bool,
-        /// Number of generated property-based inputs per atom
-        #[arg(long, default_value_t = 100)]
-        property_based_test_count: usize,
-        /// Seed for deterministic property-based input generation
-        #[arg(long)]
-        property_based_test_seed: Option<u64>,
-        /// Maximum property-based shrinking steps per counterexample
-        #[arg(long, default_value_t = 64)]
-        property_based_test_max_shrink_steps: usize,
-        /// Harness contract path or identifier to embed in generated proof certificates
-        #[arg(long)]
-        harness_contract: Option<String>,
-        /// Intent fidelity metadata JSON to embed in generated proof certificates
-        #[arg(long)]
-        intent_fidelity: Option<String>,
-        /// Comma-separated artifact paths to embed in generated proof certificates
-        #[arg(long)]
-        artifact_paths: Option<String>,
-        /// Budget policy fingerprint to embed in generated proof certificates
-        #[arg(long)]
-        budget_policy_fingerprint: Option<String>,
-        /// Emit a contract manifest containing per-atom specification hashes
-        #[arg(long)]
-        emit_contract_manifest: bool,
+
+        /// Enable P8-A spurious counterexample detection
+        #[arg(
+            long,
+            conflicts_with = "disable_spurious_detection",
+            help_heading = "Diagnostics"
+        )]
+        enable_spurious_detection: bool,
+        /// Disable P8-A spurious counterexample detection
+        #[arg(long, help_heading = "Diagnostics")]
+        disable_spurious_detection: bool,
         /// Enable spec vacuity checking via mutation testing
-        #[arg(long)]
+        #[arg(long, help_heading = "Diagnostics")]
         enable_vacuity_check: bool,
         /// Detect loops that may need stronger invariants
-        #[arg(long)]
+        #[arg(long, help_heading = "Diagnostics")]
         detect_loops: bool,
         /// Include CEGIS loop-invariant suggestions in JSON/report output
-        #[arg(long, requires = "detect_loops")]
+        #[arg(long, requires = "detect_loops", help_heading = "Diagnostics")]
         suggest_cegis: bool,
         /// Path to an old proof certificate for spec drift detection
-        #[arg(long)]
+        #[arg(long, help_heading = "Diagnostics")]
         detect_spec_drift: Option<String>,
+        /// Enable cross-specification consistency verification across atoms and emit cross_spec.json with agent_artifact_mapping
+        #[arg(long, help_heading = "Diagnostics")]
+        cross_spec_verify: bool,
+        /// Additional .mm files to include in cross-specification verification; contract_consistency/global_invariant_conflicts/circular_dependencies map to mumei-agent missing_constraints/divergences/drift_issues
+        #[arg(long, value_delimiter = ',', help_heading = "Diagnostics")]
+        cross_spec_files: Vec<String>,
+
+        /// Run property-based validation synthesized from refinement types
+        #[arg(long, help_heading = "Property-based testing")]
+        property_based_test: bool,
+        /// Number of generated property-based inputs per atom
+        #[arg(long, default_value_t = 100, help_heading = "Property-based testing")]
+        property_based_test_count: usize,
+        /// Seed for deterministic property-based input generation
+        #[arg(long, help_heading = "Property-based testing")]
+        property_based_test_seed: Option<u64>,
+        /// Maximum property-based shrinking steps per counterexample
+        #[arg(long, default_value_t = 64, help_heading = "Property-based testing")]
+        property_based_test_max_shrink_steps: usize,
+
+        /// Output verification report as JSON to stdout
+        #[arg(long, help_heading = "Output and artifacts")]
+        json: bool,
+        /// Emit format: "sarif" writes report.sarif; "loss-vector" prints P9-E Loss Vector JSON; "escalation-bundle" writes .escalation-bundle.json; "proof-graph" writes proof_graph.json for the interactive visualizer
+        #[arg(long, value_name = "FORMAT", help_heading = "Output and artifacts")]
+        emit: Option<String>,
+        /// Disable verify-only output targets: escalation-metrics
+        #[arg(long = "no-emit", help_heading = "Output and artifacts")]
+        no_emit: Vec<String>,
+        /// Output path for proof certificate or escalation bundle
+        #[arg(long, alias = "out", help_heading = "Output and artifacts")]
+        output: Option<String>,
+        /// Directory to write report.json into (default: current directory)
+        #[arg(long, help_heading = "Output and artifacts")]
+        report_dir: Option<String>,
+        /// Preserve per-atom SMT queries and verification phase outcomes
+        #[arg(long, value_name = "DIR", help_heading = "Output and artifacts")]
+        keep_phase_artifacts: Option<String>,
+        /// Emit a contract manifest containing per-atom specification hashes
+        #[arg(long, help_heading = "Output and artifacts")]
+        emit_contract_manifest: bool,
+        /// Verification task ID for MCP/CI provenance
+        #[arg(long, help_heading = "Output and artifacts")]
+        task_id: Option<String>,
+
+        /// Harness contract path or identifier to embed in generated proof certificates
+        #[arg(long, help_heading = "Harness metadata")]
+        harness_contract: Option<String>,
+        /// Intent fidelity metadata JSON to embed in generated proof certificates
+        #[arg(long, help_heading = "Harness metadata")]
+        intent_fidelity: Option<String>,
+        /// Comma-separated artifact paths to embed in generated proof certificates
+        #[arg(long, help_heading = "Harness metadata")]
+        artifact_paths: Option<String>,
+        /// Budget policy fingerprint to embed in generated proof certificates
+        #[arg(long, help_heading = "Harness metadata")]
+        budget_policy_fingerprint: Option<String>,
     },
     /// Show effective settings and where each value comes from
     #[command(
