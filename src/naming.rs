@@ -31,15 +31,26 @@ const SAFETY_RELAXATIONS: &[(&str, &str)] = &[
 
 const EXTERNAL: &[(&str, &str)] = &[
     (
-        "category:build",
-        "Compiler and linker variables are consumed by external build tooling.",
-    ),
-    (
         "OTEL_*",
         "OpenTelemetry variables are defined by the tracing SDK and ecosystem.",
     ),
     ("TRACEPARENT", "W3C distributed trace context variable."),
     ("TRACESTATE", "W3C distributed trace state variable."),
+    ("CPATH", "C compiler include search path."),
+    (
+        "CPPFLAGS",
+        "C preprocessor flags consumed by build tooling.",
+    ),
+    (
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "macOS dynamic-library search path.",
+    ),
+    (
+        "LD_LIBRARY_PATH",
+        "Dynamic loader variable defined by the operating system.",
+    ),
+    ("LDFLAGS", "Linker flags consumed by native build tooling."),
+    ("LIBRARY_PATH", "Native linker library search path."),
     (
         "GITHUB_*",
         "Variables defined by GitHub Actions and GitHub tooling.",
@@ -53,14 +64,15 @@ const EXTERNAL: &[(&str, &str)] = &[
         "Shared fixture-mode control used by repository CI.",
     ),
     (
-        "LD_LIBRARY_PATH",
-        "Dynamic loader variable defined by the operating system.",
-    ),
-    (
         "LLVM_SYS_170_PREFIX",
         "Installation prefix defined by llvm-sys tooling.",
     ),
-    ("Z3_SYS_*", "Build variables defined by z3-sys tooling."),
+    (
+        "LIBCLANG_PATH",
+        "libclang path consumed by bindgen build tooling.",
+    ),
+    ("Z3_SYS_Z3_HEADER", "Z3 header path consumed by z3-sys."),
+    ("Z3_SYS_Z3_LIB_DIR", "Z3 library path consumed by z3-sys."),
 ];
 
 fn collect_flags(
@@ -74,8 +86,15 @@ fn collect_flags(
         if matches!(argument.get_action(), ArgAction::Help | ArgAction::Version) {
             continue;
         }
-        if let Some(long) = argument.get_long() {
-            flags.insert((command_path.clone(), format!("--{long}")));
+        if let Some(longs) = argument.get_long_and_visible_aliases() {
+            for long in longs {
+                flags.insert((command_path.clone(), format!("--{long}")));
+            }
+            if let Some(aliases) = argument.get_aliases() {
+                for alias in aliases {
+                    flags.insert((command_path.clone(), format!("--{alias}")));
+                }
+            }
         }
     }
     for subcommand in command.get_subcommands() {
@@ -138,11 +157,9 @@ fn flag_violations(flags: &BTreeSet<(String, String)>) -> BTreeSet<(String, Stri
     violations
 }
 
-fn is_external(name: &str, category: &str) -> bool {
+fn is_external(name: &str) -> bool {
     EXTERNAL.iter().any(|(selector, _)| {
-        if let Some(expected_category) = selector.strip_prefix("category:") {
-            category == expected_category
-        } else if let Some(prefix) = selector.strip_suffix('*') {
+        if let Some(prefix) = selector.strip_suffix('*') {
             name.starts_with(prefix)
         } else {
             name == *selector
@@ -158,7 +175,7 @@ fn is_upper_snake(name: &str) -> bool {
 
 fn environment_violations(variables: &[(&str, &str)]) -> BTreeSet<(String, String)> {
     let mut violations = BTreeSet::new();
-    for (name, category) in variables {
+    for (name, _category) in variables {
         if !is_upper_snake(name) {
             violations.insert(((*name).to_owned(), "E1".to_owned()));
         }
@@ -169,7 +186,7 @@ fn environment_violations(variables: &[(&str, &str)]) -> BTreeSet<(String, Strin
         {
             violations.insert(((*name).to_owned(), "E4".to_owned()));
         }
-        if is_external(name, category) {
+        if is_external(name) {
             continue;
         }
         if [
@@ -344,6 +361,29 @@ mod tests {
     }
 
     #[test]
+    fn long_aliases_are_included_in_flag_rule_checks() {
+        let mut command = ClapCommand::new("fixture").arg(
+            clap::Arg::new("good-name")
+                .long("good-name")
+                .visible_alias("Bad_Name")
+                .alias("Hidden_Name")
+                .hide(true),
+        );
+        command.build();
+        let mut collected = BTreeSet::new();
+        collect_flags(&command, &mut Vec::new(), &mut collected);
+        let violations = flag_violations(&collected);
+        assert!(
+            violations.contains(&("fixture --Bad_Name".to_owned(), "F1".to_owned())),
+            "F1 visible alias regression was not rejected; see docs/NAMING.md"
+        );
+        assert!(
+            violations.contains(&("fixture --Hidden_Name".to_owned(), "F1".to_owned())),
+            "F1 hidden alias regression was not rejected; see docs/NAMING.md"
+        );
+    }
+
+    #[test]
     fn environment_rule_regressions_are_rejected_and_compliant_names_are_accepted() {
         assert_env_rule(&[("mumei_repo", "user")], "mumei_repo", "E1");
         assert!(
@@ -367,6 +407,11 @@ mod tests {
         );
 
         assert_env_rule(&[("ENABLE_CACHE", "user")], "ENABLE_CACHE", "E3");
+        assert_env_rule(
+            &[("ENABLE_BUILD_CACHE", "build")],
+            "ENABLE_BUILD_CACHE",
+            "E3",
+        );
         assert!(
             environment_violations(&[("MUMEI_ENABLE_CACHE", "user")]).is_empty(),
             "E3 compliant name rejected; see docs/NAMING.md"
