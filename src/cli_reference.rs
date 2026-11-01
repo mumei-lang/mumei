@@ -703,6 +703,7 @@ mod tests {
                 "reviewed exception {exception} is no longer in the registry"
             );
         }
+        assert!(ENV_VARS.iter().all(|variable| !variable.sensitive));
         for variable in ENV_VARS {
             if pattern.is_match(variable.name) && !exceptions.contains(&variable.name) {
                 assert!(
