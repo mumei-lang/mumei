@@ -12,6 +12,8 @@ on:
       - 'mumei-core/**'
       - 'mumei-emit-*/**'
       - 'src/**'
+      - 'scripts/install.sh'
+      - 'scripts/setup*'
       - 'tests/**'
       - 'docs/CLI_REFERENCE.md'
       - 'docs/ENV_REFERENCE.md'
