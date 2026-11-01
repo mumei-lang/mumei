@@ -75,10 +75,10 @@ turns a flag off. `--suggest-cegis` still requires an explicit
 
 `mumei config` reports the discovered `mumei.toml`, its verify profile, and
 registered environment variables. Use `--all` to include unset variables and
-`--json` for machine-readable output. Values of sensitive variables are never
-printed; the report shows only whether they are set. Credentials embedded in
-URLs are stripped. The CLI `--profile` is per-invocation, so this command
-reports only the manifest profile.
+`--json` for machine-readable output. Values of variables classified as
+sensitive in the registry are never printed, only whether they are set. URLs
+are shown without credentials, query, or fragment. The CLI `--profile` is
+per-invocation, so this command reports only the manifest profile.
 
 The local proof store is opt-in with `--proof-store` or `[proof] store = true`
 in `mumei.toml`. `MUMEI_PROOF_STORE` selects its directory; otherwise it uses

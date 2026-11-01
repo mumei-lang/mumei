@@ -172,15 +172,39 @@ fn text_lists_set_registered_variables_but_omits_unset_and_unknown_names() {
 }
 
 #[test]
-fn registry_url_userinfo_is_redacted_in_text_and_json() {
+fn solver_cache_key_is_reported_as_non_sensitive() {
     let project = Scratch::new(None);
-    let url = "https://registry-user:registry-password@example.test/packages";
+    let value = "cache-content-hash";
+    let text_output = project.run(&["config"], &[("MUMEI_SOLVER_CACHE_KEY", value)]);
+    assert!(text_output.status.success(), "{}", stderr(&text_output));
+    assert!(
+        stdout(&text_output).contains("  MUMEI_SOLVER_CACHE_KEY=cache-content-hash  (integration)")
+    );
+
+    let json_result = project.run(&["config", "--json"], &[("MUMEI_SOLVER_CACHE_KEY", value)]);
+    let payload = json_output(&json_result);
+    let entry = payload["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "MUMEI_SOLVER_CACHE_KEY")
+        .expect("registered solver cache key");
+    assert_eq!(entry["sensitive"], false);
+    assert_eq!(entry["value"], value);
+}
+
+#[test]
+fn registry_url_credentials_and_metadata_are_stripped_in_text_and_json() {
+    let project = Scratch::new(None);
+    let url =
+        "https://registry-user:registry-password@example.test/packages?api_key=url-secret#fragment";
     let text_output = project.run(&["config"], &[("MUMEI_REGISTRY_URL", url)]);
     let text = stdout(&text_output);
     assert!(text_output.status.success(), "{}", stderr(&text_output));
     assert!(text.contains("MUMEI_REGISTRY_URL=https://example.test/packages  (user)"));
     assert!(!text.contains("registry-password"));
-    assert!(!text.contains("***"));
+    assert!(!text.contains("url-secret"));
+    assert!(!text.contains("#fragment"));
 
     let json_result = project.run(&["config", "--json"], &[("MUMEI_REGISTRY_URL", url)]);
     let payload = json_output(&json_result);
@@ -194,14 +218,16 @@ fn registry_url_userinfo_is_redacted_in_text_and_json() {
     assert_eq!(registry_url["value"], "https://example.test/packages");
     assert_eq!(registry_url["sensitive"], false);
     assert!(!stdout(&json_result).contains("registry-password"));
-    assert!(!stdout(&json_result).contains("***"));
+    assert!(!stdout(&json_result).contains("url-secret"));
+    assert!(!stdout(&json_result).contains("#fragment"));
 
     let all_output = project.run(&["config", "--all"], &[("MUMEI_REGISTRY_URL", url)]);
     let all_text = stdout(&all_output);
     assert!(all_output.status.success(), "{}", stderr(&all_output));
     assert!(all_text.contains("MUMEI_REGISTRY_URL=https://example.test/packages  (user)"));
     assert!(!all_text.contains("registry-password"));
-    assert!(!all_text.contains("***"));
+    assert!(!all_text.contains("url-secret"));
+    assert!(!all_text.contains("#fragment"));
 }
 
 #[test]

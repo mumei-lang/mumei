@@ -9,7 +9,7 @@ struct EnvironmentEntry<'a> {
 
 fn json_environment_entry(entry: &EnvironmentEntry<'_>) -> serde_json::Value {
     let variable = entry.variable;
-    let sensitive = is_sensitive_name(variable.name);
+    let sensitive = variable.sensitive;
     let mut json_entry = serde_json::Map::new();
     json_entry.insert("name".to_owned(), serde_json::json!(variable.name));
     json_entry.insert("set".to_owned(), serde_json::json!(entry.value.is_some()));
@@ -25,7 +25,7 @@ fn json_environment_entry(entry: &EnvironmentEntry<'_>) -> serde_json::Value {
     if !sensitive {
         json_entry.insert(
             "value".to_owned(),
-            serde_json::json!(entry.value.as_deref().map(redact_url_userinfo)),
+            serde_json::json!(entry.value.as_deref().map(sanitize_url_value)),
         );
     }
     serde_json::Value::Object(json_entry)
@@ -120,14 +120,14 @@ pub(crate) fn cmd_config(json: bool, all: bool) {
     println!("environment ({set_count} set of {} known):", ENV_VARS.len());
     for entry in &environment {
         match entry.value.as_deref() {
-            Some(_) if is_sensitive_name(entry.variable.name) => println!(
+            Some(_) if entry.variable.sensitive => println!(
                 "  {}: set  ({})",
                 entry.variable.name, entry.variable.category
             ),
             Some(value) => println!(
                 "  {}={}  ({})",
                 entry.variable.name,
-                redact_url_userinfo(value),
+                sanitize_url_value(value),
                 entry.variable.category
             ),
             None if all => println!(
@@ -140,27 +140,28 @@ pub(crate) fn cmd_config(json: bool, all: bool) {
     }
 }
 
-fn is_sensitive_name(name: &str) -> bool {
-    let upper_name = name.to_ascii_uppercase();
-    ["TOKEN", "KEY", "SECRET", "PASSWORD"]
-        .iter()
-        .any(|needle| upper_name.contains(needle))
-}
-
-fn redact_url_userinfo(value: &str) -> String {
+fn sanitize_url_value(value: &str) -> String {
     let Some(scheme_end) = value.find("://") else {
         return value.to_owned();
     };
     let authority_start = scheme_end + 3;
     let authority_end = value[authority_start..]
-        .find('/')
+        .find(['/', '?', '#'])
         .map(|offset| authority_start + offset)
         .unwrap_or(value.len());
-    let Some(at_offset) = value[authority_start..authority_end].find('@') else {
-        return value.to_owned();
-    };
-    let host_start = authority_start + at_offset + 1;
-    format!("{}{}", &value[..authority_start], &value[host_start..])
+    let authority = &value[authority_start..authority_end];
+    let host = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
+    let suffix = &value[authority_end..];
+    let suffix_end = suffix.find(['?', '#']).unwrap_or(suffix.len());
+    format!(
+        "{}{}{}",
+        &value[..authority_start],
+        host,
+        &suffix[..suffix_end]
+    )
 }
 
 fn text_default(default: &str) -> &str {
@@ -184,21 +185,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn identifies_sensitive_names_case_insensitively() {
-        assert!(is_sensitive_name("mumei_registry_token"));
-        assert!(is_sensitive_name("API_key"));
-        assert!(is_sensitive_name("SERVICE_SECRET"));
-        assert!(is_sensitive_name("ADMIN_PASSWORD"));
-        assert!(!is_sensitive_name("MUMEI_TASK_ID"));
-    }
-
-    #[test]
     fn json_omits_values_for_sensitive_variables() {
         let variable = EnvVar {
             name: "SERVICE_TOKEN",
             category: "integration",
             default: "unset",
             description: "test",
+            sensitive: true,
         };
         let entry = EnvironmentEntry {
             variable: &variable,
@@ -212,17 +205,18 @@ mod tests {
     }
 
     #[test]
-    fn strips_url_userinfo_without_changing_other_values() {
+    fn sanitizes_url_userinfo_queries_and_fragments() {
         assert_eq!(
-            redact_url_userinfo("https://user:pass@host/path"),
+            sanitize_url_value("https://user:pass@host:8443/path?token=x#fragment"),
+            "https://host:8443/path"
+        );
+        assert_eq!(sanitize_url_value("https://user@host"), "https://host");
+        assert_eq!(sanitize_url_value("https://host/path"), "https://host/path");
+        assert_eq!(sanitize_url_value("https://host/a@b"), "https://host/a@b");
+        assert_eq!(
+            sanitize_url_value("https://host/path?query=x#fragment"),
             "https://host/path"
         );
-        assert_eq!(redact_url_userinfo("https://user@host"), "https://host");
-        assert_eq!(
-            redact_url_userinfo("https://host/path"),
-            "https://host/path"
-        );
-        assert_eq!(redact_url_userinfo("https://host/a@b"), "https://host/a@b");
-        assert_eq!(redact_url_userinfo("not-a-url@host"), "not-a-url@host");
+        assert_eq!(sanitize_url_value("not-a-url@host"), "not-a-url@host");
     }
 }

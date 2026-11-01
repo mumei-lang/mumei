@@ -692,6 +692,29 @@ mod tests {
     }
 
     #[test]
+    fn sensitive_registry_classification_covers_secret_like_names() {
+        let pattern =
+            Regex::new(r"(?i)(TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|PRIVATE|COOKIE)")
+                .unwrap();
+        let exceptions = ["MUMEI_SOLVER_CACHE_KEY"]; // Content hash, not a credential.
+        for exception in exceptions {
+            assert!(
+                ENV_VARS.iter().any(|variable| variable.name == exception),
+                "reviewed exception {exception} is no longer in the registry"
+            );
+        }
+        for variable in ENV_VARS {
+            if pattern.is_match(variable.name) && !exceptions.contains(&variable.name) {
+                assert!(
+                    variable.sensitive,
+                    "secret-like registry name is not marked sensitive: {}",
+                    variable.name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn markdown_cells_escape_pipes_and_collapse_newlines() {
         assert_eq!(markdown_cell("left | right\nnext"), "left \\| right next");
     }
