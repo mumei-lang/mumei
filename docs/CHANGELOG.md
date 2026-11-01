@@ -1,3 +1,8 @@
+### Unreleased: naming convention
+
+- Documented CLI flag and environment-variable naming rules and added tests
+  that grandfather existing names without renaming them.
+
 ### Unreleased: effective configuration report
 
 - Added `mumei config` to report the manifest verify profile and registered

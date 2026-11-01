@@ -733,14 +733,27 @@ mod tests {
         let pattern =
             Regex::new(r"(?i)(TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|PRIVATE|COOKIE)")
                 .unwrap();
+        const EXPECTED_SENSITIVE_ENV_VARS: &[&str] = &[];
         let exceptions = ["MUMEI_SOLVER_CACHE_KEY"]; // Content hash, not a credential.
+        let actual_sensitive = ENV_VARS
+            .iter()
+            .filter(|variable| variable.sensitive)
+            .map(|variable| variable.name)
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected_sensitive = EXPECTED_SENSITIVE_ENV_VARS
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            actual_sensitive, expected_sensitive,
+            "update EXPECTED_SENSITIVE_ENV_VARS when sensitivity changes"
+        );
         for exception in exceptions {
             assert!(
                 ENV_VARS.iter().any(|variable| variable.name == exception),
                 "reviewed exception {exception} is no longer in the registry"
             );
         }
-        assert!(ENV_VARS.iter().all(|variable| !variable.sensitive));
         for variable in ENV_VARS {
             if pattern.is_match(variable.name) && !exceptions.contains(&variable.name) {
                 assert!(
