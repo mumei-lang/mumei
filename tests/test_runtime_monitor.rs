@@ -90,9 +90,9 @@ fn extern_declaration_gets_a_monitor() {
     assert!(source.contains("|| result >= 0)"));
 }
 
-/// A contract inside the supported expression subset can still fault (division
-/// by zero, debug overflow). The monitor observes: the faulting evaluation is
-/// reported and the monitored call returns normally.
+/// A contract inside the supported expression subset can still fault (debug
+/// overflow). The monitor observes: the faulting evaluation is reported and the
+/// monitored call returns normally.
 #[test]
 fn a_faulting_contract_is_reported_instead_of_unwinding() {
     let (dir, _log) = build_monitor(
@@ -108,15 +108,15 @@ fn a_faulting_contract_is_reported_instead_of_unwinding() {
 
 mod host_impl {{
     #[no_mangle]
-    pub extern "C" fn risky_ratio(divisor: i64) -> i64 {{
-        divisor
+    pub extern "C" fn risky_square(x: i64) -> i64 {{
+        x
     }}
 }}
 
 fn main() {{
-    // Both 'requires: 100 / divisor > 0' and 'ensures: 100 / result > 0'
-    // divide by zero here.
-    let result = risky_ratio_monitored(0);
+    // Both 'requires: x * x >= 0' and 'ensures: result * result >= 0'
+    // overflow i64 here.
+    let result = risky_square_monitored(i64::MAX);
     println!("survived={{result}}");
 }}
 "#
@@ -151,7 +151,10 @@ fn main() {{
         run.status.success(),
         "contract evaluation escaped the monitor\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    assert!(stdout.contains("survived=0"), "stdout:\n{stdout}");
+    assert!(
+        stdout.contains(&format!("survived={}", i64::MAX)),
+        "stdout:\n{stdout}"
+    );
     assert_eq!(
         stderr.matches("observed=evaluation panicked").count(),
         2,

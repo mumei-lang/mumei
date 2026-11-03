@@ -90,6 +90,7 @@ fn test_subsumption_vc<'a>(ctx: &'a Context, module_env: &'a ModuleEnv) -> VCtx<
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -531,6 +532,128 @@ fn test_f64_division_wrong_postcondition_is_refuted() {
         "a == 3.0 && b == 2.0",
         "result == 1.0",
         "{ a / b }",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("Postcondition"), "{err}");
+}
+
+fn verify_i64_div(name: &str, requires: &str, ensures: &str, body: &str) -> Result<(), MumeiError> {
+    let atom = test_atom(
+        name,
+        vec![test_param("a", Some("i64")), test_param("b", Some("i64"))],
+        requires,
+        ensures,
+        body,
+        Some("i64"),
+    );
+    let mut module_env = ModuleEnv::new();
+    register_builtin_traits(&mut module_env);
+    module_env.register_atom(&atom);
+    let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+    verify(&hir, Path::new("."), &module_env).map(|_| ())
+}
+
+fn assert_zero_divisor(err: MumeiError) {
+    let msg = err.to_string();
+    assert!(
+        msg.contains("division by zero") || msg.contains("divisor may be zero"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn test_contract_division_rejects_possible_zero_divisor() {
+    for (name, requires, ensures) in [
+        ("req_div", "a / b > 0", "true"),
+        ("req_rem", "a % b == 0", "true"),
+        ("req_div_nonneg", "b >= 0 && a / b > 0", "true"),
+        ("req_div_lit", "a / 0 == 0", "true"),
+        ("req_div_wrong_guard", "a != 0 => a / b > 0", "true"),
+        ("ens_div", "true", "result == 0 || result == a / b"),
+        ("ens_rem", "b >= 0", "result == 0 || result == a % b"),
+    ] {
+        assert_zero_divisor(verify_i64_div(name, requires, ensures, "{ 0 }").unwrap_err());
+    }
+    for (name, requires, ensures) in [
+        ("freq_div", "a / b > 0.0", "true"),
+        ("freq_div_nonneg", "b >= 0.0 && a / b > 0.0", "true"),
+        ("fens_div", "true", "result == 0.0 || result == a / b"),
+    ] {
+        assert_zero_divisor(verify_f64_div(name, requires, ensures, "{ 0.0 }").unwrap_err());
+    }
+}
+
+#[test]
+fn test_contract_division_under_a_quantifier_still_checks_the_range() {
+    assert_zero_divisor(
+        verify_i64_div(
+            "req_forall_zero",
+            "forall(i, 0, 3, a / i == a / i)",
+            "true",
+            "{ 0 }",
+        )
+        .unwrap_err(),
+    );
+}
+
+#[test]
+fn test_skipped_clause_drops_its_division_checks() {
+    verify_i64_div(
+        "req_skipped_div",
+        "a / b > 0 || no_such_fn(a)",
+        "true",
+        "{ 0 }",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn test_contract_division_accepts_nonzero_divisor() {
+    for (name, requires, ensures) in [
+        ("req_div_ok", "b != 0 && a / b > 0", "true"),
+        ("req_div_pos", "b > 0 && a / b >= 0", "true"),
+        ("req_rem_ok", "b != 0 && a % b == 0", "true"),
+        ("req_div_lit_ok", "a / 2 >= 0", "true"),
+        ("req_div_implies", "b != 0 => a / b > 0", "true"),
+        ("req_div_or", "b == 0 || a / b > 0", "true"),
+        (
+            "ens_div_implies",
+            "true",
+            "b != 0 => result == 0 || result == a / b",
+        ),
+    ] {
+        verify_i64_div(name, requires, ensures, "{ 0 }").unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+    verify_i64_div("ens_div_body", "b > 0", "result == a / b", "{ a / b }").unwrap();
+    for (name, requires) in [
+        ("req_forall_div", "forall(i, 1, 3, a / i == a / i)"),
+        ("req_exists_div", "exists(i, 1, 3, a % i == 0)"),
+    ] {
+        verify_i64_div(name, requires, "true", "{ 0 }").unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+    for (name, requires) in [
+        ("freq_div_ok", "b != 0.0 && a / b > 0.0"),
+        ("freq_div_pos", "b > 0.0 && a / b >= 0.0"),
+        ("freq_div_lit_ok", "a / 2.0 >= 0.0"),
+    ] {
+        verify_f64_div(name, requires, "true", "{ 0.0 }").unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+}
+
+#[test]
+fn test_requires_division_by_nonzero_still_constrains_inputs() {
+    verify_i64_div(
+        "req_div_fact",
+        "b == 2 && a / b == 3",
+        "result == 6 || result == 7",
+        "{ a }",
+    )
+    .unwrap();
+    let err = verify_i64_div(
+        "req_div_fact_wrong",
+        "b == 2 && a / b == 3",
+        "result == 6",
+        "{ a }",
     )
     .unwrap_err();
     assert!(err.to_string().contains("Postcondition"), "{err}");
@@ -1551,6 +1674,7 @@ fn test_constraint_budget_exceeded() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -1606,6 +1730,7 @@ fn test_constraint_budget_no_limit() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -2438,6 +2563,7 @@ fn test_subsumption_check_holds_with_requires() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -2688,6 +2814,7 @@ fn test_subsumption_check_bool_param_and_result() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -2779,6 +2906,7 @@ fn test_subsumption_check_call_ref_alias_x() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -2870,6 +2998,7 @@ fn test_subsumption_check_call_ref_aliases_do_not_follow_concrete_names() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -2935,6 +3064,7 @@ fn test_subsumption_check_array_length_does_not_alias_caller_symbol() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -2998,6 +3128,7 @@ fn test_subsumption_check_array_length_aliases_follow_callback_position() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -3064,6 +3195,7 @@ fn test_subsumption_check_fails_without_requires() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -3161,6 +3293,7 @@ fn test_subsumption_check_crossed_param_names() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -3266,6 +3399,7 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -3352,6 +3486,7 @@ fn test_subsumption_check_concrete_true_ensures_fails() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -3983,6 +4118,7 @@ fn test_expr_to_z3_true_false_are_bool() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -4061,6 +4197,7 @@ fn test_expr_to_z3_pow_constant_folds_full_precision() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -4132,6 +4269,7 @@ fn test_tuple_result_indexing_uses_typed_components() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -4303,6 +4441,7 @@ fn test_chained_comparison_normalizes_before_lowering() {
         bitvec_i64: false,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),

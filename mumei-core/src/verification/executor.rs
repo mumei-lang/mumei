@@ -604,6 +604,7 @@ fn lower_clause_with_skip<'a>(
         return Ok(ClauseLoweringOutcome::Trivial);
     }
     let clause_ast = parse_expression(trimmed);
+    let marks = super::translator::obligation_marks(vc);
     let clause_z3 = match expr_to_z3(vc, &clause_ast, env, solver_opt) {
         Ok(value) => value,
         // Dropping a requires would quietly weaken the assumptions and could
@@ -621,6 +622,7 @@ fn lower_clause_with_skip<'a>(
                 diagnostics,
                 unsupported_clause_warning(label, trimmed, &err),
             );
+            super::translator::discard_obligations_since(vc, marks);
             return Ok(ClauseLoweringOutcome::Skipped);
         }
         // Termination errors carry a counterexample that the generic
@@ -1723,6 +1725,7 @@ fn verify_inner_impl(
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),

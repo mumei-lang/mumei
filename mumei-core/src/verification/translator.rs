@@ -21,9 +21,9 @@ pub(crate) use context::{
 
 pub(crate) use expr::termination_violation_error;
 pub(crate) use expr::{
-    discharge_bv_div_obligations, discharge_bv_shift_obligations, div_safety_status, expr_to_z3,
-    has_new_obligations, obligation_marks, rebind_deferred_obligations, shift_range_status,
-    DivSafetyStatus, ShiftRangeStatus,
+    discard_obligations_since, discharge_bv_div_obligations, discharge_bv_shift_obligations,
+    div_safety_status, expr_to_z3, has_new_obligations, obligation_marks,
+    rebind_deferred_obligations, shift_range_status, DivSafetyStatus, ShiftRangeStatus,
 };
 pub(crate) use pattern::{
     detect_enum_from_arms, format_counterexample, pattern_bind_variables, pattern_to_z3_condition,

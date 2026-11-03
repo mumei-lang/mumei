@@ -528,6 +528,7 @@ pub(crate) fn validation_ctx<'a>(
         bitvec_i64,
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -727,6 +728,7 @@ pub(crate) fn assert_clause<'a>(
     let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
+            super::translator::discard_obligations_since(vc, marks);
             return Ok(ClauseLoweringOutcome::Skipped(unsupported_clause_warning(
                 label, trimmed, &err,
             )));

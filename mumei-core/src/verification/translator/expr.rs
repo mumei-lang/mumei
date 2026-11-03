@@ -1027,7 +1027,21 @@ pub(crate) fn div_safety_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> DivSa
     let zero = BV::from_i64(ctx, 0, I64_BITS);
     let min = BV::from_i64(ctx, i64::MIN, I64_BITS);
     let minus_one = BV::from_i64(ctx, -1, I64_BITS);
+    let zero_divisors: Vec<(Bool<'a>, Bool<'a>)> =
+        vc.div_zero_obligations.borrow_mut().drain(..).collect();
     let mut status = DivSafetyStatus::Safe;
+    for (path_cond, divisor_is_zero) in zero_divisors {
+        solver.push();
+        solver.assert(&path_cond);
+        solver.assert(&divisor_is_zero);
+        let divides_by_zero = crate::verification::phase_artifacts::check(solver);
+        solver.pop(1);
+        match divides_by_zero {
+            SatResult::Sat => return DivSafetyStatus::DivisionByZero,
+            SatResult::Unknown => status = DivSafetyStatus::Undecided,
+            SatResult::Unsat => {}
+        }
+    }
     for (path_cond, lb, rb) in obligations {
         solver.push();
         solver.assert(&path_cond);
@@ -1055,19 +1069,32 @@ pub(crate) fn div_safety_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> DivSa
 
 /// Discharge the deferred division-safety obligations recorded while
 /// lowering contract clauses without a solver.
+/// Lengths of the deferred shift, bit-vector division and zero-divisor queues.
+pub(crate) type ObligationMarks = (usize, usize, usize);
+
 /// Snapshot of deferred shift/division obligation queue lengths, used by
 /// [`rebind_deferred_obligations`] to scope a rebind to one lowering.
-pub(crate) fn obligation_marks(vc: &VCtx<'_>) -> (usize, usize) {
+pub(crate) fn obligation_marks(vc: &VCtx<'_>) -> ObligationMarks {
     (
         vc.bv_shift_obligations.borrow().len(),
         vc.bv_div_obligations.borrow().len(),
+        vc.div_zero_obligations.borrow().len(),
     )
 }
 
 /// True when at least one deferred obligation was recorded since `marks`.
-pub(crate) fn has_new_obligations(vc: &VCtx<'_>, marks: (usize, usize)) -> bool {
+/// Drop the deferred obligations queued since `marks`, for a clause that was
+/// lowered and then skipped: its divisions and shifts are never evaluated.
+pub(crate) fn discard_obligations_since(vc: &VCtx<'_>, marks: ObligationMarks) {
+    vc.bv_shift_obligations.borrow_mut().truncate(marks.0);
+    vc.bv_div_obligations.borrow_mut().truncate(marks.1);
+    vc.div_zero_obligations.borrow_mut().truncate(marks.2);
+}
+
+pub(crate) fn has_new_obligations(vc: &VCtx<'_>, marks: ObligationMarks) -> bool {
     vc.bv_shift_obligations.borrow().len() > marks.0
         || vc.bv_div_obligations.borrow().len() > marks.1
+        || vc.div_zero_obligations.borrow().len() > marks.2
 }
 
 /// Conjoin `extra` into the path condition of deferred shift/division
@@ -1078,13 +1105,16 @@ pub(crate) fn has_new_obligations(vc: &VCtx<'_>, marks: (usize, usize)) -> bool 
 /// obligation, since `r`'s bound lives inside the same clause.
 pub(crate) fn rebind_deferred_obligations<'a>(
     vc: &VCtx<'a>,
-    marks: (usize, usize),
+    marks: ObligationMarks,
     extra: &Bool<'a>,
 ) {
     for (pc, _) in vc.bv_shift_obligations.borrow_mut()[marks.0..].iter_mut() {
         *pc = Bool::and(vc.ctx, &[pc, extra]);
     }
     for (pc, _, _) in vc.bv_div_obligations.borrow_mut()[marks.1..].iter_mut() {
+        *pc = Bool::and(vc.ctx, &[pc, extra]);
+    }
+    for (pc, _) in vc.div_zero_obligations.borrow_mut()[marks.2..].iter_mut() {
         *pc = Bool::and(vc.ctx, &[pc, extra]);
     }
 }
@@ -1624,8 +1654,12 @@ pub(crate) fn expr_to_z3<'a>(
                     vc.quantifier_binders
                         .borrow_mut()
                         .push((var_name.clone(), bound_var.clone().into()));
+                    let marks = obligation_marks(vc);
                     let condition_res = expr_to_z3(vc, &args[3], env, None);
                     vc.quantifier_binders.borrow_mut().pop();
+                    // Deferred checks inside the body only hold for binder
+                    // values in range; outside it the binder is unconstrained.
+                    rebind_deferred_obligations(vc, marks, &range_cond);
 
                     // 束縛変数を env から復元
                     if let Some(old) = old_val {
@@ -3177,6 +3211,10 @@ pub(crate) fn expr_to_z3<'a>(
                                 }
                                 SatResult::Unsat => {}
                             }
+                        } else {
+                            vc.div_zero_obligations
+                                .borrow_mut()
+                                .push((vc.path_cond_conj(), rr._eq(&Real::from_real(ctx, 0, 1))));
                         }
                         Ok(lr.div(&rr).into())
                     }
@@ -3340,6 +3378,10 @@ pub(crate) fn expr_to_z3<'a>(
                                 .with_verdict(crate::verification::VerdictKind::Rejected));
                             }
                             solver.pop(1);
+                        } else {
+                            vc.div_zero_obligations
+                                .borrow_mut()
+                                .push((vc.path_cond_conj(), ri._eq(&Int::from_i64(ctx, 0))));
                         }
                         if matches!(op, Op::Rem) {
                             Ok(truncated_rem(ctx, &li, &ri).into())
