@@ -465,6 +465,77 @@ fn test_array_store_rejects_out_of_bounds_ffi_buffers() {
     assert!(err.to_string().contains("Potential Out-of-Bounds store"));
 }
 
+fn verify_f64_div(name: &str, requires: &str, ensures: &str, body: &str) -> Result<(), MumeiError> {
+    let atom = test_atom(
+        name,
+        vec![test_param("a", Some("f64")), test_param("b", Some("f64"))],
+        requires,
+        ensures,
+        body,
+        Some("f64"),
+    );
+    let mut module_env = ModuleEnv::new();
+    register_builtin_traits(&mut module_env);
+    module_env.register_atom(&atom);
+    let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+    verify(&hir, Path::new("."), &module_env).map(|_| ())
+}
+
+#[test]
+fn test_f64_division_rejects_possible_zero_divisor() {
+    let err = verify_f64_div("fdiv_zero", "true", "true", "{ a / b }").unwrap_err();
+    assert!(err.to_string().contains("division by zero"), "{err}");
+    let err = verify_f64_div("fdiv_nonneg", "b >= 0.0", "true", "{ a / b }").unwrap_err();
+    assert!(err.to_string().contains("division by zero"), "{err}");
+    let err = verify_f64_div("fdiv_lit", "true", "true", "{ a / 0.0 }").unwrap_err();
+    assert!(err.to_string().contains("division by zero"), "{err}");
+}
+
+#[test]
+fn test_f64_division_accepts_nonzero_divisor() {
+    verify_f64_div("fdiv_req", "b > 0.0", "true", "{ a / b }").unwrap();
+    verify_f64_div("fdiv_neq", "b != 0.0", "true", "{ a / b }").unwrap();
+    verify_f64_div(
+        "fdiv_guard",
+        "true",
+        "true",
+        "{ if b == 0.0 { 0.0 } else { a / b } }",
+    )
+    .unwrap();
+    verify_f64_div("fdiv_lit_ok", "true", "true", "{ a / 2.0 }").unwrap();
+}
+
+#[test]
+fn test_f64_division_guard_does_not_leak() {
+    let err = verify_f64_div(
+        "fdiv_leak",
+        "true",
+        "true",
+        "{ let q = if b == 0.0 { 0.0 } else { a / b }; q + a / b }",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("division by zero"), "{err}");
+}
+
+#[test]
+fn test_f64_division_wrong_postcondition_is_refuted() {
+    verify_f64_div(
+        "fdiv_right",
+        "a == 3.0 && b == 2.0",
+        "result == 1.5",
+        "{ a / b }",
+    )
+    .unwrap();
+    let err = verify_f64_div(
+        "fdiv_wrong",
+        "a == 3.0 && b == 2.0",
+        "result == 1.0",
+        "{ a / b }",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("Postcondition"), "{err}");
+}
+
 fn verify_struct_result(name: &str, ensures: &str) -> Result<(), MumeiError> {
     let source = format!(
         "struct Parsed {{\n    ok: bool,\n    value: i64,\n}}\n\n\

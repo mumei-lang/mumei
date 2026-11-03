@@ -3146,7 +3146,40 @@ pub(crate) fn expr_to_z3<'a>(
                     Op::Add => Ok(Real::add(ctx, &[&lr, &rr]).into()),
                     Op::Sub => Ok(Real::sub(ctx, &[&lr, &rr]).into()),
                     Op::Mul => Ok(Real::mul(ctx, &[&lr, &rr]).into()),
-                    Op::Div => Ok(lr.div(&rr).into()),
+                    Op::Div => {
+                        // Z3 leaves `x / 0.0` unconstrained over the reals, so an
+                        // unchecked zero divisor would let any `ensures` through.
+                        if let Some(solver) = solver_opt {
+                            solver.push();
+                            for cond in vc.path_cond_stack.borrow().iter() {
+                                solver.assert(cond);
+                            }
+                            solver.assert(&rr._eq(&Real::from_real(ctx, 0, 1)));
+                            let zero_divisor = crate::verification::phase_artifacts::check(solver);
+                            solver.pop(1);
+                            match zero_divisor {
+                                SatResult::Sat => {
+                                    return Err(MumeiError::verification(
+                                        "Potential division by zero.".to_string(),
+                                    )
+                                    .with_help("Add a condition divisor != 0.0 to requires")
+                                    .with_verdict(crate::verification::VerdictKind::Rejected))
+                                }
+                                SatResult::Unknown => {
+                                    return Err(MumeiError::verification(
+                                        "Z3 could not decide whether the f64 divisor is nonzero."
+                                            .to_string(),
+                                    )
+                                    .with_help(
+                                        "Strengthen requires so the divisor is provably nonzero",
+                                    )
+                                    .with_verdict(crate::verification::VerdictKind::Inconclusive))
+                                }
+                                SatResult::Unsat => {}
+                            }
+                        }
+                        Ok(lr.div(&rr).into())
+                    }
                     _ => Err("Invalid real op".into()),
                 }
             } else if l.as_float().is_some() || r.as_float().is_some() {
