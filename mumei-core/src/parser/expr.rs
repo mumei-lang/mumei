@@ -320,6 +320,14 @@ fn expr_to_call_path(expr: &Expr, separator: &str) -> Option<String> {
 }
 
 /// Parse a prefix / primary expression.
+/// Operand of a prefix `!` or `-`: a primary plus any `.field` / `::path`
+/// postfix, so `!r.ok` is `!(r.ok)` and `-p.x` is `-(p.x)`, while infix
+/// operators (including `**`) still bind looser than the prefix.
+fn parse_unary_operand(ctx: &mut ParseContext) -> Expr {
+    let (dot_bp, _) = binding_power(&Token::Dot).expect("`.` has a binding power");
+    parse_expr(ctx, dot_bp)
+}
+
 fn parse_prefix(ctx: &mut ParseContext) -> Expr {
     match ctx.peek().clone() {
         Token::AtomRef => {
@@ -566,7 +574,7 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
             // `a < b && b == false`.) Verify requires a Bool condition; codegen
             // emits the 0/1 branch, matching `if e { 0 } else { 1 }`.
             ctx.advance();
-            let operand = parse_prefix(ctx);
+            let operand = parse_unary_operand(ctx);
             Expr::IfThenElse {
                 cond: Box::new(operand),
                 then_branch: Box::new(Stmt::Expr(
@@ -595,7 +603,7 @@ fn parse_prefix(ctx: &mut ParseContext) -> Expr {
                 }
                 _ => {
                     // Treat as 0 - expr
-                    let rhs = parse_prefix(ctx);
+                    let rhs = parse_unary_operand(ctx);
                     Expr::BinaryOp(Box::new(Expr::Number(0)), Op::Sub, Box::new(rhs))
                 }
             }

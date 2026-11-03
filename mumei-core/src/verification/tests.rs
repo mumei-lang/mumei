@@ -465,6 +465,57 @@ fn test_array_store_rejects_out_of_bounds_ffi_buffers() {
     assert!(err.to_string().contains("Potential Out-of-Bounds store"));
 }
 
+fn verify_struct_result(name: &str, ensures: &str) -> Result<(), MumeiError> {
+    let source = format!(
+        "struct Parsed {{\n    ok: bool,\n    value: i64,\n}}\n\n\
+         atom {name}(x: i64) -> Parsed\n    requires: true;\n    ensures: {ensures};\n    \
+         body: {{ if x < 0 {{ Parsed {{ ok: false, value: 0 }} }} else {{ Parsed {{ ok: true, value: x }} }} }}\n"
+    );
+    let items = crate::parser::parse_module(&source);
+    let mut module_env = ModuleEnv::new();
+    register_builtin_traits(&mut module_env);
+    let mut atoms = Vec::new();
+    for item in &items {
+        match item {
+            crate::parser::Item::StructDef(sdef) => module_env.register_struct(sdef),
+            crate::parser::Item::Atom(atom) => atoms.push(atom.clone()),
+            _ => {}
+        }
+    }
+    for atom in &atoms {
+        module_env.register_atom(atom);
+    }
+    let atom = atoms.into_iter().next().expect("atom");
+    let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+    verify(&hir, Path::new("."), &module_env).map(|_| ())
+}
+
+#[test]
+fn test_ensures_negated_bool_field() {
+    verify_struct_result("neg_field_ok", "!result.ok => x < 0").unwrap();
+    verify_struct_result(
+        "neg_field_both",
+        "(!result.ok => x < 0) && (x < 0 => !result.ok)",
+    )
+    .unwrap();
+    verify_struct_result(
+        "neg_field_and",
+        "(!result.ok && x < 0) || (result.ok && x >= 0)",
+    )
+    .unwrap();
+    verify_struct_result("neg_minus_field", "-result.value <= 0").unwrap();
+}
+
+#[test]
+fn test_ensures_negated_bool_field_still_refutes() {
+    let err = verify_struct_result("neg_field_bad", "!result.ok => x >= 0").unwrap_err();
+    assert!(err.to_string().contains("Postcondition"), "{err}");
+    let err = verify_struct_result("neg_field_bad2", "!result.ok").unwrap_err();
+    assert!(err.to_string().contains("Postcondition"), "{err}");
+    let err = verify_struct_result("neg_minus_bad", "-result.value < 0").unwrap_err();
+    assert!(err.to_string().contains("Postcondition"), "{err}");
+}
+
 #[test]
 fn test_executor_marks_symbolic_exponent_ensures_unverifiable() {
     let atom = test_atom(

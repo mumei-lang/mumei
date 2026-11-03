@@ -1,3 +1,11 @@
+### Unreleased: prefix `!` and `-` bind field access
+
+- `!r.ok` now parses as `!(r.ok)` and `-p.x` as `-(p.x)`. Before, the prefix
+  applied to `r` alone and the field was read from the result, so
+  `ensures: !result.ok => ...` was skipped as an unsupported clause and
+  `-p.x` read a field of `0 - p`. Infix operators still bind looser than the
+  prefix (`!a.ok && b` is `(!a.ok) && b`).
+
 ### Unreleased: naming convention
 
 - Documented CLI flag and environment-variable naming rules and added tests
