@@ -1166,7 +1166,7 @@ fn bv_binary_op<'a>(
         Op::Add => Ok(lb.bvadd(&rb).into()),
         Op::Sub => Ok(lb.bvsub(&rb).into()),
         Op::Mul => Ok(lb.bvmul(&rb).into()),
-        Op::Div => {
+        Op::Div | Op::Rem => {
             if let Some(solver) = solver_opt {
                 let zero = BV::from_i64(ctx, 0, I64_BITS);
                 solver.push();
@@ -1218,7 +1218,12 @@ fn bv_binary_op<'a>(
                     rb.clone(),
                 ));
             }
-            Ok(lb.bvsdiv(&rb).into())
+            if matches!(op, Op::Rem) {
+                // `bvsrem` truncates and takes the dividend's sign, like LLVM `srem`.
+                Ok(lb.bvsrem(&rb).into())
+            } else {
+                Ok(lb.bvsdiv(&rb).into())
+            }
         }
         Op::Gt => Ok(lb.bvsgt(&rb).into()),
         Op::Lt => Ok(lb.bvslt(&rb).into()),
@@ -2959,6 +2964,9 @@ pub(crate) fn expr_to_z3<'a>(
                 let safe = index_in_bounds(ctx, &idx_value, &len)
                     .ok_or(MumeiError::type_error("Index must be integer"))?;
                 solver.push();
+                for cond in vc.path_cond_stack.borrow().iter() {
+                    solver.assert(cond);
+                }
                 solver.assert(&safe.not());
                 if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                     solver.pop(1);
@@ -3253,7 +3261,7 @@ pub(crate) fn expr_to_z3<'a>(
                     Op::Add => Ok((&li + &ri).simplify().into()),
                     Op::Sub => Ok((&li - &ri).simplify().into()),
                     Op::Mul => Ok((&li * &ri).simplify().into()),
-                    Op::Div => {
+                    Op::Div | Op::Rem => {
                         if let Some(solver) = solver_opt {
                             solver.push();
                             for cond in vc.path_cond_stack.borrow().iter() {
@@ -3333,7 +3341,11 @@ pub(crate) fn expr_to_z3<'a>(
                             }
                             solver.pop(1);
                         }
-                        Ok((&li / &ri).into())
+                        if matches!(op, Op::Rem) {
+                            Ok(truncated_rem(ctx, &li, &ri).into())
+                        } else {
+                            Ok((&li / &ri).into())
+                        }
                     }
                     Op::Gt => Ok(li.gt(&ri).into()),
                     Op::Lt => Ok(li.lt(&ri).into()),
@@ -5269,4 +5281,14 @@ mod rec_fn_args_tests {
     fn array_length_is_a_recursive_uf_argument_in_bitvec_mode() {
         assert_length_is_part_of_the_domain(true);
     }
+}
+
+/// `%` with the truncating semantics of Rust/Go/C/TypeScript/Solidity and
+/// LLVM `srem`: `l - r * trunc(l / r)`, so the result takes the dividend's
+/// sign. Z3 `Int` division is Euclidean, which already truncates for a
+/// non-negative dividend; a negative one is divided as `-(-l / r)`.
+fn truncated_rem<'a>(ctx: &'a Context, l: &Int<'a>, r: &Int<'a>) -> Int<'a> {
+    let zero = Int::from_i64(ctx, 0);
+    let quotient = l.ge(&zero).ite(&(l / r), &(-(&(-l) / r)));
+    l - &(r * &quotient)
 }

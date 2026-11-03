@@ -204,6 +204,7 @@ impl<'a> Lexer<'a> {
             }
 
             '/' => Token::Slash,
+            '%' => Token::Percent,
 
             '"' => self.read_string_literal(),
 

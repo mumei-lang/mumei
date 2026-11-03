@@ -81,6 +81,7 @@ pub enum Token {
     Star,       // *
     StarStar,   // **
     Slash,      // /
+    Percent,    // %
     Eq,         // ==
     Neq,        // !=
     Gt,         // >
@@ -229,6 +230,7 @@ impl std::fmt::Display for Token {
             Token::Star => write!(f, "*"),
             Token::StarStar => write!(f, "**"),
             Token::Slash => write!(f, "/"),
+            Token::Percent => write!(f, "%"),
             Token::Eq => write!(f, "=="),
             Token::Neq => write!(f, "!="),
             Token::Gt => write!(f, ">"),

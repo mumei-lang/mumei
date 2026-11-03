@@ -243,6 +243,7 @@ pub(crate) fn expr_to_source_string(expr: &Expr) -> String {
                 Op::Sub => "-",
                 Op::Mul => "*",
                 Op::Div => "/",
+                Op::Rem => "%",
                 Op::Eq => "==",
                 Op::Neq => "!=",
                 Op::Gt => ">",

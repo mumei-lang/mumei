@@ -6,6 +6,21 @@
   guards. The opt-in `--ieee754-f64` mode is unchanged: there `x / 0.0` is
   modelled as infinity or NaN, as on hardware.
 
+### Unreleased: remainder operator
+
+- Added the `%` operator for integers. It truncates toward zero like Rust, Go,
+  C, TypeScript and Solidity (the result takes the dividend's sign), not like
+  Python's floored `%`. A possibly-zero divisor is reported like division, and
+  `--bitvec-i64` also rejects `i64::MIN % -1`. Native code uses LLVM `srem`.
+  Host contract checks and runtime monitors leave clauses with `%` unchecked.
+
+### Unreleased: guarded array bounds checks
+
+- Array reads and stores now check their bounds under the enclosing `if`/`else`
+  and `&&`/`||` guards, so `if n >= 4 { a[3] }` with `len(a) == n` verifies
+  instead of reporting a potential out-of-bounds access. Guards still apply
+  only inside their branch.
+
 ### Unreleased: naming convention
 
 - Documented CLI flag and environment-variable naming rules and added tests
