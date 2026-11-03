@@ -3147,15 +3147,27 @@ pub(crate) fn expr_to_z3<'a>(
                                 solver.assert(cond);
                             }
                             solver.assert(&rr._eq(&Real::from_real(ctx, 0, 1)));
-                            let may_be_zero = crate::verification::phase_artifacts::check(solver)
-                                == SatResult::Sat;
+                            let zero_divisor = crate::verification::phase_artifacts::check(solver);
                             solver.pop(1);
-                            if may_be_zero {
-                                return Err(MumeiError::verification(
-                                    "Potential division by zero.".to_string(),
-                                )
-                                .with_help("Add a condition divisor != 0.0 to requires")
-                                .with_verdict(crate::verification::VerdictKind::Rejected));
+                            match zero_divisor {
+                                SatResult::Sat => {
+                                    return Err(MumeiError::verification(
+                                        "Potential division by zero.".to_string(),
+                                    )
+                                    .with_help("Add a condition divisor != 0.0 to requires")
+                                    .with_verdict(crate::verification::VerdictKind::Rejected))
+                                }
+                                SatResult::Unknown => {
+                                    return Err(MumeiError::verification(
+                                        "Z3 could not decide whether the f64 divisor is nonzero."
+                                            .to_string(),
+                                    )
+                                    .with_help(
+                                        "Strengthen requires so the divisor is provably nonzero",
+                                    )
+                                    .with_verdict(crate::verification::VerdictKind::Inconclusive))
+                                }
+                                SatResult::Unsat => {}
                             }
                         }
                         Ok(lr.div(&rr).into())
