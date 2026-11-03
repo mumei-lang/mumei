@@ -99,6 +99,7 @@ fn remainder_keeps_the_dividend_unit() {
 fn remainder_of_a_unitless_dividend_is_unitless() {
     let out = run_verify(&fixture("test_units_rem_unitless_ok.mm"), "rem_unitless");
     let text = combined(&out);
+    assert!(out.status.success(), "{text}");
     assert!(!text.contains("Unit mismatch"), "{text}");
 }
 
