@@ -87,6 +87,7 @@ pub enum HirBinOp {
     Mul,
     Pow,
     Div,
+    Rem,
     Eq,
     Neq,
     Gt,
@@ -111,6 +112,7 @@ impl From<Op> for HirBinOp {
             Op::Mul => HirBinOp::Mul,
             Op::Pow => HirBinOp::Pow,
             Op::Div => HirBinOp::Div,
+            Op::Rem => HirBinOp::Rem,
             Op::Eq => HirBinOp::Eq,
             Op::Neq => HirBinOp::Neq,
             Op::Gt => HirBinOp::Gt,
@@ -137,6 +139,7 @@ impl From<HirBinOp> for Op {
             HirBinOp::Mul => Op::Mul,
             HirBinOp::Pow => Op::Pow,
             HirBinOp::Div => Op::Div,
+            HirBinOp::Rem => Op::Rem,
             HirBinOp::Eq => Op::Eq,
             HirBinOp::Neq => Op::Neq,
             HirBinOp::Gt => Op::Gt,
@@ -1111,7 +1114,12 @@ fn infer_hir_expr_type(
                 | HirBinOp::BitXor
                 | HirBinOp::Shl
                 | HirBinOp::Shr => Some("i64".to_string()),
-                HirBinOp::Add | HirBinOp::Sub | HirBinOp::Mul | HirBinOp::Pow | HirBinOp::Div => {
+                HirBinOp::Add
+                | HirBinOp::Sub
+                | HirBinOp::Mul
+                | HirBinOp::Pow
+                | HirBinOp::Div
+                | HirBinOp::Rem => {
                     if left_ty.as_deref() == Some("f64") || right_ty.as_deref() == Some("f64") {
                         Some("f64".to_string())
                     } else {

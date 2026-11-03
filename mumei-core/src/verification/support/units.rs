@@ -182,7 +182,7 @@ impl<'a> UnitCtx<'a> {
                         })?;
                         None
                     }
-                    Op::Mul | Op::Div | Op::Pow => match (l, r) {
+                    Op::Mul | Op::Div | Op::Rem | Op::Pow => match (l, r) {
                         (Some(u), None) | (None, Some(u)) => Some(u),
                         _ => None,
                     },

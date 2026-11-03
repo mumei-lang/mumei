@@ -400,7 +400,8 @@ pub(crate) fn repl_infer_expr_type_name(
             | parser::Op::Sub
             | parser::Op::Mul
             | parser::Op::Pow
-            | parser::Op::Div => {
+            | parser::Op::Div
+            | parser::Op::Rem => {
                 if repl_infer_expr_type_name(ctx, left)
                     .is_some_and(|ty| ctx.module_env.resolve_base_type(&ty) == "f64")
                     || repl_infer_expr_type_name(ctx, right)

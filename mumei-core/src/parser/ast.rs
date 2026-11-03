@@ -50,6 +50,9 @@ pub enum Op {
     Mul,
     Pow,
     Div,
+    /// Remainder (`%`), truncated toward zero like Rust/Go/C/TypeScript/Solidity
+    /// (the result takes the sign of the dividend); not Python's floored `%`.
+    Rem,
     Eq,
     Neq,
     Gt,

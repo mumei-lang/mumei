@@ -2123,6 +2123,9 @@ pub(crate) fn compile_hir_expr<'a>(
                     HirBinOp::Div => {
                         Ok(llvm!(builder.build_int_signed_div(l, r, "div_tmp")).into())
                     }
+                    HirBinOp::Rem => {
+                        Ok(llvm!(builder.build_int_signed_rem(l, r, "rem_tmp")).into())
+                    }
                     HirBinOp::Pow => Err(MumeiError::codegen(
                         "Unsupported int operator Pow".to_string(),
                     )),
