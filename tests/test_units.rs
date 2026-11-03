@@ -91,6 +91,11 @@ fn meter_compared_to_second_is_rejected() {
 }
 
 #[test]
+fn remainder_keeps_the_dividend_unit() {
+    assert_unit_mismatch("test_units_mismatch_rem.mm", "rem", "Second", "Byte");
+}
+
+#[test]
 fn returning_usd_as_jpy_is_rejected() {
     assert_unit_mismatch("test_units_mismatch_return.mm", "ret", "JPY", "USD");
 }

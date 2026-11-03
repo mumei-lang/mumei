@@ -182,7 +182,11 @@ impl<'a> UnitCtx<'a> {
                         })?;
                         None
                     }
-                    Op::Mul | Op::Div | Op::Rem | Op::Pow => match (l, r) {
+                    Op::Rem => {
+                        self.check_compatible("remainder", &l, &r, || expr_to_source_string(expr))?;
+                        l.or(r)
+                    }
+                    Op::Mul | Op::Div | Op::Pow => match (l, r) {
                         (Some(u), None) | (None, Some(u)) => Some(u),
                         _ => None,
                     },
