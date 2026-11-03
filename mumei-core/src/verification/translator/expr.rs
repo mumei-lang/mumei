@@ -1083,6 +1083,14 @@ pub(crate) fn obligation_marks(vc: &VCtx<'_>) -> ObligationMarks {
 }
 
 /// True when at least one deferred obligation was recorded since `marks`.
+/// Drop the deferred obligations queued since `marks`, for a clause that was
+/// lowered and then skipped: its divisions and shifts are never evaluated.
+pub(crate) fn discard_obligations_since(vc: &VCtx<'_>, marks: ObligationMarks) {
+    vc.bv_shift_obligations.borrow_mut().truncate(marks.0);
+    vc.bv_div_obligations.borrow_mut().truncate(marks.1);
+    vc.div_zero_obligations.borrow_mut().truncate(marks.2);
+}
+
 pub(crate) fn has_new_obligations(vc: &VCtx<'_>, marks: ObligationMarks) -> bool {
     vc.bv_shift_obligations.borrow().len() > marks.0
         || vc.bv_div_obligations.borrow().len() > marks.1
@@ -1646,8 +1654,12 @@ pub(crate) fn expr_to_z3<'a>(
                     vc.quantifier_binders
                         .borrow_mut()
                         .push((var_name.clone(), bound_var.clone().into()));
+                    let marks = obligation_marks(vc);
                     let condition_res = expr_to_z3(vc, &args[3], env, None);
                     vc.quantifier_binders.borrow_mut().pop();
+                    // Deferred checks inside the body only hold for binder
+                    // values in range; outside it the binder is unconstrained.
+                    rebind_deferred_obligations(vc, marks, &range_cond);
 
                     // 束縛変数を env から復元
                     if let Some(old) = old_val {

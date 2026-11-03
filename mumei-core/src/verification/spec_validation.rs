@@ -728,6 +728,7 @@ pub(crate) fn assert_clause<'a>(
     let clause_z3 = match expr_to_z3(vc, &clause_ast, env, None) {
         Ok(value) => value,
         Err(err) if is_unsupported_clause_error(&err) => {
+            super::translator::discard_obligations_since(vc, marks);
             return Ok(ClauseLoweringOutcome::Skipped(unsupported_clause_warning(
                 label, trimmed, &err,
             )));

@@ -604,6 +604,7 @@ fn lower_clause_with_skip<'a>(
         return Ok(ClauseLoweringOutcome::Trivial);
     }
     let clause_ast = parse_expression(trimmed);
+    let marks = super::translator::obligation_marks(vc);
     let clause_z3 = match expr_to_z3(vc, &clause_ast, env, solver_opt) {
         Ok(value) => value,
         // Dropping a requires would quietly weaken the assumptions and could
@@ -621,6 +622,7 @@ fn lower_clause_with_skip<'a>(
                 diagnostics,
                 unsupported_clause_warning(label, trimmed, &err),
             );
+            super::translator::discard_obligations_since(vc, marks);
             return Ok(ClauseLoweringOutcome::Skipped);
         }
         // Termination errors carry a counterexample that the generic

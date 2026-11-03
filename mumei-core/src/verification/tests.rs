@@ -584,6 +584,30 @@ fn test_contract_division_rejects_possible_zero_divisor() {
 }
 
 #[test]
+fn test_contract_division_under_a_quantifier_still_checks_the_range() {
+    assert_zero_divisor(
+        verify_i64_div(
+            "req_forall_zero",
+            "forall(i, 0, 3, a / i == a / i)",
+            "true",
+            "{ 0 }",
+        )
+        .unwrap_err(),
+    );
+}
+
+#[test]
+fn test_skipped_clause_drops_its_division_checks() {
+    verify_i64_div(
+        "req_skipped_div",
+        "a / b > 0 || no_such_fn(a)",
+        "true",
+        "{ 0 }",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
 fn test_contract_division_accepts_nonzero_divisor() {
     for (name, requires, ensures) in [
         ("req_div_ok", "b != 0 && a / b > 0", "true"),
@@ -601,6 +625,12 @@ fn test_contract_division_accepts_nonzero_divisor() {
         verify_i64_div(name, requires, ensures, "{ 0 }").unwrap_or_else(|e| panic!("{name}: {e}"));
     }
     verify_i64_div("ens_div_body", "b > 0", "result == a / b", "{ a / b }").unwrap();
+    for (name, requires) in [
+        ("req_forall_div", "forall(i, 1, 3, a / i == a / i)"),
+        ("req_exists_div", "exists(i, 1, 3, a % i == 0)"),
+    ] {
+        verify_i64_div(name, requires, "true", "{ 0 }").unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
     for (name, requires) in [
         ("freq_div_ok", "b != 0.0 && a / b > 0.0"),
         ("freq_div_pos", "b > 0.0 && a / b >= 0.0"),
