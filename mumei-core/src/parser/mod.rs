@@ -388,6 +388,60 @@ mod tests {
     }
 
     #[test]
+    fn test_prefix_not_and_minus_bind_field_access() {
+        // `!r.ok` is `!(r.ok)`, not `(!r).ok`.
+        match parse_expression("!r.ok") {
+            Expr::IfThenElse { cond, .. } => {
+                assert!(
+                    matches!(*cond, Expr::FieldAccess(_, ref f) if f == "ok"),
+                    "{cond:?}"
+                );
+            }
+            other => panic!("expected `!(r.ok)`, got {other:?}"),
+        }
+        match parse_expression("!a.b.c") {
+            Expr::IfThenElse { cond, .. } => match *cond {
+                Expr::FieldAccess(inner, f) => {
+                    assert_eq!(f, "c");
+                    assert!(matches!(*inner, Expr::FieldAccess(_, ref g) if g == "b"));
+                }
+                other => panic!("expected `!(a.b.c)`, got {other:?}"),
+            },
+            other => panic!("expected `!(a.b.c)`, got {other:?}"),
+        }
+        // `-p.x` is `0 - (p.x)`.
+        match parse_expression("-p.x") {
+            Expr::BinaryOp(lhs, Op::Sub, rhs) => {
+                assert!(matches!(*lhs, Expr::Number(0)));
+                assert!(
+                    matches!(*rhs, Expr::FieldAccess(_, ref f) if f == "x"),
+                    "{rhs:?}"
+                );
+            }
+            other => panic!("expected `0 - p.x`, got {other:?}"),
+        }
+        // Infix operators still bind looser than the prefix.
+        match parse_expression("!a.ok && b") {
+            Expr::BinaryOp(lhs, Op::And, _) => {
+                assert!(matches!(*lhs, Expr::IfThenElse { .. }));
+            }
+            other => panic!("expected `(!a.ok) && b`, got {other:?}"),
+        }
+        match parse_expression("-a + b") {
+            Expr::BinaryOp(lhs, Op::Add, _) => {
+                assert!(matches!(*lhs, Expr::BinaryOp(_, Op::Sub, _)));
+            }
+            other => panic!("expected `(-a) + b`, got {other:?}"),
+        }
+        match parse_expression("!f(x) || y") {
+            Expr::BinaryOp(lhs, Op::Or, _) => {
+                assert!(matches!(*lhs, Expr::IfThenElse { .. }));
+            }
+            other => panic!("expected `(!f(x)) || y`, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_parse_lambda_still_uses_bar() {
         // Prefix `|` keeps introducing a lambda even though infix `|` is now
         // bitwise OR.
