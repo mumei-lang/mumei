@@ -477,6 +477,7 @@ fn op_to_source(op: &Op) -> &'static str {
         Op::Sub => "-",
         Op::Mul => "*",
         Op::Div => "/",
+        Op::Rem => "%",
         Op::Eq => "==",
         Op::Neq => "!=",
         Op::Gt => ">",

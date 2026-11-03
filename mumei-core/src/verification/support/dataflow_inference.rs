@@ -304,6 +304,7 @@ fn trace_eval_binary(left: TraceValue, op: &Op, right: TraceValue) -> Option<Tra
                 .map(TraceValue::Int),
             Op::Pow => None,
             Op::Div => left.checked_div(right).map(TraceValue::Int),
+            Op::Rem => left.checked_rem(right).map(TraceValue::Int),
             Op::Eq => Some(TraceValue::Bool(left == right)),
             Op::Neq => Some(TraceValue::Bool(left != right)),
             Op::Gt => Some(TraceValue::Bool(left > right)),
@@ -411,6 +412,7 @@ fn trace_op_symbol(op: &Op) -> &'static str {
         Op::Sub => "-",
         Op::Mul => "*",
         Op::Div => "/",
+        Op::Rem => "%",
         Op::Eq => "==",
         Op::Neq => "!=",
         Op::Gt => ">",
@@ -521,7 +523,7 @@ pub fn infer_effects_json(items: &[Item], module_env: &ModuleEnv) -> serde_json:
 pub(crate) fn collect_divisors_expr(expr: &Expr) -> Vec<String> {
     let mut divisors = Vec::new();
     match expr {
-        Expr::BinaryOp(lhs, Op::Div, rhs) => {
+        Expr::BinaryOp(lhs, Op::Div | Op::Rem, rhs) => {
             // The right-hand side is a divisor
             match rhs.as_ref() {
                 Expr::Variable(name) => divisors.push(name.clone()),
@@ -900,5 +902,27 @@ mod trace_eval_binary_tests {
             ),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod collect_divisors_tests {
+    use super::collect_divisors_expr;
+    use crate::parser::{Expr, Op};
+
+    fn var(name: &str) -> Box<Expr> {
+        Box::new(Expr::Variable(name.to_string()))
+    }
+
+    #[test]
+    fn remainder_divisor_is_collected() {
+        let expr = Expr::BinaryOp(var("a"), Op::Rem, var("b"));
+        assert_eq!(collect_divisors_expr(&expr), vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn division_divisor_is_still_collected() {
+        let expr = Expr::BinaryOp(var("a"), Op::Div, var("d"));
+        assert_eq!(collect_divisors_expr(&expr), vec!["d".to_string()]);
     }
 }
