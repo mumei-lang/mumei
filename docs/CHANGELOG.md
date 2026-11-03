@@ -1,3 +1,11 @@
+### Unreleased: zero divisors in contracts
+
+- Integer and `f64` divisions (`/`, `%`) inside `requires`, `ensures` and
+  invariants are now checked for a possibly-zero divisor, as body divisions
+  already were. Before, `requires: a / b > 0` left `b == 0` unconstrained, so
+  any `ensures` could verify. Guards from `=>`, `&&`, `||` and `if` still
+  apply, so `b != 0 => a / b > 0` is accepted. `--bitvec-i64` already did this.
+
 ### Unreleased: f64 division by zero
 
 - `f64` division now reports a possibly-zero divisor, like integer division.

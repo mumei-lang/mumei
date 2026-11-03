@@ -178,6 +178,11 @@ pub(crate) struct VCtx<'a> {
     /// `discharge_bv_div_obligations` replays them under each entry's path
     /// condition.
     pub(crate) bv_div_obligations: std::cell::RefCell<Vec<(Bool<'a>, BV<'a>, BV<'a>)>>,
+    /// Integer and real divisions lowered without a solver, as
+    /// `(path condition, divisor == 0)`. Without them a `requires` such as
+    /// `a / b > 0` would leave `b == 0` unconstrained and let any `ensures`
+    /// through. Checked by `div_safety_status` with the bit-vector pairs.
+    pub(crate) div_zero_obligations: std::cell::RefCell<Vec<(Bool<'a>, Bool<'a>)>>,
     /// Clause booleans asserted so far during spec validation, in source
     /// order. Deferred obligations are conditioned on the clauses already in
     /// scope so a bound in one conjunct (`result <= 62`) discharges a shift

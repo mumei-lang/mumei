@@ -1109,6 +1109,7 @@ fn validation_ctx<'a>(
             || super::fragment::atom_requires_bitvector_semantics_in_module(atom, module_env),
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
+        div_zero_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
