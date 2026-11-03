@@ -96,6 +96,13 @@ fn remainder_keeps_the_dividend_unit() {
 }
 
 #[test]
+fn remainder_of_a_unitless_dividend_is_unitless() {
+    let out = run_verify(&fixture("test_units_rem_unitless_ok.mm"), "rem_unitless");
+    let text = combined(&out);
+    assert!(!text.contains("Unit mismatch"), "{text}");
+}
+
+#[test]
 fn returning_usd_as_jpy_is_rejected() {
     assert_unit_mismatch("test_units_mismatch_return.mm", "ret", "JPY", "USD");
 }

@@ -184,7 +184,7 @@ impl<'a> UnitCtx<'a> {
                     }
                     Op::Rem => {
                         self.check_compatible("remainder", &l, &r, || expr_to_source_string(expr))?;
-                        l.or(r)
+                        l
                     }
                     Op::Mul | Op::Div | Op::Pow => match (l, r) {
                         (Some(u), None) | (None, Some(u)) => Some(u),
