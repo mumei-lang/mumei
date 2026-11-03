@@ -651,6 +651,9 @@ pub(crate) fn stmt_to_z3<'a>(
                 let safe = index_in_bounds(ctx, &idx_value, &len)
                     .ok_or(MumeiError::type_error("Array index must be integer"))?;
                 solver.push();
+                for cond in vc.path_cond_stack.borrow().iter() {
+                    solver.assert(cond);
+                }
                 solver.assert(&safe.not());
                 if crate::verification::phase_artifacts::check(solver) == SatResult::Sat {
                     solver.pop(1);
