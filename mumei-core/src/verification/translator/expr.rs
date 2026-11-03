@@ -3138,7 +3138,28 @@ pub(crate) fn expr_to_z3<'a>(
                     Op::Add => Ok(Real::add(ctx, &[&lr, &rr]).into()),
                     Op::Sub => Ok(Real::sub(ctx, &[&lr, &rr]).into()),
                     Op::Mul => Ok(Real::mul(ctx, &[&lr, &rr]).into()),
-                    Op::Div => Ok(lr.div(&rr).into()),
+                    Op::Div => {
+                        // Z3 leaves `x / 0.0` unconstrained over the reals, so an
+                        // unchecked zero divisor would let any `ensures` through.
+                        if let Some(solver) = solver_opt {
+                            solver.push();
+                            for cond in vc.path_cond_stack.borrow().iter() {
+                                solver.assert(cond);
+                            }
+                            solver.assert(&rr._eq(&Real::from_real(ctx, 0, 1)));
+                            let may_be_zero = crate::verification::phase_artifacts::check(solver)
+                                == SatResult::Sat;
+                            solver.pop(1);
+                            if may_be_zero {
+                                return Err(MumeiError::verification(
+                                    "Potential division by zero.".to_string(),
+                                )
+                                .with_help("Add a condition divisor != 0.0 to requires")
+                                .with_verdict(crate::verification::VerdictKind::Rejected));
+                            }
+                        }
+                        Ok(lr.div(&rr).into())
+                    }
                     _ => Err("Invalid real op".into()),
                 }
             } else if l.as_float().is_some() || r.as_float().is_some() {

@@ -1,3 +1,11 @@
+### Unreleased: f64 division by zero
+
+- `f64` division now reports a possibly-zero divisor, like integer division.
+  Over Z3 reals `x / 0.0` is unconstrained, so before this an unchecked zero
+  divisor could make any `ensures` hold. The check uses the enclosing branch
+  guards. The opt-in `--ieee754-f64` mode is unchanged: there `x / 0.0` is
+  modelled as infinity or NaN, as on hardware.
+
 ### Unreleased: naming convention
 
 - Documented CLI flag and environment-variable naming rules and added tests
