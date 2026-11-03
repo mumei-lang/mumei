@@ -6,6 +6,14 @@
   guards. The opt-in `--ieee754-f64` mode is unchanged: there `x / 0.0` is
   modelled as infinity or NaN, as on hardware.
 
+### Unreleased: prefix `!` and `-` bind field access
+
+- `!r.ok` now parses as `!(r.ok)` and `-p.x` as `-(p.x)`. Before, the prefix
+  applied to `r` alone and the field was read from the result, so
+  `ensures: !result.ok => ...` was skipped as an unsupported clause and
+  `-p.x` read a field of `0 - p`. Infix operators still bind looser than the
+  prefix (`!a.ok && b` is `(!a.ok) && b`).
+
 ### Unreleased: remainder operator
 
 - Added the `%` operator for integers. It truncates toward zero like Rust, Go,
