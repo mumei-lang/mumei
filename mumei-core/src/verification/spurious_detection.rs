@@ -914,6 +914,13 @@ fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, 
                 Op::Div if right == 0 => {
                     Err("division by zero during counterexample replay".to_string())
                 }
+                Op::Rem if right == 0 => {
+                    Err("division by zero during counterexample replay".to_string())
+                }
+                Op::Rem => left
+                    .checked_rem(right)
+                    .map(EvalValue::Int)
+                    .ok_or_else(integer_overflow_during_replay),
                 Op::Div => left
                     .checked_div(right)
                     .map(EvalValue::Int)
@@ -968,6 +975,7 @@ fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, 
                     Op::Mul => Ok(EvalValue::Float(l * r)),
                     Op::Pow => Ok(EvalValue::Float(l.powf(r))),
                     Op::Div => Ok(EvalValue::Float(l / r)),
+                    Op::Rem => Ok(EvalValue::Float(l % r)),
                     Op::Eq => Ok(EvalValue::Bool(l == r)),
                     Op::Neq => Ok(EvalValue::Bool(l != r)),
                     Op::Gt => Ok(EvalValue::Bool(l > r)),

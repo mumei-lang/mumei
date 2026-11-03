@@ -312,7 +312,7 @@ fn node_bp(e: &Expr, t: HostTarget) -> u8 {
                     8
                 }
             }
-            Op::Mul | Op::Div => {
+            Op::Mul | Op::Div | Op::Rem => {
                 if t == HostTarget::Python {
                     10
                 } else {
@@ -497,6 +497,11 @@ fn emit_binop(
         // negative exponents — degrade instead of emitting wrong code.
         return None;
     }
+    if *op == Op::Rem {
+        // Python's `%` floors and Rust's truncates only for integers of one
+        // signedness; degrade rather than print a remainder that can differ.
+        return None;
+    }
     if *op == Op::Div && !expr_is_floaty(whole, vars) {
         // Z3 `Int` division — what `verify` proves `Op::Div` against — is
         // EUCLIDEAN: `mod` is always ≥ 0, so the quotient floors for positive
@@ -558,6 +563,7 @@ fn emit_binop(
         Op::Sub => "-",
         Op::Mul => "*",
         Op::Div => "/",
+        Op::Rem => "%",
         Op::Pow => "**",
         Op::Eq => "==",
         Op::Neq => "!=",

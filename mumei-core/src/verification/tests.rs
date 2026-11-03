@@ -516,6 +516,195 @@ fn test_ensures_negated_bool_field_still_refutes() {
     assert!(err.to_string().contains("Postcondition"), "{err}");
 }
 
+fn verify_rem_atom(
+    name: &str,
+    requires: &str,
+    ensures: &str,
+    body: &str,
+) -> Result<(), MumeiError> {
+    let atom = test_atom(
+        name,
+        vec![test_param("a", Some("i64")), test_param("b", Some("i64"))],
+        requires,
+        ensures,
+        body,
+        Some("i64"),
+    );
+    let mut module_env = ModuleEnv::new();
+    register_builtin_traits(&mut module_env);
+    module_env.register_atom(&atom);
+    let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+    verify(&hir, Path::new("."), &module_env).map(|_| ())
+}
+
+#[test]
+fn test_rem_truncates_toward_zero_for_all_signs() {
+    verify_rem_atom("rem_pp", "a == 7 && b == 2", "result == 1", "{ a % b }").unwrap();
+    verify_rem_atom(
+        "rem_np",
+        "a == 0 - 7 && b == 2",
+        "result == 0 - 1",
+        "{ a % b }",
+    )
+    .unwrap();
+    verify_rem_atom("rem_pn", "a == 7 && b == 0 - 2", "result == 1", "{ a % b }").unwrap();
+    verify_rem_atom(
+        "rem_nn",
+        "a == 0 - 7 && b == 0 - 2",
+        "result == 0 - 1",
+        "{ a % b }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_rem_bounds_and_identity() {
+    verify_rem_atom(
+        "rem_bounds",
+        "a >= 0 && b > 0",
+        "result >= 0 && result < b",
+        "{ a % b }",
+    )
+    .unwrap();
+    verify_rem_atom(
+        "rem_identity",
+        "b != 0",
+        "result == a",
+        "{ (a / b) * b + a % b }",
+    )
+    .unwrap_err();
+    verify_rem_atom("rem_sign", "b != 0 && a < 0", "result <= 0", "{ a % b }").unwrap();
+}
+
+#[test]
+fn test_rem_rejects_possible_zero_divisor() {
+    let err = verify_rem_atom("rem_zero", "true", "true", "{ a % b }").unwrap_err();
+    assert!(err.to_string().contains("division by zero"));
+    verify_rem_atom(
+        "rem_guarded",
+        "true",
+        "true",
+        "{ if b == 0 { 0 } else { a % b } }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_rem_wrong_postcondition_is_refuted() {
+    let err =
+        verify_rem_atom("rem_wrong", "a == 7 && b == 3", "result == 2", "{ a % b }").unwrap_err();
+    assert!(err.to_string().contains("Postcondition"), "{err}");
+}
+
+#[test]
+fn test_rem_parses_with_multiplicative_precedence() {
+    verify_rem_atom(
+        "rem_prec",
+        "a == 10 && b == 4",
+        "result == 3",
+        "{ 1 + a % b }",
+    )
+    .unwrap();
+    verify_rem_atom(
+        "rem_prec2",
+        "a == 10 && b == 4",
+        "result == 0",
+        "{ a * 2 % b }",
+    )
+    .unwrap();
+}
+
+fn verify_guarded_array_body(name: &str, requires: &str, body: &str) -> Result<(), MumeiError> {
+    let atom = test_atom(
+        name,
+        vec![test_param("a", Some("[i64]")), test_param("n", Some("i64"))],
+        requires,
+        "true",
+        body,
+        Some("i64"),
+    );
+    let mut module_env = ModuleEnv::new();
+    register_builtin_traits(&mut module_env);
+    module_env.register_atom(&atom);
+    let hir = lower_atom_to_hir_with_env(&atom, Some(&module_env));
+    verify(&hir, Path::new("."), &module_env).map(|_| ())
+}
+
+#[test]
+fn test_array_access_uses_enclosing_if_guard() {
+    verify_guarded_array_body(
+        "guarded_read",
+        "len(a) == n && n >= 0",
+        "{ if n < 4 { 0 } else { a[3] } }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_array_access_uses_else_guard_and_nested_guards() {
+    verify_guarded_array_body(
+        "nested_guarded_read",
+        "len(a) == n",
+        "{ if n > 0 { if 2 < n { a[2] } else { a[0] } } else { 0 } }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_array_access_still_rejects_insufficient_guard() {
+    let err = verify_guarded_array_body(
+        "weak_guarded_read",
+        "len(a) == n && n >= 0",
+        "{ if n < 3 { 0 } else { a[3] } }",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("Potential Out-of-Bounds on 'a'"));
+}
+
+#[test]
+fn test_array_access_guard_does_not_leak_past_branch() {
+    let err = verify_guarded_array_body(
+        "leaky_guarded_read",
+        "len(a) == n && n >= 0",
+        "{ let x = if n < 4 { 0 } else { a[3] }; x + a[3] }",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("Potential Out-of-Bounds on 'a'"));
+}
+
+#[test]
+fn test_array_store_uses_enclosing_if_guard() {
+    verify_guarded_array_body(
+        "guarded_store",
+        "len(a) == 5",
+        "{ if n >= 0 && n < 5 { a[n] = 1; 1 } else { 0 } }",
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_array_store_still_rejects_insufficient_guard() {
+    let err = verify_guarded_array_body(
+        "weak_guarded_store",
+        "len(a) == 5",
+        "{ if n >= 0 && n <= 5 { a[n] = 1; 1 } else { 0 } }",
+    )
+    .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("Potential Out-of-Bounds store on 'a'"));
+}
+
+#[test]
+fn test_array_access_uses_short_circuit_guard() {
+    verify_guarded_array_body(
+        "short_circuit_read",
+        "len(a) == n",
+        "{ if n > 1 && a[1] > 0 { 1 } else { 0 } }",
+    )
+    .unwrap();
+}
+
 #[test]
 fn test_executor_marks_symbolic_exponent_ensures_unverifiable() {
     let atom = test_atom(
