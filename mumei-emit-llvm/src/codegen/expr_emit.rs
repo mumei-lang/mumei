@@ -2124,7 +2124,23 @@ pub(crate) fn compile_hir_expr<'a>(
                         Ok(llvm!(builder.build_int_signed_div(l, r, "div_tmp")).into())
                     }
                     HirBinOp::Rem => {
-                        Ok(llvm!(builder.build_int_signed_rem(l, r, "rem_tmp")).into())
+                        // `srem i64::MIN, -1` is undefined in LLVM; `x % -1` is
+                        // always 0, which `x % 1` also yields.
+                        let minus_one = r.get_type().const_all_ones();
+                        let is_minus_one = llvm!(builder.build_int_compare(
+                            IntPredicate::EQ,
+                            r,
+                            minus_one,
+                            "rem_is_minus_one"
+                        ));
+                        let safe_r = llvm!(builder.build_select(
+                            is_minus_one,
+                            r.get_type().const_int(1, false),
+                            r,
+                            "rem_divisor"
+                        ))
+                        .into_int_value();
+                        Ok(llvm!(builder.build_int_signed_rem(l, safe_r, "rem_tmp")).into())
                     }
                     HirBinOp::Pow => Err(MumeiError::codegen(
                         "Unsupported int operator Pow".to_string(),
