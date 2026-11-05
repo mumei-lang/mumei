@@ -21,19 +21,22 @@ fn binding_power(tok: &Token) -> Option<(u8, u8)> {
         Token::FatArrow => Some((3, 4)), // left-assoc => (matches old parser's while-loop behavior)
         Token::Or => Some((5, 6)),
         Token::And => Some((7, 8)),
-        Token::Eq | Token::Neq | Token::Gt | Token::Lt | Token::Ge | Token::Le => Some((9, 10)),
+        // Ordering binds tighter than equality, as in C, Go, Java and
+        // TypeScript, so `result == a >= b` is `result == (a >= b)`.
+        Token::Eq | Token::Neq => Some((9, 10)),
+        Token::Gt | Token::Lt | Token::Ge | Token::Le => Some((11, 12)),
         // Bitwise operators bind tighter than comparison and looser than
         // arithmetic, following the C/Rust ordering `| < ^ < & < shift`.
         // `Token::Bar` is only a bitwise OR in infix position; in prefix
         // position it still opens a lambda parameter list (`|x| x + 1`).
-        Token::Bar => Some((11, 12)),
-        Token::Caret => Some((13, 14)),
-        Token::Amp => Some((15, 16)),
-        Token::Shl | Token::Shr => Some((17, 18)),
-        Token::Plus | Token::Minus => Some((19, 20)),
-        Token::Star | Token::Slash | Token::Percent => Some((21, 22)),
-        Token::StarStar => Some((23, 22)),
-        Token::Dot | Token::ColonColon => Some((25, 26)),
+        Token::Bar => Some((13, 14)),
+        Token::Caret => Some((15, 16)),
+        Token::Amp => Some((17, 18)),
+        Token::Shl | Token::Shr => Some((19, 20)),
+        Token::Plus | Token::Minus => Some((21, 22)),
+        Token::Star | Token::Slash | Token::Percent => Some((23, 24)),
+        Token::StarStar => Some((25, 24)),
+        Token::Dot | Token::ColonColon => Some((27, 28)),
         _ => None,
     }
 }
@@ -68,10 +71,21 @@ fn is_relational_op(op: &Op) -> bool {
     matches!(op, Op::Eq | Op::Neq | Op::Gt | Op::Lt | Op::Ge | Op::Le)
 }
 
-fn collect_relational_chain(expr: &Expr, operands: &mut Vec<Expr>, ops: &mut Vec<Op>) {
+fn is_equality_op(op: &Op) -> bool {
+    matches!(op, Op::Eq | Op::Neq)
+}
+
+/// Flatten a chain of comparisons of one precedence level: `a <= b < c` or
+/// `a == b == c`, but not `(a < b) == c`, whose left operand is a value.
+fn collect_relational_chain(
+    expr: &Expr,
+    equality: bool,
+    operands: &mut Vec<Expr>,
+    ops: &mut Vec<Op>,
+) {
     if let Expr::BinaryOp(left, op, right) = expr {
-        if is_relational_op(op) {
-            collect_relational_chain(left, operands, ops);
+        if is_relational_op(op) && is_equality_op(op) == equality {
+            collect_relational_chain(left, equality, operands, ops);
             ops.push(op.clone());
             operands.push((**right).clone());
             return;
@@ -83,10 +97,11 @@ fn collect_relational_chain(expr: &Expr, operands: &mut Vec<Expr>, ops: &mut Vec
 fn normalize_expr(expr: Expr) -> Expr {
     match expr {
         Expr::BinaryOp(left, op, right) if is_relational_op(&op) => {
+            let equality = is_equality_op(&op);
             let raw = Expr::BinaryOp(left, op, right);
             let mut operands = Vec::new();
             let mut ops = Vec::new();
-            collect_relational_chain(&raw, &mut operands, &mut ops);
+            collect_relational_chain(&raw, equality, &mut operands, &mut ops);
             if ops.len() <= 1 {
                 let left = normalize_expr(operands.remove(0));
                 let right = normalize_expr(operands.remove(0));
