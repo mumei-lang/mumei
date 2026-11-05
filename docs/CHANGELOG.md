@@ -5,6 +5,9 @@
   result outside the `i64` range, where compiled Go, Rust or LLVM code would
   wrap or panic. Contracts keep unbounded arithmetic. The flag is part of the
   proof cache key; default verification and certificates are unchanged.
+- An operation on a `u64`, `u32`, `u16`, `u8`, `i32`, `i16` or `i8` parameter
+  (or a `let` computed from one) is checked against that type's range
+  instead of `i64`.
 
 ### Unreleased: ordering binds tighter than equality
 

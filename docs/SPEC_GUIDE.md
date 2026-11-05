@@ -276,6 +276,8 @@ The default `Int` encoding proves `epoch + 1 == epoch + 1` for every `epoch`, bu
 `match` guards are checked too, and a lambda body is checked at each call
 with the actual arguments. A possible overflow fails with `Integer arithmetic may overflow i64`; bound the inputs in `requires` or guard the operation.
 
+The range is that of the operands' declared type: an operation that reads a `u64`, `u32`, `u16`, `u8`, `i32`, `i16` or `i8` parameter, or a `let` computed from one, must stay within that type (`x - 1` on a `u64` fails at `x == 0` with `may overflow u64`), and everything else is checked as `i64`. A function that mixes `x: i64` and `tag: u8` checks `x + 1` as `i64` and `tag + 1` as `u8`.
+
 ```mumei
 atom next_epoch(epoch: i64) -> i64
 requires: epoch >= 0 && epoch < 1000000;

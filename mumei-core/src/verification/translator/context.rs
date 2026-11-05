@@ -167,8 +167,9 @@ pub(crate) struct VCtx<'a> {
     /// whether a callee's `ensures` may be imported at a call site.
     pub(crate) bitvec_i64_global: bool,
     /// `--check-i64-overflow`: body `+`, `-`, `*` under the `Int` encoding
-    /// must stay within the `i64` range, as the compiled code would wrap or
-    /// panic outside it. Contracts keep unbounded arithmetic.
+    /// must stay within the range of their operands' integer type (`i64`
+    /// unless a parameter or local is declared `u64`, `i32`, ...), as the
+    /// compiled code would wrap or panic outside it. Contracts keep unbounded arithmetic.
     /// Set only while the body is lowered.
     pub(crate) check_i64_overflow: std::cell::Cell<bool>,
     /// Shift amounts lowered while no `Solver` was available (contract clauses
@@ -190,8 +191,13 @@ pub(crate) struct VCtx<'a> {
     pub(crate) div_zero_obligations: std::cell::RefCell<Vec<(Bool<'a>, Bool<'a>)>>,
     /// `--check-i64-overflow` obligations from body arithmetic lowered
     /// without a solver (loop conditions, match guards), as
-    /// `(path condition, overflows)`. Checked after the body.
-    pub(crate) i64_overflow_obligations: std::cell::RefCell<Vec<(Bool<'a>, Bool<'a>)>>,
+    /// `(path condition, overflows, integer type)`. Checked after the body.
+    pub(crate) i64_overflow_obligations:
+        std::cell::RefCell<Vec<(Bool<'a>, Bool<'a>, &'static str)>>,
+    /// Fixed-width integer type (`"u64"`, `"i32"`, ...) of `let`/assign
+    /// bound locals, so `--check-i64-overflow` checks arithmetic on them
+    /// against their own range rather than `i64`.
+    pub(crate) local_int_types: std::cell::RefCell<std::collections::HashMap<String, &'static str>>,
     /// Clause booleans asserted so far during spec validation, in source
     /// order. Deferred obligations are conditioned on the clauses already in
     /// scope so a bound in one conjunct (`result <= 62`) discharges a shift

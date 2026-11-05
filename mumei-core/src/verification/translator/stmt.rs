@@ -356,6 +356,16 @@ fn check_while_invariant<'a>(
     result
 }
 
+/// Record the fixed-width integer type of a let/assign binding (`i64` when
+/// the value declares none), so a local shadowing a `u64` parameter is
+/// checked as `i64` and a local computed from one is checked as `u64`.
+fn record_binding_int_type(vc: &VCtx, var: &str, value: &Expr) {
+    let ty = crate::verification::translator::expr::fixed_width_int_type(vc, value);
+    vc.local_int_types
+        .borrow_mut()
+        .insert(var.to_string(), ty.unwrap_or("i64"));
+}
+
 /// Record (or clear, when the value has no inferable enum type) the
 /// inferred declared enum type of a let/assign binding in
 /// `vc.local_enum_types`, so a later `match var` resolves variant owners via
@@ -575,6 +585,7 @@ pub(crate) fn stmt_to_z3<'a>(
         Stmt::Let { var, value, .. } => {
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             record_binding_enum_type(vc, var, value);
+            record_binding_int_type(vc, var, value);
             record_binding_lambda(vc, var, value, env, solver_opt);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
@@ -622,6 +633,7 @@ pub(crate) fn stmt_to_z3<'a>(
             }
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             record_binding_enum_type(vc, var, value);
+            record_binding_int_type(vc, var, value);
             record_binding_lambda(vc, var, value, env, solver_opt);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);

@@ -1120,7 +1120,7 @@ pub(crate) fn rebind_deferred_obligations<'a>(
     for (pc, _) in vc.div_zero_obligations.borrow_mut()[marks.2..].iter_mut() {
         *pc = Bool::and(vc.ctx, &[pc, extra]);
     }
-    for (pc, _) in vc.i64_overflow_obligations.borrow_mut()[marks.3..].iter_mut() {
+    for (pc, _, _) in vc.i64_overflow_obligations.borrow_mut()[marks.3..].iter_mut() {
         *pc = Bool::and(vc.ctx, &[pc, extra]);
     }
 }
@@ -1152,19 +1152,56 @@ pub(crate) fn discharge_bv_div_obligations<'a>(
     }
 }
 
+/// Name and range of a fixed-width integer type, or `None` for other types.
+fn fixed_width_int(type_name: &str) -> Option<(&'static str, i128, i128)> {
+    Some(match type_name {
+        "i8" => ("i8", i8::MIN.into(), i8::MAX.into()),
+        "i16" => ("i16", i16::MIN.into(), i16::MAX.into()),
+        "i32" => ("i32", i32::MIN.into(), i32::MAX.into()),
+        "i64" => ("i64", i64::MIN.into(), i64::MAX.into()),
+        "u8" => ("u8", 0, u8::MAX.into()),
+        "u16" => ("u16", 0, u16::MAX.into()),
+        "u32" => ("u32", 0, u32::MAX.into()),
+        "u64" => ("u64", 0, u64::MAX.into()),
+        _ => return None,
+    })
+}
+
+/// The declared fixed-width integer type of a body expression, taken from
+/// the parameter or local it reads. `None` when nothing declares one
+/// (literals, calls, lengths), which the overflow check treats as `i64`.
+pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::Variable(name) => {
+            if let Some(ty) = vc.local_int_types.borrow().get(name) {
+                return Some(ty);
+            }
+            let param = vc.current_atom?.params.iter().find(|p| &p.name == name)?;
+            let base = vc.module_env.resolve_base_type(param.type_name.as_deref()?);
+            fixed_width_int(&base).map(|(ty, _, _)| ty)
+        }
+        Expr::BinaryOp(l, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Rem, r) => {
+            fixed_width_int_type(vc, l).or_else(|| fixed_width_int_type(vc, r))
+        }
+        _ => None,
+    }
+}
+
 /// `--check-i64-overflow`: the operands of a body `+`, `-` or `*` fit in
-/// `i64` but the unbounded result does not. The compiled code wraps (or
-/// panics in a checked build) there, so a proof in the `Int` encoding would
-/// not describe it.
+/// their integer type `ty` but the unbounded result does not. The compiled
+/// code wraps (or panics in a checked build) there, so a proof in the `Int`
+/// encoding would not describe it.
 fn i64_overflow_condition<'a>(
     vc: &VCtx<'a>,
     left: &Int<'a>,
     right: &Int<'a>,
     result: &Int<'a>,
+    ty: &str,
 ) -> Bool<'a> {
     let ctx = vc.ctx;
-    let min = Int::from_i64(ctx, i64::MIN);
-    let max = Int::from_i64(ctx, i64::MAX);
+    let (_, lo, hi) = fixed_width_int(ty).unwrap_or(("i64", i64::MIN.into(), i64::MAX.into()));
+    let min = Int::from_str(ctx, &lo.to_string()).expect("integer literal");
+    let max = Int::from_str(ctx, &hi.to_string()).expect("integer literal");
     let in_range = |v: &Int<'a>| Bool::and(ctx, &[&v.ge(&min), &v.le(&max)]);
     Bool::and(
         ctx,
@@ -1172,18 +1209,22 @@ fn i64_overflow_condition<'a>(
     )
 }
 
-fn i64_overflow_error(outcome: SatResult) -> MumeiResult<()> {
+fn i64_overflow_error(outcome: SatResult, ty: &str) -> MumeiResult<()> {
     match outcome {
         SatResult::Unsat => Ok(()),
-        SatResult::Sat => Err(MumeiError::verification(
-            "Integer arithmetic may overflow i64.".to_string(),
-        )
-        .with_help("Bound the operands in requires so the result fits in i64")
+        SatResult::Sat => Err(MumeiError::verification(format!(
+            "Integer arithmetic may overflow {ty}."
+        ))
+        .with_help(format!(
+            "Bound the operands in requires so the result fits in {ty}"
+        ))
         .with_verdict(crate::verification::VerdictKind::Rejected)),
-        SatResult::Unknown => Err(MumeiError::verification(
-            "Z3 could not decide whether integer arithmetic stays within i64.".to_string(),
-        )
-        .with_help("Bound the operands in requires so the result fits in i64")
+        SatResult::Unknown => Err(MumeiError::verification(format!(
+            "Z3 could not decide whether integer arithmetic stays within {ty}."
+        ))
+        .with_help(format!(
+            "Bound the operands in requires so the result fits in {ty}"
+        ))
         .with_verdict(crate::verification::VerdictKind::Inconclusive)),
     }
 }
@@ -1192,6 +1233,7 @@ fn check_i64_range<'a>(
     vc: &VCtx<'a>,
     solver: &Solver<'a>,
     overflows: &Bool<'a>,
+    ty: &str,
 ) -> MumeiResult<()> {
     solver.push();
     for cond in vc.path_cond_stack.borrow().iter() {
@@ -1200,7 +1242,7 @@ fn check_i64_range<'a>(
     solver.assert(overflows);
     let outcome = crate::verification::phase_artifacts::check(solver);
     solver.pop(1);
-    i64_overflow_error(outcome)
+    i64_overflow_error(outcome, ty)
 }
 
 /// Check the `--check-i64-overflow` obligations recorded while lowering loop
@@ -1219,28 +1261,27 @@ fn discharge_i64_overflow_obligations_from<'a>(
     solver: &Solver<'a>,
     start: usize,
 ) -> MumeiResult<()> {
-    let obligations: Vec<(Bool<'a>, Bool<'a>)> = vc
+    let obligations: Vec<(Bool<'a>, Bool<'a>, &'static str)> = vc
         .i64_overflow_obligations
         .borrow_mut()
         .drain(start..)
         .collect();
-    let mut undecided = false;
-    for (path_cond, overflows) in obligations {
+    let mut undecided = None;
+    for (path_cond, overflows, ty) in obligations {
         solver.push();
         solver.assert(&path_cond);
         solver.assert(&overflows);
         let outcome = crate::verification::phase_artifacts::check(solver);
         solver.pop(1);
         match outcome {
-            SatResult::Sat => return i64_overflow_error(outcome),
-            SatResult::Unknown => undecided = true,
+            SatResult::Sat => return i64_overflow_error(outcome, ty),
+            SatResult::Unknown => undecided = undecided.or(Some(ty)),
             SatResult::Unsat => {}
         }
     }
-    if undecided {
-        i64_overflow_error(SatResult::Unknown)
-    } else {
-        Ok(())
+    match undecided {
+        Some(ty) => i64_overflow_error(SatResult::Unknown, ty),
+        None => Ok(()),
     }
 }
 
@@ -3409,15 +3450,19 @@ pub(crate) fn expr_to_z3<'a>(
                             && vc.recursion.lambda_bind_depth.get() == 0
                             && vc.contracts_in_instantiation.borrow().is_empty()
                         {
-                            let overflows = i64_overflow_condition(vc, &li, &ri, &result);
+                            let ty = fixed_width_int_type(vc, left)
+                                .or_else(|| fixed_width_int_type(vc, right))
+                                .unwrap_or("i64");
+                            let overflows = i64_overflow_condition(vc, &li, &ri, &result, ty);
                             match solver_opt {
-                                Some(solver) => check_i64_range(vc, solver, &overflows)?,
+                                Some(solver) => check_i64_range(vc, solver, &overflows, ty)?,
                                 // Loop conditions and match guards are lowered
                                 // without a solver: check them after the body.
-                                None => vc
-                                    .i64_overflow_obligations
-                                    .borrow_mut()
-                                    .push((vc.path_cond_conj(), overflows)),
+                                None => vc.i64_overflow_obligations.borrow_mut().push((
+                                    vc.path_cond_conj(),
+                                    overflows,
+                                    ty,
+                                )),
                             }
                         }
                         Ok(result.into())

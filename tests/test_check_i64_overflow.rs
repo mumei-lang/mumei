@@ -184,3 +184,70 @@ fn a_match_guard_in_a_loop_is_checked_under_the_invariant() {
     let output = verify("loop_guard", source, &["--check-i64-overflow"]);
     assert!(output.status.success(), "{}", text(&output));
 }
+
+#[test]
+fn unsigned_arithmetic_is_checked_against_its_own_range() {
+    let flag = &["--check-i64-overflow"];
+    // Above i64::MAX but within u64.
+    let big = "atom bump(x: u64) -> u64\n\
+        requires: x <= 10000000000000000000;\n\
+        ensures: result == x + 1;\n\
+        body: { x + 1 };\n";
+    let output = verify("u64_big", big, flag);
+    assert!(output.status.success(), "{}", text(&output));
+    let wraps = "atom bump(x: u64) -> u64\n\
+        requires: true;\n\
+        ensures: result == x + 1;\n\
+        body: { x + 1 };\n";
+    let output = verify("u64_wraps", wraps, flag);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains("Integer arithmetic may overflow u64"),
+        "{}",
+        text(&output)
+    );
+    let underflow = "atom dec(x: u64) -> u64\n\
+        requires: true;\n\
+        ensures: result == x - 1;\n\
+        body: { let y = x; y - 1 };\n";
+    let output = verify("u64_underflow", underflow, flag);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains("Integer arithmetic may overflow u64"),
+        "{}",
+        text(&output)
+    );
+}
+
+#[test]
+fn signed_arithmetic_is_checked_next_to_an_unsigned_parameter() {
+    let flag = &["--check-i64-overflow"];
+    let mixed = "atom tagged(x: i64, tag: u8) -> i64\n\
+        requires: true;\n\
+        ensures: result == x + 1;\n\
+        body: { x + 1 };\n";
+    let output = verify("mixed_signed", mixed, flag);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains("Integer arithmetic may overflow i64"),
+        "{}",
+        text(&output)
+    );
+    let bounded = "atom tagged(x: i64, tag: u8) -> i64\n\
+        requires: x >= 0 && x < 1000 && tag < 255;\n\
+        ensures: result == x + tag + 1;\n\
+        body: { x + (tag + 1) };\n";
+    let output = verify("mixed_bounded", bounded, flag);
+    assert!(output.status.success(), "{}", text(&output));
+    let narrow = "atom tagged(x: i64, tag: u8) -> i64\n\
+        requires: x >= 0 && x < 1000;\n\
+        ensures: result == x + tag + 1;\n\
+        body: { x + (tag + 1) };\n";
+    let output = verify("mixed_u8", narrow, flag);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains("Integer arithmetic may overflow u8"),
+        "{}",
+        text(&output)
+    );
+}

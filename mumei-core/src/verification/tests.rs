@@ -105,6 +105,7 @@ fn test_subsumption_vc<'a>(ctx: &'a Context, module_env: &'a ModuleEnv) -> VCtx<
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     }
 }
 
@@ -1691,6 +1692,7 @@ fn test_constraint_budget_exceeded() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
 
     // Each call increments and checks
@@ -1749,6 +1751,7 @@ fn test_constraint_budget_no_limit() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
 
     // Should always succeed when no constraint tracking
@@ -2584,6 +2587,7 @@ fn test_subsumption_check_holds_with_requires() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = Atom {
         name: "increment".to_string(),
@@ -2837,6 +2841,7 @@ fn test_subsumption_check_bool_param_and_result() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = Atom {
         name: "neg".to_string(),
@@ -2931,6 +2936,7 @@ fn test_subsumption_check_call_ref_alias_x() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = Atom {
         name: "identity".to_string(),
@@ -3025,6 +3031,7 @@ fn test_subsumption_check_call_ref_aliases_do_not_follow_concrete_names() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = test_atom(
         "second",
@@ -3093,6 +3100,7 @@ fn test_subsumption_check_array_length_does_not_alias_caller_symbol() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = test_atom(
         "arr_len",
@@ -3159,6 +3167,7 @@ fn test_subsumption_check_array_length_aliases_follow_callback_position() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = test_atom(
         "arr_len",
@@ -3228,6 +3237,7 @@ fn test_subsumption_check_fails_without_requires() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = Atom {
         name: "negate".to_string(),
@@ -3328,6 +3338,7 @@ fn test_subsumption_check_crossed_param_names() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = Atom {
         name: "compute".to_string(),
@@ -3436,6 +3447,7 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = Atom {
         name: "something".to_string(),
@@ -3525,6 +3537,7 @@ fn test_subsumption_check_concrete_true_ensures_fails() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = Atom {
         name: "no_guarantee".to_string(),
@@ -4159,6 +4172,7 @@ fn test_expr_to_z3_true_false_are_bool() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let mut env: Env = HashMap::new();
 
@@ -4240,6 +4254,7 @@ fn test_expr_to_z3_pow_constant_folds_full_precision() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let mut env: Env = HashMap::new();
 
@@ -4314,6 +4329,7 @@ fn test_tuple_result_indexing_uses_typed_components() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let mut env: Env = HashMap::new();
     seed_tuple_result_components(
@@ -4488,6 +4504,7 @@ fn test_chained_comparison_normalizes_before_lowering() {
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
         check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let mut env: Env = HashMap::new();
 
