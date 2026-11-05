@@ -1210,8 +1210,20 @@ pub(crate) fn discharge_i64_overflow_obligations<'a>(
     vc: &VCtx<'a>,
     solver: &Solver<'a>,
 ) -> MumeiResult<()> {
-    let obligations: Vec<(Bool<'a>, Bool<'a>)> =
-        vc.i64_overflow_obligations.borrow_mut().drain(..).collect();
+    discharge_i64_overflow_obligations_from(vc, solver, 0)
+}
+
+/// Check the obligations recorded from index `start` on, and drop them.
+fn discharge_i64_overflow_obligations_from<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    start: usize,
+) -> MumeiResult<()> {
+    let obligations: Vec<(Bool<'a>, Bool<'a>)> = vc
+        .i64_overflow_obligations
+        .borrow_mut()
+        .drain(start..)
+        .collect();
     let mut undecided = false;
     for (path_cond, overflows) in obligations {
         solver.push();
@@ -3391,7 +3403,11 @@ pub(crate) fn expr_to_z3<'a>(
                         .simplify();
                         // The bind-time pass of a lambda body runs on unconstrained
                         // params; each call site re-lowers it with the real arguments.
-                        if vc.check_i64_overflow.get() && vc.recursion.lambda_bind_depth.get() == 0
+                        // A callee's instantiated contract is math, like the
+                        // caller's own contract.
+                        if vc.check_i64_overflow.get()
+                            && vc.recursion.lambda_bind_depth.get() == 0
+                            && vc.contracts_in_instantiation.borrow().is_empty()
                         {
                             let overflows = i64_overflow_condition(vc, &li, &ri, &result);
                             match solver_opt {
@@ -3736,7 +3752,11 @@ pub(crate) fn expr_to_z3<'a>(
                     )?;
                     // ガード条件がある場合は AND で結合
                     let full_cond = if let Some(guard) = &arm.guard {
-                        let guard_z3 = expr_to_z3(vc, guard, env, None)?
+                        // The arm pass below checks the guard's arithmetic.
+                        let check_i64 = vc.check_i64_overflow.replace(false);
+                        let guard_z3 = expr_to_z3(vc, guard, env, None);
+                        vc.check_i64_overflow.set(check_i64);
+                        let guard_z3 = guard_z3?
                             .as_bool()
                             .ok_or(MumeiError::type_error("Guard must be boolean"))?;
                         Bool::and(ctx, &[&cond, &guard_z3])
@@ -3852,7 +3872,17 @@ pub(crate) fn expr_to_z3<'a>(
                     decl_hint.as_deref(),
                 )?;
                 let full_cond = if let Some(guard) = &arm.guard {
-                    let guard_z3 = expr_to_z3(vc, guard, &mut arm_env, None)?
+                    // The guard only runs when the arm's pattern matches.
+                    vc.path_cond_stack.borrow_mut().push(arm_cond.clone());
+                    let pending = vc.i64_overflow_obligations.borrow().len();
+                    let guard_z3 = expr_to_z3(vc, guard, &mut arm_env, None);
+                    vc.path_cond_stack.borrow_mut().pop();
+                    // Check now, under the solver's assumptions (a loop body's
+                    // invariant), rather than after the body without them.
+                    if let Some(solver) = solver_opt {
+                        discharge_i64_overflow_obligations_from(vc, solver, pending)?;
+                    }
+                    let guard_z3 = guard_z3?
                         .as_bool()
                         .ok_or(MumeiError::type_error("Guard must be boolean"))?;
                     Bool::and(ctx, &[&arm_cond, &guard_z3])

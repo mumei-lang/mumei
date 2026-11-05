@@ -150,3 +150,37 @@ fn lambda_bodies_are_checked_at_the_call_site() {
     let output = verify("lambda_unbounded", unbounded, &["--check-i64-overflow"]);
     assert!(!output.status.success(), "{}", text(&output));
 }
+
+#[test]
+fn a_callee_contract_stays_unbounded_at_the_call_site() {
+    let source = "atom ident(x: i64) -> i64\n\
+        requires: true;\n\
+        ensures: result + 1 > result && result == x;\n\
+        body: { x };\n\
+        atom caller(x: i64) -> i64\n\
+        requires: true;\n\
+        ensures: result == x;\n\
+        body: { ident(x) };\n";
+    let output = verify("callee_contract", source, &["--check-i64-overflow"]);
+    assert!(output.status.success(), "{}", text(&output));
+}
+
+#[test]
+fn a_match_guard_is_checked_under_its_pattern() {
+    let source = "atom pat(x: i64) -> i64\n\
+        requires: true;\n\
+        ensures: result >= 0;\n\
+        body: { match x { 5 if x + 1 > 0 => 1, _ => 0 } };\n";
+    let output = verify("guard_pattern", source, &["--check-i64-overflow"]);
+    assert!(output.status.success(), "{}", text(&output));
+}
+
+#[test]
+fn a_match_guard_in_a_loop_is_checked_under_the_invariant() {
+    let source = "atom loop_guard(n: i64) -> i64\n\
+        requires: n >= 0 && n < 1000;\n\
+        ensures: result >= 0;\n\
+        body: { let i = 0; while i < n invariant i >= 0 && i <= n { i = match i { k if k + 1 <= n => k + 1, _ => n }; }; i };\n";
+    let output = verify("loop_guard", source, &["--check-i64-overflow"]);
+    assert!(output.status.success(), "{}", text(&output));
+}
