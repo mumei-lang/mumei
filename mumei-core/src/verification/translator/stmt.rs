@@ -284,6 +284,7 @@ fn check_while_invariant<'a>(
     let clause_context_snapshot = vc.clause_context.borrow().clone();
     let enum_sorts_snapshot = vc.enum_sorts.borrow().clone();
     let types_snapshot = vc.local_enum_types.borrow().clone();
+    let int_types_snapshot = vc.local_int_types.borrow().clone();
     let array_elem_types_snapshot = vc.local_array_elem_types.borrow().clone();
     let lambdas_snapshot = vc.local_lambdas.borrow().clone();
     let call_result_lens_snapshot = vc.call_result_lens.borrow().clone();
@@ -309,6 +310,7 @@ fn check_while_invariant<'a>(
         *vc.clause_context.borrow_mut() = clause_context_snapshot.clone();
         *vc.enum_sorts.borrow_mut() = enum_sorts_snapshot.clone();
         *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
+        *vc.local_int_types.borrow_mut() = int_types_snapshot.clone();
         *vc.local_array_elem_types.borrow_mut() = array_elem_types_snapshot.clone();
         *vc.local_lambdas.borrow_mut() = lambdas_snapshot.clone();
         *vc.call_result_lens.borrow_mut() = call_result_lens_snapshot.clone();
@@ -848,6 +850,7 @@ pub(crate) fn stmt_to_z3<'a>(
                 {
                     let env_snapshot = env.clone();
                     let types_snapshot = vc.local_enum_types.borrow().clone();
+                    let int_types_snapshot = vc.local_int_types.borrow().clone();
                     let lambdas_snapshot = vc.local_lambdas.borrow().clone();
                     let mut step_env = env.clone();
                     havoc_vars(vc, &mut step_env, &modified);
@@ -877,6 +880,7 @@ pub(crate) fn stmt_to_z3<'a>(
                     solver.pop(1);
                     *env = env_snapshot;
                     *vc.local_enum_types.borrow_mut() = types_snapshot;
+                    *vc.local_int_types.borrow_mut() = int_types_snapshot.clone();
                     *vc.local_lambdas.borrow_mut() = lambdas_snapshot;
                 }
                 let invariant = &effective_invariant;
@@ -885,6 +889,7 @@ pub(crate) fn stmt_to_z3<'a>(
                 if let Some(dec_expr) = decreases {
                     let env_snapshot = env.clone();
                     let types_snapshot = vc.local_enum_types.borrow().clone();
+                    let int_types_snapshot = vc.local_int_types.borrow().clone();
                     let lambdas_snapshot = vc.local_lambdas.borrow().clone();
                     let mut term_env = env.clone();
                     havoc_vars(vc, &mut term_env, &modified);
@@ -912,6 +917,7 @@ pub(crate) fn stmt_to_z3<'a>(
                         solver.pop(1);
                         *env = env_snapshot;
                         *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
+                        *vc.local_int_types.borrow_mut() = int_types_snapshot.clone();
                         *vc.local_lambdas.borrow_mut() = lambdas_snapshot.clone();
                         return Err(MumeiError::verification(
                             "Termination check failed: decreases expression may be negative",
@@ -932,6 +938,7 @@ pub(crate) fn stmt_to_z3<'a>(
                         solver.pop(1);
                         *env = env_snapshot;
                         *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
+                        *vc.local_int_types.borrow_mut() = int_types_snapshot.clone();
                         *vc.local_lambdas.borrow_mut() = lambdas_snapshot.clone();
                         return Err(MumeiError::verification(
                             "Termination check failed: decreases expression does not strictly decrease"
@@ -941,6 +948,7 @@ pub(crate) fn stmt_to_z3<'a>(
                     solver.pop(1);
                     *env = env_snapshot;
                     *vc.local_enum_types.borrow_mut() = types_snapshot.clone();
+                    *vc.local_int_types.borrow_mut() = int_types_snapshot.clone();
                     *vc.local_lambdas.borrow_mut() = lambdas_snapshot.clone();
                 }
 

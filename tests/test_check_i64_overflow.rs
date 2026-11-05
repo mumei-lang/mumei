@@ -251,3 +251,39 @@ fn signed_arithmetic_is_checked_next_to_an_unsigned_parameter() {
         text(&output)
     );
 }
+
+#[test]
+fn narrow_bindings_keep_their_type_through_lambdas_matches_and_branches() {
+    let flag = &["--check-i64-overflow"];
+    let cases = [
+        (
+            "lambda_u8",
+            "atom f(x: i64) -> i64\n    requires: true;\n    ensures: true;\n    body: { let g = |n: u8| n + 1; g(255) };\n",
+            "u8",
+        ),
+        (
+            "match_u8",
+            "atom f(x: u8) -> i64\n    requires: true;\n    ensures: true;\n    body: { match x { n => n + 1 } };\n",
+            "u8",
+        ),
+        (
+            "if_value_u8",
+            "atom f(x: u8) -> i64\n    requires: true;\n    ensures: true;\n    body: { let y = if x > 0 { x } else { x }; y + 1 };\n",
+            "u8",
+        ),
+        (
+            "sibling_branch_i64",
+            "atom f(x: i64, t: u8, c: i64) -> i64\n    requires: true;\n    ensures: true;\n    body: { let y = x; if c > 0 { let y = t; 0 } else { y + 1 } };\n",
+            "i64",
+        ),
+    ];
+    for (tag, source, ty) in cases {
+        let output = verify(tag, source, flag);
+        assert!(!output.status.success(), "{tag}: {}", text(&output));
+        assert!(
+            text(&output).contains(&format!("Integer arithmetic may overflow {ty}")),
+            "{tag}: {}",
+            text(&output)
+        );
+    }
+}

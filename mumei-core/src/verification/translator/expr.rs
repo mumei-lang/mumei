@@ -1183,6 +1183,19 @@ pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static st
         Expr::BinaryOp(l, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Rem, r) => {
             fixed_width_int_type(vc, l).or_else(|| fixed_width_int_type(vc, r))
         }
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => stmt_tail_int_type(vc, then_branch).or_else(|| stmt_tail_int_type(vc, else_branch)),
+        _ => None,
+    }
+}
+
+fn stmt_tail_int_type(vc: &VCtx, stmt: &Stmt) -> Option<&'static str> {
+    match stmt {
+        Stmt::Expr(e, _) => fixed_width_int_type(vc, e),
+        Stmt::Block(stmts, _) => stmts.last().and_then(|s| stmt_tail_int_type(vc, s)),
         _ => None,
     }
 }
@@ -3605,6 +3618,7 @@ pub(crate) fn expr_to_z3<'a>(
             // inferred type onto an outer binding).
             let types_before = vc.local_enum_types.borrow().clone();
             let lambdas_before = vc.local_lambdas.borrow().clone();
+            let int_types_before = vc.local_int_types.borrow().clone();
             vc.path_cond_stack.borrow_mut().push(c.clone());
             let mut then_env = env.clone();
             let t = stmt_to_z3(vc, then_branch, &mut then_env, solver_opt);
@@ -3613,6 +3627,10 @@ pub(crate) fn expr_to_z3<'a>(
             let then_types = vc.local_enum_types.borrow().clone();
             let then_lambdas = vc.local_lambdas.borrow().clone();
             *vc.local_enum_types.borrow_mut() = types_before.clone();
+            let then_int_types = std::mem::replace(
+                &mut *vc.local_int_types.borrow_mut(),
+                int_types_before.clone(),
+            );
             *vc.local_lambdas.borrow_mut() = lambdas_before.clone();
             vc.path_cond_stack.borrow_mut().push(c.not());
             let mut else_env = env.clone();
@@ -3628,6 +3646,19 @@ pub(crate) fn expr_to_z3<'a>(
                 }
             }
             *vc.local_enum_types.borrow_mut() = merged;
+            // A local keeps its integer type only when both branches agree;
+            // otherwise the checker falls back to the declared parameter or i64.
+            let else_int_types = vc.local_int_types.borrow().clone();
+            let mut merged_int = int_types_before;
+            merged_int.retain(|k, v| {
+                then_int_types.get(k) == Some(v) && else_int_types.get(k) == Some(v)
+            });
+            for (k, v) in then_int_types.iter() {
+                if else_int_types.get(k) == Some(v) {
+                    merged_int.insert(k.clone(), v);
+                }
+            }
+            *vc.local_int_types.borrow_mut() = merged_int;
             // Same merge rule as the value env: a binding only on one
             // branch keeps that side's (branch-local bindings leak, like
             // `merge_branch_envs`), while a name bound on both survives
@@ -3885,6 +3916,11 @@ pub(crate) fn expr_to_z3<'a>(
             for arm in arms.iter().rev() {
                 *vc.local_lambdas.borrow_mut() = lambdas_before.clone();
                 let mut arm_env = env.clone();
+                let int_types_before_arm = vc.local_int_types.borrow().clone();
+                if let Pattern::Variable(name) = &arm.pattern {
+                    let ty = fixed_width_int_type(vc, target).unwrap_or("i64");
+                    vc.local_int_types.borrow_mut().insert(name.clone(), ty);
+                }
 
                 // Names bound by the arm's pattern — or by `let`s anywhere
                 // in the arm body — stay arm-local even when they shadow an
@@ -3946,6 +3982,7 @@ pub(crate) fn expr_to_z3<'a>(
                         solver.push();
                         solver.assert(&prior_negation);
                         let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
+                        *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
                         solver.pop(1);
                         merge_arm_env_into(
                             &mut merged_arm_env,
@@ -3967,6 +4004,7 @@ pub(crate) fn expr_to_z3<'a>(
                 }
 
                 let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
+                *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
                 merge_arm_env_into(&mut merged_arm_env, &arm_env, env, &full_cond, &arm_bound);
                 result = Some(match result {
                     Some(else_val) => {
@@ -5228,10 +5266,27 @@ fn apply_local_lambda<'a>(
             }
         }
     }
+    let int_types_before = vc.local_int_types.borrow().clone();
+    let param_int_types: Vec<&'static str> = params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            p.type_ref
+                .as_ref()
+                .and_then(|t| fixed_width_int(&vc.module_env.resolve_base_type(&t.name)))
+                .map(|(ty, _, _)| ty)
+                .or_else(|| args.get(i).and_then(|a| fixed_width_int_type(vc, a)))
+                .unwrap_or("i64")
+        })
+        .collect();
+    for (p, ty) in params.iter().zip(param_int_types) {
+        vc.local_int_types.borrow_mut().insert(p.name.clone(), ty);
+    }
     let saved_lambdas = std::mem::replace(&mut *vc.local_lambdas.borrow_mut(), call_lambdas);
     let enum_types_before = vc.local_enum_types.borrow().clone();
     let elem_types_before = vc.local_array_elem_types.borrow().clone();
     let result = stmt_to_z3(vc, body, &mut call_env, solver_opt);
+    *vc.local_int_types.borrow_mut() = int_types_before;
     *vc.local_lambdas.borrow_mut() = saved_lambdas;
     *vc.local_enum_types.borrow_mut() = enum_types_before;
     *vc.local_array_elem_types.borrow_mut() = elem_types_before;
