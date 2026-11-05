@@ -1070,7 +1070,7 @@ pub(crate) fn div_safety_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> DivSa
 /// Discharge the deferred division-safety obligations recorded while
 /// lowering contract clauses without a solver.
 /// Lengths of the deferred shift, bit-vector division and zero-divisor queues.
-pub(crate) type ObligationMarks = (usize, usize, usize);
+pub(crate) type ObligationMarks = (usize, usize, usize, usize);
 
 /// Snapshot of deferred shift/division obligation queue lengths, used by
 /// [`rebind_deferred_obligations`] to scope a rebind to one lowering.
@@ -1079,6 +1079,7 @@ pub(crate) fn obligation_marks(vc: &VCtx<'_>) -> ObligationMarks {
         vc.bv_shift_obligations.borrow().len(),
         vc.bv_div_obligations.borrow().len(),
         vc.div_zero_obligations.borrow().len(),
+        vc.i64_overflow_obligations.borrow().len(),
     )
 }
 
@@ -1089,12 +1090,14 @@ pub(crate) fn discard_obligations_since(vc: &VCtx<'_>, marks: ObligationMarks) {
     vc.bv_shift_obligations.borrow_mut().truncate(marks.0);
     vc.bv_div_obligations.borrow_mut().truncate(marks.1);
     vc.div_zero_obligations.borrow_mut().truncate(marks.2);
+    vc.i64_overflow_obligations.borrow_mut().truncate(marks.3);
 }
 
 pub(crate) fn has_new_obligations(vc: &VCtx<'_>, marks: ObligationMarks) -> bool {
     vc.bv_shift_obligations.borrow().len() > marks.0
         || vc.bv_div_obligations.borrow().len() > marks.1
         || vc.div_zero_obligations.borrow().len() > marks.2
+        || vc.i64_overflow_obligations.borrow().len() > marks.3
 }
 
 /// Conjoin `extra` into the path condition of deferred shift/division
@@ -1115,6 +1118,9 @@ pub(crate) fn rebind_deferred_obligations<'a>(
         *pc = Bool::and(vc.ctx, &[pc, extra]);
     }
     for (pc, _) in vc.div_zero_obligations.borrow_mut()[marks.2..].iter_mut() {
+        *pc = Bool::and(vc.ctx, &[pc, extra]);
+    }
+    for (pc, _, _) in vc.i64_overflow_obligations.borrow_mut()[marks.3..].iter_mut() {
         *pc = Bool::and(vc.ctx, &[pc, extra]);
     }
 }
@@ -1143,6 +1149,152 @@ pub(crate) fn discharge_bv_div_obligations<'a>(
         )
         .with_help("Strengthen requires so the divisor is provably nonzero")
         .with_verdict(crate::verification::VerdictKind::Inconclusive)),
+    }
+}
+
+/// Name and range of a fixed-width integer type, or `None` for other types.
+fn fixed_width_int(type_name: &str) -> Option<(&'static str, i128, i128)> {
+    Some(match type_name {
+        "i8" => ("i8", i8::MIN.into(), i8::MAX.into()),
+        "i16" => ("i16", i16::MIN.into(), i16::MAX.into()),
+        "i32" => ("i32", i32::MIN.into(), i32::MAX.into()),
+        "i64" => ("i64", i64::MIN.into(), i64::MAX.into()),
+        "u8" => ("u8", 0, u8::MAX.into()),
+        "u16" => ("u16", 0, u16::MAX.into()),
+        "u32" => ("u32", 0, u32::MAX.into()),
+        "u64" => ("u64", 0, u64::MAX.into()),
+        _ => return None,
+    })
+}
+
+/// The declared fixed-width integer type of a body expression, taken from
+/// the parameter or local it reads. `None` when nothing declares one
+/// (literals, calls, lengths), which the overflow check treats as `i64`.
+pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::Variable(name) => {
+            if let Some(ty) = vc.local_int_types.borrow().get(name) {
+                return Some(ty);
+            }
+            let param = vc.current_atom?.params.iter().find(|p| &p.name == name)?;
+            let base = vc.module_env.resolve_base_type(param.type_name.as_deref()?);
+            fixed_width_int(&base).map(|(ty, _, _)| ty)
+        }
+        Expr::BinaryOp(l, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Rem, r) => {
+            fixed_width_int_type(vc, l).or_else(|| fixed_width_int_type(vc, r))
+        }
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => stmt_tail_int_type(vc, then_branch).or_else(|| stmt_tail_int_type(vc, else_branch)),
+        _ => None,
+    }
+}
+
+fn stmt_tail_int_type(vc: &VCtx, stmt: &Stmt) -> Option<&'static str> {
+    match stmt {
+        Stmt::Expr(e, _) => fixed_width_int_type(vc, e),
+        Stmt::Block(stmts, _) => stmts.last().and_then(|s| stmt_tail_int_type(vc, s)),
+        _ => None,
+    }
+}
+
+/// `--check-i64-overflow`: the operands of a body `+`, `-` or `*` fit in
+/// their integer type `ty` but the unbounded result does not. The compiled
+/// code wraps (or panics in a checked build) there, so a proof in the `Int`
+/// encoding would not describe it.
+fn i64_overflow_condition<'a>(
+    vc: &VCtx<'a>,
+    left: &Int<'a>,
+    right: &Int<'a>,
+    result: &Int<'a>,
+    ty: &str,
+) -> Bool<'a> {
+    let ctx = vc.ctx;
+    let (_, lo, hi) = fixed_width_int(ty).unwrap_or(("i64", i64::MIN.into(), i64::MAX.into()));
+    let min = Int::from_str(ctx, &lo.to_string()).expect("integer literal");
+    let max = Int::from_str(ctx, &hi.to_string()).expect("integer literal");
+    let in_range = |v: &Int<'a>| Bool::and(ctx, &[&v.ge(&min), &v.le(&max)]);
+    Bool::and(
+        ctx,
+        &[&in_range(left), &in_range(right), &in_range(result).not()],
+    )
+}
+
+fn i64_overflow_error(outcome: SatResult, ty: &str) -> MumeiResult<()> {
+    match outcome {
+        SatResult::Unsat => Ok(()),
+        SatResult::Sat => Err(MumeiError::verification(format!(
+            "Integer arithmetic may overflow {ty}."
+        ))
+        .with_help(format!(
+            "Bound the operands in requires so the result fits in {ty}"
+        ))
+        .with_verdict(crate::verification::VerdictKind::Rejected)),
+        SatResult::Unknown => Err(MumeiError::verification(format!(
+            "Z3 could not decide whether integer arithmetic stays within {ty}."
+        ))
+        .with_help(format!(
+            "Bound the operands in requires so the result fits in {ty}"
+        ))
+        .with_verdict(crate::verification::VerdictKind::Inconclusive)),
+    }
+}
+
+fn check_i64_range<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    overflows: &Bool<'a>,
+    ty: &str,
+) -> MumeiResult<()> {
+    solver.push();
+    for cond in vc.path_cond_stack.borrow().iter() {
+        solver.assert(cond);
+    }
+    solver.assert(overflows);
+    let outcome = crate::verification::phase_artifacts::check(solver);
+    solver.pop(1);
+    i64_overflow_error(outcome, ty)
+}
+
+/// Check the `--check-i64-overflow` obligations recorded while lowering loop
+/// conditions and match guards without a solver, each under its path
+/// condition.
+pub(crate) fn discharge_i64_overflow_obligations<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+) -> MumeiResult<()> {
+    discharge_i64_overflow_obligations_from(vc, solver, 0)
+}
+
+/// Check the obligations recorded from index `start` on, and drop them.
+fn discharge_i64_overflow_obligations_from<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    start: usize,
+) -> MumeiResult<()> {
+    let obligations: Vec<(Bool<'a>, Bool<'a>, &'static str)> = vc
+        .i64_overflow_obligations
+        .borrow_mut()
+        .drain(start..)
+        .collect();
+    let mut undecided = None;
+    for (path_cond, overflows, ty) in obligations {
+        solver.push();
+        solver.assert(&path_cond);
+        solver.assert(&overflows);
+        let outcome = crate::verification::phase_artifacts::check(solver);
+        solver.pop(1);
+        match outcome {
+            SatResult::Sat => return i64_overflow_error(outcome, ty),
+            SatResult::Unknown => undecided = undecided.or(Some(ty)),
+            SatResult::Unsat => {}
+        }
+    }
+    match undecided {
+        Some(ty) => i64_overflow_error(SatResult::Unknown, ty),
+        None => Ok(()),
     }
 }
 
@@ -3296,9 +3448,38 @@ pub(crate) fn expr_to_z3<'a>(
                 let li = l.as_int().ok_or("Expected int")?;
                 let ri = r.as_int().ok_or("Expected int")?;
                 match op {
-                    Op::Add => Ok((&li + &ri).simplify().into()),
-                    Op::Sub => Ok((&li - &ri).simplify().into()),
-                    Op::Mul => Ok((&li * &ri).simplify().into()),
+                    Op::Add | Op::Sub | Op::Mul => {
+                        let result = match op {
+                            Op::Add => &li + &ri,
+                            Op::Sub => &li - &ri,
+                            _ => &li * &ri,
+                        }
+                        .simplify();
+                        // The bind-time pass of a lambda body runs on unconstrained
+                        // params; each call site re-lowers it with the real arguments.
+                        // A callee's instantiated contract is math, like the
+                        // caller's own contract.
+                        if vc.check_i64_overflow.get()
+                            && vc.recursion.lambda_bind_depth.get() == 0
+                            && vc.contracts_in_instantiation.borrow().is_empty()
+                        {
+                            let ty = fixed_width_int_type(vc, left)
+                                .or_else(|| fixed_width_int_type(vc, right))
+                                .unwrap_or("i64");
+                            let overflows = i64_overflow_condition(vc, &li, &ri, &result, ty);
+                            match solver_opt {
+                                Some(solver) => check_i64_range(vc, solver, &overflows, ty)?,
+                                // Loop conditions and match guards are lowered
+                                // without a solver: check them after the body.
+                                None => vc.i64_overflow_obligations.borrow_mut().push((
+                                    vc.path_cond_conj(),
+                                    overflows,
+                                    ty,
+                                )),
+                            }
+                        }
+                        Ok(result.into())
+                    }
                     Op::Div | Op::Rem => {
                         if let Some(solver) = solver_opt {
                             solver.push();
@@ -3437,6 +3618,7 @@ pub(crate) fn expr_to_z3<'a>(
             // inferred type onto an outer binding).
             let types_before = vc.local_enum_types.borrow().clone();
             let lambdas_before = vc.local_lambdas.borrow().clone();
+            let int_types_before = vc.local_int_types.borrow().clone();
             vc.path_cond_stack.borrow_mut().push(c.clone());
             let mut then_env = env.clone();
             let t = stmt_to_z3(vc, then_branch, &mut then_env, solver_opt);
@@ -3445,6 +3627,10 @@ pub(crate) fn expr_to_z3<'a>(
             let then_types = vc.local_enum_types.borrow().clone();
             let then_lambdas = vc.local_lambdas.borrow().clone();
             *vc.local_enum_types.borrow_mut() = types_before.clone();
+            let then_int_types = std::mem::replace(
+                &mut *vc.local_int_types.borrow_mut(),
+                int_types_before.clone(),
+            );
             *vc.local_lambdas.borrow_mut() = lambdas_before.clone();
             vc.path_cond_stack.borrow_mut().push(c.not());
             let mut else_env = env.clone();
@@ -3460,6 +3646,19 @@ pub(crate) fn expr_to_z3<'a>(
                 }
             }
             *vc.local_enum_types.borrow_mut() = merged;
+            // A local keeps its integer type only when both branches agree;
+            // otherwise the checker falls back to the declared parameter or i64.
+            let else_int_types = vc.local_int_types.borrow().clone();
+            let mut merged_int = int_types_before;
+            merged_int.retain(|k, v| {
+                then_int_types.get(k) == Some(v) && else_int_types.get(k) == Some(v)
+            });
+            for (k, v) in then_int_types.iter() {
+                if else_int_types.get(k) == Some(v) {
+                    merged_int.insert(k.clone(), v);
+                }
+            }
+            *vc.local_int_types.borrow_mut() = merged_int;
             // Same merge rule as the value env: a binding only on one
             // branch keeps that side's (branch-local bindings leak, like
             // `merge_branch_envs`), while a name bound on both survives
@@ -3629,7 +3828,11 @@ pub(crate) fn expr_to_z3<'a>(
                     )?;
                     // ガード条件がある場合は AND で結合
                     let full_cond = if let Some(guard) = &arm.guard {
-                        let guard_z3 = expr_to_z3(vc, guard, env, None)?
+                        // The arm pass below checks the guard's arithmetic.
+                        let check_i64 = vc.check_i64_overflow.replace(false);
+                        let guard_z3 = expr_to_z3(vc, guard, env, None);
+                        vc.check_i64_overflow.set(check_i64);
+                        let guard_z3 = guard_z3?
                             .as_bool()
                             .ok_or(MumeiError::type_error("Guard must be boolean"))?;
                         Bool::and(ctx, &[&cond, &guard_z3])
@@ -3713,6 +3916,11 @@ pub(crate) fn expr_to_z3<'a>(
             for arm in arms.iter().rev() {
                 *vc.local_lambdas.borrow_mut() = lambdas_before.clone();
                 let mut arm_env = env.clone();
+                let int_types_before_arm = vc.local_int_types.borrow().clone();
+                if let Pattern::Variable(name) = &arm.pattern {
+                    let ty = fixed_width_int_type(vc, target).unwrap_or("i64");
+                    vc.local_int_types.borrow_mut().insert(name.clone(), ty);
+                }
 
                 // Names bound by the arm's pattern — or by `let`s anywhere
                 // in the arm body — stay arm-local even when they shadow an
@@ -3745,7 +3953,17 @@ pub(crate) fn expr_to_z3<'a>(
                     decl_hint.as_deref(),
                 )?;
                 let full_cond = if let Some(guard) = &arm.guard {
-                    let guard_z3 = expr_to_z3(vc, guard, &mut arm_env, None)?
+                    // The guard only runs when the arm's pattern matches.
+                    vc.path_cond_stack.borrow_mut().push(arm_cond.clone());
+                    let pending = vc.i64_overflow_obligations.borrow().len();
+                    let guard_z3 = expr_to_z3(vc, guard, &mut arm_env, None);
+                    vc.path_cond_stack.borrow_mut().pop();
+                    // Check now, under the solver's assumptions (a loop body's
+                    // invariant), rather than after the body without them.
+                    if let Some(solver) = solver_opt {
+                        discharge_i64_overflow_obligations_from(vc, solver, pending)?;
+                    }
+                    let guard_z3 = guard_z3?
                         .as_bool()
                         .ok_or(MumeiError::type_error("Guard must be boolean"))?;
                     Bool::and(ctx, &[&arm_cond, &guard_z3])
@@ -3764,6 +3982,7 @@ pub(crate) fn expr_to_z3<'a>(
                         solver.push();
                         solver.assert(&prior_negation);
                         let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
+                        *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
                         solver.pop(1);
                         merge_arm_env_into(
                             &mut merged_arm_env,
@@ -3785,6 +4004,7 @@ pub(crate) fn expr_to_z3<'a>(
                 }
 
                 let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
+                *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
                 merge_arm_env_into(&mut merged_arm_env, &arm_env, env, &full_cond, &arm_bound);
                 result = Some(match result {
                     Some(else_val) => {
@@ -5046,10 +5266,27 @@ fn apply_local_lambda<'a>(
             }
         }
     }
+    let int_types_before = vc.local_int_types.borrow().clone();
+    let param_int_types: Vec<&'static str> = params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            p.type_ref
+                .as_ref()
+                .and_then(|t| fixed_width_int(&vc.module_env.resolve_base_type(&t.name)))
+                .map(|(ty, _, _)| ty)
+                .or_else(|| args.get(i).and_then(|a| fixed_width_int_type(vc, a)))
+                .unwrap_or("i64")
+        })
+        .collect();
+    for (p, ty) in params.iter().zip(param_int_types) {
+        vc.local_int_types.borrow_mut().insert(p.name.clone(), ty);
+    }
     let saved_lambdas = std::mem::replace(&mut *vc.local_lambdas.borrow_mut(), call_lambdas);
     let enum_types_before = vc.local_enum_types.borrow().clone();
     let elem_types_before = vc.local_array_elem_types.borrow().clone();
     let result = stmt_to_z3(vc, body, &mut call_env, solver_opt);
+    *vc.local_int_types.borrow_mut() = int_types_before;
     *vc.local_lambdas.borrow_mut() = saved_lambdas;
     *vc.local_enum_types.borrow_mut() = enum_types_before;
     *vc.local_array_elem_types.borrow_mut() = elem_types_before;

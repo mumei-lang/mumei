@@ -91,6 +91,7 @@ fn test_subsumption_vc<'a>(ctx: &'a Context, module_env: &'a ModuleEnv) -> VCtx<
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -103,6 +104,8 @@ fn test_subsumption_vc<'a>(ctx: &'a Context, module_env: &'a ModuleEnv) -> VCtx<
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     }
 }
 
@@ -1675,6 +1678,7 @@ fn test_constraint_budget_exceeded() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -1687,6 +1691,8 @@ fn test_constraint_budget_exceeded() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
 
     // Each call increments and checks
@@ -1731,6 +1737,7 @@ fn test_constraint_budget_no_limit() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -1743,6 +1750,8 @@ fn test_constraint_budget_no_limit() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
 
     // Should always succeed when no constraint tracking
@@ -2564,6 +2573,7 @@ fn test_subsumption_check_holds_with_requires() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -2576,6 +2586,8 @@ fn test_subsumption_check_holds_with_requires() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = Atom {
         name: "increment".to_string(),
@@ -2815,6 +2827,7 @@ fn test_subsumption_check_bool_param_and_result() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -2827,6 +2840,8 @@ fn test_subsumption_check_bool_param_and_result() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = Atom {
         name: "neg".to_string(),
@@ -2907,6 +2922,7 @@ fn test_subsumption_check_call_ref_alias_x() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -2919,6 +2935,8 @@ fn test_subsumption_check_call_ref_alias_x() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = Atom {
         name: "identity".to_string(),
@@ -2999,6 +3017,7 @@ fn test_subsumption_check_call_ref_aliases_do_not_follow_concrete_names() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -3011,6 +3030,8 @@ fn test_subsumption_check_call_ref_aliases_do_not_follow_concrete_names() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = test_atom(
         "second",
@@ -3065,6 +3086,7 @@ fn test_subsumption_check_array_length_does_not_alias_caller_symbol() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -3077,6 +3099,8 @@ fn test_subsumption_check_array_length_does_not_alias_caller_symbol() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = test_atom(
         "arr_len",
@@ -3129,6 +3153,7 @@ fn test_subsumption_check_array_length_aliases_follow_callback_position() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -3141,6 +3166,8 @@ fn test_subsumption_check_array_length_aliases_follow_callback_position() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = test_atom(
         "arr_len",
@@ -3196,6 +3223,7 @@ fn test_subsumption_check_fails_without_requires() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -3208,6 +3236,8 @@ fn test_subsumption_check_fails_without_requires() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = Atom {
         name: "negate".to_string(),
@@ -3294,6 +3324,7 @@ fn test_subsumption_check_crossed_param_names() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -3306,6 +3337,8 @@ fn test_subsumption_check_crossed_param_names() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = Atom {
         name: "compute".to_string(),
@@ -3400,6 +3433,7 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -3412,6 +3446,8 @@ fn test_subsumption_check_trivial_contract_ensures_skipped() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = Atom {
         name: "something".to_string(),
@@ -3487,6 +3523,7 @@ fn test_subsumption_check_concrete_true_ensures_fails() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -3499,6 +3536,8 @@ fn test_subsumption_check_concrete_true_ensures_fails() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let concrete = Atom {
         name: "no_guarantee".to_string(),
@@ -4119,6 +4158,7 @@ fn test_expr_to_z3_true_false_are_bool() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -4131,6 +4171,8 @@ fn test_expr_to_z3_true_false_are_bool() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let mut env: Env = HashMap::new();
 
@@ -4198,6 +4240,7 @@ fn test_expr_to_z3_pow_constant_folds_full_precision() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -4210,6 +4253,8 @@ fn test_expr_to_z3_pow_constant_folds_full_precision() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let mut env: Env = HashMap::new();
 
@@ -4270,6 +4315,7 @@ fn test_tuple_result_indexing_uses_typed_components() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -4282,6 +4328,8 @@ fn test_tuple_result_indexing_uses_typed_components() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let mut env: Env = HashMap::new();
     seed_tuple_result_components(
@@ -4442,6 +4490,7 @@ fn test_chained_comparison_normalizes_before_lowering() {
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -4454,6 +4503,8 @@ fn test_chained_comparison_normalizes_before_lowering() {
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global: false,
+        check_i64_overflow: std::cell::Cell::new(false),
+        local_int_types: Default::default(),
     };
     let mut env: Env = HashMap::new();
 

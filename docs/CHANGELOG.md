@@ -1,3 +1,14 @@
+### Unreleased: `--check-i64-overflow`
+
+- New opt-in `mumei verify --check-i64-overflow`. It keeps the default `Int`
+  encoding but rejects a body `+`, `-` or `*` whose `i64` operands can give a
+  result outside the `i64` range, where compiled Go, Rust or LLVM code would
+  wrap or panic. Contracts keep unbounded arithmetic. The flag is part of the
+  proof cache key; default verification and certificates are unchanged.
+- An operation on a `u64`, `u32`, `u16`, `u8`, `i32`, `i16` or `i8` parameter
+  (or a `let` computed from one) is checked against that type's range
+  instead of `i64`.
+
 ### Unreleased: ordering binds tighter than equality
 
 - `<`, `<=`, `>` and `>=` now bind tighter than `==` and `!=`, as in C, Go,

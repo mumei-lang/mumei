@@ -362,6 +362,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
         warn_fragment,
         ieee754_f64,
         bitvec_i64,
+        check_i64_overflow,
         warn_untyped_arrays,
         strict_array_types,
         property_based_test_count,
@@ -579,6 +580,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                     warn_fragment,
                     ieee754_f64,
                     bitvec_i64,
+                    check_i64_overflow,
                     warn_untyped_arrays,
                     strict_array_types,
                     property_based_test_count,
@@ -661,6 +663,7 @@ pub(crate) fn cmd_verify_command(command: Command) {
                 warn_fragment,
                 ieee754_f64,
                 bitvec_i64,
+                check_i64_overflow,
                 warn_untyped_arrays,
                 strict_array_types,
                 property_based_test_count,
@@ -801,6 +804,7 @@ pub(crate) struct VerifyOptions<'a> {
     pub(crate) warn_fragment: bool,
     pub(crate) ieee754_f64: bool,
     pub(crate) bitvec_i64: bool,
+    pub(crate) check_i64_overflow: bool,
     pub(crate) warn_untyped_arrays: bool,
     pub(crate) strict_array_types: bool,
     pub(crate) property_based_test_count: usize,
@@ -1052,6 +1056,9 @@ fn verify_single_atom_inner(atom: &parser::Atom, name: &str, ctx: &mut VerifyCon
     }
     if atom_verification_config.ieee754_f64 {
         proof_flags.push("ieee754_f64");
+    }
+    if atom_verification_config.check_i64_overflow {
+        proof_flags.push("check_i64_overflow");
     }
     // The BV encoding changes the semantics of the obligation, so a proof
     // produced in Int mode must not be reused for a `--bitvec-i64` run (and
@@ -1751,6 +1758,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         warn_fragment,
         ieee754_f64,
         bitvec_i64,
+        check_i64_overflow,
         warn_untyped_arrays,
         strict_array_types,
         property_based_test_count,
@@ -1879,6 +1887,7 @@ pub(crate) fn cmd_verify(options: VerifyOptions<'_>) -> VerifyOutcome {
         suggest_cegis,
         ieee754_f64,
         bitvec_i64,
+        check_i64_overflow,
         property_based_test: property_based_config,
     };
     let input_path = Path::new(input);

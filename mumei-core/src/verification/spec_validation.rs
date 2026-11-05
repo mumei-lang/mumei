@@ -529,6 +529,7 @@ pub(crate) fn validation_ctx<'a>(
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -542,6 +543,10 @@ pub(crate) fn validation_ctx<'a>(
         call_result_symbols: Default::default(),
 
         bitvec_i64_global,
+
+        check_i64_overflow: std::cell::Cell::new(false),
+
+        local_int_types: Default::default(),
     }
 }
 

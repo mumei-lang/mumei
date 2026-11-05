@@ -64,6 +64,7 @@ pub(crate) fn verify_atom_invariant(
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -77,6 +78,10 @@ pub(crate) fn verify_atom_invariant(
         call_result_symbols: Default::default(),
 
         bitvec_i64_global: false,
+
+        check_i64_overflow: std::cell::Cell::new(false),
+
+        local_int_types: Default::default(),
     };
 
     let mut env: Env = HashMap::new();

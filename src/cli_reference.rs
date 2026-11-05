@@ -991,6 +991,7 @@ mod tests {
             ("proof_cert", "Solver and proof"),
             ("ieee754_f64", "Solver and proof"),
             ("bitvec_i64", "Solver and proof"),
+            ("check_i64_overflow", "Solver and proof"),
             ("enable_spurious_detection", "Diagnostics"),
             ("disable_spurious_detection", "Diagnostics"),
             ("enable_vacuity_check", "Diagnostics"),
