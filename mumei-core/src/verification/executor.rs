@@ -1732,6 +1732,7 @@ fn verify_inner_impl(
         bv_shift_obligations: std::cell::RefCell::new(Vec::new()),
         bv_div_obligations: std::cell::RefCell::new(Vec::new()),
         div_zero_obligations: std::cell::RefCell::new(Vec::new()),
+        i64_overflow_obligations: std::cell::RefCell::new(Vec::new()),
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -2999,6 +3000,7 @@ fn verify_inner_impl(
     // solver that already carries the preconditions.
     discharge_bv_shift_obligations(&vc, &solver)?;
     discharge_bv_div_obligations(&vc, &solver)?;
+    discharge_i64_overflow_obligations(&vc, &solver)?;
 
     let z3_check_start = std::time::Instant::now();
     let profiler_final_check_start = profiler_checkpoint(&vc);

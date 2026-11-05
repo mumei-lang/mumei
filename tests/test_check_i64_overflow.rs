@@ -102,3 +102,51 @@ fn contract_arithmetic_stays_unbounded_with_the_flag() {
     let output = verify("contract", source, &["--check-i64-overflow"]);
     assert!(output.status.success(), "{}", text(&output));
 }
+
+#[test]
+fn loop_conditions_and_match_guards_are_checked() {
+    let looping = "atom loop_cond(x: i64) -> i64\n\
+        requires: x >= 0;\n\
+        ensures: result >= 0;\n\
+        body: { let i = x; while i + 1 < 0 invariant i >= 0 { i = i + 0; }; i };\n";
+    let guarded = "atom guard(x: i64) -> i64\n\
+        requires: x >= 0;\n\
+        ensures: result >= 0;\n\
+        body: { match x { n if n + 1 > 0 => 1, _ => 0 } };\n";
+    for (tag, source) in [("loop", looping), ("guard", guarded)] {
+        assert!(verify(tag, source, &[]).status.success());
+        let output = verify(tag, source, &["--check-i64-overflow"]);
+        assert!(!output.status.success(), "{tag}: {}", text(&output));
+        assert!(
+            text(&output).contains("Integer arithmetic may overflow i64"),
+            "{tag}: {}",
+            text(&output)
+        );
+    }
+}
+
+#[test]
+fn a_loop_condition_bounded_by_the_invariant_verifies_with_the_flag() {
+    let source = "atom loop_ok(n: i64) -> i64\n\
+        requires: n >= 0 && n < 1000;\n\
+        ensures: result >= 0;\n\
+        body: { let i = 0; while i + 1 <= n invariant i >= 0 && i <= n { i = i + 1; }; i };\n";
+    let output = verify("loop_ok", source, &["--check-i64-overflow"]);
+    assert!(output.status.success(), "{}", text(&output));
+}
+
+#[test]
+fn lambda_bodies_are_checked_at_the_call_site() {
+    let safe = "atom lam(x: i64) -> i64\n\
+        requires: true;\n\
+        ensures: result == 1;\n\
+        body: { let f = |n| n + 1; f(0) };\n";
+    let output = verify("lambda_safe", safe, &["--check-i64-overflow"]);
+    assert!(output.status.success(), "{}", text(&output));
+    let unbounded = "atom lam_bad(x: i64) -> i64\n\
+        requires: true;\n\
+        ensures: result == x + 1;\n\
+        body: { let f = |n| n + 1; f(x) };\n";
+    let output = verify("lambda_unbounded", unbounded, &["--check-i64-overflow"]);
+    assert!(!output.status.success(), "{}", text(&output));
+}

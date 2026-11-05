@@ -272,7 +272,9 @@ Qualified constructor expressions `E::V(..)` / `E::V` work in bodies too — `Mi
 
 ## Fixed-width `i64` arithmetic (`--check-i64-overflow`)
 
-The default `Int` encoding proves `epoch + 1 == epoch + 1` for every `epoch`, but a compiled `i64` wraps at `i64::MAX` (Go, LLVM) or panics (Rust debug builds). When a `.mm` atom is a port of native code, `--check-i64-overflow` adds one obligation per body `+`, `-` and `*`: if both operands fit in `i64`, the result must fit too, under the `requires` and the enclosing branch guards. A possible overflow fails with `Integer arithmetic may overflow i64`; bound the inputs in `requires` or guard the operation.
+The default `Int` encoding proves `epoch + 1 == epoch + 1` for every `epoch`, but a compiled `i64` wraps at `i64::MAX` (Go, LLVM) or panics (Rust debug builds). When a `.mm` atom is a port of native code, `--check-i64-overflow` adds one obligation per body `+`, `-` and `*`: if both operands fit in `i64`, the result must fit too, under the `requires` and the enclosing branch guards. Loop conditions (under the invariant) and
+`match` guards are checked too, and a lambda body is checked at each call
+with the actual arguments. A possible overflow fails with `Integer arithmetic may overflow i64`; bound the inputs in `requires` or guard the operation.
 
 ```mumei
 atom next_epoch(epoch: i64) -> i64

@@ -1070,7 +1070,7 @@ pub(crate) fn div_safety_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> DivSa
 /// Discharge the deferred division-safety obligations recorded while
 /// lowering contract clauses without a solver.
 /// Lengths of the deferred shift, bit-vector division and zero-divisor queues.
-pub(crate) type ObligationMarks = (usize, usize, usize);
+pub(crate) type ObligationMarks = (usize, usize, usize, usize);
 
 /// Snapshot of deferred shift/division obligation queue lengths, used by
 /// [`rebind_deferred_obligations`] to scope a rebind to one lowering.
@@ -1079,6 +1079,7 @@ pub(crate) fn obligation_marks(vc: &VCtx<'_>) -> ObligationMarks {
         vc.bv_shift_obligations.borrow().len(),
         vc.bv_div_obligations.borrow().len(),
         vc.div_zero_obligations.borrow().len(),
+        vc.i64_overflow_obligations.borrow().len(),
     )
 }
 
@@ -1089,12 +1090,14 @@ pub(crate) fn discard_obligations_since(vc: &VCtx<'_>, marks: ObligationMarks) {
     vc.bv_shift_obligations.borrow_mut().truncate(marks.0);
     vc.bv_div_obligations.borrow_mut().truncate(marks.1);
     vc.div_zero_obligations.borrow_mut().truncate(marks.2);
+    vc.i64_overflow_obligations.borrow_mut().truncate(marks.3);
 }
 
 pub(crate) fn has_new_obligations(vc: &VCtx<'_>, marks: ObligationMarks) -> bool {
     vc.bv_shift_obligations.borrow().len() > marks.0
         || vc.bv_div_obligations.borrow().len() > marks.1
         || vc.div_zero_obligations.borrow().len() > marks.2
+        || vc.i64_overflow_obligations.borrow().len() > marks.3
 }
 
 /// Conjoin `extra` into the path condition of deferred shift/division
@@ -1115,6 +1118,9 @@ pub(crate) fn rebind_deferred_obligations<'a>(
         *pc = Bool::and(vc.ctx, &[pc, extra]);
     }
     for (pc, _) in vc.div_zero_obligations.borrow_mut()[marks.2..].iter_mut() {
+        *pc = Bool::and(vc.ctx, &[pc, extra]);
+    }
+    for (pc, _) in vc.i64_overflow_obligations.borrow_mut()[marks.3..].iter_mut() {
         *pc = Bool::and(vc.ctx, &[pc, extra]);
     }
 }
@@ -1146,30 +1152,27 @@ pub(crate) fn discharge_bv_div_obligations<'a>(
     }
 }
 
-/// `--check-i64-overflow`: reject a body `+`, `-` or `*` whose operands
-/// fit in `i64` but whose unbounded result does not. The compiled code wraps
-/// (or panics in a checked build) there, so a proof in the `Int` encoding
-/// would not describe it.
-fn check_i64_range<'a>(
+/// `--check-i64-overflow`: the operands of a body `+`, `-` or `*` fit in
+/// `i64` but the unbounded result does not. The compiled code wraps (or
+/// panics in a checked build) there, so a proof in the `Int` encoding would
+/// not describe it.
+fn i64_overflow_condition<'a>(
     vc: &VCtx<'a>,
-    solver: &Solver<'a>,
     left: &Int<'a>,
     right: &Int<'a>,
     result: &Int<'a>,
-) -> MumeiResult<()> {
+) -> Bool<'a> {
     let ctx = vc.ctx;
     let min = Int::from_i64(ctx, i64::MIN);
     let max = Int::from_i64(ctx, i64::MAX);
     let in_range = |v: &Int<'a>| Bool::and(ctx, &[&v.ge(&min), &v.le(&max)]);
-    solver.push();
-    for cond in vc.path_cond_stack.borrow().iter() {
-        solver.assert(cond);
-    }
-    solver.assert(&in_range(left));
-    solver.assert(&in_range(right));
-    solver.assert(&in_range(result).not());
-    let outcome = crate::verification::phase_artifacts::check(solver);
-    solver.pop(1);
+    Bool::and(
+        ctx,
+        &[&in_range(left), &in_range(right), &in_range(result).not()],
+    )
+}
+
+fn i64_overflow_error(outcome: SatResult) -> MumeiResult<()> {
     match outcome {
         SatResult::Unsat => Ok(()),
         SatResult::Sat => Err(MumeiError::verification(
@@ -1182,6 +1185,50 @@ fn check_i64_range<'a>(
         )
         .with_help("Bound the operands in requires so the result fits in i64")
         .with_verdict(crate::verification::VerdictKind::Inconclusive)),
+    }
+}
+
+fn check_i64_range<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    overflows: &Bool<'a>,
+) -> MumeiResult<()> {
+    solver.push();
+    for cond in vc.path_cond_stack.borrow().iter() {
+        solver.assert(cond);
+    }
+    solver.assert(overflows);
+    let outcome = crate::verification::phase_artifacts::check(solver);
+    solver.pop(1);
+    i64_overflow_error(outcome)
+}
+
+/// Check the `--check-i64-overflow` obligations recorded while lowering loop
+/// conditions and match guards without a solver, each under its path
+/// condition.
+pub(crate) fn discharge_i64_overflow_obligations<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+) -> MumeiResult<()> {
+    let obligations: Vec<(Bool<'a>, Bool<'a>)> =
+        vc.i64_overflow_obligations.borrow_mut().drain(..).collect();
+    let mut undecided = false;
+    for (path_cond, overflows) in obligations {
+        solver.push();
+        solver.assert(&path_cond);
+        solver.assert(&overflows);
+        let outcome = crate::verification::phase_artifacts::check(solver);
+        solver.pop(1);
+        match outcome {
+            SatResult::Sat => return i64_overflow_error(outcome),
+            SatResult::Unknown => undecided = true,
+            SatResult::Unsat => {}
+        }
+    }
+    if undecided {
+        i64_overflow_error(SatResult::Unknown)
+    } else {
+        Ok(())
     }
 }
 
@@ -3342,9 +3389,19 @@ pub(crate) fn expr_to_z3<'a>(
                             _ => &li * &ri,
                         }
                         .simplify();
-                        if vc.check_i64_overflow.get() {
-                            if let Some(solver) = solver_opt {
-                                check_i64_range(vc, solver, &li, &ri, &result)?;
+                        // The bind-time pass of a lambda body runs on unconstrained
+                        // params; each call site re-lowers it with the real arguments.
+                        if vc.check_i64_overflow.get() && vc.recursion.lambda_bind_depth.get() == 0
+                        {
+                            let overflows = i64_overflow_condition(vc, &li, &ri, &result);
+                            match solver_opt {
+                                Some(solver) => check_i64_range(vc, solver, &overflows)?,
+                                // Loop conditions and match guards are lowered
+                                // without a solver: check them after the body.
+                                None => vc
+                                    .i64_overflow_obligations
+                                    .borrow_mut()
+                                    .push((vc.path_cond_conj(), overflows)),
                             }
                         }
                         Ok(result.into())
