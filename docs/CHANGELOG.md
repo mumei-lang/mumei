@@ -1,3 +1,11 @@
+### Unreleased: ordering binds tighter than equality
+
+- `<`, `<=`, `>` and `>=` now bind tighter than `==` and `!=`, as in C, Go,
+  Java and TypeScript. `ensures: result == a >= b;` is `result == (a >= b)`;
+  before, the comparison-chain normalizer read it as
+  `result == a && a >= b` and rejected it with `Expected bool for ==`.
+  Chains within one level are unchanged (`0 <= i < n`, `a == b == c`).
+
 ### Unreleased: zero divisors in contracts
 
 - Integer and `f64` divisions (`/`, `%`) inside `requires`, `ensures` and
