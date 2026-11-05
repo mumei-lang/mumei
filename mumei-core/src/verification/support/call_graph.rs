@@ -77,6 +77,8 @@ pub(crate) fn verify_atom_invariant(
         call_result_symbols: Default::default(),
 
         bitvec_i64_global: false,
+
+        check_i64_overflow: std::cell::Cell::new(false),
     };
 
     let mut env: Env = HashMap::new();

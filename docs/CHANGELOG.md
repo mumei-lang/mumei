@@ -1,3 +1,11 @@
+### Unreleased: `--check-i64-overflow`
+
+- New opt-in `mumei verify --check-i64-overflow`. It keeps the default `Int`
+  encoding but rejects a body `+`, `-` or `*` whose `i64` operands can give a
+  result outside the `i64` range, where compiled Go, Rust or LLVM code would
+  wrap or panic. Contracts keep unbounded arithmetic. The flag is part of the
+  proof cache key; default verification and certificates are unchanged.
+
 ### Unreleased: zero divisors in contracts
 
 - Integer and `f64` divisions (`/`, `%`) inside `requires`, `ensures` and

@@ -166,6 +166,11 @@ pub(crate) struct VCtx<'a> {
     /// included — is verified in the bit-vector encoding, which is what decides
     /// whether a callee's `ensures` may be imported at a call site.
     pub(crate) bitvec_i64_global: bool,
+    /// `--check-i64-overflow`: body `+`, `-`, `*` under the `Int` encoding
+    /// must stay within the `i64` range, as the compiled code would wrap or
+    /// panic outside it. Contracts keep unbounded arithmetic.
+    /// Set only while the body is lowered.
+    pub(crate) check_i64_overflow: std::cell::Cell<bool>,
     /// Shift amounts lowered while no `Solver` was available (contract clauses
     /// and invariants are lowered with `solver_opt = None`), paired with the
     /// path condition in force at that point. `discharge_bv_shift_obligations`

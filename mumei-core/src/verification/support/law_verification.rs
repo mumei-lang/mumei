@@ -362,6 +362,8 @@ pub fn verify_impl_with_options(
             call_result_symbols: Default::default(),
 
             bitvec_i64_global: bitvec_i64,
+
+            check_i64_overflow: std::cell::Cell::new(false),
         };
 
         let mut env: Env = HashMap::new();

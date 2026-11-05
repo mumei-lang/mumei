@@ -68,6 +68,9 @@ fn build_proof_flags(
     if config.ieee754_f64 {
         flags.push("ieee754_f64");
     }
+    if config.check_i64_overflow {
+        flags.push("check_i64_overflow");
+    }
     if config.bitvec_i64
         || verification::atom_requires_bitvector_semantics_in_module(atom, module_env)
     {
@@ -270,6 +273,7 @@ pub(crate) fn cmd_build(
         suggest_cegis: false,
         ieee754_f64: false,
         bitvec_i64: false,
+        check_i64_overflow: false,
         property_based_test: None,
     };
     let mut escalation_cert_results: std::collections::HashMap<String, (String, String)> =

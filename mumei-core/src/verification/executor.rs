@@ -76,6 +76,7 @@ pub fn verify_with_config(
             enable_vacuity_check: false,
             ieee754_f64: false,
             bitvec_i64: false,
+            check_i64_overflow: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -101,6 +102,7 @@ pub fn verify_with_verification_config(
             enable_vacuity_check: config.enable_vacuity_check,
             ieee754_f64: config.ieee754_f64,
             bitvec_i64: config.bitvec_i64,
+            check_i64_overflow: config.check_i64_overflow,
             property_based_config: config.property_based_test.as_ref(),
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -142,6 +144,7 @@ pub fn verify(hir_atom: &HirAtom, output_dir: &Path, module_env: &ModuleEnv) -> 
             enable_vacuity_check: false,
             ieee754_f64: false,
             bitvec_i64: false,
+            check_i64_overflow: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -158,6 +161,7 @@ pub(crate) struct VerifyInnerOptions<'a> {
     enable_vacuity_check: bool,
     ieee754_f64: bool,
     bitvec_i64: bool,
+    check_i64_overflow: bool,
     property_based_config: Option<&'a PropertyBasedTestConfig>,
     task_id: Option<String>,
     generation_id: Option<String>,
@@ -172,6 +176,7 @@ impl<'a> VerifyInnerOptions<'a> {
             enable_vacuity_check: false,
             ieee754_f64: false,
             bitvec_i64: false,
+            check_i64_overflow: false,
             property_based_config: None,
             task_id: orchestration_task_id_from_env(),
             generation_id: orchestration_generation_id_from_env(),
@@ -684,6 +689,7 @@ fn verify_inner_impl(
         enable_vacuity_check,
         ieee754_f64,
         bitvec_i64,
+        check_i64_overflow,
         property_based_config,
         task_id,
         generation_id: _generation_id,
@@ -1738,6 +1744,7 @@ fn verify_inner_impl(
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
         bitvec_i64_global,
+        check_i64_overflow: std::cell::Cell::new(false),
     };
     vc.recursion.enabled.set(true);
     let mut env: Env = HashMap::new();
@@ -2221,7 +2228,10 @@ fn verify_inner_impl(
     // 4. ボディの検証
     let phase_start = std::time::Instant::now();
     check_resource_initial_state(&vc, &mut env, &solver)?;
-    let body_result = match stmt_to_z3(&vc, &hir_atom.body_stmt, &mut env, Some(&solver)) {
+    vc.check_i64_overflow.set(check_i64_overflow);
+    let body_lowered = stmt_to_z3(&vc, &hir_atom.body_stmt, &mut env, Some(&solver));
+    vc.check_i64_overflow.set(false);
+    let body_result = match body_lowered {
         Ok(val) => val,
         Err(e) => {
             // Body evaluation errors (e.g., division by zero, out-of-bounds) propagate

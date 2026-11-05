@@ -1146,6 +1146,45 @@ pub(crate) fn discharge_bv_div_obligations<'a>(
     }
 }
 
+/// `--check-i64-overflow`: reject a body `+`, `-` or `*` whose operands
+/// fit in `i64` but whose unbounded result does not. The compiled code wraps
+/// (or panics in a checked build) there, so a proof in the `Int` encoding
+/// would not describe it.
+fn check_i64_range<'a>(
+    vc: &VCtx<'a>,
+    solver: &Solver<'a>,
+    left: &Int<'a>,
+    right: &Int<'a>,
+    result: &Int<'a>,
+) -> MumeiResult<()> {
+    let ctx = vc.ctx;
+    let min = Int::from_i64(ctx, i64::MIN);
+    let max = Int::from_i64(ctx, i64::MAX);
+    let in_range = |v: &Int<'a>| Bool::and(ctx, &[&v.ge(&min), &v.le(&max)]);
+    solver.push();
+    for cond in vc.path_cond_stack.borrow().iter() {
+        solver.assert(cond);
+    }
+    solver.assert(&in_range(left));
+    solver.assert(&in_range(right));
+    solver.assert(&in_range(result).not());
+    let outcome = crate::verification::phase_artifacts::check(solver);
+    solver.pop(1);
+    match outcome {
+        SatResult::Unsat => Ok(()),
+        SatResult::Sat => Err(MumeiError::verification(
+            "Integer arithmetic may overflow i64.".to_string(),
+        )
+        .with_help("Bound the operands in requires so the result fits in i64")
+        .with_verdict(crate::verification::VerdictKind::Rejected)),
+        SatResult::Unknown => Err(MumeiError::verification(
+            "Z3 could not decide whether integer arithmetic stays within i64.".to_string(),
+        )
+        .with_help("Bound the operands in requires so the result fits in i64")
+        .with_verdict(crate::verification::VerdictKind::Inconclusive)),
+    }
+}
+
 fn bv_binary_op<'a>(
     vc: &VCtx<'a>,
     op: &Op,
@@ -3296,9 +3335,20 @@ pub(crate) fn expr_to_z3<'a>(
                 let li = l.as_int().ok_or("Expected int")?;
                 let ri = r.as_int().ok_or("Expected int")?;
                 match op {
-                    Op::Add => Ok((&li + &ri).simplify().into()),
-                    Op::Sub => Ok((&li - &ri).simplify().into()),
-                    Op::Mul => Ok((&li * &ri).simplify().into()),
+                    Op::Add | Op::Sub | Op::Mul => {
+                        let result = match op {
+                            Op::Add => &li + &ri,
+                            Op::Sub => &li - &ri,
+                            _ => &li * &ri,
+                        }
+                        .simplify();
+                        if vc.check_i64_overflow.get() {
+                            if let Some(solver) = solver_opt {
+                                check_i64_range(vc, solver, &li, &ri, &result)?;
+                            }
+                        }
+                        Ok(result.into())
+                    }
                     Op::Div | Op::Rem => {
                         if let Some(solver) = solver_opt {
                             solver.push();

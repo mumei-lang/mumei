@@ -1123,6 +1123,8 @@ fn validation_ctx<'a>(
         call_result_symbols: Default::default(),
 
         bitvec_i64_global: bitvec_i64,
+
+        check_i64_overflow: std::cell::Cell::new(false),
     }
 }
 

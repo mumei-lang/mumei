@@ -12,7 +12,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 |---|---:|---|
 | `mumei` | 1 | Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) |
 | `mumei build` | 5 | Verify + compile to LLVM IR (default) |
-| `mumei verify` | 37 | Z3 formal verification only (no codegen) |
+| `mumei verify` | 38 | Z3 formal verification only (no codegen) |
 | `mumei config` | 2 | Show effective settings and where each value comes from. The CLI `--profile` is per-invocation; `mumei config` only reports the manifest source. |
 | `mumei proof-store` | 0 | Inspect or prune the local proof store |
 | `mumei proof-store stats` | 2 | Show local proof-store entry counts and size |
@@ -127,6 +127,7 @@ Usage: mumei verify [OPTIONS] <INPUT>
 | `--proof-cert` | false | — | Generate Z3 proof certificate (.proof.json) |
 | `--ieee754-f64` | false | — | Opt-in IEEE 754 (binary64) verification for `f64`: encode `f64` as Z3 `Float(11,53)` with round-nearest-even FP arithmetic instead of the default exact-rational `Real` encoding. Models rounding so e.g. `0.1 + 0.2 != 0.3` holds. Default off (keeps `Real` semantics) |
 | `--bitvec-i64` | false | — | Opt-in bit-vector verification for `i64`: encode `i64` as Z3 `BV(64)` so `&`, `\|`, `^`, `<<`, `>>` have real bit semantics and `+`, `-`, `*` wrap in two's complement like machine arithmetic, instead of the default unbounded `Int` encoding. Default off (keeps `Int` semantics and existing proof certificates) |
+| `--check-i64-overflow` | false | — | Opt-in fixed-width check under the default `Int` encoding: reject a body `+`, `-` or `*` whose `i64` operands give a result outside the `i64` range, where compiled code would wrap or panic. Contracts keep unbounded arithmetic. Default off |
 
 #### Diagnostics
 

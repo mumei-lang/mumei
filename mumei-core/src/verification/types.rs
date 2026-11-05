@@ -780,6 +780,9 @@ pub struct VerificationConfig {
     /// Default `false` keeps the unbounded `Int` encoding, so existing proof
     /// certificates are reproduced bit-for-bit.
     pub bitvec_i64: bool,
+    /// Opt-in check that body `i64` arithmetic stays in range under the
+    /// `Int` encoding (`--check-i64-overflow`). Default `false`.
+    pub check_i64_overflow: bool,
     pub property_based_test: Option<PropertyBasedTestConfig>,
 }
 
@@ -796,6 +799,7 @@ impl Default for VerificationConfig {
             suggest_cegis: false,
             ieee754_f64: false,
             bitvec_i64: false,
+            check_i64_overflow: false,
             property_based_test: None,
         }
     }

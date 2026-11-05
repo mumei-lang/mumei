@@ -114,6 +114,12 @@ pub(crate) enum Command {
         /// (keeps `Int` semantics and existing proof certificates).
         #[arg(long, help_heading = "Solver and proof")]
         bitvec_i64: bool,
+        /// Opt-in fixed-width check under the default `Int` encoding: reject a
+        /// body `+`, `-` or `*` whose `i64` operands give a result outside the
+        /// `i64` range, where compiled code would wrap or panic. Contracts keep
+        /// unbounded arithmetic. Default off.
+        #[arg(long, help_heading = "Solver and proof")]
+        check_i64_overflow: bool,
 
         /// Enable P8-A spurious counterexample detection
         #[arg(
