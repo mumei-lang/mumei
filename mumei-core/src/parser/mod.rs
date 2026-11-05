@@ -1833,6 +1833,43 @@ atom transfer(x: i64)
     }
 
     #[test]
+    fn test_ordering_binds_tighter_than_equality() {
+        let expr = parse_expression("result == a >= b");
+        match expr {
+            Expr::BinaryOp(left, Op::Eq, right) => {
+                assert!(matches!(*left, Expr::Variable(ref name) if name == "result"));
+                assert!(matches!(*right, Expr::BinaryOp(_, Op::Ge, _)));
+            }
+            other => panic!("Expected result == (a >= b), got {:?}", other),
+        }
+        match parse_expression("a < b != c < d") {
+            Expr::BinaryOp(left, Op::Neq, right) => {
+                assert!(matches!(*left, Expr::BinaryOp(_, Op::Lt, _)));
+                assert!(matches!(*right, Expr::BinaryOp(_, Op::Lt, _)));
+            }
+            other => panic!("Expected (a < b) != (c < d), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_equality_chain_is_still_a_chain() {
+        match parse_expression("a == b == c") {
+            Expr::BinaryOp(left, Op::And, right) => {
+                assert!(matches!(*left, Expr::BinaryOp(_, Op::Eq, _)));
+                assert!(matches!(*right, Expr::BinaryOp(_, Op::Eq, _)));
+            }
+            other => panic!("Expected a == b && b == c, got {:?}", other),
+        }
+        match parse_expression("result == 0 <= x < n") {
+            Expr::BinaryOp(left, Op::Eq, right) => {
+                assert!(matches!(*left, Expr::Variable(_)));
+                assert!(matches!(*right, Expr::BinaryOp(_, Op::And, _)));
+            }
+            other => panic!("Expected result == (0 <= x && x < n), got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_normalize_non_chain_comparison_is_unchanged() {
         let expr = crate::parser::expr::normalize_comparison_chains(parse_expression("a < b && c"));
         match expr {
