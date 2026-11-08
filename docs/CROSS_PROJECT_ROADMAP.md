@@ -217,6 +217,24 @@ Neither packaging nor repinning object/executable bytes promotes proof status.
 Existing commands, grades, Claim Book, Lean gates and Mumei/Agent ownership stay
 unchanged; no external verifier is adopted.
 
+### Wave 5 first native consumer Evidence producer
+
+The [C02/C10 producer slice](VERIFICATION_NATIVE.md#first-native-consumer-evidence-producer)
+adds opt-in `native-bundle recheck-llvm --json` after every Stage A/B gate succeeds.
+It emits three separate common-Evidence records: pinned bundle identity, fresh
+source postcondition and restricted source-to-LLVM user-body correspondence.
+The envelope explicitly leaves acceptance unevaluated. Source/IR/specification
+hashes bind the same in-memory snapshots; labels are fixed, provenance is local,
+and the configuration fingerprint contains only approved non-secret settings.
+No failure or inconclusive query emits a success report or partial Evidence.
+
+This is partial C02/C10 output integration, not a new report-acceptance path.
+Saved/schema-valid JSON supplies no truth, freshness, authenticity, grade or
+artifact guarantee. General evidence consumers, C02 acceptance/mapping, object,
+linker/runtime/ABI/OS/final-binary correctness, dependency/toolchain closure and
+broader C09/C10 remain open. Agent orchestration, existing text/default commands,
+Claim Book/Seal Grade/Lean gates and external-verifier adoption are unchanged.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:

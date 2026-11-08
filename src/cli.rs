@@ -428,6 +428,9 @@ pub(crate) enum NativeBundleCommand {
         /// SHA-256 of native-bundle.json obtained through a separately trusted channel
         #[arg(long)]
         expected_build_id: String,
+        /// Print scoped common Evidence JSON on success, without proof acceptance or grade promotion
+        #[arg(long)]
+        json: bool,
     },
     /// Check pinned snapshots and freshly recheck the C03 source postcondition, not LLVM or binary semantics
     RecheckSource {

@@ -138,8 +138,10 @@ over an approved non-secret configuration projection, not secret values or
 credential-derived material. Referenced tool artifacts also require safe
 handling; a path is not proof that the referenced contents are safe.
 
-Producer integration, consumer validation and mapping to existing claim
-evidence are later C02 slices. A plugin cannot self-assert a new grade or use
+The first local producer connection is the success-only
+[`native-bundle recheck-llvm --json` report](#first-native-consumer-evidence-producer).
+General producer integration, consumer validation and mapping to existing claim
+evidence remain later C02 slices. A plugin cannot self-assert a new grade or use
 this schema to bypass Lean/kernel or current certificate checks.
 
 ## 5. Minimal semantic contract (C03)
@@ -554,6 +556,51 @@ gates, general build/run and Mumei/Agent ownership remain unchanged.
 
 Regression gates:
 `LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo test --test test_native_bundle --test test_translation_validation --test test_semantic_contract`.
+
+### First native consumer Evidence producer
+
+`mumei native-bundle recheck-llvm <bundle> <source> --expected-build-id <trusted-id> --json`
+retains every Stage A/B gate and exit code. Without `--json`, the existing text
+output is unchanged. JSON is emitted **only after both fresh queries succeed**;
+identity failures, refutation, unsupported input and inconclusive outcomes emit
+no report or partial Evidence on stdout. Diagnostics remain static on stderr.
+The command does not write files or execute an artifact.
+
+The `mumei.native-consumer-evidence/v1` envelope contains the trusted build-ID
+pin, the existing snapshot-only scope, `acceptance: not_evaluated`, and exactly
+three records conforming to `mumei.verification-evidence/v1`:
+
+| Record | Method / scope | Meaning |
+| --- | --- | --- |
+| Native bundle identity | `identity_check` / `identity` | The pinned source, certificate and bundle-member identities are consistent. Semantic correspondence remains unchecked. |
+| Source postcondition | `deductive_proof` / `unbounded` | Fresh C03 source query succeeded within the zero-argument-main profile. The source encoding/normalization correspondence remains an explicit trusted assumption. |
+| Source-to-LLVM user body | `deductive_proof` / `unbounded` | Fresh full-i64 equivalence query succeeded within the native LLVM profile; only the truncating wrapper shape is checked. |
+
+Here `unbounded` means a deductive query without finite replay or loop unrolling,
+**not unrestricted source, all LLVM, system correctness or an unbounded integer
+model**. The numeric model is the checked i64 source profile, whose arithmetic
+and overflow operations remain unsupported. Fixed source/LLVM solver budgets
+and observed target/layout are included in the approved configuration fingerprint;
+profile names retain all syntax/size/path limits.
+
+Subjects/specifications are tied to the exact snapshots already held in memory,
+not reopened files: identity uses the pinned manifest as specification, source
+postcondition uses the C03 contract identity, and LLVM correspondence uses the
+full source digest that binds the particular body, not only its postcondition.
+IDs and artifact paths are fixed logical labels/relative
+bundle-member names, never caller paths. Provenance reports the running Mumei
+version and linked Z3 version, not producer-supplied tool/version strings.
+No source/LLVM text, models, environment, endpoint, command arguments, raw
+configuration or credential-derived fingerprint material is included.
+
+This is **partial C02/C10 producer integration**, not Evidence acceptance.
+A saved or schema-valid report can be forged or become stale: schema validation
+alone establishes neither truth, identity/freshness, provenance trust nor
+authenticity. No external report ingestion, signature, cache reuse, evidence
+acceptance, Claim Book/Seal Grade or Lean gate is added. Object/optimizer/linker,
+ABI/runtime/OS exit-status/final-executable semantics and dependency/toolchain
+closure remain unverified. Broader C02/C09/C10 and final-artifact assurance stay
+open; external verifiers are not adopted.
 
 ## 9. External verifier candidates, not adoption decisions
 

@@ -7,18 +7,24 @@ use std::{
     path::Path,
 };
 
+mod evidence;
+
+enum LlvmRecheck {
+    Rechecked(Box<evidence::NativeConsumerEvidence>),
+    Different,
+    Inconclusive,
+}
+
 const MAX_COMPONENT_BYTES: u64 = 32 * 1024 * 1024;
 const LLVM_RECHECK_SCOPE: &str =
     "source_postcondition_identity_and_llvm_snapshot_only/no_authenticity_or_binary_semantic_proof";
 
 pub(crate) fn run(command: NativeBundleCommand) {
     let result = match command {
-        NativeBundleCommand::RecheckLlvm { bundle, source, expected_build_id } => {
-            match recheck_llvm(Path::new(&bundle), Path::new(&source), &expected_build_id) {
-                Ok(Outcome::EquivalentWithinProfile) => {
-                    println!("Pinned snapshot identities consistent; source postcondition and native LLVM body freshly rechecked.\nProfile: {}\nScope: {LLVM_RECHECK_SCOPE}\nWrapper: checked call/trunc/ret shape, returning low 32 bits of the i64 body.\nObject/linker/runtime/OS exit-status/executable semantics: not checked.", tv::NATIVE_PROFILE);
-                    Ok(())
-                }
+        NativeBundleCommand::RecheckLlvm { bundle, source, expected_build_id, json } => {
+            match recheck_llvm(Path::new(&bundle), Path::new(&source), &expected_build_id)
+                .and_then(|result| write_llvm_recheck(result, json, &mut std::io::stdout().lock())) {
+                Ok(Outcome::EquivalentWithinProfile) => Ok(()),
                 Ok(Outcome::Different) => Err(BundleError("native LLVM body differs from source")),
                 Ok(Outcome::Inconclusive) => {
                     eprintln!("Native source/LLVM recheck inconclusive; no combined result established.");
@@ -51,6 +57,31 @@ pub(crate) fn run(command: NativeBundleCommand) {
     if let Err(error) = result {
         eprintln!("{error}");
         std::process::exit(1);
+    }
+}
+
+fn write_llvm_recheck(
+    result: LlvmRecheck,
+    json: bool,
+    output: &mut impl std::io::Write,
+) -> Result<Outcome, BundleError> {
+    match result {
+        LlvmRecheck::Rechecked(report) => {
+            let bytes = if json {
+                let mut bytes = serde_json::to_vec_pretty(&report)
+                    .map_err(|_| BundleError("cannot encode consumer evidence"))?;
+                bytes.push(b'\n');
+                bytes
+            } else {
+                format!("Pinned snapshot identities consistent; source postcondition and native LLVM body freshly rechecked.\nProfile: {}\nScope: {LLVM_RECHECK_SCOPE}\nWrapper: checked call/trunc/ret shape, returning low 32 bits of the i64 body.\nObject/linker/runtime/OS exit-status/executable semantics: not checked.\n", tv::NATIVE_PROFILE).into_bytes()
+            };
+            output
+                .write_all(&bytes)
+                .map_err(|_| BundleError("cannot write consumer evidence"))?;
+            Ok(Outcome::EquivalentWithinProfile)
+        }
+        LlvmRecheck::Different => Ok(Outcome::Different),
+        LlvmRecheck::Inconclusive => Ok(Outcome::Inconclusive),
     }
 }
 
@@ -212,7 +243,11 @@ fn recheck(bundle: &Path, source: &Path, expected_id: &str) -> Result<SourceRech
     recheck_source(&record, expected_id, &source, &components(bundle)?)
 }
 
-fn recheck_llvm(bundle: &Path, source: &Path, expected_id: &str) -> Result<Outcome, BundleError> {
+fn recheck_llvm(
+    bundle: &Path,
+    source: &Path,
+    expected_id: &str,
+) -> Result<LlvmRecheck, BundleError> {
     let bytes = read_regular(&bundle.join(RECORD_FILE), 1024 * 1024)?;
     let record = load_pinned_record(&bytes, expected_id)?;
     let source = String::from_utf8(read_regular(source, 65_536)?)
@@ -220,7 +255,7 @@ fn recheck_llvm(bundle: &Path, source: &Path, expected_id: &str) -> Result<Outco
     let files = components(bundle)?;
     match recheck_source(&bytes, expected_id, &source, &files)? {
         SourceRecheck::Refuted => return Err(BundleError("source postcondition refuted")),
-        SourceRecheck::Inconclusive => return Ok(Outcome::Inconclusive),
+        SourceRecheck::Inconclusive => return Ok(LlvmRecheck::Inconclusive),
         SourceRecheck::RecheckedWithinProfile => (),
     }
     let llvm_ir = std::str::from_utf8(&files[&BundleFile::LlvmIr])
@@ -234,7 +269,13 @@ fn recheck_llvm(bundle: &Path, source: &Path, expected_id: &str) -> Result<Outco
             "native LLVM snapshot/toolchain observation mismatch",
         ));
     }
-    Ok(report.outcome)
+    Ok(match report.outcome {
+        Outcome::EquivalentWithinProfile => LlvmRecheck::Rechecked(Box::new(
+            evidence::from_recheck(expected_id, &record, &report)?,
+        )),
+        Outcome::Different => LlvmRecheck::Different,
+        Outcome::Inconclusive => LlvmRecheck::Inconclusive,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -264,4 +305,26 @@ fn publish(stage: &Path, output: &Path) -> Result<(), BundleError> {
 #[cfg(not(target_os = "linux"))]
 fn publish(_: &Path, _: &Path) -> Result<(), BundleError> {
     Err(BundleError("unsupported host"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refuted_or_inconclusive_queries_never_write_json_or_text() {
+        for json in [false, true] {
+            for (result, expected) in [
+                (LlvmRecheck::Different, Outcome::Different),
+                (LlvmRecheck::Inconclusive, Outcome::Inconclusive),
+            ] {
+                let mut output = Vec::new();
+                assert_eq!(
+                    write_llvm_recheck(result, json, &mut output).unwrap(),
+                    expected
+                );
+                assert!(output.is_empty());
+            }
+        }
+    }
 }

@@ -52,6 +52,26 @@ def test_synthetic_records_have_valid_representation(case: dict) -> None:
     VALIDATOR.validate(case["evidence"])
 
 
+def test_normalized_native_cli_shape_conforms_without_proof_acceptance() -> None:
+    # Rust CLI regressions match this normalized shape; hashes/versions are placeholders.
+    report = json.loads(
+        (ROOT / "tests/fixtures/verification-evidence/native_consumer_shape.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert report["schema_version"] == "mumei.native-consumer-evidence/v1"
+    assert report["acceptance"] == "not_evaluated"
+    assert len(report["evidence"]) == 3
+    for record in report["evidence"]:
+        VALIDATOR.validate(record)
+    assert [record["method"] for record in report["evidence"]] == [
+        "identity_check", "deductive_proof", "deductive_proof"
+    ]
+    assert report["evidence"][0]["correspondence"]["status"] == "unverified"
+    assert report["evidence"][1]["correspondence"]["status"] == "assumed"
+    assert report["evidence"][2]["correspondence"]["status"] == "validated"
+
+
 @pytest.mark.parametrize("field", SCHEMA["required"])
 def test_required_information_cannot_disappear(field: str) -> None:
     record = evidence()
