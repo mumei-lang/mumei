@@ -1,5 +1,182 @@
 use super::*;
 
+fn saved(source: &str, options: Options) -> Vec<u8> {
+    serde_json::to_vec(&established(source, options)).unwrap()
+}
+
+#[test]
+fn saved_source_recheck_matches_decoded_fields_not_json_formatting() {
+    let bytes = saved(CLAMP, Options::default());
+    assert_eq!(
+        recheck(CLAMP, &bytes, Options::default()).unwrap(),
+        RecheckOutcome::Consistent
+    );
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        recheck(
+            CLAMP,
+            &serde_json::to_vec_pretty(&value).unwrap(),
+            Options::default()
+        )
+        .unwrap(),
+        RecheckOutcome::Consistent
+    );
+    let custom = Options {
+        timeout_ms: 9000,
+        resource_limit: 900_000,
+    };
+    assert_eq!(
+        recheck(CLAMP, &saved(CLAMP, custom), custom).unwrap(),
+        RecheckOutcome::Consistent
+    );
+    assert_eq!(
+        recheck(CLAMP, &bytes, custom),
+        Err(SourceEvidenceError::InconsistentSavedEvidence)
+    );
+    assert_eq!(
+        recheck(
+            &format!("{CLAMP}\n// relocated snapshot bytes\n"),
+            &bytes,
+            Options::default()
+        ),
+        Err(SourceEvidenceError::InconsistentSavedEvidence)
+    );
+}
+
+#[test]
+fn saved_source_recheck_checks_every_leaf_including_assumptions_and_exclusions() {
+    fn leaves(value: &serde_json::Value, path: String, paths: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                for (key, value) in object {
+                    leaves(value, format!("{path}/{key}"), paths);
+                }
+            }
+            serde_json::Value::Array(array) if !array.is_empty() => {
+                for (index, value) in array.iter().enumerate() {
+                    leaves(value, format!("{path}/{index}"), paths);
+                }
+            }
+            _ => paths.push(path),
+        }
+    }
+    let original: serde_json::Value =
+        serde_json::from_slice(&saved(CLAMP, Options::default())).unwrap();
+    let mut paths = Vec::new();
+    leaves(&original, String::new(), &mut paths);
+    assert!(paths.len() >= 30);
+    for path in paths {
+        let mut mutated = original.clone();
+        let field = mutated.pointer_mut(&path).unwrap();
+        *field = match field {
+            serde_json::Value::String(s) if s.len() == 64 => {
+                serde_json::Value::String("f".repeat(64))
+            }
+            serde_json::Value::Array(_) => serde_json::json!(["FAKE_PRIVATE_ARTIFACT"]),
+            _ => serde_json::Value::String("FAKE_PRIVATE_METADATA".into()),
+        };
+        assert!(
+            recheck(
+                CLAMP,
+                &serde_json::to_vec(&mutated).unwrap(),
+                Options::default()
+            )
+            .is_err(),
+            "unchecked field: {path}"
+        );
+    }
+}
+
+#[test]
+fn rebound_success_cannot_replace_fresh_refutation_or_inconclusive_queries() {
+    let source = CLAMP.replace("body: { if x < 0 { 0 } else { x } };", "body: { 1 };");
+    assert_ne!(source, CLAMP);
+    let contract =
+        semantic_contract::extract_pure_i64_contract(&source, SOURCE_LABEL, None).unwrap();
+    let mut forged = established(CLAMP, Options::default());
+    forged.subject.sha256 = contract.source_sha256;
+    let bytes = serde_json::to_vec(&forged).unwrap();
+    assert_eq!(
+        recheck(&source, &bytes, Options::default()).unwrap(),
+        RecheckOutcome::Refuted
+    );
+    assert_eq!(
+        recheck(
+            CLAMP,
+            &bytes,
+            Options {
+                resource_limit: 1,
+                ..Options::default()
+            }
+        )
+        .unwrap(),
+        RecheckOutcome::Inconclusive
+    );
+    assert_eq!(
+        recheck(
+            CLAMP,
+            &bytes,
+            Options {
+                timeout_ms: 0,
+                ..Options::default()
+            }
+        ),
+        Err(SourceEvidenceError::InvalidBudget)
+    );
+    for source in [
+        "",
+        "atom f() -> i64 body: { 0 };",
+        "atom f() -> i64 requires: false; ensures: false; body: { 0 };",
+    ] {
+        assert_eq!(
+            recheck(source, &bytes, Options::default()),
+            Err(SourceEvidenceError::UnsupportedSource)
+        );
+    }
+}
+
+#[test]
+fn saved_source_recheck_rejects_malformed_duplicate_unknown_and_oversized_records() {
+    let bytes = saved(CLAMP, Options::default());
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    for input in [
+        Vec::new(),
+        vec![0xff],
+        b"{}".to_vec(),
+        b"[]".to_vec(),
+        format!("{text} {text}").into_bytes(),
+        text.replacen("{", "{\"schema_version\":\"FAKE_PRIVATE_DUPLICATE\",", 1)
+            .into_bytes(),
+        text.replacen(
+            "{",
+            "{\"schema_versi\\u006fn\":\"FAKE_PRIVATE_DUPLICATE\",",
+            1,
+        )
+        .into_bytes(),
+        text.replacen("{", "{\"FAKE_PRIVATE_UNKNOWN\":true,", 1)
+            .into_bytes(),
+        vec![b' '; crate::verification_evidence::MAX_INPUT_BYTES + 1],
+    ] {
+        assert_eq!(
+            recheck(CLAMP, &input, Options::default()),
+            Err(SourceEvidenceError::InvalidSavedEvidence)
+        );
+    }
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    value["semantics"]
+        .as_object_mut()
+        .unwrap()
+        .remove("target_triple");
+    assert_eq!(
+        recheck(
+            CLAMP,
+            &serde_json::to_vec(&value).unwrap(),
+            Options::default()
+        ),
+        Err(SourceEvidenceError::InvalidSavedEvidence)
+    );
+}
+
 const CLAMP: &str = include_str!("../../../tests/fixtures/semantic_contract_clamp.mm");
 
 fn established(source: &str, options: Options) -> Evidence {
