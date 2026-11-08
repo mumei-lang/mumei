@@ -41,7 +41,7 @@ pub enum Outcome {
 pub enum SourceEvidenceError {
     #[error("invalid bounded source-query budget")]
     InvalidBudget,
-    #[error("source outside the bounded pure-i64 profile with literal true precondition")]
+    #[error("source outside the bounded pure-i64 profile with explicit contracts and literal true precondition")]
     UnsupportedSource,
     #[error("cannot construct source evidence representation")]
     InvalidRepresentation,
@@ -69,12 +69,50 @@ pub fn verify(source: &str, options: Options) -> Result<Outcome, SourceEvidenceE
         .map_err(|_| SourceEvidenceError::UnsupportedSource)?;
     let contract = semantic_contract::extract_pure_i64_contract(source, SOURCE_LABEL, None)
         .map_err(|_| SourceEvidenceError::UnsupportedSource)?;
-    if contract.specification.requires.trim() != "true" {
+    if contract.specification.requires.trim() != "true" || !explicit_contract_clauses(source)? {
         return Err(SourceEvidenceError::UnsupportedSource);
     }
     let solver = Solver::new(&context);
     solver.assert(&obligation);
     finish(solver.check(), &contract, options)
+}
+
+fn explicit_contract_clauses(source: &str) -> Result<bool, SourceEvidenceError> {
+    use crate::parser::{lexer::Lexer, token::Token};
+    // The bounded C03 encoder has already validated the AST. Inspect tokens,
+    // not raw text: parser defaults and comments cannot stand in for clauses.
+    let tokens = Lexer::new(source)
+        .tokenize_checked()
+        .map_err(|_| SourceEvidenceError::UnsupportedSource)?;
+    let (mut parens, mut brackets, mut braces) = (0usize, 0usize, 0usize);
+    let (mut requires, mut ensures, mut body) = (0, 0, 0);
+    for tokens in tokens.windows(3) {
+        let token = &tokens[0].token;
+        if parens == 0 && brackets == 0 && braces <= 1 && tokens[1].token == Token::Colon {
+            let count = match token {
+                Token::Requires => Some(&mut requires),
+                Token::Ensures => Some(&mut ensures),
+                Token::Body => Some(&mut body),
+                _ => None,
+            };
+            if let Some(count) = count {
+                if tokens[2].token == Token::Semicolon {
+                    return Ok(false);
+                }
+                *count += 1;
+            }
+        }
+        match token {
+            Token::LParen => parens += 1,
+            Token::RParen => parens = parens.saturating_sub(1),
+            Token::LBracket => brackets += 1,
+            Token::RBracket => brackets = brackets.saturating_sub(1),
+            Token::LBrace => braces += 1,
+            Token::RBrace => braces = braces.saturating_sub(1),
+            _ => (),
+        }
+    }
+    Ok((requires, ensures, body) == (1, 1, 1))
 }
 
 fn finish(
@@ -100,6 +138,7 @@ fn record(contract: &SemanticContract, options: Options) -> Result<Evidence, Sou
         "semantic_profile": PURE_I64_PROFILE,
         "query": "restricted_c03_bitvector_postcondition_counterexample",
         "precondition": "literal_true_only",
+        "contract_clauses": "one_explicit_nonempty_requires_ensures_and_body",
         "timeout_ms": options.timeout_ms,
         "resource_limit": options.resource_limit,
         "compiler_version": env!("CARGO_PKG_VERSION"),

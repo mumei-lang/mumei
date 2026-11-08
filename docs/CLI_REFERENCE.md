@@ -94,7 +94,7 @@ Usage: mumei evidence verify-source [OPTIONS] <INPUT>
 
 | Name | Required | Description |
 |---|---|---|
-| `INPUT` | Yes | Regular source file; single pure-i64 comparison/conditional atom, at most 16 parameters and literal true precondition |
+| `INPUT` | Yes | Regular source at most 65,536 bytes; one pure-i64 comparison/conditional atom, explicit clauses, at most 16 parameters and literal true precondition |
 
 ### Options
 

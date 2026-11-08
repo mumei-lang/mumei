@@ -428,7 +428,7 @@ pub(crate) enum Command {
 pub(crate) enum EvidenceCommand {
     /// Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance
     VerifySource {
-        /// Regular source file; single pure-i64 comparison/conditional atom, at most 16 parameters and literal true precondition
+        /// Regular source at most 65,536 bytes; one pure-i64 comparison/conditional atom, explicit clauses, at most 16 parameters and literal true precondition
         input: String,
         /// Emit one common Evidence v1 record on fresh unsat only (not an acceptance receipt)
         #[arg(long)]

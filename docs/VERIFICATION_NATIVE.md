@@ -246,6 +246,10 @@ This opt-in **producer**, separate from the representation-only `check`, runs a
 fresh linked Z3 query through Core's existing bounded C03 bitvector encoder.
 It accepts one pure-i64 comparison/conditional atom with explicit owned i64
 parameters/return, at most 16 parameters and a **literal `true` precondition**.
+Exactly one explicit, nonempty `requires:`, `ensures:` and `body:` clause is
+required. Parser-default `true`, comments, empty or repeated clauses cannot
+substitute for the written contract; explicit `ensures: true` remains a valid
+tautological postcondition, not evidence for a stronger property.
 False and nonliteral preconditions are rejected before querying, not accepted
 by vacuity. Arithmetic, calls, imports, effects, heap, FFI, quantifiers and
 concurrency remain unsupported. The encoder also bounds source tokens (256),

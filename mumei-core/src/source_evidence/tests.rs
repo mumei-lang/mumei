@@ -148,6 +148,38 @@ fn full_i64_domain_not_finite_observations_or_unbounded_integers() {
 }
 
 #[test]
+fn omitted_or_repeated_contract_clauses_do_not_become_implicit_true_evidence() {
+    for source in [
+        "atom f(x: i64) -> i64 body: { x };",
+        "atom f(x: i64) -> i64 requires: true; body: { x };",
+        "atom f(x: i64) -> i64 ensures: result == x; body: { x };",
+        "atom f(x: i64) -> i64 requires: true; ensures: true;",
+        "atom f(x: i64) -> i64 requires: ; ensures: true; body: { x };",
+        "atom f(x: i64) -> i64 requires: true; ensures: // empty\n; body: { x };",
+        "atom f(x: i64) -> i64 { body: { x } }",
+        "// requires: true; ensures: true;\natom f(x: i64) -> i64 body: { x };",
+        "atom f(x: i64) -> i64 requires: true; requires: true; ensures: true; body: { x };",
+        "atom f(x: i64) -> i64 requires: true; ensures: true; ensures: true; body: { x };",
+        "atom f(x: i64) -> i64 requires: true; ensures: true; body: { x }; body: { 0 };",
+    ] {
+        assert_eq!(
+            verify(source, Options::default()),
+            Err(SourceEvidenceError::UnsupportedSource)
+        );
+    }
+    for (index, source) in [
+        "atom f(x: i64) -> i64 { // requires: false; ensures: false;\n requires: true; ensures: result == x; body: { x } }",
+        "atom f(x: i64) -> i64 requires: true; ensures: true; body: { x };",
+    ].into_iter().enumerate() {
+        assert!(explicit_contract_clauses(source).unwrap(), "token-presence case {index}");
+        let context = Context::new(&Config::new());
+        let encoded = semantic_contract::encode_pure_i64_obligation(source, &context);
+        assert!(encoded.is_ok(), "C03 encoding case {index}: {:?}", encoded.err());
+        established(source, Options::default());
+    }
+}
+
+#[test]
 fn false_and_nonliteral_preconditions_cannot_succeed_vacuously() {
     for precondition in [
         "false",

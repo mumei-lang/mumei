@@ -118,6 +118,26 @@ fn fresh_false_postconditions_and_false_preconditions_never_reuse_a_previous_suc
 }
 
 #[test]
+fn missing_empty_duplicate_and_comment_only_contracts_emit_no_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("FAKE_PRIVATE_SOURCE.mm");
+    for source in [
+        "atom FAKE_PRIVATE_NAME(x: i64) -> i64 body: { x };",
+        "atom FAKE_PRIVATE_NAME(x: i64) -> i64 requires: true; body: { x };",
+        "atom FAKE_PRIVATE_NAME(x: i64) -> i64 ensures: result == x; body: { x };",
+        "// requires: true; ensures: true;\natom FAKE_PRIVATE_NAME() -> i64 { body: { 0 }; }",
+        "atom FAKE_PRIVATE_NAME() -> i64 requires: true; ensures: // empty\n; body: { 0 };",
+        "atom FAKE_PRIVATE_NAME() -> i64 requires: ; ensures: true; body: { 0 };",
+        "atom FAKE_PRIVATE_NAME() -> i64 requires: true; requires: true; ensures: true; body: { 0 };",
+        "atom FAKE_PRIVATE_NAME() -> i64 requires: true; ensures: true; ensures: true; body: { 0 };",
+        "atom FAKE_PRIVATE_NAME() -> i64 requires: true; ensures: true; body: { 0 }; body: { 1 };",
+    ] {
+        fs::write(&path, source).unwrap();
+        for json in [false, true] { assert_failure(&command(&path, json).output().unwrap(), 1); }
+    }
+}
+
+#[test]
 fn bounded_solver_unknown_has_distinct_exit_and_no_success_record() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("FAKE_PRIVATE_SOURCE.mm");
