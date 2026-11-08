@@ -128,6 +128,39 @@ and aliases/resources unsafe or unsupported. C09 remains a separate, limited
 LLVM translation-validation pilot after its C03/C08 prerequisites; neither
 compiler type metadata, finite replay nor C08 hash binding supplies that claim.
 
+### Wave 4 first resolved-call dependency summaries
+
+The [C07 scalar dependency slice](https://github.com/mumei-lang/mumei-agent/pull/658)
+composes formal-to-actual parameter dependencies through trusted C06 local call
+targets and source-mapped C05 CFG joins. It is an opt-in, in-process Agent
+consumer, not a compiler/evidence dependency or a default audit-route change.
+The fragment has scalar integer/Boolean parameters and one explicit scalar
+return expression; supported syntax is parameter/literal reads, selected pure
+operators and supported ordinary local calls. Target widths and named type
+identities remain compiler-derived, not inferred from identifier spelling.
+
+Reordered/nested calls compose dependencies, but this is not value evaluation
+or a correctness proof: `x*0` still includes parameter `x`, and an empty set
+means parameter-independent within the fragment, not a known constant. Every
+argument must be supported even when the callee ignores it. Missing/opaque
+edges, recursion, effects, unsupported signatures/statements/operators and
+alias/resource operations block summaries; unknown results are not empty
+dependencies or effect-free facts. Unsupported callees block their callers.
+
+Full source/profile/language/target/compiler and consumed-report identities
+invalidate reuse after any unit/callee change. Bounded analysis fails closed,
+and no persistent cache, proof acceptance or finding suppression is added.
+Invocation-fragment effect metadata does not verify package initialization,
+process/runtime behavior, resource state or authority; hashes do not establish
+authenticity. Existing function-local dataflow and audit/grade/Lean gates stay
+authoritative. No external verifier is adopted.
+
+This is **partial C07**, not general value/SSA/fixed-point analysis, cross-file
+freshness, alias/resource semantics or production audit integration. Those
+remain open alongside broader C06 resolution. C09 is still a separate limited
+LLVM translation-validation pilot; neither dependency summaries nor C08 hashes
+establish executable semantic correctness.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
