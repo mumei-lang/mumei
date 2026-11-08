@@ -2791,13 +2791,21 @@ Mumei owns C01–C03 and C08–C10/C12/C14: a small common specification/semanti
 core, standard verification, shared evidence/acceptance rules and LLVM emission.
 Non-executable proof models need not compile to LLVM. No universal IR, new grade,
 external verifier adoption or verified-binary claim is introduced by the first
-contract/schema slice. C02 producer/consumer integration and C03 executable
-vertical validation remain separate follow-ups in the linked issues.
+contract/schema slice. C02 producer/consumer integration and broader C03
+obligation/translation contracts remain follow-ups in the linked issues.
 
 The initial delivery documents ownership and minimal semantics, and adds a
 standalone evidence schema with synthetic positive/negative fixtures. Its schema
 validation checks representation consistency, not proof truth, source fidelity
 or artifact authenticity. Existing proof-certificate serialization is unchanged.
+
+The first C03 scalar API now extracts an opt-in, fail-closed
+`mumei.pure-i64-comparison/v1` description through the existing parser/HIR/MIR.
+Its real CLI regression checks a Z3 certificate, LLVM generation, fixed finite
+native observations and a wrong-LLVM negative control. This is not a universal
+IR, default sidecar output or semantic equivalence proof; target requests and
+compiler-local fingerprints do not establish artifact binding. See the
+[supported scope and exclusions](VERIFICATION_NATIVE.md#first-supported-scalar-slice).
 
 WASM remains the existing deferred P7-C item, tracked by
 [C14](https://github.com/mumei-lang/mumei/issues/792); dynamic capability

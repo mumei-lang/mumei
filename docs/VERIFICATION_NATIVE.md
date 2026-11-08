@@ -142,7 +142,7 @@ Producer integration, consumer validation and mapping to existing claim
 evidence are later C02 slices. A plugin cannot self-assert a new grade or use
 this schema to bypass Lean/kernel or current certificate checks.
 
-## 5. Minimal semantic-contract design (C03)
+## 5. Minimal semantic contract (C03)
 
 Start with a pure integer/Boolean function: for a signed 64-bit input, return
 zero for negative values and the input otherwise. Fix the precondition,
@@ -167,11 +167,71 @@ The initial design contract must identify:
 5. The selected solver/proof route, declared assumptions, emitted LLVM target
    and the exact boundary of any correspondence claim.
 
-This is a design boundary, not a new parser grammar or an implemented common
-obligation IR. The next C03 slice must construct a real supported obligation,
-connect existing verification and execution paths, and detect intentionally
-wrong lowering under fixed semantics. Do not claim that the current schema
-fixtures or a sample pure-function specification establish that vertical slice.
+### First supported scalar slice
+
+`mumei_core::semantic_contract::extract_pure_i64_contract` is an opt-in library
+API for `mumei.pure-i64-comparison/v1`. It accepts exactly one atom with explicit
+owned `i64` parameters/return, integer constants, Boolean conditions, signed
+comparisons and conditional expressions. It uses existing checked parsing and
+HIR/MIR lowering, not a new grammar, solver, evaluator or universal IR.
+Arithmetic (including overflow), division, shifts, conversions, calls, heap,
+FFI, mutation, local bindings, quantifiers, trust overrides and effect/ownership
+annotations are rejected rather than silently dropped. Boolean values are
+conditions in this first profile, not public Boolean parameters/return values.
+Checked lexing rejects failed numeric conversions and nonfinite float literals
+before parser recovery or text reconstruction can replace them with zero or an
+identifier. The existing integer literal representation is `i64`, independently
+of parameter types: this also rejects a single oversized literal in a `u64`
+contract. It does not restrict `u64` variables to the signed range; larger
+mathematical constants can currently be built from in-range literals and
+unbounded contract arithmetic. General width-aware literal representation is
+still future work, not silently supplied by this profile.
+
+Raw float tokens, including integer-valued, underflowing
+and overflowing float literals, are rejected by this profile before item text
+reconstruction can erase their category. This is not an exact-decimal or IEEE
+floating-point validation profile. The current `-9223372036854775808` spelling is
+also rejected because its positive magnitude is not representable by the lexer;
+this does not exclude that input value from the function's typed input domain.
+Legacy tolerant parsing is not changed into a validation API by this slice.
+
+The serializable description binds full-source, specification and implementation
+hashes; typed/result binders with explicitly atom-level span precision; the
+original parsed contract text; obligation identity; numeric semantics; existing
+Translator IR/translator/lemma metadata; and compiler-local HIR/MIR fingerprints.
+The parser's comparison-chain normalization is disclosed, not independently
+certified. The HIR debug and MIR JSON `v0` fingerprints are opaque diagnostics,
+not a stable interchange format, cross-version cache key or equivalence proof.
+`compiler_version` alone is not an exact compiler/toolchain build identity.
+
+An optional `requested_target_triple` is a caller request, never a binding to
+emitted code or a capability/availability claim. `None` serializes as null. The
+existing LLVM-IR emitter does not bind a target triple in the emitted module;
+actual target/build/artifact binding remains C08 work. The recorded standard-Z3
+route is requested only: extraction does not invoke Z3, Lean or LLVM, establish
+precondition satisfiability, or mark any result as proved. Neither current
+certificate serialization nor Claim Book grades are changed.
+
+The real CLI integration regression uses the clamp fixture to:
+
+- generate/re-check an actual Z3 certificate and match its content/contract and
+  Translator IR goal with the extracted description;
+- generate LLVM with the existing build path and observe native results at
+  `i64::MIN`, -1, 0, 1 and `i64::MAX` using a separate fixed C driver;
+- reject an intentionally reversed LLVM signed comparison under that same
+  finite driver, a false postcondition under the unchanged body, and a defective
+  body under the unchanged postcondition.
+
+These native observations are finite regression evidence, not universal LLVM
+translation validation or binary correctness. Correspondence remains explicitly
+unchecked even when they pass. General obligation decomposition, production
+sidecar emission/consumer acceptance, stable IR contracts and formal translation
+correspondence remain open C02/C03/C08/C09 work.
+
+```bash
+cargo test -p mumei-core semantic_contract --lib
+cargo test --test test_semantic_contract
+```
 
 ## 6. Replaceable planner and verifier plugins (C04/C11)
 

@@ -13,6 +13,7 @@ pub struct Lexer<'a> {
     pos: usize,
     line: usize,
     col: usize,
+    numeric_errors: Vec<String>,
 }
 
 impl<'a> Lexer<'a> {
@@ -23,6 +24,7 @@ impl<'a> Lexer<'a> {
             pos: 0,
             line: 1,
             col: 1,
+            numeric_errors: Vec::new(),
         }
     }
 
@@ -43,6 +45,16 @@ impl<'a> Lexer<'a> {
             tokens.push(tok);
         }
         tokens
+    }
+
+    /// Reject failed numeric conversion, not ordinary IEEE float rounding.
+    pub fn tokenize_checked(&mut self) -> Result<Vec<SpannedToken>, Vec<String>> {
+        let tokens = self.tokenize();
+        if self.numeric_errors.is_empty() {
+            Ok(tokens)
+        } else {
+            Err(self.numeric_errors.clone())
+        }
     }
 
     fn peek(&self) -> Option<char> {
@@ -261,7 +273,7 @@ impl<'a> Lexer<'a> {
         Token::StringLit(s)
     }
 
-    fn read_number(&mut self, first: char, _start_line: usize, _start_col: usize) -> Token {
+    fn read_number(&mut self, first: char, start_line: usize, start_col: usize) -> Token {
         let mut num_str = String::new();
         num_str.push(first);
         let mut is_float = false;
@@ -282,9 +294,29 @@ impl<'a> Lexer<'a> {
         }
 
         if is_float {
-            Token::FloatLit(num_str.parse::<f64>().unwrap_or(0.0))
+            match num_str.parse::<f64>() {
+                Ok(value) if value.is_finite() => Token::FloatLit(value),
+                value => {
+                    self.record_numeric_error(start_line, start_col);
+                    Token::FloatLit(value.unwrap_or(0.0))
+                }
+            }
         } else {
-            Token::IntLit(num_str.parse::<i64>().unwrap_or(0))
+            match num_str.parse::<i64>() {
+                Ok(value) => Token::IntLit(value),
+                Err(_) => {
+                    self.record_numeric_error(start_line, start_col);
+                    Token::IntLit(0)
+                }
+            }
+        }
+    }
+
+    fn record_numeric_error(&mut self, line: usize, col: usize) {
+        if self.numeric_errors.len() < 100 {
+            self.numeric_errors.push(format!(
+                "invalid or out-of-range numeric literal at line {line}, column {col}"
+            ));
         }
     }
 
@@ -394,4 +426,46 @@ pub fn legacy_tokenize(input: &str) -> Vec<String> {
             other => format!("{}", other),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_module_rejects_nonfinite_literals_before_they_can_become_identifiers() {
+        let source = format!("atom identity(inf: i64) -> i64 requires: true; ensures: result == {}.0; body: {{ inf }};", "9".repeat(400));
+        assert!(crate::parser::parse_module_checked(&source).is_err());
+        let underflow = format!("0.{}1", "0".repeat(400));
+        assert_eq!(
+            Lexer::new(&underflow).tokenize_checked().unwrap()[0].token,
+            Token::FloatLit(0.0)
+        );
+    }
+
+    #[test]
+    fn checked_lexing_rejects_numeric_recovery_but_ignores_comments_and_strings() {
+        for source in [
+            "9223372036854775808".to_owned(),
+            "-9223372036854775808".to_owned(),
+            "1.2.3".to_owned(),
+        ] {
+            assert!(Lexer::new(&source).tokenize_checked().is_err());
+        }
+        for source in [
+            "0",
+            "9223372036854775807",
+            "0.5",
+            "// 9223372036854775808\n0",
+            "\"9223372036854775808\"",
+        ] {
+            assert!(Lexer::new(source).tokenize_checked().is_ok());
+        }
+        assert_eq!(
+            Lexer::new("9223372036854775808").tokenize()[0].token,
+            Token::IntLit(0)
+        );
+        assert!(crate::parser::parse_expression_checked("x < 9223372036854775808").is_err());
+        assert!(crate::parser::parse_body_expr_checked("{ 9223372036854775808 }").is_err());
+    }
 }

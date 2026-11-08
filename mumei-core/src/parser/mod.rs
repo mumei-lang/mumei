@@ -219,7 +219,7 @@ pub fn parse_body_expr(input: &str) -> Stmt {
 /// a tolerant path.
 pub fn parse_expression_checked(input: &str) -> Result<Expr, Vec<String>> {
     let mut lexer = lexer::Lexer::new(input);
-    let tokens = lexer.tokenize();
+    let tokens = lexer.tokenize_checked()?;
     let mut ctx = ParseContext::new(tokens);
     let expr = expr::normalize_comparison_chains(expr::parse_expr(&mut ctx, 0));
     let mut failures = ctx.expect_failures().to_vec();
@@ -241,7 +241,7 @@ pub fn parse_expression_checked(input: &str) -> Result<Expr, Vec<String>> {
 /// malformed atom body instead of running verification on a recovered AST.
 pub fn parse_body_expr_checked(input: &str) -> Result<Stmt, Vec<String>> {
     let mut lexer = lexer::Lexer::new(input);
-    let tokens = lexer.tokenize();
+    let tokens = lexer.tokenize_checked()?;
     let mut ctx = ParseContext::new(tokens);
     let stmt = expr::parse_block_or_stmt(&mut ctx);
     let failures = ctx.expect_failures();
