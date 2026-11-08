@@ -246,6 +246,23 @@ pub fn compile_atoms_into_module<'ctx>(
 }
 
 pub fn compile_llvm_ir_to_object(ir_path: &Path, object_path: &Path) -> MumeiResult<()> {
+    compile_native_object(ir_path, object_path, false).map(|_| ())
+}
+
+/// Bind target/layout and persist the staged IR actually used for object emission.
+/// Unlike the legacy entry point, this rewrites `ir_path`; use generated staging IR.
+pub fn compile_llvm_ir_to_object_recorded(
+    ir_path: &Path,
+    object_path: &Path,
+) -> MumeiResult<mumei_core::native_bundle::ObjectBuild> {
+    compile_native_object(ir_path, object_path, true)
+}
+
+fn compile_native_object(
+    ir_path: &Path,
+    object_path: &Path,
+    bind_ir: bool,
+) -> MumeiResult<mumei_core::native_bundle::ObjectBuild> {
     Target::initialize_native(&InitializationConfig::default()).map_err(|e| {
         MumeiError::codegen(format!("Failed to initialize native LLVM target: {e}"))
     })?;
@@ -282,6 +299,17 @@ pub fn compile_llvm_ir_to_object(ir_path: &Path, object_path: &Path) -> MumeiRes
         ))
     })?;
 
+    let layout = machine.get_target_data().get_data_layout();
+    if bind_ir {
+        module.set_triple(&triple);
+        module.set_data_layout(&layout);
+        module
+            .verify()
+            .map_err(|_| MumeiError::codegen("invalid native module".to_owned()))?;
+        module
+            .print_to_file(ir_path)
+            .map_err(|_| MumeiError::codegen("cannot persist bound native IR".to_owned()))?;
+    }
     machine
         .write_to_file(&module, FileType::Object, object_path)
         .map_err(|e| {
@@ -289,7 +317,17 @@ pub fn compile_llvm_ir_to_object(ir_path: &Path, object_path: &Path) -> MumeiRes
                 "Failed to write object '{}': {e}",
                 object_path.display()
             ))
-        })
+        })?;
+    let (mut major, mut minor, mut patch) = (0, 0, 0);
+    // SAFETY: LLVM writes three unsigned version components to live local variables.
+    unsafe {
+        llvm_sys::core::LLVMGetVersion(&mut major, &mut minor, &mut patch);
+    }
+    Ok(mumei_core::native_bundle::ObjectBuild {
+        target_triple: triple.as_str().to_string_lossy().into_owned(),
+        data_layout: layout.as_str().to_string_lossy().into_owned(),
+        llvm_version: format!("{major}.{minor}.{patch}"),
+    })
 }
 
 pub fn compile(

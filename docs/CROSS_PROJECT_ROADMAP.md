@@ -82,6 +82,24 @@ It does not complete general obligation decomposition, default producer/consumer
 integration, stable IR interchange or translation validation; see the
 [supported scope](VERIFICATION_NATIVE.md#first-supported-scalar-slice).
 
+### Wave 3 first supported boundaries
+
+The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
+adds source-mapped structured Go normal-flow graphs and return-site lookup over
+the existing heuristic walker. Unsupported control flow produces gaps, not a
+partial graph; fixed-point CFG dataflow, complete source identities, typed
+resolution and other-language coverage remain open.
+
+The [first C08 native identity slice](VERIFICATION_NATIVE.md#first-native-identity-bundle-slice)
+adds opt-in `native-bundle build/check` for one pure-i64 `main` on Linux/x86_64.
+It captures source/specification/IR/certificate/object/executable identities
+and observed build settings in the same fresh build. The consumer compares
+snapshots to an externally pinned build ID, without executing the artifact or
+promoting hash consistency to authenticity, translation validation or an
+`artifact_verified` claim. System dependencies, tool execution, filesystem
+metadata and wider ABI/runtime semantics remain unverified. This is partial
+C08 and a narrow C10 identity-check foundation, not completion of either item.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:

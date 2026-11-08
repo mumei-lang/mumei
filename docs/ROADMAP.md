@@ -2811,6 +2811,18 @@ WASM remains the existing deferred P7-C item, tracked by
 [C14](https://github.com/mumei-lang/mumei/issues/792); dynamic capability
 delegation/revocation stays behind its existing demand gate.
 
+The first C08 implementation adds opt-in `mumei native-bundle build/check` for
+the [restricted native identity profile](VERIFICATION_NATIVE.md#first-native-identity-bundle-slice).
+It freshly verifies one explicit pure-i64 main, reuses existing LLVM/native
+generation, records actual object target/layout and toolchain observations,
+and binds the certificate/LLVM IR/object/executable to source/specification/IR
+identities. The consumer requires an externally pinned build ID and checks
+current snapshots without executing the artifact. It is only identity
+consistency, not authenticity, translation validation or `artifact_verified`.
+System dependency closure, wider programs/targets/runtime/ABI, attestation,
+C02 integration and full C08/C10 consumer policies remain open. Existing
+build/run, Claim Book, grades and Lean gates are unchanged.
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

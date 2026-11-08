@@ -21,7 +21,7 @@ mod task_runtime;
 
 pub use driver::{
     compile, compile_atom_into_module, compile_atoms_into_module, compile_llvm_ir_to_object,
-    compile_to_module,
+    compile_llvm_ir_to_object_recorded, compile_to_module,
 };
 pub use lowering::declare_extern_functions;
 
