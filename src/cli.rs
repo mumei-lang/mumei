@@ -421,6 +421,15 @@ pub(crate) enum Command {
 
 #[derive(Subcommand)]
 pub(crate) enum NativeBundleCommand {
+    /// Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance
+    RecheckEvidence {
+        bundle: String,
+        source: String,
+        evidence: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel, not the report
+        #[arg(long)]
+        expected_build_id: String,
+    },
     /// Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics
     RecheckLlvm {
         bundle: String,

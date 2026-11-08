@@ -130,6 +130,8 @@ fn clean_consumer_rechecks_copied_read_only_snapshots_without_producer_tools_or_
     let producer = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build(producer.path());
     let consumer = tempfile::tempdir().unwrap();
+    let saved = save_evidence(consumer.path(), &source, &bundle, &id);
+    fs::set_permissions(&saved, fs::Permissions::from_mode(0o400)).unwrap();
     let executable = consumer.path().join("mumei");
     fs::copy(env!("CARGO_BIN_EXE_mumei"), &executable).unwrap();
     let copied_source = consumer.path().join("source.mm");
@@ -156,6 +158,7 @@ fn clean_consumer_rechecks_copied_read_only_snapshots_without_producer_tools_or_
         ("recheck-source", false),
         ("recheck-llvm", false),
         ("recheck-llvm", true),
+        ("recheck-evidence", false),
     ] {
         let mut command = Command::new(&executable);
         command
@@ -175,6 +178,7 @@ fn clean_consumer_rechecks_copied_read_only_snapshots_without_producer_tools_or_
                 "--expected-build-id",
                 &id,
             ])
+            .args((action == "recheck-evidence").then_some(saved.to_str().unwrap()))
             .args(json.then_some("--json"))
             .output()
             .unwrap();
@@ -187,6 +191,9 @@ fn clean_consumer_rechecks_copied_read_only_snapshots_without_producer_tools_or_
             let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
             assert_eq!(report["acceptance"], "not_evaluated");
             assert_eq!(report["evidence"].as_array().unwrap().len(), 3);
+        } else if action == "recheck-evidence" {
+            assert!(stdout.contains("Saved native Evidence consistent with fresh"));
+            assert!(stdout.contains("Evidence acceptance: not evaluated"));
         } else {
             assert!(stdout.contains(mumei_emit_llvm::translation_validation::NATIVE_PROFILE));
             assert!(stdout.contains("source_postcondition_identity_and_llvm_snapshot_only"));
@@ -195,7 +202,7 @@ fn clean_consumer_rechecks_copied_read_only_snapshots_without_producer_tools_or_
         assert!(!stdout.contains("artifact_verified"));
         assert_eq!(fs::read_dir(&copied_bundle).unwrap().count(), 5);
         assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
-        assert_eq!(fs::read_dir(consumer.path()).unwrap().count(), 5);
+        assert_eq!(fs::read_dir(consumer.path()).unwrap().count(), 6);
     }
     fs::set_permissions(&copied_bundle, fs::Permissions::from_mode(0o700)).unwrap();
 }
@@ -1111,4 +1118,325 @@ fn json_uses_local_provenance_and_non_secret_configuration_only() {
         evidence["evidence"][2]["semantics"]["target_triple"],
         record.object_build.target_triple
     );
+    let saved = save_evidence(root.path(), &source, &bundle, &id);
+    let replay = replay_command(&source, &bundle, &id, &saved)
+        .env("MUMEI_VERIFICATION_TIMEOUT_MS", "1")
+        .env("MUMEI_SOLVER_CONFIG_FINGERPRINT", fake)
+        .env("OPENAI_API_KEY", fake)
+        .output()
+        .unwrap();
+    assert_success(&replay);
+    assert!(!String::from_utf8_lossy(&replay.stdout).contains(fake));
+    assert!(!String::from_utf8_lossy(&replay.stderr).contains(fake));
+}
+
+fn save_evidence(root: &Path, source: &Path, bundle: &Path, id: &str) -> std::path::PathBuf {
+    let path = root.join("evidence.json");
+    let output = recheck_llvm_json(source, bundle, id);
+    assert_success(&output);
+    fs::write(&path, output.stdout).unwrap();
+    path
+}
+
+fn replay_command(source: &Path, bundle: &Path, id: &str, saved: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+    command.args([
+        "native-bundle",
+        "recheck-evidence",
+        bundle.to_str().unwrap(),
+        source.to_str().unwrap(),
+        saved.to_str().unwrap(),
+        "--expected-build-id",
+        id,
+    ]);
+    command
+}
+
+fn replay_rejected(source: &Path, bundle: &Path, id: &str, saved: &Path) -> Output {
+    let output = replay_command(source, bundle, id, saved).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("FAKE_PRIVATE"));
+    assert!(!stderr.contains(saved.to_str().unwrap()));
+    output
+}
+
+#[test]
+fn saved_evidence_roundtrips_without_changes_and_ignores_json_object_order() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let saved = save_evidence(root.path(), &source, &bundle, &id);
+    let before = fs::read(&saved).unwrap();
+    let output = replay_command(&source, &bundle, &id, &saved)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    assert!(output.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Evidence acceptance: not evaluated"));
+    assert_eq!(fs::read(&saved).unwrap(), before);
+    let mut reordered: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    reordered["evidence"][1]["semantics"]
+        .as_object_mut()
+        .unwrap()
+        .remove("target_triple");
+    fs::write(&saved, serde_json::to_vec(&reordered).unwrap()).unwrap();
+    assert_success(
+        &replay_command(&source, &bundle, &id, &saved)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(fs::read_dir(&bundle).unwrap().count(), 5);
+}
+
+fn json_paths(
+    value: &serde_json::Value,
+    prefix: String,
+    leaves: &mut Vec<String>,
+    objects: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            objects.push(prefix.clone());
+            for (key, value) in fields {
+                json_paths(value, format!("{prefix}/{key}"), leaves, objects);
+            }
+        }
+        serde_json::Value::Array(values) if !values.is_empty() => {
+            for (index, value) in values.iter().enumerate() {
+                json_paths(value, format!("{prefix}/{index}"), leaves, objects);
+            }
+        }
+        _ => leaves.push(prefix),
+    }
+}
+
+#[test]
+fn replay_checks_every_field_and_rejects_unknown_fields_at_every_object_level() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let saved = save_evidence(root.path(), &source, &bundle, &id);
+    let original: serde_json::Value = serde_json::from_slice(&fs::read(&saved).unwrap()).unwrap();
+    let (mut leaves, mut objects) = (Vec::new(), Vec::new());
+    json_paths(&original, String::new(), &mut leaves, &mut objects);
+    assert!(leaves.len() > 100);
+    for path in leaves {
+        let mut changed = original.clone();
+        *changed.pointer_mut(&path).unwrap() = serde_json::json!("FAKE_PRIVATE_FIELD_MUTATION");
+        fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
+        replay_rejected(&source, &bundle, &id, &saved);
+    }
+    for path in objects {
+        let mut changed = original.clone();
+        changed
+            .pointer_mut(&path)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "FAKE_PRIVATE_UNKNOWN_FIELD".into(),
+                serde_json::json!("not_a_trust_override"),
+            );
+        fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
+        replay_rejected(&source, &bundle, &id, &saved);
+    }
+    for key in original.as_object().unwrap().keys() {
+        let mut changed = original.clone();
+        changed.as_object_mut().unwrap().remove(key);
+        fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
+        replay_rejected(&source, &bundle, &id, &saved);
+    }
+    for index in 0..3 {
+        for key in original["evidence"][index].as_object().unwrap().keys() {
+            let mut changed = original.clone();
+            changed["evidence"][index]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
+            replay_rejected(&source, &bundle, &id, &saved);
+        }
+    }
+    for count in [0, 1, 2, 4] {
+        let mut changed = original.clone();
+        changed["evidence"] = serde_json::json!(vec![original["evidence"][0].clone(); count]);
+        fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
+        replay_rejected(&source, &bundle, &id, &saved);
+    }
+    let mut reordered = original.clone();
+    reordered["evidence"].as_array_mut().unwrap().swap(0, 2);
+    fs::write(&saved, serde_json::to_vec(&reordered).unwrap()).unwrap();
+    replay_rejected(&source, &bundle, &id, &saved);
+    fs::write(&saved, serde_json::to_vec(&original).unwrap()).unwrap();
+    assert_success(
+        &replay_command(&source, &bundle, &id, &saved)
+            .output()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn replay_rejects_duplicate_escaped_or_nested_fields_and_private_malformed_input() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let saved = save_evidence(root.path(), &source, &bundle, &id);
+    let original = fs::read_to_string(&saved).unwrap();
+    for (key, duplicate) in [
+        ("\"acceptance\":", "\"acceptance\":\"FAKE_PRIVATE_DUPLICATE\",\"acceptance\":"),
+        ("\"acceptance\":", "\"\\u0061cceptance\":\"not_evaluated\",\"acceptance\":"),
+        ("\"configuration_fingerprint\":", "\"configuration_fingerprint\":\"FAKE_PRIVATE_DUPLICATE\",\"configuration_fingerprint\":"),
+        ("\"obligation_id\":", "\"obligation_id\":\"FAKE_PRIVATE_DUPLICATE\",\"obligation_id\":"),
+    ] {
+        let duplicate = original.replacen(key, duplicate, 1);
+        assert_ne!(duplicate, original);
+        fs::write(&saved, duplicate).unwrap();
+        replay_rejected(&source, &bundle, &id, &saved);
+    }
+    for malformed in [
+        "".into(),
+        "FAKE_PRIVATE_NOT_JSON".into(),
+        "null".into(),
+        "[]".into(),
+        original[..original.len() / 2].to_owned(),
+        format!("{original}{original}"),
+        format!("{}0{}", "[".repeat(129), "]".repeat(129)),
+    ] {
+        fs::write(&saved, malformed).unwrap();
+        replay_rejected(&source, &bundle, &id, &saved);
+    }
+    fs::write(&saved, [0xff, 0xfe]).unwrap();
+    replay_rejected(&source, &bundle, &id, &saved);
+}
+
+#[test]
+fn replay_file_and_pin_boundaries_are_fail_closed_without_following_report_paths() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let saved = save_evidence(root.path(), &source, &bundle, &id);
+    let original = fs::read(&saved).unwrap();
+    for pin in ["", "FAKE_PRIVATE_PIN", &"0".repeat(64), &format!("{id}\n")] {
+        replay_rejected(&source, &bundle, pin, &saved);
+    }
+    let mut padded = original.clone();
+    padded.resize(65_536, b' ');
+    fs::write(&saved, &padded).unwrap();
+    assert_success(
+        &replay_command(&source, &bundle, &id, &saved)
+            .output()
+            .unwrap(),
+    );
+    padded.push(b' ');
+    fs::write(&saved, padded).unwrap();
+    replay_rejected(&source, &bundle, &id, &saved);
+    fs::remove_file(&saved).unwrap();
+    replay_rejected(&source, &bundle, &id, &saved);
+    let target = root.path().join("FAKE_PRIVATE_TARGET.json");
+    fs::write(&target, &original).unwrap();
+    symlink(&target, &saved).unwrap();
+    replay_rejected(&source, &bundle, &id, &saved);
+    fs::remove_file(&saved).unwrap();
+    fs::create_dir(&saved).unwrap();
+    replay_rejected(&source, &bundle, &id, &saved);
+    fs::remove_dir(&saved).unwrap();
+    fs::write(&saved, original).unwrap();
+    let snapshot = fs::read(bundle.join("program.ll")).unwrap();
+    fs::remove_file(bundle.join("program.ll")).unwrap();
+    replay_rejected(&source, &bundle, &id, &saved);
+    fs::write(bundle.join("program.ll"), &snapshot).unwrap();
+    fs::write(&source, format!("{GOOD}//FAKE_PRIVATE_STALE_SOURCE")).unwrap();
+    replay_rejected(&source, &bundle, &id, &saved);
+    fs::write(&source, GOOD).unwrap();
+    let mut changed: serde_json::Value =
+        serde_json::from_slice(&fs::read(&saved).unwrap()).unwrap();
+    changed["evidence"][0]["artifact_paths"] =
+        serde_json::json!(["FAKE_PRIVATE_PATH_MUST_NOT_BE_OPENED"]);
+    fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
+    replay_rejected(&source, &bundle, &id, &saved);
+}
+
+#[test]
+fn saved_success_with_rebound_hashes_cannot_bypass_either_fresh_query() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, _) = build(root.path());
+    for alter_source in [true, false] {
+        fs::write(&source, GOOD).unwrap();
+        let id = repin(&bundle, Some(GOOD));
+        let saved = save_evidence(root.path(), &source, &bundle, &id);
+        let mut report: serde_json::Value =
+            serde_json::from_slice(&fs::read(&saved).unwrap()).unwrap();
+        let original_ir = fs::read_to_string(bundle.join("program.ll")).unwrap();
+        let text = if alter_source {
+            GOOD.replace("== 7", "== 8")
+        } else {
+            GOOD.to_owned()
+        };
+        fs::write(&source, &text).unwrap();
+        if !alter_source {
+            fs::write(
+                bundle.join("program.ll"),
+                original_ir.replace("ret i64 7", "ret i64 4294967303"),
+            )
+            .unwrap();
+        }
+        let id = repin(&bundle, Some(&text));
+        assert_success(&check(&source, &bundle, &id));
+        let record: native_bundle::NativeBundleRecord =
+            serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+        report["build_id"] = serde_json::json!(id);
+        report["evidence"][0]["specification"]["sha256"] = serde_json::json!(id);
+        report["evidence"][1]["subject"]["sha256"] = serde_json::json!(record.source.source_sha256);
+        report["evidence"][1]["specification"]["sha256"] =
+            serde_json::json!(record.source.specification_sha256);
+        report["evidence"][2]["subject"]["sha256"] =
+            serde_json::json!(record.files[&BundleFile::LlvmIr].sha256);
+        report["evidence"][2]["specification"]["sha256"] =
+            serde_json::json!(record.source.source_sha256);
+        fs::write(&saved, serde_json::to_vec(&report).unwrap()).unwrap();
+        let rejected = replay_rejected(&source, &bundle, &id, &saved);
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains(if alter_source {
+                "source postcondition refuted"
+            } else {
+                "LLVM body differs from source"
+            })
+        );
+        fs::write(bundle.join("program.ll"), original_ir).unwrap();
+    }
+}
+
+#[test]
+fn replay_of_rebound_garbage_artifacts_never_executes_or_promotes_binary_assurance() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let saved = save_evidence(root.path(), &source, &bundle, &id);
+    let mut report: serde_json::Value = serde_json::from_slice(&fs::read(&saved).unwrap()).unwrap();
+    let marker = root.path().join("MUST_NOT_RUN");
+    fs::write(
+        bundle.join("program"),
+        format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(bundle.join("program"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(bundle.join("program.o"), b"garbage object").unwrap();
+    let id = repin(&bundle, None);
+    replay_rejected(&source, &bundle, &id, &saved);
+    report["build_id"] = serde_json::json!(id);
+    report["evidence"][0]["specification"]["sha256"] = serde_json::json!(id);
+    report["evidence"][0]["subject"]["sha256"] = serde_json::json!(native_bundle::sha256(
+        &fs::read(bundle.join("program")).unwrap()
+    ));
+    fs::write(&saved, serde_json::to_vec(&report).unwrap()).unwrap();
+    let output = replay_command(&source, &bundle, &id, &saved)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Object/linker/runtime/OS exit-status/executable semantics: not checked")
+    );
+    assert!(stdout.contains("Evidence acceptance: not evaluated"));
+    assert!(!stdout.contains("artifact_verified"));
+    assert!(!marker.exists());
 }

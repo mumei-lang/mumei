@@ -602,6 +602,58 @@ ABI/runtime/OS exit-status/final-executable semantics and dependency/toolchain
 closure remain unverified. Broader C02/C09/C10 and final-artifact assurance stay
 open; external verifiers are not adopted.
 
+### First saved native Evidence replay consumer
+
+`mumei native-bundle recheck-evidence <bundle> <source> <evidence> --expected-build-id <trusted-id>`
+compares a saved native consumer report with **fresh Stage B checks**, not with
+the saved success claims alone. For example:
+
+```sh
+mumei native-bundle recheck-llvm bundle source.mm --expected-build-id <trusted-id> --json > evidence.json
+mumei native-bundle recheck-evidence bundle source.mm evidence.json --expected-build-id <trusted-id>
+```
+
+The expected build ID must still come from a separately trusted channel, never
+from the report. The report is an additional input, not a bundle member or a
+replacement for source, IR, certificates or pinned identities. It is read once
+as a regular, non-symlink file of at most 65,536 bytes. A closed typed decoder
+rejects malformed/non-UTF-8 JSON, duplicate/unknown fields at every object level,
+missing required fields and record counts other than three. Report strings and
+artifact paths never select tools or files to execute/open.
+
+After decoding, the consumer performs every C08/Stage A/B identity, source-query,
+LLVM-body/wrapper and exact target/layout gate. Only a successful fresh result
+is compared with the saved report. All decoded data must match: schema/build
+identity/scope/acceptance, each subject/specification/obligation, semantics,
+method/execution/result, correspondence, assumptions/exclusions, artifact labels
+and local adapter/tool/configuration provenance. JSON object order and whitespace
+do not matter; an omitted nullable source target is equivalent to null. Records
+and all lists retain producer order. Unsupported profiles or different version/
+configuration labels are rejected rather than silently migrated, even when a
+different consumer might also verify the program. This is a deliberately narrow
+same-profile/provenance replay, not a general common-Evidence schema validator
+or cross-version/backend interchange policy.
+
+Exit 0 means the report agrees with the fresh restricted checks. Missing,
+stale/tampered, malformed, unsupported, refuted or mismatched inputs exit 1;
+fresh solver unknown/resource exhaustion exits 3 and never establishes report
+consistency. Failures have empty stdout and static diagnostics. The command
+writes no files/certificates/new Evidence, loads no project config/cache, starts
+no producer tools or external verifiers, and never runs the artifact. Existing
+`check`, `recheck-source` and `recheck-llvm` output/exit behavior is unchanged.
+
+**A match is not authenticity, historical proof execution, or proof acceptance.**
+A report author can fabricate data that matches a successful fresh query; the
+assurance comes from that current query and its trusted components, not the
+report author. Saved `established` claims, rebound hashes or schema validity
+cannot replace a fresh query. Repinned garbage object/executable bytes may still
+match an updated report: only identity is checked for those bytes. The full-i64
+LLVM body and wrapper shape remain distinct from OS exit status, object/backend/
+linker/runtime/ABI/final-executable semantics. `acceptance: not_evaluated`, Seal
+Grades, Claim Book and Lean trust/freshness gates remain unchanged. General C02
+acceptance/mapping, broader C09/C10, authenticity and final-artifact assurance
+stay open; no external verifier is adopted.
+
 ## 9. External verifier candidates, not adoption decisions
 
 Before any adoption check current maintenance, license/distribution/commercial

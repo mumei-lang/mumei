@@ -16,11 +16,26 @@ enum LlvmRecheck {
 }
 
 const MAX_COMPONENT_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_EVIDENCE_BYTES: u64 = 65_536;
 const LLVM_RECHECK_SCOPE: &str =
     "source_postcondition_identity_and_llvm_snapshot_only/no_authenticity_or_binary_semantic_proof";
 
 pub(crate) fn run(command: NativeBundleCommand) {
     let result = match command {
+        NativeBundleCommand::RecheckEvidence { bundle, source, evidence, expected_build_id } => {
+            match recheck_evidence(Path::new(&bundle), Path::new(&source), Path::new(&evidence), &expected_build_id) {
+                Ok(Outcome::EquivalentWithinProfile) => {
+                    println!("Saved native Evidence consistent with fresh pinned source/LLVM rechecks.\nScope: {LLVM_RECHECK_SCOPE}\nEvidence acceptance: not evaluated.\nObject/linker/runtime/OS exit-status/executable semantics: not checked.");
+                    Ok(())
+                }
+                Ok(Outcome::Different) => Err(BundleError("native LLVM body differs from source")),
+                Ok(Outcome::Inconclusive) => {
+                    eprintln!("Native source/LLVM recheck inconclusive; no evidence consistency result established.");
+                    std::process::exit(3);
+                }
+                Err(error) => Err(error),
+            }
+        },
         NativeBundleCommand::RecheckLlvm { bundle, source, expected_build_id, json } => {
             match recheck_llvm(Path::new(&bundle), Path::new(&source), &expected_build_id)
                 .and_then(|result| write_llvm_recheck(result, json, &mut std::io::stdout().lock())) {
@@ -278,6 +293,33 @@ fn recheck_llvm(
     })
 }
 
+fn recheck_evidence(
+    bundle: &Path,
+    source: &Path,
+    evidence_path: &Path,
+    expected_id: &str,
+) -> Result<Outcome, BundleError> {
+    if !is_digest(expected_id) {
+        return Err(BundleError("invalid expected build ID"));
+    }
+    let saved = evidence::decode(&read_regular(evidence_path, MAX_EVIDENCE_BYTES)?)?;
+    compare_evidence(recheck_llvm(bundle, source, expected_id)?, &saved)
+}
+
+fn compare_evidence(
+    result: LlvmRecheck,
+    saved: &evidence::NativeConsumerEvidence,
+) -> Result<Outcome, BundleError> {
+    match result {
+        LlvmRecheck::Rechecked(fresh) if *fresh == *saved => Ok(Outcome::EquivalentWithinProfile),
+        LlvmRecheck::Rechecked(_) => Err(BundleError(
+            "saved native evidence differs from fresh consumer report",
+        )),
+        LlvmRecheck::Different => Ok(Outcome::Different),
+        LlvmRecheck::Inconclusive => Ok(Outcome::Inconclusive),
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn publish(stage: &Path, output: &Path) -> Result<(), BundleError> {
     let stage = std::ffi::CString::new(stage.as_os_str().as_encoded_bytes())
@@ -325,6 +367,20 @@ mod tests {
                 );
                 assert!(output.is_empty());
             }
+        }
+    }
+
+    #[test]
+    fn claimed_success_cannot_replace_a_fresh_refuted_or_inconclusive_result() {
+        let saved = evidence::decode(include_bytes!(
+            "../../tests/fixtures/verification-evidence/native_consumer_shape.json"
+        ))
+        .unwrap();
+        for (fresh, expected) in [
+            (LlvmRecheck::Different, Outcome::Different),
+            (LlvmRecheck::Inconclusive, Outcome::Inconclusive),
+        ] {
+            assert_eq!(compare_evidence(fresh, &saved).unwrap(), expected);
         }
     }
 }

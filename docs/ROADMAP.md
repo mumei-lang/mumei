@@ -2875,6 +2875,17 @@ report authentication or object/linker/runtime/ABI/OS/final-binary assurance.
 General evidence consumers, dependency/toolchain closure and broader C09/C10
 remain open. No external verifier is adopted.
 
+The next C02/C10 consumer connection adds `native-bundle recheck-evidence` for
+saved native reports. A closed, size-limited decoder and separately trusted
+build-ID pin precede fresh Stage B checks; all decoded report data must agree
+with the fresh same-profile/provenance result. Stored success claims never
+replace either query. This is report consistency replay, not general Evidence
+acceptance, authenticity, historical proof execution, grade/Lean promotion or
+object/linker/runtime/OS/final-binary assurance. Existing commands and the common
+schema remain unchanged. See the [replay boundary](VERIFICATION_NATIVE.md#first-saved-native-evidence-replay-consumer).
+General acceptance/mapping, broader C09/C10 and final-artifact assurance remain
+open; no external verifier is adopted.
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
