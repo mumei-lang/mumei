@@ -487,6 +487,74 @@ adopted.
 Regression gate:
 `LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo test --test test_native_bundle`.
 
+### First native LLVM snapshot consumer slice
+
+`mumei native-bundle recheck-llvm` is the opt-in **C10 Stage B** slice. It keeps
+`check` identity-only and `recheck-source` source-and-identity-only, and requires
+both Stage A's fresh source-postcondition result and a new C09-derived native
+LLVM snapshot check. It never substitutes a translation result for a source
+postcondition proof.
+
+```sh
+mumei native-bundle recheck-llvm example-native-bundle native-main.mm \
+  --expected-build-id <trusted-64-character-lowercase-sha256>
+```
+
+It reads the same pinned files once into bounded in-memory snapshots, passes
+all Stage A gates, then parses and verifies the **actual `program.ll` bytes**
+using the existing LLVM 17 library. It does not rewrite the IR, rename source
+text or regenerate an alternative module. The native profile is
+`mumei.llvm17-native-main-snapshot/v1`, distinct from C09's single-function
+scalar profile; the latter is not broadened.
+
+The new profile admits exactly two externally linked definitions:
+`i64 @__mumei_user_main()` and `i32 @main(i32, ptr)`. Core's C03 model supplies
+the zero-argument source i64 body; the existing bounded SSA interpreter and Z3
+compare its full 64-bit result with the user-main LLVM definition. The wrapper
+must be one block containing only a direct zero-argument call to that exact
+definition, a truncation of its result to i32 and a return of that truncation.
+Function/call attributes, operand bundles (including empty ones), alternate calling conventions, extra instructions,
+functions/declarations, globals, aliases, inline assembly and metadata are not
+admitted. The existing C09 body restrictions and bounds still apply: no memory,
+calls, loops, poison/undef or unsupported operations; 64 KiB IR, 48 delimiter
+levels, 64 body blocks, 1,024 body instructions and 256 expanded path states.
+
+Only the exact triples `x86_64-pc-linux-gnu` and `x86_64-unknown-linux-gnu` and
+C09's fixed x86_64 GNU data layout are admitted. The module triple/layout must
+also equal the pinned record's object-build observations; no normalization or
+implicit target substitution occurs. Other C08-buildable target spellings may
+remain unsupported by this narrower consumer.
+
+After Stage A's fixed 10,000 ms / 1,000,000-resource-unit source query, the
+translation query uses fixed 5,000 ms / 1,000,000-resource-unit settings. Both
+queries must be unsat for exit 0. A false postcondition or different LLVM body
+exits 1, as do malformed, unsupported or inconsistent snapshots. Unknown or
+resource exhaustion at either query exits 3 with no combined success claim.
+Diagnostics are static and do not disclose source/IR excerpts or models. No
+ambient settings, project configuration/cache, producer tools, external verifier
+or artifact execution is used; no new certificate/evidence acceptance is written.
+
+The ephemeral success scope is
+`source_postcondition_identity_and_llvm_snapshot_only/no_authenticity_or_binary_semantic_proof`.
+Checking the wrapper shape makes **low-32-bit truncation explicit**, not an
+i64-to-OS-exit-code equivalence or an ABI/runtime guarantee. A user body differing
+only above bit 31 is still rejected even if the wrapper's low 32 bits coincide.
+Conversely, repinned garbage object/executable bytes may still pass when source
+and LLVM checks hold: there is **no LLVM-to-object, optimization, backend, linker,
+system-library, OS, runtime or final-executable semantic proof**, nor producer
+authenticity or attestation that the object was emitted from these IR bytes.
+The consumer binary, Core source model, Z3 and LLVM parser/verifier/interpreter
+remain trusted components. Packaging is not a hermetic deployment.
+
+This is partial C09/C10 integration, not full C10 or Proof-Carrying Executable
+assurance. Common C02 evidence integration, broader profiles/targets, dependency
+closure, authenticity and final-artifact assurance stay open. Nothing becomes
+`artifact_verified`, unrestricted `proved` or a new Seal Grade; Claim Book, Lean
+gates, general build/run and Mumei/Agent ownership remain unchanged.
+
+Regression gates:
+`LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo test --test test_native_bundle --test test_translation_validation --test test_semantic_contract`.
+
 ## 9. External verifier candidates, not adoption decisions
 
 Before any adoption check current maintenance, license/distribution/commercial

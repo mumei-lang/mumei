@@ -2847,6 +2847,21 @@ grades and Lean gates remain unchanged. See the
 This is partial C10: C09 integration/Stage B, dependency closure, wider profiles,
 runtime/ABI/linker and final-artifact assurance remain open.
 
+The first C10 Stage B slice adds opt-in `native-bundle recheck-llvm`: all Stage A
+gates plus a fresh comparison of the source i64 body with the actual pinned
+native LLVM user-main definition. A separate C09-derived two-function profile
+checks the direct-call/i64-to-i32-truncation/return wrapper, exact GNU x86_64
+target/layout and record observations without rewriting snapshots or broadening
+the scalar C09 checker. Different bodies, unsupported wrappers/modules and
+inconclusive results cannot become success. Read-only consumers do not invoke
+producer tools, load project config/cache, execute artifacts or write evidence.
+See the [native LLVM snapshot boundary](VERIFICATION_NATIVE.md#first-native-llvm-snapshot-consumer-slice).
+This is partial C09/C10 integration, not LLVM-to-object correspondence, OS exit
+status equivalence, ABI/runtime/linker/final-binary correctness, authenticity or
+full C10. Dependency closure, wider profiles/targets and C02 evidence integration
+remain open; existing commands, grades and Lean gates stay unchanged. No external
+verifier is adopted.
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

@@ -11,6 +11,8 @@ use z3::{
 };
 
 pub const PROFILE: &str = "mumei.llvm17-pure-i64-ssa-equivalence/v1";
+pub const NATIVE_PROFILE: &str = "mumei.llvm17-native-main-snapshot/v1";
+pub const NATIVE_TARGET: &str = "x86_64-pc-linux-gnu";
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
 pub const DATA_LAYOUT: &str =
     "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128";
@@ -118,6 +120,26 @@ pub fn validate_pure_i64(
     llvm_ir: &str,
     options: Options,
 ) -> Result<ValidationReport> {
+    validate(source, llvm_ir, options, false)
+}
+
+/// Compare a zero-argument C03 main body with __mumei_user_main in the exact
+/// supplied snapshot. Check only the call/trunc/ret shape of its C main wrapper;
+/// no object, linking, OS exit-status or final-executable semantics are attested.
+pub fn validate_native_main(
+    source: &str,
+    llvm_ir: &str,
+    options: Options,
+) -> Result<ValidationReport> {
+    validate(source, llvm_ir, options, true)
+}
+
+fn validate(
+    source: &str,
+    llvm_ir: &str,
+    options: Options,
+    native: bool,
+) -> Result<ValidationReport> {
     bounded(llvm_ir)?;
     if options.timeout_ms == 0 || options.timeout_ms > 30_000 || options.resource_limit == 0 {
         return Err(ValidationError("invalid solver budget"));
@@ -128,6 +150,11 @@ pub fn validate_pure_i64(
     let context = Context::new(&config);
     let model = encode_pure_i64_body(source, &context)
         .map_err(|_| ValidationError("unsupported C03 source"))?;
+    if native && (model.function_name != "main" || !model.inputs.is_empty()) {
+        return Err(ValidationError(
+            "native profile requires zero-argument main",
+        ));
+    }
     let llvm_context = LlvmContext::create();
     let module = llvm_context
         .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
@@ -138,18 +165,30 @@ pub fn validate_pure_i64(
     module
         .verify()
         .map_err(|_| ValidationError("invalid LLVM module"))?;
-    if module.get_triple().as_str().to_bytes() != TARGET.as_bytes()
-        || module.get_data_layout().as_str().to_bytes() != DATA_LAYOUT.as_bytes()
-    {
+    let target = match module.get_triple().as_str().to_bytes() {
+        bytes if bytes == TARGET.as_bytes() => TARGET,
+        bytes if native && bytes == NATIVE_TARGET.as_bytes() => NATIVE_TARGET,
+        _ => return Err(ValidationError("unsupported target or data layout")),
+    };
+    if module.get_data_layout().as_str().to_bytes() != DATA_LAYOUT.as_bytes() {
         return Err(ValidationError("unsupported target or data layout"));
     }
     let function = module
-        .get_function(&model.function_name)
+        .get_function(if native {
+            "__mumei_user_main"
+        } else {
+            &model.function_name
+        })
         .ok_or(ValidationError("missing source function"))?;
     // The module is parsed/verified and remains alive for every raw LLVM query.
     let returns = unsafe {
         let raw = function.as_value_ref();
-        check_module(module.as_mut_ptr(), raw, model.inputs.len())?;
+        if native {
+            check_native_module(module.as_mut_ptr(), raw)?;
+        } else {
+            check_module(module.as_mut_ptr(), raw)?;
+        }
+        check_function(raw, model.inputs.len())?;
         IrEncoder::new(&context).encode(raw, &model.inputs)?
     };
     let mismatches: Vec<_> = returns
@@ -164,12 +203,20 @@ pub fn validate_pure_i64(
         SatResult::Unknown => Outcome::Inconclusive,
     };
     Ok(ValidationReport {
-        profile: PROFILE,
+        profile: if native { NATIVE_PROFILE } else { PROFILE },
         source_profile: PURE_I64_PROFILE,
-        target: TARGET,
+        target,
         data_layout: DATA_LAYOUT,
-        checked_stage: "supplied_llvm_ir_snapshot_no_pipeline_attestation",
-        input_domain: "all_signed_i64_inputs_not_restricted_by_requires",
+        checked_stage: if native {
+            "native_user_body_and_truncating_wrapper_snapshot_no_pipeline_attestation"
+        } else {
+            "supplied_llvm_ir_snapshot_no_pipeline_attestation"
+        },
+        input_domain: if native {
+            "zero_argument_main_i64_body_not_process_exit_status"
+        } else {
+            "all_signed_i64_inputs_not_restricted_by_requires"
+        },
         source_sha256: model.source_sha256,
         llvm_sha256: mumei_core::native_bundle::sha256(llvm_ir.as_bytes()),
         timeout_ms: options.timeout_ms,
@@ -188,32 +235,41 @@ unsafe fn width(ty: LLVMTypeRef) -> Result<u32> {
     }
 }
 
-unsafe fn check_module(module: LLVMModuleRef, function: LLVMValueRef, params: usize) -> Result<()> {
+unsafe fn check_module_environment(module: LLVMModuleRef) -> Result<()> {
     let mut asm_size = 0;
     LLVMGetModuleInlineAsm(module, &mut asm_size);
+    if asm_size != 0
+        || !LLVMGetFirstNamedMetadata(module).is_null()
+        || !LLVMGetFirstGlobal(module).is_null()
+        || !LLVMGetFirstGlobalAlias(module).is_null()
+        || !LLVMGetFirstGlobalIFunc(module).is_null()
+    {
+        return Err(ValidationError("module outside bounded snapshot profile"));
+    }
+    Ok(())
+}
+
+unsafe fn check_module(module: LLVMModuleRef, function: LLVMValueRef) -> Result<()> {
+    check_module_environment(module)?;
+    if LLVMGetFirstFunction(module) != function || !LLVMGetNextFunction(function).is_null() {
+        return Err(ValidationError("module outside single-function profile"));
+    }
+    Ok(())
+}
+
+unsafe fn check_function_header(function: LLVMValueRef, params: usize) -> Result<()> {
     let mut metadata_count = 0;
     let metadata = LLVMGlobalCopyAllMetadata(function, &mut metadata_count);
     if !metadata.is_null() {
         LLVMDisposeValueMetadataEntries(metadata);
     }
-    if asm_size != 0
-        || metadata_count != 0
-        || !LLVMGetFirstNamedMetadata(module).is_null()
-        || !LLVMGetFirstGlobal(module).is_null()
-        || !LLVMGetFirstGlobalAlias(module).is_null()
-        || !LLVMGetFirstGlobalIFunc(module).is_null()
-        || LLVMGetFirstFunction(module) != function
-        || !LLVMGetNextFunction(function).is_null()
-    {
-        return Err(ValidationError("module outside single-function profile"));
-    }
-    if LLVMGetFunctionCallConv(function) != 0
+    if metadata_count != 0
+        || LLVMGetFunctionCallConv(function) != 0
         || LLVMHasPersonalityFn(function) != 0
         || !LLVMGetGC(function).is_null()
         || LLVMGetPointerAddressSpace(LLVMTypeOf(function)) != 0
         || LLVMCountParams(function) as usize != params
         || LLVMIsFunctionVarArg(LLVMGlobalGetValueType(function)) != 0
-        || width(LLVMGetReturnType(LLVMGlobalGetValueType(function)))? != 64
     {
         return Err(ValidationError("unsupported LLVM signature"));
     }
@@ -221,6 +277,14 @@ unsafe fn check_module(module: LLVMModuleRef, function: LLVMValueRef, params: us
         if LLVMGetAttributeCountAtIndex(function, index) != 0 {
             return Err(ValidationError("LLVM attributes unsupported"));
         }
+    }
+    Ok(())
+}
+
+unsafe fn check_function(function: LLVMValueRef, params: usize) -> Result<()> {
+    check_function_header(function, params)?;
+    if width(LLVMGetReturnType(LLVMGlobalGetValueType(function)))? != 64 {
+        return Err(ValidationError("unsupported LLVM signature"));
     }
     if LLVMCountBasicBlocks(function) == 0 || LLVMCountBasicBlocks(function) as usize > MAX_BLOCKS {
         return Err(ValidationError("LLVM block limit"));
@@ -268,6 +332,90 @@ unsafe fn check_module(module: LLVMModuleRef, function: LLVMValueRef, params: us
             inst = LLVMGetNextInstruction(inst);
         }
         block = LLVMGetNextBasicBlock(block);
+    }
+    Ok(())
+}
+
+unsafe fn check_native_module(module: LLVMModuleRef, user_main: LLVMValueRef) -> Result<()> {
+    check_module_environment(module)?;
+    let main = LLVMGetNamedFunction(module, c"main".as_ptr());
+    if main.is_null() {
+        return Err(ValidationError("missing native main wrapper"));
+    }
+    let mut function = LLVMGetFirstFunction(module);
+    let mut count = 0;
+    while !function.is_null() {
+        if (function != user_main && function != main)
+            || LLVMGetLinkage(function) != llvm_sys::LLVMLinkage::LLVMExternalLinkage
+        {
+            return Err(ValidationError(
+                "module outside two-function native profile",
+            ));
+        }
+        count += 1;
+        function = LLVMGetNextFunction(function);
+    }
+    if count != 2 {
+        return Err(ValidationError(
+            "module outside two-function native profile",
+        ));
+    }
+    check_function_header(main, 2)?;
+    let is_i32 = |ty| {
+        LLVMGetTypeKind(ty) == LLVMTypeKind::LLVMIntegerTypeKind && LLVMGetIntTypeWidth(ty) == 32
+    };
+    let argv_type = LLVMTypeOf(LLVMGetParam(main, 1));
+    if !is_i32(LLVMGetReturnType(LLVMGlobalGetValueType(main)))
+        || !is_i32(LLVMTypeOf(LLVMGetParam(main, 0)))
+        || LLVMGetTypeKind(argv_type) != LLVMTypeKind::LLVMPointerTypeKind
+        || LLVMGetPointerAddressSpace(argv_type) != 0
+        || LLVMCountBasicBlocks(main) != 1
+    {
+        return Err(ValidationError("unsupported native wrapper signature"));
+    }
+    let call = LLVMGetFirstInstruction(LLVMGetEntryBasicBlock(main));
+    if call.is_null() || LLVMGetInstructionOpcode(call) != LLVMOpcode::LLVMCall {
+        return Err(ValidationError("unsupported native wrapper call"));
+    }
+    if LLVMGetCalledValue(call) != user_main
+        || LLVMGetCalledFunctionType(call) != LLVMGlobalGetValueType(user_main)
+        || LLVMGetNumArgOperands(call) != 0
+        || LLVMGetNumOperands(call) != 1
+        || LLVMGetInstructionCallConv(call) != 0
+        || LLVMIsTailCall(call) != 0
+        || LLVMGetCallSiteAttributeCount(call, 0) != 0
+        || LLVMGetCallSiteAttributeCount(call, u32::MAX) != 0
+    {
+        return Err(ValidationError("unsupported native wrapper call"));
+    }
+    // LLVM 17's C API cannot enumerate bundles; empty bundles add no operands.
+    // Its canonical plain-call suffix excludes them without constraining SSA names.
+    let printed = LLVMPrintValueToString(call);
+    let plain_call = std::ffi::CStr::from_ptr(printed)
+        .to_bytes()
+        .ends_with(b"call i64 @__mumei_user_main()");
+    LLVMDisposeMessage(printed);
+    if !plain_call {
+        return Err(ValidationError("unsupported native wrapper call"));
+    }
+    let trunc = LLVMGetNextInstruction(call);
+    if trunc.is_null()
+        || LLVMGetInstructionOpcode(trunc) != LLVMOpcode::LLVMTrunc
+        || LLVMGetOperand(trunc, 0) != call
+        || !is_i32(LLVMTypeOf(trunc))
+    {
+        return Err(ValidationError("unsupported native wrapper truncation"));
+    }
+    let ret = LLVMGetNextInstruction(trunc);
+    if ret.is_null()
+        || LLVMGetInstructionOpcode(ret) != LLVMOpcode::LLVMRet
+        || LLVMGetOperand(ret, 0) != trunc
+        || !LLVMGetNextInstruction(ret).is_null()
+        || [call, trunc, ret]
+            .iter()
+            .any(|&inst| LLVMHasMetadata(inst) != 0)
+    {
+        return Err(ValidationError("unsupported native wrapper return"));
     }
     Ok(())
 }

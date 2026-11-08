@@ -421,6 +421,14 @@ pub(crate) enum Command {
 
 #[derive(Subcommand)]
 pub(crate) enum NativeBundleCommand {
+    /// Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics
+    RecheckLlvm {
+        bundle: String,
+        source: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel
+        #[arg(long)]
+        expected_build_id: String,
+    },
     /// Check pinned snapshots and freshly recheck the C03 source postcondition, not LLVM or binary semantics
     RecheckSource {
         bundle: String,
