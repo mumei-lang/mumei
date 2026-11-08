@@ -493,7 +493,6 @@ mod tests {
             "0.0".to_owned(),
             "1.0".to_owned(),
             format!("0.{}1", "0".repeat(400)),
-            format!("{}.0", "9".repeat(400)),
         ] {
             for source in [
                 SOURCE.replace("requires: true", &format!("requires: x < {literal}")),
@@ -507,6 +506,11 @@ mod tests {
                 ));
             }
         }
+        assert!(extract(&SOURCE.replace(
+            "if x < 0 { 0 } else { x }",
+            &format!("{}.0", "9".repeat(400))
+        ))
+        .is_err());
         assert!(extract(&format!("// 0.0 and 1.0 are comments\n{SOURCE}")).is_ok());
     }
 

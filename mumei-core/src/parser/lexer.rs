@@ -295,10 +295,10 @@ impl<'a> Lexer<'a> {
 
         if is_float {
             match num_str.parse::<f64>() {
-                Ok(value) => Token::FloatLit(value),
-                Err(_) => {
+                Ok(value) if value.is_finite() => Token::FloatLit(value),
+                value => {
                     self.record_numeric_error(start_line, start_col);
-                    Token::FloatLit(0.0)
+                    Token::FloatLit(value.unwrap_or(0.0))
                 }
             }
         } else {
@@ -315,7 +315,7 @@ impl<'a> Lexer<'a> {
     fn record_numeric_error(&mut self, line: usize, col: usize) {
         if self.numeric_errors.len() < 100 {
             self.numeric_errors.push(format!(
-                "invalid numeric literal or out-of-range integer at line {line}, column {col}"
+                "invalid or out-of-range numeric literal at line {line}, column {col}"
             ));
         }
     }
@@ -431,6 +431,17 @@ pub fn legacy_tokenize(input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_module_rejects_nonfinite_literals_before_they_can_become_identifiers() {
+        let source = format!("atom identity(inf: i64) -> i64 requires: true; ensures: result == {}.0; body: {{ inf }};", "9".repeat(400));
+        assert!(crate::parser::parse_module_checked(&source).is_err());
+        let underflow = format!("0.{}1", "0".repeat(400));
+        assert_eq!(
+            Lexer::new(&underflow).tokenize_checked().unwrap()[0].token,
+            Token::FloatLit(0.0)
+        );
+    }
 
     #[test]
     fn checked_lexing_rejects_numeric_recovery_but_ignores_comments_and_strings() {
