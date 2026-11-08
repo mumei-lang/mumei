@@ -125,6 +125,7 @@ pub(super) fn from_recheck(
     let version = mumei_core::verification::linked_z3_version();
     let z3_version = format!("{}.{}.{}.{}", version.0, version.1, version.2, version.3);
     let make = |subject: Subject,
+                specification: Identity,
                 obligation_id,
                 profile,
                 integer_model,
@@ -136,10 +137,7 @@ pub(super) fn from_recheck(
                 artifact_paths| Evidence {
         schema_version: "mumei.verification-evidence/v1",
         subject,
-        specification: Identity {
-            id: "main.contract",
-            sha256: record.source.specification_sha256.clone(),
-        },
+        specification,
         obligation_id,
         semantics: Semantics {
             profile,
@@ -175,6 +173,7 @@ pub(super) fn from_recheck(
         evidence: [
             make(
                 Subject { id: "program", kind: "native_artifact", sha256: record.files[&BundleFile::Executable].sha256.clone() },
+                Identity { id: "native-bundle.json", sha256: expected_id.to_owned() },
                 "native_bundle_identity_consistency", PROFILE, "not_applicable", Some(report.target),
                 "identity_check", "identity",
                 Correspondence { relation: "unchecked", status: "unverified", notes: &["pinned_source_certificate_and_bundle_member_identities_only_not_semantic_correspondence"] },
@@ -183,6 +182,7 @@ pub(super) fn from_recheck(
             ),
             make(
                 Subject { id: "native-source.mm", kind: "mumei_source", sha256: report.source_sha256.clone() },
+                Identity { id: "main.contract", sha256: record.source.specification_sha256.clone() },
                 "main_source_postcondition", RECHECK_PROFILE, "checked_i64", None,
                 "deductive_proof", "unbounded",
                 Correspondence { relation: "exact_model", status: "assumed", notes: &["restricted_c03_source_encoding_and_parser_normalization_are_trusted_not_independently_proved"] },
@@ -191,6 +191,7 @@ pub(super) fn from_recheck(
             ),
             make(
                 Subject { id: "program.ll", kind: "lowered_ir", sha256: report.llvm_sha256.clone() },
+                Identity { id: "native-source.mm#main.body", sha256: report.source_sha256.clone() },
                 "main_source_to_llvm_user_body", report.profile, "checked_i64", Some(report.target),
                 "deductive_proof", "unbounded",
                 Correspondence { relation: "exact_model", status: "validated", notes: &[

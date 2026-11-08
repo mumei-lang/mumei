@@ -584,7 +584,10 @@ and observed target/layout are included in the approved configuration fingerprin
 profile names retain all syntax/size/path limits.
 
 Subjects/specifications are tied to the exact snapshots already held in memory,
-not reopened files. IDs and artifact paths are fixed logical labels/relative
+not reopened files: identity uses the pinned manifest as specification, source
+postcondition uses the C03 contract identity, and LLVM correspondence uses the
+full source digest that binds the particular body, not only its postcondition.
+IDs and artifact paths are fixed logical labels/relative
 bundle-member names, never caller paths. Provenance reports the running Mumei
 version and linked Z3 version, not producer-supplied tool/version strings.
 No source/LLVM text, models, environment, endpoint, command arguments, raw
