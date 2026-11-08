@@ -188,9 +188,9 @@ fn a_match_guard_in_a_loop_is_checked_under_the_invariant() {
 #[test]
 fn unsigned_arithmetic_is_checked_against_its_own_range() {
     let flag = &["--check-i64-overflow"];
-    // Above i64::MAX but within u64.
+    // Above i64::MAX but within u64, using representable integer literals.
     let big = "atom bump(x: u64) -> u64\n\
-        requires: x <= 10000000000000000000;\n\
+        requires: x <= 9223372036854775807 + 1;\n\
         ensures: result == x + 1;\n\
         body: { x + 1 };\n";
     let output = verify("u64_big", big, flag);
@@ -214,6 +214,36 @@ fn unsigned_arithmetic_is_checked_against_its_own_range() {
     assert!(!output.status.success(), "{}", text(&output));
     assert!(
         text(&output).contains("Integer arithmetic may overflow u64"),
+        "{}",
+        text(&output)
+    );
+}
+
+#[test]
+fn unsigned_values_above_i64_max_are_not_vacuous() {
+    let source = "atom above_signed_max(x: u64) -> u64\n\
+        requires: x > 9223372036854775807;\n\
+        ensures: result <= 9223372036854775807;\n\
+        body: { x };\n";
+    let output = verify("u64_above_signed_max", source, &["--check-i64-overflow"]);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains("Postcondition (ensures) is not satisfied"),
+        "{}",
+        text(&output)
+    );
+}
+
+#[test]
+fn oversized_literals_cannot_silently_narrow_unsigned_preconditions() {
+    let source = "atom narrowed(x: u64) -> u64\n\
+        requires: x <= 10000000000000000000;\n\
+        ensures: x == 0;\n\
+        body: { x };\n";
+    let output = verify("u64_literal_recovery", source, &[]);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains("numeric literal"),
         "{}",
         text(&output)
     );

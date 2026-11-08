@@ -178,8 +178,16 @@ Arithmetic (including overflow), division, shifts, conversions, calls, heap,
 FFI, mutation, local bindings, quantifiers, trust overrides and effect/ownership
 annotations are rejected rather than silently dropped. Boolean values are
 conditions in this first profile, not public Boolean parameters/return values.
-Checked lexing rejects failed numeric conversions before parser recovery can
-replace them with zero. Raw float tokens, including integer-valued, underflowing
+Checked lexing rejects failed numeric conversions and nonfinite float literals
+before parser recovery or text reconstruction can replace them with zero or an
+identifier. The existing integer literal representation is `i64`, independently
+of parameter types: this also rejects a single oversized literal in a `u64`
+contract. It does not restrict `u64` variables to the signed range; larger
+mathematical constants can currently be built from in-range literals and
+unbounded contract arithmetic. General width-aware literal representation is
+still future work, not silently supplied by this profile.
+
+Raw float tokens, including integer-valued, underflowing
 and overflowing float literals, are rejected by this profile before item text
 reconstruction can erase their category. This is not an exact-decimal or IEEE
 floating-point validation profile. The current `-9223372036854775808` spelling is
