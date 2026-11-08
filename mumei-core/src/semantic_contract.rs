@@ -14,7 +14,11 @@ use crate::verification::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use z3::{
+    ast::{Ast, Bool, BV},
+    Context,
+};
 
 pub const SEMANTIC_CONTRACT_VERSION: &str = "mumei.semantic-contract/v1";
 pub const PURE_I64_PROFILE: &str = "mumei.pure-i64-comparison/v1";
@@ -379,6 +383,178 @@ fn json_digest(value: &impl Serialize) -> Result<String, SemanticContractError> 
     let value = serde_json::to_value(value).map_err(|_| SemanticContractError::Encoding)?;
     let bytes = serde_json::to_vec(&value).map_err(|_| SemanticContractError::Encoding)?;
     Ok(digest(&bytes))
+}
+
+/// Symbolic body for the C03 comparison fragment, independent of an emitter.
+/// No solver check, pre/postcondition proof or LLVM claim is performed here.
+pub struct PureI64Body<'ctx> {
+    pub function_name: String,
+    pub source_sha256: String,
+    pub inputs: Vec<BV<'ctx>>,
+    pub value: BV<'ctx>,
+}
+
+type BodyResult<T> = std::result::Result<T, SemanticContractError>;
+
+pub fn encode_pure_i64_body<'ctx>(
+    source: &str,
+    context: &'ctx Context,
+) -> BodyResult<PureI64Body<'ctx>> {
+    if source.len() > 65_536 {
+        return Err(SemanticContractError::Unsupported("source size limit"));
+    }
+    let tokens = crate::parser::lexer::Lexer::new(source)
+        .tokenize_checked()
+        .map_err(|_| SemanticContractError::Parse)?;
+    if tokens.len() > 256 {
+        return Err(SemanticContractError::Unsupported("source token limit"));
+    }
+    let mut depth = 0usize;
+    for token in tokens {
+        use crate::parser::token::Token;
+        match token.token {
+            Token::LParen | Token::LBrace | Token::LBracket => {
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return Err(SemanticContractError::Unsupported("source nesting limit"));
+                }
+            }
+            Token::RParen | Token::RBrace | Token::RBracket => depth = depth.saturating_sub(1),
+            _ => (),
+        }
+    }
+    let contract = extract_pure_i64_contract(source, "scalar-body.mm", None)?;
+    let mut items = parse_module_checked(source).map_err(|_| SemanticContractError::Parse)?;
+    let Some(Item::Atom(atom)) = items.pop() else {
+        return Err(SemanticContractError::Unsupported("source atom"));
+    };
+    if atom.params.len() > 16 {
+        return Err(SemanticContractError::Unsupported("parameter limit"));
+    }
+    let body =
+        parse_body_expr_checked(&atom.body_expr).map_err(|_| SemanticContractError::Parse)?;
+    let inputs: Vec<_> = (0..atom.params.len())
+        .map(|i| BV::new_const(context, format!("input_{i}"), 64))
+        .collect();
+    let params = atom
+        .params
+        .iter()
+        .zip(&inputs)
+        .map(|(p, v)| (p.name.as_str(), v.clone()))
+        .collect();
+    let value = source_stmt(&body, context, &params, 0)?.integer()?;
+    Ok(PureI64Body {
+        function_name: atom.name,
+        source_sha256: contract.source_sha256,
+        inputs,
+        value,
+    })
+}
+
+const MAX_DEPTH: usize = 48;
+
+enum SourceValue<'ctx> {
+    Integer(BV<'ctx>),
+    Boolean(Bool<'ctx>),
+}
+impl<'ctx> SourceValue<'ctx> {
+    fn integer(self) -> BodyResult<BV<'ctx>> {
+        match self {
+            Self::Integer(v) => Ok(v),
+            _ => Err(SemanticContractError::Unsupported(
+                "source integer expected",
+            )),
+        }
+    }
+    fn boolean(self) -> BodyResult<Bool<'ctx>> {
+        match self {
+            Self::Boolean(v) => Ok(v),
+            _ => Err(SemanticContractError::Unsupported(
+                "source boolean expected",
+            )),
+        }
+    }
+}
+
+fn source_stmt<'ctx>(
+    stmt: &Stmt,
+    ctx: &'ctx Context,
+    params: &HashMap<&str, BV<'ctx>>,
+    depth: usize,
+) -> BodyResult<SourceValue<'ctx>> {
+    if depth > MAX_DEPTH {
+        return Err(SemanticContractError::Unsupported("source depth limit"));
+    }
+    match stmt {
+        Stmt::Expr(e, _) => source_expr(e, ctx, params, depth + 1),
+        Stmt::Block(stmts, _) if stmts.len() == 1 => source_stmt(&stmts[0], ctx, params, depth + 1),
+        _ => Err(SemanticContractError::Unsupported(
+            "unsupported source statement",
+        )),
+    }
+}
+
+fn source_expr<'ctx>(
+    expr: &Expr,
+    ctx: &'ctx Context,
+    params: &HashMap<&str, BV<'ctx>>,
+    depth: usize,
+) -> BodyResult<SourceValue<'ctx>> {
+    use SourceValue::{Boolean as B, Integer as I};
+    if depth > MAX_DEPTH {
+        return Err(SemanticContractError::Unsupported("source depth limit"));
+    }
+    Ok(match expr {
+        Expr::Number(n) => I(BV::from_i64(ctx, *n, 64)),
+        Expr::Variable(n) if n == "true" || n == "false" => B(Bool::from_bool(ctx, n == "true")),
+        Expr::Variable(n) => I(params
+            .get(n.as_str())
+            .ok_or(SemanticContractError::Unsupported("source binding"))?
+            .clone()),
+        Expr::Block(s) => source_stmt(s, ctx, params, depth + 1)?,
+        Expr::BinaryOp(a, op, b) => {
+            let a = source_expr(a, ctx, params, depth + 1)?;
+            let b = source_expr(b, ctx, params, depth + 1)?;
+            B(match (a, op, b) {
+                (I(a), Op::Eq, I(b)) => a._eq(&b),
+                (I(a), Op::Neq, I(b)) => a._eq(&b).not(),
+                (B(a), Op::Eq, B(b)) => a._eq(&b),
+                (B(a), Op::Neq, B(b)) => a._eq(&b).not(),
+                (I(a), Op::Lt, I(b)) => a.bvslt(&b),
+                (I(a), Op::Le, I(b)) => a.bvsle(&b),
+                (I(a), Op::Gt, I(b)) => a.bvsgt(&b),
+                (I(a), Op::Ge, I(b)) => a.bvsge(&b),
+                (B(a), Op::And, B(b)) => Bool::and(ctx, &[&a, &b]),
+                (B(a), Op::Or, B(b)) => Bool::or(ctx, &[&a, &b]),
+                (B(a), Op::Implies, B(b)) => a.implies(&b),
+                _ => {
+                    return Err(SemanticContractError::Unsupported(
+                        "unsupported source operator",
+                    ))
+                }
+            })
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            let cond = source_expr(cond, ctx, params, depth + 1)?.boolean()?;
+            match (
+                source_stmt(then_branch, ctx, params, depth + 1)?,
+                source_stmt(else_branch, ctx, params, depth + 1)?,
+            ) {
+                (I(a), I(b)) => I(cond.ite(&a, &b)),
+                (B(a), B(b)) => B(cond.ite(&a, &b)),
+                _ => return Err(SemanticContractError::Unsupported("source branch types")),
+            }
+        }
+        _ => {
+            return Err(SemanticContractError::Unsupported(
+                "unsupported source expression",
+            ))
+        }
+    })
 }
 
 #[cfg(test)]

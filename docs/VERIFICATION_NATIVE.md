@@ -314,6 +314,65 @@ initially; reject rather than promote unsupported cases. A pre-optimization IR
 check cannot automatically certify post-optimization IR or the final binary.
 Existing source/Z3/Lean bridge lemmas do not already cover LLVM generation.
 
+### First LLVM translation-validation slice
+
+`mumei_emit_llvm::translation_validation::validate_pure_i64` is an opt-in,
+in-process C09 pilot, not a new CLI route or common-evidence producer. It consumes
+one C03 `mumei.pure-i64-comparison/v1` source unit and one caller-supplied LLVM
+17 textual IR snapshot. The caller must explicitly pin the exact
+`x86_64-unknown-linux-gnu` triple and the profile's `DATA_LAYOUT` on that snapshot;
+the checker never mutates it, invokes optimization passes or executes code.
+
+The checked relation is equality of the source **body** and LLVM return value
+for **every concrete signed-i64 input**, independently of requires/ensures.
+Because arithmetic is excluded, signed bitvector comparisons encode the C03
+integer comparison meaning without overflow. The LLVM side is separately
+interpreted from the verified LLVM-C graph, not regenerated from the source HIR.
+Its whitelist is scalar i1/i64 SSA: integer constants, comparisons (including
+unsigned predicates so wrong signedness can be refuted), bitwise Boolean
+operations, i1/i64 zext/trunc, select, phi, acyclic branches and returns. Parameter
+mapping is positional; phi values follow actual predecessor edges.
+The source model includes Boolean implication, but the existing emitter still
+rejects implication in an executable body. Checking manually supplied IR for
+that source form does not add or claim an emitter lowering.
+
+Only one ordinary C-call-convention function with an i64 signature is accepted.
+Memory/pointers, arithmetic, division/remainder/shifts, calls/FFI/intrinsics,
+loops, vectors/floats, globals/aliases/ifuncs, inline assembly, attributes,
+metadata, undef/poison and freeze are unsupported. Every block is screened,
+including dead blocks. Unsupported syntax, invalid IR, unmatched identities
+and exhausted analysis budgets are errors, never successful partial checks.
+The initial bounds are 64 KiB per input, 256 source tokens, 16 parameters,
+48 syntax/expression levels, 64 LLVM blocks, 1,024 static instructions and 256
+expanded path states. Input limits and parser normalization are not independent
+proofs of the parser's correctness.
+
+The existing Z3 library checks a quantifier-free bitvector mismatch query.
+Unsat yields `EquivalentWithinProfile`; sat yields `Different`; unknown/resource
+exhaustion yields `Inconclusive`, never equivalence. Default limits are 5,000 ms
+and 1,000,000 solver resource units; zero budgets are rejected. Reports contain
+profile, input domain, target/layout, budgets and exact source/IR hashes, but no
+source excerpts, solver models or raw parser diagnostics. They are ephemeral,
+unauthenticated results, not serialized certificates or a cache acceptance API.
+
+The integration checks the actual CLI's emitted **pre-optimization** IR after
+the caller explicitly pins its target/layout; it does not attest the snapshot's
+pipeline history. Rechecking a changed IR requires invoking the checker on that
+exact input. No result propagates across later optimization, target lowering,
+object emission, linker, runtime or executable changes. The trusted base still
+includes the existing checked parser/C03 profile, LLVM 17 parser/verifier, this
+small encoding and Z3. Parser/HIR normalization itself is not independently
+validated. A false source postcondition may coexist with equivalent bodies.
+
+This is **partial C09**, not full LLVM semantics, source contract correctness,
+native-bundle acceptance or final-binary verification. The C03 extractor still
+reports unchecked correspondence on its own, C08 `build/check` still verifies
+identity consistency only, and audit/Claim Book/Seal Grade/Lean gates do not
+change. No external verifier, plugin or universal semantic IR is added.
+
+Regression gate:
+`LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo test --test test_translation_validation --test test_semantic_contract`.
+
 ### First native identity bundle slice
 
 `mumei native-bundle build` is an opt-in producer for
