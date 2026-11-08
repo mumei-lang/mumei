@@ -23,6 +23,11 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Command {
+    /// Check common Evidence representation only, without proof acceptance or verifier execution
+    Evidence {
+        #[command(subcommand)]
+        command: EvidenceCommand,
+    },
     /// Build/check a restricted native identity bundle (not artifact semantic proof)
     NativeBundle {
         #[command(subcommand)]
@@ -416,6 +421,18 @@ pub(crate) enum Command {
         /// Arguments to pass to the compiled program
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum EvidenceCommand {
+    /// Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity
+    Check {
+        /// Regular JSON file (at most 65,536 bytes); not a native report envelope or proof certificate
+        input: String,
+        /// Print a static representation-only diagnostic, not an accepted Evidence record or certificate
+        #[arg(long)]
+        json: bool,
     },
 }
 

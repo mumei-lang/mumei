@@ -140,7 +140,7 @@ handling; a path is not proof that the referenced contents are safe.
 
 The first local producer connection is the success-only
 [`native-bundle recheck-llvm --json` report](#first-native-consumer-evidence-producer).
-General producer integration, consumer validation and mapping to existing claim
+Further producer integration, trust-aware consumer validation and mapping to existing claim
 evidence remain later C02 slices. A plugin cannot self-assert a new grade or use
 this schema to bypass Lean/kernel or current certificate checks.
 
@@ -187,6 +187,52 @@ Existing synthetic and native shapes, nested required/unknown fields, duplicates
 digests, lists, input bounds, optional metadata and privacy have separate gates.
 These are representation checks only. Generic acceptance/mapping and additional
 real producers/consumers remain open; no external verifier or WASM is enabled.
+
+### Standalone representation-only CLI consumer
+
+```sh
+mumei evidence check record.json
+mumei evidence check record.json --json
+```
+
+This opt-in command uses the shared Core gate on **one common v1 record**, not
+the three-record native report envelope, a proof certificate, a JSON array or
+JSON Lines. It is an integration entry point for representation checking without
+a Native bundle or a Rust caller, not a verifier/adapter execution path or a
+general acceptance engine. It does not load project configuration/proof caches,
+read record-selected artifacts, check hashes against files, authenticate a
+producer, select a verifier or execute anything mentioned in the record.
+
+The input must be a regular file with at most 65,536 bytes. Symlink/nonregular
+inputs, malformed/non-UTF-8/trailing/deep JSON, duplicate/escaped keys, unknown
+fields, missing nullable targets and invalid v1 combinations fail closed. The
+bounded file reader is shared with Native consumer inputs without changing their
+limits or diagnostics. On Unix it also uses `O_NOFOLLOW | O_NONBLOCK` for the
+final component and checks the opened file type; this is not a claim of general
+race-free/path-confinement handling on every platform or parent directory.
+
+Exit **0** means only representation-valid, including valid records describing
+counterexamples, findings, unknown, timeout, unsupported or unchecked results.
+It never asserts that the reported result is true or applies to the files on
+disk. Exit **1** means input/representation/output failure. Input rejection emits
+no stdout, including with `--json`; diagnostics contain no input values or paths.
+Clap usage errors retain exit 2. There is no solver-inconclusive exit 3 because
+this command makes no solver query.
+
+Success text and JSON are static, anonymous diagnostics, identical across valid
+inputs. JSON has `schema_version: mumei.evidence-representation-check/v1`,
+`evidence_schema_version: mumei.verification-evidence/v1`, `representation: valid`,
+`acceptance: not_evaluated` and `checks_not_performed` listing claim truth, file
+identity, freshness, producer authenticity, semantic correspondence and artifact
+semantics. It intentionally contains no subject, hash, provenance, raw report,
+acceptance decision or grade; it is **not a record-bound/reusable Evidence,
+certificate or acceptance receipt**, and is not accepted as an Evidence input.
+Native `recheck-evidence` remains a distinct fresh/pinned same-profile operation.
+
+This CLI checks representation only. Truth/trust/freshness, existing
+certificate/Claim Book/Seal Grade/Lean gates, general acceptance/mapping and
+final-artifact assurance remain separate/open. No external verifier, new
+environment variable, proof grade or WASM support is introduced.
 
 ## 5. Minimal semantic contract (C03)
 

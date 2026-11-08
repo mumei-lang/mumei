@@ -269,6 +269,22 @@ Generic acceptance/mapping, more real producers/consumers, wider C09/C10 and
 final-artifact semantics remain open. Agent orchestration/plugin ownership,
 external-verifier adoption decisions and deferred WASM remain unchanged.
 
+### Wave 5 standalone Evidence representation consumer
+
+`mumei evidence check <record> [--json]` exposes the existing shared v1 Core
+representation gate without a Native bundle or Rust integration. It accepts one
+bounded regular JSON file and emits only a static anonymous diagnostic, not raw
+metadata or a reusable Evidence/acceptance receipt. Valid non-success records
+also pass the representation gate; no solver, hash/file check, record-selected
+tool/file access, project configuration, proof cache or artifact execution occurs.
+
+This is partial C02/C13 consumer integration, not trust/freshness/authenticity,
+semantic support, common acceptance/mapping, grade/Claim Book/Lean promotion or
+final-binary assurance. Native's independently pinned fresh same-profile rechecks
+remain separate and unchanged; Agent's orchestration boundary, external-verifier
+adoption decisions and deferred WASM remain intact. See the
+[CLI contract](VERIFICATION_NATIVE.md#standalone-representation-only-cli-consumer).
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
