@@ -19,6 +19,7 @@ pub mod lowering;
 pub mod manifest;
 pub mod mir;
 pub mod mir_analysis;
+pub mod native_bundle;
 pub mod observe;
 pub mod parser;
 pub mod proof_cert;

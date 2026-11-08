@@ -11,6 +11,9 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | Command | Option count | Summary |
 |---|---:|---|
 | `mumei` | 1 | Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) |
+| `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
+| `mumei native-bundle build` | 1 | Freshly verify and build a pure-i64 main on Linux/x86_64 with fixed settings |
+| `mumei native-bundle check` | 1 | Check snapshot identities against an externally supplied build ID; does not execute or prove the artifact |
 | `mumei build` | 5 | Verify + compile to LLVM IR (default) |
 | `mumei verify` | 38 | Z3 formal verification only (no codegen) |
 | `mumei config` | 2 | Show effective settings and where each value comes from. The CLI `--profile` is per-invocation; `mumei config` only reports the manifest source. |
@@ -60,6 +63,61 @@ Usage: mumei [OPTIONS] [INPUT] [COMMAND]
 | Option | Default | Possible values | Description |
 |---|---|---|---|
 | `-o, --output <OUTPUT>` | katana | — | Output base name (for .ll) |
+
+## `mumei native-bundle`
+
+Build/check a restricted native identity bundle (not artifact semantic proof)
+
+Usage:
+
+```text
+Usage: mumei native-bundle <COMMAND>
+```
+
+## `mumei native-bundle build`
+
+Freshly verify and build a pure-i64 main on Linux/x86_64 with fixed settings
+
+Usage:
+
+```text
+Usage: mumei native-bundle build [OPTIONS] <INPUT>
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `INPUT` | Yes | — |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `-o, --output <OUTPUT>` | native-bundle | — | New bundle directory; must not exist (project config and proof cache are not loaded) |
+
+## `mumei native-bundle check`
+
+Check snapshot identities against an externally supplied build ID; does not execute or prove the artifact
+
+Usage:
+
+```text
+Usage: mumei native-bundle check --expected-build-id <EXPECTED_BUILD_ID> <BUNDLE> <SOURCE>
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `BUNDLE` | Yes | — |
+| `SOURCE` | Yes | — |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--expected-build-id <EXPECTED_BUILD_ID>` | — | — | SHA-256 of native-bundle.json obtained through a separately trusted channel |
 
 ## `mumei build`
 

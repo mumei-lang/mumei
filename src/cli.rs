@@ -23,6 +23,11 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Command {
+    /// Build/check a restricted native identity bundle (not artifact semantic proof)
+    NativeBundle {
+        #[command(subcommand)]
+        command: NativeBundleCommand,
+    },
     /// Verify + compile to LLVM IR (default)
     Build {
         /// Input .mm file
@@ -411,6 +416,25 @@ pub(crate) enum Command {
         /// Arguments to pass to the compiled program
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum NativeBundleCommand {
+    /// Freshly verify and build a pure-i64 main on Linux/x86_64 with fixed settings
+    Build {
+        input: String,
+        /// New bundle directory; must not exist (project config and proof cache are not loaded)
+        #[arg(short, long, default_value = "native-bundle")]
+        output: String,
+    },
+    /// Check snapshot identities against an externally supplied build ID; does not execute or prove the artifact
+    Check {
+        bundle: String,
+        source: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel
+        #[arg(long)]
+        expected_build_id: String,
     },
 }
 
