@@ -82,6 +82,25 @@ It does not complete general obligation decomposition, default producer/consumer
 integration, stable IR interchange or translation validation; see the
 [supported scope](VERIFICATION_NATIVE.md#first-supported-scalar-slice).
 
+### Wave 2 explicit result-contract routing follow-up
+
+Agent's opt-in C04/C11 planner now supports an optional exact `ResultContract`
+binding a profile/method pair to scope, complete bound/assumption identifiers
+and correspondence relation/status. Registered offers must match one whole
+contract: no borrowing fields across offers or treating missing declarations
+as wildcards. Priority, explicit selection and permitted preflight fallback
+cannot relax it. No implication, numeric ordering, assumption discharge or
+correspondence upgrade is inferred. Unconstrained requests retain their earlier
+v1 payload and do not silently acquire an assurance policy.
+
+This is partial routing and C13 confusion regression, not Evidence ingestion,
+proof acceptance, capability truth, lifecycle/execution/resource enforcement or
+runtime fallback/reconciliation. Existing Core source/native consumers remain
+separate; audit keys, grades, Lean gates and Mumei/Agent ownership are unchanged.
+No external verifier is adopted and WASM stays deferred. The
+[Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-explicit-result-contract-routing)
+owns local API details under this implementation order.
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)

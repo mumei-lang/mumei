@@ -464,6 +464,21 @@ Conflicting results must not be resolved by picking the successful one. First
 check that tools saw the same obligation, semantics, inputs and assumptions;
 preserve unresolved disagreement for investigation.
 
+Agent's opt-in metadata planner has a first exact result-contract slice:
+`ResultContract` pairs one profile/method with scope, complete bound/assumption
+identifiers and explicit correspondence relation/status. A constrained request
+requires one equal registered offer; missing declarations are not wildcards and
+fields cannot be combined across offers. Explicit selection, priority and
+permitted preflight fallback preserve the request. No implication, scope/bound
+ordering, assumption discharge or correspondence promotion is inferred.
+Unconstrained queries retain their prior payload/behavior, not an implicit
+assurance guarantee. Host/profile identifiers are routing metadata, not raw
+Evidence fields or executable inputs. A claimed `validated` capability is not
+checked correspondence, and selecting it is not accepting any result. Evidence
+ingestion/validation, execution/cancellation, resource enforcement and runtime
+reconciliation remain later work. See the
+[local API boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-explicit-result-contract-routing).
+
 "Plugin" describes the extension boundary, not a decision to use shared
 libraries. Subprocess, container and explicitly configured remote transports
 are possible later choices. Do not reuse the emitter-plugin ABI by assumption.
