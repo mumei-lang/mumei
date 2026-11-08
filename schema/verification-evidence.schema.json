@@ -126,7 +126,7 @@
     "artifact_paths": {"type":"array","items":{"type":"string","minLength":1},"uniqueItems":true}
   },
   "$defs": {
-    "sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "sha256": {"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-f]{64}$"},
     "subject": {
       "type": "object",
       "additionalProperties": false,
