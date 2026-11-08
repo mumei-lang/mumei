@@ -234,6 +234,60 @@ certificate/Claim Book/Seal Grade/Lean gates, general acceptance/mapping and
 final-artifact assurance remain separate/open. No external verifier, new
 environment variable, proof grade or WASM support is introduced.
 
+### Standalone fresh source Evidence producer
+
+```sh
+mumei evidence verify-source tests/fixtures/semantic_contract_clamp.mm
+mumei evidence verify-source tests/fixtures/semantic_contract_clamp.mm --json > source-evidence.json
+mumei evidence check source-evidence.json --json
+```
+
+This opt-in **producer**, separate from the representation-only `check`, runs a
+fresh linked Z3 query through Core's existing bounded C03 bitvector encoder.
+It accepts one pure-i64 comparison/conditional atom with explicit owned i64
+parameters/return, at most 16 parameters and a **literal `true` precondition**.
+False and nonliteral preconditions are rejected before querying, not accepted
+by vacuity. Arithmetic, calls, imports, effects, heap, FFI, quantifiers and
+concurrency remain unsupported. The encoder also bounds source tokens (256),
+nesting/expression depth (48) and accepted syntax. Input uses the same 65,536-byte
+regular-file reader as `evidence check`; symlinks/nonregular inputs are rejected.
+
+`--solver-timeout` is milliseconds (default/max 10,000), and
+`--solver-resource-limit` is Z3 resource units (default/max 1,000,000). Both
+must be positive; zero/unlimited and above-profile budgets fail closed. No
+project configuration, ambient feature-policy settings, proof cache, existing
+certificate or native bundle is loaded. The Core API is
+`mumei_core::source_evidence::verify(source, Options)`; the representation gate
+remains independent and does not run Z3.
+
+Only a fresh `unsat` counterexample query yields exit 0 and, with `--json`,
+**one common v1 record**, not a native envelope or certificate. `sat` yields
+exit 1, solver `unknown` (including resource exhaustion) yields exit 3, and
+invalid input/profile/budget/I/O yields exit 1. All non-success paths have
+empty stdout and static diagnostics; there is no partial record or model dump.
+Text success is static and explicitly says acceptance is not evaluated.
+
+The record binds the exact source bytes and normalized C03 specification by
+SHA-256, uses constant source/specification labels rather than paths, source
+names, binders or raw expressions, and records the actual linked Z3 version
+and a fingerprint of producer/semantic/encoder versions, budgets and tool
+configuration. No artifact paths are emitted or followed. Method is
+`deductive_proof`, execution `completed`, result `established`, and scope
+`unbounded` **over all representable signed-i64 inputs**, not arbitrary-precision
+integers or unbounded syntax. The source-to-model correspondence is explicitly
+`assumed`: the restricted parser/normalization/encoder and solver are trusted,
+not independently proved. This is not a replay of the general verifier pipeline
+and does not prove correspondence to that pipeline or LLVM lowering.
+
+A saved record is unauthenticated metadata, **not an acceptance receipt**;
+`evidence check` on it still checks only representation. There is no saved-record
+consumer that establishes current identity, freshness, authenticity or truth.
+Seal Grades, Claim Book, certificate serialization/trust, Lean checks and Native
+identity/recheck/replay semantics are unchanged. LLVM correspondence, optimizer,
+object/linker/runtime/ABI/OS-exit/final-executable semantics and general common
+acceptance/mapping remain open. This is partial C02/C13 real-producer integration;
+it neither completes C02/C10 nor adds an external verifier or WASM.
+
 ## 5. Minimal semantic contract (C03)
 
 Start with a pure integer/Boolean function: for a signed 64-bit input, return

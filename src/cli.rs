@@ -23,7 +23,7 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Command {
-    /// Check common Evidence representation only, without proof acceptance or verifier execution
+    /// Check common Evidence representation or produce fresh scoped source Evidence; no proof acceptance
     Evidence {
         #[command(subcommand)]
         command: EvidenceCommand,
@@ -426,6 +426,20 @@ pub(crate) enum Command {
 
 #[derive(Subcommand)]
 pub(crate) enum EvidenceCommand {
+    /// Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance
+    VerifySource {
+        /// Regular source file; single pure-i64 comparison/conditional atom, at most 16 parameters and literal true precondition
+        input: String,
+        /// Emit one common Evidence v1 record on fresh unsat only (not an acceptance receipt)
+        #[arg(long)]
+        json: bool,
+        /// Solver timeout in milliseconds (1..=10000); no project/ambient policy loaded
+        #[arg(long, default_value_t = mumei_core::source_evidence::MAX_TIMEOUT_MS)]
+        solver_timeout: u32,
+        /// Solver resource units (1..=1000000); zero/unlimited is rejected
+        #[arg(long, default_value_t = mumei_core::source_evidence::MAX_RESOURCE_LIMIT)]
+        solver_resource_limit: u32,
+    },
     /// Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity
     Check {
         /// Regular JSON file (at most 65,536 bytes); not a native report envelope or proof certificate

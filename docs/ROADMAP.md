@@ -2905,6 +2905,17 @@ Native pins/fresh rechecks and certificate/grade/Lean policies remain unchanged.
 General acceptance/mapping and artifact assurance stay open. See the
 [standalone CLI contract](VERIFICATION_NATIVE.md#standalone-representation-only-cli-consumer).
 
+The first standalone C02/C13 source producer now connects the existing bounded
+C03 bitvector model to fresh linked-Z3 queries without a Native bundle:
+`mumei evidence verify-source <source> [--json]`. Only fresh unsat emits one
+common Evidence record; refuted, unknown, unsupported and vacuous-precondition
+inputs cannot emit success. The literal-true, at-most-16-parameter pure-i64
+comparison/conditional profile has explicit positive solver budgets and trusted,
+not independently proved, source-model correspondence. Saved output is not
+accepted proof, grade promotion, LLVM correspondence or executable assurance.
+General acceptance/mapping and wider producers/consumers stay open. See the
+[source producer contract](VERIFICATION_NATIVE.md#standalone-fresh-source-evidence-producer).
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

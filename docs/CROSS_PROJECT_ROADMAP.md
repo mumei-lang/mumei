@@ -285,6 +285,22 @@ remain separate and unchanged; Agent's orchestration boundary, external-verifier
 adoption decisions and deferred WASM remain intact. See the
 [CLI contract](VERIFICATION_NATIVE.md#standalone-representation-only-cli-consumer).
 
+### Wave 5 standalone fresh source Evidence producer
+
+`mumei evidence verify-source <source> [--json]` uses the existing bounded C03
+encoder and a fresh linked-Z3 query independently of Native bundles or existing
+certificates. Only unsat yields one common v1 record; sat/unknown/unsupported
+inputs emit none. The literal-true pure-i64 comparison/conditional profile
+prevents vacuity and explicitly trusts parser/model/solver correspondence.
+Positive timeout/resource budgets and actual tool/configuration provenance
+bound the local query; saved JSON is not accepted or authenticated proof.
+
+This is partial C02/C13 producer integration, not common acceptance/mapping,
+general verifier/LLVM-lowering correspondence, grade/Claim Book/Lean promotion,
+or final-artifact assurance. Native consumer/replay, Agent orchestration,
+external-verifier adoption decisions and deferred WASM remain unchanged. See the
+[source producer contract](VERIFICATION_NATIVE.md#standalone-fresh-source-evidence-producer).
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:

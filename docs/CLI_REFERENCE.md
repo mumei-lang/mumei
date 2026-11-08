@@ -11,7 +11,8 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | Command | Option count | Summary |
 |---|---:|---|
 | `mumei` | 1 | Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) |
-| `mumei evidence` | 0 | Check common Evidence representation only, without proof acceptance or verifier execution |
+| `mumei evidence` | 0 | Check common Evidence representation or produce fresh scoped source Evidence; no proof acceptance |
+| `mumei evidence verify-source` | 3 | Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance |
 | `mumei evidence check` | 1 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
 | `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
 | `mumei native-bundle recheck-evidence` | 1 | Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance |
@@ -71,13 +72,37 @@ Usage: mumei [OPTIONS] [INPUT] [COMMAND]
 
 ## `mumei evidence`
 
-Check common Evidence representation only, without proof acceptance or verifier execution
+Check common Evidence representation or produce fresh scoped source Evidence; no proof acceptance
 
 Usage:
 
 ```text
 Usage: mumei evidence <COMMAND>
 ```
+
+## `mumei evidence verify-source`
+
+Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance
+
+Usage:
+
+```text
+Usage: mumei evidence verify-source [OPTIONS] <INPUT>
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `INPUT` | Yes | Regular source file; single pure-i64 comparison/conditional atom, at most 16 parameters and literal true precondition |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--json` | false | — | Emit one common Evidence v1 record on fresh unsat only (not an acceptance receipt) |
+| `--solver-timeout <SOLVER_TIMEOUT>` | 10000 | — | Solver timeout in milliseconds (1..=10000); no project/ambient policy loaded |
+| `--solver-resource-limit <SOLVER_RESOURCE_LIMIT>` | 1000000 | — | Solver resource units (1..=1000000); zero/unlimited is rejected |
 
 ## `mumei evidence check`
 
