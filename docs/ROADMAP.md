@@ -2835,6 +2835,18 @@ later optimizer/backend/linker/runtime/binary correctness, native-bundle
 acceptance, new evidence route or grade. C08 hash checks remain identity-only;
 broader C09 semantics and C02/C10 consumer integration remain open.
 
+The first C10 Stage A consumer adds opt-in `native-bundle recheck-source`:
+existing C08 pinned identity/status checks plus a fresh, bounded C03 source
+postcondition query using fixed Z3 settings, without project configuration,
+proof caches, producer tools or artifact execution. Self-consistent forged
+certificates cannot replace that query; refuted/inconclusive/unsupported results
+fail closed. The result is source-and-identity-only, not `artifact_verified`,
+authenticity, LLVM correspondence or binary correctness. Existing `check`,
+grades and Lean gates remain unchanged. See the
+[clean consumer boundary](VERIFICATION_NATIVE.md#first-clean-source-recheck-consumer-slice).
+This is partial C10: C09 integration/Stage B, dependency closure, wider profiles,
+runtime/ABI/linker and final-artifact assurance remain open.
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

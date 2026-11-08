@@ -180,6 +180,23 @@ This is **partial C09**, not full LLVM semantics or final-artifact verification.
 C06/C07 expansion and broader C09/C02/C10 remain open. No external verifier is
 adopted and Mumei/Agent ownership remains unchanged.
 
+### Wave 5 first clean source-recheck consumer boundary
+
+The [C10 Stage A slice](VERIFICATION_NATIVE.md#first-clean-source-recheck-consumer-slice)
+adds `native-bundle recheck-source` separately from identity-only `check`.
+A clean consumer checks the separately pinned C08 snapshots and freshly queries
+the C03 source postcondition under fixed, bounded Z3 settings. It needs no
+producer directory, project configuration/cache or compiler/linker processes;
+it neither executes the artifact nor emits new proof/evidence acceptance.
+Forged self-consistent source certificates do not substitute for the query;
+stale/tampered/missing inputs and inconclusive results cannot become success.
+
+This is **partial C10**, source-and-identity-only. It does not connect C09 LLVM
+correspondence (Stage B), certify executable semantics, authenticate a producer
+or change Claim Book/Seal Grade/Lean gates. Dependency closure, wider programs
+and targets, runtime/ABI/linker and final-artifact assurance remain open. No
+external verifier is adopted, and Mumei/Agent ownership remains unchanged.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:

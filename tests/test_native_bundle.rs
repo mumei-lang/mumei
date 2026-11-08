@@ -51,6 +51,276 @@ fn check(source: &Path, bundle: &Path, id: &str) -> Output {
     ])
 }
 
+fn recheck(source: &Path, bundle: &Path, id: &str) -> Output {
+    cli(&[
+        "native-bundle",
+        "recheck-source",
+        bundle.to_str().unwrap(),
+        source.to_str().unwrap(),
+        "--expected-build-id",
+        id,
+    ])
+}
+
+fn repin(bundle: &Path, source: Option<&str>) -> String {
+    let mut record: native_bundle::NativeBundleRecord =
+        serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    if let Some(source) = source {
+        use mumei_core::{proof_cert, verification::ModuleEnv};
+        let (binding, atom) = native_bundle::prepare_source(source).unwrap();
+        let mut env = ModuleEnv::default();
+        env.register_atom(&atom);
+        let results = std::collections::HashMap::from([(
+            "main".into(),
+            (
+                proof_cert::status::Z3_UNSAT.into(),
+                proof_cert::status::VERIFIED.into(),
+            ),
+        )]);
+        let cert = proof_cert::generate_certificate(
+            native_bundle::SOURCE_LABEL,
+            &[&atom],
+            &results,
+            &env,
+            None,
+            None,
+            None,
+        );
+        fs::write(
+            bundle.join("proof-cert.json"),
+            serde_json::to_vec(&cert).unwrap(),
+        )
+        .unwrap();
+        record.source = binding;
+    }
+    for role in BundleFile::ALL {
+        record.files.insert(
+            role,
+            native_bundle::ContentIdentity::of(&fs::read(bundle.join(role.file_name())).unwrap()),
+        );
+    }
+    let bytes = serde_json::to_vec(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    native_bundle::sha256(&bytes)
+}
+
+#[test]
+fn clean_consumer_rechecks_copied_read_only_snapshots_without_producer_tools_or_execution() {
+    use std::os::unix::fs::PermissionsExt;
+    let producer = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(producer.path());
+    let consumer = tempfile::tempdir().unwrap();
+    let executable = consumer.path().join("mumei");
+    fs::copy(env!("CARGO_BIN_EXE_mumei"), &executable).unwrap();
+    let copied_source = consumer.path().join("source.mm");
+    fs::copy(source, &copied_source).unwrap();
+    let copied_bundle = consumer.path().join("bundle");
+    fs::create_dir(&copied_bundle).unwrap();
+    for name in
+        std::iter::once(RECORD_FILE).chain(BundleFile::ALL.iter().map(|role| role.file_name()))
+    {
+        fs::copy(bundle.join(name), copied_bundle.join(name)).unwrap();
+        fs::set_permissions(copied_bundle.join(name), fs::Permissions::from_mode(0o400)).unwrap();
+    }
+    fs::set_permissions(&copied_source, fs::Permissions::from_mode(0o400)).unwrap();
+    fs::set_permissions(&copied_bundle, fs::Permissions::from_mode(0o500)).unwrap();
+    producer.close().unwrap();
+    fs::write(
+        consumer.path().join("mumei.toml"),
+        "not valid project configuration [",
+    )
+    .unwrap();
+    let home = consumer.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let mut command = Command::new(&executable);
+    command
+        .env_clear()
+        .current_dir(consumer.path())
+        .env("HOME", &home)
+        .env("PATH", "/nonexistent-consumer-tools");
+    if let Some(path) = std::env::var_os("LD_LIBRARY_PATH") {
+        command.env("LD_LIBRARY_PATH", path);
+    }
+    let result = command
+        .args([
+            "native-bundle",
+            "recheck-source",
+            copied_bundle.to_str().unwrap(),
+            copied_source.to_str().unwrap(),
+            "--expected-build-id",
+            &id,
+        ])
+        .output()
+        .unwrap();
+    assert_success(&result);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(stdout.contains(native_bundle::RECHECK_SCOPE));
+    assert!(stdout.contains(native_bundle::RECHECK_PROFILE));
+    assert!(!stdout.contains("artifact_verified"));
+    assert_eq!(fs::read_dir(&copied_bundle).unwrap().count(), 5);
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(consumer.path()).unwrap().count(), 5);
+    fs::set_permissions(&copied_bundle, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn self_consistent_forged_source_certificate_is_not_a_source_proof() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, _) = build(root.path());
+    for text in [
+        GOOD.replace("== 7", "== 8"),
+        GOOD.replace("== 7", "== 1234567890123456"),
+        GOOD.replace("result == 7", "false"),
+    ] {
+        fs::write(&source, &text).unwrap();
+        let id = repin(&bundle, Some(&text));
+        assert_success(&check(&source, &bundle, &id));
+        let result = recheck(&source, &bundle, &id);
+        assert_eq!(result.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("source postcondition refuted"));
+        assert!(!stderr.contains("1234567890123456"));
+        assert!(!String::from_utf8_lossy(&result.stdout).contains("1234567890123456"));
+    }
+}
+
+#[test]
+fn source_recheck_rejects_missing_tampered_and_unpinned_members_before_success() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    assert_success(&recheck(&source, &bundle, &id));
+    for name in
+        std::iter::once(RECORD_FILE).chain(BundleFile::ALL.iter().map(|role| role.file_name()))
+    {
+        let path = bundle.join(name);
+        let bytes = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(!recheck(&source, &bundle, &id).status.success());
+        fs::write(&path, b"tampered").unwrap();
+        assert!(!recheck(&source, &bundle, &id).status.success());
+        fs::write(path, bytes).unwrap();
+    }
+    assert!(!recheck(&source, &bundle, &"0".repeat(64)).status.success());
+    fs::write(&source, format!("{GOOD}\n// stale source")).unwrap();
+    assert!(!recheck(&source, &bundle, &id).status.success());
+}
+
+#[test]
+fn authorized_non_executable_bytes_are_not_promoted_to_binary_assurance() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, old_id) = build(root.path());
+    let marker = root.path().join("must-not-run");
+    fs::write(
+        bundle.join("program"),
+        format!("#!/bin/sh\ntouch '{}'\nexit 99\n", marker.display()),
+    )
+    .unwrap();
+    assert!(!recheck(&source, &bundle, &old_id).status.success());
+    let id = repin(&bundle, None);
+    let result = recheck(&source, &bundle, &id);
+    assert_success(&result);
+    assert!(String::from_utf8_lossy(&result.stdout).contains("executable semantics: not checked"));
+    assert!(!marker.exists());
+}
+
+#[test]
+fn bounded_source_and_symlinks_cannot_bypass_the_consumer() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    for (text, diagnostic) in [
+        ("x".repeat(65_537), "unsupported component type or size"),
+        (
+            GOOD.replace(
+                "{ 7 }",
+                &format!("{{ {}7{} }}", "(".repeat(49), ")".repeat(49)),
+            ),
+            "source outside bounded C03 recheck profile",
+        ),
+        (
+            GOOD.replace(
+                "result == 7",
+                &std::iter::repeat_n("result == 7", 100)
+                    .collect::<Vec<_>>()
+                    .join(" || "),
+            ),
+            "source outside bounded C03 recheck profile",
+        ),
+    ] {
+        fs::write(&source, text).unwrap();
+        let result = recheck(&source, &bundle, &id);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&result.stderr).contains(diagnostic));
+    }
+    fs::write(&source, GOOD).unwrap();
+    let object = bundle.join("program.o");
+    fs::remove_file(&object).unwrap();
+    std::os::unix::fs::symlink(&source, &object).unwrap();
+    assert!(!recheck(&source, &bundle, &id).status.success());
+}
+
+#[test]
+fn vacuous_preconditions_and_unsupported_sources_cannot_recheck_successfully() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    for text in [
+        GOOD.replace("requires: true", "requires: false")
+            .replace("result == 7", "false"),
+        GOOD.replace("main()", "main(x: i64)"),
+        GOOD.replace("main()", "other()"),
+    ] {
+        fs::write(&source, text).unwrap();
+        let result = recheck(&source, &bundle, &id);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&result.stderr)
+            .contains("zero-argument main with literal true precondition"));
+    }
+    let fake = "FAKE_C10_SOURCE_DIAGNOSTIC_ONLY";
+    for text in [
+        GOOD.replace("{ 7 }", "{ 7 + 0 }"),
+        GOOD.replace("{ 7 }", "{ 7.0 }"),
+        GOOD.replace("{ 7 }", &format!("{{ {fake} }}")),
+    ] {
+        fs::write(&source, text).unwrap();
+        let result = recheck(&source, &bundle, &id);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&result.stderr)
+            .contains("source outside bounded C03 recheck profile"));
+        assert!(!String::from_utf8_lossy(&result.stderr).contains(fake));
+        assert!(!String::from_utf8_lossy(&result.stdout).contains(fake));
+    }
+}
+
+#[test]
+fn ambient_orchestration_settings_and_fake_secrets_do_not_enter_the_recheck() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, _) = build(root.path());
+    let fake = "FAKE_C10_SECRET_ONLY";
+    let text = format!("{GOOD}\n// {fake}");
+    fs::write(&source, &text).unwrap();
+    let id = repin(&bundle, Some(&text));
+    let result = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args([
+            "native-bundle",
+            "recheck-source",
+            bundle.to_str().unwrap(),
+            source.to_str().unwrap(),
+            "--expected-build-id",
+            &id,
+        ])
+        .env("MUMEI_VERIFICATION_TIMEOUT_MS", "1")
+        .env("MUMEI_TASK_ID", fake)
+        .env("MUMEI_CANCEL_REASON", fake)
+        .env("MUMEI_SOLVER_CONFIG_FINGERPRINT", fake)
+        .env("MUMEI_HARNESS_CONTRACT", fake)
+        .env("MUMEI_ARTIFACT_PATHS", fake)
+        .env("OPENAI_API_KEY", fake)
+        .output()
+        .unwrap();
+    assert_success(&result);
+    assert!(!String::from_utf8_lossy(&result.stdout).contains(fake));
+    assert!(!String::from_utf8_lossy(&result.stderr).contains(fake));
+}
+
 #[test]
 fn build_binds_actual_native_output_and_source_certificate_without_proving_artifact() {
     let root = tempfile::tempdir().unwrap();

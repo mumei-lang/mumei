@@ -421,6 +421,14 @@ pub(crate) enum Command {
 
 #[derive(Subcommand)]
 pub(crate) enum NativeBundleCommand {
+    /// Check pinned snapshots and freshly recheck the C03 source postcondition, not LLVM or binary semantics
+    RecheckSource {
+        bundle: String,
+        source: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel
+        #[arg(long)]
+        expected_build_id: String,
+    },
     /// Freshly verify and build a pure-i64 main on Linux/x86_64 with fixed settings
     Build {
         input: String,
