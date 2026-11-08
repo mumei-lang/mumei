@@ -453,3 +453,243 @@ fn source_literals_comments_and_ir_diagnostics_are_not_echoed() {
     let ir = function(&format!("ret i64 {literal}"));
     assert!(!format!("{:?}", validate(&src, &ir)).contains(literal));
 }
+
+fn native_source(body: &str) -> String {
+    format!("atom main() -> i64 requires: true; ensures: true; body: {{ {body} }};")
+}
+
+fn native_ir(body: &str) -> String {
+    pin(&format!(
+        "define i64 @__mumei_user_main() {{ {body} }}\n\
+         define i32 @main(i32 %argc, ptr %argv) {{\n\
+         %result = call i64 @__mumei_user_main()\n\
+         %exit_code = trunc i64 %result to i32\n\
+         ret i32 %exit_code\n}}"
+    ))
+}
+
+fn native_validate(src: &str, ir: &str) -> tv::ValidationReport {
+    tv::validate_native_main(src, ir, Options::default()).unwrap()
+}
+
+#[test]
+fn native_emitter_bodies_and_truncating_wrapper_match_without_rewriting() {
+    for body in [
+        "0",
+        "7",
+        "2147483648",
+        "4294967296",
+        "9223372036854775807",
+        "if 1 < 2 { if false { 99 } else { 7 } } else { 42 }",
+        "if (1 < 2) && (7 != 8) { 7 } else { 99 }",
+        "if (1 > 2) || (7 == 8) { 99 } else { 7 }",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .chain(
+        ["<", "<=", ">", ">=", "==", "!="]
+            .into_iter()
+            .map(|op| format!("if 7 {op} 8 {{ 7 }} else {{ 8 }}")),
+    ) {
+        let src = native_source(&body);
+        let Item::Atom(atom) = parse_module_checked(&src).unwrap().remove(0) else {
+            panic!("atom")
+        };
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("native.ll");
+        mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
+            &[lower_atom_to_hir(&atom)],
+            &ModuleEnv::default(),
+            &[],
+            &path,
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let ir = pin(&raw);
+        let report = native_validate(&src, &ir);
+        assert_eq!(report.outcome, Outcome::EquivalentWithinProfile, "{body}");
+        assert_eq!(report.profile, tv::NATIVE_PROFILE);
+        assert_eq!(
+            report.source_sha256,
+            mumei_core::native_bundle::sha256(src.as_bytes())
+        );
+        assert_eq!(
+            report.llvm_sha256,
+            mumei_core::native_bundle::sha256(ir.as_bytes())
+        );
+        assert_eq!(
+            report.input_domain,
+            "zero_argument_main_i64_body_not_process_exit_status"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        assert!(tv::validate_pure_i64(&src, &ir, Options::default()).is_err());
+    }
+}
+
+#[test]
+fn native_full_i64_body_must_match_even_when_low_32_bits_are_equal() {
+    let src = native_source("7");
+    for value in ["8", "4294967303", "9223372036854775807"] {
+        assert_eq!(
+            native_validate(&src, &native_ir(&format!("ret i64 {value}"))).outcome,
+            Outcome::Different
+        );
+    }
+    let ir = native_ir("%same = or i64 7, 0\nret i64 %same");
+    assert_eq!(
+        native_validate(&src, &ir).outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn native_snapshot_profile_is_separate_and_pins_exact_target_and_layout() {
+    let src = native_source("7");
+    let ir = native_ir("ret i64 7");
+    let pc = ir.replace(tv::TARGET, tv::NATIVE_TARGET);
+    assert_eq!(native_validate(&src, &pc).target, tv::NATIVE_TARGET);
+    for bad in [
+        ir.replace(tv::TARGET, "x86_64-pc-windows-msvc"),
+        ir.replace(tv::TARGET, "x86_64-unknown-linux-musl"),
+        ir.replace(tv::DATA_LAYOUT, "e-i64:64"),
+        ir.replace(&format!("target triple = \"{}\"", tv::TARGET), ""),
+        ir.replace("__mumei_user_main", "other"),
+    ] {
+        assert!(tv::validate_native_main(&src, &bad, Options::default()).is_err());
+    }
+    for bad in [
+        source("", "7"),
+        source("x: i64", "x"),
+        native_source("7 + 0"),
+    ] {
+        assert!(tv::validate_native_main(&bad, &ir, Options::default()).is_err());
+    }
+    assert!(tv::validate_native_main(&src, &function("ret i64 7"), Options::default()).is_err());
+}
+
+#[test]
+fn native_wrapper_must_be_only_a_direct_call_truncation_and_return() {
+    let src = native_source("7");
+    let ir = native_ir("ret i64 7");
+    for (from, to) in [
+        ("ret i32 %exit_code", "ret i32 7"),
+        ("ret i32 %exit_code", "ret i32 %argc"),
+        ("trunc i64 %result", "trunc i64 7"),
+        ("trunc i64 %result to i32", "add i32 0, 7"),
+        (
+            "%result = call",
+            "%unused = call i64 @__mumei_user_main()\n%result = call",
+        ),
+        ("%result = call", "%result = tail call"),
+        ("call i64", "call noundef i64"),
+        (
+            "call i64 @__mumei_user_main()",
+            "call i64 @__mumei_user_main() nounwind",
+        ),
+        (
+            "call i64 @__mumei_user_main()",
+            "call i64 @__mumei_user_main() [ \"deopt\"(i32 1) ]",
+        ),
+        ("ptr %argv", "ptr addrspace(1) %argv"),
+        ("i32 %argc", "i32 noundef %argc"),
+        ("define i32 @main", "define i32 @main_wrong"),
+        ("define i32 @main", "define fastcc i32 @main"),
+        ("define i32 @main", "define weak i32 @main"),
+        (
+            "define i64 @__mumei_user_main",
+            "define weak i64 @__mumei_user_main",
+        ),
+        ("ptr %argv)", "ptr %argv, ...)"),
+        (
+            "%exit_code = trunc",
+            "br label %next\nnext: %exit_code = trunc",
+        ),
+        ("ret i32 %exit_code", "ret i32 %exit_code, !private !0"),
+    ] {
+        assert_ne!(ir.replace(from, to), ir, "mutation {from}");
+        assert!(
+            tv::validate_native_main(&src, &ir.replace(from, to), Options::default()).is_err(),
+            "{from} -> {to}"
+        );
+    }
+}
+
+#[test]
+fn native_module_cannot_hide_extra_functions_globals_metadata_or_instructions() {
+    let src = native_source("7");
+    let ir = native_ir("ret i64 7");
+    for extra in [
+        "declare void @external()",
+        "define i64 @other() { ret i64 7 }",
+        "@global = global i64 7",
+        "@alias = alias i64 (), ptr @__mumei_user_main",
+        "module asm \"FAKE_PRIVATE_IR_ONLY\"",
+        "!private = !{!0}\n!0 = !{i64 7}",
+    ] {
+        assert!(
+            tv::validate_native_main(&src, &format!("{ir}\n{extra}"), Options::default()).is_err()
+        );
+    }
+    for body in [
+        "ret i64 poison",
+        "ret i64 undef",
+        "%p = alloca i64\nret i64 7",
+        "%x = add i64 6, 1\nret i64 %x",
+        "entry: br label %entry",
+        "ret i64 7, !private !0\n}\n!0 = !{i64 7}\ndefine i64 @extra() { ret i64 7",
+    ] {
+        assert!(tv::validate_native_main(&src, &native_ir(body), Options::default()).is_err());
+    }
+    for from_to in [
+        ("define i64", "define fastcc i64"),
+        ("define i64", "define noundef i64"),
+        ("@__mumei_user_main() {", "@__mumei_user_main() nounwind {"),
+    ] {
+        assert!(tv::validate_native_main(
+            &src,
+            &ir.replace(from_to.0, from_to.1),
+            Options::default()
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn native_budgets_and_private_parser_diagnostics_fail_closed() {
+    let src = native_source("7");
+    let ir = native_ir("ret i64 7");
+    for options in [
+        Options {
+            timeout_ms: 0,
+            ..Options::default()
+        },
+        Options {
+            timeout_ms: 30_001,
+            ..Options::default()
+        },
+        Options {
+            resource_limit: 0,
+            ..Options::default()
+        },
+    ] {
+        assert!(tv::validate_native_main(&src, &ir, options).is_err());
+    }
+    for bad in [
+        format!("{ir};{}", "x".repeat(65_536)),
+        "[".repeat(49),
+        "FAKE_PRIVATE_IR_ONLY".into(),
+    ] {
+        let error = tv::validate_native_main(&src, &bad, Options::default()).unwrap_err();
+        assert!(!format!("{error:?} {error}").contains("FAKE_PRIVATE_IR_ONLY"));
+    }
+    let report = tv::validate_native_main(
+        &src,
+        &ir,
+        Options {
+            resource_limit: 1,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(report.outcome, Outcome::Inconclusive);
+}

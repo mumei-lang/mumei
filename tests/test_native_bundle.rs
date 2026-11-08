@@ -52,9 +52,17 @@ fn check(source: &Path, bundle: &Path, id: &str) -> Output {
 }
 
 fn recheck(source: &Path, bundle: &Path, id: &str) -> Output {
+    consume("recheck-source", source, bundle, id)
+}
+
+fn recheck_llvm(source: &Path, bundle: &Path, id: &str) -> Output {
+    consume("recheck-llvm", source, bundle, id)
+}
+
+fn consume(action: &str, source: &Path, bundle: &Path, id: &str) -> Output {
     cli(&[
         "native-bundle",
-        "recheck-source",
+        action,
         bundle.to_str().unwrap(),
         source.to_str().unwrap(),
         "--expected-build-id",
@@ -132,34 +140,42 @@ fn clean_consumer_rechecks_copied_read_only_snapshots_without_producer_tools_or_
     .unwrap();
     let home = consumer.path().join("home");
     fs::create_dir(&home).unwrap();
-    let mut command = Command::new(&executable);
-    command
-        .env_clear()
-        .current_dir(consumer.path())
-        .env("HOME", &home)
-        .env("PATH", "/nonexistent-consumer-tools");
-    if let Some(path) = std::env::var_os("LD_LIBRARY_PATH") {
-        command.env("LD_LIBRARY_PATH", path);
+    for action in ["recheck-source", "recheck-llvm"] {
+        let mut command = Command::new(&executable);
+        command
+            .env_clear()
+            .current_dir(consumer.path())
+            .env("HOME", &home)
+            .env("PATH", "/nonexistent-consumer-tools");
+        if let Some(path) = std::env::var_os("LD_LIBRARY_PATH") {
+            command.env("LD_LIBRARY_PATH", path);
+        }
+        let result = command
+            .args([
+                "native-bundle",
+                action,
+                copied_bundle.to_str().unwrap(),
+                copied_source.to_str().unwrap(),
+                "--expected-build-id",
+                &id,
+            ])
+            .output()
+            .unwrap();
+        assert_success(&result);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        if action == "recheck-source" {
+            assert!(stdout.contains(native_bundle::RECHECK_SCOPE));
+            assert!(stdout.contains(native_bundle::RECHECK_PROFILE));
+        } else {
+            assert!(stdout.contains(mumei_emit_llvm::translation_validation::NATIVE_PROFILE));
+            assert!(stdout.contains("source_postcondition_identity_and_llvm_snapshot_only"));
+            assert!(stdout.contains("OS exit-status/executable semantics: not checked"));
+        }
+        assert!(!stdout.contains("artifact_verified"));
+        assert_eq!(fs::read_dir(&copied_bundle).unwrap().count(), 5);
+        assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(consumer.path()).unwrap().count(), 5);
     }
-    let result = command
-        .args([
-            "native-bundle",
-            "recheck-source",
-            copied_bundle.to_str().unwrap(),
-            copied_source.to_str().unwrap(),
-            "--expected-build-id",
-            &id,
-        ])
-        .output()
-        .unwrap();
-    assert_success(&result);
-    let stdout = String::from_utf8_lossy(&result.stdout);
-    assert!(stdout.contains(native_bundle::RECHECK_SCOPE));
-    assert!(stdout.contains(native_bundle::RECHECK_PROFILE));
-    assert!(!stdout.contains("artifact_verified"));
-    assert_eq!(fs::read_dir(&copied_bundle).unwrap().count(), 5);
-    assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
-    assert_eq!(fs::read_dir(consumer.path()).unwrap().count(), 5);
     fs::set_permissions(&copied_bundle, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
@@ -175,12 +191,14 @@ fn self_consistent_forged_source_certificate_is_not_a_source_proof() {
         fs::write(&source, &text).unwrap();
         let id = repin(&bundle, Some(&text));
         assert_success(&check(&source, &bundle, &id));
-        let result = recheck(&source, &bundle, &id);
-        assert_eq!(result.status.code(), Some(1));
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(stderr.contains("source postcondition refuted"));
-        assert!(!stderr.contains("1234567890123456"));
-        assert!(!String::from_utf8_lossy(&result.stdout).contains("1234567890123456"));
+        for action in ["recheck-source", "recheck-llvm"] {
+            let result = consume(action, &source, &bundle, &id);
+            assert_eq!(result.status.code(), Some(1));
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(stderr.contains("source postcondition refuted"));
+            assert!(!stderr.contains("1234567890123456"));
+            assert!(!String::from_utf8_lossy(&result.stdout).contains("1234567890123456"));
+        }
     }
 }
 
@@ -189,6 +207,7 @@ fn source_recheck_rejects_missing_tampered_and_unpinned_members_before_success()
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build(root.path());
     assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
     for name in
         std::iter::once(RECORD_FILE).chain(BundleFile::ALL.iter().map(|role| role.file_name()))
     {
@@ -196,13 +215,19 @@ fn source_recheck_rejects_missing_tampered_and_unpinned_members_before_success()
         let bytes = fs::read(&path).unwrap();
         fs::remove_file(&path).unwrap();
         assert!(!recheck(&source, &bundle, &id).status.success());
+        assert!(!recheck_llvm(&source, &bundle, &id).status.success());
         fs::write(&path, b"tampered").unwrap();
         assert!(!recheck(&source, &bundle, &id).status.success());
+        assert!(!recheck_llvm(&source, &bundle, &id).status.success());
         fs::write(path, bytes).unwrap();
     }
     assert!(!recheck(&source, &bundle, &"0".repeat(64)).status.success());
+    assert!(!recheck_llvm(&source, &bundle, &"0".repeat(64))
+        .status
+        .success());
     fs::write(&source, format!("{GOOD}\n// stale source")).unwrap();
     assert!(!recheck(&source, &bundle, &id).status.success());
+    assert!(!recheck_llvm(&source, &bundle, &id).status.success());
 }
 
 #[test]
@@ -218,6 +243,11 @@ fn authorized_non_executable_bytes_are_not_promoted_to_binary_assurance() {
     assert!(!recheck(&source, &bundle, &old_id).status.success());
     let id = repin(&bundle, None);
     let result = recheck(&source, &bundle, &id);
+    assert_success(&result);
+    assert!(String::from_utf8_lossy(&result.stdout).contains("executable semantics: not checked"));
+    fs::write(bundle.join("program.o"), b"repinned non-object bytes").unwrap();
+    let id = repin(&bundle, None);
+    let result = recheck_llvm(&source, &bundle, &id);
     assert_success(&result);
     assert!(String::from_utf8_lossy(&result.stdout).contains("executable semantics: not checked"));
     assert!(!marker.exists());
@@ -298,27 +328,29 @@ fn ambient_orchestration_settings_and_fake_secrets_do_not_enter_the_recheck() {
     let text = format!("{GOOD}\n// {fake}");
     fs::write(&source, &text).unwrap();
     let id = repin(&bundle, Some(&text));
-    let result = Command::new(env!("CARGO_BIN_EXE_mumei"))
-        .args([
-            "native-bundle",
-            "recheck-source",
-            bundle.to_str().unwrap(),
-            source.to_str().unwrap(),
-            "--expected-build-id",
-            &id,
-        ])
-        .env("MUMEI_VERIFICATION_TIMEOUT_MS", "1")
-        .env("MUMEI_TASK_ID", fake)
-        .env("MUMEI_CANCEL_REASON", fake)
-        .env("MUMEI_SOLVER_CONFIG_FINGERPRINT", fake)
-        .env("MUMEI_HARNESS_CONTRACT", fake)
-        .env("MUMEI_ARTIFACT_PATHS", fake)
-        .env("OPENAI_API_KEY", fake)
-        .output()
-        .unwrap();
-    assert_success(&result);
-    assert!(!String::from_utf8_lossy(&result.stdout).contains(fake));
-    assert!(!String::from_utf8_lossy(&result.stderr).contains(fake));
+    for action in ["recheck-source", "recheck-llvm"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .args([
+                "native-bundle",
+                action,
+                bundle.to_str().unwrap(),
+                source.to_str().unwrap(),
+                "--expected-build-id",
+                &id,
+            ])
+            .env("MUMEI_VERIFICATION_TIMEOUT_MS", "1")
+            .env("MUMEI_TASK_ID", fake)
+            .env("MUMEI_CANCEL_REASON", fake)
+            .env("MUMEI_SOLVER_CONFIG_FINGERPRINT", fake)
+            .env("MUMEI_HARNESS_CONTRACT", fake)
+            .env("MUMEI_ARTIFACT_PATHS", fake)
+            .env("OPENAI_API_KEY", fake)
+            .output()
+            .unwrap();
+        assert_success(&result);
+        assert!(!String::from_utf8_lossy(&result.stdout).contains(fake));
+        assert!(!String::from_utf8_lossy(&result.stderr).contains(fake));
+    }
 }
 
 #[test]
@@ -327,6 +359,7 @@ fn build_binds_actual_native_output_and_source_certificate_without_proving_artif
     let (source, bundle, id) = build(root.path());
     let result = check(&source, &bundle, &id);
     assert_success(&result);
+    assert_success(&recheck_llvm(&source, &bundle, &id));
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("identity consistent"));
     assert!(stdout.contains(native_bundle::SCOPE));
@@ -367,6 +400,7 @@ fn build_binds_actual_native_output_and_source_certificate_without_proving_artif
     ]));
     let id = native_bundle::sha256(&fs::read(conditional.join(RECORD_FILE)).unwrap());
     assert_success(&check(&source, &conditional, &id));
+    assert_success(&recheck_llvm(&source, &conditional, &id));
 }
 
 #[test]
@@ -642,5 +676,122 @@ fn rehashed_certificate_targets_must_match_the_source_translator_identity() {
                 .success(),
             "field {field}"
         );
+    }
+}
+
+#[test]
+fn repinned_wrong_llvm_is_not_a_translation_even_with_valid_source_and_certificate() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, _) = build(root.path());
+    let path = bundle.join("program.ll");
+    let original = fs::read_to_string(&path).unwrap();
+    for value in ["8", "4294967303", "1234567890123456"] {
+        let changed = original.replace("ret i64 7", &format!("ret i64 {value}"));
+        assert_ne!(changed, original);
+        fs::write(&path, changed).unwrap();
+        let id = repin(&bundle, None);
+        assert_success(&check(&source, &bundle, &id));
+        assert_success(&recheck(&source, &bundle, &id));
+        let result = recheck_llvm(&source, &bundle, &id);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("LLVM body differs from source"));
+        assert!(!String::from_utf8_lossy(&result.stderr).contains(value));
+    }
+    fs::write(&path, original).unwrap();
+    let changed = GOOD.replace("7", "8");
+    fs::write(&source, &changed).unwrap();
+    let id = repin(&bundle, Some(&changed));
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_eq!(recheck_llvm(&source, &bundle, &id).status.code(), Some(1));
+}
+
+#[test]
+fn repinned_wrapper_mutations_and_private_malformed_ir_fail_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, _) = build(root.path());
+    let path = bundle.join("program.ll");
+    let original = fs::read_to_string(&path).unwrap();
+    let fake = "FAKE_PRIVATE_NATIVE_LLVM_ONLY";
+    let mutations = [
+        original.replace("ret i32 %exit_code", "ret i32 7"),
+        original.replace("trunc i64 %result", "trunc i64 7"),
+        original.replace("define i32 @main", "define i32 @other"),
+        format!("{original}\ndeclare void @other()"),
+        format!("{original}\n@global = global i64 7"),
+        original.replace("e-m:e-", "E-m:e-"),
+        format!("{fake}\n{original}"),
+        format!("{original};{}", "X".repeat(65_536)),
+    ];
+    for changed in mutations {
+        assert_ne!(changed, original);
+        fs::write(&path, changed).unwrap();
+        let id = repin(&bundle, None);
+        assert_success(&recheck(&source, &bundle, &id));
+        let result = recheck_llvm(&source, &bundle, &id);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(!String::from_utf8_lossy(&result.stdout).contains(fake));
+        assert!(!String::from_utf8_lossy(&result.stderr).contains(fake));
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("outside bounded translation profile")
+        );
+    }
+    fs::write(&path, [0xff, 0xfe]).unwrap();
+    let id = repin(&bundle, None);
+    assert_eq!(recheck_llvm(&source, &bundle, &id).status.code(), Some(1));
+}
+
+#[test]
+fn native_ir_observations_must_match_the_snapshot_without_normalization() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, _) = build(root.path());
+    let path = bundle.join(RECORD_FILE);
+    let original: native_bundle::NativeBundleRecord =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for change_layout in [false, true] {
+        let mut record = original.clone();
+        if change_layout {
+            record.object_build.data_layout = "e-i64:64".into();
+        } else {
+            record.object_build.target_triple =
+                if record.object_build.target_triple == "x86_64-pc-linux-gnu" {
+                    "x86_64-unknown-linux-gnu".into()
+                } else {
+                    "x86_64-pc-linux-gnu".into()
+                };
+        }
+        let bytes = serde_json::to_vec(&record).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        let id = native_bundle::sha256(&bytes);
+        assert_success(&check(&source, &bundle, &id));
+        assert_success(&recheck(&source, &bundle, &id));
+        let result = recheck_llvm(&source, &bundle, &id);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&result.stderr)
+            .contains("snapshot/toolchain observation mismatch"));
+    }
+}
+
+#[test]
+fn full_native_build_rechecks_large_i64_results_without_promising_an_os_exit_code() {
+    let root = tempfile::tempdir().unwrap();
+    for value in ["0", "2147483648", "4294967296", "9223372036854775807"] {
+        let source = root.path().join("source.mm");
+        let bundle = root.path().join(format!("bundle-{value}"));
+        fs::write(&source, format!("atom main() -> i64 requires: true; ensures: result == {value}; body: {{ {value} }};")).unwrap();
+        assert_success(&cli(&[
+            "native-bundle",
+            "build",
+            source.to_str().unwrap(),
+            "-o",
+            bundle.to_str().unwrap(),
+        ]));
+        let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+        let result = recheck_llvm(&source, &bundle, &id);
+        assert_success(&result);
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(stdout.contains("low 32 bits of the i64 body"));
+        assert!(stdout.contains("OS exit-status/executable semantics: not checked"));
+        assert!(!stdout.contains("artifact_verified"));
     }
 }
