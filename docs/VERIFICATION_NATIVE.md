@@ -178,8 +178,11 @@ Arithmetic (including overflow), division, shifts, conversions, calls, heap,
 FFI, mutation, local bindings, quantifiers, trust overrides and effect/ownership
 annotations are rejected rather than silently dropped. Boolean values are
 conditions in this first profile, not public Boolean parameters/return values.
-Checked lexing rejects unrepresentable numeric tokens before parser recovery can
-replace them with zero. The current `-9223372036854775808` literal spelling is
+Checked lexing rejects failed numeric conversions before parser recovery can
+replace them with zero. Raw float tokens, including integer-valued, underflowing
+and overflowing float literals, are rejected by this profile before item text
+reconstruction can erase their category. This is not an exact-decimal or IEEE
+floating-point validation profile. The current `-9223372036854775808` spelling is
 also rejected because its positive magnitude is not representable by the lexer;
 this does not exclude that input value from the function's typed input domain.
 Legacy tolerant parsing is not changed into a validation API by this slice.

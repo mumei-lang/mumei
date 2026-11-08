@@ -47,7 +47,7 @@ impl<'a> Lexer<'a> {
         tokens
     }
 
-    /// Reject numeric recovery before a checked parser can lose the source value.
+    /// Reject failed numeric conversion, not ordinary IEEE float rounding.
     pub fn tokenize_checked(&mut self) -> Result<Vec<SpannedToken>, Vec<String>> {
         let tokens = self.tokenize();
         if self.numeric_errors.is_empty() {
@@ -295,10 +295,10 @@ impl<'a> Lexer<'a> {
 
         if is_float {
             match num_str.parse::<f64>() {
-                Ok(value) if value.is_finite() => Token::FloatLit(value),
-                value => {
+                Ok(value) => Token::FloatLit(value),
+                Err(_) => {
                     self.record_numeric_error(start_line, start_col);
-                    Token::FloatLit(value.unwrap_or(0.0))
+                    Token::FloatLit(0.0)
                 }
             }
         } else {
@@ -315,7 +315,7 @@ impl<'a> Lexer<'a> {
     fn record_numeric_error(&mut self, line: usize, col: usize) {
         if self.numeric_errors.len() < 100 {
             self.numeric_errors.push(format!(
-                "unrepresentable numeric literal at line {line}, column {col}"
+                "invalid numeric literal or out-of-range integer at line {line}, column {col}"
             ));
         }
     }
@@ -438,7 +438,6 @@ mod tests {
             "9223372036854775808".to_owned(),
             "-9223372036854775808".to_owned(),
             "1.2.3".to_owned(),
-            format!("{}.0", "9".repeat(400)),
         ] {
             assert!(Lexer::new(&source).tokenize_checked().is_err());
         }

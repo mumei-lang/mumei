@@ -105,6 +105,19 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
+    // Item text reconstruction can print 1.0 as 1. Reject float tokens before
+    // that normalization erases the category required by this integer profile.
+    let tokens = crate::parser::lexer::Lexer::new(source)
+        .tokenize_checked()
+        .map_err(|_| SemanticContractError::Parse)?;
+    if tokens
+        .iter()
+        .any(|token| matches!(token.token, crate::parser::token::Token::FloatLit(_)))
+    {
+        return Err(SemanticContractError::Unsupported(
+            "floating-point literals",
+        ));
+    }
     let mut items = parse_module_checked(source).map_err(|_| SemanticContractError::Parse)?;
     if items.len() != 1 {
         return Err(SemanticContractError::Unsupported(
@@ -472,6 +485,29 @@ mod tests {
             "// 9223372036854775808 is only a comment\n{SOURCE}"
         ))
         .is_ok());
+    }
+
+    #[test]
+    fn rejects_float_tokens_before_text_reconstruction_can_erase_their_type() {
+        for literal in [
+            "0.0".to_owned(),
+            "1.0".to_owned(),
+            format!("0.{}1", "0".repeat(400)),
+            format!("{}.0", "9".repeat(400)),
+        ] {
+            for source in [
+                SOURCE.replace("requires: true", &format!("requires: x < {literal}")),
+                SOURCE.replace("if x < 0 { 0 } else { x }", &literal),
+            ] {
+                assert!(matches!(
+                    extract(&source),
+                    Err(SemanticContractError::Unsupported(
+                        "floating-point literals"
+                    ))
+                ));
+            }
+        }
+        assert!(extract(&format!("// 0.0 and 1.0 are comments\n{SOURCE}")).is_ok());
     }
 
     #[test]
