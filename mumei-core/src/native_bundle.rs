@@ -387,6 +387,21 @@ mod source_recheck_tests {
             solver.assert(&obligation);
             assert_eq!(solver.check(), expected);
         }
+        for (requires, ensures, expected) in [
+            ("x >= 0", "result == x", SatResult::Unsat),
+            ("true", "result == x", SatResult::Sat),
+            ("true", "result >= 0", SatResult::Unsat),
+            ("false", "false", SatResult::Unsat),
+        ] {
+            let config = Config::new();
+            let context = Context::new(&config);
+            let source = format!("atom f(x: i64) -> i64 requires: {requires}; ensures: {ensures}; body: {{ if x < 0 {{ 0 }} else {{ x }} }};");
+            let obligation =
+                semantic_contract::encode_pure_i64_obligation(&source, &context).unwrap();
+            let solver = Solver::new(&context);
+            solver.assert(&obligation);
+            assert_eq!(solver.check(), expected);
+        }
         let mut config = Config::new();
         config.set_param_value("rlimit", "1");
         let context = Context::new(&config);

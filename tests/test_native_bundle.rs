@@ -159,6 +159,7 @@ fn clean_consumer_rechecks_copied_read_only_snapshots_without_producer_tools_or_
     assert!(!stdout.contains("artifact_verified"));
     assert_eq!(fs::read_dir(&copied_bundle).unwrap().count(), 5);
     assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(consumer.path()).unwrap().count(), 5);
     fs::set_permissions(&copied_bundle, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
@@ -226,21 +227,67 @@ fn authorized_non_executable_bytes_are_not_promoted_to_binary_assurance() {
 fn bounded_source_and_symlinks_cannot_bypass_the_consumer() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build(root.path());
-    for text in [
-        "x".repeat(65_537),
-        GOOD.replace(
-            "{ 7 }",
-            &format!("{{ {}7{} }}", "(".repeat(49), ")".repeat(49)),
+    for (text, diagnostic) in [
+        ("x".repeat(65_537), "unsupported component type or size"),
+        (
+            GOOD.replace(
+                "{ 7 }",
+                &format!("{{ {}7{} }}", "(".repeat(49), ")".repeat(49)),
+            ),
+            "source outside bounded C03 recheck profile",
+        ),
+        (
+            GOOD.replace(
+                "result == 7",
+                &std::iter::repeat_n("result == 7", 100)
+                    .collect::<Vec<_>>()
+                    .join(" || "),
+            ),
+            "source outside bounded C03 recheck profile",
         ),
     ] {
         fs::write(&source, text).unwrap();
-        assert!(!recheck(&source, &bundle, &id).status.success());
+        let result = recheck(&source, &bundle, &id);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&result.stderr).contains(diagnostic));
     }
     fs::write(&source, GOOD).unwrap();
     let object = bundle.join("program.o");
     fs::remove_file(&object).unwrap();
     std::os::unix::fs::symlink(&source, &object).unwrap();
     assert!(!recheck(&source, &bundle, &id).status.success());
+}
+
+#[test]
+fn vacuous_preconditions_and_unsupported_sources_cannot_recheck_successfully() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    for text in [
+        GOOD.replace("requires: true", "requires: false")
+            .replace("result == 7", "false"),
+        GOOD.replace("main()", "main(x: i64)"),
+        GOOD.replace("main()", "other()"),
+    ] {
+        fs::write(&source, text).unwrap();
+        let result = recheck(&source, &bundle, &id);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&result.stderr)
+            .contains("zero-argument main with literal true precondition"));
+    }
+    let fake = "FAKE_C10_SOURCE_DIAGNOSTIC_ONLY";
+    for text in [
+        GOOD.replace("{ 7 }", "{ 7 + 0 }"),
+        GOOD.replace("{ 7 }", "{ 7.0 }"),
+        GOOD.replace("{ 7 }", &format!("{{ {fake} }}")),
+    ] {
+        fs::write(&source, text).unwrap();
+        let result = recheck(&source, &bundle, &id);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&result.stderr)
+            .contains("source outside bounded C03 recheck profile"));
+        assert!(!String::from_utf8_lossy(&result.stderr).contains(fake));
+        assert!(!String::from_utf8_lossy(&result.stdout).contains(fake));
+    }
 }
 
 #[test]
