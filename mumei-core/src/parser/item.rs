@@ -2606,7 +2606,7 @@ pub fn parse_module_from_source(source: &str) -> Vec<Item> {
 /// silently reporting success.
 pub fn parse_module_from_source_checked(source: &str) -> Result<Vec<Item>, Vec<String>> {
     let mut lexer = super::lexer::Lexer::new(source);
-    let tokens = lexer.tokenize();
+    let tokens = lexer.tokenize_checked()?;
     let mut ctx = ParseContext::new(tokens);
     let items = parse_module_from_tokens(&mut ctx);
     let failures = ctx.expect_failures();

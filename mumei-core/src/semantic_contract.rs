@@ -445,6 +445,36 @@ mod tests {
     }
 
     #[test]
+    fn rejects_numeric_literals_that_the_tolerant_lexer_recovers_as_zero() {
+        for literal in [
+            "9223372036854775808",
+            "-9223372036854775808",
+            "999999999999999999999999999999999999",
+        ] {
+            for source in [
+                SOURCE.replace("requires: true", &format!("requires: x < {literal}")),
+                SOURCE.replace(
+                    "ensures: (x < 0 => result == 0) && (x >= 0 => result == x)",
+                    &format!("ensures: result == {literal}"),
+                ),
+                SOURCE.replace("if x < 0 { 0 } else { x }", literal),
+            ] {
+                assert!(
+                    matches!(extract(&source), Err(SemanticContractError::Parse)),
+                    "accepted a lossy numeric token: {literal}"
+                );
+            }
+        }
+        assert!(
+            extract(&SOURCE.replace("if x < 0 { 0 } else { x }", "9223372036854775807")).is_ok()
+        );
+        assert!(extract(&format!(
+            "// 9223372036854775808 is only a comment\n{SOURCE}"
+        ))
+        .is_ok());
+    }
+
+    #[test]
     fn parser_normalization_and_translator_versions_are_disclosed() {
         let source = SOURCE.replace("requires: true", "requires: 0 <= x <= 3");
         let contract = extract(&source).unwrap();

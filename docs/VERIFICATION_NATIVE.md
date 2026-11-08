@@ -178,6 +178,11 @@ Arithmetic (including overflow), division, shifts, conversions, calls, heap,
 FFI, mutation, local bindings, quantifiers, trust overrides and effect/ownership
 annotations are rejected rather than silently dropped. Boolean values are
 conditions in this first profile, not public Boolean parameters/return values.
+Checked lexing rejects unrepresentable numeric tokens before parser recovery can
+replace them with zero. The current `-9223372036854775808` literal spelling is
+also rejected because its positive magnitude is not representable by the lexer;
+this does not exclude that input value from the function's typed input domain.
+Legacy tolerant parsing is not changed into a validation API by this slice.
 
 The serializable description binds full-source, specification and implementation
 hashes; typed/result binders with explicitly atom-level span precision; the
