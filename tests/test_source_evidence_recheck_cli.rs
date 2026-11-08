@@ -164,6 +164,71 @@ fn changed_metadata_digests_semantics_trust_and_provenance_never_consume_as_succ
 }
 
 #[test]
+fn nested_required_unknown_and_duplicate_fields_use_the_strict_common_gate() {
+    let (_dir, source, saved) = fixture();
+    let bytes = fs::read(&saved).unwrap();
+    let original: Value = serde_json::from_slice(&bytes).unwrap();
+    for pointer in [
+        "",
+        "/subject",
+        "/specification",
+        "/semantics",
+        "/scope",
+        "/correspondence",
+        "/provenance",
+        "/provenance/adapter",
+        "/provenance/tool",
+    ] {
+        for key in original
+            .pointer(pointer)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+        {
+            let mut changed = original.clone();
+            changed
+                .pointer_mut(pointer)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
+            failure(&command(&source, &saved, true).output().unwrap(), 1);
+        }
+        let mut changed = original.clone();
+        changed
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("FAKE_PRIVATE_UNKNOWN".into(), Value::Null);
+        fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
+        failure(&command(&source, &saved, true).output().unwrap(), 1);
+    }
+    let text = std::str::from_utf8(&bytes).unwrap();
+    for input in [
+        text.replacen(
+            '{',
+            "{\"schema_versi\\u006fn\":\"FAKE_PRIVATE_DUPLICATE\",",
+            1,
+        ),
+        text.replacen(
+            "\"profile\":",
+            "\"profile\":\"FAKE_PRIVATE_DUPLICATE\",\"profile\":",
+            1,
+        ),
+        r#"{"schema_version":"mumei.native-consumer-evidence/v1","evidence":[]}"#.into(),
+        r#"{"schema_version":"mumei.proof-cert/v1","verified":true}"#.into(),
+    ] {
+        fs::write(&saved, input).unwrap();
+        for json in [false, true] {
+            failure(&command(&source, &saved, json).output().unwrap(), 1);
+        }
+    }
+}
+
+#[test]
 fn forged_rebound_success_does_not_replace_live_refutation_or_unknown() {
     let (_dir, source, saved) = fixture();
     let original = fs::read(&saved).unwrap();
