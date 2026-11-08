@@ -2862,6 +2862,19 @@ full C10. Dependency closure, wider profiles/targets and C02 evidence integratio
 remain open; existing commands, grades and Lean gates stay unchanged. No external
 verifier is adopted.
 
+The first C02/C10 producer connection adds opt-in `native-bundle recheck-llvm
+--json` after all Stage A/B gates succeed. Its envelope separates three common
+Evidence records for identity, fresh source postcondition and restricted LLVM
+user-body correspondence, while explicitly leaving acceptance unevaluated.
+Only checked snapshot digests, fixed labels/scopes and approved non-secret
+configuration/provenance are emitted; failures and inconclusive results emit
+no partial Evidence. The default text output and existing commands are preserved.
+See the [producer boundary](VERIFICATION_NATIVE.md#first-native-consumer-evidence-producer).
+This is partial C02/C10 output integration, not proof/grade/Lean acceptance,
+report authentication or object/linker/runtime/ABI/OS/final-binary assurance.
+General evidence consumers, dependency/toolchain closure and broader C09/C10
+remain open. No external verifier is adopted.
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

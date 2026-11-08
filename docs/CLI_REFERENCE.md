@@ -12,7 +12,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 |---|---:|---|
 | `mumei` | 1 | Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) |
 | `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
-| `mumei native-bundle recheck-llvm` | 1 | Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics |
+| `mumei native-bundle recheck-llvm` | 2 | Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics |
 | `mumei native-bundle recheck-source` | 1 | Check pinned snapshots and freshly recheck the C03 source postcondition, not LLVM or binary semantics |
 | `mumei native-bundle build` | 1 | Freshly verify and build a pure-i64 main on Linux/x86_64 with fixed settings |
 | `mumei native-bundle check` | 1 | Check snapshot identities against an externally supplied build ID; does not execute or prove the artifact |
@@ -83,7 +83,7 @@ Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object 
 Usage:
 
 ```text
-Usage: mumei native-bundle recheck-llvm --expected-build-id <EXPECTED_BUILD_ID> <BUNDLE> <SOURCE>
+Usage: mumei native-bundle recheck-llvm [OPTIONS] --expected-build-id <EXPECTED_BUILD_ID> <BUNDLE> <SOURCE>
 ```
 
 ### Positional arguments
@@ -98,6 +98,7 @@ Usage: mumei native-bundle recheck-llvm --expected-build-id <EXPECTED_BUILD_ID> 
 | Option | Default | Possible values | Description |
 |---|---|---|---|
 | `--expected-build-id <EXPECTED_BUILD_ID>` | — | — | SHA-256 of native-bundle.json obtained through a separately trusted channel |
+| `--json` | false | — | Print scoped common Evidence JSON on success, without proof acceptance or grade promotion |
 
 ## `mumei native-bundle recheck-source`
 
