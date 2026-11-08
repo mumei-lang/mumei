@@ -280,12 +280,14 @@ fn bounded_source_and_symlinks_cannot_bypass_the_consumer() {
         let result = recheck(&source, &bundle, &id);
         assert_eq!(result.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&result.stderr).contains(diagnostic));
+        assert_eq!(recheck_llvm(&source, &bundle, &id).status.code(), Some(1));
     }
     fs::write(&source, GOOD).unwrap();
     let object = bundle.join("program.o");
     fs::remove_file(&object).unwrap();
     std::os::unix::fs::symlink(&source, &object).unwrap();
     assert!(!recheck(&source, &bundle, &id).status.success());
+    assert!(!recheck_llvm(&source, &bundle, &id).status.success());
 }
 
 #[test]
@@ -303,6 +305,7 @@ fn vacuous_preconditions_and_unsupported_sources_cannot_recheck_successfully() {
         assert_eq!(result.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&result.stderr)
             .contains("zero-argument main with literal true precondition"));
+        assert_eq!(recheck_llvm(&source, &bundle, &id).status.code(), Some(1));
     }
     let fake = "FAKE_C10_SOURCE_DIAGNOSTIC_ONLY";
     for text in [
@@ -315,6 +318,10 @@ fn vacuous_preconditions_and_unsupported_sources_cannot_recheck_successfully() {
         assert_eq!(result.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&result.stderr)
             .contains("source outside bounded C03 recheck profile"));
+        assert!(!String::from_utf8_lossy(&result.stderr).contains(fake));
+        assert!(!String::from_utf8_lossy(&result.stdout).contains(fake));
+        let result = recheck_llvm(&source, &bundle, &id);
+        assert_eq!(result.status.code(), Some(1));
         assert!(!String::from_utf8_lossy(&result.stderr).contains(fake));
         assert!(!String::from_utf8_lossy(&result.stdout).contains(fake));
     }
