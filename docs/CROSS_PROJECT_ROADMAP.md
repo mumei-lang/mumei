@@ -100,6 +100,34 @@ promoting hash consistency to authenticity, translation validation or an
 metadata and wider ABI/runtime semantics remain unverified. This is partial
 C08 and a narrow C10 identity-check foundation, not completion of either item.
 
+### Wave 4 first compiler-backed source-analysis boundary
+
+The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
+opt-in, standard-library `go/types` metadata producer and a pure Agent-side
+reader. It type-checks one explicitly supplied source unit under Go 1.23
+language rules with explicit `gc` integer widths for `amd64`, `386` or `arm64`.
+Bindings, scopes, references, named/alias scalar types, parameters/results and
+ordinary local declaration call targets are tied to the full source identity;
+shadowing is distinct and reassignment is not a new lexical binding. The reader
+checks the unit identity before joining the exact body to the existing C05 CFG,
+keeping file UTF-8 byte spans separate from body Unicode-codepoint spans.
+
+Imports/directives and failed type checks produce no partial bindings. Dynamic,
+method, generic, variadic, bodyless, deferred/concurrent and other unsupported
+call/value semantics remain opaque. A direct target is declaration lookup,
+not purity, termination, recursion analysis or argument/return/effect transfer.
+Source hashes detect stale reports, not compiler authenticity or semantic truth.
+The helper is explicitly provisioned/used by an authorized Agent-side caller;
+Mumei gains no external tool dependency, and existing audit/grade/Lean gates do
+not change. No external verifier is adopted.
+
+This is **partial C06**, not full Go/project/import resolution, other-language
+coverage or a completed C07 call-summary engine. Continue with conservative C07
+summaries only over explicitly supported resolved calls; keep unresolved calls
+and aliases/resources unsafe or unsupported. C09 remains a separate, limited
+LLVM translation-validation pilot after its C03/C08 prerequisites; neither
+compiler type metadata, finite replay nor C08 hash binding supplies that claim.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
