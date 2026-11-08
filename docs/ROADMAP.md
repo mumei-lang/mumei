@@ -2823,6 +2823,18 @@ System dependency closure, wider programs/targets/runtime/ABI, attestation,
 C02 integration and full C08/C10 consumer policies remain open. Existing
 build/run, Claim Book, grades and Lean gates are unchanged.
 
+The first C09 pilot adds opt-in source-body/LLVM-SSA equivalence checking via
+the existing Z3 bitvector library for C03's i64 comparison/conditional fragment.
+It fixes LLVM 17, Linux/x86_64 and target/layout, screens memory-free acyclic
+i1/i64 SSA, and compares all concrete i64 inputs rather than finite observations.
+Wrong lowering is refuted; unsupported semantics, invalid IR and inconclusive
+solver results are not equivalence. See the
+[checked snapshot and exclusions](VERIFICATION_NATIVE.md#first-llvm-translation-validation-slice).
+This is partial C09: no postcondition proof, pipeline-history attestation,
+later optimizer/backend/linker/runtime/binary correctness, native-bundle
+acceptance, new evidence route or grade. C08 hash checks remain identity-only;
+broader C09 semantics and C02/C10 consumer integration remain open.
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

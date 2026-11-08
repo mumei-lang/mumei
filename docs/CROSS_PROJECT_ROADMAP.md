@@ -161,6 +161,25 @@ remain open alongside broader C06 resolution. C09 is still a separate limited
 LLVM translation-validation pilot; neither dependency summaries nor C08 hashes
 establish executable semantic correctness.
 
+### Wave 4 first LLVM equivalence boundary
+
+The [C09 pilot](VERIFICATION_NATIVE.md#first-llvm-translation-validation-slice)
+compares a C03 source body to a separately interpreted LLVM 17 SSA snapshot
+over all concrete i64 inputs using the existing Z3 library. It fixes Linux/x86_64
+target/layout and accepts only a memory-free, acyclic scalar instruction
+whitelist. Wrong signedness, changed values and phi edges are refuted;
+unsupported/invalid IR, poison/undef, budget exhaustion and inconclusive solver
+results never become equivalence.
+
+The real CLI regression supplies emitted pre-optimization IR with an explicitly
+pinned target/layout. The result concerns that exact snapshot, not its origin
+or later optimizer/backend/object/linker/runtime/executable stages. It does not
+prove requires/ensures, independently validate parser normalization, authenticate
+reports, change C08 native-bundle acceptance or add an evidence/grade/Lean route.
+This is **partial C09**, not full LLVM semantics or final-artifact verification.
+C06/C07 expansion and broader C09/C02/C10 remain open. No external verifier is
+adopted and Mumei/Agent ownership remains unchanged.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:

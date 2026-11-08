@@ -103,6 +103,25 @@ fn scalar_contract_connects_real_z3_certificate_and_llvm_generation_without_prom
     assert!(llvm.contains("define i64 @clamp_nonnegative(i64"));
     assert!(llvm.contains("icmp slt i64"));
     assert!(llvm.contains("ret i64"));
+    let pinned = format!(
+        "target triple = \"{}\"\ntarget datalayout = \"{}\"\n{}",
+        mumei_emit_llvm::translation_validation::TARGET,
+        mumei_emit_llvm::translation_validation::DATA_LAYOUT,
+        llvm
+    );
+    let validate = |source: &str, ir: &str| {
+        mumei_emit_llvm::translation_validation::validate_pure_i64(source, ir, Default::default())
+            .unwrap()
+            .outcome
+    };
+    assert_eq!(
+        validate(SOURCE, &pinned),
+        mumei_emit_llvm::translation_validation::Outcome::EquivalentWithinProfile
+    );
+    assert_eq!(
+        validate(SOURCE, &pinned.replace("icmp slt", "icmp sgt")),
+        mumei_emit_llvm::translation_validation::Outcome::Different
+    );
     assert!(contract.requested_target_triple.is_none());
     assert_eq!(
         contract.correspondence,

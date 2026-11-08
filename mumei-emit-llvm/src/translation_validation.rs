@@ -1,0 +1,463 @@
+//! Opt-in equivalence checking of one C03 body and one supplied LLVM 17 SSA snapshot.
+//! Not postcondition verification, pipeline attestation or final-binary verification.
+
+use inkwell::{context::Context as LlvmContext, memory_buffer::MemoryBuffer, values::AsValueRef};
+use llvm_sys::{core::*, prelude::*, LLVMIntPredicate, LLVMOpcode, LLVMTypeKind};
+use mumei_core::semantic_contract::{encode_pure_i64_body, PURE_I64_PROFILE};
+use std::collections::HashMap;
+use z3::{
+    ast::{Ast, Bool, BV},
+    Config, Context, SatResult, Solver,
+};
+
+pub const PROFILE: &str = "mumei.llvm17-pure-i64-ssa-equivalence/v1";
+pub const TARGET: &str = "x86_64-unknown-linux-gnu";
+pub const DATA_LAYOUT: &str =
+    "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128";
+const MAX_BYTES: usize = 65_536;
+const MAX_DEPTH: usize = 48;
+const MAX_BLOCKS: usize = 64;
+const MAX_INSTRUCTIONS: usize = 1024;
+const MAX_STATES: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    EquivalentWithinProfile,
+    Different,
+    Inconclusive,
+}
+
+#[derive(Debug)]
+pub struct ValidationReport {
+    pub profile: &'static str,
+    pub source_profile: &'static str,
+    pub target: &'static str,
+    pub data_layout: &'static str,
+    pub checked_stage: &'static str,
+    pub input_domain: &'static str,
+    pub source_sha256: String,
+    pub llvm_sha256: String,
+    pub timeout_ms: u32,
+    pub resource_limit: u32,
+    pub outcome: Outcome,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    pub timeout_ms: u32,
+    pub resource_limit: u32,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            timeout_ms: 5_000,
+            resource_limit: 1_000_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationError(pub &'static str);
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for ValidationError {}
+
+type Result<T> = std::result::Result<T, ValidationError>;
+
+fn bounded(text: &str) -> Result<()> {
+    if text.len() > MAX_BYTES {
+        return Err(ValidationError("input size limit"));
+    }
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut comment = false;
+    for byte in text.bytes() {
+        if comment {
+            if byte == b'\n' {
+                comment = false;
+            }
+            continue;
+        }
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match byte {
+            b';' => comment = true,
+            b'"' => quoted = true,
+            b'(' | b'[' | b'{' | b'<' => {
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return Err(ValidationError("input nesting limit"));
+                }
+            }
+            b')' | b']' | b'}' | b'>' => depth = depth.saturating_sub(1),
+            _ => (),
+        }
+    }
+    Ok(())
+}
+
+/// Compare all signed-i64 inputs, independently of requires/ensures. The caller
+/// must pin target/layout on the supplied snapshot; this function never rewrites,
+/// optimizes, executes or persists it. Unsupported inputs return only static gaps.
+pub fn validate_pure_i64(
+    source: &str,
+    llvm_ir: &str,
+    options: Options,
+) -> Result<ValidationReport> {
+    bounded(llvm_ir)?;
+    if options.timeout_ms == 0 || options.timeout_ms > 30_000 || options.resource_limit == 0 {
+        return Err(ValidationError("invalid solver budget"));
+    }
+    let mut config = Config::new();
+    config.set_timeout_msec(options.timeout_ms as u64);
+    config.set_param_value("rlimit", &options.resource_limit.to_string());
+    let context = Context::new(&config);
+    let model = encode_pure_i64_body(source, &context)
+        .map_err(|_| ValidationError("unsupported C03 source"))?;
+    let llvm_context = LlvmContext::create();
+    let module = llvm_context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            llvm_ir.as_bytes(),
+            "translation-validation.ll",
+        ))
+        .map_err(|_| ValidationError("invalid LLVM IR"))?;
+    module
+        .verify()
+        .map_err(|_| ValidationError("invalid LLVM module"))?;
+    if module.get_triple().as_str().to_bytes() != TARGET.as_bytes()
+        || module.get_data_layout().as_str().to_bytes() != DATA_LAYOUT.as_bytes()
+    {
+        return Err(ValidationError("unsupported target or data layout"));
+    }
+    let function = module
+        .get_function(&model.function_name)
+        .ok_or(ValidationError("missing source function"))?;
+    // The module is parsed/verified and remains alive for every raw LLVM query.
+    let returns = unsafe {
+        let raw = function.as_value_ref();
+        check_module(module.as_mut_ptr(), raw, model.inputs.len())?;
+        IrEncoder::new(&context).encode(raw, &model.inputs)?
+    };
+    let mismatches: Vec<_> = returns
+        .iter()
+        .map(|(guard, value)| Bool::and(&context, &[guard, &value._eq(&model.value).not()]))
+        .collect();
+    let solver = Solver::new(&context);
+    solver.assert(&Bool::or(&context, &mismatches.iter().collect::<Vec<_>>()));
+    let outcome = match solver.check() {
+        SatResult::Unsat => Outcome::EquivalentWithinProfile,
+        SatResult::Sat => Outcome::Different,
+        SatResult::Unknown => Outcome::Inconclusive,
+    };
+    Ok(ValidationReport {
+        profile: PROFILE,
+        source_profile: PURE_I64_PROFILE,
+        target: TARGET,
+        data_layout: DATA_LAYOUT,
+        checked_stage: "supplied_llvm_ir_snapshot_no_pipeline_attestation",
+        input_domain: "all_signed_i64_inputs_not_restricted_by_requires",
+        source_sha256: model.source_sha256,
+        llvm_sha256: mumei_core::native_bundle::sha256(llvm_ir.as_bytes()),
+        timeout_ms: options.timeout_ms,
+        resource_limit: options.resource_limit,
+        outcome,
+    })
+}
+
+unsafe fn width(ty: LLVMTypeRef) -> Result<u32> {
+    if LLVMGetTypeKind(ty) != LLVMTypeKind::LLVMIntegerTypeKind {
+        return Err(ValidationError("non-integer LLVM value"));
+    }
+    match LLVMGetIntTypeWidth(ty) {
+        n @ (1 | 64) => Ok(n),
+        _ => Err(ValidationError("unsupported LLVM width")),
+    }
+}
+
+unsafe fn check_module(module: LLVMModuleRef, function: LLVMValueRef, params: usize) -> Result<()> {
+    let mut asm_size = 0;
+    LLVMGetModuleInlineAsm(module, &mut asm_size);
+    let mut metadata_count = 0;
+    let metadata = LLVMGlobalCopyAllMetadata(function, &mut metadata_count);
+    if !metadata.is_null() {
+        LLVMDisposeValueMetadataEntries(metadata);
+    }
+    if asm_size != 0
+        || metadata_count != 0
+        || !LLVMGetFirstNamedMetadata(module).is_null()
+        || !LLVMGetFirstGlobal(module).is_null()
+        || !LLVMGetFirstGlobalAlias(module).is_null()
+        || !LLVMGetFirstGlobalIFunc(module).is_null()
+        || LLVMGetFirstFunction(module) != function
+        || !LLVMGetNextFunction(function).is_null()
+    {
+        return Err(ValidationError("module outside single-function profile"));
+    }
+    if LLVMGetFunctionCallConv(function) != 0
+        || LLVMHasPersonalityFn(function) != 0
+        || !LLVMGetGC(function).is_null()
+        || LLVMGetPointerAddressSpace(LLVMTypeOf(function)) != 0
+        || LLVMCountParams(function) as usize != params
+        || LLVMIsFunctionVarArg(LLVMGlobalGetValueType(function)) != 0
+        || width(LLVMGetReturnType(LLVMGlobalGetValueType(function)))? != 64
+    {
+        return Err(ValidationError("unsupported LLVM signature"));
+    }
+    for index in (0..=params as u32).chain(std::iter::once(u32::MAX)) {
+        if LLVMGetAttributeCountAtIndex(function, index) != 0 {
+            return Err(ValidationError("LLVM attributes unsupported"));
+        }
+    }
+    if LLVMCountBasicBlocks(function) == 0 || LLVMCountBasicBlocks(function) as usize > MAX_BLOCKS {
+        return Err(ValidationError("LLVM block limit"));
+    }
+    let mut block = LLVMGetFirstBasicBlock(function);
+    let mut count = 0;
+    let mut colors = HashMap::new();
+    while !block.is_null() {
+        acyclic(block, &mut colors)?;
+        let mut inst = LLVMGetFirstInstruction(block);
+        while !inst.is_null() {
+            count += 1;
+            if count > MAX_INSTRUCTIONS {
+                return Err(ValidationError("LLVM instruction limit"));
+            }
+            if LLVMHasMetadata(inst) != 0 {
+                return Err(ValidationError("LLVM metadata unsupported"));
+            }
+            for i in 0..LLVMGetNumOperands(inst) {
+                let value = LLVMGetOperand(inst, i as u32);
+                if LLVMIsUndef(value) != 0 || LLVMIsPoison(value) != 0 {
+                    return Err(ValidationError("undef or poison unsupported"));
+                }
+                if LLVMValueIsBasicBlock(value) == 0 {
+                    width(LLVMTypeOf(value))?;
+                    if LLVMIsConstant(value) != 0 && LLVMIsAConstantInt(value).is_null() {
+                        return Err(ValidationError("unsupported LLVM constant"));
+                    }
+                }
+            }
+            match LLVMGetInstructionOpcode(inst) {
+                LLVMOpcode::LLVMRet | LLVMOpcode::LLVMBr => (),
+                LLVMOpcode::LLVMICmp
+                | LLVMOpcode::LLVMAnd
+                | LLVMOpcode::LLVMOr
+                | LLVMOpcode::LLVMXor
+                | LLVMOpcode::LLVMZExt
+                | LLVMOpcode::LLVMTrunc
+                | LLVMOpcode::LLVMSelect
+                | LLVMOpcode::LLVMPHI => {
+                    width(LLVMTypeOf(inst))?;
+                }
+                _ => return Err(ValidationError("unsupported LLVM instruction")),
+            }
+            inst = LLVMGetNextInstruction(inst);
+        }
+        block = LLVMGetNextBasicBlock(block);
+    }
+    Ok(())
+}
+
+unsafe fn acyclic(block: LLVMBasicBlockRef, colors: &mut HashMap<usize, u8>) -> Result<()> {
+    match colors.get(&(block as usize)) {
+        Some(1) => return Err(ValidationError("LLVM cycle unsupported")),
+        Some(2) => return Ok(()),
+        _ => (),
+    }
+    colors.insert(block as usize, 1);
+    let term = LLVMGetBasicBlockTerminator(block);
+    if term.is_null()
+        || !matches!(
+            LLVMGetInstructionOpcode(term),
+            LLVMOpcode::LLVMBr | LLVMOpcode::LLVMRet
+        )
+    {
+        return Err(ValidationError("unsupported LLVM terminator"));
+    }
+    for i in 0..LLVMGetNumSuccessors(term) {
+        acyclic(LLVMGetSuccessor(term, i), colors)?;
+    }
+    colors.insert(block as usize, 2);
+    Ok(())
+}
+
+struct IrEncoder<'ctx> {
+    ctx: &'ctx Context,
+    states: usize,
+}
+impl<'ctx> IrEncoder<'ctx> {
+    fn new(ctx: &'ctx Context) -> Self {
+        Self { ctx, states: 0 }
+    }
+
+    unsafe fn value(
+        &self,
+        value: LLVMValueRef,
+        values: &HashMap<usize, BV<'ctx>>,
+    ) -> Result<BV<'ctx>> {
+        let bits = width(LLVMTypeOf(value))?;
+        if LLVMIsUndef(value) != 0 || LLVMIsPoison(value) != 0 {
+            return Err(ValidationError("undef or poison unsupported"));
+        }
+        if !LLVMIsAConstantInt(value).is_null() {
+            return Ok(BV::from_u64(
+                self.ctx,
+                LLVMConstIntGetZExtValue(value),
+                bits,
+            ));
+        }
+        values
+            .get(&(value as usize))
+            .cloned()
+            .ok_or(ValidationError("unresolved LLVM value"))
+    }
+
+    fn condition(&self, value: &BV<'ctx>) -> Result<Bool<'ctx>> {
+        if value.get_size() != 1 {
+            return Err(ValidationError("LLVM i1 condition expected"));
+        }
+        Ok(value._eq(&BV::from_u64(self.ctx, 1, 1)))
+    }
+
+    unsafe fn encode(
+        &mut self,
+        function: LLVMValueRef,
+        inputs: &[BV<'ctx>],
+    ) -> Result<Vec<(Bool<'ctx>, BV<'ctx>)>> {
+        let mut values = HashMap::new();
+        for (i, input) in inputs.iter().enumerate() {
+            let param = LLVMGetParam(function, i as u32);
+            if width(LLVMTypeOf(param))? != 64 {
+                return Err(ValidationError("LLVM i64 parameter expected"));
+            }
+            values.insert(param as usize, input.clone());
+        }
+        let mut returns = Vec::new();
+        self.block(
+            LLVMGetEntryBasicBlock(function),
+            std::ptr::null_mut(),
+            values,
+            Bool::from_bool(self.ctx, true),
+            &mut returns,
+        )?;
+        if returns.is_empty() {
+            return Err(ValidationError("missing LLVM return"));
+        }
+        Ok(returns)
+    }
+
+    unsafe fn block(
+        &mut self,
+        block: LLVMBasicBlockRef,
+        previous: LLVMBasicBlockRef,
+        mut values: HashMap<usize, BV<'ctx>>,
+        guard: Bool<'ctx>,
+        returns: &mut Vec<(Bool<'ctx>, BV<'ctx>)>,
+    ) -> Result<()> {
+        self.states += 1;
+        if self.states > MAX_STATES {
+            return Err(ValidationError("LLVM path expansion limit"));
+        }
+        let mut inst = LLVMGetFirstInstruction(block);
+        while !inst.is_null() {
+            let op = LLVMGetInstructionOpcode(inst);
+            if op == LLVMOpcode::LLVMRet {
+                let value = self.value(LLVMGetOperand(inst, 0), &values)?;
+                returns.push((guard, value));
+                return Ok(());
+            }
+            if op == LLVMOpcode::LLVMBr {
+                if LLVMGetNumSuccessors(inst) == 1 {
+                    return self.block(LLVMGetSuccessor(inst, 0), block, values, guard, returns);
+                }
+                let cond = self.condition(&self.value(LLVMGetCondition(inst), &values)?)?;
+                self.block(
+                    LLVMGetSuccessor(inst, 0),
+                    block,
+                    values.clone(),
+                    Bool::and(self.ctx, &[&guard, &cond]),
+                    returns,
+                )?;
+                return self.block(
+                    LLVMGetSuccessor(inst, 1),
+                    block,
+                    values,
+                    Bool::and(self.ctx, &[&guard, &cond.not()]),
+                    returns,
+                );
+            }
+            let value = if op == LLVMOpcode::LLVMPHI {
+                let i = (0..LLVMCountIncoming(inst))
+                    .find(|&i| LLVMGetIncomingBlock(inst, i) == previous)
+                    .ok_or(ValidationError("missing LLVM phi edge"))?;
+                self.value(LLVMGetIncomingValue(inst, i), &values)?
+            } else {
+                let a = self.value(LLVMGetOperand(inst, 0), &values)?;
+                match op {
+                    LLVMOpcode::LLVMZExt => {
+                        if a.get_size() != 1 || width(LLVMTypeOf(inst))? != 64 {
+                            return Err(ValidationError("unsupported LLVM cast"));
+                        }
+                        a.zero_ext(63)
+                    }
+                    LLVMOpcode::LLVMTrunc => {
+                        if a.get_size() != 64 || width(LLVMTypeOf(inst))? != 1 {
+                            return Err(ValidationError("unsupported LLVM cast"));
+                        }
+                        a.extract(0, 0)
+                    }
+                    LLVMOpcode::LLVMSelect => {
+                        let b = self.value(LLVMGetOperand(inst, 1), &values)?;
+                        let c = self.value(LLVMGetOperand(inst, 2), &values)?;
+                        self.condition(&a)?.ite(&b, &c)
+                    }
+                    _ => {
+                        let b = self.value(LLVMGetOperand(inst, 1), &values)?;
+                        match op {
+                            LLVMOpcode::LLVMAnd => a.bvand(&b),
+                            LLVMOpcode::LLVMOr => a.bvor(&b),
+                            LLVMOpcode::LLVMXor => a.bvxor(&b),
+                            LLVMOpcode::LLVMICmp => {
+                                use LLVMIntPredicate::*;
+                                let condition = match LLVMGetICmpPredicate(inst) {
+                                    LLVMIntEQ => a._eq(&b),
+                                    LLVMIntNE => a._eq(&b).not(),
+                                    LLVMIntSGT => a.bvsgt(&b),
+                                    LLVMIntSGE => a.bvsge(&b),
+                                    LLVMIntSLT => a.bvslt(&b),
+                                    LLVMIntSLE => a.bvsle(&b),
+                                    LLVMIntUGT => a.bvugt(&b),
+                                    LLVMIntUGE => a.bvuge(&b),
+                                    LLVMIntULT => a.bvult(&b),
+                                    LLVMIntULE => a.bvule(&b),
+                                };
+                                condition.ite(
+                                    &BV::from_u64(self.ctx, 1, 1),
+                                    &BV::from_u64(self.ctx, 0, 1),
+                                )
+                            }
+                            _ => return Err(ValidationError("unsupported LLVM value instruction")),
+                        }
+                    }
+                }
+            };
+            values.insert(inst as usize, value);
+            inst = LLVMGetNextInstruction(inst);
+        }
+        Err(ValidationError("missing LLVM terminator"))
+    }
+}
