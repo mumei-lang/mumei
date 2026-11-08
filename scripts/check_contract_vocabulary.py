@@ -42,6 +42,7 @@ VERIFIED_SAMPLE_FIXTURE = (
 CANONICAL_DOC = REPO_ROOT / "docs" / "CROSS_PROJECT_ROADMAP.md"
 SYNC_DOCS = [
     REPO_ROOT / "docs" / "ROADMAP.md",
+    REPO_ROOT / "docs" / "VERIFICATION_NATIVE.md",
     REPO_ROOT / "docs" / "ONBOARDING.md",
     REPO_ROOT / "docs" / "PROOF_CERTIFICATE.md",
     REPO_ROOT / "docs" / "TRUSTED_ATOMS.md",

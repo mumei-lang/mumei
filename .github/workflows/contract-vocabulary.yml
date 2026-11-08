@@ -10,6 +10,12 @@ on:
       - 'src/cli.rs'
       - 'scripts/check_contract_vocabulary.py'
       - 'schema/bridge_lemma_catalog.json'
+      - 'schema/verification-evidence.schema.json'
+      - 'schema/proof-cert.schema.json'
+      - 'tests/fixtures/proof-cert/**'
+      - 'tests/test_proof_cert_schema.py'
+      - 'tests/fixtures/verification-evidence/**'
+      - 'tests/test_verification_evidence_schema.py'
       - 'mumei-core/src/verification/types.rs'
       - 'tests/fixtures/proof-cert/verified_sample.proof-cert.json'
       - 'tests/test_check_contract_vocabulary.py'
@@ -31,6 +37,12 @@ on:
       - 'src/cli.rs'
       - 'scripts/check_contract_vocabulary.py'
       - 'schema/bridge_lemma_catalog.json'
+      - 'schema/verification-evidence.schema.json'
+      - 'schema/proof-cert.schema.json'
+      - 'tests/fixtures/proof-cert/**'
+      - 'tests/test_proof_cert_schema.py'
+      - 'tests/fixtures/verification-evidence/**'
+      - 'tests/test_verification_evidence_schema.py'
       - 'mumei-core/src/verification/types.rs'
       - 'tests/fixtures/proof-cert/verified_sample.proof-cert.json'
       - 'tests/test_check_contract_vocabulary.py'
@@ -64,5 +76,5 @@ jobs:
 
       - name: Run extraction tests
         run: |
-          python3 -m pip install --quiet pytest pyyaml
-          python3 -m pytest tests/test_check_contract_vocabulary.py tests/test_ci_workflow_timeouts.py tests/test_check_mcp_tool_contract.py tests/test_check_proof_bundle_drift.py tests/test_lsp_diagnostic_data_doc.py -v
+          python3 -m pip install --quiet pytest pyyaml 'jsonschema>=4.18,<5'
+          python3 -m pytest tests/test_check_contract_vocabulary.py tests/test_ci_workflow_timeouts.py tests/test_check_mcp_tool_contract.py tests/test_check_proof_bundle_drift.py tests/test_lsp_diagnostic_data_doc.py tests/test_verification_evidence_schema.py tests/test_proof_cert_schema.py -v
