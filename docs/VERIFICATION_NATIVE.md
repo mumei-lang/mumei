@@ -479,6 +479,22 @@ ingestion/validation, execution/cancellation, resource enforcement and runtime
 reconciliation remain later work. See the
 [local API boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-explicit-result-contract-routing).
 
+The next metadata-only C04/C11 slice adds per-adapter host-reviewed non-secret
+setting schemas: strict Boolean, bounded integer and closed identifier choice.
+Defaults precede explicit per-adapter overrides. Unknown/malformed settings fail
+before selection, including disabled candidates; fallback uses its own settings
+without borrowing from the original adapter or weakening the result contract.
+Only the validated selected projection is exposed/fingerprinted; raw overrides
+are not serialized or hashed. The canonical configuration hash binds schema,
+effective values/budgets, selected versions/location and the full capability
+query. Schema-less legacy selected JSON stays unchanged. The host must review
+declared defaults/labels as non-secret: this API is not a secret detector.
+The hash is not a Core Evidence configuration identity, source/tool identity,
+execution/authenticity receipt, permission grant or acceptance decision.
+File/environment lookup, secret transport, actual execution/resource enforcement
+and runtime reconciliation remain open; audit/Lean/native/LLVM/WASM policies are
+unchanged. See the [typed settings contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-typed-configuration-follow-up).
+
 "Plugin" describes the extension boundary, not a decision to use shared
 libraries. Subprocess, container and explicitly configured remote transports
 are possible later choices. Do not reuse the emitter-plugin ABI by assumption.

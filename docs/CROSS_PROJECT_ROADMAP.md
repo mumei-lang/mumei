@@ -101,6 +101,31 @@ No external verifier is adopted and WASM stays deferred. The
 [Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-explicit-result-contract-routing)
 owns local API details under this implementation order.
 
+### Wave 2 typed configuration follow-up
+
+Agent's opt-in C04/C11 planner adds host-reviewed non-secret setting schemas:
+strict Boolean, explicitly bounded integer and closed identifier choice only.
+Registered defaults precede per-adapter explicit overrides. Unknown adapters or
+options and invalid/duplicate values fail before selection, even for disabled
+candidates; they cannot silently fall back. Permitted fallback uses its own
+schema/defaults/overrides without copying settings or weakening the result
+contract. Schema-less legacy output stays unchanged.
+
+Only approved selected values are exposed/fingerprinted. A canonical
+`mumei.adapter-configuration/v1` SHA-256 projection binds schema, defaults,
+effective settings/budgets and selected adapter/tool/request context. Raw
+overrides are not serialized or hashed before validation. The host must approve
+all declared labels/defaults as non-secret; this is not secret detection or a
+Core Evidence configuration identity. It is not an execution/authenticity or
+acceptance receipt.
+
+This remains partial C04/C11 and C13. Input preparation, actual permissions,
+tool/plugin execution, secret transport, resource enforcement and runtime
+reconciliation remain open. Core acceptance, audit grades, Lean/native/LLVM
+guarantees and deferred WASM are unchanged; no external verifier is adopted.
+The [Agent settings contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-typed-configuration-follow-up)
+owns local API details.
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)

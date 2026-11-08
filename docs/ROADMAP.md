@@ -2936,6 +2936,16 @@ not capability truth, Evidence acceptance, execution/resource enforcement,
 runtime conflict reconciliation or grade/Lean promotion. See the
 [canonical milestone](CROSS_PROJECT_ROADMAP.md#wave-2-explicit-result-contract-routing-follow-up).
 
+The Agent C04/C11 planner adds a typed non-secret configuration follow-up:
+host-approved Boolean, bounded integer and closed-choice schemas resolve
+defaults plus per-adapter overrides before selection. Unknown/invalid settings
+fail closed; permitted fallback uses its own settings and preserves the exact
+result contract. Only the approved selected projection is exposed/fingerprinted;
+legacy schema-less JSON stays unchanged. This is not a Core Evidence identity,
+secret detector, permission grant, execution or acceptance receipt. Actual input
+preparation, tool execution/resource enforcement and runtime reconciliation
+remain open. See the [canonical milestone](CROSS_PROJECT_ROADMAP.md#wave-2-typed-configuration-follow-up).
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
