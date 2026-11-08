@@ -1,0 +1,268 @@
+{
+  "description": "Synthetic representation fixtures only. No tool was run and no proof, hash correspondence or assurance was established.",
+  "cases": [
+    {
+      "name": "synthetic-model-proof",
+      "evidence": {
+        "schema_version": "mumei.verification-evidence/v1",
+        "subject": {
+          "id": "synthetic-clamp-model",
+          "kind": "model",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "specification": {
+          "id": "synthetic-nonnegative-result",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "obligation_id": "synthetic-clamp-postcondition",
+        "semantics": {"profile":"synthetic-pure-integer/v1","integer_model":"mathematical_integer","target_triple":null},
+        "method": "deductive_proof",
+        "execution": "completed",
+        "result": "established",
+        "scope": {"kind":"unbounded","bounds":[]},
+        "correspondence": {
+          "relation": "exact_model",
+          "status": "assumed",
+          "notes": ["Synthetic representation fixture; no real tool execution or checked translation."]
+        },
+        "assumptions": ["Input is a signed 64-bit integer."],
+        "exclusions": ["No source fidelity, compiler correctness, authenticity or runtime assurance is established."],
+        "provenance": {
+          "adapter": {"id":"synthetic-adapter","version":"fixture-only","protocol_version":"fixture/v1"},
+          "tool": {"name":"synthetic-tool","version":"not-executed"},
+          "configuration_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "artifact_paths": []
+      }
+    },
+    {
+      "name": "synthetic-unchecked-port-proof",
+      "evidence": {
+        "schema_version": "mumei.verification-evidence/v1",
+        "subject": {
+          "id": "synthetic-body-port",
+          "kind": "model",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "specification": {
+          "id": "synthetic-nonnegative-result",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "obligation_id": "synthetic-clamp-postcondition",
+        "semantics": {"profile":"synthetic-pure-integer/v1","integer_model":"mathematical_integer","target_triple":null},
+        "method": "deductive_proof",
+        "execution": "completed",
+        "result": "established",
+        "scope": {"kind":"unbounded","bounds":[]},
+        "correspondence": {
+          "relation": "unchecked",
+          "status": "unverified",
+          "notes": ["A proof on this port does not prove original-code correspondence."]
+        },
+        "assumptions": ["Input is a signed 64-bit integer."],
+        "exclusions": ["No source fidelity, compiler correctness, authenticity or runtime assurance is established."],
+        "provenance": {
+          "adapter": {"id":"synthetic-adapter","version":"fixture-only","protocol_version":"fixture/v1"},
+          "tool": {"name":"synthetic-tool","version":"not-executed"},
+          "configuration_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "artifact_paths": []
+      }
+    },
+    {
+      "name": "synthetic-finite-replay",
+      "evidence": {
+        "schema_version": "mumei.verification-evidence/v1",
+        "subject": {
+          "id": "synthetic-clamp-model",
+          "kind": "foreign_source",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "specification": {
+          "id": "synthetic-nonnegative-result",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "obligation_id": "synthetic-clamp-postcondition",
+        "semantics": {"profile":"synthetic-pure-integer/v1","integer_model":"mathematical_integer","target_triple":null},
+        "method": "finite_execution",
+        "execution": "completed",
+        "result": "observed_no_failure",
+        "scope": {"kind":"finite","bounds":["Only inputs -1, 0 and 1 were exercised."]},
+        "correspondence": {"relation":"unchecked","status":"unverified","notes":[]},
+        "assumptions": ["Input is a signed 64-bit integer."],
+        "exclusions": ["No source fidelity, compiler correctness, authenticity or runtime assurance is established."],
+        "provenance": {
+          "adapter": {"id":"synthetic-adapter","version":"fixture-only","protocol_version":"fixture/v1"},
+          "tool": {"name":"synthetic-tool","version":"not-executed"},
+          "configuration_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "artifact_paths": []
+      }
+    },
+    {
+      "name": "synthetic-bounded-check",
+      "evidence": {
+        "schema_version": "mumei.verification-evidence/v1",
+        "subject": {
+          "id": "synthetic-clamp-model",
+          "kind": "foreign_source",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "specification": {
+          "id": "synthetic-nonnegative-result",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "obligation_id": "synthetic-clamp-postcondition",
+        "semantics": {"profile":"synthetic-pure-integer/v1","integer_model":"mathematical_integer","target_triple":null},
+        "method": "bounded_model_checking",
+        "execution": "completed",
+        "result": "established",
+        "scope": {
+          "kind": "bounded",
+          "bounds": ["Explicit harness input domain and successful unwind checks are required."]
+        },
+        "correspondence": {"relation":"exact_model","status":"assumed","notes":[]},
+        "assumptions": ["Input is a signed 64-bit integer."],
+        "exclusions": ["No source fidelity, compiler correctness, authenticity or runtime assurance is established."],
+        "provenance": {
+          "adapter": {"id":"synthetic-adapter","version":"fixture-only","protocol_version":"fixture/v1"},
+          "tool": {"name":"synthetic-tool","version":"not-executed"},
+          "configuration_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "artifact_paths": []
+      }
+    },
+    {
+      "name": "synthetic-timeout",
+      "evidence": {
+        "schema_version": "mumei.verification-evidence/v1",
+        "subject": {
+          "id": "synthetic-clamp-model",
+          "kind": "model",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "specification": {
+          "id": "synthetic-nonnegative-result",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "obligation_id": "synthetic-clamp-postcondition",
+        "semantics": {"profile":"synthetic-pure-integer/v1","integer_model":"mathematical_integer","target_triple":null},
+        "method": "deductive_proof",
+        "execution": "timeout",
+        "result": "unknown",
+        "scope": {"kind":"unbounded","bounds":[]},
+        "correspondence": {
+          "relation": "exact_model",
+          "status": "assumed",
+          "notes": ["Synthetic representation fixture; no real tool execution or checked translation."]
+        },
+        "assumptions": ["Input is a signed 64-bit integer."],
+        "exclusions": ["No source fidelity, compiler correctness, authenticity or runtime assurance is established."],
+        "provenance": {
+          "adapter": {"id":"synthetic-adapter","version":"fixture-only","protocol_version":"fixture/v1"},
+          "tool": {"name":"synthetic-tool","version":"not-executed"},
+          "configuration_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "artifact_paths": []
+      }
+    },
+    {
+      "name": "synthetic-artifact-identity",
+      "evidence": {
+        "schema_version": "mumei.verification-evidence/v1",
+        "subject": {
+          "id": "synthetic-clamp-model",
+          "kind": "native_artifact",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "specification": {
+          "id": "synthetic-nonnegative-result",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "obligation_id": "synthetic-clamp-postcondition",
+        "semantics": {
+          "profile": "synthetic-build-identity/v1",
+          "integer_model": "not_applicable",
+          "target_triple": "x86_64-unknown-linux-gnu"
+        },
+        "method": "identity_check",
+        "execution": "completed",
+        "result": "established",
+        "scope": {"kind":"identity","bounds":[]},
+        "correspondence": {"relation":"unchecked","status":"unverified","notes":["Identity is not semantics or authenticity."]},
+        "assumptions": ["Input is a signed 64-bit integer."],
+        "exclusions": ["No source fidelity, compiler correctness, authenticity or runtime assurance is established."],
+        "provenance": {
+          "adapter": {"id":"synthetic-adapter","version":"fixture-only","protocol_version":"fixture/v1"},
+          "tool": {"name":"synthetic-tool","version":"not-executed"},
+          "configuration_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "artifact_paths": []
+      }
+    },
+    {
+      "name": "synthetic-heuristic-finding",
+      "evidence": {
+        "schema_version": "mumei.verification-evidence/v1",
+        "subject": {
+          "id": "synthetic-clamp-model",
+          "kind": "model",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "specification": {
+          "id": "synthetic-nonnegative-result",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "obligation_id": "synthetic-clamp-postcondition",
+        "semantics": {"profile":"synthetic-pure-integer/v1","integer_model":"mathematical_integer","target_triple":null},
+        "method": "static_heuristic",
+        "execution": "completed",
+        "result": "finding",
+        "scope": {"kind":"unbounded","bounds":[]},
+        "correspondence": {"relation":"unchecked","status":"unverified","notes":[]},
+        "assumptions": ["Input is a signed 64-bit integer."],
+        "exclusions": ["No source fidelity, compiler correctness, authenticity or runtime assurance is established."],
+        "provenance": {
+          "adapter": {"id":"synthetic-adapter","version":"fixture-only","protocol_version":"fixture/v1"},
+          "tool": {"name":"synthetic-tool","version":"not-executed"},
+          "configuration_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "artifact_paths": []
+      }
+    },
+    {
+      "name": "synthetic-partial-translation",
+      "evidence": {
+        "schema_version": "mumei.verification-evidence/v1",
+        "subject": {
+          "id": "synthetic-clamp-model",
+          "kind": "model",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "specification": {
+          "id": "synthetic-nonnegative-result",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "obligation_id": "synthetic-clamp-postcondition",
+        "semantics": {"profile":"synthetic-pure-integer/v1","integer_model":"mathematical_integer","target_triple":null},
+        "method": "deductive_proof",
+        "execution": "completed",
+        "result": "unsupported",
+        "scope": {"kind":"unbounded","bounds":[]},
+        "correspondence": {
+          "relation": "unsupported",
+          "status": "unsupported",
+          "notes": ["Translation is partial; no proof acceptance."]
+        },
+        "assumptions": ["Input is a signed 64-bit integer."],
+        "exclusions": ["No source fidelity, compiler correctness, authenticity or runtime assurance is established."],
+        "provenance": {
+          "adapter": {"id":"synthetic-adapter","version":"fixture-only","protocol_version":"fixture/v1"},
+          "tool": {"name":"synthetic-tool","version":"not-executed"},
+          "configuration_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "artifact_paths": []
+      }
+    }
+  ]
+}

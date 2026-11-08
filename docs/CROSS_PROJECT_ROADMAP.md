@@ -18,7 +18,63 @@ Canonical harness vocabulary:
 | `budget_policy_fingerprint` | Stable hash of the retry/search policy used when producing evidence. | agent self-healing/audit, compiler proof certificates |
 | `lean_verified` | Certificate status for an atom accepted only when the current `translator_version` and `bridge_lemma_hash` match both certificate fields and Lean result metadata; otherwise the atom is stale/unproven. | `mumei-lean` bridge; `mumei` certificate resolver; CLI/MCP certificate consumers |
 
-Current priority after the completed P11/P14 integration is docs-sync and harness-contract regression prevention: keep the vocabulary above stable, keep local docs subordinate to this roadmap, and run the bridge/MCP/audit/spec regression gates whenever those contracts move. Manual review is now backed by the deterministic `scripts/check_contract_vocabulary.py` docs-sync gate — which checks docs, CLI help (`src/cli.rs`), and MCP tool docstrings (`mcp_server.py`) for forbidden aliases and `contradiction_type` drift. MCP docstring extraction uses `ast`-based parsing with a count assertion (decorator count vs extracted docstring count) to prevent silent false-negatives from decorator-argument or signature variations. Repository-local contract tests in `mumei-agent`, `mumei-lean`, and `mumei-demo` complement the central gate; `mumei-demo` extends its `scripts/check_scenario_contracts.py` to cover docs/README files for forbidden aliases in key-like contexts (backtick, code fence, JSON key style). `mumei-lean` extends its `tests/test_contract_vocabulary.py` beyond docs text to cover Python bridge code surfaces: `scripts/export_cert.py` constants (`TRANSLATOR_VERSION`, `BRIDGE_LEMMA_HASH`) are asserted against `docs/LEAN_HARNESS_CONTRACT.md` pinned values for bidirectional drift detection, and docstrings/argparse help/user-visible strings in `export_cert.py`, `bridge.py`, `ingest_cert.py`, `bridge_harness.py` are checked for Lean vocabulary alias drift in key-like contexts. All four repositories now symmetrically cover docs + code-surface contract vocabulary regression.
+The completed P11/P14 integration established docs-sync and harness-contract regression prevention as ongoing gates for the Verification-Native program below: keep the vocabulary above stable, keep local docs subordinate to this roadmap, and run the bridge/MCP/audit/spec regression gates whenever those contracts move. Manual review is now backed by the deterministic `scripts/check_contract_vocabulary.py` docs-sync gate — which checks docs, CLI help (`src/cli.rs`), and MCP tool docstrings (`mcp_server.py`) for forbidden aliases and `contradiction_type` drift. MCP docstring extraction uses `ast`-based parsing with a count assertion (decorator count vs extracted docstring count) to prevent silent false-negatives from decorator-argument or signature variations. Repository-local contract tests in `mumei-agent`, `mumei-lean`, and `mumei-demo` complement the central gate; `mumei-demo` extends its `scripts/check_scenario_contracts.py` to cover docs/README files for forbidden aliases in key-like contexts (backtick, code fence, JSON key style). `mumei-lean` extends its `tests/test_contract_vocabulary.py` beyond docs text to cover Python bridge code surfaces: `scripts/export_cert.py` constants (`TRANSLATOR_VERSION`, `BRIDGE_LEMMA_HASH`) are asserted against `docs/LEAN_HARNESS_CONTRACT.md` pinned values for bidirectional drift detection, and docstrings/argparse help/user-visible strings in `export_cert.py`, `bridge.py`, `ingest_cert.py`, `bridge_harness.py` are checked for Lean vocabulary alias drift in key-like contexts. All four repositories now symmetrically cover docs + code-surface contract vocabulary regression.
+
+## Verification-Native program: ordered implementation
+
+Mumei will evolve from primarily Z3-backed verification toward a small common
+specification language connected to multiple formal verification methods,
+while retaining execution. It will not become a universal language containing
+every backend's logic. The user-approved program is tracked in
+[the parent issue](https://github.com/mumei-lang/mumei/issues/784).
+The [architecture and acceptance contract](VERIFICATION_NATIVE.md) defines
+ownership, existing foundations, plugin requirements, evidence and non-goals;
+this file remains the sole authority for cross-project implementation order.
+
+| Wave | Work | Exit condition |
+| --- | --- | --- |
+| 1 | C01 ownership; initial C02 evidence contract; C03 minimal semantic design; C13 negative baseline | Shared meaning and non-guarantees are documented, and contract fixtures are checked without changing existing verdicts or grades. |
+| 2 | C03 supported vertical slice; C04 planner; C11 replaceable plugin contract | Existing Z3/Lean paths and test adapters demonstrate capability checks, user selection/configuration, explainable routing and explicit fallback. No new external tool adoption is required. |
+| 3 | C05 CFG/dataflow and C08 evidence-bound native bundles | Preserve Go facts and source provenance; independently check artifact identity, freshness and build conditions without claiming semantic correctness. |
+| 4 | C06/C07 language/interprocedural analysis; C09 limited LLVM translation validation; individual C11 feasibility pilots | Expand one supported domain at a time, preserving assumptions, bounds and unsupported cases. |
+| 5 | C10 consumer-side executable checks; demand-driven C12 authority correspondence | Recheck required evidence and display unverified runtime, ABI, linking and authority connections. |
+| Deferred | C14 WASM; additional solvers; dynamic capability stages | Revisit only with explicit demand and the native/runtime/evidence prerequisites. |
+
+Wave 1 is the initial foundation delivery, not completion of C02/C03/C13 or
+the later waves. Existing logic-fragment tags, HIR/MIR, Translator IR,
+Claim Book, native compilation and Lean dual checks must be extended rather
+than re-created. Existing audit keys, grades, dependency freshness and Lean
+promotion gates remain unchanged.
+
+| Work item | Scope | Priority | Owner | Dependencies |
+| --- | --- | --- | --- | --- |
+| [C01](https://github.com/mumei-lang/mumei/issues/785) | Define Verification-Native ownership and assurance boundaries | P0 | mumei | None |
+| [C02](https://github.com/mumei-lang/mumei/issues/786) | Define backend-neutral verification evidence without changing proof grades | P0 | mumei | C01 |
+| [C03](https://github.com/mumei-lang/mumei/issues/787) | Define a minimal common semantic contract over existing IRs | P0 design; P1 vertical implementation | mumei | C01; co-design with C02 |
+| [C04](https://github.com/mumei-lang/mumei-agent/issues/649) | Build an explainable user-configurable verifier planner | P1 | mumei-agent | C02; minimal C03 contract; co-design C11 |
+| [C05](https://github.com/mumei-lang/mumei-agent/issues/650) | Connect explicit CFGs to existing function-local dataflow facts | P1 | mumei-agent | C02 source/provenance contract |
+| [C06](https://github.com/mumei-lang/mumei-agent/issues/651) | Extend language semantics and type-symbol resolution incrementally | P2 | mumei-agent | C05 |
+| [C07](https://github.com/mumei-lang/mumei-agent/issues/652) | Add interprocedural summaries over resolved calls | P2 | mumei-agent | C05; target-language C06 |
+| [C08](https://github.com/mumei-lang/mumei/issues/788) | Bind native artifacts to source proof and build provenance | P1 | mumei | C02; identity/semantic-settings portion of C03 |
+| [C09](https://github.com/mumei-lang/mumei/issues/789) | Pilot limited semantic translation validation to LLVM | P2 research pilot | mumei | C03; C08 target identification |
+| [C10](https://github.com/mumei-lang/mumei/issues/790) | Add consumer-side checks for evidence-carrying native executables | P2 staged integration | mumei | C08; C09 for translation-validated claims |
+| [C11](https://github.com/mumei-lang/mumei-agent/issues/653) | Define replaceable verifier plugin contracts before external adoption | P1 contract design; P2 individual feasibility pilots | mumei-agent | C02; co-design C04; C03 when semantic translation is needed |
+| [C12](https://github.com/mumei-lang/mumei/issues/791) | Connect effect resource and capability models to real authority | P2 investigation; demand-driven | mumei | C03; concrete use case |
+| [C13](https://github.com/mumei-lang/mumei-demo/issues/118) | Add regression gates against cross-backend assurance confusion | P0 baseline; ongoing per milestone | mumei-demo | Alongside C01/C02 and each later feature |
+| [C14](https://github.com/mumei-lang/mumei/issues/792) | Keep WASM execution deferred behind native assurance milestones | Deferred / TODO | mumei | Native stability; C08/C10; concrete demand |
+
+These priorities order this new program; they do not reopen completed work or
+override unrelated security fixes. All four repository-local roadmaps follow
+this order. C14 extends the existing deferred P7-C item, not a second active
+WASM implementation. C12 preserves the existing demand gate for Capability
+Stage 2 and later. Solver diversification is deferred rather than a default
+requirement of the plugin architecture.
+The compiler must not embed all external tools or implement every logic.
+Agent owns external-tool selection/execution; Mumei owns specification semantics
+and shared evidence acceptance. Do not equate external success with proved,
+hide semantic loss in a universal IR, or run every backend in parallel by
+default. Purpose-driven comparisons require permitted policy, budget and
+result-reconciliation rules.
 
 ## No-`.mm` front door and V1 order
 

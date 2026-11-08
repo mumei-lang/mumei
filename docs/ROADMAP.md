@@ -2783,6 +2783,26 @@ templates are:
 - `--proof-store` は成功した Z3 proof の再利用を opt-in で有効にし、`mumei proof-store stats` / `prune` で管理する。Unix では directory を mode 0700、entry file を mode 0600 で作成し、group / other writable な既存 directory と entry を拒否する。回帰ゲートは `cargo test --test proof_store_cli`。
 - dependency coverage がない旧証明書は non-strict import で warning 付き unchecked になり得る。trusted / failed / Lean-verified / escalation-candidate / inconclusive の結果は proof store に保存・再利用しない。
 
+## Verification-Native foundation and follow-ups
+
+The [canonical cross-project order](CROSS_PROJECT_ROADMAP.md#verification-native-program-ordered-implementation)
+and [architecture contract](VERIFICATION_NATIVE.md) own this program.
+Mumei owns C01–C03 and C08–C10/C12/C14: a small common specification/semantic
+core, standard verification, shared evidence/acceptance rules and LLVM emission.
+Non-executable proof models need not compile to LLVM. No universal IR, new grade,
+external verifier adoption or verified-binary claim is introduced by the first
+contract/schema slice. C02 producer/consumer integration and C03 executable
+vertical validation remain separate follow-ups in the linked issues.
+
+The initial delivery documents ownership and minimal semantics, and adds a
+standalone evidence schema with synthetic positive/negative fixtures. Its schema
+validation checks representation consistency, not proof truth, source fidelity
+or artifact authenticity. Existing proof-certificate serialization is unchanged.
+
+WASM remains the existing deferred P7-C item, tracked by
+[C14](https://github.com/mumei-lang/mumei/issues/792); dynamic capability
+delegation/revocation stays behind its existing demand gate.
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
