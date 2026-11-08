@@ -2916,6 +2916,17 @@ accepted proof, grade promotion, LLVM correspondence or executable assurance.
 General acceptance/mapping and wider producers/consumers stay open. See the
 [source producer contract](VERIFICATION_NATIVE.md#standalone-fresh-source-evidence-producer).
 
+The standalone saved-source consumer is now connected through
+`evidence recheck-source <record> --source <source> [--json]` and a Core API.
+It decodes one bounded record, runs the existing source producer fresh with
+caller-supplied source/budgets, and requires equality of every field with the
+current same-profile/provenance result. Forged success and rebound digests do
+not replace that query. Static anonymous diagnostics are not Evidence or
+acceptance receipts. This remains partial C02/C13, not authenticity, historical
+execution, grade/Lean promotion, LLVM/native semantics or common acceptance.
+Native consumers and Agent ownership remain unchanged. See the
+[source consistency contract](VERIFICATION_NATIVE.md#standalone-source-evidence-consistency-recheck).
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

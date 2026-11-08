@@ -301,6 +301,23 @@ or final-artifact assurance. Native consumer/replay, Agent orchestration,
 external-verifier adoption decisions and deferred WASM remain unchanged. See the
 [source producer contract](VERIFICATION_NATIVE.md#standalone-fresh-source-evidence-producer).
 
+### Wave 5 standalone source Evidence consistency consumer
+
+`evidence recheck-source <record> --source <source> [--json]` and Core's recheck
+API connect the standalone producer to a strict same-profile consumer. A single
+bounded common record is decoded, then independently supplied source/budgets
+drive a fresh source query. Only unsat and agreement of all decoded fields with
+the current producer result succeeds; forged success, rebound hashes, stale or
+different profile/tool/configuration/assumption metadata cannot replace it.
+Anonymous diagnostics are not Evidence or acceptance receipts. No saved field
+selects a tool, file, artifact, query or budget.
+
+This remains partial C02/C13, not generic acceptance/mapping, authenticity,
+historical execution, independent source-model correspondence, grade/Claim
+Book/Lean promotion or LLVM/final-artifact assurance. Native rechecks, Agent
+orchestration, external-verifier decisions and deferred WASM remain unchanged.
+See the [source consistency contract](VERIFICATION_NATIVE.md#standalone-source-evidence-consistency-recheck).
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:

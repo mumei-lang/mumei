@@ -12,6 +12,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 |---|---:|---|
 | `mumei` | 1 | Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) |
 | `mumei evidence` | 0 | Check common Evidence representation or produce fresh scoped source Evidence; no proof acceptance |
+| `mumei evidence recheck-source` | 4 | Freshly recheck saved source Evidence with linked Z3 and caller-supplied source/budgets; not proof acceptance |
 | `mumei evidence verify-source` | 3 | Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance |
 | `mumei evidence check` | 1 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
 | `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
@@ -79,6 +80,31 @@ Usage:
 ```text
 Usage: mumei evidence <COMMAND>
 ```
+
+## `mumei evidence recheck-source`
+
+Freshly recheck saved source Evidence with linked Z3 and caller-supplied source/budgets; not proof acceptance
+
+Usage:
+
+```text
+Usage: mumei evidence recheck-source [OPTIONS] --source <SOURCE> <INPUT>
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `INPUT` | Yes | One regular common Evidence JSON record (at most 65,536 bytes), not a Native envelope/certificate |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--source <SOURCE>` | — | — | Separate regular C03 pure-i64 source (at most 65,536 bytes); saved labels/paths are never read |
+| `--json` | false | — | Emit a static consistency diagnostic, not Evidence or an acceptance receipt |
+| `--solver-timeout <SOLVER_TIMEOUT>` | 10000 | — | Solver timeout in milliseconds (1..=10000); must match the producer's explicit budget |
+| `--solver-resource-limit <SOLVER_RESOURCE_LIMIT>` | 1000000 | — | Solver resource units (1..=1000000); no saved/ambient policy is loaded |
 
 ## `mumei evidence verify-source`
 

@@ -37,6 +37,13 @@ pub enum Outcome {
     Inconclusive,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum RecheckOutcome {
+    Consistent,
+    Refuted,
+    Inconclusive,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SourceEvidenceError {
     #[error("invalid bounded source-query budget")]
@@ -45,6 +52,29 @@ pub enum SourceEvidenceError {
     UnsupportedSource,
     #[error("cannot construct source evidence representation")]
     InvalidRepresentation,
+    #[error("invalid saved source evidence representation")]
+    InvalidSavedEvidence,
+    #[error("saved source evidence differs from the fresh same-profile result")]
+    InconsistentSavedEvidence,
+}
+
+/// Recompute from caller-supplied source and budgets, never from saved metadata.
+/// Consistency is not producer authentication, historical replay or proof acceptance.
+pub fn recheck(
+    source: &str,
+    saved: &[u8],
+    options: Options,
+) -> Result<RecheckOutcome, SourceEvidenceError> {
+    let saved = crate::verification_evidence::decode(saved)
+        .map_err(|_| SourceEvidenceError::InvalidSavedEvidence)?;
+    match verify(source, options)? {
+        Outcome::EstablishedWithinProfile(fresh) if *fresh == saved => {
+            Ok(RecheckOutcome::Consistent)
+        }
+        Outcome::EstablishedWithinProfile(_) => Err(SourceEvidenceError::InconsistentSavedEvidence),
+        Outcome::Refuted => Ok(RecheckOutcome::Refuted),
+        Outcome::Inconclusive => Ok(RecheckOutcome::Inconclusive),
+    }
 }
 
 /// Check one C03 atom over all its signed-i64 inputs. Only fresh unsat yields a

@@ -1,5 +1,5 @@
 use crate::cli::EvidenceCommand;
-use mumei_core::source_evidence::{self, Options, Outcome};
+use mumei_core::source_evidence::{self, Options, Outcome, RecheckOutcome};
 use mumei_core::verification_evidence::{self, MAX_INPUT_BYTES, SCHEMA_VERSION};
 use std::{io::Write, path::Path};
 
@@ -11,6 +11,24 @@ No verifier or artifact executed; no grade promotion or final-executable assuran
 pub(crate) fn run(command: EvidenceCommand) {
     let mut output = std::io::stdout().lock();
     let (result, prefix) = match command {
+        EvidenceCommand::RecheckSource {
+            input,
+            source,
+            json,
+            solver_timeout,
+            solver_resource_limit,
+        } => (
+            source_options(&solver_timeout, &solver_resource_limit).and_then(|options| {
+                recheck_source(
+                    Path::new(&input),
+                    Path::new(&source),
+                    json,
+                    options,
+                    &mut output,
+                )
+            }),
+            "Source evidence recheck failed",
+        ),
         EvidenceCommand::Check { input, json } => (
             check(Path::new(&input), json, &mut output).map(|()| 0),
             "Evidence representation check failed",
@@ -44,6 +62,62 @@ pub(crate) fn run(command: EvidenceCommand) {
             std::process::exit(1);
         }
     }
+}
+
+fn recheck_source(
+    input: &Path,
+    source: &Path,
+    json: bool,
+    options: Options,
+    output: &mut impl Write,
+) -> Result<i32, &'static str> {
+    let saved = super::input::read_regular(input, MAX_INPUT_BYTES as u64)?;
+    let source = super::input::read_regular(source, MAX_INPUT_BYTES as u64)?;
+    let source = String::from_utf8(source).map_err(|_| "source is not UTF-8")?;
+    let outcome =
+        source_evidence::recheck(&source, &saved, options).map_err(|error| match error {
+            source_evidence::SourceEvidenceError::InvalidBudget => {
+                "invalid bounded source-query budget"
+            }
+            source_evidence::SourceEvidenceError::InvalidSavedEvidence => {
+                "invalid saved source evidence representation"
+            }
+            source_evidence::SourceEvidenceError::InconsistentSavedEvidence => {
+                "saved source evidence differs from fresh same-profile result"
+            }
+            _ => "source outside restricted profile or cannot encode evidence",
+        })?;
+    write_recheck(outcome, json, output)
+}
+
+fn write_recheck(
+    outcome: RecheckOutcome,
+    json: bool,
+    output: &mut impl Write,
+) -> Result<i32, &'static str> {
+    match outcome {
+        RecheckOutcome::Refuted => return Ok(1),
+        RecheckOutcome::Inconclusive => return Ok(3),
+        RecheckOutcome::Consistent => (),
+    }
+    let bytes = if json {
+        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "mumei.source-evidence-recheck/v1",
+            "evidence_schema_version": SCHEMA_VERSION,
+            "recheck": "consistent",
+            "scope": "restricted_c03_source_postcondition_and_same_profile_record_consistency",
+            "acceptance": "not_evaluated",
+            "checks_not_performed": ["producer_authenticity", "historical_execution", "parser_encoder_solver_correctness", "llvm_correspondence", "artifact_semantics", "grade_promotion", "lean_kernel_checks"],
+        })).map_err(|_| "cannot encode source recheck diagnostic")?;
+        bytes.push(b'\n');
+        bytes
+    } else {
+        b"Source Evidence consistent with fresh restricted C03 source query and current profile/provenance.\nEvidence acceptance: not evaluated; no producer authenticity, historical execution, LLVM, artifact, grade or final-executable assurance.\n".to_vec()
+    };
+    output
+        .write_all(&bytes)
+        .map_err(|_| "cannot write source recheck diagnostic")?;
+    Ok(0)
 }
 
 fn source_options(timeout: &str, resource_limit: &str) -> Result<Options, &'static str> {
@@ -132,6 +206,24 @@ mod tests {
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn source_recheck_only_writes_anonymous_diagnostics_on_consistency() {
+        for json in [false, true] {
+            for (outcome, code) in [
+                (RecheckOutcome::Refuted, 1),
+                (RecheckOutcome::Inconclusive, 3),
+            ] {
+                let mut output = Vec::new();
+                assert_eq!(write_recheck(outcome, json, &mut output).unwrap(), code);
+                assert!(output.is_empty());
+            }
+            assert_eq!(
+                write_recheck(RecheckOutcome::Consistent, json, &mut BrokenOutput).unwrap_err(),
+                "cannot write source recheck diagnostic"
+            );
         }
     }
 

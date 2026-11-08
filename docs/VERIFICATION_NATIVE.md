@@ -284,13 +284,62 @@ not independently proved. This is not a replay of the general verifier pipeline
 and does not prove correspondence to that pipeline or LLVM lowering.
 
 A saved record is unauthenticated metadata, **not an acceptance receipt**;
-`evidence check` on it still checks only representation. There is no saved-record
-consumer that establishes current identity, freshness, authenticity or truth.
+`evidence check` on it still checks only representation. The restricted fresh
+consistency consumer below does not authenticate it or establish historical
+freshness/execution.
 Seal Grades, Claim Book, certificate serialization/trust, Lean checks and Native
 identity/recheck/replay semantics are unchanged. LLVM correspondence, optimizer,
 object/linker/runtime/ABI/OS-exit/final-executable semantics and general common
 acceptance/mapping remain open. This is partial C02/C13 real-producer integration;
 it neither completes C02/C10 nor adds an external verifier or WASM.
+
+### Standalone source Evidence consistency recheck
+
+```sh
+mumei evidence recheck-source source-evidence.json --source source.mm
+mumei evidence recheck-source source-evidence.json --source source.mm --json
+```
+
+`mumei_core::source_evidence::recheck(source, saved_bytes, Options)` and this
+opt-in CLI connect the standalone producer to a bounded consumer. The common
+representation gate first decodes exactly one record. The existing producer
+then runs **a fresh query** from the independently supplied source and explicit
+timeout/resource budgets. Only fresh unsat plus equality of **every decoded
+field** with the freshly produced record succeeds. Source/specification hashes,
+method/result/scope, assumptions/exclusions, assumed correspondence, actual
+linked-Z3/package versions, configuration fingerprint and empty artifact paths
+must all agree. JSON whitespace/object-key order does not matter; list order and
+all field values do. Budget flags have the producer's defaults and must be set
+explicitly to its original values when nondefault; saved metadata never chooses
+the query, budget, profile, verifier, input file or configuration.
+
+Both inputs independently use the 65,536-byte regular-file reader; the source
+also retains every C03 producer restriction, including explicit nonempty
+contracts and literal-true preconditions. Native report envelopes, certificates,
+diagnostics, malformed/duplicate/unknown-field records and mismatched versions
+or provenance are not compatible saved input. No record-selected path is opened
+or executed. Project config, proof caches, claims and external tools are unused.
+
+The Core result is `Consistent`, `Refuted` or `Inconclusive`, with static errors
+for malformed/unsupported/mismatched inputs; it does not return stored Evidence.
+Fresh sat yields CLI exit 1; unknown/resource exhaustion yields exit 3. Invalid
+input/profile/budget, mismatch and I/O yield exit 1. Non-success paths emit no
+stdout, including JSON mode. A rebound source hash and forged stored success
+cannot replace the fresh query. Refuted/inconclusive describes that source
+query, not validation of an unrelated stored report.
+
+Success is only a **same-profile snapshot/record consistency** diagnostic. Text
+and JSON are static and anonymous: JSON uses
+`schema_version: mumei.source-evidence-recheck/v1`, `recheck: consistent`, the
+restricted scope and `acceptance: not_evaluated`, with explicit exclusions.
+It has no subject/digest/provenance and is not reusable Evidence, a certificate
+or an acceptance receipt; neither common `check` nor this recheck accepts it as
+Evidence. It does not prove historical producer execution/authenticity, binary
+provenance, parser/encoder/solver correctness, independent model correspondence,
+LLVM/object/linker/runtime/ABI/final-executable semantics, or general Evidence
+acceptance. Grade/Claim Book/Lean and Native consumer policies are unchanged.
+Wider producers/consumers and C02 acceptance/mapping remain open; external
+verifier adoption and WASM remain separate/deferred.
 
 ## 5. Minimal semantic contract (C03)
 

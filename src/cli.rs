@@ -426,6 +426,23 @@ pub(crate) enum Command {
 
 #[derive(Subcommand)]
 pub(crate) enum EvidenceCommand {
+    /// Freshly recheck saved source Evidence with linked Z3 and caller-supplied source/budgets; not proof acceptance
+    RecheckSource {
+        /// One regular common Evidence JSON record (at most 65,536 bytes), not a Native envelope/certificate
+        input: String,
+        /// Separate regular C03 pure-i64 source (at most 65,536 bytes); saved labels/paths are never read
+        #[arg(long)]
+        source: String,
+        /// Emit a static consistency diagnostic, not Evidence or an acceptance receipt
+        #[arg(long)]
+        json: bool,
+        /// Solver timeout in milliseconds (1..=10000); must match the producer's explicit budget
+        #[arg(long, default_value_t = mumei_core::source_evidence::MAX_TIMEOUT_MS.to_string(), allow_hyphen_values = true)]
+        solver_timeout: String,
+        /// Solver resource units (1..=1000000); no saved/ambient policy is loaded
+        #[arg(long, default_value_t = mumei_core::source_evidence::MAX_RESOURCE_LIMIT.to_string(), allow_hyphen_values = true)]
+        solver_resource_limit: String,
+    },
     /// Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance
     VerifySource {
         /// Regular source at most 65,536 bytes; one pure-i64 comparison/conditional atom, explicit clauses, at most 16 parameters and literal true precondition
