@@ -12,6 +12,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 |---|---:|---|
 | `mumei` | 1 | Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) |
 | `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
+| `mumei native-bundle recheck-evidence` | 1 | Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance |
 | `mumei native-bundle recheck-llvm` | 2 | Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics |
 | `mumei native-bundle recheck-source` | 1 | Check pinned snapshots and freshly recheck the C03 source postcondition, not LLVM or binary semantics |
 | `mumei native-bundle build` | 1 | Freshly verify and build a pure-i64 main on Linux/x86_64 with fixed settings |
@@ -75,6 +76,30 @@ Usage:
 ```text
 Usage: mumei native-bundle <COMMAND>
 ```
+
+## `mumei native-bundle recheck-evidence`
+
+Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance
+
+Usage:
+
+```text
+Usage: mumei native-bundle recheck-evidence --expected-build-id <EXPECTED_BUILD_ID> <BUNDLE> <SOURCE> <EVIDENCE>
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `BUNDLE` | Yes | — |
+| `SOURCE` | Yes | — |
+| `EVIDENCE` | Yes | — |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--expected-build-id <EXPECTED_BUILD_ID>` | — | — | SHA-256 of native-bundle.json obtained through a separately trusted channel, not the report |
 
 ## `mumei native-bundle recheck-llvm`
 

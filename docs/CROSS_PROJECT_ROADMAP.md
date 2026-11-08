@@ -235,6 +235,24 @@ linker/runtime/ABI/OS/final-binary correctness, dependency/toolchain closure and
 broader C09/C10 remain open. Agent orchestration, existing text/default commands,
 Claim Book/Seal Grade/Lean gates and external-verifier adoption are unchanged.
 
+### Wave 5 first saved native Evidence replay consumer
+
+The [C02/C10 replay slice](VERIFICATION_NATIVE.md#first-saved-native-evidence-replay-consumer)
+adds `native-bundle recheck-evidence`: bounded closed report decoding plus all
+fresh Stage B checks against separately pinned bundle/source snapshots. Every
+decoded field must agree with the fresh same-profile/provenance result; saved
+success or self-consistent hashes cannot substitute for either query. Unknown,
+refuted, unsupported, malformed, stale and mismatched inputs never become a
+consistency result. Read-only consumers need no producer tools, cache/config or
+artifact execution, and report values never select files/tools to open/run.
+
+This is partial C02/C10 consumer integration, not general Evidence acceptance,
+authenticity, historical proof execution, version migration or grade promotion.
+Object/backend/linker/runtime/ABI/OS/final-binary assurance, dependency closure,
+broader profiles and common acceptance/mapping remain open. Existing commands,
+schema, Claim Book/Seal Grade/Lean gates, Mumei/Agent ownership and the decision
+not to adopt external verifiers are unchanged.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
