@@ -693,3 +693,24 @@ fn native_budgets_and_private_parser_diagnostics_fail_closed() {
     .unwrap();
     assert_eq!(report.outcome, Outcome::Inconclusive);
 }
+
+#[test]
+fn native_empty_operand_bundles_are_not_plain_direct_calls() {
+    let src = native_source("7");
+    let ir = native_ir("ret i64 7");
+    for bundle in ["\"custom\"()", "\"deopt\"()", "\"custom\"(i32 1)"] {
+        let changed = ir.replace(
+            "call i64 @__mumei_user_main()",
+            &format!("call i64 @__mumei_user_main() [ {bundle} ]"),
+        );
+        assert!(
+            tv::validate_native_main(&src, &changed, Options::default()).is_err(),
+            "{bundle}"
+        );
+    }
+    let renamed = ir.replace("%result", "%\"call name []\"");
+    assert_eq!(
+        native_validate(&src, &renamed).outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}

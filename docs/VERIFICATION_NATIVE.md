@@ -513,7 +513,7 @@ the zero-argument source i64 body; the existing bounded SSA interpreter and Z3
 compare its full 64-bit result with the user-main LLVM definition. The wrapper
 must be one block containing only a direct zero-argument call to that exact
 definition, a truncation of its result to i32 and a return of that truncation.
-Function/call attributes, alternate calling conventions, extra instructions,
+Function/call attributes, operand bundles (including empty ones), alternate calling conventions, extra instructions,
 functions/declarations, globals, aliases, inline assembly and metadata are not
 admitted. The existing C09 body restrictions and bounds still apply: no memory,
 calls, loops, poison/undef or unsupported operations; 64 KiB IR, 48 delimiter

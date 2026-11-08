@@ -388,6 +388,16 @@ unsafe fn check_native_module(module: LLVMModuleRef, user_main: LLVMValueRef) ->
     {
         return Err(ValidationError("unsupported native wrapper call"));
     }
+    // LLVM 17's C API cannot enumerate bundles; empty bundles add no operands.
+    // Its canonical plain-call suffix excludes them without constraining SSA names.
+    let printed = LLVMPrintValueToString(call);
+    let plain_call = std::ffi::CStr::from_ptr(printed)
+        .to_bytes()
+        .ends_with(b"call i64 @__mumei_user_main()");
+    LLVMDisposeMessage(printed);
+    if !plain_call {
+        return Err(ValidationError("unsupported native wrapper call"));
+    }
     let trunc = LLVMGetNextInstruction(call);
     if trunc.is_null()
         || LLVMGetInstructionOpcode(trunc) != LLVMOpcode::LLVMTrunc

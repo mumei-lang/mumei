@@ -724,6 +724,14 @@ fn repinned_wrapper_mutations_and_private_malformed_ir_fail_closed() {
         original.replace("ret i32 %exit_code", "ret i32 7"),
         original.replace("trunc i64 %result", "trunc i64 7"),
         original.replace("define i32 @main", "define i32 @other"),
+        original.replace(
+            "call i64 @__mumei_user_main()",
+            "call i64 @__mumei_user_main() [ \"custom\"() ]",
+        ),
+        original.replace(
+            "call i64 @__mumei_user_main()",
+            "call i64 @__mumei_user_main() [ \"deopt\"() ]",
+        ),
         format!("{original}\ndeclare void @other()"),
         format!("{original}\n@global = global i64 7"),
         original.replace("e-m:e-", "E-m:e-"),
