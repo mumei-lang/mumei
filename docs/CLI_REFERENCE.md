@@ -11,6 +11,8 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | Command | Option count | Summary |
 |---|---:|---|
 | `mumei` | 1 | Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) |
+| `mumei evidence` | 0 | Check common Evidence representation only, without proof acceptance or verifier execution |
+| `mumei evidence check` | 1 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
 | `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
 | `mumei native-bundle recheck-evidence` | 1 | Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance |
 | `mumei native-bundle recheck-llvm` | 2 | Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics |
@@ -66,6 +68,38 @@ Usage: mumei [OPTIONS] [INPUT] [COMMAND]
 | Option | Default | Possible values | Description |
 |---|---|---|---|
 | `-o, --output <OUTPUT>` | katana | — | Output base name (for .ll) |
+
+## `mumei evidence`
+
+Check common Evidence representation only, without proof acceptance or verifier execution
+
+Usage:
+
+```text
+Usage: mumei evidence <COMMAND>
+```
+
+## `mumei evidence check`
+
+Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity
+
+Usage:
+
+```text
+Usage: mumei evidence check [OPTIONS] <INPUT>
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `INPUT` | Yes | Regular JSON file (at most 65,536 bytes); not a native report envelope or proof certificate |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--json` | false | — | Print a static representation-only diagnostic, not an accepted Evidence record or certificate |
 
 ## `mumei native-bundle`
 

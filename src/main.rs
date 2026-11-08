@@ -32,6 +32,7 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Command::Evidence { command }) => commands::evidence::run(command),
         Some(Command::NativeBundle { command }) => commands::native_bundle::run(command),
         Some(command @ Command::Build { .. }) => commands::build::cmd_build_command(command),
         Some(command @ Command::Verify { .. }) => commands::verify::cmd_verify_command(command),

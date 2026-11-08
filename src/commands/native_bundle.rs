@@ -101,36 +101,7 @@ fn write_llvm_recheck(
 }
 
 fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, BundleError> {
-    use std::io::Read;
-    let metadata = fs::symlink_metadata(path).map_err(|_| BundleError("missing component"))?;
-    if !metadata.is_file() || metadata.len() > limit {
-        return Err(BundleError("unsupported component type or size"));
-    }
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let file = options
-        .open(path)
-        .map_err(|_| BundleError("cannot open component"))?;
-    if !file
-        .metadata()
-        .map_err(|_| BundleError("cannot inspect component"))?
-        .is_file()
-    {
-        return Err(BundleError("component is not a regular file"));
-    }
-    let mut bytes = Vec::new();
-    file.take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| BundleError("cannot read component"))?;
-    if bytes.len() as u64 > limit {
-        return Err(BundleError("component too large"));
-    }
-    Ok(bytes)
+    super::input::read_regular(path, limit).map_err(BundleError)
 }
 
 fn source_text(path: &Path) -> Result<String, BundleError> {

@@ -2896,6 +2896,15 @@ privacy regressions. This is not a common acceptance engine or a new backend:
 truth, trust/freshness, grade/Lean promotion, general mapping and final-artifact
 assurance remain separate/open. See the [Core gate](VERIFICATION_NATIVE.md#shared-core-representation-gate).
 
+The next bounded C02/C13 consumer entry point is
+`mumei evidence check <record> [--json]`, applying the shared Core gate to one bounded regular
+file. Static anonymous diagnostics never echo report metadata or serve as a
+proof/acceptance receipt. A valid counterexample/timeout/unsupported record still
+exits 0 for representation only; malformed/inconsistent data fails closed.
+Native pins/fresh rechecks and certificate/grade/Lean policies remain unchanged.
+General acceptance/mapping and artifact assurance stay open. See the
+[standalone CLI contract](VERIFICATION_NATIVE.md#standalone-representation-only-cli-consumer).
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
