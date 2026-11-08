@@ -1,0 +1,197 @@
+{
+  "schema_version": "mumei.native-consumer-evidence/v1",
+  "build_id": "0000000000000000000000000000000000000000000000000000000000000000",
+  "scope": "source_postcondition_identity_and_llvm_snapshot_only/no_authenticity_or_binary_semantic_proof",
+  "acceptance": "not_evaluated",
+  "evidence": [
+    {
+      "schema_version": "mumei.verification-evidence/v1",
+      "subject": {
+        "id": "program",
+        "kind": "native_artifact",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "specification": {
+        "id": "native-bundle.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "obligation_id": "native_bundle_identity_consistency",
+      "semantics": {
+        "profile": "mumei.native-pure-i64-main-linux-x86_64/v1",
+        "integer_model": "not_applicable",
+        "target_triple": "runtime-target"
+      },
+      "method": "identity_check",
+      "execution": "completed",
+      "result": "established",
+      "scope": {
+        "kind": "identity",
+        "bounds": []
+      },
+      "correspondence": {
+        "relation": "unchecked",
+        "status": "unverified",
+        "notes": [
+          "pinned_source_certificate_and_bundle_member_identities_only_not_semantic_correspondence"
+        ]
+      },
+      "assumptions": [
+        "expected_build_id_supplied_through_a_separately_trusted_channel",
+        "sha256_collision_resistance",
+        "restricted_source_and_llvm_encoders_linked_z3_and_llvm17_are_trusted",
+        "successful_unbounded_queries_are_only_within_the_named_restricted_profiles"
+      ],
+      "exclusions": [
+        "producer_and_report_authenticity",
+        "parser_encoder_and_solver_correctness",
+        "llvm_to_object_and_optimizer_correctness",
+        "linker_runtime_system_libraries_and_abi",
+        "os_exit_status_and_final_executable_semantics",
+        "dependency_closure_and_hermetic_toolchain",
+        "proof_acceptance_seal_grades_and_lean_kernel_checks"
+      ],
+      "provenance": {
+        "adapter": {
+          "id": "mumei.native-consumer",
+          "version": "build-version",
+          "protocol_version": "mumei.native-consumer-evidence/v1"
+        },
+        "tool": {
+          "name": "mumei",
+          "version": "runtime-version"
+        },
+        "configuration_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "artifact_paths": [
+        "native-bundle.json",
+        "program.ll",
+        "program.o",
+        "proof-cert.json",
+        "program"
+      ]
+    },
+    {
+      "schema_version": "mumei.verification-evidence/v1",
+      "subject": {
+        "id": "native-source.mm",
+        "kind": "mumei_source",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "specification": {
+        "id": "main.contract",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "obligation_id": "main_source_postcondition",
+      "semantics": {
+        "profile": "mumei.native-source-recheck/v1",
+        "integer_model": "checked_i64",
+        "target_triple": null
+      },
+      "method": "deductive_proof",
+      "execution": "completed",
+      "result": "established",
+      "scope": {
+        "kind": "unbounded",
+        "bounds": []
+      },
+      "correspondence": {
+        "relation": "exact_model",
+        "status": "assumed",
+        "notes": [
+          "restricted_c03_source_encoding_and_parser_normalization_are_trusted_not_independently_proved"
+        ]
+      },
+      "assumptions": [
+        "expected_build_id_supplied_through_a_separately_trusted_channel",
+        "sha256_collision_resistance",
+        "restricted_source_and_llvm_encoders_linked_z3_and_llvm17_are_trusted",
+        "successful_unbounded_queries_are_only_within_the_named_restricted_profiles"
+      ],
+      "exclusions": [
+        "producer_and_report_authenticity",
+        "parser_encoder_and_solver_correctness",
+        "llvm_to_object_and_optimizer_correctness",
+        "linker_runtime_system_libraries_and_abi",
+        "os_exit_status_and_final_executable_semantics",
+        "dependency_closure_and_hermetic_toolchain",
+        "proof_acceptance_seal_grades_and_lean_kernel_checks"
+      ],
+      "provenance": {
+        "adapter": {
+          "id": "mumei.native-consumer",
+          "version": "build-version",
+          "protocol_version": "mumei.native-consumer-evidence/v1"
+        },
+        "tool": {
+          "name": "Z3",
+          "version": "runtime-version"
+        },
+        "configuration_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "artifact_paths": []
+    },
+    {
+      "schema_version": "mumei.verification-evidence/v1",
+      "subject": {
+        "id": "program.ll",
+        "kind": "lowered_ir",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "specification": {
+        "id": "native-source.mm#main.body",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "obligation_id": "main_source_to_llvm_user_body",
+      "semantics": {
+        "profile": "mumei.llvm17-native-main-snapshot/v1",
+        "integer_model": "checked_i64",
+        "target_triple": "runtime-target"
+      },
+      "method": "deductive_proof",
+      "execution": "completed",
+      "result": "established",
+      "scope": {
+        "kind": "unbounded",
+        "bounds": []
+      },
+      "correspondence": {
+        "relation": "exact_model",
+        "status": "validated",
+        "notes": [
+          "full_i64_user_body_compared_to_source_within_the_restricted_profile",
+          "wrapper_call_trunc_ret_shape_only_returns_low_32_bits_not_an_os_exit_status_proof"
+        ]
+      },
+      "assumptions": [
+        "expected_build_id_supplied_through_a_separately_trusted_channel",
+        "sha256_collision_resistance",
+        "restricted_source_and_llvm_encoders_linked_z3_and_llvm17_are_trusted",
+        "successful_unbounded_queries_are_only_within_the_named_restricted_profiles"
+      ],
+      "exclusions": [
+        "producer_and_report_authenticity",
+        "parser_encoder_and_solver_correctness",
+        "llvm_to_object_and_optimizer_correctness",
+        "linker_runtime_system_libraries_and_abi",
+        "os_exit_status_and_final_executable_semantics",
+        "dependency_closure_and_hermetic_toolchain",
+        "proof_acceptance_seal_grades_and_lean_kernel_checks"
+      ],
+      "provenance": {
+        "adapter": {
+          "id": "mumei.native-consumer",
+          "version": "build-version",
+          "protocol_version": "mumei.native-consumer-evidence/v1"
+        },
+        "tool": {
+          "name": "Z3",
+          "version": "runtime-version"
+        },
+        "configuration_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "artifact_paths": [
+        "program.ll"
+      ]
+    }
+  ]
+}

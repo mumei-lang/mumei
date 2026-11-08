@@ -56,18 +56,30 @@ fn recheck(source: &Path, bundle: &Path, id: &str) -> Output {
 }
 
 fn recheck_llvm(source: &Path, bundle: &Path, id: &str) -> Output {
-    consume("recheck-llvm", source, bundle, id)
+    let text = consume("recheck-llvm", source, bundle, id);
+    if !text.status.success() {
+        let json = recheck_llvm_json(source, bundle, id);
+        assert_eq!(json.status.code(), text.status.code());
+        assert!(json.stdout.is_empty());
+        assert_eq!(json.stderr, text.stderr);
+    }
+    text
+}
+
+fn recheck_llvm_json(source: &Path, bundle: &Path, id: &str) -> Output {
+    consume("recheck-llvm --json", source, bundle, id)
 }
 
 fn consume(action: &str, source: &Path, bundle: &Path, id: &str) -> Output {
-    cli(&[
-        "native-bundle",
-        action,
+    let mut args = vec!["native-bundle"];
+    args.extend(action.split_whitespace());
+    args.extend([
         bundle.to_str().unwrap(),
         source.to_str().unwrap(),
         "--expected-build-id",
         id,
-    ])
+    ]);
+    cli(&args)
 }
 
 fn repin(bundle: &Path, source: Option<&str>) -> String {
@@ -140,7 +152,11 @@ fn clean_consumer_rechecks_copied_read_only_snapshots_without_producer_tools_or_
     .unwrap();
     let home = consumer.path().join("home");
     fs::create_dir(&home).unwrap();
-    for action in ["recheck-source", "recheck-llvm"] {
+    for (action, json) in [
+        ("recheck-source", false),
+        ("recheck-llvm", false),
+        ("recheck-llvm", true),
+    ] {
         let mut command = Command::new(&executable);
         command
             .env_clear()
@@ -159,6 +175,7 @@ fn clean_consumer_rechecks_copied_read_only_snapshots_without_producer_tools_or_
                 "--expected-build-id",
                 &id,
             ])
+            .args(json.then_some("--json"))
             .output()
             .unwrap();
         assert_success(&result);
@@ -166,6 +183,10 @@ fn clean_consumer_rechecks_copied_read_only_snapshots_without_producer_tools_or_
         if action == "recheck-source" {
             assert!(stdout.contains(native_bundle::RECHECK_SCOPE));
             assert!(stdout.contains(native_bundle::RECHECK_PROFILE));
+        } else if json {
+            let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+            assert_eq!(report["acceptance"], "not_evaluated");
+            assert_eq!(report["evidence"].as_array().unwrap().len(), 3);
         } else {
             assert!(stdout.contains(mumei_emit_llvm::translation_validation::NATIVE_PROFILE));
             assert!(stdout.contains("source_postcondition_identity_and_llvm_snapshot_only"));
@@ -191,9 +212,10 @@ fn self_consistent_forged_source_certificate_is_not_a_source_proof() {
         fs::write(&source, &text).unwrap();
         let id = repin(&bundle, Some(&text));
         assert_success(&check(&source, &bundle, &id));
-        for action in ["recheck-source", "recheck-llvm"] {
+        for action in ["recheck-source", "recheck-llvm", "recheck-llvm --json"] {
             let result = consume(action, &source, &bundle, &id);
             assert_eq!(result.status.code(), Some(1));
+            assert!(result.stdout.is_empty());
             let stderr = String::from_utf8_lossy(&result.stderr);
             assert!(stderr.contains("source postcondition refuted"));
             assert!(!stderr.contains("1234567890123456"));
@@ -335,7 +357,11 @@ fn ambient_orchestration_settings_and_fake_secrets_do_not_enter_the_recheck() {
     let text = format!("{GOOD}\n// {fake}");
     fs::write(&source, &text).unwrap();
     let id = repin(&bundle, Some(&text));
-    for action in ["recheck-source", "recheck-llvm"] {
+    for (action, json) in [
+        ("recheck-source", false),
+        ("recheck-llvm", false),
+        ("recheck-llvm", true),
+    ] {
         let result = Command::new(env!("CARGO_BIN_EXE_mumei"))
             .args([
                 "native-bundle",
@@ -345,6 +371,7 @@ fn ambient_orchestration_settings_and_fake_secrets_do_not_enter_the_recheck() {
                 "--expected-build-id",
                 &id,
             ])
+            .args(json.then_some("--json"))
             .env("MUMEI_VERIFICATION_TIMEOUT_MS", "1")
             .env("MUMEI_TASK_ID", fake)
             .env("MUMEI_CANCEL_REASON", fake)
@@ -808,5 +835,280 @@ fn full_native_build_rechecks_large_i64_results_without_promising_an_os_exit_cod
         assert!(stdout.contains("low 32 bits of the i64 body"));
         assert!(stdout.contains("OS exit-status/executable semantics: not checked"));
         assert!(!stdout.contains("artifact_verified"));
+        let json = recheck_llvm_json(&source, &bundle, &id);
+        assert_success(&json);
+        let report: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+        assert_eq!(report["acceptance"], "not_evaluated");
     }
+}
+
+fn json_evidence(source: &Path, bundle: &Path, id: &str) -> serde_json::Value {
+    let result = recheck_llvm_json(source, bundle, id);
+    assert_success(&result);
+    assert!(result.stderr.is_empty());
+    serde_json::from_slice(&result.stdout).unwrap()
+}
+
+fn normalized_evidence(mut report: serde_json::Value) -> serde_json::Value {
+    report["build_id"] = serde_json::json!("0".repeat(64));
+    for evidence in report["evidence"].as_array_mut().unwrap() {
+        for value in [
+            "/subject/sha256",
+            "/specification/sha256",
+            "/provenance/configuration_fingerprint",
+        ] {
+            let digest = evidence.pointer_mut(value).unwrap();
+            assert!(native_bundle::is_digest(digest.as_str().unwrap()));
+            *digest = serde_json::json!("0".repeat(64));
+        }
+        if !evidence["semantics"]["target_triple"].is_null() {
+            evidence["semantics"]["target_triple"] = serde_json::json!("runtime-target");
+        }
+        assert_eq!(
+            evidence["provenance"]["adapter"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
+        assert!(!evidence["provenance"]["tool"]["version"]
+            .as_str()
+            .unwrap()
+            .is_empty());
+        evidence["provenance"]["adapter"]["version"] = serde_json::json!("build-version");
+        evidence["provenance"]["tool"]["version"] = serde_json::json!("runtime-version");
+    }
+    report
+}
+
+#[test]
+fn json_evidence_separates_actual_identities_obligations_and_schema_checked_shape() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let before: Vec<_> = fs::read_dir(&bundle)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            (path.clone(), fs::read(path).unwrap())
+        })
+        .collect();
+    let report = json_evidence(&source, &bundle, &id);
+    assert_eq!(report, json_evidence(&source, &bundle, &id));
+    assert_eq!(report["build_id"], id);
+    let records = report["evidence"].as_array().unwrap();
+    let manifest: native_bundle::NativeBundleRecord =
+        serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    assert_eq!(
+        records[0]["subject"]["sha256"],
+        manifest.files[&BundleFile::Executable].sha256
+    );
+    assert_eq!(records[0]["specification"]["sha256"], id);
+    assert_eq!(
+        records[1]["subject"]["sha256"],
+        native_bundle::sha256(&fs::read(&source).unwrap())
+    );
+    assert_eq!(
+        records[1]["specification"]["sha256"],
+        manifest.source.specification_sha256
+    );
+    assert_eq!(
+        records[2]["subject"]["sha256"],
+        native_bundle::sha256(&fs::read(bundle.join("program.ll")).unwrap())
+    );
+    assert_eq!(
+        records[2]["specification"]["sha256"],
+        records[1]["subject"]["sha256"]
+    );
+    for record in &records[1..] {
+        let version = mumei_core::verification::linked_z3_version();
+        assert_eq!(record["provenance"]["tool"]["name"], "Z3");
+        assert_eq!(
+            record["provenance"]["tool"]["version"],
+            format!("{}.{}.{}.{}", version.0, version.1, version.2, version.3)
+        );
+    }
+    assert_eq!(
+        records[0]["provenance"]["configuration_fingerprint"],
+        records[2]["provenance"]["configuration_fingerprint"]
+    );
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/verification-evidence/native_consumer_shape.json"
+    ))
+    .unwrap();
+    assert_eq!(normalized_evidence(report), fixture);
+    for (path, bytes) in before {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+    assert_eq!(fs::read_dir(&bundle).unwrap().count(), 5);
+}
+
+#[test]
+fn json_llvm_obligation_binds_the_body_not_just_shared_postconditions() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source.mm");
+    let mut reports = Vec::new();
+    for value in [7, 8] {
+        fs::write(
+            &source,
+            format!("atom main() -> i64 requires: true; ensures: true; body: {{ {value} }};"),
+        )
+        .unwrap();
+        let bundle = root.path().join(format!("bundle-{value}"));
+        assert_success(&cli(&[
+            "native-bundle",
+            "build",
+            source.to_str().unwrap(),
+            "-o",
+            bundle.to_str().unwrap(),
+        ]));
+        let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+        reports.push(json_evidence(&source, &bundle, &id));
+    }
+    assert_eq!(
+        reports[0]["evidence"][1]["specification"],
+        reports[1]["evidence"][1]["specification"]
+    );
+    assert_ne!(
+        reports[0]["evidence"][2]["specification"],
+        reports[1]["evidence"][2]["specification"]
+    );
+}
+
+#[test]
+fn json_failures_emit_no_partial_report_or_private_diagnostics() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let rejected = |pin: &str| {
+        let result = recheck_llvm_json(&source, &bundle, pin);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&result.stderr).contains(root.path().to_str().unwrap()));
+    };
+    for pin in ["", "untrusted", &"0".repeat(64), &format!("{id}\n")] {
+        rejected(pin);
+    }
+    for role in BundleFile::ALL {
+        let path = bundle.join(role.file_name());
+        let bytes = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        rejected(&id);
+        fs::write(&path, b"FAKE_PRIVATE_REPORT_COMPONENT").unwrap();
+        rejected(&id);
+        fs::write(&path, bytes).unwrap();
+    }
+    for text in [
+        GOOD.replace("7", "8"),
+        format!("{GOOD}//FAKE_PRIVATE_STALE_SOURCE"),
+        "FAKE_PRIVATE_MALFORMED_SOURCE".to_owned(),
+    ] {
+        fs::write(&source, text).unwrap();
+        rejected(&id);
+    }
+    fs::write(&source, GOOD).unwrap();
+    let ir_path = bundle.join("program.ll");
+    let original = fs::read_to_string(&ir_path).unwrap();
+    for changed in [
+        original.replace("ret i64 7", "ret i64 4294967303"),
+        original.replace("ret i32 %exit_code", "ret i32 7"),
+        original.replace(
+            "call i64 @__mumei_user_main()",
+            "call i64 @__mumei_user_main() [ \"custom\"() ]",
+        ),
+        format!("{original}\ndeclare void @extra()"),
+        format!("FAKE_PRIVATE_MALFORMED_IR{original}"),
+    ] {
+        fs::write(&ir_path, changed).unwrap();
+        rejected(&repin(&bundle, None));
+    }
+}
+
+#[test]
+fn json_repinned_non_executable_artifacts_remain_identity_only_and_are_not_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, _) = build(root.path());
+    let marker = root.path().join("MUST_NOT_EXIST");
+    fs::write(bundle.join("program.o"), b"not an object").unwrap();
+    fs::write(
+        bundle.join("program"),
+        format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(bundle.join("program"), fs::Permissions::from_mode(0o700)).unwrap();
+    let id = repin(&bundle, None);
+    let report = json_evidence(&source, &bundle, &id);
+    assert!(!marker.exists());
+    assert_eq!(report["acceptance"], "not_evaluated");
+    assert_eq!(report["evidence"][0]["method"], "identity_check");
+    assert_eq!(
+        report["evidence"][0]["correspondence"]["status"],
+        "unverified"
+    );
+    assert_eq!(
+        report["evidence"][0]["subject"]["sha256"],
+        native_bundle::sha256(&fs::read(bundle.join("program")).unwrap())
+    );
+    assert!(report["evidence"][2]["exclusions"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(
+            "os_exit_status_and_final_executable_semantics"
+        )));
+}
+
+#[test]
+fn json_uses_local_provenance_and_non_secret_configuration_only() {
+    let root = tempfile::Builder::new()
+        .prefix("FAKE_PRIVATE_CALLER_PATH")
+        .tempdir()
+        .unwrap();
+    let (source, bundle, _) = build(root.path());
+    let fake = "FAKE_PRIVATE_EVIDENCE_ONLY";
+    let text = format!("{GOOD}//{fake}");
+    fs::write(&source, &text).unwrap();
+    repin(&bundle, Some(&text));
+    let path = bundle.join(RECORD_FILE);
+    let mut record: native_bundle::NativeBundleRecord =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record.object_build.llvm_version = "17.98765.43210".into();
+    record.link_build.driver_version = "98765.43210".into();
+    record.link_build.linker_version = "98765.43210".into();
+    record.link_build.driver_target = format!("x86_64-{fake}-linux-gnu");
+    let bytes = serde_json::to_vec(&record).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    let id = native_bundle::sha256(&bytes);
+    let baseline = recheck_llvm_json(&source, &bundle, &id);
+    assert_success(&baseline);
+    let result = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args([
+            "native-bundle",
+            "recheck-llvm",
+            bundle.to_str().unwrap(),
+            source.to_str().unwrap(),
+            "--expected-build-id",
+            &id,
+            "--json",
+        ])
+        .env("MUMEI_VERIFICATION_TIMEOUT_MS", "1")
+        .env("MUMEI_SOLVER_CONFIG_FINGERPRINT", fake)
+        .env("MUMEI_ARTIFACT_PATHS", fake)
+        .env("MUMEI_TASK_ID", fake)
+        .env("OPENAI_API_KEY", fake)
+        .output()
+        .unwrap();
+    assert_success(&result);
+    assert_eq!(result.stdout, baseline.stdout);
+    assert!(result.stderr.is_empty());
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    for private in [
+        fake,
+        "98765.43210",
+        "FAKE_PRIVATE_CALLER_PATH",
+        GOOD,
+        root.path().to_str().unwrap(),
+    ] {
+        assert!(!stdout.contains(private));
+    }
+    let evidence: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        evidence["evidence"][2]["semantics"]["target_triple"],
+        record.object_build.target_triple
+    );
 }

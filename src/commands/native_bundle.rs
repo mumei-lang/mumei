@@ -22,17 +22,11 @@ const LLVM_RECHECK_SCOPE: &str =
 pub(crate) fn run(command: NativeBundleCommand) {
     let result = match command {
         NativeBundleCommand::RecheckLlvm { bundle, source, expected_build_id, json } => {
-            match recheck_llvm(Path::new(&bundle), Path::new(&source), &expected_build_id) {
-                Ok(LlvmRecheck::Rechecked(report)) => {
-                    if json {
-                        print_evidence(&report)
-                    } else {
-                        println!("Pinned snapshot identities consistent; source postcondition and native LLVM body freshly rechecked.\nProfile: {}\nScope: {LLVM_RECHECK_SCOPE}\nWrapper: checked call/trunc/ret shape, returning low 32 bits of the i64 body.\nObject/linker/runtime/OS exit-status/executable semantics: not checked.", tv::NATIVE_PROFILE);
-                        Ok(())
-                    }
-                }
-                Ok(LlvmRecheck::Different) => Err(BundleError("native LLVM body differs from source")),
-                Ok(LlvmRecheck::Inconclusive) => {
+            match recheck_llvm(Path::new(&bundle), Path::new(&source), &expected_build_id)
+                .and_then(|result| write_llvm_recheck(result, json, &mut std::io::stdout().lock())) {
+                Ok(Outcome::EquivalentWithinProfile) => Ok(()),
+                Ok(Outcome::Different) => Err(BundleError("native LLVM body differs from source")),
+                Ok(Outcome::Inconclusive) => {
                     eprintln!("Native source/LLVM recheck inconclusive; no combined result established.");
                     std::process::exit(3);
                 }
@@ -66,15 +60,29 @@ pub(crate) fn run(command: NativeBundleCommand) {
     }
 }
 
-fn print_evidence(report: &evidence::NativeConsumerEvidence) -> Result<(), BundleError> {
-    use std::io::Write;
-    let mut bytes = serde_json::to_vec_pretty(report)
-        .map_err(|_| BundleError("cannot encode consumer evidence"))?;
-    bytes.push(b'\n');
-    std::io::stdout()
-        .lock()
-        .write_all(&bytes)
-        .map_err(|_| BundleError("cannot write consumer evidence"))
+fn write_llvm_recheck(
+    result: LlvmRecheck,
+    json: bool,
+    output: &mut impl std::io::Write,
+) -> Result<Outcome, BundleError> {
+    match result {
+        LlvmRecheck::Rechecked(report) => {
+            let bytes = if json {
+                let mut bytes = serde_json::to_vec_pretty(&report)
+                    .map_err(|_| BundleError("cannot encode consumer evidence"))?;
+                bytes.push(b'\n');
+                bytes
+            } else {
+                format!("Pinned snapshot identities consistent; source postcondition and native LLVM body freshly rechecked.\nProfile: {}\nScope: {LLVM_RECHECK_SCOPE}\nWrapper: checked call/trunc/ret shape, returning low 32 bits of the i64 body.\nObject/linker/runtime/OS exit-status/executable semantics: not checked.\n", tv::NATIVE_PROFILE).into_bytes()
+            };
+            output
+                .write_all(&bytes)
+                .map_err(|_| BundleError("cannot write consumer evidence"))?;
+            Ok(Outcome::EquivalentWithinProfile)
+        }
+        LlvmRecheck::Different => Ok(Outcome::Different),
+        LlvmRecheck::Inconclusive => Ok(Outcome::Inconclusive),
+    }
 }
 
 fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, BundleError> {
@@ -297,4 +305,26 @@ fn publish(stage: &Path, output: &Path) -> Result<(), BundleError> {
 #[cfg(not(target_os = "linux"))]
 fn publish(_: &Path, _: &Path) -> Result<(), BundleError> {
     Err(BundleError("unsupported host"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refuted_or_inconclusive_queries_never_write_json_or_text() {
+        for json in [false, true] {
+            for (result, expected) in [
+                (LlvmRecheck::Different, Outcome::Different),
+                (LlvmRecheck::Inconclusive, Outcome::Inconclusive),
+            ] {
+                let mut output = Vec::new();
+                assert_eq!(
+                    write_llvm_recheck(result, json, &mut output).unwrap(),
+                    expected
+                );
+                assert!(output.is_empty());
+            }
+        }
+    }
 }
