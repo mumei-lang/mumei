@@ -10,6 +10,20 @@ const MAX_COMPONENT_BYTES: u64 = 32 * 1024 * 1024;
 
 pub(crate) fn run(command: NativeBundleCommand) {
     let result = match command {
+        NativeBundleCommand::RecheckSource { bundle, source, expected_build_id } => {
+            match recheck(Path::new(&bundle), Path::new(&source), &expected_build_id) {
+                Ok(SourceRecheck::RecheckedWithinProfile) => {
+                    println!("Pinned snapshot identities consistent; source postcondition freshly rechecked within C03.\nProfile: {RECHECK_PROFILE}\nScope: {RECHECK_SCOPE}\nLLVM/object/linker/runtime/executable semantics: not checked.");
+                    Ok(())
+                }
+                Ok(SourceRecheck::Refuted) => Err(BundleError("source postcondition refuted")),
+                Ok(SourceRecheck::Inconclusive) => {
+                    eprintln!("Native source recheck inconclusive; no source proof established.");
+                    std::process::exit(3);
+                }
+                Err(error) => Err(error),
+            }
+        },
         NativeBundleCommand::Build { input, output } => build(Path::new(&input), Path::new(&output)).map(|id| {
             println!("Native bundle built with fixed profile (project config/cache not loaded).\nBuild ID: {id}\nScope: {SCOPE}");
         }),
@@ -171,6 +185,14 @@ fn check(bundle: &Path, source: &Path, expected_id: &str) -> Result<(), BundleEr
         &source_text(source)?,
         &components(bundle)?,
     )
+}
+
+fn recheck(bundle: &Path, source: &Path, expected_id: &str) -> Result<SourceRecheck, BundleError> {
+    let record = read_regular(&bundle.join(RECORD_FILE), 1024 * 1024)?;
+    load_pinned_record(&record, expected_id)?;
+    let source = String::from_utf8(read_regular(source, 65_536)?)
+        .map_err(|_| BundleError("source is not UTF-8"))?;
+    recheck_source(&record, expected_id, &source, &components(bundle)?)
 }
 
 #[cfg(target_os = "linux")]

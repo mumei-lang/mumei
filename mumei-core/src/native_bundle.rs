@@ -11,6 +11,48 @@ pub const SOURCE_LABEL: &str = "native-source.mm";
 pub const RECORD_FILE: &str = "native-bundle.json";
 pub const SCOPE: &str = "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const SYSTEM_SCOPE: &str = "system_crt_libraries_environment_and_tool_execution_not_attested";
+pub const RECHECK_SCOPE: &str =
+    "source_postcondition_and_identity_only/no_translation_authenticity_or_binary_semantic_proof";
+pub const RECHECK_PROFILE: &str = "mumei.native-source-recheck/v1";
+pub const RECHECK_RESOURCE_LIMIT: u32 = 1_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceRecheck {
+    RecheckedWithinProfile,
+    Refuted,
+    Inconclusive,
+}
+
+/// Recheck an exact source snapshot under C03 after the existing identity gates.
+/// No project configuration, proof cache, orchestration environment or tools are read.
+pub fn recheck_source(
+    record_bytes: &[u8],
+    expected_id: &str,
+    source: &str,
+    files: &BTreeMap<BundleFile, Vec<u8>>,
+) -> Result<SourceRecheck, BundleError> {
+    use z3::{Config, Context, Solver};
+    load_pinned_record(record_bytes, expected_id)?;
+    let mut config = Config::new();
+    config.set_timeout_msec(BuildSettings::default().solver_timeout_ms);
+    config.set_param_value("rlimit", &RECHECK_RESOURCE_LIMIT.to_string());
+    let context = Context::new(&config);
+    let obligation = semantic_contract::encode_pure_i64_obligation(source, &context)
+        .map_err(|_| BundleError("source outside bounded C03 recheck profile"))?;
+    // This also enforces zero-argument main and a literal true precondition.
+    check_identity(record_bytes, expected_id, source, files)?;
+    let solver = Solver::new(&context);
+    solver.assert(&obligation);
+    Ok(source_recheck_result(solver.check()))
+}
+
+fn source_recheck_result(result: z3::SatResult) -> SourceRecheck {
+    match result {
+        z3::SatResult::Unsat => SourceRecheck::RecheckedWithinProfile,
+        z3::SatResult::Sat => SourceRecheck::Refuted,
+        z3::SatResult::Unknown => SourceRecheck::Inconclusive,
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("native bundle rejected: {0}")]
@@ -298,4 +340,62 @@ pub fn check_identity(
         return Err(BundleError("certificate binding mismatch"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod source_recheck_tests {
+    use super::*;
+    use z3::{Config, Context, SatResult, Solver};
+
+    #[test]
+    fn only_unsat_can_establish_the_source_postcondition() {
+        assert_eq!(
+            source_recheck_result(SatResult::Unsat),
+            SourceRecheck::RecheckedWithinProfile
+        );
+        assert_eq!(
+            source_recheck_result(SatResult::Sat),
+            SourceRecheck::Refuted
+        );
+        assert_eq!(
+            source_recheck_result(SatResult::Unknown),
+            SourceRecheck::Inconclusive
+        );
+    }
+
+    #[test]
+    fn source_obligation_models_conditions_signed_boundaries_and_real_exhaustion() {
+        for (body, ensures, expected) in [
+            ("7", "result == 7", SatResult::Unsat),
+            ("7", "result == 8", SatResult::Sat),
+            (
+                "if 1 < 2 { 7 } else { 8 }",
+                "(true => result == 7) && ((result < 8) == true)",
+                SatResult::Unsat,
+            ),
+            ("-9223372036854775807", "result < 0", SatResult::Unsat),
+            ("9223372036854775807", "result < 0", SatResult::Sat),
+        ] {
+            let config = Config::new();
+            let context = Context::new(&config);
+            let source = format!(
+                "atom main() -> i64 requires: true; ensures: {ensures}; body: {{ {body} }};"
+            );
+            let obligation =
+                semantic_contract::encode_pure_i64_obligation(&source, &context).unwrap();
+            let solver = Solver::new(&context);
+            solver.assert(&obligation);
+            assert_eq!(solver.check(), expected);
+        }
+        let mut config = Config::new();
+        config.set_param_value("rlimit", "1");
+        let context = Context::new(&config);
+        let obligation = semantic_contract::encode_pure_i64_obligation("atom f(x: i64) -> i64 requires: true; ensures: result == x; body: { if x < 0 { 0 } else { x } };", &context).unwrap();
+        let solver = Solver::new(&context);
+        solver.assert(&obligation);
+        assert_eq!(
+            source_recheck_result(solver.check()),
+            SourceRecheck::Inconclusive
+        );
+    }
 }

@@ -437,6 +437,56 @@ coverage, common C02 evidence integration, C09 translation validation and the
 full C10 consumer policy remain open. This is partial C08, not end-to-end
 Proof-Carrying Executable assurance. General build/run behavior is unchanged.
 
+### First clean source-recheck consumer slice
+
+`mumei native-bundle recheck-source` is the opt-in **C10 Stage A** consumer.
+The existing `native-bundle check` remains identity-only; this new command adds
+a fresh source-postcondition query, not a stronger claim about the executable.
+
+```sh
+mumei native-bundle recheck-source example-native-bundle native-main.mm \
+  --expected-build-id <trusted-64-character-lowercase-sha256>
+```
+
+The command requires the same separately trusted build ID and exact C08 source,
+record, certificate, LLVM IR, object and executable snapshots. Current
+identity/status/Translator IR gates still reject stale, replaced, missing,
+symlinked, non-regular and unsupported inputs. The C03 source is additionally
+bounded to 64 KiB, 256 tokens and 48 syntax/expression levels. Its existing
+profile restrictions apply; C08 still requires one zero-argument `main()`, an
+explicit i64 result and a literal `true` precondition, so a false precondition
+cannot manufacture a vacuous successful recheck.
+
+Core's C03 symbolic body and contract encoding checks `requires && !ensures`
+using the existing Z3 library with fixed settings: the native profile's solver
+10,000 ms timeout and 1,000,000 resource units. Unsat gives `RecheckedWithinProfile` (exit
+0); sat gives `Refuted` (exit 1); unknown/resource exhaustion gives
+`Inconclusive` (exit 3), never success. Malformed/unsupported inputs and failed
+identity gates exit 1. Diagnostics are static; no source excerpts, solver models,
+environment values or raw filesystem errors are printed.
+
+The ephemeral result identifies `mumei.native-source-recheck/v1` and
+`source_postcondition_and_identity_only/no_translation_authenticity_or_binary_semantic_proof`.
+It reads copied, read-only snapshots without loading project configuration,
+proof caches or orchestration settings, running a compiler/linker/Z3 process,
+executing the artifact or writing a new certificate/evidence/cache entry. The
+consumer binary and its existing Z3 library remain required trusted components;
+this is not a hermetic deployment or an independently certified source parser.
+
+A self-consistent forged source certificate may pass identity-only `check` but
+cannot replace the fresh source query. Conversely, an authorized replacement
+executable can still pass if its new byte identity is pinned and the source
+postcondition holds: executable semantics are explicitly **not checked**.
+Nothing becomes `artifact_verified`, `proved`, a common-evidence acceptance or
+a new Seal Grade. Audit/Claim Book/Lean acceptance and general build/run stay
+unchanged. C09 source-to-LLVM snapshot correspondence belongs to a separate
+Stage B; optimizer/object/linker/runtime/ABI/final-binary assurance, authenticity,
+dependency closure and full C10 policy remain open. No external verifier is
+adopted.
+
+Regression gate:
+`LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo test --test test_native_bundle`.
+
 ## 9. External verifier candidates, not adoption decisions
 
 Before any adoption check current maintenance, license/distribution/commercial

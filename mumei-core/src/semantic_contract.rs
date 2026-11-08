@@ -453,6 +453,33 @@ pub fn encode_pure_i64_body<'ctx>(
 
 const MAX_DEPTH: usize = 48;
 
+/// Encode a counterexample to the C03 source contract, not LLVM correspondence.
+/// Callers must separately guard against vacuous preconditions when required.
+pub fn encode_pure_i64_obligation<'ctx>(
+    source: &str,
+    context: &'ctx Context,
+) -> BodyResult<Bool<'ctx>> {
+    let body = encode_pure_i64_body(source, context)?;
+    let mut items = parse_module_checked(source).map_err(|_| SemanticContractError::Parse)?;
+    let Some(Item::Atom(atom)) = items.pop() else {
+        return Err(SemanticContractError::Unsupported("source atom"));
+    };
+    let mut params: HashMap<_, _> = atom
+        .params
+        .iter()
+        .zip(&body.inputs)
+        .map(|(p, v)| (p.name.as_str(), v.clone()))
+        .collect();
+    let requires =
+        parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
+    let requires = source_expr(&requires, context, &params, 0)?.boolean()?;
+    params.insert("result", body.value);
+    let ensures =
+        parse_expression_checked(&atom.ensures).map_err(|_| SemanticContractError::Parse)?;
+    let ensures = source_expr(&ensures, context, &params, 0)?.boolean()?;
+    Ok(Bool::and(context, &[&requires, &ensures.not()]))
+}
+
 enum SourceValue<'ctx> {
     Integer(BV<'ctx>),
     Boolean(Bool<'ctx>),
