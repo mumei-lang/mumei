@@ -263,6 +263,73 @@ def test_all_method_result_pairs_obey_the_representation_contract() -> None:
         )
 
 
+def runtime_representation_matrix(section: str) -> list[dict]:
+    paths = {
+        "outcomes": ["method", "execution", "result", "scope.kind"],
+        "correspondence": ["correspondence.relation", "correspondence.status", "result"],
+    }[section]
+    enums = []
+    for path in paths:
+        node = SCHEMA
+        for key in path.split("."):
+            node = node["properties"][key]
+        enums.append(node["enum"])
+    records = []
+    for values in itertools.product(*enums):
+        record = evidence()
+        for path, value in zip(paths, values):
+            change(record, path, value)
+        if section == "correspondence":
+            record["method"] = {
+                "observed_no_failure": "finite_execution", "finding": "abstract_interpretation"
+            }.get(record["result"], "deductive_proof")
+            record["scope"]["kind"] = (
+                "finite" if record["method"] == "finite_execution" else "unbounded"
+            )
+        record["scope"]["bounds"] = (
+            ["synthetic_limit"] if record["scope"]["kind"] in {"bounded", "finite"} else []
+        )
+        records.append(record)
+    return records
+
+
+def test_core_representation_oracle_matches_the_unchanged_schema() -> None:
+    oracle = json.loads(
+        (ROOT / "tests/fixtures/verification-evidence/representation_matrix.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert oracle["schema_version"] == SCHEMA["properties"]["schema_version"]["const"]
+    for section in ["outcomes", "correspondence"]:
+        records = runtime_representation_matrix(section)
+        assert oracle["case_counts"][section] == len(records)
+        assert oracle["valid_indices"][section] == [
+            index for index, record in enumerate(records) if VALIDATOR.is_valid(record)
+        ]
+
+
+@pytest.mark.parametrize("parent", [
+    "subject", "specification", "semantics", "scope", "correspondence", "provenance",
+    "provenance.adapter", "provenance.tool",
+])
+def test_nested_required_nullable_fields_are_required_too(parent: str) -> None:
+    schema = SCHEMA
+    record = evidence()
+    target = record
+    for key in parent.split("."):
+        schema = schema["properties"][key]
+        if "$ref" in schema:
+            schema = SCHEMA["$defs"][schema["$ref"].split("/")[-1]]
+        target = target[key]
+    for key in schema["required"]:
+        changed = deepcopy(record)
+        nested = changed
+        for part in parent.split("."):
+            nested = nested[part]
+        del nested[key]
+        assert not VALIDATOR.is_valid(changed), (parent, key)
+
+
 def test_evidence_gate_runs_when_only_schema_or_fixtures_change() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/contract-vocabulary.yml").read_text(encoding="utf-8")
@@ -272,6 +339,8 @@ def test_evidence_gate_runs_when_only_schema_or_fixtures_change() -> None:
         "schema/verification-evidence.schema.json",
         "tests/fixtures/verification-evidence/**",
         "tests/test_verification_evidence_schema.py",
+        "mumei-core/src/verification_evidence.rs",
+        "mumei-core/src/verification_evidence/**",
         "schema/proof-cert.schema.json",
         "tests/fixtures/proof-cert/**",
         "tests/test_proof_cert_schema.py",

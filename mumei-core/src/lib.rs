@@ -31,3 +31,4 @@ pub mod semantic_contract;
 pub mod structured_feedback;
 pub mod trust_boundary;
 pub mod verification;
+pub mod verification_evidence;

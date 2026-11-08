@@ -2886,6 +2886,16 @@ schema remain unchanged. See the [replay boundary](VERIFICATION_NATIVE.md#first-
 General acceptance/mapping, broader C09/C10 and final-artifact assurance remain
 open; no external verifier is adopted.
 
+The next C02/C13 slice moves the common v1 representation model and runtime
+validation into `mumei_core::verification_evidence`. Native producer/replay use
+the shared shape/combination gate without changing emitted JSON or their fresh
+query/pin/profile comparison policy. Required nullable targets must be present;
+replay no longer permits omitting that already-required v1 field. A shared
+schema-derived oracle covers 1,152 combination cases, alongside structural and
+privacy regressions. This is not a common acceptance engine or a new backend:
+truth, trust/freshness, grade/Lean promotion, general mapping and final-artifact
+assurance remain separate/open. See the [Core gate](VERIFICATION_NATIVE.md#shared-core-representation-gate).
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

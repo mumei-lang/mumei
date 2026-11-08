@@ -253,6 +253,22 @@ broader profiles and common acceptance/mapping remain open. Existing commands,
 schema, Claim Book/Seal Grade/Lean gates, Mumei/Agent ownership and the decision
 not to adopt external verifiers are unchanged.
 
+### Wave 5 shared Core Evidence representation gate
+
+The [C02/C13 Core gate](VERIFICATION_NATIVE.md#shared-core-representation-gate)
+provides the existing common v1 owned model and bounded runtime decoding plus
+shape/vocabulary/list/digest/outcome/scope/correspondence checks. Native producer
+and replay share it without changing emitted JSON or bypassing pins/fresh queries/
+same-profile equality. Missing nullable targets are rejected in accordance with
+the unchanged schema. Python/schema and Rust share a 1,152-case synthetic oracle;
+Core needs no Python, runtime schema library, new tool or verifier dependency.
+
+This is representation infrastructure, not proof acceptance, metadata trust,
+semantic support, grade/Claim Book/Lean promotion or final-binary assurance.
+Generic acceptance/mapping, more real producers/consumers, wider C09/C10 and
+final-artifact semantics remain open. Agent orchestration/plugin ownership,
+external-verifier adoption decisions and deferred WASM remain unchanged.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
