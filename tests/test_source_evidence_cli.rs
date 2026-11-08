@@ -138,6 +138,50 @@ fn missing_empty_duplicate_and_comment_only_contracts_emit_no_record() {
 }
 
 #[test]
+fn malformed_budget_values_are_not_echoed_by_the_argument_parser() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("FAKE_PRIVATE_SOURCE.mm");
+    fs::write(&path, CLAMP).unwrap();
+    for flag in ["--solver-timeout", "--solver-resource-limit"] {
+        for value in [
+            "",
+            "FAKE_PRIVATE_BUDGET",
+            "-FAKE_PRIVATE_BUDGET",
+            "FAKE_PRIVATE\nBUDGET",
+            "-1",
+            "1.2",
+            "4294967296",
+        ] {
+            for json in [false, true] {
+                let output = command(&path, json).args([flag, value]).output().unwrap();
+                assert_failure(&output, 1);
+                assert_eq!(
+                    output.stderr,
+                    b"Source evidence check failed: invalid bounded source-query budget\n"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn saved_records_and_proof_reports_are_not_accepted_as_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.mm");
+    fs::write(&path, CLAMP).unwrap();
+    let generated = command(&path, true).output().unwrap();
+    assert_success(&generated, true);
+    for bytes in [
+        generated.stdout,
+        br#"{"schema_version":"mumei.native-consumer-evidence/v1","evidence":[],"result":"established"}"#.to_vec(),
+        br#"{"schema_version":"mumei.proof-cert/v1","grade":"Gold","verified":true}"#.to_vec(),
+    ] {
+        fs::write(&path, bytes).unwrap();
+        for json in [false, true] { assert_failure(&command(&path, json).output().unwrap(), 1); }
+    }
+}
+
+#[test]
 fn bounded_solver_unknown_has_distinct_exit_and_no_success_record() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("FAKE_PRIVATE_SOURCE.mm");

@@ -21,15 +21,8 @@ pub(crate) fn run(command: EvidenceCommand) {
             solver_timeout,
             solver_resource_limit,
         } => (
-            verify_source(
-                Path::new(&input),
-                json,
-                Options {
-                    timeout_ms: solver_timeout,
-                    resource_limit: solver_resource_limit,
-                },
-                &mut output,
-            ),
+            source_options(&solver_timeout, &solver_resource_limit)
+                .and_then(|options| verify_source(Path::new(&input), json, options, &mut output)),
             "Source evidence check failed",
         ),
     };
@@ -51,6 +44,17 @@ pub(crate) fn run(command: EvidenceCommand) {
             std::process::exit(1);
         }
     }
+}
+
+fn source_options(timeout: &str, resource_limit: &str) -> Result<Options, &'static str> {
+    Ok(Options {
+        timeout_ms: timeout
+            .parse()
+            .map_err(|_| "invalid bounded source-query budget")?,
+        resource_limit: resource_limit
+            .parse()
+            .map_err(|_| "invalid bounded source-query budget")?,
+    })
 }
 
 fn verify_source(

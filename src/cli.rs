@@ -434,11 +434,11 @@ pub(crate) enum EvidenceCommand {
         #[arg(long)]
         json: bool,
         /// Solver timeout in milliseconds (1..=10000); no project/ambient policy loaded
-        #[arg(long, default_value_t = mumei_core::source_evidence::MAX_TIMEOUT_MS)]
-        solver_timeout: u32,
+        #[arg(long, default_value_t = mumei_core::source_evidence::MAX_TIMEOUT_MS.to_string(), allow_hyphen_values = true)]
+        solver_timeout: String,
         /// Solver resource units (1..=1000000); zero/unlimited is rejected
-        #[arg(long, default_value_t = mumei_core::source_evidence::MAX_RESOURCE_LIMIT)]
-        solver_resource_limit: u32,
+        #[arg(long, default_value_t = mumei_core::source_evidence::MAX_RESOURCE_LIMIT.to_string(), allow_hyphen_values = true)]
+        solver_resource_limit: String,
     },
     /// Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity
     Check {
