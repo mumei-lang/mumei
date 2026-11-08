@@ -82,6 +82,21 @@ fn build_binds_actual_native_output_and_source_certificate_without_proving_artif
         source.to_str().unwrap(),
     ]));
     assert_eq!(fs::read_dir(&bundle).unwrap().count(), 5);
+    fs::write(
+        &source,
+        GOOD.replace("{ 7 }", "{ if 1 < 2 { 7 } else { 8 } }"),
+    )
+    .unwrap();
+    let conditional = root.path().join("conditional");
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        conditional.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(conditional.join(RECORD_FILE)).unwrap());
+    assert_success(&check(&source, &conditional, &id));
 }
 
 #[test]
@@ -317,6 +332,45 @@ fn repinning_a_certificate_cannot_bypass_source_status_or_translator_gates() {
             !check(&source, &bundle, &native_bundle::sha256(&record_bytes))
                 .status
                 .success()
+        );
+    }
+}
+
+#[test]
+fn rehashed_certificate_targets_must_match_the_source_translator_identity() {
+    use mumei_core::proof_cert;
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, _) = build(root.path());
+    let record: native_bundle::NativeBundleRecord =
+        serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    let cert: proof_cert::ProofCertificate =
+        serde_json::from_slice(&fs::read(bundle.join("proof-cert.json")).unwrap()).unwrap();
+    for field in 0..7 {
+        let mut changed = cert.clone();
+        match field {
+            0 => changed.atoms[0].translator_ir.theorem_goal = "False".into(),
+            1 => changed.atoms[0].translator_ir.sort = "different".into(),
+            2 => changed.atoms[0].body_expr = "{ 8 }".into(),
+            3 => changed.atoms[0].ensures = "result == 8".into(),
+            4 => changed.atoms[0].requires = "false".into(),
+            5 => changed.atoms[0].assumed_clauses.push("ensures".into()),
+            _ => changed.atoms[0].effects.push("IO".into()),
+        }
+        proof_cert::refresh_certificate_integrity(&mut changed);
+        let bytes = serde_json::to_vec(&changed).unwrap();
+        fs::write(bundle.join("proof-cert.json"), &bytes).unwrap();
+        let mut changed_record = record.clone();
+        changed_record.files.insert(
+            BundleFile::Certificate,
+            native_bundle::ContentIdentity::of(&bytes),
+        );
+        let record_bytes = serde_json::to_vec(&changed_record).unwrap();
+        fs::write(bundle.join(RECORD_FILE), &record_bytes).unwrap();
+        assert!(
+            !check(&source, &bundle, &native_bundle::sha256(&record_bytes))
+                .status
+                .success(),
+            "field {field}"
         );
     }
 }

@@ -277,6 +277,16 @@ pub fn check_identity(
         || proof_cert::validate_certificate_translator_versions(&cert).is_err()
         || cert.atoms[0].name != "main"
         || cert.atoms[0].content_hash != binding.atom_content_hash
+        || cert.atoms[0].requires != atom.requires
+        || cert.atoms[0].ensures != atom.ensures
+        || cert.atoms[0].body_expr != atom.body_expr
+        || !cert.atoms[0].assumed_clauses.is_empty()
+        || !cert.atoms[0].forall_constraints.is_empty()
+        || !cert.atoms[0].effects.is_empty()
+        || sha256(
+            &serde_json::to_vec(&cert.atoms[0].translator_ir)
+                .map_err(|_| BundleError("IR encoding failed"))?,
+        ) != binding.translator_ir_sha256
         || cert.atoms[0].status != proof_cert::status::VERIFIED
         || cert.atoms[0].z3_check_result != proof_cert::status::Z3_UNSAT
         || cert.atoms[0].reused_from_store
