@@ -4,6 +4,10 @@ use mumei_core::native_bundle::{
     sha256, BuildSettings, BundleError, BundleFile, NativeBundleRecord, PROFILE, RECHECK_PROFILE,
     RECHECK_RESOURCE_LIMIT,
 };
+use mumei_core::verification_evidence::{
+    Adapter, Correspondence, Evidence, Identity, Provenance, Scope, Semantics, Subject, Tool,
+    SCHEMA_VERSION,
+};
 use mumei_emit_llvm::translation_validation::ValidationReport;
 use serde::{Deserialize, Serialize};
 
@@ -34,88 +38,20 @@ pub(super) struct NativeConsumerEvidence {
     evidence: [Evidence; 3],
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct Evidence {
-    schema_version: String,
-    subject: Subject,
-    specification: Identity,
-    obligation_id: String,
-    semantics: Semantics,
-    method: String,
-    execution: String,
-    result: String,
-    scope: Scope,
-    correspondence: Correspondence,
-    assumptions: Vec<String>,
-    exclusions: Vec<String>,
-    provenance: Provenance,
-    artifact_paths: Vec<String>,
-}
-
-#[derive(Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct Subject {
-    id: String,
-    kind: String,
-    sha256: String,
-}
-
-#[derive(Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct Identity {
-    id: String,
-    sha256: String,
-}
-
-#[derive(Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct Semantics {
-    profile: String,
-    integer_model: String,
-    target_triple: Option<String>,
-}
-
-#[derive(Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct Scope {
-    kind: String,
-    bounds: [String; 0],
-}
-
-#[derive(Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct Correspondence {
-    relation: String,
-    status: String,
-    notes: Vec<String>,
-}
-
-#[derive(Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct Provenance {
-    adapter: Adapter,
-    tool: Tool,
-    configuration_fingerprint: String,
-}
-
-#[derive(Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct Adapter {
-    id: String,
-    version: String,
-    protocol_version: String,
-}
-
-#[derive(Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct Tool {
-    name: String,
-    version: String,
-}
-
 pub(super) fn decode(bytes: &[u8]) -> Result<NativeConsumerEvidence, BundleError> {
-    serde_json::from_slice(bytes).map_err(|_| BundleError("invalid native evidence representation"))
+    let report: NativeConsumerEvidence = serde_json::from_slice(bytes)
+        .map_err(|_| BundleError("invalid native evidence representation"))?;
+    validate(&report)?;
+    Ok(report)
+}
+
+fn validate(report: &NativeConsumerEvidence) -> Result<(), BundleError> {
+    for record in &report.evidence {
+        record
+            .validate()
+            .map_err(|_| BundleError("invalid native evidence representation"))?;
+    }
+    Ok(())
 }
 
 fn strings(values: &[&str]) -> Vec<String> {
@@ -155,7 +91,7 @@ pub(super) fn from_recheck(
                 correspondence: Correspondence,
                 tool: Tool,
                 artifact_paths: &[&str]| Evidence {
-        schema_version: "mumei.verification-evidence/v1".into(),
+        schema_version: SCHEMA_VERSION.into(),
         subject,
         specification,
         obligation_id: obligation_id.into(),
@@ -169,7 +105,7 @@ pub(super) fn from_recheck(
         result: "established".into(),
         scope: Scope {
             kind: scope.into(),
-            bounds: [],
+            bounds: Vec::new(),
         },
         correspondence,
         assumptions: strings(ASSUMPTIONS),
@@ -182,10 +118,12 @@ pub(super) fn from_recheck(
             },
             tool,
             configuration_fingerprint: fingerprint.clone(),
+            translator_version: None,
+            bridge_lemma_hash: None,
         },
         artifact_paths: strings(artifact_paths),
     };
-    Ok(NativeConsumerEvidence {
+    let evidence = NativeConsumerEvidence {
         schema_version: SCHEMA.into(),
         build_id: expected_id.to_owned(),
         scope: super::LLVM_RECHECK_SCOPE.into(),
@@ -222,5 +160,7 @@ pub(super) fn from_recheck(
                 &["program.ll"],
             ),
         ],
-    })
+    };
+    validate(&evidence)?;
+    Ok(evidence)
 }

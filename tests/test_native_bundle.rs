@@ -1175,11 +1175,7 @@ fn saved_evidence_roundtrips_without_changes_and_ignores_json_object_order() {
     assert!(output.stderr.is_empty());
     assert!(String::from_utf8_lossy(&output.stdout).contains("Evidence acceptance: not evaluated"));
     assert_eq!(fs::read(&saved).unwrap(), before);
-    let mut reordered: serde_json::Value = serde_json::from_slice(&before).unwrap();
-    reordered["evidence"][1]["semantics"]
-        .as_object_mut()
-        .unwrap()
-        .remove("target_triple");
+    let reordered: serde_json::Value = serde_json::from_slice(&before).unwrap();
     fs::write(&saved, serde_json::to_vec(&reordered).unwrap()).unwrap();
     assert_success(
         &replay_command(&source, &bundle, &id, &saved)
@@ -1187,6 +1183,55 @@ fn saved_evidence_roundtrips_without_changes_and_ignores_json_object_order() {
             .unwrap(),
     );
     assert_eq!(fs::read_dir(&bundle).unwrap().count(), 5);
+}
+
+#[test]
+fn common_representation_is_not_native_profile_or_fresh_query_acceptance() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let saved = save_evidence(root.path(), &source, &bundle, &id);
+    let original: serde_json::Value = serde_json::from_slice(&fs::read(&saved).unwrap()).unwrap();
+    let cases: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/verification-evidence/synthetic_cases.json"
+    ))
+    .unwrap();
+    for case in cases["cases"].as_array().unwrap() {
+        let record = &case["evidence"];
+        mumei_core::verification_evidence::decode(&serde_json::to_vec(record).unwrap()).unwrap();
+        let mut report = original.clone();
+        report["evidence"][1] = record.clone();
+        fs::write(&saved, serde_json::to_vec(&report).unwrap()).unwrap();
+        replay_rejected(&source, &bundle, &id, &saved);
+    }
+    for metadata in [
+        serde_json::Value::Null,
+        serde_json::json!("synthetic-translator/v1"),
+    ] {
+        let mut report = original.clone();
+        for record in report["evidence"].as_array_mut().unwrap() {
+            record["provenance"]["translator_version"] = metadata.clone();
+            record["provenance"]["bridge_lemma_hash"] = serde_json::Value::Null;
+        }
+        fs::write(&saved, serde_json::to_vec(&report).unwrap()).unwrap();
+        if metadata.is_null() {
+            assert_success(
+                &replay_command(&source, &bundle, &id, &saved)
+                    .output()
+                    .unwrap(),
+            );
+        } else {
+            replay_rejected(&source, &bundle, &id, &saved);
+        }
+    }
+    let mut missing = original.clone();
+    missing["evidence"][1]["semantics"]
+        .as_object_mut()
+        .unwrap()
+        .remove("target_triple");
+    fs::write(&saved, serde_json::to_vec(&missing).unwrap()).unwrap();
+    let rejected = replay_rejected(&source, &bundle, &id, &saved);
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("invalid native evidence representation"));
 }
 
 fn json_paths(
@@ -1243,9 +1288,6 @@ fn replay_checks_every_field_and_rejects_unknown_fields_at_every_object_level() 
     for path in objects {
         let fields = original.pointer(&path).unwrap().as_object().unwrap();
         for key in fields.keys() {
-            if key == "target_triple" && fields[key].is_null() {
-                continue;
-            }
             let mut changed = original.clone();
             changed
                 .pointer_mut(&path)

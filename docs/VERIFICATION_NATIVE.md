@@ -144,6 +144,50 @@ General producer integration, consumer validation and mapping to existing claim
 evidence remain later C02 slices. A plugin cannot self-assert a new grade or use
 this schema to bypass Lean/kernel or current certificate checks.
 
+### Shared Core representation gate
+
+`mumei_core::verification_evidence` provides the common v1 owned record model,
+`decode(&[u8])` and `Evidence::validate()`. This is a runtime representation gate
+for the existing schema, not an acceptance engine. It does not define new logic,
+semantic profiles, verifier support or an executable universal IR.
+
+`decode` accepts at most 65,536 bytes and checks closed JSON shape plus the
+schema's vocabulary, nonempty text, lowercase SHA-256 syntax, unique/nonempty
+list entries and method/execution/result/scope/correspondence combinations.
+Bounded/finite scopes require explicit bounds; unbounded/identity scopes forbid
+them. Timeouts/errors cannot claim conclusive success; finite observations,
+abstract warnings and identity consistency retain their distinct meanings.
+Required nullable fields still have to be present: `semantics.target_triple`
+may be null, but may not be omitted. Optional translator/lemma metadata retains
+the schema's allowance for absent/null/value inputs; absent and
+null normalize to `None`, omitted on serialization.
+
+Serde deserialization alone checks shape. Call `Evidence::validate()` on
+constructed/deserialized records, or use `decode` for both checks. The byte cap
+is a decoder resource policy, not a new JSON Schema rule; callers constructing
+records in memory are responsible for their own resource limits. Static errors
+and opaque record Debug formatting do not echo arbitrary metadata. Serialization
+is not a secret scrubber: producers must still use approved non-secret fields.
+Artifact paths and strings remain untrusted labels, never file/tool selectors.
+
+The native producer and saved-report consumer now use this shared model and
+gate while retaining their envelope, three-record order, independently trusted
+build-ID pin, fresh queries and complete same-profile report comparison. Producer
+JSON is unchanged. Replay now rejects an omitted nullable target, correcting the
+previous permissive decoder to the already-required v1 schema field. Optional
+common provenance fields can be absent/null; non-null additions must still match
+fresh local provenance. Representation success is not trust, freshness,
+authenticity, historical proof execution, semantic correspondence or truth,
+proof acceptance, grade/Claim Book/Lean promotion or final-artifact assurance.
+
+The shared synthetic matrix oracle covers 960 outcome/scope combinations and
+192 correspondence combinations. Python recomputes it using the unchanged JSON
+Schema; Rust checks the same cases without a Python/runtime-schema dependency.
+Existing synthetic and native shapes, nested required/unknown fields, duplicates,
+digests, lists, input bounds, optional metadata and privacy have separate gates.
+These are representation checks only. Generic acceptance/mapping and additional
+real producers/consumers remain open; no external verifier or WASM is enabled.
+
 ## 5. Minimal semantic contract (C03)
 
 Start with a pure integer/Boolean function: for a signed 64-bit input, return
@@ -627,8 +671,8 @@ is compared with the saved report. All decoded data must match: schema/build
 identity/scope/acceptance, each subject/specification/obligation, semantics,
 method/execution/result, correspondence, assumptions/exclusions, artifact labels
 and local adapter/tool/configuration provenance. JSON object order and whitespace
-do not matter; an omitted nullable source target is equivalent to null. Records
-and all lists retain producer order. Unsupported profiles or different version/
+do not matter; nullable targets must be explicitly present, including source
+targets set to null. Records and all lists retain producer order. Unsupported profiles or different version/
 configuration labels are rejected rather than silently migrated, even when a
 different consumer might also verify the program. This is a deliberately narrow
 same-profile/provenance replay, not a general common-Evidence schema validator
