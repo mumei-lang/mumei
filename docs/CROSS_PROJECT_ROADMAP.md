@@ -197,6 +197,26 @@ or change Claim Book/Seal Grade/Lean gates. Dependency closure, wider programs
 and targets, runtime/ABI/linker and final-artifact assurance remain open. No
 external verifier is adopted, and Mumei/Agent ownership remains unchanged.
 
+### Wave 5 first native LLVM snapshot consumer boundary
+
+The [C10 Stage B slice](VERIFICATION_NATIVE.md#first-native-llvm-snapshot-consumer-slice)
+adds opt-in `native-bundle recheck-llvm`: Stage A's pinned identity and fresh
+source-postcondition gates plus a C09-derived check of the actual pinned
+`program.ll`. A separate narrow native profile compares the full i64 user-main
+body and checks the direct-call/truncating C-main wrapper shape without rewriting
+snapshots or relaxing the existing scalar C09 profile. Target/layout observations
+must match the module exactly; unsupported shapes and inconclusive queries never
+become success. Copied read-only consumers need the existing Z3/LLVM libraries,
+not producer tools, project config/cache or artifact execution.
+
+This is **partial C09/C10 integration**, not proof that these IR bytes produced
+the object, or that an i64 result equals an OS exit status. Object/backend/linker,
+runtime/ABI/OS/final-binary semantics, authenticity, dependency closure, wider
+profiles/targets, common evidence integration and full C10 policy remain open.
+Neither packaging nor repinning object/executable bytes promotes proof status.
+Existing commands, grades, Claim Book, Lean gates and Mumei/Agent ownership stay
+unchanged; no external verifier is adopted.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
