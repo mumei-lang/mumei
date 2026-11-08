@@ -1226,10 +1226,10 @@ fn replay_checks_every_field_and_rejects_unknown_fields_at_every_object_level() 
         fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
         replay_rejected(&source, &bundle, &id, &saved);
     }
-    for path in objects {
+    for path in &objects {
         let mut changed = original.clone();
         changed
-            .pointer_mut(&path)
+            .pointer_mut(path)
             .unwrap()
             .as_object_mut()
             .unwrap()
@@ -1240,22 +1240,58 @@ fn replay_checks_every_field_and_rejects_unknown_fields_at_every_object_level() 
         fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
         replay_rejected(&source, &bundle, &id, &saved);
     }
-    for key in original.as_object().unwrap().keys() {
-        let mut changed = original.clone();
-        changed.as_object_mut().unwrap().remove(key);
-        fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
-        replay_rejected(&source, &bundle, &id, &saved);
-    }
-    for index in 0..3 {
-        for key in original["evidence"][index].as_object().unwrap().keys() {
+    for path in objects {
+        let fields = original.pointer(&path).unwrap().as_object().unwrap();
+        for key in fields.keys() {
+            if key == "target_triple" && fields[key].is_null() {
+                continue;
+            }
             let mut changed = original.clone();
-            changed["evidence"][index]
+            changed
+                .pointer_mut(&path)
+                .unwrap()
                 .as_object_mut()
                 .unwrap()
                 .remove(key);
             fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
             replay_rejected(&source, &bundle, &id, &saved);
         }
+    }
+    let mut digests = vec!["/build_id".to_owned()];
+    for index in 0..3 {
+        for field in [
+            "subject/sha256",
+            "specification/sha256",
+            "provenance/configuration_fingerprint",
+        ] {
+            digests.push(format!("/evidence/{index}/{field}"));
+        }
+    }
+    for path in digests {
+        let mut changed = original.clone();
+        let value = changed.pointer_mut(&path).unwrap();
+        assert_ne!(value.as_str().unwrap(), "0".repeat(64));
+        *value = serde_json::json!("0".repeat(64));
+        fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
+        replay_rejected(&source, &bundle, &id, &saved);
+    }
+    for (path, value) in [
+        ("/evidence/1/result", "inconclusive"),
+        ("/evidence/1/execution", "timeout"),
+        ("/evidence/2/method", "finite_execution"),
+        (
+            "/evidence/2/semantics/integer_model",
+            "mathematical_integer",
+        ),
+        ("/evidence/2/correspondence/status", "assumed"),
+        ("/evidence/1/provenance/tool/version", "0.0.0.0"),
+        ("/evidence/0/provenance/adapter/version", "0.0.0"),
+        ("/acceptance", "accepted"),
+    ] {
+        let mut changed = original.clone();
+        *changed.pointer_mut(path).unwrap() = serde_json::json!(value);
+        fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
+        replay_rejected(&source, &bundle, &id, &saved);
     }
     for count in [0, 1, 2, 4] {
         let mut changed = original.clone();
