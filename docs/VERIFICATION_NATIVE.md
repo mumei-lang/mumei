@@ -126,6 +126,12 @@ validate hashes against actual files, check freshness, authenticate a producer,
 or validate semantic correspondence. Consumers must still check all relevant
 trust, identity, coverage and acceptance rules before accepting a claim.
 
+Abstract-interpretation warnings use `result: finding` while retaining
+`method: abstract_interpretation`. Over-approximation warnings can be spurious;
+they are not concrete counterexamples or proofs. Any separately validated
+concrete witness needs its own method/scope evidence, not a promotion of the
+warning or a relabeling as a static heuristic.
+
 No raw environment, credentials, remote endpoint, invocation arguments or
 arbitrary tool configuration belong in this shared record. A fingerprint is
 over an approved non-secret configuration projection, not secret values or

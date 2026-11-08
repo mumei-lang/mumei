@@ -170,7 +170,7 @@
     },
     {
       "if": {"properties":{"result":{"enum":["finding"]}},"required":["result"]},
-      "then": {"properties":{"execution":{"const":"completed"},"method":{"const":"static_heuristic"}}}
+      "then": {"properties":{"execution":{"const":"completed"},"method":{"enum":["static_heuristic","abstract_interpretation"]}}}
     },
     {
       "if": {"properties":{"method":{"enum":["finite_execution"]}},"required":["method"]},

@@ -148,6 +148,14 @@ def test_identity_and_heuristics_cannot_claim_counterexamples(case: int) -> None
     assert not VALIDATOR.is_valid(record)
 
 
+def test_abstract_interpretation_warning_keeps_its_method_without_claiming_a_witness() -> None:
+    record = evidence()
+    record.update(method="abstract_interpretation", result="finding")
+    VALIDATOR.validate(record)
+    record["result"] = "counterexample"
+    assert not VALIDATOR.is_valid(record)
+
+
 def test_unchecked_port_proof_stays_about_the_port() -> None:
     record = evidence(1)
     VALIDATOR.validate(record)
@@ -212,7 +220,7 @@ def test_unknown_nested_fields_are_not_silently_ignored(parent: str) -> None:
 def test_all_method_result_pairs_obey_the_representation_contract() -> None:
     allowed = {
         "deductive_proof": {"established", "counterexample"},
-        "abstract_interpretation": {"established"},
+        "abstract_interpretation": {"established", "finding"},
         "bounded_model_checking": {"established", "counterexample"},
         "finite_execution": {"observed_no_failure", "counterexample"},
         "static_heuristic": {"finding"},
@@ -244,6 +252,9 @@ def test_evidence_gate_runs_when_only_schema_or_fixtures_change() -> None:
         "schema/verification-evidence.schema.json",
         "tests/fixtures/verification-evidence/**",
         "tests/test_verification_evidence_schema.py",
+        "schema/proof-cert.schema.json",
+        "tests/fixtures/proof-cert/**",
+        "tests/test_proof_cert_schema.py",
     }
     for event in ["push", "pull_request"]:
         assert required <= set(triggers[event]["paths"])
