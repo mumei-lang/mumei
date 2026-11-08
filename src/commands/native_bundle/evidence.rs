@@ -111,6 +111,8 @@ pub(super) fn from_recheck(
 ) -> Result<NativeConsumerEvidence, BundleError> {
     let configuration = serde_json::to_vec(&serde_json::json!({
         "identity_profile": PROFILE,
+        "semantic_contract_version": mumei_core::semantic_contract::SEMANTIC_CONTRACT_VERSION,
+        "source_semantic_profile": report.source_profile,
         "source_profile": RECHECK_PROFILE,
         "source_timeout_ms": BuildSettings::default().solver_timeout_ms,
         "source_resource_limit": RECHECK_RESOURCE_LIMIT,
