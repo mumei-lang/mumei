@@ -26,6 +26,7 @@ pub mod proof_graph;
 pub mod reconstruction_loss;
 pub mod registry;
 pub mod resolver;
+pub mod semantic_contract;
 pub mod structured_feedback;
 pub mod trust_boundary;
 pub mod verification;

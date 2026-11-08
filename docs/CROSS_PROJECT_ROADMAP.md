@@ -76,6 +76,12 @@ hide semantic loss in a universal IR, or run every backend in parallel by
 default. Purpose-driven comparisons require permitted policy, budget and
 result-reconciliation rules.
 
+The initial C03 scalar implementation is an opt-in library profile over the
+existing parser/HIR/MIR, with a real Z3/LLVM/native finite-regression slice.
+It does not complete general obligation decomposition, default producer/consumer
+integration, stable IR interchange or translation validation; see the
+[supported scope](VERIFICATION_NATIVE.md#first-supported-scalar-slice).
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
