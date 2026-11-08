@@ -2927,6 +2927,15 @@ execution, grade/Lean promotion, LLVM/native semantics or common acceptance.
 Native consumers and Agent ownership remain unchanged. See the
 [source consistency contract](VERIFICATION_NATIVE.md#standalone-source-evidence-consistency-recheck).
 
+The Agent C04/C11 planner also adds optional exact result-contract routing:
+one profile/method pair, scope, bound/assumption identifiers and correspondence
+relation/status must match one complete declared offer. Explicit/automatic
+selection and permitted preflight fallback cannot weaken it or borrow fields
+across offers. Unconstrained v1 plans remain unchanged. This is partial routing,
+not capability truth, Evidence acceptance, execution/resource enforcement,
+runtime conflict reconciliation or grade/Lean promotion. See the
+[canonical milestone](CROSS_PROJECT_ROADMAP.md#wave-2-explicit-result-contract-routing-follow-up).
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
