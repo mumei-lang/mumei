@@ -225,6 +225,24 @@ C12's demand gate, existing
 assurance/Lean/native/LLVM behavior and deferred WASM are unchanged. No external
 verifier is adopted. See the [Agent output boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-opaque-stdout-snapshots).
 
+### Wave 2 bounded JSON stdout decoding
+
+Agent adds explicit private-body decoding of one UTF-8 JSON object from a bounded
+stdout snapshot. Duplicate decoded keys, extra output, BOM/other encodings,
+unpaired surrogates, invalid syntax and non-JSON numeric constants fail with a
+static error and no chained decoder payload. Nesting is bounded to 32 before
+parsing; number tokens are at most 128 characters and decimal exponents must be
+representable. Exact integer/Decimal values avoid binary-float precision loss.
+
+Each decode returns a fresh private tree without changing raw bytes, identity or
+metadata. Neither decoded content nor explicit byte access is safe to log. Empty
+objects and success claims are still untrusted, not Evidence. Core must check
+original bytes, not a reserialized Python tree. Core schema/meaning/acceptance,
+adapter normalization, stream collection, execution and authority enforcement
+remain separate; no default audit/CLI/MCP route or external verifier is added.
+C11 remains partial, C12 demand-gated and existing assurance/Lean/native/LLVM/
+deferred-WASM behavior unchanged. See the [Agent JSON boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-json-stdout-decoding).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)

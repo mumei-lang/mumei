@@ -2982,6 +2982,12 @@ contain metadata only. Stream collection, origin/completeness, actual enforcemen
 and Core Evidence checks remain open. See the
 [canonical output milestone](CROSS_PROJECT_ROADMAP.md#wave-2-bounded-opaque-stdout-snapshots).
 
+The explicit JSON decode follow-up checks bounded UTF-8/single-object syntax,
+unique keys and exact numbers without changing raw snapshots or treating saved
+success as Evidence. Private detached trees must not be logged or reserialized
+as authoritative input; Core checks still consume original bytes. See the
+[canonical JSON milestone](CROSS_PROJECT_ROADMAP.md#wave-2-bounded-json-stdout-decoding).
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
