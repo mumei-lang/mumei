@@ -2962,6 +2962,12 @@ This is metadata matching only: real authority, OS enforcement and execution
 remain open, with C12 still demand-gated. See the
 [canonical permission milestone](CROSS_PROJECT_ROADMAP.md#wave-2-declared-permission-policy-filtering).
 
+Agent's next C11/C13 contract adds bounded host-reported attempt histories tied
+to prepared-request fingerprints. It distinguishes cancellation requests from
+acknowledgements and rejects contradictory/late terminal observations, but does
+not execute, monitor clocks, enforce authority/resources or accept Evidence.
+See the [canonical lifecycle milestone](CROSS_PROJECT_ROADMAP.md#wave-2-bounded-host-observed-attempt-lifecycle).
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
