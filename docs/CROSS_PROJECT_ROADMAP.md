@@ -162,6 +162,24 @@ boundary. Core specification/Evidence ownership, C12's demand gate and existing
 audit/Lean/native/LLVM/deferred-WASM policies remain unchanged. No external
 verifier is adopted. See the [Agent permission contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-declared-permission-policy-filtering).
 
+### Wave 2 bounded host-observed attempt lifecycle
+
+Agent's next partial C11/C13 contract records host-reported start, cancellation
+request/acknowledgement, exit, failure and timeout observations against a prepared
+manifest fingerprint, attempt number and declared timeout. Immutable histories
+are bounded to three events, validate elapsed counters and terminal transitions,
+and reject exit observations at/after the deadline. Cancellation requests are not
+acknowledgements; incomplete histories remain nonterminal. Exit code zero is not
+verification success or Evidence acceptance.
+
+This is an observation contract, not a runner, authority token or common Evidence
+replacement. No clock/process/I/O/signal operations, actual timeout/cleanup,
+global attempt uniqueness, cross-record reconciliation, output ingestion or
+default audit/CLI/MCP integration is added. Core meaning/Evidence ownership,
+C12's real-authority demand gate and existing assurance/Lean/native/LLVM/deferred
+WASM boundaries are unchanged. No external verifier is adopted. See the
+[Agent lifecycle contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-host-observed-attempt-lifecycle).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)

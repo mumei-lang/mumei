@@ -521,6 +521,16 @@ independently establish and enforce authority. C12's real-authority demand gate,
 Core Evidence acceptance and existing assurance policies remain unchanged. See
 the [permission-policy boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-declared-permission-policy-filtering).
 
+Agent's next C11/C13 lifecycle contract binds bounded, immutable host-reported
+attempt histories to prepared-request fingerprints. Start, cancel request/ack,
+exit, failure and timeout are distinct observations; terminal histories cannot
+be rewritten and exit code zero is not verification success. The contract does
+not execute tools, read clocks, enforce authority/resources or prove process
+cleanup. It does not replace common Evidence or Core acceptance. Global attempt
+uniqueness, conflicting-record reconciliation, output ingestion and actual
+execution remain open; C12's demand gate and existing assurance policies are
+unchanged. See the [Agent lifecycle boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-host-observed-attempt-lifecycle).
+
 "Plugin" describes the extension boundary, not a decision to use shared
 libraries. Subprocess, container and explicitly configured remote transports
 are possible later choices. Do not reuse the emitter-plugin ABI by assumption.
