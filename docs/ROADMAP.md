@@ -2968,6 +2968,12 @@ acknowledgements and rejects contradictory/late terminal observations, but does
 not execute, monitor clocks, enforce authority/resources or accept Evidence.
 See the [canonical lifecycle milestone](CROSS_PROJECT_ROADMAP.md#wave-2-bounded-host-observed-attempt-lifecycle).
 
+The same-attempt follow-up accepts only matching-bound, exact-prefix extensions
+of the caller's current record, with duplicate reports treated idempotently and
+stale/divergent/rewritten histories rejected. It does not arbitrate independent
+branches, maintain global/atomic storage, prevent replay, execute or accept
+Evidence. See the [canonical reconciliation milestone](CROSS_PROJECT_ROADMAP.md#wave-2-same-attempt-report-reconciliation).
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

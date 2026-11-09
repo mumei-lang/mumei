@@ -174,11 +174,30 @@ verification success or Evidence acceptance.
 
 This is an observation contract, not a runner, authority token or common Evidence
 replacement. No clock/process/I/O/signal operations, actual timeout/cleanup,
-global attempt uniqueness, cross-record reconciliation, output ingestion or
+global attempt uniqueness, cross-attempt/backend arbitration, output ingestion or
 default audit/CLI/MCP integration is added. Core meaning/Evidence ownership,
 C12's real-authority demand gate and existing assurance/Lean/native/LLVM/deferred
 WASM boundaries are unchanged. No external verifier is adopted. See the
 [Agent lifecycle contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-host-observed-attempt-lifecycle).
+
+### Wave 2 same-attempt report reconciliation
+
+Agent's next partial C11/C13 step compares an incoming immutable attempt snapshot
+to the caller's current record. Request fingerprint, attempt number and timeout
+must match; all known events must remain an exact prefix. Identical reports are
+idempotent, and complete validated extensions may advance multiple observations.
+Stale/shorter, divergent or rewritten terminal histories fail rather than being
+merged or resolved in favor of code zero, later counters or report arrival order.
+
+The helper does not select which independent branch is true. Callers still own
+retaining and atomically updating their current record and surfacing conflicts;
+starting from an older prefix can still fork. Duplicate acceptance is not
+freshness, authentication or replay protection. No global ledger, new schema,
+runtime/process/clock/I/O operation, actual enforcement or output/Evidence
+normalization/acceptance is added. Cross-attempt/backend result reconciliation
+and full C11 execution remain open. Core meaning/acceptance, C12's demand gate,
+existing assurance/Lean/native/LLVM behavior and deferred WASM are unchanged.
+See the [Agent reconciliation boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-same-attempt-report-reconciliation).
 
 ### Wave 3 first supported boundaries
 

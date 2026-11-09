@@ -527,9 +527,23 @@ exit, failure and timeout are distinct observations; terminal histories cannot
 be rewritten and exit code zero is not verification success. The contract does
 not execute tools, read clocks, enforce authority/resources or prove process
 cleanup. It does not replace common Evidence or Core acceptance. Global attempt
-uniqueness, conflicting-record reconciliation, output ingestion and actual
+uniqueness, cross-attempt/backend arbitration, output ingestion and actual
 execution remain open; C12's demand gate and existing assurance policies are
 unchanged. See the [Agent lifecycle boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-host-observed-attempt-lifecycle).
+
+Agent's same-attempt reconciliation follow-up accepts only snapshots with the
+same request fingerprint, attempt number and timeout that preserve the current
+event history as an exact prefix. Identical reports are idempotent, not fresh;
+shorter/stale, divergent and terminal-rewriting reports fail without modifying
+either record. Code zero, later elapsed counters or arrival order do not resolve
+conflicting branches. Callers must retain and atomically advance their current
+record and surface disagreements: independent callers can still fork from an
+old common prefix. This is consistency within one metadata lineage, not a global
+ledger, authentication/replay protection, actual execution or common Evidence
+normalization/acceptance. Cross-attempt/backend arbitration, authority/resource
+enforcement and C11 execution remain open; C12's demand gate, Core ownership and
+existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent reconciliation boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-same-attempt-report-reconciliation).
 
 "Plugin" describes the extension boundary, not a decision to use shared
 libraries. Subprocess, container and explicitly configured remote transports
