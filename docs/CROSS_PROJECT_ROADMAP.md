@@ -144,6 +144,24 @@ resource enforcement and runtime reconciliation remain separate work. No Core
 acceptance, audit/Lean/native/LLVM guarantees or deferred WASM policy changes;
 no external verifier is adopted. See the [Agent preparation contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-bounded-source-input-preparation).
 
+### Wave 2 declared permission-policy filtering
+
+Agent's next opt-in C04/C11 slice matches host-declared required permission
+categories against an explicit allowed set. Missing requirements fail closed
+under an explicit policy; an empty allowed set denies all nonempty declarations.
+Priority/explicit selection cannot bypass the filter, and permitted fallback
+uses the destination declaration while preserving exact result/input contracts.
+Omitted policy retains legacy planning/JSON without implying approval. Explicit
+plan metadata and prepared-source fingerprints retain the policy/requirements.
+
+This is coarse declaration matching and C13 regression coverage, not proof of
+actual privilege requirements, authenticated user/admin authorization, an OS
+sandbox, resource enforcement or execution. A matching plan cannot authorize
+code execution or data egress; the later runner must independently enforce its
+boundary. Core specification/Evidence ownership, C12's demand gate and existing
+audit/Lean/native/LLVM/deferred-WASM policies remain unchanged. No external
+verifier is adopted. See the [Agent permission contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-declared-permission-policy-filtering).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)

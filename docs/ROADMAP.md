@@ -2955,6 +2955,13 @@ acceptance receipts. Actual tool execution, transport, input-access permissions,
 resource enforcement and reconciliation remain open. See the
 [canonical milestone](CROSS_PROJECT_ROADMAP.md#wave-2-bounded-source-input-preparation).
 
+The next Agent C04/C11 pre-execution slice filters declared permission
+requirements against an explicit closed-set policy, including fallback.
+Unspecified policy preserves legacy planning, not implicit execution approval.
+This is metadata matching only: real authority, OS enforcement and execution
+remain open, with C12 still demand-gated. See the
+[canonical permission milestone](CROSS_PROJECT_ROADMAP.md#wave-2-declared-permission-policy-filtering).
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
