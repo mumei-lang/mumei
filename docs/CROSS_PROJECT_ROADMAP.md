@@ -126,6 +126,24 @@ guarantees and deferred WASM are unchanged; no external verifier is adopted.
 The [Agent settings contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-typed-configuration-follow-up)
 owns local API details.
 
+### Wave 2 bounded source-input preparation
+
+Agent's opt-in C04/C11 planner can constrain an explicit input-format declaration.
+Missing offers are not wildcards; all prior filters and exact result contracts
+remain in force. A separate `prepare_source` API replans against current registry
+metadata and binds at-most-1-MiB immutable UTF-8 source bytes to a host-supplied
+expected SHA-256 and the selected plan. The explicit manifest exposes only
+format/digest/byte count and plan metadata, not source text, plus a deterministic
+request fingerprint. Legacy unconstrained JSON stays unchanged.
+
+This is partial input preparation and C13 negative-regression coverage, not
+source parsing/semantic extraction, an Evidence identity, observation freshness,
+authenticity, execution permission or acceptance. Saved records cannot authorize
+later execution. Input/file/environment access policy, transport, real execution,
+resource enforcement and runtime reconciliation remain separate work. No Core
+acceptance, audit/Lean/native/LLVM guarantees or deferred WASM policy changes;
+no external verifier is adopted. See the [Agent preparation contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-bounded-source-input-preparation).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)

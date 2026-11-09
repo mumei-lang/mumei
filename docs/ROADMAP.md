@@ -2946,6 +2946,15 @@ secret detector, permission grant, execution or acceptance receipt. Actual input
 preparation, tool execution/resource enforcement and runtime reconciliation
 remain open. See the [canonical milestone](CROSS_PROJECT_ROADMAP.md#wave-2-typed-configuration-follow-up).
 
+The Agent C04/C11 input-preparation follow-up binds a bounded immutable source
+snapshot to an explicit supported input format, exact result contract and
+freshly selected metadata plan. Host-pinned raw-byte identity is checked without
+opening paths or parsing source meaning. Explicit manifests omit source text;
+their fingerprints are not Evidence identities, execution authorization or
+acceptance receipts. Actual tool execution, transport, input-access permissions,
+resource enforcement and reconciliation remain open. See the
+[canonical milestone](CROSS_PROJECT_ROADMAP.md#wave-2-bounded-source-input-preparation).
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
