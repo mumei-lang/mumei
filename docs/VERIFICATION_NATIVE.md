@@ -567,6 +567,20 @@ cross-attempt/backend arbitration remain open; C12's demand gate and existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent output boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-opaque-stdout-snapshots).
 
+Agent's explicit JSON stdout decode follow-up checks only bounded transport:
+one UTF-8 object, unique decoded keys, scalar Unicode strings, at most 32 nested
+containers and 128 characters per number literal with representable decimal
+exponents. Extra output, malformed syntax and non-JSON constants fail without
+echoing input or chaining decoder payloads. Exact integer/Decimal values avoid
+binary-float rounding; each private mutable tree is detached from the immutable
+raw-byte snapshot. Neither the tree nor explicit bytes may be logged. Decode is
+not canonicalization: downstream Core checks must consume original bytes.
+An empty object or saved success claim can decode without being Evidence. Core
+representation/meaning/acceptance, adapter result normalization and actual
+execution/authority remain separate; default routes, C12's demand gate and
+existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent JSON boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-json-stdout-decoding).
+
 "Plugin" describes the extension boundary, not a decision to use shared
 libraries. Subprocess, container and explicitly configured remote transports
 are possible later choices. Do not reuse the emitter-plugin ABI by assumption.
