@@ -509,6 +509,18 @@ executors still need independent authorization, current preflight, resource
 enforcement and result reconciliation. Default routes and existing assurance
 policies remain unchanged. See the [source preparation boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-bounded-source-input-preparation).
 
+The next Agent C04/C11 permission slice compares host-declared requirements
+against an explicit closed set of allowed categories before selection and
+fallback. Missing declarations do not satisfy an explicit policy, while omitted
+policy preserves legacy planning without implying approval. Selected declarations
+and allowed policy are retained in explicit plan/preparation metadata.
+This is not capability truth, a user/admin grant, an OS sandbox or permission to
+execute code/transmit source data. Categories do not derive Mumei effects or
+actual privileges from adapter location/implementation; later executors must
+independently establish and enforce authority. C12's real-authority demand gate,
+Core Evidence acceptance and existing assurance policies remain unchanged. See
+the [permission-policy boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-declared-permission-policy-filtering).
+
 "Plugin" describes the extension boundary, not a decision to use shared
 libraries. Subprocess, container and explicitly configured remote transports
 are possible later choices. Do not reuse the emitter-plugin ABI by assumption.
