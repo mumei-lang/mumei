@@ -560,8 +560,9 @@ Output reconciliation accepts only identical attempt histories and raw stdout;
 conflicts fail without choosing a winner. Hosts must first reconcile their
 current attempt, retain the canonical output and atomically publish updates;
 binding alone cannot detect independent forks. This is not parsing, stream
-collection, freshness/authentication/replay protection, actual execution or
-Core-owned common Evidence normalization/acceptance. C11 execution and
+collection, freshness/authentication/replay protection, actual execution,
+adapter result normalization or Core-owned common Evidence checks/acceptance.
+C11 execution and
 cross-attempt/backend arbitration remain open; C12's demand gate and existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent output boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-opaque-stdout-snapshots).

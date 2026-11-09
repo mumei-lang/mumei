@@ -219,8 +219,9 @@ and atomically publish a canonical output; independent snapshots can still fork.
 No parsing, process/stream collection, I/O/clock operation, authentication/replay
 protection, actual resource/authority enforcement or default audit/CLI/MCP wiring
 is added. Caller-supplied digests do not establish origin, completeness, delivery
-timing, secrecy or Evidence acceptance. Cross-attempt/backend arbitration and
-Core-owned common Evidence checks remain open; C12's demand gate, existing
+timing, secrecy or Evidence acceptance. Cross-attempt/backend arbitration,
+adapter result normalization and Core-owned common Evidence checks remain open;
+C12's demand gate, existing
 assurance/Lean/native/LLVM behavior and deferred WASM are unchanged. No external
 verifier is adopted. See the [Agent output boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-opaque-stdout-snapshots).
 
