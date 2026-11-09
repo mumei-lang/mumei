@@ -221,6 +221,9 @@ the stream. This bounds bytes read, not time: a producer must close input and th
 invoking host owns deadlines/cancellation. EOF does not prove producer completeness
 or authenticity. Read failures cannot emit a success diagnostic; underlying
 errors and private input are not quoted.
+This is a raw UTF-8 byte interface for pipes/redirected files, not a terminal-text
+encoding adapter. In particular, Windows console code-page conversion is not
+performed; supply UTF-8 bytes through a pipe/redirected file or use file mode.
 This adds no Agent process runner, automatic Core call, adapter normalization,
 request/result binding, authority enforcement or Evidence acceptance.
 
