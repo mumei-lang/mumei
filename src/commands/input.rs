@@ -76,5 +76,10 @@ mod tests {
             read_bounded(FailingReader, 65_536).unwrap_err(),
             "cannot read component"
         );
+        let mut partial = Cursor::new(b"FAKE_PRIVATE_BYTES").chain(FailingReader);
+        assert_eq!(
+            read_bounded(&mut partial, 65_536).unwrap_err(),
+            "cannot read component"
+        );
     }
 }

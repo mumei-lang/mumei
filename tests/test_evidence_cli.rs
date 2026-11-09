@@ -289,6 +289,10 @@ fn all_1152_schema_oracle_combinations_have_representation_only_exit_status() {
             };
             write(&path, &record);
             let output = run(&path, true);
+            let streamed = run_stdin(&fs::read(&path).unwrap(), true);
+            assert_eq!(streamed.status.code(), output.status.code());
+            assert_eq!(streamed.stdout, output.stdout);
+            assert_eq!(streamed.stderr, output.stderr);
             if oracle["valid_indices"][section]
                 .as_array()
                 .unwrap()

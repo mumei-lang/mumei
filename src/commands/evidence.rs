@@ -211,6 +211,19 @@ mod tests {
     use super::*;
 
     struct BrokenOutput;
+
+    #[test]
+    fn invalid_input_selection_cannot_read_or_write() {
+        for input in [None, Some(Path::new("FAKE_PRIVATE_NONEXISTENT"))] {
+            let stdin = input.is_some();
+            for json in [false, true] {
+                assert_eq!(
+                    check(input, stdin, json, &mut BrokenOutput).unwrap_err(),
+                    "choose exactly one evidence input"
+                );
+            }
+        }
+    }
     impl Write for BrokenOutput {
         fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
             Err(std::io::Error::other("FAKE_PRIVATE_OUTPUT_ERROR"))
