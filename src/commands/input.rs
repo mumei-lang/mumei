@@ -35,6 +35,29 @@ pub(super) fn read_bounded(reader: impl Read, limit: u64) -> Result<Vec<u8>, &'s
     Ok(bytes)
 }
 
+#[cfg(any(unix, windows))]
+pub(super) fn read_stdin(limit: u64) -> Result<Vec<u8>, &'static str> {
+    let stdin = std::io::stdin().lock();
+    #[cfg(unix)]
+    let handle = {
+        use std::os::fd::AsFd;
+        stdin.as_fd().try_clone_to_owned()
+    };
+    #[cfg(windows)]
+    let handle = {
+        use std::os::windows::io::AsHandle;
+        stdin.as_handle().try_clone_to_owned()
+    };
+    // StdinLock is buffered; a duplicate OS handle keeps the read bound physical.
+    let file = fs::File::from(handle.map_err(|_| "cannot open standard input")?);
+    read_bounded(file, limit)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(super) fn read_stdin(_: u64) -> Result<Vec<u8>, &'static str> {
+    Err("standard input unsupported on this platform")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

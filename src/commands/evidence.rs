@@ -180,9 +180,7 @@ fn check(
 ) -> Result<(), &'static str> {
     let bytes = match (input, stdin) {
         (Some(path), false) => super::input::read_regular(path, MAX_INPUT_BYTES as u64)?,
-        (None, true) => {
-            super::input::read_bounded(std::io::stdin().lock(), MAX_INPUT_BYTES as u64)?
-        }
+        (None, true) => super::input::read_stdin(MAX_INPUT_BYTES as u64)?,
         _ => return Err("choose exactly one evidence input"),
     };
     verification_evidence::decode(&bytes).map_err(|_| "invalid evidence representation")?;

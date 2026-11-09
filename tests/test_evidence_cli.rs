@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::Write,
+    io::{Seek, Write},
     path::Path,
     process::{Command, Output, Stdio},
 };
@@ -106,6 +106,21 @@ fn stdin_enforces_exact_byte_boundary_including_trailing_whitespace() {
             assert_invalid(&run_stdin(&body, json), Path::new("FAKE_PRIVATE_INPUT"));
         }
     }
+}
+
+#[test]
+fn stdin_never_prefetches_beyond_the_overflow_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("oversized.json");
+    fs::write(&path, vec![b' '; 1_048_576]).unwrap();
+    let mut input = fs::File::open(&path).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args(["evidence", "check", "--stdin", "--json"])
+        .stdin(Stdio::from(input.try_clone().unwrap()))
+        .output()
+        .unwrap();
+    assert_invalid(&output, &path);
+    assert_eq!(input.stream_position().unwrap(), 65_537);
 }
 
 #[test]
