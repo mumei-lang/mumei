@@ -545,6 +545,27 @@ enforcement and C11 execution remain open; C12's demand gate, Core ownership and
 existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent reconciliation boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-same-attempt-report-reconciliation).
 
+Agent's bounded stdout follow-up prepares 0–65,536 opaque host-supplied bytes
+against an exited attempt, a separately specified attempt number, the prepared
+request/timeout and caller-supplied SHA-256, requiring explicit permission
+metadata but not granting authority. Other states and digest/binding mismatches
+fail; no truncation occurs. Empty, binary and malformed JSON remain opaque bytes,
+and zero/nonzero exit codes do not establish verification success. A private
+in-memory body is available explicitly; repr/JSON contain only attempt and
+size/digest/fingerprint metadata, not source, commands, stderr or stdout text.
+Generic reflection and explicit body access must not be logged. Digests are not
+secret detection, declassification, provenance or completeness proofs.
+
+Output reconciliation accepts only identical attempt histories and raw stdout;
+conflicts fail without choosing a winner. Hosts must first reconcile their
+current attempt, retain the canonical output and atomically publish updates;
+binding alone cannot detect independent forks. This is not parsing, stream
+collection, freshness/authentication/replay protection, actual execution or
+Core-owned common Evidence normalization/acceptance. C11 execution and
+cross-attempt/backend arbitration remain open; C12's demand gate and existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent output boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-opaque-stdout-snapshots).
+
 "Plugin" describes the extension boundary, not a decision to use shared
 libraries. Subprocess, container and explicitly configured remote transports
 are possible later choices. Do not reuse the emitter-plugin ABI by assumption.
