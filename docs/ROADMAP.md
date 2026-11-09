@@ -2988,6 +2988,13 @@ success as Evidence. Private detached trees must not be logged or reserialized
 as authoritative input; Core checks still consume original bytes. See the
 [canonical JSON milestone](CROSS_PROJECT_ROADMAP.md#wave-2-bounded-json-stdout-decoding).
 
+Core's explicit `evidence check --stdin` follow-up checks original bytes without
+an intermediate file or reserialization. It preserves file mode and anonymous
+representation-only diagnostics, bounds stdin reads to 65,536 bytes plus one
+overflow byte, and adds no Agent runner, acceptance or grade promotion. Host
+deadlines and input closure remain required. See the
+[canonical stdin milestone](CROSS_PROJECT_ROADMAP.md#wave-2-original-byte-core-stdin-representation-checks).
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)

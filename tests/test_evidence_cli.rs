@@ -1,8 +1,9 @@
 use serde_json::{json, Value};
 use std::{
     fs,
+    io::Write,
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 const FIXTURES: &str = include_str!("fixtures/verification-evidence/synthetic_cases.json");
@@ -24,6 +25,117 @@ fn command(path: &Path, json: bool) -> Command {
 
 fn run(path: &Path, json: bool) -> Output {
     command(path, json).output().unwrap()
+}
+
+fn run_stdin(body: &[u8], json: bool) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+    command.args(["evidence", "check", "--stdin"]);
+    if json {
+        command.arg("--json");
+    }
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    if let Err(error) = child.stdin.take().unwrap().write_all(body) {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn explicit_stdin_matches_file_diagnostics_without_echoing_or_accepting_claims() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("FAKE_PRIVATE_RECORD.json");
+    let cases: Value = serde_json::from_str(FIXTURES).unwrap();
+    for case in cases["cases"].as_array().unwrap() {
+        let mut record = case["evidence"].clone();
+        record["artifact_paths"] = json!(["FAKE_PRIVATE_NONEXISTENT_PATH"]);
+        record["exclusions"] = json!(["FAKE_PRIVATE_JSON"]);
+        let body = serde_json::to_vec(&record).unwrap();
+        fs::write(&path, &body).unwrap();
+        for json in [false, true] {
+            let output = run_stdin(&body, json);
+            assert_valid(&output, json);
+            assert_eq!(output.stdout, run(&path, json).stdout);
+        }
+    }
+}
+
+#[test]
+fn stdin_uses_original_bytes_for_duplicate_encoding_and_closed_schema_checks() {
+    let mut unknown = base();
+    unknown["FAKE_PRIVATE_UNKNOWN"] = json!(true);
+    let mut duplicate = serde_json::to_vec(&base()).unwrap();
+    duplicate.pop();
+    duplicate.extend_from_slice(br#", "result":"established"}"#);
+    for body in [
+        b"".to_vec(),
+        b"{}".to_vec(),
+        b"[]".to_vec(),
+        b"null".to_vec(),
+        b"{\"success\":true}".to_vec(),
+        b"{\"FAKE_PRIVATE_JSON\":NaN}".to_vec(),
+        b"{\"FAKE_PRIVATE_JSON\":\"\\ud800\"}".to_vec(),
+        b"\xff\xfe{}".to_vec(),
+        b"\xef\xbb\xbf{}".to_vec(),
+        b"{}{}".to_vec(),
+        b"{\"FAKE_PRIVATE_JSON\":".to_vec(),
+        serde_json::to_vec(&unknown).unwrap(),
+        duplicate,
+        serde_json::to_vec(&base()["subject"]).unwrap(),
+    ] {
+        for json in [false, true] {
+            assert_invalid(&run_stdin(&body, json), Path::new("FAKE_PRIVATE_INPUT"));
+        }
+    }
+}
+
+#[test]
+fn stdin_enforces_exact_byte_boundary_including_trailing_whitespace() {
+    let mut body = serde_json::to_vec(&base()).unwrap();
+    body.resize(65_536, b' ');
+    for json in [false, true] {
+        assert_valid(&run_stdin(&body, json), json);
+    }
+    for size in [65_537, 65_538, 1_048_576] {
+        body.resize(size, b' ');
+        for json in [false, true] {
+            assert_invalid(&run_stdin(&body, json), Path::new("FAKE_PRIVATE_INPUT"));
+        }
+    }
+}
+
+#[test]
+fn input_selection_is_explicit_exclusive_and_dash_remains_a_file() {
+    for args in [
+        vec!["evidence", "check"],
+        vec!["evidence", "check", "FAKE_PRIVATE_RECORD", "--stdin"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("-");
+    write(&path, &base());
+    for json in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+        command
+            .current_dir(dir.path())
+            .args(["evidence", "check", "-"])
+            .stdin(Stdio::null());
+        if json {
+            command.arg("--json");
+        }
+        assert_valid(&command.output().unwrap(), json);
+    }
 }
 
 fn assert_valid(output: &Output, json: bool) {

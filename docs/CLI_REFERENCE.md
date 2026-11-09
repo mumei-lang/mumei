@@ -14,7 +14,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei evidence` | 0 | Check common Evidence representation or produce fresh scoped source Evidence; no proof acceptance |
 | `mumei evidence recheck-source` | 4 | Freshly recheck saved source Evidence with linked Z3 and caller-supplied source/budgets; not proof acceptance |
 | `mumei evidence verify-source` | 3 | Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance |
-| `mumei evidence check` | 1 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
+| `mumei evidence check` | 2 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
 | `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
 | `mumei native-bundle recheck-evidence` | 1 | Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance |
 | `mumei native-bundle recheck-llvm` | 2 | Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics |
@@ -137,19 +137,20 @@ Validate one Evidence v1 JSON record's representation, not its truth, identity, 
 Usage:
 
 ```text
-Usage: mumei evidence check [OPTIONS] <INPUT>
+Usage: mumei evidence check [OPTIONS] [INPUT]
 ```
 
 ### Positional arguments
 
 | Name | Required | Description |
 |---|---|---|
-| `INPUT` | Yes | Regular JSON file (at most 65,536 bytes); not a native report envelope or proof certificate |
+| `INPUT` | No | Regular JSON file (at most 65,536 bytes); not a native report envelope or proof certificate |
 
 ### Options
 
 | Option | Default | Possible values | Description |
 |---|---|---|---|
+| `--stdin` | false | — | Read one common Evidence record from standard input (at most 65,536 bytes); never infer stdin from a missing file |
 | `--json` | false | — | Print a static representation-only diagnostic, not an accepted Evidence record or certificate |
 
 ## `mumei native-bundle`

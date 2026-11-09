@@ -243,6 +243,27 @@ remain separate; no default audit/CLI/MCP route or external verifier is added.
 C11 remains partial, C12 demand-gated and existing assurance/Lean/native/LLVM/
 deferred-WASM behavior unchanged. See the [Agent JSON boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-json-stdout-decoding).
 
+### Wave 2 original-byte Core stdin representation checks
+
+Core's explicit `evidence check --stdin [--json]` accepts original stdout bytes
+without a temporary file or reserializing Agent's private decoded tree. It uses
+the existing common Evidence representation decoder and unchanged anonymous
+diagnostic: success is representation-valid only, acceptance remains
+`not_evaluated`. Empty objects/saved success claims still fail Core shape checks.
+
+Exactly one file or stdin source is required; missing/conflicting selection is
+a usage error, and a positional `-` remains a file name. Both modes keep the
+65,536-byte limit. Stdin reads at most one extra byte to detect overflow and
+does not drain an oversized stream. This is no time bound: the invoking host
+must close input and own deadlines/cancellation. No private body, decoder or
+underlying I/O error is echoed. File-only source/native consumers are unchanged.
+
+This is an opt-in Core integration entry point, not an Agent call/runner, receipt,
+normalization or result-contract binding. Agent execution/stream collection and
+Core-owned Evidence meaning/acceptance remain separate open work. C11 is partial;
+C12, assurance/Lean/native/LLVM and deferred-WASM policies are unchanged, with no
+external verifier adoption. See the [Core consumer](VERIFICATION_NATIVE.md#standalone-representation-only-cli-consumer).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)

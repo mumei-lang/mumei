@@ -193,6 +193,7 @@ real producers/consumers remain open; no external verifier or WASM is enabled.
 ```sh
 mumei evidence check record.json
 mumei evidence check record.json --json
+mumei evidence check --stdin --json < record.json
 ```
 
 This opt-in command uses the shared Core gate on **one common v1 record**, not
@@ -203,13 +204,25 @@ general acceptance engine. It does not load project configuration/proof caches,
 read record-selected artifacts, check hashes against files, authenticate a
 producer, select a verifier or execute anything mentioned in the record.
 
-The input must be a regular file with at most 65,536 bytes. Symlink/nonregular
-inputs, malformed/non-UTF-8/trailing/deep JSON, duplicate/escaped keys, unknown
+Select exactly one input: a regular file or explicit `--stdin`, each with at most
+65,536 bytes. Missing/conflicting input selection is a usage error (exit 2), not
+an implicit stdin fallback; a positional `-` remains a literal file name.
+Symlink/nonregular file inputs, malformed/non-UTF-8/trailing/deep JSON, duplicate/escaped keys, unknown
 fields, missing nullable targets and invalid v1 combinations fail closed. The
 bounded file reader is shared with Native consumer inputs without changing their
 limits or diagnostics. On Unix it also uses `O_NOFOLLOW | O_NONBLOCK` for the
 final component and checks the opened file type; this is not a claim of general
 race-free/path-confinement handling on every platform or parent directory.
+
+`--stdin` sends original bytes directly to the same Core decoder without a
+temporary input file or JSON reserialization. It reads at most 65,537 bytes
+(one extra byte detects overflow), then rejects oversized input without draining
+the stream. This bounds bytes read, not time: a producer must close input and the
+invoking host owns deadlines/cancellation. EOF does not prove producer completeness
+or authenticity. Read failures cannot emit a success diagnostic; underlying
+errors and private input are not quoted.
+This adds no Agent process runner, automatic Core call, adapter normalization,
+request/result binding, authority enforcement or Evidence acceptance.
 
 Exit **0** means only representation-valid, including valid records describing
 counterexamples, findings, unknown, timeout, unsupported or unchecked results.

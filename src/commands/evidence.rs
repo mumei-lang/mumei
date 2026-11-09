@@ -29,8 +29,8 @@ pub(crate) fn run(command: EvidenceCommand) {
             }),
             "Source evidence recheck failed",
         ),
-        EvidenceCommand::Check { input, json } => (
-            check(Path::new(&input), json, &mut output).map(|()| 0),
+        EvidenceCommand::Check { input, stdin, json } => (
+            check(input.as_deref().map(Path::new), stdin, json, &mut output).map(|()| 0),
             "Evidence representation check failed",
         ),
         EvidenceCommand::VerifySource {
@@ -172,8 +172,19 @@ fn write_source(
     Ok(0)
 }
 
-fn check(path: &Path, json: bool, output: &mut impl Write) -> Result<(), &'static str> {
-    let bytes = super::input::read_regular(path, MAX_INPUT_BYTES as u64)?;
+fn check(
+    input: Option<&Path>,
+    stdin: bool,
+    json: bool,
+    output: &mut impl Write,
+) -> Result<(), &'static str> {
+    let bytes = match (input, stdin) {
+        (Some(path), false) => super::input::read_regular(path, MAX_INPUT_BYTES as u64)?,
+        (None, true) => {
+            super::input::read_bounded(std::io::stdin().lock(), MAX_INPUT_BYTES as u64)?
+        }
+        _ => return Err("choose exactly one evidence input"),
+    };
     verification_evidence::decode(&bytes).map_err(|_| "invalid evidence representation")?;
     let diagnostic = if json {
         let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
@@ -251,7 +262,7 @@ mod tests {
         std::fs::write(&path, b"FAKE_PRIVATE_MALFORMED").unwrap();
         for json in [false, true] {
             let mut output = Vec::new();
-            let error = check(&path, json, &mut output).unwrap_err();
+            let error = check(Some(&path), false, json, &mut output).unwrap_err();
             assert!(!error.contains("FAKE_PRIVATE"));
             assert!(output.is_empty());
         }
@@ -266,7 +277,7 @@ mod tests {
         .unwrap();
         for json in [false, true] {
             assert_eq!(
-                check(&path, json, &mut BrokenOutput).unwrap_err(),
+                check(Some(&path), false, json, &mut BrokenOutput).unwrap_err(),
                 "cannot write representation diagnostic"
             );
         }

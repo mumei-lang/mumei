@@ -460,7 +460,11 @@ pub(crate) enum EvidenceCommand {
     /// Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity
     Check {
         /// Regular JSON file (at most 65,536 bytes); not a native report envelope or proof certificate
-        input: String,
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        input: Option<String>,
+        /// Read one common Evidence record from standard input (at most 65,536 bytes); never infer stdin from a missing file
+        #[arg(long)]
+        stdin: bool,
         /// Print a static representation-only diagnostic, not an accepted Evidence record or certificate
         #[arg(long)]
         json: bool,
