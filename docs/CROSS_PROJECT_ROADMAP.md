@@ -199,6 +199,32 @@ and full C11 execution remain open. Core meaning/acceptance, C12's demand gate,
 existing assurance/Lean/native/LLVM behavior and deferred WASM are unchanged.
 See the [Agent reconciliation boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-same-attempt-report-reconciliation).
 
+### Wave 2 bounded opaque stdout snapshots
+
+Agent's next partial C11/C13 step prepares host-supplied immutable stdout bytes
+against an exited attempt, a separately specified attempt number, the prepared
+request/timeout and a caller-supplied raw SHA-256. The helper requires explicit
+permission metadata; this is not authority. The 0–65,536-byte bound is checked
+before hashing, with no truncation. Failed/timed-out/cancelled/nonterminal records
+are rejected, but zero/nonzero exit codes and empty/binary/invalid JSON bodies
+remain opaque transport data, not verification success or well-formed Evidence.
+
+The bounded snapshot retains stdout for explicit access, while repr/JSON expose
+only attempt, size/digest and canonical metadata fingerprint. Generic reflection
+or `.stdout` access is not redacted. Same-output reconciliation is idempotent only
+for identical attempt histories and raw bytes; changed metadata/body fails, not
+last-writer-wins. Callers must first reconcile their current attempt and retain
+and atomically publish a canonical output; independent snapshots can still fork.
+
+No parsing, process/stream collection, I/O/clock operation, authentication/replay
+protection, actual resource/authority enforcement or default audit/CLI/MCP wiring
+is added. Caller-supplied digests do not establish origin, completeness, delivery
+timing, secrecy or Evidence acceptance. Cross-attempt/backend arbitration,
+adapter result normalization and Core-owned common Evidence checks remain open;
+C12's demand gate, existing
+assurance/Lean/native/LLVM behavior and deferred WASM are unchanged. No external
+verifier is adopted. See the [Agent output boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-opaque-stdout-snapshots).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)

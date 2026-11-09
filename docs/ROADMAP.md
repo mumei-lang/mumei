@@ -2974,6 +2974,14 @@ stale/divergent/rewritten histories rejected. It does not arbitrate independent
 branches, maintain global/atomic storage, prevent replay, execute or accept
 Evidence. See the [canonical reconciliation milestone](CROSS_PROJECT_ROADMAP.md#wave-2-same-attempt-report-reconciliation).
 
+Agent's bounded stdout follow-up binds opaque host-supplied bytes and a supplied
+digest to an exited attempt and explicit prepared-request/number/timeout metadata.
+It rejects oversized bodies and conflicting snapshots without interpreting JSON,
+exit code zero or empty output as Evidence. Body access stays explicit; repr/JSON
+contain metadata only. Stream collection, origin/completeness, actual enforcement
+and Core Evidence checks remain open. See the
+[canonical output milestone](CROSS_PROJECT_ROADMAP.md#wave-2-bounded-opaque-stdout-snapshots).
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
