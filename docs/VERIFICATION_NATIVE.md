@@ -597,6 +597,21 @@ execution/authority remain separate; default routes, C12's demand gate and
 existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent JSON boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-json-stdout-decoding).
 
+Agent also offers a separate opt-in POSIX local Core representation handoff.
+An independently authorized host-trusted absolute executable receives original
+stdout bytes through fixed `evidence check --stdin --json`, without environment
+forwarding, command discovery, temporary files or reserialization. Concurrent
+bounded pipes and a separate caller timeout protect this limited interaction;
+process creation is not interruptible and direct-child cleanup has a bounded
+extra grace period. This is not a general adapter runner or OS sandbox.
+Zero exit alone is insufficient: the complete known v1 diagnostic, no stderr and
+no output overflow are required. Errors are static and no new receipt is returned.
+Representation validity still relies on the host-trusted binary, not authenticity
+of an anonymous saved diagnostic. Core acceptance, claim truth, request/result
+matching, freshness, correspondence, adapter normalization and generic execution
+remain separate; no default audit/CLI/MCP or assurance policy changes. See the
+[Agent handoff boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-explicit-local-core-representation-handoff).
+
 "Plugin" describes the extension boundary, not a decision to use shared
 libraries. Subprocess, container and explicitly configured remote transports
 are possible later choices. Do not reuse the emitter-plugin ABI by assumption.
