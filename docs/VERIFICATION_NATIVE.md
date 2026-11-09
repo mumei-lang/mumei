@@ -495,6 +495,20 @@ File/environment lookup, secret transport, actual execution/resource enforcement
 and runtime reconciliation remain open; audit/Lean/native/LLVM/WASM policies are
 unchanged. See the [typed settings contract](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-typed-configuration-follow-up).
 
+Agent's next C04/C11 preparation slice requires an explicit input-format offer
+and exact result contract, replans against current host registry declarations,
+and binds a bounded immutable UTF-8 source snapshot to an externally supplied
+raw-byte SHA-256. The explicit manifest contains only format/digest/byte count,
+selected plan metadata and a deterministic request fingerprint. It does not
+emit source text or read files, imports, artifact paths or environment data.
+This is byte-level input preparation, not Core parsing/semantic extraction,
+normalized specification identity, actual tool/observation freshness,
+authenticity, execution permission or Evidence acceptance. Old prepared records
+are historical metadata, not tokens authorizing later execution. Future
+executors still need independent authorization, current preflight, resource
+enforcement and result reconciliation. Default routes and existing assurance
+policies remain unchanged. See the [source preparation boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-bounded-source-input-preparation).
+
 "Plugin" describes the extension boundary, not a decision to use shared
 libraries. Subprocess, container and explicitly configured remote transports
 are possible later choices. Do not reuse the emitter-plugin ABI by assumption.
