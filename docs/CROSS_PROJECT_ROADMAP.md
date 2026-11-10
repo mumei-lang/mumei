@@ -199,6 +199,35 @@ and full C11 execution remain open. Core meaning/acceptance, C12's demand gate,
 existing assurance/Lean/native/LLVM behavior and deferred WASM are unchanged.
 See the [Agent reconciliation boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-same-attempt-report-reconciliation).
 
+### Wave 2 bounded sequential attempt records
+
+Agent adds an opt-in `AttemptSequence` for one prepared-request fingerprint and
+unchanged per-attempt timeout, with at most 16 exact immutable attempt records.
+An empty sequence requires explicit permission metadata when prepared; direct
+construction checks representation only. Reserving a record assigns the next
+contiguous ordinal from 1 and requires a terminal predecessor. Gaps, duplicates,
+mixed bindings, nonterminal predecessors and overflow fail without truncation.
+No process starts and no retry is authorized. The current record is not a winner.
+
+Reports must target an already reserved ordinal and preserve that attempt's
+known prefix via existing same-attempt reconciliation. Unknown ordinals, rewinds,
+branches and terminal replacements fail; exact duplicates of old terminal reports
+remain idempotent, not fresh. Sequence JSON adds only ordered attempt metadata,
+not stdout, successful results or common Evidence; prior attempt/output formats
+and the explicit Core handoff are unchanged. A changed plan/timeout needs a
+separate prepared request/sequence, not cross-backend fallback reuse.
+
+This is local logical ordering, not global numbering, atomic/durable publication,
+replay/authenticity protection, retry scheduling or cross-attempt/backend result
+arbitration. Hosts retain/atomically advance their canonical value; independent
+values can fork. A terminal report does not prove cleanup or prevent physical
+process overlap. No total retry deadline, backoff, resource/authority enforcement,
+stream collection, output selection/invalidation, normalization or Core-owned
+Evidence acceptance is added. Code zero remains only an observation. C11/C13 are
+partial, C12 remains demand-gated, existing assurance/Lean/native/LLVM/deferred-WASM
+policies unchanged, with no default audit/CLI/MCP route or external verifier.
+See the [Agent sequence boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-sequential-attempt-records).
+
 ### Wave 2 bounded opaque stdout snapshots
 
 Agent's next partial C11/C13 step prepares host-supplied immutable stdout bytes
