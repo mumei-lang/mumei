@@ -318,13 +318,27 @@ Signals can race with the last completion check and set/clear pulses can be
 missed: the host must keep the event set until return and arbitrate completion.
 No event is changed and no host attempt cancel/timeout report is synthesized.
 
+An optional Agent `attempt_sequence` argument checks an exact `AttemptSequence`
+against the exact stdout snapshot before Core spawn/I/O. Its
+`check_output_binding()` requires the current record to match request fingerprint,
+ordinal, timeout and complete event history; empty/unreconciled sequences,
+old/future outputs and changed histories fail with static, body-free errors.
+Omission/`None` preserves the sequence-independent API and all existing schemas.
+This is equality of supplied immutable metadata, not global currentness or
+Evidence/request-contract matching: a stale sequence may match a stale output.
+Competing bodies for the same record both pass binding; the host must retain and
+reconcile canonical outputs and own atomic updates, publication/completion and
+result selection. No lock/CAS, completion revalidation, authentication/replay
+protection, process cleanup proof, receipt or acceptance is added.
+
 The complete known v1 diagnostic and zero Core exit are both required; stderr,
 malformed/duplicate/extra output, unknown versions and timeouts fail with static
 errors. The function returns no receipt/record and changes no snapshot. A normal
 return means representation-valid only, relying on the trusted executable;
 `acceptance` remains `not_evaluated`. An anonymous saved diagnostic is not proof
-of this invocation. Request/result binding, adapter normalization, actual plugin
-execution, truth, authenticity, freshness and Core acceptance remain separate.
+of this invocation. Evidence/request result-contract matching, adapter
+normalization, actual plugin execution, truth, authenticity, freshness and Core
+acceptance remain separate.
 C11 stays partial; C12 and existing assurance/Lean/native/LLVM/deferred-WASM
 policies are unchanged. See the [Agent handoff boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-explicit-local-core-representation-handoff).
 

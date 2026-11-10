@@ -630,6 +630,21 @@ Process creation is not interruptible, scheduling is not hard real-time, and
 completion can race with the last check. Keep the event set until return, not as
 a set/clear pulse. No event mutation or attempt cancellation report is produced;
 canonical lineage and completion/cancel arbitration remain host responsibilities.
+
+An optional `attempt_sequence` keyword with an exact `AttemptSequence` value can
+gate this Agent call before Core spawn/I/O. `check_output_binding()` requires an
+exact `AttemptOutput` with the
+same request fingerprint, ordinal, timeout and full event history as that value's
+current record; empty/unreconciled sequences, old/future attempts and divergent
+bindings/histories fail with fixed body-free errors. Omission/`None` preserves
+existing sequence-independent calls; original bytes, diagnostics and schemas do
+not change. This is a supplied-snapshot precondition, not global freshness:
+stale sequence/output pairs can match, and competing bodies for the same current
+record each pass binding. Hosts still reconcile canonical outputs and own atomic
+storage, concurrent publication/completion and result selection. No lock/CAS,
+completion-time revalidation, authentication/replay protection, process cleanup
+proof, Evidence/request-contract matching, receipt or acceptance is implied.
+
 Zero exit alone is insufficient: the complete known v1 diagnostic, no stderr and
 no output overflow are required. Errors are static and no new receipt is returned.
 Representation validity still relies on the host-trusted binary, not authenticity
