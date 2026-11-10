@@ -264,6 +264,31 @@ Core-owned Evidence meaning/acceptance remain separate open work. C11 is partial
 C12, assurance/Lean/native/LLVM and deferred-WASM policies are unchanged, with no
 external verifier adoption. See the [Core consumer](VERIFICATION_NATIVE.md#standalone-representation-only-cli-consumer).
 
+### Wave 2 explicit Agent-to-Core representation handoff
+
+Agent adds a separately invoked POSIX-only local Core handoff. The host must
+independently authorize a trusted absolute executable; adapter declarations,
+fingerprints and an absolute path do not establish authority or authenticate it.
+Fixed `evidence check --stdin --json` receives the original bounded stdout bytes,
+with no reserialization, temporary input file, environment forwarding or command
+discovery. No default route calls it and no external verifier is adopted.
+
+A separately supplied 1–60,000 ms timeout bounds pipe I/O and child exit (not
+uninterruptible OS process creation), with up to one extra second for direct-child
+kill/reap. Nonblocking concurrent pipes bound each diagnostic to 4,096 bytes plus
+one overflow byte. This is not a general plugin runner, descendant sandbox or
+memory/CPU/authority enforcement. Windows support remains outside this pilot.
+
+The complete known v1 diagnostic and zero Core exit are both required; stderr,
+malformed/duplicate/extra output, unknown versions and timeouts fail with static
+errors. The function returns no receipt/record and changes no snapshot. A normal
+return means representation-valid only, relying on the trusted executable;
+`acceptance` remains `not_evaluated`. An anonymous saved diagnostic is not proof
+of this invocation. Request/result binding, adapter normalization, actual plugin
+execution, truth, authenticity, freshness and Core acceptance remain separate.
+C11 stays partial; C12 and existing assurance/Lean/native/LLVM/deferred-WASM
+policies are unchanged. See the [Agent handoff boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-explicit-local-core-representation-handoff).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
