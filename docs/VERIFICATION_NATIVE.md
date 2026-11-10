@@ -604,6 +604,14 @@ forwarding, command discovery, temporary files or reserialization. Concurrent
 bounded pipes and a separate caller timeout protect this limited interaction;
 process creation is not interruptible and direct-child cleanup has a bounded
 extra grace period. This is not a general adapter runner or OS sandbox.
+An optional host-owned standard `threading.Event` cancels only this Core call:
+pre-cancel prevents spawn; pipe and exit waits poll within 50 ms without extending
+the deadline. Observed cancellation closes pipes and kills/reaps the direct child
+before a fixed cancellation error; cleanup failures remain check failures.
+Process creation is not interruptible, scheduling is not hard real-time, and
+completion can race with the last check. Keep the event set until return, not as
+a set/clear pulse. No event mutation or attempt cancellation report is produced;
+canonical lineage and completion/cancel arbitration remain host responsibilities.
 Zero exit alone is insufficient: the complete known v1 diagnostic, no stderr and
 no output overflow are required. Errors are static and no new receipt is returned.
 Representation validity still relies on the host-trusted binary, not authenticity
