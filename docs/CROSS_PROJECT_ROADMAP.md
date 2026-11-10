@@ -279,6 +279,16 @@ kill/reap. Nonblocking concurrent pipes bound each diagnostic to 4,096 bytes plu
 one overflow byte. This is not a general plugin runner, descendant sandbox or
 memory/CPU/authority enforcement. Windows support remains outside this pilot.
 
+Agent additionally accepts an optional host-owned standard `threading.Event`
+for cooperative cancellation of this Core call. A pre-set event prevents spawn;
+otherwise pipe/exit waits poll at most every 50 ms without resetting the deadline.
+Observed cancellation closes pipes and kills/reaps the direct child before a
+fixed cancellation error (cleanup failures remain check failures). This does
+not interrupt process creation, guarantee real-time response or stop descendants.
+Signals can race with the last completion check and set/clear pulses can be
+missed: the host must keep the event set until return and arbitrate completion.
+No event is changed and no host attempt cancel/timeout report is synthesized.
+
 The complete known v1 diagnostic and zero Core exit are both required; stderr,
 malformed/duplicate/extra output, unknown versions and timeouts fail with static
 errors. The function returns no receipt/record and changes no snapshot. A normal
