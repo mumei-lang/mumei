@@ -336,8 +336,9 @@ malformed/duplicate/extra output, unknown versions and timeouts fail with static
 errors. The function returns no receipt/record and changes no snapshot. A normal
 return means representation-valid only, relying on the trusted executable;
 `acceptance` remains `not_evaluated`. An anonymous saved diagnostic is not proof
-of this invocation. Evidence/request result-contract matching, adapter normalization, actual plugin
-execution, truth, authenticity, freshness and Core acceptance remain separate.
+of this invocation. Evidence/request result-contract matching, adapter
+normalization, actual plugin execution, truth, authenticity, freshness and Core
+acceptance remain separate.
 C11 stays partial; C12 and existing assurance/Lean/native/LLVM/deferred-WASM
 policies are unchanged. See the [Agent handoff boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-explicit-local-core-representation-handoff).
 
