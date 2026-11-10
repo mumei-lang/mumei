@@ -561,6 +561,24 @@ enforcement and C11 execution remain open; C12's demand gate, Core ownership and
 existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent reconciliation boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-same-attempt-report-reconciliation).
 
+Agent's sequential-record follow-up adds an immutable `AttemptSequence` for one
+request fingerprint and per-attempt timeout, capped at 16 records numbered from 1
+without gaps. Reserving the next ready record requires a terminal predecessor;
+it neither starts nor authorizes execution. Reports can only extend an already
+reserved attempt's known prefix; exact old terminal duplicates are idempotent,
+while unknown ordinals, mixed bindings, rewinds, branches and terminal rewrites
+fail. The current record is not a verification winner and code zero has no success
+meaning. Sequence dictionaries contain ordered metadata, not output or Evidence.
+
+This enforces local logical ordering only: hosts retain/atomically advance the
+canonical value, and independent branches can still fork. Global identity,
+replay/authenticity protection, total retry/resource budgets, retry scheduling,
+cross-backend/result arbitration and output lineage/selection remain outside it.
+Terminal metadata does not establish process cleanup or prevent physical overlap.
+Existing outputs, explicit Core calls, Evidence meaning/acceptance and assurance
+policies remain unchanged; C11/C13 remain partial, C12 demand-gated, with no
+default route or external verifier. See the [Agent sequence boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-sequential-attempt-records).
+
 Agent's bounded stdout follow-up prepares 0–65,536 opaque host-supplied bytes
 against an exited attempt, a separately specified attempt number, the prepared
 request/timeout and caller-supplied SHA-256, requiring explicit permission
