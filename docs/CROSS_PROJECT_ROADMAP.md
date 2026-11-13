@@ -756,6 +756,23 @@ measures consistency between two declarations, not correctness of
 either. See the
 [Agent hint metrics](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-independent-hint-metrics-over-declared-expectations).
 
+### Wave 3 file-level provenance over Go source units
+
+Agent's `control_flow.go_file_units(source)` indexes every function
+declaration in one Go source unit into `GoFileUnits` — the unit's
+SHA-256 plus per-function `FileFunction` entries with raw name,
+declaration and inner-body `SourceSpan`s and body digests.
+`function_body(source, units, function)` hands `build_go_cfg` only
+bytes whose declared digests still match, so analysis results can bind
+back to a verified location in the source file instead of a detached
+body string. Bodiless declarations and unparseable units surface as
+declared gaps, never a partial index.
+
+Provenance is declared metadata, not semantic identity: digests bind
+bytes, not meaning, and the index is not symbol resolution or
+cross-file linking. See the
+[Agent file provenance](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-file-level-provenance-over-go-source-units).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
