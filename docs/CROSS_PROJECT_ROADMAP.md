@@ -419,6 +419,30 @@ existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
 See the
 [Agent report-stamp boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-monotonic-report-stamps-for-replay-detection).
 
+### Wave 2 declared execution and cancellation requests
+
+Agent's `AttemptSequence.request_execution()` returns an
+`AttemptExecutionRequest` value declaring which reserved record a host
+intends to run next; only a `ready` current record can produce one, so an
+unreserved, started, cancelling, terminal or selected-result-closed sequence
+fails with a static error. `request_cancellation()` returns an
+`AttemptCancelRequest` for a `running` current record only — cancellation
+intent cannot be declared for nothing running or twice. Both serialize as
+detached metadata under `mumei.verifier-attempt-execution/v1` and
+`mumei.verifier-attempt-cancel/v1`.
+
+These are declarations of intent only: producing a request never spawns a
+process, signals a running one, delivers anything to a runner, reserves
+resources or confirms an outcome — dispatch, delivery integrity, process
+control and start/stop observation remain host duties, and a request bound
+to a stale sequence value is just a stale description the host must discard.
+The calls are pure and carry no source, stdout, environment or process
+state. C11 stays partial: runner/scheduler, stream collection, actual
+execution/cancellation effects and Evidence normalization/acceptance remain
+open, and C12's demand gate plus existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent request boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-execution-and-cancellation-requests).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
