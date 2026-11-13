@@ -816,6 +816,22 @@ The set is syntactic, not call-graph or escape analysis — conservative
 marking is possible in both directions. See the
 [Agent unreliable names](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-declared-unreliable-names-over-flow-hints).
 
+### Wave 3 expression switches as exclusive alternatives
+
+Agent's `build_go_cfg` now models Go expression switches: the `switch`
+node edges to one `case`/`default` node per arm with implicit-break
+semantics (each arm exits to the switch's following), plus a direct
+edge to following when no `default` exists. `break` inside a case
+exits the switch — not an enclosing loop — `continue` still targets
+the enclosing loop, and switch initializers are modelled. `select` and
+type switches stay declared gaps (`unsupported_select_switch`/
+`unsupported_type_switch`), as do `fallthrough` and non-loop labels.
+
+Arms are alternatives under the non-evaluating profile — no ordering,
+overlap or exhaustiveness claims beyond the default's no-match path.
+See the
+[Agent expression switches](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-expression-switches-as-exclusive-alternatives).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
