@@ -694,6 +694,21 @@ definite finding is a stronger suspicion, not proof, and fields, calls,
 shadowing, closures and unreachable code remain unmodelled. See the
 [Agent definite unassigned-use classes](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-definite-unassigned-use-classes-over-the-same-facts).
 
+### Wave 3 unused-assignment hints at name granularity
+
+Agent's `control_flow.unused_assignments(body, graph)` reports
+`UnusedAssignment` when a recognized assignment statement targets a
+simple identifier that appears in no use position anywhere in the body —
+the dead-store hint at name granularity, over the same conservative
+identifier scan as the unassigned-use hints.
+
+Still a hint for the host's own analysis, not a defect verdict: any
+textual occurrence counts as a read (including inside the name's own
+initializer, `x++`, and unreachable code), every writer of an unread
+name is flagged, and fields, calls, shadowing and closures remain
+unmodelled. See the
+[Agent unused-assignment hints](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-unused-assignment-hints-at-name-granularity).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
