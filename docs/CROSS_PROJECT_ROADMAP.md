@@ -858,6 +858,18 @@ remains the declared gap, and the model is positional rather than a Go
 type check. See the
 [Agent terminal fallthrough](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-terminal-fallthrough-in-expression-switches).
 
+### Wave 3 let bindings in scalar parameter summaries
+
+Agent's C07 body fragment now admits `name := expression` declarations
+ahead of the single scalar return: each let binding records its
+compiler-resolved binding identity, requires a scalar declared type, and
+contributes its initializer's dependencies to later expressions and the
+return. Reassignment, tuples and other statement shapes stay
+`unsupported_statement`; a left-hand identifier with no compiler binding
+or a non-scalar type yields `binding_unavailable`. Dependencies remain a
+conservative overapproximation — never equality or proof. See the
+[Agent let bindings](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-let-bindings-before-the-single-return).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
