@@ -846,6 +846,18 @@ The scan is textual: field names may be over-counted as reads — a
 conservative miss, never a false "assigned" claim. See the
 [Agent compound targets](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-compound-targets-as-reads-not-assignments).
 
+### Wave 3 terminal fallthrough in expression switches
+
+Agent's Go CFG now models a `fallthrough` statement that is the final
+statement of a non-final case clause (including a non-final `default:`):
+it edges into the next clause's body instead of producing the declared
+`unsupported_fallthrough` gap. `break` inside such a clause still exits
+the switch and `continue` still targets an enclosing loop. Any other
+`fallthrough` position — last clause, mid-body, outside a switch —
+remains the declared gap, and the model is positional rather than a Go
+type check. See the
+[Agent terminal fallthrough](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-terminal-fallthrough-in-expression-switches).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
