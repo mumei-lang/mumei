@@ -723,6 +723,20 @@ explicit normal flow is not dead-code proof, and each finding stays a
 hint for the host, not a defect verdict. See the
 [Agent flow-hint report](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-one-pass-flow-hint-report-and-unreachable-statement-hints).
 
+### Wave 3 independent hint metrics over declared expectations
+
+Agent's `control_flow.evaluate_flow_hints(hints, expected)` compares a
+`FlowHints` report against host-declared `HintExpectations` and returns
+per-family `FamilyMetrics` — `matched`, expected-but-unreported
+(`missed`) and reported-but-unexpected (`unexpected`) — keeping false
+positives and missed defects independent as the C05 acceptance
+criteria require.
+
+Expectations are host declarations, not ground truth: agreement
+measures consistency between two declarations, not correctness of
+either. See the
+[Agent hint metrics](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-independent-hint-metrics-over-declared-expectations).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
