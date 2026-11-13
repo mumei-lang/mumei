@@ -533,6 +533,29 @@ remains open, and C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent attempt runner](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-real-process-control-for-declared-execution-requests).
 
+### Wave 2 normalized run-result descriptors
+
+Agent's `AttemptRunResult.normalized()` maps one observed terminal run into
+`AttemptNormalizedResult` — detached metadata under
+`mumei.verifier-run-result/v1` naming only the request binding (fingerprint,
+ordinal, declared timeout), the terminal outcome
+(`exited`/`failed`/`timed_out`/`cancelled`), the terminal event's elapsed
+counter, the exit code when and only when the outcome is `exited`, and the
+bounded-output manifest (size, SHA-256, `complete`). Hosts can consume every
+outcome through one stable shape without reading event histories or raw
+bytes; non-terminal outcomes, foreign exit codes, oversize declarations and
+non-bool completeness are static errors.
+
+Normalization covers agent-side observations only: the digest binds bytes,
+not meaning; an exit code is transport metadata, never a verification
+verdict; `complete` records only that collection stayed within the bound.
+No parsing, verdict interpretation, acceptance or canonical publication is
+added — Core still owns Evidence checks and meaning, and hosts still bind
+snapshots with `AttemptOutput` and publish via `AttemptSequenceStore`. C11
+stays partial; C12's demand gate plus existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent normalized run result](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-normalized-run-result-descriptors).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
