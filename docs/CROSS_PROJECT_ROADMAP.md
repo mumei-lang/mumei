@@ -666,6 +666,20 @@ use/defect detection and proof-grade semantics remain open C05/C06 work.
 See the
 [Agent assignment facts](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-fixed-point-assignment-facts-over-the-explicit-cfg).
 
+### Wave 3 possibly-unassigned use hints over assignment facts
+
+Agent's `control_flow.unassigned_uses(body, graph)` connects the
+fixed-point assignment facts to reads: it reports `UnassignedUse` when a
+simple identifier is textually assigned somewhere in the body yet absent
+from a node's `all_paths` pre-state — a possibly-unassigned read (one
+sided branch, loop-gated assignment). Checks run against the pre-state
+and initializers flow into their conditions.
+
+A finding is a hint for the host's own analysis, not a defect verdict:
+fields/elements, calls, shadowing and closures are not modelled, and
+proof-grade semantics remain open C05/C06 work. See the
+[Agent unassigned-use hints](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-possibly-unassigned-use-hints-over-assignment-facts).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
