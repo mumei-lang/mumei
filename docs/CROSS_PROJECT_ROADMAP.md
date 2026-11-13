@@ -803,6 +803,19 @@ deferred calls, `recover` and unwinding semantics stay unmodelled, and
 a terminate edge says nothing about whether the process stops. See the
 [Agent terminating calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-terminating-calls-as-exit-edges).
 
+### Wave 3 declared unreliable names over flow hints
+
+Agent's `flow_hints` now exports `unreliable` — names the extractor
+declares unsafe for path facts (closure-assigned or address-taken).
+They still appear in `unassigned` findings but are never promoted to
+`definite`, since a closure call or aliased write sits outside the
+modelled paths and "no modelled path can deliver it" would overclaim.
+The set is exported on the report so hosts can see suppressed claims.
+
+The set is syntactic, not call-graph or escape analysis — conservative
+marking is possible in both directions. See the
+[Agent unreliable names](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-declared-unreliable-names-over-flow-hints).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
