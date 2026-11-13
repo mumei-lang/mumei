@@ -466,6 +466,26 @@ existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
 See the
 [Agent stream-declaration boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-stream-identity-and-completeness).
 
+### Wave 2 evidence-candidate handoff descriptors
+
+Agent's `AttemptSequence.evidence_candidate()` returns an
+`AttemptEvidenceCandidate` naming the declared canonical snapshot for a host
+to hand to Core: the request fingerprint, the selected attempt ordinal and
+the output manifest fingerprint — nothing else. Only a sequence closed by
+`select_result` can produce one, and the value serializes as detached
+metadata under `mumei.verifier-evidence-candidate/v1`.
+
+This is a handoff descriptor, not Evidence: the fingerprint binds the
+manifest, not content correctness — hashing a manifest is not semantic
+correctness and naming a candidate is not acceptance. The value carries no
+bytes, makes no validity claim and grants no authority; Core owns the
+meaning and acceptance of the original bytes, which the host must still
+deliver over its own channel. C11 stays partial: runner/scheduler, actual
+execution/cancellation effects and Evidence normalization/acceptance itself
+remain open, and C12's demand gate plus existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent evidence-handoff boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-evidence-candidate-handoff-descriptors).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
