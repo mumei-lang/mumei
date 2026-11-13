@@ -613,6 +613,23 @@ stays partial; C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent memory bounds](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-memory-bounds-for-attempted-executions).
 
+### Wave 2 bounded plan history for runtime fallback records
+
+Agent's `AdapterRegistry.plan()` appends each successful
+`VerificationPlan` to a bounded in-memory `history()` — the runtime
+fallback/selection record in the C04/C11 gap list. Entries are appended
+in call order and evicted oldest-first past the bound; failed plans are
+never recorded, `prepare_source` records exactly the plan it ran and
+adapter replacement does not clear the record.
+
+History is a declared record, not a durable audit or Evidence: it is lost
+with the registry, evicts silently past the bound, and says nothing about
+dispatch or acceptance. Persistence, tamper evidence and Evidence
+acceptance remain host duties and open work. C11 stays partial; C12's
+demand gate plus existing assurance/Lean/native/LLVM/deferred-WASM
+policies are unchanged. See the
+[Agent plan history](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-plan-history-for-runtime-fallback-records).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
