@@ -788,6 +788,21 @@ Label names come from syntax, not scope resolution; duplicate-label
 rejection is not modelled. See the
 [Agent labelled jumps](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-labelled-loop-jumps-over-the-explicit-cfg).
 
+### Wave 3 terminating calls as exit edges
+
+Agent's `build_go_cfg` now models Go terminating calls
+(`panic`/`os.Exit`/`log.Fatal*`/`log.Panic*`/`runtime.Goexit`) as
+`terminate` nodes edging to the CFG exit instead of refusing the body
+with `unsupported_terminate`. Normal flow after such a call becomes
+genuinely unreachable, so `unreachable_statements` reports trailing
+code after `panic`, while branch-local termination keeps sibling paths
+live and arguments still count as reads.
+
+Termination means exit of the modelled function's normal flow only —
+deferred calls, `recover` and unwinding semantics stay unmodelled, and
+a terminate edge says nothing about whether the process stops. See the
+[Agent terminating calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-terminating-calls-as-exit-edges).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
