@@ -832,6 +832,20 @@ overlap or exhaustiveness claims beyond the default's no-match path.
 See the
 [Agent expression switches](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-expression-switches-as-exclusive-alternatives).
 
+### Wave 3 compound targets as reads, not assignments
+
+Agent's flow hints now treat compound assignment targets (`x.f`,
+`a[i]`, `*p`) as reads of every identifier inside them: `x := 1;
+x.f = 2` no longer flags `x` as an unused store and `a[i] = 2` keeps
+both `a` and `i` live — removing dead-store false positives on
+composite roots. Compound targets still never assign their root in
+`assignment_facts`, and a name whose only writes are compound stays
+outside the declared universe.
+
+The scan is textual: field names may be over-counted as reads — a
+conservative miss, never a false "assigned" claim. See the
+[Agent compound targets](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-compound-targets-as-reads-not-assignments).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
