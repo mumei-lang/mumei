@@ -630,6 +630,25 @@ demand gate plus existing assurance/Lean/native/LLVM/deferred-WASM
 policies are unchanged. See the
 [Agent plan history](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-plan-history-for-runtime-fallback-records).
 
+### Wave 2 declared runtime fallback replanning
+
+Agent's `AdapterRegistry.replan(plan, exclude=(), observations=None)`
+re-routes a recorded plan after a host-declared runtime failure — the
+runtime fallback the plan history was recorded for. The previously
+selected adapter plus every registered `exclude` id is treated as
+disabled and explicit selection is cleared; the same request and policy
+constraints are preserved. The plan must come from the registry's
+recorded history, must have selected an adapter, and must permit
+routing — an explicit non-fallback selection stays a hard boundary.
+When `observations` is `None` the registry reuses its last accepted
+stamped observations.
+
+Replanning is a declared re-selection, not a runtime verdict: it records
+that the host observed a failure — it does not prove the excluded
+adapter failed or that the new route works, and it carries no attempt
+outcome or Evidence. See the
+[Agent runtime fallback](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-declared-runtime-fallback-replanning).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
