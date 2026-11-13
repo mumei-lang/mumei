@@ -773,6 +773,21 @@ bytes, not meaning, and the index is not symbol resolution or
 cross-file linking. See the
 [Agent file provenance](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-file-level-provenance-over-go-source-units).
 
+### Wave 3 labelled loop jumps over the explicit CFG
+
+Agent's `build_go_cfg` now models labelled `break`/`continue`: a label
+on a `for`/`range` statement becomes a jump target for that loop's
+body, so `break L` / `continue L` edge to the labelled loop's exit or
+update — including jumps through nested unlabelled loops. Labels on
+non-loop statements, unresolved label names and `goto` stay declared
+gaps (`labelled_statement`, `unresolved_label`, `unsupported_goto`), so
+existing flow analyses work over the new edges without change — a
+labelled break skipping the loop update is reported unreachable.
+
+Label names come from syntax, not scope resolution; duplicate-label
+rejection is not modelled. See the
+[Agent labelled jumps](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-labelled-loop-jumps-over-the-explicit-cfg).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
