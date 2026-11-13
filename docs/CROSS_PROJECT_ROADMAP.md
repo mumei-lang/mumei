@@ -891,6 +891,18 @@ into the result; iteration is never unrolled or counted. `range`,
 `break`/`continue` and assignment updates stay unsupported. See the
 [Agent bounded for statements](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-bounded-for-statements).
 
+### Wave 3 scalar reassignment in scalar summaries
+
+Agent's C07 fragment now admits scalar `x = expression` reassignments:
+a single identifier target bound to a parameter or in-scope let, never
+a declaration. Top-level reassignment replaces dependencies; inside a
+branch or loop the new value joins back by union (a may-analysis);
+loop bodies join to a widening fixed point so dependencies propagating
+across iterations are captured.
+Compound operators, tuple targets and out-of-scope names stay
+unsupported. See the
+[Agent scalar reassignment](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-scalar-reassignment).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
