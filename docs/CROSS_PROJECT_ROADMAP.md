@@ -680,6 +680,20 @@ fields/elements, calls, shadowing and closures are not modelled, and
 proof-grade semantics remain open C05/C06 work. See the
 [Agent unassigned-use hints](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-possibly-unassigned-use-hints-over-assignment-facts).
 
+### Wave 3 definite unassigned-use classes over the same facts
+
+Agent's `UnassignedUse` gains a `definite` flag: a possibly-unassigned
+read is definite when the name is textually assigned somewhere in the
+body yet absent from the node's `some_path` pre-state too — no modelled
+path can deliver it (assignment only after the use, or only in a
+sibling the use's path never takes). `definite = False` keeps the
+earlier class where some path may deliver the value.
+
+Still a hint for the host's own analysis, not a defect verdict — a
+definite finding is a stronger suspicion, not proof, and fields, calls,
+shadowing, closures and unreachable code remain unmodelled. See the
+[Agent definite unassigned-use classes](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-definite-unassigned-use-classes-over-the-same-facts).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
