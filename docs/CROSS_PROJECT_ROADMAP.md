@@ -520,7 +520,8 @@ events — `started`, then exactly one of `exited` (real exit code), `failed`
 `cancelled` (cancel grace expired after `cancel_requested` + terminate).
 Captured stdout is drained on a side thread so writers past the pipe buffer
 cannot deadlock the wait, bounded to `MAX_STDOUT_BYTES`, and returned with a
-`complete` declaration recording only whether truncation occurred.
+`complete` declaration that is `False` whenever truncation occurred or the
+bounded drain could not finish.
 
 `run` performs no authorization, scheduling, dispatch decision, output
 interpretation or canonical publication — the host still decides via
