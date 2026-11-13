@@ -912,6 +912,14 @@ and returns inside clauses union into the result. Type switches and
 `select` stay unsupported. See the
 [Agent expression switches](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-expression-switches-in-bodies).
 
+### Wave 3 var declarations in scalar summaries
+
+Agent's C07 fragment now admits `var_declaration`: one name per
+`var_spec` with at most one value, scalar bindings only, and `var x T`
+binding the dep-free zero value. Multi-name specs, non-scalar bindings,
+`const` and grouped `var (...)` stay declared gaps. See the
+[Agent var declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-var-declarations-in-bodies).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
