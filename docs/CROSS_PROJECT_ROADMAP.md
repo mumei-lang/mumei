@@ -342,6 +342,33 @@ acceptance remain separate.
 C11 stays partial; C12 and existing assurance/Lean/native/LLVM/deferred-WASM
 policies are unchanged. See the [Agent handoff boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-explicit-local-core-representation-handoff).
 
+### Wave 2 host-declared canonical result selection
+
+Agent adds `AttemptSequence.select_result(output)`, a canonical-result-selection
+contract on the sequential-attempt ledger. The supplied snapshot must satisfy
+the existing `check_output_binding` against the sequence's current `exited`
+record — request fingerprint, ordinal, timeout and complete event history.
+Selection marks the detached `(attempt_number, output_fingerprint)` pair as
+this value's canonical result and closes the sequence: further reservations
+and competing snapshots fail with static errors, while re-selecting the same
+output is an idempotent no-op. `to_dict()` carries the marker under the
+existing `mumei.verifier-attempt-sequence/v1` schema with no stdout, source or
+diagnostics.
+
+A selected result is host-declared canonical metadata for that sequence value
+only — not truth, Evidence acceptance, a Core representation-check receipt or
+cross-sequence arbitration. Independently captured snapshots bound to the same
+attempt both satisfy binding, and independent sequences can select independent
+results; hosts still own canonical storage, `AttemptOutput.reconcile`,
+atomic publication and any cross-attempt/backend arbitration. There is no
+global ordering, locking/CAS, replay protection, freshness or authenticity
+claim, and selection neither revalidates the output nor invokes Core.
+C11 stays partial: runner/scheduler, stream collection, Evidence
+normalization/acceptance and actual execution/cancellation remain open, and
+C12's demand gate plus existing assurance/Lean/native/LLVM/deferred-WASM
+policies are unchanged. See the
+[Agent result-selection boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-canonical-result-selection-for-sequential-attempts).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
