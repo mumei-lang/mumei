@@ -575,6 +575,26 @@ stays partial; C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent adapter manifest](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declarative-adapter-manifests).
 
+### Wave 2 monotonic observation stamps for replay detection
+
+Agent's `RuntimeObservation` carries an optional host-declared `stamp` — a
+bounded monotonic counter, the planner-side analogue of attempt
+`report_stamp`. `AdapterRegistry.plan()` records accepted stamped
+observations per adapter id: once one is accepted every later observation
+for that adapter must carry a stamp, a smaller stamp is a static stale
+error, a reused stamp only tolerates an identical observation and a larger
+one advances the boundary. Tracking only updates when the whole plan
+succeeds; unstamped tuples keep legacy behavior.
+
+A stamp is a delivery counter, not freshness proof, authenticity or
+acceptance: the host can always mint a larger one, and observed
+availability/tool versions stay untrusted claims. Probing, clock checks,
+delivery completeness, cross-registry ordering and Evidence acceptance
+remain host duties and open work. C11 stays partial; C12's demand gate plus
+existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+See the
+[Agent observation stamps](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-monotonic-observation-stamps-for-replay-detection).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
