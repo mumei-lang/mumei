@@ -486,6 +486,28 @@ remain open, and C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent evidence-handoff boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-evidence-candidate-handoff-descriptors).
 
+### Wave 2 dispatch-boundary checks for declared requests
+
+Agent's `AttemptSequence.next_dispatch()` derives the single outstanding
+dispatchable intent — a `ready` current record yields its
+`AttemptExecutionRequest`, and anything else yields `None` (which does not
+mean nothing may run: an in-flight attempt continues and host-initiated
+cancellations are declared separately). `check_dispatch` is the static
+counterpart for host-built requests: an execution request must name this
+value's current ready record including its declared timeout, a cancellation
+request the current running one — wrong types, foreign fingerprints, stale
+ordinals and unserved states are static errors, never silent drops.
+
+These are boundary checks, not a runner or scheduler: nothing is
+dispatched, delivered, queued, ordered across sequences or confirmed —
+dispatch, delivery integrity, ordering policy and process control remain
+host duties, and a request that passes today is just a description the host
+must re-check against the canonical value at send time. C11 stays partial:
+actual execution/cancellation effects and Evidence normalization/acceptance
+remain open, and C12's demand gate plus existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent dispatch boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-dispatch-boundary-checks-for-declared-requests).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
