@@ -556,6 +556,25 @@ stays partial; C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent normalized run result](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-normalized-run-result-descriptors).
 
+### Wave 2 declarative adapter manifests
+
+Agent's `AdapterDescriptor.from_manifest(manifest)` statically parses a
+detached host-supplied manifest (`mumei.verifier-adapter/v1`) into a
+validated descriptor, and `AdapterRegistry.register_manifest(manifest,
+replace=...)` registers it — a test user adapter can be described and added
+or replaced without editing core code. `to_dict()` round-trips losslessly;
+wrong schema versions, unknown or missing fields, malformed label lists,
+result contracts or setting specs are static errors.
+
+A manifest is metadata, not a plugin: it names capabilities, budgets and
+schemas but carries no code, grants no authority and proves nothing about
+availability — nothing is imported, discovered, probed or executed on
+registration. Actual plugin loading, adapter code execution, resource
+enforcement and Evidence acceptance remain host duties and open work. C11
+stays partial; C12's demand gate plus existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent adapter manifest](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declarative-adapter-manifests).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
