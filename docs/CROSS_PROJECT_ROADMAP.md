@@ -870,6 +870,17 @@ or a non-scalar type yields `binding_unavailable`. Dependencies remain a
 conservative overapproximation — never equality or proof. See the
 [Agent let bindings](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-let-bindings-before-the-single-return).
 
+### Wave 3 branched bodies and multiple returns
+
+Agent's C07 fragment now admits `if`/`else` statements and more than one
+return: dependencies union every syntactic return, conditions are
+evaluated but contribute no result dependency (every fragment statement
+is effect-free), and branch-local let bindings stay scoped to their
+branch. Unreachable returns still contribute — reachability is not
+proven — and `if` initializers, loops and other statement shapes stay
+`unsupported_statement`. See the
+[Agent branched bodies](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-branched-bodies-and-multiple-returns).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
