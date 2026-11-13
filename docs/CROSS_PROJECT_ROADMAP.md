@@ -369,6 +369,31 @@ C12's demand gate plus existing assurance/Lean/native/LLVM/deferred-WASM
 policies are unchanged. See the
 [Agent result-selection boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-canonical-result-selection-for-sequential-attempts).
 
+### Wave 2 atomic canonical-lineage publication
+
+Agent adds `AttemptSequenceStore`, an in-process compare-and-set publication
+point for one canonical `AttemptSequence` lineage — the atomic storage hosts
+were previously told to own. `publish(sequence)` stores the first canonical
+value; `compare_and_set(expected, updated)` atomically swaps it when
+`expected` equals the stored value, so competing writers extending the same
+prefix can no longer silently fork. A mismatch reports the fork with a static
+error and changes nothing; equal updates and re-publications are idempotent.
+
+An update must be a lineage extension of the expected value: same request
+fingerprint and timeout, every retained record equal or a valid same-attempt
+report extension, and no change after a selected result. Removed, replaced,
+rewound, rebound or diverged updates are rejected. The store holds immutable
+metadata values only — never source or stdout bodies — and has no
+serialization surface of its own. It linearizes callers on this object only:
+it is not durable storage, a cross-process/OS lock, replay protection at the
+boundary or authentication. Stale expectations are detected by equality, not
+freshness proof; hosts still own distribution, crash recovery and any
+cross-attempt/backend arbitration. C11 stays partial: runner/scheduler,
+stream collection, actual execution/cancellation and Evidence
+normalization/acceptance remain open, and C12's demand gate plus existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent publication boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-atomic-canonical-lineage-publication).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
