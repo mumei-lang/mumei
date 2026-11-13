@@ -709,6 +709,20 @@ name is flagged, and fields, calls, shadowing and closures remain
 unmodelled. See the
 [Agent unused-assignment hints](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-unused-assignment-hints-at-name-granularity).
 
+### Wave 3 one-pass flow-hint report and unreachable-statement hints
+
+Agent's `control_flow.flow_hints(body, graph)` returns `FlowHints` —
+the three bounded hint families in one immutable report:
+`unassigned_uses`, `unused_assignments` and the new
+`unreachable_statements(graph)`, which flags every span-carrying node
+outside `graph.reachable()` as `UnreachableStatement` — statements no
+normal-flow path from the entry reaches.
+
+The aggregate adds no analysis of its own: syntactic reachability over
+explicit normal flow is not dead-code proof, and each finding stays a
+hint for the host, not a defect verdict. See the
+[Agent flow-hint report](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-one-pass-flow-hint-report-and-unreachable-statement-hints).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
