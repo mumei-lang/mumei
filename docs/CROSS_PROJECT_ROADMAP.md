@@ -443,6 +443,29 @@ open, and C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent request boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-execution-and-cancellation-requests).
 
+### Wave 2 declared stream identity and completeness
+
+Agent's `AttemptOutput` declares the collection boundary of its snapshot with
+two optional metadata fields: `stream` names the declared stream the captured
+bytes came from (the `STREAM_KINDS` vocabulary supports only `"stdout"`
+today — other names fail as unsupported rather than being aliased), and
+`complete` is an exact `bool` declaring whether the capture is the whole
+stream. `reconcile` compares the claims too, so identical bytes carrying
+different declarations conflict instead of silently merging, and the
+`mumei.verifier-output/v1` manifest emits both only when non-default so
+default `output_fingerprint` values are unchanged.
+
+Both fields are host declarations, not proven observations: a declared
+`complete=True` does not establish completeness and `False` does not measure
+what was missed — only the SHA-256 binds the captured bytes. No streams are
+read, pipes are opened or truncation is detected; capture mechanics, the
+producer's true byte count and multi-stream capture remain host duties. C11
+stays partial: runner/scheduler, actual execution/cancellation effects and
+Evidence normalization/acceptance remain open, and C12's demand gate plus
+existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+See the
+[Agent stream-declaration boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-stream-identity-and-completeness).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
