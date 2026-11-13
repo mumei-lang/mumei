@@ -648,6 +648,24 @@ promoting hash consistency to authenticity, translation validation or an
 metadata and wider ABI/runtime semantics remain unverified. This is partial
 C08 and a narrow C10 identity-check foundation, not completion of either item.
 
+### Wave 3 fixed-point assignment facts over the explicit Go CFG
+
+Agent's `control_flow.assignment_facts(body, graph)` runs the first
+bounded fixed-point dataflow over the `mumei.go-explicit-normal-flow/v1`
+graph: per-node `all_paths` (identifiers textually assigned on every
+path from entry) and `some_path` (assigned on at least one path). Both
+directions converge monotonically on a finite lattice with a defensive
+iteration bound; a body that does not match the graph digest or fails to
+parse is a static error.
+
+Facts are declared textual assignment, not memory truth: only simple
+identifier targets count — selectors, indexes, the blank `_`,
+scoping/shadowing and mutation through opaque calls are excluded, and
+unreachable nodes hold the vacuous universe. Interprocedural flow,
+use/defect detection and proof-grade semantics remain open C05/C06 work.
+See the
+[Agent assignment facts](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c05-fixed-point-assignment-facts-over-the-explicit-cfg).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
