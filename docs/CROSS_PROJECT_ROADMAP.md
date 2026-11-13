@@ -595,6 +595,24 @@ existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
 See the
 [Agent observation stamps](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-monotonic-observation-stamps-for-replay-detection).
 
+### Wave 2 declared memory bounds for attempted executions
+
+Agent's `AttemptRunner.run()` accepts an optional host-declared
+`memory_bound_mb`: the child is spawned under POSIX `RLIMIT_AS`, so the
+declared `memory_mb` budget a `VerificationPlan` produces now reaches the
+execution boundary rather than stopping at the plan manifest. The bound is
+validated statically, applies to the child only, and a non-POSIX host
+refuses it outright.
+
+The bound is best-effort resource enforcement, not a sandbox: it covers no
+CPU, I/O, network or permission policy, and exceeding it surfaces only as
+an ordinary observed outcome (`exited`/`failed`/`timed_out`), never
+diagnosed as a resource violation. Authorization, scheduling, Evidence
+acceptance and further isolation remain host duties and open work. C11
+stays partial; C12's demand gate plus existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent memory bounds](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-memory-bounds-for-attempted-executions).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
