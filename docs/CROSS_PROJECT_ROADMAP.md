@@ -394,6 +394,31 @@ normalization/acceptance remain open, and C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent publication boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-atomic-canonical-lineage-publication).
 
+### Wave 2 monotonic report stamps for replay detection
+
+Agent's `AttemptSequence.reconcile_report` accepts an optional
+`report_stamp`: a host-declared monotonic counter bound to the lineage's
+report stream. Stamps are exact positive bounded integers; once one is
+accepted every later report must carry one. A stamp must strictly increase
+across distinct deliveries — a smaller stamp fails as stale, and a reused
+stamp only reconciles an identical report (reused stamp + changed content
+fails too). A fresh stamp on identical content advances the counter, so
+replays arriving after newer reports are detected. The last accepted stamp
+serializes as detached `report_stamp` metadata under the existing
+`mumei.verifier-attempt-sequence/v1` schema, and `AttemptSequenceStore`
+lineage updates may never regress it.
+
+This is a replay/reorder detection contract, not a clock, freshness proof,
+authentication or authorization: a host assigns stamps itself, so a host can
+always mint a higher one. Delivery integrity, sender identity, durable
+storage, global counters across lineages and content acceptance remain host
+duties. Stamps carry no report content, source or stdout. C11 stays partial:
+runner/scheduler, stream collection, actual execution/cancellation and
+Evidence normalization/acceptance remain open, and C12's demand gate plus
+existing assurance/Lean/native/LLVM/deferred-WASM policies are unchanged.
+See the
+[Agent report-stamp boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-monotonic-report-stamps-for-replay-detection).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
