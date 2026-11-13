@@ -508,6 +508,31 @@ remain open, and C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent dispatch boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-dispatch-boundary-checks-for-declared-requests).
 
+### Wave 2 real process control for declared execution requests
+
+Agent's `attempt_runner.py` is the first effectful boundary in the C11
+cluster: `AttemptRunner.run(request, argv, cancel_event=None)` spawns one
+real child process for one declared `AttemptExecutionRequest`, waits bounded
+by the request's declared timeout, terminates runaways and honors a single
+`threading.Event` cancellation. Observations are reported as `AttemptRecord`
+events — `started`, then exactly one of `exited` (real exit code), `failed`
+(spawn refused by the OS), `timed_out` (deadline reached, child killed) or
+`cancelled` (cancel grace expired after `cancel_requested` + terminate).
+Captured stdout is drained on a side thread so writers past the pipe buffer
+cannot deadlock the wait, bounded to `MAX_STDOUT_BYTES`, and returned with a
+`complete` declaration that is `False` whenever truncation occurred or the
+bounded drain could not finish.
+
+`run` performs no authorization, scheduling, dispatch decision, output
+interpretation or canonical publication — the host still decides via
+`check_dispatch`, binds snapshots with `AttemptOutput` and publishes through
+`AttemptSequenceStore`. `complete=False` records observed truncation, not
+how much was lost, and an `exited` code is a fact about process exit, never
+a verification verdict. C11 stays partial: Evidence normalization/acceptance
+remains open, and C12's demand gate plus existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent attempt runner](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-real-process-control-for-declared-execution-requests).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
