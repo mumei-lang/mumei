@@ -903,6 +903,15 @@ Compound operators, tuple targets and out-of-scope names stay
 unsupported. See the
 [Agent scalar reassignment](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-scalar-reassignment).
 
+### Wave 3 expression switches in scalar summaries
+
+Agent's C07 fragment now admits `expression_switch_statement` bodies:
+no initializer, no `fallthrough`; tag and case guards are evaluated
+effect-free, clause bodies run scoped with union-join (a may-analysis),
+and returns inside clauses union into the result. Type switches and
+`select` stay unsupported. See the
+[Agent expression switches](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-expression-switches-in-bodies).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
