@@ -881,6 +881,16 @@ proven — and `if` initializers, loops and other statement shapes stay
 `unsupported_statement`. See the
 [Agent branched bodies](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-branched-bodies-and-multiple-returns).
 
+### Wave 3 bounded for statements in scalar summaries
+
+Agent's C07 fragment now admits `for` statements under a narrow clause
+contract: a single let-binding initializer, a supported condition and an
+inc/dec update on a bound scalar — or no clause at all (`for {}`,
+`for cond {}`). Loop-scoped bindings never escape; returns inside union
+into the result; iteration is never unrolled or counted. `range`,
+`break`/`continue` and assignment updates stay unsupported. See the
+[Agent bounded for statements](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-bounded-for-statements).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
