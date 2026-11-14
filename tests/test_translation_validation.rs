@@ -242,10 +242,12 @@ fn unsupported_source_is_not_silently_weakened() {
         "1.0",
         "f(x)",
         "while x > 0 invariant true { x }; x",
-        // Sequences admit `let`s only: a bare expression statement, an
-        // assignment and a trailing `let` without a value still fail.
-        "x + 1; x",
+        // Sequences admit `let`s and pure expression statements: an
+        // assignment, a call statement and a trailing `let` without a
+        // value still fail.
         "x = 1",
+        "x = 1; x",
+        "f(x); x",
         "let y = x;",
         "let y = f(x); y",
     ] {
@@ -378,6 +380,40 @@ fn lexical_let_bindings_are_equivalent_scoped_and_refuted() {
     }
     // `let y = x; y` returns x, not x + 1 — the binding is not a rewrite.
     let src = source("x: i64", "let y = x; y");
+    let wrong = emitted(&source("x: i64", "x + 1"));
+    assert_eq!(validate(&src, &wrong).outcome, Outcome::Different);
+}
+
+#[test]
+fn pure_expression_statements_are_equivalent_and_refuted() {
+    for (params, body) in [
+        // A discarded expression evaluates for its obligations only —
+        // the value statement still yields the result.
+        ("x: i64", "x + 1; x"),
+        ("x: i64", "x & 3; x | 2"),
+        ("x: i64", "x > 0; x"),
+        ("x: i64", "let a = x; a + 1; a"),
+        ("x: i64", "let a = x + 1; let b = a * 2; b - a; b"),
+        ("x: i64", "if x > 0 { 1 } else { 2 }; x"),
+    ] {
+        let src = source(params, body);
+        assert_eq!(
+            validate(&src, &emitted(&src)).outcome,
+            Outcome::EquivalentWithinProfile,
+            "{body}"
+        );
+    }
+    // A discarded partial operation keeps its definedness obligation:
+    // `x / y; x` is defined exactly where the division is.
+    let src = source("x: i64, y: i64", "x / y; x");
+    let report = validate(&src, &emitted(&src));
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(
+        report.input_domain,
+        "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires"
+    );
+    // `x + 1; x` returns x — the discarded expression is not a rewrite.
+    let src = source("x: i64", "x + 1; x");
     let wrong = emitted(&source("x: i64", "x + 1"));
     assert_eq!(validate(&src, &wrong).outcome, Outcome::Different);
 }
@@ -750,6 +786,8 @@ fn native_emitter_bodies_and_truncating_wrapper_match_without_rewriting() {
         "(7 & 3) | (7 ^ 1)",
         "let y = 7 & 3; y + 1",
         "let a = 7; let b = a | 1; a ^ b",
+        "7 + 1; 8",
+        "let a = 7; a ^ 1; a",
     ]
     .into_iter()
     .map(str::to_owned)

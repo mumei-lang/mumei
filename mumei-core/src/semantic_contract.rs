@@ -26,8 +26,8 @@ pub const PURE_I64_PROFILE: &str = "mumei.pure-i64-comparison/v1";
 /// the same scalar comparisons plus wrapping i64 add/sub/mul, total
 /// bitwise `&`/`|`/`^`, guarded div/rem/shl/shr (defined only for nonzero
 /// divisors excluding
-/// i64::MIN / -1 and shift amounts in 0..64) and block-scoped `let`
-/// bindings. Kept distinct from the
+/// i64::MIN / -1 and shift amounts in 0..64), block-scoped `let`
+/// bindings and discarded pure expression statements. Kept distinct from the
 /// bounded C03 contract, which still excludes arithmetic and sequences.
 pub const PURE_I64_WRAPPING_PROFILE: &str = "mumei.pure-i64-wrapping-scalar/v1";
 
@@ -109,7 +109,8 @@ pub struct SemanticContract {
 /// The target is caller-supplied metadata, not a claim of backend availability.
 /// `allow_wrapping_arithmetic` admits i64 add/sub/mul as mod-2^64 wrapping
 /// operations, total bitwise `&`/`|`/`^`, plus guarded div/rem/shl/shr (a
-/// partial domain: nonzero divisor, no i64::MIN / -1, shift amount in 0..64);
+/// partial domain: nonzero divisor, no i64::MIN / -1, shift amount in 0..64),
+/// block-scoped `let` bindings and discarded pure expression statements;
 /// the bounded C03
 /// contract always passes `false` so the build
 /// and recheck paths keep agreeing on a fragment with no arithmetic.
@@ -276,6 +277,7 @@ pub fn extract_pure_i64_contract(
         .chain(allow_wrapping_arithmetic.then_some("wrapping_i64_arithmetic"))
         .chain(allow_wrapping_arithmetic.then_some("i64_bitwise_total"))
         .chain(allow_wrapping_arithmetic.then_some("lexical_scoped_let_bindings"))
+        .chain(allow_wrapping_arithmetic.then_some("discarded_pure_expression_statements"))
         .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
         .collect(),
         requested_route: "standard_z3_not_executed_by_extractor",
@@ -381,21 +383,34 @@ fn statement_kind(
         Stmt::Block(stmts, _) if stmts.len() == 1 => {
             statement_kind(&stmts[0], scope, result_in_scope, allow_wrapping_arithmetic)
         }
-        // `let`-only statement sequences end in a value statement; the
-        // widened equivalence profile admits them, the bounded C03
-        // fragment stays closed. Bindings are lexical to the block.
+        // `let` bindings and pure expression statements end in a value
+        // statement; the widened equivalence profile admits them, the
+        // bounded C03 fragment stays closed. Bindings are lexical to the
+        // block and a discarded expression's partial operations still
+        // record definedness obligations.
         Stmt::Block(stmts, _) if !stmts.is_empty() && allow_wrapping_arithmetic => {
             let mut inner = scope.clone();
             let (lets, last) = stmts.split_at(stmts.len() - 1);
             for stmt in lets {
-                let Stmt::Let { var, value, .. } = stmt else {
-                    return Err(SemanticContractError::Unsupported(
-                        "non-let statement in a sequence",
-                    ));
-                };
-                let kind =
-                    expression_kind(value, &inner, result_in_scope, allow_wrapping_arithmetic)?;
-                inner.insert(var.clone(), kind);
+                match stmt {
+                    Stmt::Let { var, value, .. } => {
+                        let kind = expression_kind(
+                            value,
+                            &inner,
+                            result_in_scope,
+                            allow_wrapping_arithmetic,
+                        )?;
+                        inner.insert(var.clone(), kind);
+                    }
+                    Stmt::Expr(value, _) => {
+                        expression_kind(value, &inner, result_in_scope, allow_wrapping_arithmetic)?;
+                    }
+                    _ => {
+                        return Err(SemanticContractError::Unsupported(
+                            "statement outside a let/expression sequence",
+                        ));
+                    }
+                }
             }
             statement_kind(&last[0], &inner, result_in_scope, allow_wrapping_arithmetic)
         }
@@ -655,20 +670,29 @@ fn source_stmt<'ctx>(
             source_stmt(&stmts[0], ctx, env, guard, definedness, depth + 1)
         }
         Stmt::Block(stmts, _) if !stmts.is_empty() => {
-            // Sequential `let`-only blocks bind names lexically: each
+            // Sequential blocks bind names lexically: each `let`
             // initializer encodes under the current guard (its partial
-            // operations still record definedness obligations), then the
-            // last statement yields the block value under the wider scope.
+            // operations still record definedness obligations) and a bare
+            // expression statement encodes and discards its value — its
+            // own definedness obligations still apply — then the last
+            // statement yields the block value under the wider scope.
             let mut inner = env.clone();
             let (lets, last) = stmts.split_at(stmts.len() - 1);
             for stmt in lets {
-                let Stmt::Let { var, value, .. } = stmt else {
-                    return Err(SemanticContractError::Unsupported(
-                        "non-let statement in a sequence",
-                    ));
-                };
-                let bound = source_expr(value, ctx, &inner, guard, definedness, depth + 1)?;
-                inner.insert(var.clone(), bound);
+                match stmt {
+                    Stmt::Let { var, value, .. } => {
+                        let bound = source_expr(value, ctx, &inner, guard, definedness, depth + 1)?;
+                        inner.insert(var.clone(), bound);
+                    }
+                    Stmt::Expr(value, _) => {
+                        source_expr(value, ctx, &inner, guard, definedness, depth + 1)?;
+                    }
+                    _ => {
+                        return Err(SemanticContractError::Unsupported(
+                            "statement outside a let/expression sequence",
+                        ));
+                    }
+                }
             }
             source_stmt(&last[0], ctx, &inner, guard, definedness, depth + 1)
         }
@@ -883,11 +907,13 @@ mod tests {
     #[test]
     fn let_bindings_stay_outside_the_bounded_c03_fragment() {
         // The equivalence profile (allow_wrapping_arithmetic = true) admits
-        // `let` sequences; the bounded C03 contract still rejects them, so
-        // build and recheck keep agreeing on one source grammar.
-        let source = SOURCE.replace("if x < 0 { 0 } else { x }", "let y = x; y");
-        assert!(extract(&source).is_err());
-        assert!(extract_pure_i64_contract(&source, "clamp.mm", Some(TARGET), true).is_ok());
+        // `let`/expression sequences; the bounded C03 contract still rejects
+        // them, so build and recheck keep agreeing on one source grammar.
+        for body in ["let y = x; y", "x + 1; x"] {
+            let source = SOURCE.replace("if x < 0 { 0 } else { x }", body);
+            assert!(extract(&source).is_err());
+            assert!(extract_pure_i64_contract(&source, "clamp.mm", Some(TARGET), true).is_ok());
+        }
     }
 
     #[test]
