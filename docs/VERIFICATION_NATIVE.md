@@ -709,15 +709,17 @@ in-process C09 pilot, not a new CLI route or common-evidence producer. It consum
 one `mumei.pure-i64-wrapping-scalar/v1` source unit — the C03 comparison fragment
 extended with wrapping add/sub/mul, total bitwise `&`/`|`/`^`, guarded
 signed division/remainder/shifts, block-scoped `let` bindings, scalar
-reassignments on the linear path and discarded pure expression
-statements —
+reassignments on the linear path, discarded pure expression
+statements and `bool` parameters —
 and one caller-supplied LLVM
 17 textual IR snapshot. The caller must explicitly pin the exact
 `x86_64-unknown-linux-gnu` triple and the profile's `DATA_LAYOUT` on that snapshot;
 the checker never mutates it, invokes optimization passes or executes code.
 
 The checked relation is equality of the source **body** and LLVM return value
-for **every concrete signed-i64 input**, independently of requires/ensures.
+for **every concrete signed-i64 input** the declared signature admits —
+a `bool` parameter bounds its i64 input to 0/1 —, independently of
+requires/ensures.
 Signed bitvector comparisons and wrapping add/sub/mul encode the C03
 integer meaning over mod-2^64 wrap-around — the emitter never sets
 nsw/nuw, and flagged IR arithmetic is rejected, so overflow still
@@ -752,7 +754,17 @@ because the
 source model cannot merge a rebinding that escapes a conditional path —
 `if x > 0 { x = 1; 0 } else { 0 }` stays rejected. Other statement
 forms (unbound assignment, calls, loops) stay
-unsupported. The LLVM side is
+unsupported.
+A declared `bool` parameter lowers to i64 carrying 0/1 — the same
+lowering `resolve_param_type` and the emitter's `icmp ne` condition use —
+so its source value is the truth of `input != 0` and the signature
+itself bounds the checked domain (`input <=u 1`); without that bound a
+declared `b == true` would spuriously differ from `icmp eq i64 %b, 1`
+at `input = 5`, an input the signature never admits. Boolean
+expressions stay two-valued: a `bool` binding is not an i64 operand
+(`b + 1` is rejected), a `-> bool` return stays outside the profile,
+and reassigning a bool to a non-bool value keeps the binding's kind.
+The LLVM side is
 separately
 interpreted from the verified LLVM-C graph, not regenerated from the source HIR.
 Its whitelist is scalar i1/i64 SSA: integer constants, comparisons (including
