@@ -949,6 +949,14 @@ the result inherits the operand's dependencies; the type change
 non-scalar targets still fail closed at the binding check. See the
 [Agent scalar conversions](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-scalar-conversions-in-expressions).
 
+### Wave 3 pure builtins in scalar summaries
+
+Agent's C07 fragment now admits the `min`/`max` builtins — the only
+builtins whose operands can be scalars in-fragment — with the result
+unioning every argument's dependencies. `panic`, `len`, `cap`,
+`append`, `make`, `new` and the rest stay opaque. See the
+[Agent pure builtins](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-pure-builtins-in-expressions).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
