@@ -957,6 +957,16 @@ unioning every argument's dependencies. `panic`, `len`, `cap`,
 `append`, `make`, `new` and the rest stay opaque. See the
 [Agent pure builtins](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-pure-builtins-in-expressions).
 
+### Wave 3 compound and tuple assignments in scalar summaries
+
+Agent's C07 fragment now admits compound assignments `x op= e` — the
+result unions the binding's current dependencies with the right-hand
+side's — and parallel tuple assignments `x, y = e1, e2`, where every
+right-hand side evaluates against the pre-state before any store lands.
+Selector/index targets and multi-valued call results stay declared
+gaps. See the
+[Agent assignment forms](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-compound-and-tuple-assignments).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
