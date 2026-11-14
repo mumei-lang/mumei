@@ -1158,8 +1158,11 @@ whose type fact is integer or boolean, so the result inherits the
 operand's dependencies like a local or predeclared scalar conversion.
 Alias targets (`type A = int64`) take the same path; non-scalar named
 types, non-`type` records and missing declarations keep
-`binding_unavailable`, and generic instantiations `lib.T[int](e)` stay
-closed (the `index_expression` callee is not an admitted expression).
+`binding_unavailable`. Generic instantiations `lib.T[int](e)` are
+admitted by the instantiated type-conversion gate (see below) when the
+target is a scalar `type` member and every named identity in its type
+arguments pins; a composite underlying or an unpinnable type argument
+stays closed.
 
 Dot-imported names take the same declared-member path: the producer
 records `import` references and member records for a `. "lib"`
