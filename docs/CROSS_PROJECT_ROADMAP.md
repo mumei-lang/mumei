@@ -1312,9 +1312,21 @@ pointee as package state, sharing the operand read's imported
 transfer and its pointee pin — when the named pointee resolves to
 a `type` member whose fact is scalar or pointer; a struct or
 interface pointee, an unnamed pointee (`*int64`) and a nested
-pointer (`**T`) stay closed, as does `*p` through any local or
-parameter pointer (dep sets track binding indices, not pointee
-contents — the read-side of `*t = v`). Recording a pointer-typed
+pointer (`**T`) stay closed. A bound pointer dereferences the
+same way — `*t` on a parameter or local whose declared `*T` names
+the pointee admits, records its own imported transfer against the
+pointee identity (the binding's read carries none of its own),
+and returns the pointer's provenance unioned with the current deps
+of every `&x`-escaped binding — a stored pointer may alias one,
+and alias facts record distinct type_id's per alias so no type
+check narrows the set (`p := &x; x = y; *p` reads x's updated
+value, and the same may-read covers `*lib.PV` after `lib.PV =
+&x`); `p := &t` inherits the same
+`*T` identity, so `*p` reads the same way, while an unnamed-pointee
+binding (`p := &x` on a builtin `int64`), a computed pointer
+(`*g()`), a nested deref (`**t`) and a pointee naming a local
+`type` stay closed, matching the `*t = v` write side (dep sets
+track binding indices, not pointee contents). Recording a pointer-typed
 `var` member now also declares its named pointee as a `type`
 member so the consumer can classify it. Passing
 `&x` to an imported callee hands it a writable alias of `x`, so
