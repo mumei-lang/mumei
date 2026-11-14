@@ -1043,6 +1043,17 @@ condition evaluation stays a once-per-loop approximation and trip
 counts remain unmodelled. See the
 [Agent general for updates](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-general-for-updates).
 
+### Wave 3 scalar constants in summaries
+
+Agent's scalar fragment now admits `const` declarations and constant
+reads: a constant expression can never read a variable, so a
+scalar-typed `constant` binding always resolves to an empty dependency
+set and the declaration writes nothing — `iota` is dep-free, and spec
+values are still checked for fragment legality. Non-scalar constants
+stay declared gaps, grouped `const ( ... )` remains a parser gap, and
+this is dependency analysis, not constant evaluation. See the
+[Agent scalar const declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-scalar-const-declarations-and-reads).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
