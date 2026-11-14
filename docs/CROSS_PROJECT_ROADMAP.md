@@ -1425,8 +1425,11 @@ optional and existing contracts without it are unchanged. `dependency_kinds`
 extends the pin per claim atom, so a mixed-kind chain can pin each claim's own
 kind (the selected claim and any reachable dependency may be named; a name
 outside the coverage fails closed), and a per-claim pin composes with a uniform
-`evidence_kind` rather than overriding it. Synthetic reader regressions cover
-the pinned-match, substituted-kind and per-claim-selector arms.
+`evidence_kind` rather than overriding it. `content_hash`/`proof_hash` pins
+bind the requirement to the reviewed producer bytes, so a same-atom claim
+regenerated with different bytes no longer satisfies it. Synthetic reader
+regressions cover the pinned-match, substituted-kind, per-claim-selector and
+producer-hash arms.
 
 Repository responsibilities stay the same: `mumei` owns proof and dependency
 gates; `mumei-agent` owns harvesting and repair tools; `mumei-lean` remains the
