@@ -1072,8 +1072,9 @@ mod tests {
 
     #[test]
     fn bool_parameters_stay_outside_the_bounded_c03_fragment() {
-        // The widened equivalence profile admits `bool` parameters as i1
-        // inputs; the bounded C03 contract keeps its i64-only signature.
+        // The widened equivalence profile admits `bool` parameters
+        // (lowered to i64 carrying 0/1); the bounded C03 contract keeps
+        // its i64-only signature.
         let bool_atom = "atom f(b: bool, x: i64) -> i64 requires: true; ensures: true; body: { if b { x } else { 0 } };";
         assert!(extract_pure_i64_contract(bool_atom, "clamp.mm", Some(TARGET), false).is_err());
         assert!(extract_pure_i64_contract(bool_atom, "clamp.mm", Some(TARGET), true).is_ok());

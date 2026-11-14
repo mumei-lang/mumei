@@ -301,6 +301,14 @@ fn unsupported_source_is_not_silently_weakened() {
         .outcome,
         Outcome::Different
     );
+    // An i1 IR parameter is a different signature than the i64 0/1 a
+    // declared bool lowers to — a signature error, not a value difference.
+    assert!(tv::validate_pure_i64(
+        &bool_src,
+        &pin("define i64 @f(i1 %b, i64 %x) { ret i64 %x }"),
+        Options::default()
+    )
+    .is_err());
     for params in ["x: u64", "x: i32", "x: [i64]", "x: f64"] {
         assert!(tv::validate_pure_i64(
             &source(params, "0"),
@@ -328,6 +336,10 @@ fn bool_parameters_are_equivalent_and_refuted() {
             "b: bool, x: i64",
             "let c = b || x > 0; if c { x } else { 1 }",
         ),
+        ("b: bool, x: i64", "if !b { x } else { 0 }"),
+        // A boolean guard over a partial operation keeps both domains:
+        // the 0/1 signature bound and the operation's definedness.
+        ("b: bool, x: i64, y: i64", "if b { x / y } else { 0 }"),
     ] {
         let src = source(params, body);
         assert_eq!(
