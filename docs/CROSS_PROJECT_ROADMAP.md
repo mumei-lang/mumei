@@ -1278,7 +1278,17 @@ expression summarize with the receiver-plus-arguments union.
 Pointer *values* also flow: `&x` inherits its operand's deps,
 imported calls may return pointers (`lib.R(t)` — the arg-union dep
 set is identical), and pointer-typed imported `var` reads
-(`lib.PV`) stay dep-free with the staleness transfer. Passing
+(`lib.PV`) stay dep-free with the staleness transfer. One level
+of dereference on such a var is admitted too — `*lib.PV` reads the
+pointee as package state, sharing the operand read's imported
+transfer and its pointee pin — when the named pointee resolves to
+a `type` member whose fact is scalar or pointer; a struct or
+interface pointee, an unnamed pointee (`*int64`) and a nested
+pointer (`**T`) stay closed, as does `*p` through any local or
+parameter pointer (dep sets track binding indices, not pointee
+contents — the read-side of `*t = v`). Recording a pointer-typed
+`var` member now also declares its named pointee as a `type`
+member so the consumer can classify it. Passing
 `&x` to an imported callee hands it a writable alias of `x`, so
 afterwards `x` conservatively depends on every call argument,
 and a pointer result never admits a generic callee through its
