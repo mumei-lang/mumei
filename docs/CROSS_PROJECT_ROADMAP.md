@@ -1211,8 +1211,11 @@ opaque shape (the result depends on every argument) and the member
 record's signature pins cover the generic's declared signature,
 type-parameter identities included. Named/alias type arguments or
 parameters (`lib.G[lib.T](v)`) stay closed — they would add a type
-identity no pin declares — and inferred calls `lib.G(x)` remain
-`external_or_bodyless`. Instantiated generic types, local generics
+identity no pin declares — and an *inferred* instantiation
+`lib.G(x)`/`G(x)` takes the same gate through `info.Instances`,
+admitted when every inferred type argument is basic (`lib.G(t)`
+with `t` declared `lib.T` stays `external_or_bodyless`).
+Instantiated generic types, local generics
 and methods are unchanged. See the
 [Agent imported generic instantiations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-generic-instantiations)
 section.
@@ -1244,7 +1247,12 @@ expression summarize with the receiver-plus-arguments union.
 Pointer *values* also flow: `&x` inherits its operand's deps,
 imported calls may return pointers (`lib.R(t)` — the arg-union dep
 set is identical), and pointer-typed imported `var` reads
-(`lib.PV`) stay dep-free with the staleness transfer. Writes
+(`lib.PV`) stay dep-free with the staleness transfer. Passing
+`&x` to an imported callee hands it a writable alias of `x`, so
+afterwards `x` conservatively depends on every call argument,
+and a pointer result never admits a generic callee through its
+declared signature — `func G[P any](v P) *P` still goes through
+the instantiation gate. Writes
 through a pointer (`*t = v`, `p.f = v`), `&` on non-fragment
 operands and derefs stay outside the fragment; a pointer to an
 unnamed or composite pointee (`*int64`, `**T`) pins nothing but
