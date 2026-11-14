@@ -1271,7 +1271,12 @@ afterwards `x` conservatively depends on every call argument,
 and a pointer result never admits a generic callee through its
 declared signature — `func G[P any](v P) *P` still goes through
 the instantiation gate. Writes
-through a pointer (`*t = v`, `p.f = v`), `&` on non-fragment
+*through* a pointer land in state the dependency model does not
+follow — it tracks each binding, never the pointee's or field's
+contents — so `*t = v` and `t.f = v` admit as opaque write targets
+when the base is a bound parameter or local identifier (the RHS
+still evaluates for its calls and the result is discarded; imported
+member bases like `lib.VS.f` stay closed). `&` on non-fragment
 operands and derefs stay outside the fragment; a pointer to an
 unnamed or composite pointee (`*int64`, `**T`) pins nothing but
 still tracks its dep set. See the
