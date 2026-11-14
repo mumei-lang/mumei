@@ -2863,7 +2863,17 @@ of `input != 0` and the signature bounds that input to `{0, 1}`; a
 so the checked source value is the Boolean body's 0/1 materialization
 and an `i1` return is a signature error, not a value difference;
 boolean values stay two-valued (a `bool` binding is not an i64 operand
-and a `-> bool` body must produce a Bool kind). Unsigned forms and
+and a `-> bool` body must produce a Bool kind). `match` on an i64
+scrutinee is checked in first-match order — literal patterns contribute
+one `target == n` test each and arms encode as an ite chain under
+accumulated negations, with a trailing `Wildcard`/`Variable` catch-all
+required for exhaustive coverage (a `Variable` arm also binds the
+scrutinee); arm guards, non-literal patterns, a non-i64 scrutinee and
+mixed-kind arms stay rejected. The IR side admits `unreachable` —
+reachable on a defined input it reports `UndefinedBehavior`, and a dead
+`unreachable` block stays harmless; the existing emitter's match
+lowering never emits it (its final else edge is a constant-true branch).
+Unsigned forms and
 flagged variants remain outside the profile. The bounded C03
 recheck/native-bundle fragment stays closed to arithmetic, so build and
 recheck keep agreeing on one source grammar. See the
