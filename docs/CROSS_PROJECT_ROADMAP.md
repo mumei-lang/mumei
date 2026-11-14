@@ -1299,7 +1299,9 @@ state — struct-typed bindings cannot exist in the fragment, so
 `t.f = v` can never overwrite a tracked binding — and admits as an
 opaque write target when the base is a bound parameter or local
 identifier carrying a declared named-type identity (the RHS still
-evaluates for its calls and the result is discarded; imported
+evaluates for its calls and the stored value's dependencies
+accumulate into the base binding — a later `t.M()` can observe the
+write through the pointer; imported
 member bases like `lib.VS.f` stay closed). The store is an external
 mutation, so it records a zero-argument imported transfer against
 that identity — `effects` reports `unknown` and a type redeclaration
