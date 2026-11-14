@@ -1121,7 +1121,10 @@ result as potentially depending on every argument — a documented
 over-approximation; bodies and package-level state stay opaque. Only
 callees whose results are all scalar are `direct_import` — a
 composite result at any arity fails closed, and a multi-valued scalar
-callee declares its arity on the record; a summary
+callee declares its arity on the record; a variadic callee
+(`lib.W(x, y)`) admits positionally — each argument's dependencies
+union into the result — while the spread form `lib.W(xs...)` cannot
+map its argument expressions and stays closed; a summary
 recording an imported transfer reports `effects` as `unknown`; imported
 sources honour the same no-directive contract; identities are
 content-addressed, so identical imported sources across paths share
