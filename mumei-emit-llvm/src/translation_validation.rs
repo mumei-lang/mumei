@@ -203,8 +203,9 @@ fn validate(
     // are defined — the same safety domain `--bitvec-i64` verification
     // requires. Inputs outside the source domain are don't-care; inputs the
     // source binds but the IR poisons on are a distinct failure.
-    // A declared `bool` parameter lowers to i64 carrying 0/1, so the
-    // signature itself bounds its input beside the operation obligations.
+    // A declared `bool` or subrange integer parameter lowers to i64, so
+    // the signature itself bounds its input beside the operation
+    // obligations.
     let src_terms: Vec<Bool> = model
         .param_domain
         .iter()
