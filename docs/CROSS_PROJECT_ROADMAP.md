@@ -1235,9 +1235,11 @@ operators bind no input is an error, and hard nonlinear queries
 `udiv`/`urem`/`lshr` and any flagged form stay rejected. Source
 `&`/`|`/`^` are admitted as total i64 bitwise `and`/`or`/`xor` on both
 sides — defined for every input, so no partial domain applies.
-Block-scoped `let` bindings are admitted in bodies: initializers are
-encoded in order under the enclosing guard and bindings stay lexical —
-non-`let` statements, assignment and trailing `let`s without a value
+Block-scoped `let` bindings and pure expression statements are admitted
+in bodies: initializers and discarded expressions are encoded in order
+under the enclosing guard (keeping their definedness obligations) and
+bindings stay lexical —
+assignment, call statements and trailing `let`s without a value
 statement stay rejected. The C03
 recheck/native-bundle fragment keeps arithmetic and statement sequences
 excluded so build and recheck
