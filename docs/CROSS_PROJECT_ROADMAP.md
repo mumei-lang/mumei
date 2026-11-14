@@ -1349,7 +1349,9 @@ opaque write target when the base is a bound parameter or local
 identifier carrying a declared named-type identity (the RHS still
 evaluates for its calls and the stored value's dependencies
 accumulate into the base binding — a later `t.M()` can observe the
-write through the pointer). The store is an external
+write through the pointer). A `(*t).f = v` base spells the same
+auto-deref out and admits identically (`(**t).f` stays closed).
+The store is an external
 mutation, so it records a zero-argument imported transfer against
 that identity — `effects` reports `unknown` and a type redeclaration
 flags the summary. A `*t = v` dereference store admits through the
