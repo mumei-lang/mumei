@@ -707,7 +707,8 @@ Existing source/Z3/Lean bridge lemmas do not already cover LLVM generation.
 `mumei_emit_llvm::translation_validation::validate_pure_i64` is an opt-in,
 in-process C09 pilot, not a new CLI route or common-evidence producer. It consumes
 one `mumei.pure-i64-wrapping-scalar/v1` source unit — the C03 comparison fragment
-extended with wrapping add/sub/mul — and one caller-supplied LLVM
+extended with wrapping add/sub/mul and guarded signed division/remainder/shifts —
+and one caller-supplied LLVM
 17 textual IR snapshot. The caller must explicitly pin the exact
 `x86_64-unknown-linux-gnu` triple and the profile's `DATA_LAYOUT` on that snapshot;
 the checker never mutates it, invokes optimization passes or executes code.
@@ -717,19 +718,29 @@ for **every concrete signed-i64 input**, independently of requires/ensures.
 Signed bitvector comparisons and wrapping add/sub/mul encode the C03
 integer meaning over mod-2^64 wrap-around — the emitter never sets
 nsw/nuw, and flagged IR arithmetic is rejected, so overflow still
-carries no check and no claim. The LLVM side is separately
+carries no check and no claim. Signed `/`, `%`, `<<` and `>>` map to
+truncating `sdiv`/`srem`/`shl`/`ashr` — the same semantics `verify
+--bitvec-i64` gives the source operators — and bind the input only
+where the operation is defined: a nonzero divisor other than
+`i64::MIN / -1`, and a shift amount in `0..64`. The checked relation
+is refinement over that partial domain: inputs the source leaves
+unbound are don't-care, matching how the emitter's select-guarded
+`srem` stays defined on `x % -1`. A source whose division or shift
+binds no input at all (e.g. `x / 0`) is an error, mirroring the spec
+verifier's rejection. The LLVM side is separately
 interpreted from the verified LLVM-C graph, not regenerated from the source HIR.
 Its whitelist is scalar i1/i64 SSA: integer constants, comparisons (including
 unsigned predicates so wrong signedness can be refuted), bitwise Boolean
-operations, unflagged add/sub/mul, i1/i64 zext/trunc, select, phi, acyclic
-branches and returns. Parameter
+operations, unflagged add/sub/mul/sdiv/srem/shl/ashr, i1/i64 zext/trunc, select,
+phi, acyclic branches and returns. Parameter
 mapping is positional; phi values follow actual predecessor edges.
 The source model includes Boolean implication, but the existing emitter still
 rejects implication in an executable body. Checking manually supplied IR for
 that source form does not add or claim an emitter lowering.
 
 Only one ordinary C-call-convention function with an i64 signature is accepted.
-Memory/pointers, division/remainder/shifts, flagged (nsw/nuw) arithmetic,
+Memory/pointers, unsigned `udiv`/`urem`/`lshr`, flagged (nsw/nuw/exact)
+arithmetic — a flag widens the poison domain and is rejected —,
 calls/FFI/intrinsics,
 loops, vectors/floats, globals/aliases/ifuncs, inline assembly, attributes,
 metadata, undef/poison and freeze are unsupported. Every block is screened,
@@ -740,10 +751,16 @@ The initial bounds are 64 KiB per input, 256 source tokens, 16 parameters,
 expanded path states. Input limits and parser normalization are not independent
 proofs of the parser's correctness.
 
-The existing Z3 library checks a quantifier-free bitvector mismatch query.
-Unsat yields `EquivalentWithinProfile`; sat yields `Different`; unknown/resource
-exhaustion yields `Inconclusive`, never equivalence. Default limits are 5,000 ms
-and 1,000,000 solver resource units; zero budgets are rejected. Reports contain
+The existing Z3 library checks a quantifier-free bitvector mismatch query
+restricted to inputs where both sides are defined. Unsat yields
+`EquivalentWithinProfile`; sat yields `Different`; unknown/resource
+exhaustion yields `Inconclusive`, never equivalence — nonlinear
+queries (a variable-divisor `srem`, operand-swapped refutations) can
+legitimately outrun the budget and stay inconclusive. IR that poisons
+on an input the source's own domain binds is reported separately as
+`UndefinedBehavior`: no produced value is wrong, the operation itself is.
+Default limits are 5,000 ms and 1,000,000 solver resource units; zero budgets
+are rejected. Reports contain
 profile, input domain, target/layout, budgets and exact source/IR hashes, but no
 source excerpts, solver models or raw parser diagnostics. They are ephemeral,
 unauthenticated results, not serialized certificates or a cache acceptance API.

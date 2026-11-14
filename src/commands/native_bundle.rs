@@ -29,6 +29,9 @@ pub(crate) fn run(command: NativeBundleCommand) {
                     Ok(())
                 }
                 Ok(Outcome::Different) => Err(BundleError("native LLVM body differs from source")),
+                Ok(Outcome::UndefinedBehavior) => Err(BundleError(
+                    "native LLVM body reaches undefined behavior on an input the source defines",
+                )),
                 Ok(Outcome::Inconclusive) => {
                     eprintln!("Native source/LLVM recheck inconclusive; no evidence consistency result established.");
                     std::process::exit(3);
@@ -41,6 +44,9 @@ pub(crate) fn run(command: NativeBundleCommand) {
                 .and_then(|result| write_llvm_recheck(result, json, &mut std::io::stdout().lock())) {
                 Ok(Outcome::EquivalentWithinProfile) => Ok(()),
                 Ok(Outcome::Different) => Err(BundleError("native LLVM body differs from source")),
+                Ok(Outcome::UndefinedBehavior) => Err(BundleError(
+                    "native LLVM body reaches undefined behavior on an input the source defines",
+                )),
                 Ok(Outcome::Inconclusive) => {
                     eprintln!("Native source/LLVM recheck inconclusive; no combined result established.");
                     std::process::exit(3);
@@ -260,6 +266,7 @@ fn recheck_llvm(
             evidence::from_recheck(expected_id, &record, &report)?,
         )),
         Outcome::Different => LlvmRecheck::Different,
+        Outcome::UndefinedBehavior => LlvmRecheck::Different,
         Outcome::Inconclusive => LlvmRecheck::Inconclusive,
     })
 }

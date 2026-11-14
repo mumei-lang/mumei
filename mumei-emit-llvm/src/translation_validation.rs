@@ -26,6 +26,11 @@ const MAX_STATES: usize = 256;
 pub enum Outcome {
     EquivalentWithinProfile,
     Different,
+    /// The supplied IR reaches undefined behavior (division by zero, the
+    /// i64::MIN / -1 pair or an out-of-range shift amount) on an input the
+    /// source's own defined domain covers. Reported separately from
+    /// `Different`: no produced value is wrong, the operation itself is.
+    UndefinedBehavior,
     Inconclusive,
 }
 
@@ -189,18 +194,67 @@ fn validate(
             check_module(module.as_mut_ptr(), raw)?;
         }
         check_function(raw, model.inputs.len())?;
-        IrEncoder::new(&context).encode(raw, &model.inputs)?
+        let mut encoder = IrEncoder::new(&context);
+        let returns = encoder.encode(raw, &model.inputs)?;
+        (returns, encoder.definedness)
     };
+    let (returns, ir_definedness) = returns;
+    // Division, remainder and shifts bind both sides only where the operands
+    // are defined — the same safety domain `--bitvec-i64` verification
+    // requires. Inputs outside the source domain are don't-care; inputs the
+    // source binds but the IR poisons on are a distinct failure.
+    let src_dom = Bool::and(&context, &model.definedness.iter().collect::<Vec<_>>());
+    let ir_terms: Vec<Bool> = ir_definedness
+        .iter()
+        .map(|(path, defined)| path.implies(defined))
+        .collect();
+    let ir_dom = Bool::and(&context, &ir_terms.iter().collect::<Vec<_>>());
     let mismatches: Vec<_> = returns
         .iter()
-        .map(|(guard, value)| Bool::and(&context, &[guard, &value._eq(&model.value).not()]))
+        .map(|(guard, value)| {
+            Bool::and(
+                &context,
+                &[guard, &src_dom, &ir_dom, &value._eq(&model.value).not()],
+            )
+        })
         .collect();
     let solver = Solver::new(&context);
-    solver.assert(&Bool::or(&context, &mismatches.iter().collect::<Vec<_>>()));
-    let outcome = match solver.check() {
-        SatResult::Unsat => Outcome::EquivalentWithinProfile,
-        SatResult::Sat => Outcome::Different,
-        SatResult::Unknown => Outcome::Inconclusive,
+    let outcome = 'check: {
+        // A source whose guarded operators have no defined input at all is a
+        // spec `--bitvec-i64` verification would already reject; equivalence
+        // over an empty domain would be vacuous.
+        if !model.definedness.is_empty() {
+            solver.assert(&src_dom);
+            match solver.check() {
+                SatResult::Sat => {}
+                SatResult::Unsat => {
+                    return Err(ValidationError(
+                        "source division or shift defined on no inputs",
+                    ))
+                }
+                SatResult::Unknown => break 'check Outcome::Inconclusive,
+            }
+            solver.reset();
+        }
+        solver.assert(&Bool::or(&context, &mismatches.iter().collect::<Vec<_>>()));
+        match solver.check() {
+            SatResult::Sat => break 'check Outcome::Different,
+            SatResult::Unknown => break 'check Outcome::Inconclusive,
+            SatResult::Unsat => {}
+        }
+        // Even with matching values, an instruction may still produce poison
+        // on an input inside the source's defined domain.
+        let ub: Vec<Bool> = ir_definedness
+            .iter()
+            .map(|(path, defined)| Bool::and(&context, &[path, &defined.not(), &src_dom]))
+            .collect();
+        solver.reset();
+        solver.assert(&Bool::or(&context, &ub.iter().collect::<Vec<_>>()));
+        match solver.check() {
+            SatResult::Sat => Outcome::UndefinedBehavior,
+            SatResult::Unknown => Outcome::Inconclusive,
+            SatResult::Unsat => Outcome::EquivalentWithinProfile,
+        }
     };
     Ok(ValidationReport {
         profile: if native { NATIVE_PROFILE } else { PROFILE },
@@ -212,7 +266,13 @@ fn validate(
         } else {
             "supplied_llvm_ir_snapshot_no_pipeline_attestation"
         },
-        input_domain: if native {
+        input_domain: if !model.definedness.is_empty() || !ir_definedness.is_empty() {
+            if native {
+                "zero_argument_main_i64_body_where_division_and_shift_defined_not_process_exit_status"
+            } else {
+                "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires"
+            }
+        } else if native {
             "zero_argument_main_i64_body_not_process_exit_status"
         } else {
             "all_signed_i64_inputs_not_restricted_by_requires"
@@ -317,7 +377,13 @@ unsafe fn check_function(function: LLVMValueRef, params: usize) -> Result<()> {
             }
             match LLVMGetInstructionOpcode(inst) {
                 LLVMOpcode::LLVMRet | LLVMOpcode::LLVMBr => (),
-                LLVMOpcode::LLVMAdd | LLVMOpcode::LLVMSub | LLVMOpcode::LLVMMul => {
+                LLVMOpcode::LLVMAdd
+                | LLVMOpcode::LLVMSub
+                | LLVMOpcode::LLVMMul
+                | LLVMOpcode::LLVMSDiv
+                | LLVMOpcode::LLVMSRem
+                | LLVMOpcode::LLVMShl
+                | LLVMOpcode::LLVMAShr => {
                     unflagged_arithmetic(inst)?;
                     width(LLVMTypeOf(inst))?;
                 }
@@ -343,7 +409,9 @@ unsafe fn check_function(function: LLVMValueRef, params: usize) -> Result<()> {
 /// `add`/`sub`/`mul` wrap mod 2^64 on both sides of the comparison — the
 /// Mumei emitter never sets wrap flags. The nsw/nuw flags instead make
 /// overflow produce poison, which this profile rejects wholesale, so a
-/// flagged arithmetic instruction stays unsupported.
+/// flagged arithmetic instruction stays unsupported. `sdiv`/`shl`/`ashr`
+/// can carry nsw/nuw (`shl`) or `exact`, which likewise strengthen the
+/// poison domain, so they are rejected by the same whole-token check.
 unsafe fn unflagged_arithmetic(inst: LLVMValueRef) -> Result<()> {
     let printed = LLVMPrintValueToString(inst);
     let text = std::ffi::CStr::from_ptr(printed)
@@ -354,7 +422,7 @@ unsafe fn unflagged_arithmetic(inst: LLVMValueRef) -> Result<()> {
     // a substring test would also trip on SSA names like `%answer`.
     if text
         .split_whitespace()
-        .any(|token| token == "nsw" || token == "nuw")
+        .any(|token| matches!(token, "nsw" | "nuw" | "exact"))
     {
         return Err(ValidationError("flagged LLVM arithmetic unsupported"));
     }
@@ -471,10 +539,18 @@ unsafe fn acyclic(block: LLVMBasicBlockRef, colors: &mut HashMap<usize, u8>) -> 
 struct IrEncoder<'ctx> {
     ctx: &'ctx Context,
     states: usize,
+    /// `(path condition, defined)` obligations for `sdiv`/`srem`/`shl`/`ashr`:
+    /// the instruction's operands must satisfy the condition wherever the
+    /// path executes it, or the IR produces poison there.
+    definedness: Vec<(Bool<'ctx>, Bool<'ctx>)>,
 }
 impl<'ctx> IrEncoder<'ctx> {
     fn new(ctx: &'ctx Context) -> Self {
-        Self { ctx, states: 0 }
+        Self {
+            ctx,
+            states: 0,
+            definedness: Vec::new(),
+        }
     }
 
     unsafe fn value(
@@ -607,6 +683,42 @@ impl<'ctx> IrEncoder<'ctx> {
                             LLVMOpcode::LLVMAdd => a.bvadd(&b),
                             LLVMOpcode::LLVMSub => a.bvsub(&b),
                             LLVMOpcode::LLVMMul => a.bvmul(&b),
+                            LLVMOpcode::LLVMSDiv | LLVMOpcode::LLVMSRem => {
+                                // `sdiv`/`srem` are poison for a zero
+                                // divisor and for i64::MIN / -1 — the same
+                                // partial domain the source side records.
+                                let zero = BV::from_i64(self.ctx, 0, 64);
+                                let min = BV::from_i64(self.ctx, i64::MIN, 64);
+                                let minus_one = BV::from_i64(self.ctx, -1, 64);
+                                let defined = Bool::and(
+                                    self.ctx,
+                                    &[
+                                        &b._eq(&zero).not(),
+                                        &Bool::and(
+                                            self.ctx,
+                                            &[&a._eq(&min), &b._eq(&minus_one)],
+                                        )
+                                        .not(),
+                                    ],
+                                );
+                                self.definedness.push((guard.clone(), defined));
+                                if op == LLVMOpcode::LLVMSDiv {
+                                    a.bvsdiv(&b)
+                                } else {
+                                    a.bvsrem(&b)
+                                }
+                            }
+                            LLVMOpcode::LLVMShl | LLVMOpcode::LLVMAShr => {
+                                // `shl`/`ashr` are poison for amounts >= 64
+                                // (unsigned comparison covers negatives).
+                                let max = BV::from_i64(self.ctx, 64, 64);
+                                self.definedness.push((guard.clone(), b.bvult(&max)));
+                                if op == LLVMOpcode::LLVMShl {
+                                    a.bvshl(&b)
+                                } else {
+                                    a.bvashr(&b)
+                                }
+                            }
                             LLVMOpcode::LLVMICmp => {
                                 use LLVMIntPredicate::*;
                                 let condition = match LLVMGetICmpPredicate(inst) {

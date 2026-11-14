@@ -2831,7 +2831,12 @@ Wrong lowering is refuted; unsupported semantics, invalid IR and inconclusive
 solver results are not equivalence. The fragment now also covers wrapping
 add/sub/mul on both sides (mod 2^64): the emitter never sets nsw/nuw, flagged
 IR arithmetic is rejected, and nonlinear solver timeouts stay `Inconclusive`.
-Division and shifts remain outside the profile. The bounded C03
+Signed division, remainder and shifts (`sdiv`/`srem`/`shl`/`ashr`) join under
+refinement semantics — both sides bind inputs only where defined (nonzero
+divisor except `i64::MIN / -1`, shift amount `0..64`), IR poison on a
+source-defined input reports `UndefinedBehavior`, a vacuous source domain is
+an error, and hard nonlinear queries stay `Inconclusive`. Unsigned forms and
+flagged variants remain outside the profile. The bounded C03
 recheck/native-bundle fragment stays closed to arithmetic, so build and
 recheck keep agreeing on one source grammar. See the
 [checked snapshot and exclusions](VERIFICATION_NATIVE.md#first-llvm-translation-validation-slice).
