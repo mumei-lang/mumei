@@ -1172,10 +1172,11 @@ stay closed. A bound base admits through the same dep-free model:
 `t.F` on a `*S` parameter or local auto-dereferences caller state —
 the operand must be a bound identifier whose pointer names a `type`
 member (the pointee pins for `stale_dependents`), and the field must
-resolve to a scalar-or-pointer `var` member. A struct pointee can
-never alias a tracked scalar binding, so no escaped union applies.
-`(*t).F`, `t.W.N`, `t.PF` method values and composite-typed fields
-stay closed.
+resolve to a scalar-or-pointer `var` member. One explicit
+dereference — `(*t).F` — spells the same auto-deref out and admits
+the same way. A struct pointee can never alias a tracked scalar
+binding, so no escaped union applies. `(**t).F`, `t.W.N`, `t.PF`
+method values and composite-typed fields stay closed.
 
 Member declarations also classify `lib.T(e)` conversion targets: the
 consumer admits the call only when the declared member is a `type`
