@@ -1196,6 +1196,22 @@ signature types only — no composite nesting — and are recorded by
 the caller's analysis, never by the callee's own summary. See the
 [Agent call signature type-identity pins](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-call-signature-type-identity-pins).
 
+#### Imported generic instantiations
+
+Explicit instantiations of imported generic functions —
+`lib.G[int64](x)` — now classify as `direct_import` when every type
+argument and every instantiated parameter is a basic type and the
+instantiated result is scalar. The dependency model is the existing
+opaque shape (the result depends on every argument) and the member
+record's signature pins cover the generic's declared signature,
+type-parameter identities included. Named/alias type arguments or
+parameters (`lib.G[lib.T](v)`) stay closed — they would add a type
+identity no pin declares — and inferred calls `lib.G(x)` remain
+`external_or_bodyless`. Instantiated generic types, local generics
+and methods are unchanged. See the
+[Agent imported generic instantiations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-generic-instantiations)
+section.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
