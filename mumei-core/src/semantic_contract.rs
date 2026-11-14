@@ -329,6 +329,7 @@ pub fn extract_pure_i64_contract(
         .chain(allow_wrapping_arithmetic.then_some("bool_parameters_lowered_to_i64_zero_one"))
         .chain(allow_wrapping_arithmetic.then_some("bool_results_lowered_to_i64_zero_one"))
         .chain(allow_wrapping_arithmetic.then_some("first_match_order_i64_match_with_catch_all"))
+        .chain(allow_wrapping_arithmetic.then_some("match_arm_boolean_guards"))
         .chain(allow_wrapping_arithmetic.then_some("conditional_path_reassignment_ite_merge"))
         .collect(),
         requested_route: "standard_z3_not_executed_by_extractor",
