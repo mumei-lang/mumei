@@ -931,7 +931,11 @@ jump may have skipped them. Labelled jumps, `goto`, `defer` and `go`
 stay declared gaps; an inc/dec operand resolving to an imported
 `var` member admits through the imported member-write gate (`lib.V++`,
 `(*lib.PV)++` on a pointer-typed member)
-instead, while bound-base fields stay closed. See the
+instead, and a bound field (`t.F++`, `(*t).F++`, or nested
+`t.W.F++`) routes through the opaque-write-target gate: the
+increment records the same external-mutation transfer `t.F = v`
+does and, like `(*p)++`, needs no dependency fold — the stored
+value is the field's own external contents. See the
 [Agent effect-free control statements](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-effect-free-control-statements).
 
 ### Wave 3 statement initializers in scalar summaries
