@@ -1119,6 +1119,24 @@ packages exist, their paths and source order stay host decisions; there
 is no shadowing, vendoring or version selection. See the
 [Agent host-declared import resolution](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-host-declared-import-resolution).
 
+### Wave 3 imported member declarations and scalar constant reads
+
+The package report gains `imported_members: [{id, name, kind, type}]` —
+one declaration per imported object the unit actually names, carrying
+the member's own binding identity plus its kind (`function`, `const`,
+`var`, `type`) and type fact. The section is optional: a report without
+it still loads and imported names stay unmodelled. The consumer admits
+a package-qualified read `lib.K` only when the declared member is a
+scalar constant and the record's name matches the source token —
+constants carry no dependencies, like local constants. Imported
+variables (unmodelled package state) and imported functions (not
+values) keep `non_parameter_reference` and fail closed, as does any
+read whose member declaration is absent. Constant *values* are not
+modelled — the fragment tracks dependencies, not what a constant
+equals — and member types carry no identity usable for consumer-side
+type checks yet. Dot-imported names stay unmodelled: they are plain
+identifiers, not package-qualified selectors.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
