@@ -242,14 +242,20 @@ fn unsupported_source_is_not_silently_weakened() {
         "1.0",
         "f(x)",
         "while x > 0 invariant true { x }; x",
-        // Sequences admit `let`s and pure expression statements: an
-        // assignment, a call statement and a trailing `let` without a
-        // value still fail.
+        // Sequences admit `let`s, scalar reassignments and pure
+        // expression statements: an unbound assignment, a call statement
+        // and a trailing `let` without a value still fail.
         "x = 1",
-        "x = 1; x",
+        "y = 1; x",
         "f(x); x",
         "let y = x;",
         "let y = f(x); y",
+        // Rebinding cannot escape a conditional path: assignments inside
+        // `if` branches may only touch names bound in that branch.
+        "if x > 0 { x = 1; 0 } else { 0 }",
+        "let a = x; if x > 0 { a = 1; a } else { a }",
+        // Reassignment keeps the binding's kind.
+        "let a = x; a = x > 0; a",
     ] {
         assert!(tv::validate_pure_i64(
             &source("x: i64", body),
@@ -416,6 +422,49 @@ fn pure_expression_statements_are_equivalent_and_refuted() {
     let src = source("x: i64", "x + 1; x");
     let wrong = emitted(&source("x: i64", "x + 1"));
     assert_eq!(validate(&src, &wrong).outcome, Outcome::Different);
+}
+
+#[test]
+fn scalar_reassignment_is_equivalent_and_refuted() {
+    for (params, body) in [
+        // Rebinding a parameter or a block `let` updates the value the
+        // tail statement yields.
+        ("x: i64", "x = 1; x"),
+        ("x: i64", "x = x + 1; x"),
+        ("x: i64", "let a = x; a = a + 1; a"),
+        ("x: i64", "let a = x; a = x + 1; a = a * 2; a"),
+        ("x: i64", "let b = x > 0; b = x < 0; if b { x } else { 0 }"),
+        // A branch-local binding may be reassigned inside its own branch.
+        ("x: i64", "if x > 0 { let a = x; a = a + 1; a } else { 0 }"),
+        // Mixed with discarded expression statements.
+        ("x: i64", "let a = x; a + 1; a = a * 2; a"),
+    ] {
+        let src = source(params, body);
+        assert_eq!(
+            validate(&src, &emitted(&src)).outcome,
+            Outcome::EquivalentWithinProfile,
+            "{body}"
+        );
+    }
+    // A reassigned partial operation keeps its definedness obligation:
+    // `x = x / y; x` is defined exactly where the division is.
+    let src = source("x: i64, y: i64", "x = x / y; x");
+    let report = validate(&src, &emitted(&src));
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(
+        report.input_domain,
+        "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires"
+    );
+    // `x = x + 1; x` returns x + 1 — not x + 2 or the original x.
+    let src = source("x: i64", "x = x + 1; x");
+    for other in ["x + 2", "x"] {
+        let wrong = emitted(&source("x: i64", other));
+        assert_eq!(
+            validate(&src, &wrong).outcome,
+            Outcome::Different,
+            "{other}"
+        );
+    }
 }
 
 #[test]
@@ -788,6 +837,8 @@ fn native_emitter_bodies_and_truncating_wrapper_match_without_rewriting() {
         "let a = 7; let b = a | 1; a ^ b",
         "7 + 1; 8",
         "let a = 7; a ^ 1; a",
+        "let a = 7; a = a + 1; a",
+        "7 - 1; 8",
     ]
     .into_iter()
     .map(str::to_owned)
