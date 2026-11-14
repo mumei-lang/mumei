@@ -1077,6 +1077,23 @@ declared signature gaps, and no zero-value semantics beyond
 parameter-independence are modelled. See the
 [Agent named result parameters](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-named-result-parameters).
 
+### Wave 3 multi-file package units and per-file freshness
+
+Agent's Go producer gains a package profile —
+`mumei.go-types-package/v1` — that takes named `{name, source}` files
+as one unit. Spans carry a file index, `source_sha256` is a unit digest
+over `name\x00file-digest` pairs, and each binding identity embeds its
+declaring file's digest — so replacing one file churns only that
+file's identities and the existing `stale_dependents` check maps
+file-level changes to dependents without re-deriving untouched files.
+Calls across file boundaries inside the unit classify `direct_local`.
+Single-file v1 reports keep their exact wire shape. A unit is exactly
+the declared file set — no import resolution (`imports_not_supported`
+still applies), at most 64 files of 64 KiB each, unique names, one
+shared package name. File indices are report-internal, not paths. See
+the
+[Agent multi-file package units](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-multi-file-package-units-and-per-file-freshness).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
