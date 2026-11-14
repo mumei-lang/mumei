@@ -1270,13 +1270,19 @@ set is identical), and pointer-typed imported `var` reads
 afterwards `x` conservatively depends on every call argument,
 and a pointer result never admits a generic callee through its
 declared signature — `func G[P any](v P) *P` still goes through
-the instantiation gate. Writes
-*through* a pointer land in state the dependency model does not
-follow — it tracks each binding, never the pointee's or field's
-contents — so `*t = v` and `t.f = v` admit as opaque write targets
-when the base is a bound parameter or local identifier (the RHS
-still evaluates for its calls and the result is discarded; imported
-member bases like `lib.VS.f` stay closed). `&` on non-fragment
+the instantiation gate. A field
+write *through* a pointer-typed parameter lands only in caller
+state — struct-typed bindings cannot exist in the fragment, so
+`t.f = v` can never overwrite a tracked binding — and admits as an
+opaque write target when the base is a bound parameter or local
+identifier carrying a declared named-type identity (the RHS still
+evaluates for its calls and the result is discarded; imported
+member bases like `lib.VS.f` stay closed). The store is an external
+mutation, so it records a zero-argument imported transfer against
+that identity — `effects` reports `unknown` and a type redeclaration
+flags the summary. A `*t = v` dereference stays closed: `p := &x`
+aliases a tracked local and dep sets carry indices, not identities,
+so an indirected store cannot be proven safe. `&` on non-fragment
 operands and derefs stay outside the fragment; a pointer to an
 unnamed or composite pointee (`*int64`, `**T`) pins nothing but
 still tracks its dep set. See the
