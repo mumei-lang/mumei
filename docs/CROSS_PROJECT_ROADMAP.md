@@ -1108,7 +1108,13 @@ churns the target and `stale_dependents` flags callers across package
 boundaries. Imported member uses record `import` references; package
 names stay namespace qualifiers. The consumer treats an imported call's
 result as potentially depending on every argument — a documented
-over-approximation; bodies and package-level state stay opaque. Which
+over-approximation; bodies and package-level state stay opaque. Only
+zero-result or single-scalar-result callees are `direct_import` —
+composite or multi-valued imported results fail closed; a summary
+recording an imported transfer reports `effects` as `unknown`; imported
+sources honour the same no-directive contract; identities are
+content-addressed, so identical imported sources across paths share
+identities. Which
 packages exist, their paths and source order stay host decisions; there
 is no shadowing, vendoring or version selection. See the
 [Agent host-declared import resolution](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-host-declared-import-resolution).
