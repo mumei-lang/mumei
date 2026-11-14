@@ -1158,16 +1158,22 @@ whose type fact is integer or boolean, so the result inherits the
 operand's dependencies like a local or predeclared scalar conversion.
 Alias targets (`type A = int64`) take the same path; non-scalar named
 types, non-`type` records and missing declarations keep
-`binding_unavailable`, and generic instantiations `lib.T[int](e)` stay
-closed (the `index_expression` callee is not an admitted expression).
+`binding_unavailable`. Generic instantiations `lib.T[int](e)` are
+admitted by the instantiated type-conversion gate (see below) when the
+target is a scalar `type` member and every named identity in its type
+arguments pins; a composite underlying or an unpinnable type argument
+stays closed.
 
 Dot-imported names take the same declared-member path: the producer
 records `import` references and member records for a `. "lib"`
 import's objects, so a bare `K`, `V` or `T(e)` classifies exactly
 like its package-qualified form — scalar consts dep-free, scalar vars
 as opaque state reads with the same staleness propagation, scalar
-type members admitting conversions. Function values, non-scalars,
-generic instantiations and missing records stay closed.
+type members admitting conversions. Function values, non-scalars and
+missing records stay closed, as do generic instantiations
+(`T[int](e)`) — the instantiated type-conversion gate resolves its
+member through a `lib.` qualifier, so the dot-imported shape is out
+of scope.
 
 ### Wave 3 imported member type identities
 
@@ -1221,7 +1227,13 @@ argument is basic, named or alias (`lib.G(t)` with `t` declared
 arguments (`G[*lib.T](v)`) have no pin channel and stay closed;
 nested named arguments pin every identity they contain
 (`G[other.N[lib.T]](v)` records both `N` and `T`).
-Instantiated generic types, local generics
+Instantiated generic *type* conversions are admitted when the
+target member's underlying is scalar (`lib.S[int64](x)`,
+`type S[A any] int64`): the operand's dependencies flow through
+like any `T(e)`, and the whole type expression is walked so every
+named identity it contains is pinned. A composite underlying or an
+unpinnable constructor inside the type arguments
+(`lib.S[*lib.T](x)`) stays closed. Local generics
 and methods are unchanged. See the
 [Agent imported generic instantiations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-generic-instantiations)
 section.
