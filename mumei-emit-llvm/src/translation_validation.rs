@@ -280,6 +280,8 @@ fn validate(
                 "zero_argument_main_i64_body_where_division_and_shift_defined_not_process_exit_status"
             } else if model.param_domain.is_empty() {
                 "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires"
+            } else if model.subrange_params {
+                "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires"
             } else {
                 "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_restricted_by_requires"
             }
@@ -287,6 +289,8 @@ fn validate(
             "zero_argument_main_i64_body_not_process_exit_status"
         } else if model.param_domain.is_empty() {
             "all_signed_i64_inputs_not_restricted_by_requires"
+        } else if model.subrange_params {
+            "signed_i64_inputs_with_signature_bounded_param_domains_not_restricted_by_requires"
         } else {
             "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_restricted_by_requires"
         },

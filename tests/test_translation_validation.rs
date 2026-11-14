@@ -1510,6 +1510,12 @@ fn subrange_integer_parameters_are_equivalent_and_refuted() {
             "{src}"
         );
     }
+    // A signature-bounded domain reports as such, not as a bool domain.
+    let src = source("x: i8", "x");
+    assert_eq!(
+        validate(&src, &emitted(&src)).input_domain,
+        "signed_i64_inputs_with_signature_bounded_param_domains_not_restricted_by_requires"
+    );
     // The declared type bounds the checked inputs: `x == 200` is always
     // false inside `i8` and `x == 300` inside `u8`, so these bodies are
     // equivalent to `ret 0` only because `param_domain` rules out the

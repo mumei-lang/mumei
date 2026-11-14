@@ -796,6 +796,10 @@ pub struct PureI64Body<'ctx> {
     /// lowers to an i64 formal too, so its entries bound the input to the
     /// type's range. Empty without such parameters.
     pub param_domain: Vec<Bool<'ctx>>,
+    /// True when a declared subrange integer parameter contributed to
+    /// `param_domain` — a bool-only domain keeps its 0/1 report label,
+    /// while any subrange bound reports the signature-bounded domain.
+    pub subrange_params: bool,
 }
 
 type BodyResult<T> = std::result::Result<T, SemanticContractError>;
@@ -899,6 +903,12 @@ pub fn encode_pure_i64_body<'ctx>(
             _ => vec![],
         })
         .collect();
+    let subrange_params = atom.params.iter().any(|p| {
+        matches!(
+            p.type_name.as_deref(),
+            Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32")
+        )
+    });
     Ok(PureI64Body {
         function_name: atom.name,
         source_sha256: contract.source_sha256,
@@ -906,6 +916,7 @@ pub fn encode_pure_i64_body<'ctx>(
         value,
         definedness,
         param_domain,
+        subrange_params,
     })
 }
 
