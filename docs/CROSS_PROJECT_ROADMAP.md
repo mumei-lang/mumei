@@ -1016,6 +1016,19 @@ recorded a call to an absent target is exactly the re-derive set.
 Detection only — the host decides what to rebuild. See the
 [Agent dependent invalidation](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-dependent-invalidation).
 
+### Wave 3 switch fallthrough in scalar summaries
+
+Agent's expression-switch fragment admits a terminal `fallthrough` in
+non-final clauses, mirroring the positional rule the C05 checker already
+models: the next clause's body runs in the same scope as a sequential
+continuation, so writes chain through the fall-through boundary, while a
+conditional `break` before it keeps them may-assignments. A trailing
+fallthrough in the final clause and non-terminal fallthroughs stay
+rejected (upstream at the type check, with a defensive gap as well).
+Type switches, `select`, labelled jumps and `goto` remain outside the
+fragment. See the
+[Agent switch fallthrough](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-switch-fallthrough).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
