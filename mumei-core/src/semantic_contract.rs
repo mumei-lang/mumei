@@ -27,8 +27,8 @@ pub const PURE_I64_PROFILE: &str = "mumei.pure-i64-comparison/v1";
 /// bitwise `&`/`|`/`^`, guarded div/rem/shl/shr (defined only for nonzero
 /// divisors excluding
 /// i64::MIN / -1 and shift amounts in 0..64), block-scoped `let`
-/// bindings, scalar reassignments on the linear path and discarded pure
-/// expression statements. Kept distinct from the
+/// bindings, scalar reassignments on the linear path, nested blocks and
+/// discarded pure expression statements. Kept distinct from the
 /// bounded C03 contract, which still excludes arithmetic and sequences.
 pub const PURE_I64_WRAPPING_PROFILE: &str = "mumei.pure-i64-wrapping-scalar/v1";
 
@@ -112,8 +112,8 @@ pub struct SemanticContract {
 /// operations, total bitwise `&`/`|`/`^`, plus guarded div/rem/shl/shr (a
 /// partial domain: nonzero divisor, no i64::MIN / -1, shift amount in 0..64),
 /// block-scoped `let` bindings, scalar reassignments on the linear path
-/// (a rebinding cannot escape an `if` branch or expression block) and
-/// discarded pure expression statements;
+/// (a rebinding cannot escape an `if` branch, expression block or nested
+/// block) and discarded pure expression statements;
 /// the bounded C03
 /// contract always passes `false` so the build
 /// and recheck paths keep agreeing on a fragment with no arithmetic.
@@ -287,6 +287,7 @@ pub fn extract_pure_i64_contract(
         .chain(allow_wrapping_arithmetic.then_some("i64_bitwise_total"))
         .chain(allow_wrapping_arithmetic.then_some("lexical_scoped_let_bindings"))
         .chain(allow_wrapping_arithmetic.then_some("scalar_reassignment_linear_path"))
+        .chain(allow_wrapping_arithmetic.then_some("nested_block_sequences"))
         .chain(allow_wrapping_arithmetic.then_some("discarded_pure_expression_statements"))
         .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
         .collect(),
@@ -993,7 +994,12 @@ mod tests {
         // `let`/expression/assignment sequences; the bounded C03 contract
         // still rejects them, so build and recheck keep agreeing on one
         // source grammar.
-        for body in ["let y = x; y", "x + 1; x", "let a = x; a = a + 1; a"] {
+        for body in [
+            "let y = x; y",
+            "x + 1; x",
+            "let a = x; a = a + 1; a",
+            "let a = x; { let a = a + 1; a }; a",
+        ] {
             let source = SOURCE.replace("if x < 0 { 0 } else { x }", body);
             assert!(extract(&source).is_err());
             assert!(extract_pure_i64_contract(&source, "clamp.mm", Some(TARGET), true).is_ok());

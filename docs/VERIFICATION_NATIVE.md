@@ -742,9 +742,13 @@ guard — a partial operation (division, shifts) records its definedness
 obligation under that same guard whether or not its value is discarded —
 and bindings are lexical, so a shadowing or branch-local `let` never
 escapes its block. A discarded expression contributes no value but its
-obligations still hold. Reassignment rebinding is restricted to names
-bound on the current linear path: an assignment inside an `if` branch or
-expression block may only touch names bound within it, because the
+obligations still hold. A nested block in a leading position is checked
+and encoded like a discarded expression — its value is unused and its
+bindings stay lexical to the nested block. Reassignment rebinding is
+restricted to names
+bound on the current linear path: an assignment inside an `if` branch,
+expression block or nested block may only touch names bound within it,
+because the
 source model cannot merge a rebinding that escapes a conditional path —
 `if x > 0 { x = 1; 0 } else { 0 }` stays rejected. Other statement
 forms (unbound assignment, calls, loops) stay

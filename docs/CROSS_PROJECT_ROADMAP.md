@@ -1240,9 +1240,11 @@ statements are admitted
 in bodies: initializers, rebindings and discarded expressions are
 encoded in order
 under the enclosing guard (keeping their definedness obligations) and
-bindings stay lexical — reassignments may only rebind names bound on the
-current linear path, so an assignment inside an `if` branch or
-expression block cannot escape its conditional path;
+bindings stay lexical — nested blocks are likewise admitted in leading
+positions with bindings lexical to the nested block; reassignments may
+only rebind names bound on the
+current linear path, so an assignment inside an `if` branch, expression
+block or nested block cannot escape its conditional path;
 unbound assignment, call statements and trailing `let`s without a value
 statement stay rejected. The C03
 recheck/native-bundle fragment keeps arithmetic and statement sequences

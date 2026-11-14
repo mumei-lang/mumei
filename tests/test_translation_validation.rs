@@ -250,10 +250,12 @@ fn unsupported_source_is_not_silently_weakened() {
         "f(x); x",
         "let y = x;",
         "let y = f(x); y",
-        // Rebinding cannot escape a conditional path: assignments inside
-        // `if` branches may only touch names bound in that branch.
+        // Rebinding cannot escape a conditional path or a nested block:
+        // assignments inside `if` branches or nested blocks may only
+        // touch names bound within them.
         "if x > 0 { x = 1; 0 } else { 0 }",
         "let a = x; if x > 0 { a = 1; a } else { a }",
+        "let a = x; { a = 1; a }; a",
         // Reassignment keeps the binding's kind.
         "let a = x; a = x > 0; a",
     ] {
@@ -438,6 +440,14 @@ fn scalar_reassignment_is_equivalent_and_refuted() {
         ("x: i64", "if x > 0 { let a = x; a = a + 1; a } else { 0 }"),
         // Mixed with discarded expression statements.
         ("x: i64", "let a = x; a + 1; a = a * 2; a"),
+        // A nested block keeps its bindings lexical and discards its
+        // value: `let a` inside shadows, reads of the outer `a` still see
+        // the enclosing binding.
+        ("x: i64", "let a = x; { let b = a + 1; b }; a"),
+        ("x: i64", "let a = x; { let a = a + 1; a }; a"),
+        ("x: i64", "let a = x; { let b = a; { b + 1; b } }; a"),
+        // A nested block may reassign its own bindings.
+        ("x: i64", "let a = x; { let b = a; b = b * 2; b }; a"),
     ] {
         let src = source(params, body);
         assert_eq!(
@@ -839,6 +849,7 @@ fn native_emitter_bodies_and_truncating_wrapper_match_without_rewriting() {
         "let a = 7; a ^ 1; a",
         "let a = 7; a = a + 1; a",
         "7 - 1; 8",
+        "let a = 7; { let a = a + 1; a }; a",
     ]
     .into_iter()
     .map(str::to_owned)
