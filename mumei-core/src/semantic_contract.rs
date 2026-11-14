@@ -14,7 +14,7 @@ use crate::verification::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use z3::{
     ast::{Ast, Bool, BV},
     Context,
@@ -23,10 +23,12 @@ use z3::{
 pub const SEMANTIC_CONTRACT_VERSION: &str = "mumei.semantic-contract/v1";
 pub const PURE_I64_PROFILE: &str = "mumei.pure-i64-comparison/v1";
 /// The wider source fragment checked inside the LLVM equivalence profile:
-/// the same scalar comparisons plus wrapping i64 add/sub/mul and guarded
-/// div/rem/shl/shr (defined only for nonzero divisors excluding
-/// i64::MIN / -1 and shift amounts in 0..64). Kept distinct from the
-/// bounded C03 contract, which still excludes arithmetic.
+/// the same scalar comparisons plus wrapping i64 add/sub/mul, total
+/// bitwise `&`/`|`/`^`, guarded div/rem/shl/shr (defined only for nonzero
+/// divisors excluding
+/// i64::MIN / -1 and shift amounts in 0..64) and block-scoped `let`
+/// bindings. Kept distinct from the
+/// bounded C03 contract, which still excludes arithmetic and sequences.
 pub const PURE_I64_WRAPPING_PROFILE: &str = "mumei.pure-i64-wrapping-scalar/v1";
 
 #[derive(Debug, thiserror::Error)]
@@ -147,7 +149,11 @@ pub fn extract_pure_i64_contract(
     };
     validate_atom(&atom)?;
     atom.span.file = source_name.to_owned();
-    let params = atom.params.iter().map(|p| p.name.as_str()).collect();
+    let scope: BTreeMap<String, ScalarKind> = atom
+        .params
+        .iter()
+        .map(|p| (p.name.clone(), ScalarKind::I64))
+        .collect();
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
     let ensures =
@@ -155,15 +161,15 @@ pub fn extract_pure_i64_contract(
     let body =
         parse_body_expr_checked(&atom.body_expr).map_err(|_| SemanticContractError::Parse)?;
     expect_kind(
-        expression_kind(&requires, &params, false, allow_wrapping_arithmetic)?,
+        expression_kind(&requires, &scope, false, allow_wrapping_arithmetic)?,
         ScalarKind::Bool,
     )?;
     expect_kind(
-        expression_kind(&ensures, &params, true, allow_wrapping_arithmetic)?,
+        expression_kind(&ensures, &scope, true, allow_wrapping_arithmetic)?,
         ScalarKind::Bool,
     )?;
     expect_kind(
-        statement_kind(&body, &params, false, allow_wrapping_arithmetic)?,
+        statement_kind(&body, &scope, false, allow_wrapping_arithmetic)?,
         ScalarKind::I64,
     )?;
 
@@ -269,6 +275,7 @@ pub fn extract_pure_i64_contract(
         .into_iter()
         .chain(allow_wrapping_arithmetic.then_some("wrapping_i64_arithmetic"))
         .chain(allow_wrapping_arithmetic.then_some("i64_bitwise_total"))
+        .chain(allow_wrapping_arithmetic.then_some("lexical_scoped_let_bindings"))
         .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
         .collect(),
         requested_route: "standard_z3_not_executed_by_extractor",
@@ -363,20 +370,35 @@ fn expect_kind(actual: ScalarKind, expected: ScalarKind) -> Result<(), SemanticC
 
 fn statement_kind(
     stmt: &Stmt,
-    params: &BTreeSet<&str>,
+    scope: &BTreeMap<String, ScalarKind>,
     result_in_scope: bool,
     allow_wrapping_arithmetic: bool,
 ) -> Result<ScalarKind, SemanticContractError> {
     match stmt {
         Stmt::Expr(expr, _) => {
-            expression_kind(expr, params, result_in_scope, allow_wrapping_arithmetic)
+            expression_kind(expr, scope, result_in_scope, allow_wrapping_arithmetic)
         }
-        Stmt::Block(stmts, _) if stmts.len() == 1 => statement_kind(
-            &stmts[0],
-            params,
-            result_in_scope,
-            allow_wrapping_arithmetic,
-        ),
+        Stmt::Block(stmts, _) if stmts.len() == 1 => {
+            statement_kind(&stmts[0], scope, result_in_scope, allow_wrapping_arithmetic)
+        }
+        // `let`-only statement sequences end in a value statement; the
+        // widened equivalence profile admits them, the bounded C03
+        // fragment stays closed. Bindings are lexical to the block.
+        Stmt::Block(stmts, _) if !stmts.is_empty() && allow_wrapping_arithmetic => {
+            let mut inner = scope.clone();
+            let (lets, last) = stmts.split_at(stmts.len() - 1);
+            for stmt in lets {
+                let Stmt::Let { var, value, .. } = stmt else {
+                    return Err(SemanticContractError::Unsupported(
+                        "non-let statement in a sequence",
+                    ));
+                };
+                let kind =
+                    expression_kind(value, &inner, result_in_scope, allow_wrapping_arithmetic)?;
+                inner.insert(var.clone(), kind);
+            }
+            statement_kind(&last[0], &inner, result_in_scope, allow_wrapping_arithmetic)
+        }
         _ => Err(SemanticContractError::Unsupported(
             "statement, mutation or empty body",
         )),
@@ -385,21 +407,26 @@ fn statement_kind(
 
 fn expression_kind(
     expr: &Expr,
-    params: &BTreeSet<&str>,
+    scope: &BTreeMap<String, ScalarKind>,
     result_in_scope: bool,
     allow_wrapping_arithmetic: bool,
 ) -> Result<ScalarKind, SemanticContractError> {
     match expr {
         Expr::Number(_) => Ok(ScalarKind::I64),
         Expr::Variable(name) if matches!(name.as_str(), "true" | "false") => Ok(ScalarKind::Bool),
-        Expr::Variable(name)
-            if params.contains(name.as_str()) || (result_in_scope && name == "result") =>
-        {
-            Ok(ScalarKind::I64)
-        }
+        // Lexical bindings (including a shadowing `let result`) win over
+        // the implicit result name, so the kind checker and the BV encoder
+        // see the same binding.
+        Expr::Variable(name) => scope
+            .get(name.as_str())
+            .copied()
+            .or((result_in_scope && name == "result").then_some(ScalarKind::I64))
+            .ok_or(SemanticContractError::Unsupported(
+                "expression or unbound name",
+            )),
         Expr::BinaryOp(left, op, right) => {
-            let left = expression_kind(left, params, result_in_scope, allow_wrapping_arithmetic)?;
-            let right = expression_kind(right, params, result_in_scope, allow_wrapping_arithmetic)?;
+            let left = expression_kind(left, scope, result_in_scope, allow_wrapping_arithmetic)?;
+            let right = expression_kind(right, scope, result_in_scope, allow_wrapping_arithmetic)?;
             match op {
                 Op::Eq | Op::Neq if left == right => Ok(ScalarKind::Bool),
                 Op::Lt | Op::Le | Op::Gt | Op::Ge if left == ScalarKind::I64 && right == left => {
@@ -433,7 +460,7 @@ fn expression_kind(
             }
         }
         Expr::Block(stmt) => {
-            statement_kind(stmt, params, result_in_scope, allow_wrapping_arithmetic)
+            statement_kind(stmt, scope, result_in_scope, allow_wrapping_arithmetic)
         }
         Expr::IfThenElse {
             cond,
@@ -441,19 +468,19 @@ fn expression_kind(
             else_branch,
         } => {
             expect_kind(
-                expression_kind(cond, params, result_in_scope, allow_wrapping_arithmetic)?,
+                expression_kind(cond, scope, result_in_scope, allow_wrapping_arithmetic)?,
                 ScalarKind::Bool,
             )?;
             let then_kind = statement_kind(
                 then_branch,
-                params,
+                scope,
                 result_in_scope,
                 allow_wrapping_arithmetic,
             )?;
             expect_kind(
                 statement_kind(
                     else_branch,
-                    params,
+                    scope,
                     result_in_scope,
                     allow_wrapping_arithmetic,
                 )?,
@@ -538,15 +565,15 @@ pub fn encode_pure_i64_body<'ctx>(
     let inputs: Vec<_> = (0..atom.params.len())
         .map(|i| BV::new_const(context, format!("input_{i}"), 64))
         .collect();
-    let params = atom
+    let env: HashMap<String, SourceValue> = atom
         .params
         .iter()
         .zip(&inputs)
-        .map(|(p, v)| (p.name.as_str(), v.clone()))
+        .map(|(p, v)| (p.name.clone(), SourceValue::Integer(v.clone())))
         .collect();
     let top = Bool::from_bool(context, true);
     let mut definedness = Vec::new();
-    let value = source_stmt(&body, context, &params, &top, &mut definedness, 0)?.integer()?;
+    let value = source_stmt(&body, context, &env, &top, &mut definedness, 0)?.integer()?;
     Ok(PureI64Body {
         function_name: atom.name,
         source_sha256: contract.source_sha256,
@@ -569,24 +596,25 @@ pub fn encode_pure_i64_obligation<'ctx>(
     let Some(Item::Atom(atom)) = items.pop() else {
         return Err(SemanticContractError::Unsupported("source atom"));
     };
-    let mut params: HashMap<_, _> = atom
+    let mut env: HashMap<String, SourceValue> = atom
         .params
         .iter()
         .zip(&body.inputs)
-        .map(|(p, v)| (p.name.as_str(), v.clone()))
+        .map(|(p, v)| (p.name.clone(), SourceValue::Integer(v.clone())))
         .collect();
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
     let top = Bool::from_bool(context, true);
     let mut sink = Vec::new();
-    let requires = source_expr(&requires, context, &params, &top, &mut sink, 0)?.boolean()?;
-    params.insert("result", body.value);
+    let requires = source_expr(&requires, context, &env, &top, &mut sink, 0)?.boolean()?;
+    env.insert("result".to_string(), SourceValue::Integer(body.value));
     let ensures =
         parse_expression_checked(&atom.ensures).map_err(|_| SemanticContractError::Parse)?;
-    let ensures = source_expr(&ensures, context, &params, &top, &mut sink, 0)?.boolean()?;
+    let ensures = source_expr(&ensures, context, &env, &top, &mut sink, 0)?.boolean()?;
     Ok(Bool::and(context, &[&requires, &ensures.not()]))
 }
 
+#[derive(Clone)]
 enum SourceValue<'ctx> {
     Integer(BV<'ctx>),
     Boolean(Bool<'ctx>),
@@ -613,7 +641,7 @@ impl<'ctx> SourceValue<'ctx> {
 fn source_stmt<'ctx>(
     stmt: &Stmt,
     ctx: &'ctx Context,
-    params: &HashMap<&str, BV<'ctx>>,
+    env: &HashMap<String, SourceValue<'ctx>>,
     guard: &Bool<'ctx>,
     definedness: &mut Vec<Bool<'ctx>>,
     depth: usize,
@@ -622,9 +650,27 @@ fn source_stmt<'ctx>(
         return Err(SemanticContractError::Unsupported("source depth limit"));
     }
     match stmt {
-        Stmt::Expr(e, _) => source_expr(e, ctx, params, guard, definedness, depth + 1),
+        Stmt::Expr(e, _) => source_expr(e, ctx, env, guard, definedness, depth + 1),
         Stmt::Block(stmts, _) if stmts.len() == 1 => {
-            source_stmt(&stmts[0], ctx, params, guard, definedness, depth + 1)
+            source_stmt(&stmts[0], ctx, env, guard, definedness, depth + 1)
+        }
+        Stmt::Block(stmts, _) if !stmts.is_empty() => {
+            // Sequential `let`-only blocks bind names lexically: each
+            // initializer encodes under the current guard (its partial
+            // operations still record definedness obligations), then the
+            // last statement yields the block value under the wider scope.
+            let mut inner = env.clone();
+            let (lets, last) = stmts.split_at(stmts.len() - 1);
+            for stmt in lets {
+                let Stmt::Let { var, value, .. } = stmt else {
+                    return Err(SemanticContractError::Unsupported(
+                        "non-let statement in a sequence",
+                    ));
+                };
+                let bound = source_expr(value, ctx, &inner, guard, definedness, depth + 1)?;
+                inner.insert(var.clone(), bound);
+            }
+            source_stmt(&last[0], ctx, &inner, guard, definedness, depth + 1)
         }
         _ => Err(SemanticContractError::Unsupported(
             "unsupported source statement",
@@ -656,7 +702,7 @@ fn shift_defined<'ctx>(amount: &BV<'ctx>, ctx: &'ctx Context) -> Bool<'ctx> {
 fn source_expr<'ctx>(
     expr: &Expr,
     ctx: &'ctx Context,
-    params: &HashMap<&str, BV<'ctx>>,
+    env: &HashMap<String, SourceValue<'ctx>>,
     guard: &Bool<'ctx>,
     definedness: &mut Vec<Bool<'ctx>>,
     depth: usize,
@@ -668,13 +714,13 @@ fn source_expr<'ctx>(
     Ok(match expr {
         Expr::Number(n) => I(BV::from_i64(ctx, *n, 64)),
         Expr::Variable(n) if n == "true" || n == "false" => B(Bool::from_bool(ctx, n == "true")),
-        Expr::Variable(n) => I(params
+        Expr::Variable(n) => env
             .get(n.as_str())
-            .ok_or(SemanticContractError::Unsupported("source binding"))?
-            .clone()),
-        Expr::Block(s) => source_stmt(s, ctx, params, guard, definedness, depth + 1)?,
+            .cloned()
+            .ok_or(SemanticContractError::Unsupported("source binding"))?,
+        Expr::Block(s) => source_stmt(s, ctx, env, guard, definedness, depth + 1)?,
         Expr::BinaryOp(a, op, b) => {
-            let a = source_expr(a, ctx, params, guard, definedness, depth + 1)?;
+            let a = source_expr(a, ctx, env, guard, definedness, depth + 1)?;
             // `&&`/`||`/`=>` short-circuit like the emitter and
             // `--bitvec-i64` verification: the right operand's partial
             // operations bind only when the left one lets it run.
@@ -683,7 +729,7 @@ fn source_expr<'ctx>(
                 (B(ab), Op::Or) => Bool::and(ctx, &[guard, &ab.not()]),
                 _ => guard.clone(),
             };
-            let b = source_expr(b, ctx, params, &b_guard, definedness, depth + 1)?;
+            let b = source_expr(b, ctx, env, &b_guard, definedness, depth + 1)?;
             match (a, op, b) {
                 (I(a), Op::Eq, I(b)) => B(a._eq(&b)),
                 (I(a), Op::Neq, I(b)) => B(a._eq(&b).not()),
@@ -737,12 +783,12 @@ fn source_expr<'ctx>(
             then_branch,
             else_branch,
         } => {
-            let cond = source_expr(cond, ctx, params, guard, definedness, depth + 1)?.boolean()?;
+            let cond = source_expr(cond, ctx, env, guard, definedness, depth + 1)?.boolean()?;
             match (
                 source_stmt(
                     then_branch,
                     ctx,
-                    params,
+                    env,
                     &Bool::and(ctx, &[guard, &cond]),
                     definedness,
                     depth + 1,
@@ -750,7 +796,7 @@ fn source_expr<'ctx>(
                 source_stmt(
                     else_branch,
                     ctx,
-                    params,
+                    env,
                     &Bool::and(ctx, &[guard, &cond.not()]),
                     definedness,
                     depth + 1,
@@ -832,6 +878,16 @@ mod tests {
         assert_eq!(original.obligation_id, relocated.obligation_id);
         assert_eq!(original.source_sha256, relocated.source_sha256);
         assert_ne!(original.source_span, relocated.source_span);
+    }
+
+    #[test]
+    fn let_bindings_stay_outside_the_bounded_c03_fragment() {
+        // The equivalence profile (allow_wrapping_arithmetic = true) admits
+        // `let` sequences; the bounded C03 contract still rejects them, so
+        // build and recheck keep agreeing on one source grammar.
+        let source = SOURCE.replace("if x < 0 { 0 } else { x }", "let y = x; y");
+        assert!(extract(&source).is_err());
+        assert!(extract_pure_i64_contract(&source, "clamp.mm", Some(TARGET), true).is_ok());
     }
 
     #[test]
