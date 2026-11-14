@@ -1452,6 +1452,69 @@ fn scalar_match_is_equivalent_and_refuted() {
 }
 
 #[test]
+fn match_arm_guards_are_equivalent_and_refuted() {
+    // An arm hits when its pattern matches and its Boolean guard holds:
+    // a guarded `Variable` arm, a guarded literal falling through to the
+    // same literal unguarded, a guarded wildcard mid-chain, a bool
+    // parameter guard and a partial operator inside the guard all follow
+    // the emitter's `pattern ∧ guard` try-chain.
+    for src in [
+        source("x: i64", "match x { k if k > 0 => k, _ => 0 }"),
+        source("x: i64", "match x { _ if x > 0 => 1, _ => 0 }"),
+        source(
+            "x: i64, y: i64",
+            "match x { 0 if y > 0 => 1, 0 => 2, _ => 3 }",
+        ),
+        source(
+            "x: i64, y: i64",
+            "match x { k if k > y => k, 5 if y > 0 => 5, _ => 0 }",
+        ),
+        source("x: i64, b: bool", "match x { k if b => k, _ => 0 }"),
+        source("x: i64", "match x { k if k / 4 > 0 => k, _ => 0 }"),
+        // A guarded arm after a catch-all is dead and binds nothing.
+        source("x: i64", "match x { _ => 0, k if k > 0 => k, _ => 1 }"),
+    ] {
+        assert_eq!(
+            validate(&src, &emitted(&src)).outcome,
+            Outcome::EquivalentWithinProfile,
+            "{src}"
+        );
+    }
+    // A guarded chain spelled as nested `if`s compares equal.
+    let guarded = source(
+        "x: i64, y: i64",
+        "match x { 0 if y > 0 => 1, 0 => 2, _ => 3 }",
+    );
+    let as_ifs = emitted(&source(
+        "x: i64, y: i64",
+        "if x == 0 { if y > 0 { 1 } else { 2 } } else { 3 }",
+    ));
+    assert_eq!(
+        validate(&guarded, &as_ifs).outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    // Dropping or weakening the guard is a real value difference:
+    // at `x = -1` the guarded source yields 42 where the unguarded IR
+    // returns -1, and `k >= 0` differs from `k > 0` at `x = 0`.
+    let src = source("x: i64", "match x { k if k > 0 => k, _ => 42 }");
+    for other in [
+        emitted(&source("x: i64", "x")),
+        emitted(&source("x: i64", "match x { k if k >= 0 => k, _ => 42 }")),
+        emitted(&source("x: i64", "if x > 0 { x } else { 1 }")),
+    ] {
+        assert_eq!(validate(&src, &other).outcome, Outcome::Different);
+    }
+    // A guarded catch-all may fall through — the trailing arm must be
+    // unguarded, and a non-Boolean guard is a kind error, both static.
+    for src in [
+        source("x: i64", "match x { 0 => 1, _ if x > 0 => 2 }"),
+        source("x: i64", "match x { k if k + 1 => k, _ => 0 }"),
+    ] {
+        assert!(tv::validate_pure_i64(&src, &function("ret i64 0"), Options::default()).is_err());
+    }
+}
+
+#[test]
 fn all_unreachable_function_reports_ub_not_a_missing_return() {
     // With no `ret` edge at all, every path ends in `unreachable` — that
     // is UB on every defined input, not a missing-return error.
@@ -1472,8 +1535,10 @@ fn scalar_match_stays_bounded() {
         // catch-all arm is required.
         source("x: i64", "match x { 0 => 1 }"),
         source("x: i64", "match x { 0 => 1, 1 => 2 }"),
-        // Arm guards stay outside the profile.
-        source("x: i64", "match x { k if k > 0 => k, _ => 0 }"),
+        // A guarded catch-all arm may fall through, so the trailing arm
+        // must be unguarded; a non-Boolean guard is a kind error.
+        source("x: i64", "match x { 0 => 1, _ if x > 0 => 2 }"),
+        source("x: i64", "match x { k if k + 1 => k, _ => 0 }"),
         // A non-i64 scrutinee stays outside the profile.
         "atom f(b: bool) -> i64 requires: true; ensures: true; body: { match b { _ => 1 } };"
             .to_string(),

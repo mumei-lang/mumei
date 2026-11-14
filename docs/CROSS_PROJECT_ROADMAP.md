@@ -1268,11 +1268,13 @@ an `i1` return is a signature error, not a value difference — boolean
 expressions stay two-valued (a `bool` binding is not an i64 operand, a
 `-> bool` body must produce a Bool kind). `match` on an i64 scrutinee
 is admitted in first-match order — literal patterns contribute one
-`target == n` test each and arms encode as an ite chain under
-accumulated negations, requiring a trailing `Wildcard`/`Variable`
-catch-all arm (a `Variable` arm binds the scrutinee); arm guards,
-non-literal patterns, a non-i64 scrutinee and mixed-kind arms stay
-rejected. The IR whitelist also admits `unreachable`: reachable on a
+`target == n` test each, an arm may add a Boolean guard evaluated in
+the arm's scope so it hits only on `pattern ∧ guard`, and arms encode
+as an ite chain under the accumulated negations of earlier hits,
+requiring a trailing unguarded `Wildcard`/`Variable` catch-all arm (a
+`Variable` arm binds the scrutinee for its guard and body). A guarded
+catch-all, non-literal patterns, a non-i64 scrutinee, a non-Boolean
+guard and mixed-kind arms stay rejected. The IR whitelist also admits `unreachable`: reachable on a
 defined input it reports `UndefinedBehavior`, while a dead
 `unreachable` block is harmless — the existing emitter's match lowering
 never emits it (its final else edge is a constant-true branch). The C03
