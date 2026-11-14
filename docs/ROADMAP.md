@@ -2871,7 +2871,10 @@ integer types (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`) are admitted the same
 way: they lower to an i64 formal, so the source value is the input and
 the signature bounds the checked domain to the type's range — `x == 200`
 on an `i8` parameter is equivalent to `false` only because the bound
-rules it out; `u64`/`usize`/`isize` and wider result types stay out.
+rules it out. A declared subrange integer result type lowers to an i64
+return the same way — the emitter emits no truncation, so the checked
+result is the body's full i64 value; `u64`/`usize`/`isize` and `i128`
+stay out on both sides of the signature.
 `match` on an i64
 scrutinee is checked in first-match order — literal patterns contribute
 one `target == n` test each, an arm may add a Boolean guard evaluated in

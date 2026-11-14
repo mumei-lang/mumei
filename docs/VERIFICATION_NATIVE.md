@@ -712,7 +712,7 @@ signed division/remainder/shifts, block-scoped `let` bindings, scalar
 reassignments on the linear path and inside `if` branches, discarded
 pure expression
 statements, `bool` parameters and results, subrange integer parameter
-types (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`) and `match` on an i64
+and result types (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`) and `match` on an i64
 scrutinee with literal patterns, Boolean arm guards and a trailing
 unguarded catch-all arm —
 and one caller-supplied LLVM
@@ -785,8 +785,12 @@ by `input <=u max`, signed types by `min <=s input <=s max`): `x == 200`
 on an `i8` parameter is equivalent to `false` only because the bound
 rules `x = 200` out. `u64`, `usize` and `isize` stay outside the
 profile — a full-width unsigned domain cannot be expressed as an i64
-range bound — and a wider result type (`-> i32`) is not part of the
-slice.
+range bound — and `u64`-sized results stay outside the profile on the
+same signature boundary. A declared subrange integer result type
+(`-> i8`/`i16`/`i32`/`u8`/`u16`/`u32`) lowers to an i64 return the same
+way `resolve_return_type` lowers every non-aggregate type: the emitter
+emits no truncation, so the checked result is the body's full i64
+value and the binder discloses the declared type.
 A `match` on an i64 scrutinee is checked in first-match order: each
 literal pattern contributes one `target == n` test, an arm may add a
 Boolean guard evaluated in the arm's scope, and an arm hits only when

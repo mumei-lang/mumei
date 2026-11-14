@@ -225,10 +225,15 @@ pub fn extract_pure_i64_contract(
         .collect();
     binders.push(TypedBinder {
         name: "result".to_owned(),
-        scalar_type: if result_kind == ScalarKind::Bool {
-            "bool"
-        } else {
-            "i64"
+        scalar_type: match atom.return_type.as_deref() {
+            Some("bool") => "bool",
+            Some("i8") => "i8",
+            Some("i16") => "i16",
+            Some("i32") => "i32",
+            Some("u8") => "u8",
+            Some("u16") => "u16",
+            Some("u32") => "u32",
+            _ => "i64",
         },
         role: "result",
         provenance: atom.span.clone(),
@@ -333,6 +338,7 @@ pub fn extract_pure_i64_contract(
         .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
         .chain(allow_wrapping_arithmetic.then_some("bool_parameters_lowered_to_i64_zero_one"))
         .chain(allow_wrapping_arithmetic.then_some("subrange_integer_parameters_lowered_to_i64"))
+        .chain(allow_wrapping_arithmetic.then_some("subrange_integer_results_lowered_to_i64"))
         .chain(allow_wrapping_arithmetic.then_some("bool_results_lowered_to_i64_zero_one"))
         .chain(allow_wrapping_arithmetic.then_some("first_match_order_i64_match_with_catch_all"))
         .chain(allow_wrapping_arithmetic.then_some("match_arm_boolean_guards"))
@@ -417,9 +423,14 @@ fn return_kind(atom: &Atom) -> ScalarKind {
 }
 
 fn validate_atom(atom: &Atom, admit_widened: bool) -> Result<(), SemanticContractError> {
+    // A declared subrange integer result lowers to an i64 return like
+    // the parameters — the emitter emits no truncation, so the checked
+    // result is the body's full i64 value. `u64`-sized results stay out
+    // on the same signature boundary as the parameters. Admitting them
+    // is likewise widened-profile only.
     let return_ok = match atom.return_type.as_deref() {
         Some("i64") => true,
-        Some("bool") => admit_widened,
+        Some("bool") | Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32") => admit_widened,
         _ => false,
     };
     if !return_ok
@@ -1627,7 +1638,7 @@ mod tests {
         assert!(extract_pure_i64_contract(i32_atom, "clamp.mm", Some(TARGET), true).is_ok());
         // Full-width unsigned and target-width types stay out of both
         // profiles: a `u64`-sized domain cannot be expressed as an i64
-        // range bound, and an i32 result is not part of this slice.
+        // range bound.
         for ty in ["u64", "usize", "isize", "i128"] {
             let atom =
                 format!("atom f(x: {ty}) -> i64 requires: true; ensures: true; body: {{ x }};");
@@ -1636,11 +1647,27 @@ mod tests {
                 "{ty}"
             );
         }
+        // A declared subrange integer result is admitted too — it lowers
+        // to an i64 return with no truncation — while `u64`-sized
+        // results stay out on the same boundary.
         let i32_return = "atom f(x: i64) -> i32 requires: true; ensures: true; body: { x };";
-        assert!(extract_pure_i64_contract(i32_return, "clamp.mm", Some(TARGET), true).is_err());
-        // The binder discloses the declared type, not the i64 carrier.
+        assert!(extract_pure_i64_contract(i32_return, "clamp.mm", Some(TARGET), false).is_err());
+        let contract =
+            extract_pure_i64_contract(i32_return, "clamp.mm", Some(TARGET), true).unwrap();
+        for ty in ["u64", "usize", "isize", "i128"] {
+            let atom =
+                format!("atom f(x: i64) -> {ty} requires: true; ensures: true; body: {{ x }};");
+            assert!(
+                extract_pure_i64_contract(&atom, "clamp.mm", Some(TARGET), true).is_err(),
+                "{ty}"
+            );
+        }
+        // The binders disclose the declared types, not the i64 carrier.
         let contract = extract_pure_i64_contract(i32_atom, "clamp.mm", Some(TARGET), true).unwrap();
         assert_eq!(contract.specification.binders[0].scalar_type, "i32");
+        let contract =
+            extract_pure_i64_contract(i32_return, "clamp.mm", Some(TARGET), true).unwrap();
+        assert_eq!(contract.specification.binders[1].scalar_type, "i32");
     }
 
     #[test]

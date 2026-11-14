@@ -1634,15 +1634,41 @@ fn subrange_integer_parameters_are_equivalent_and_refuted() {
         Outcome::Different
     );
     // Full-width unsigned, target-width and unknown types stay outside
-    // the profile, as does a wider result type — all static signature
-    // errors.
+    // the profile — all static signature errors.
     for src in [
         "atom f(x: u64) -> i64 requires: true; ensures: true; body: { x };",
         "atom f(x: usize) -> i64 requires: true; ensures: true; body: { x };",
         "atom f(x: isize) -> i64 requires: true; ensures: true; body: { x };",
         "atom f(x: i128) -> i64 requires: true; ensures: true; body: { x };",
-        "atom f(x: i64) -> i32 requires: true; ensures: true; body: { x };",
+        "atom f(x: i64) -> u64 requires: true; ensures: true; body: { x };",
+        "atom f(x: i64) -> usize requires: true; ensures: true; body: { x };",
+        "atom f(x: i64) -> isize requires: true; ensures: true; body: { x };",
+        "atom f(x: i64) -> i128 requires: true; ensures: true; body: { x };",
     ] {
         assert!(tv::validate_pure_i64(src, &function("ret i64 0"), Options::default()).is_err());
     }
+    // A declared subrange integer result lowers to an i64 return the
+    // same way: the emitter emits no truncation, so `-> i32` compares
+    // the body's full i64 value against the emitted module.
+    for src in [
+        "atom f(x: i64) -> i8 requires: true; ensures: true; body: { x };",
+        "atom f(x: i64) -> i32 requires: true; ensures: true; body: { x + 1 };",
+        "atom f(x: i32) -> u8 requires: true; ensures: true; body: { x & 255 };",
+        "atom f(x: u8) -> i16 requires: true; ensures: true; body: { x * 2 };",
+        "atom f(x: i8, y: i8) -> i32 requires: true; ensures: true; body: { x + y };",
+    ] {
+        assert_eq!(
+            validate(&src, &emitted(&src)).outcome,
+            Outcome::EquivalentWithinProfile,
+            "{src}"
+        );
+    }
+    // An IR returning a different value inside the result type's domain
+    // is still `Different`, and a `-> i32` body producing an i64 kind
+    // keeps the same encoder path.
+    let src = "atom f(x: i64) -> i32 requires: true; ensures: true; body: { x + 1 };";
+    assert_eq!(
+        validate(&src, &function("ret i64 %x")).outcome,
+        Outcome::Different
+    );
 }
