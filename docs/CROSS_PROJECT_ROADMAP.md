@@ -1175,6 +1175,20 @@ identity-free type facts pin nothing, and reads that fail admission
 record no pin. See the
 [Agent imported member type identities](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-member-type-identities).
 
+#### Call signature type-identity pins
+
+Function member records now also declare `signature_type_ids`: the
+named/alias type identities the callee's declared parameters and
+results mention, in the imported unit's coordinate space. An
+admitted call pins them like a member read's declared type — a
+`direct_import` unions the member's list, and a resolved local call
+pins its callee's declared parameter/result `type_id`s, so a caller
+of `lib.Z` (`func Z() T`) goes stale when `T` is redeclared even
+though `Z`'s own identity is unchanged. Pins cover top-level
+signature types only — no composite nesting — and are recorded by
+the caller's analysis, never by the callee's own summary. See the
+[Agent call signature type-identity pins](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-call-signature-type-identity-pins).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
