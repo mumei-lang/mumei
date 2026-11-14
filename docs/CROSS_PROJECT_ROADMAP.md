@@ -1316,7 +1316,11 @@ pointer (`**T`) stay closed. A bound pointer dereferences the
 same way — `*t` on a parameter or local whose declared `*T` names
 the pointee admits, records its own imported transfer against the
 pointee identity (the binding's read carries none of its own),
-and returns the pointer's provenance; `p := &t` inherits the same
+and returns the pointer's provenance unioned with the current deps
+of every `&x`-escaped binding declared as the pointee — a stored
+pointer may alias one (`p := &x; x = y; *p` reads x's updated
+value, and the same may-read covers `*lib.PV` after `lib.PV =
+&x`); `p := &t` inherits the same
 `*T` identity, so `*p` reads the same way, while an unnamed-pointee
 binding (`p := &x` on a builtin `int64`), a computed pointer
 (`*g()`), a nested deref (`**t`) and a pointee naming a local
