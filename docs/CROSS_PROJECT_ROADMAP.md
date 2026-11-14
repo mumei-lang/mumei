@@ -923,9 +923,11 @@ binding the dep-free zero value. Multi-name specs, non-scalar bindings,
 ### Wave 3 effect-free control statements in scalar summaries
 
 Agent's C07 fragment now accepts `x++`/`x--` on bound scalars
-(dependency-preserving), unlabelled `break`/`continue` and blank
-`_ = expression` (evaluate-and-discard), and unwraps inert
-`labeled_statement`s. Labelled jumps, `goto`, `defer`, `go` and
+(dependency-preserving), blank `_ = expression` (evaluate-and-discard),
+and unwraps inert `labeled_statement`s. Unlabelled `break`/`continue`
+mark the innermost loop-or-switch body they exit, turning its remaining
+statements into may-assignments that union rather than replace — the
+jump may have skipped them. Labelled jumps, `goto`, `defer`, `go` and
 non-identifier inc/dec operands stay declared gaps. See the
 [Agent effect-free control statements](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-effect-free-control-statements).
 
