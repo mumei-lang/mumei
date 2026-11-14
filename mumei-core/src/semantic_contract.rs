@@ -1299,7 +1299,8 @@ fn source_expr<'ctx>(
                     &mut else_writes,
                 )?,
             );
-            for name in then_writes.keys().chain(else_writes.keys()) {
+            let names: BTreeSet<&String> = then_writes.keys().chain(else_writes.keys()).collect();
+            for name in names {
                 let then_bound = match then_writes.get(name) {
                     Some(value) => value.clone(),
                     None => env
