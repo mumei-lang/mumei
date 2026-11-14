@@ -1324,6 +1324,23 @@ still tracks its dep set. See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
 section.
 
+An index read of an imported container var — `lib.VA[i]` — admits
+through a new element fact on slice/array type records (`[]T`,
+`[N]T`, and named or alias types whose underlying is one, which keep
+their own identity on `type_id`). The element is external state like
+the container var itself: the result carries only the index's own
+dependencies while the read records the imported transfer, reports
+`effects` as `unknown`, and pins the container's declared identity
+plus the element's named identity (`[]lib.T` pins `T`; a named slice
+type pins itself) so a redeclaration flags the summary via
+`stale_dependents`. Elements must be scalar or pointer-typed — a
+struct or nested-slice element is a value the fragment cannot hold —
+and maps, strings, computed operands (`f()[i]`, `lib.V2[0][0]`) and
+index writes (`lib.VA[i] = v`) stay closed, the last matching the
+imported-var-write rule. See the
+[Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
+section.
+
 ### Wave 3 multi-valued imported call results
 
 An imported callee whose results are all scalar now classifies
