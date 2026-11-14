@@ -1152,6 +1152,18 @@ result carries no parameter dependencies while `effects` reports
 readers via `stale_dependents`. A `var` of non-scalar type stays
 closed.
 
+A field read of an imported struct var — `lib.VS.F` (or `VS.F` under
+a dot import, or parentheses around either) — admits through the
+member records the producer already emits: the selection's field is
+itself a `var` member whose `import` reference classifies the read.
+The field is external state like the member itself — dep-free,
+`effects` `unknown`, the transfer records the field's own identity,
+the struct var's own identity pins, and both the struct var's and
+the field's declared type identities pin for `stale_dependents`. The
+field's type must be scalar or
+pointer; method selections (`lib.VS.PF`), non-struct selections and
+bound bases (`t.f`) stay closed.
+
 Member declarations also classify `lib.T(e)` conversion targets: the
 consumer admits the call only when the declared member is a `type`
 whose type fact is integer or boolean, so the result inherits the
