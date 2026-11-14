@@ -929,8 +929,9 @@ mark the innermost loop-or-switch body they exit, turning its remaining
 statements into may-assignments that union rather than replace — the
 jump may have skipped them. Labelled jumps, `goto`, `defer` and `go`
 stay declared gaps; an inc/dec operand resolving to an imported
-`var` member admits through the imported member-write gate (`lib.V++`)
-instead, while dereferences and bound-base fields stay closed. See the
+`var` member admits through the imported member-write gate (`lib.V++`,
+`(*lib.PV)++` on a pointer-typed member)
+instead, while bound-base fields stay closed. See the
 [Agent effect-free control statements](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-effect-free-control-statements).
 
 ### Wave 3 statement initializers in scalar summaries
@@ -1344,10 +1345,16 @@ transfer against the member's identity, and pin the member's declared
 type identity (plus a container element's) for `stale_dependents`;
 a nested index still evaluates whenever it could record a call or an
 imported member read while a literal or plain-name one needs no
-evaluation, computed operands (`g()[0] = v`) and
-dereference writes (`*lib.PV = v`) stay closed, and inc/dec on an
-imported member (`lib.V++`, `VA[i]++`, `lib.VS.f++`) routes through
-this same gate. See the
+evaluation, and computed operands (`g()[0] = v`, `*g() = v`) stay
+closed. A `*`-dereferenced LHS admits too when it resolves a
+pointer-typed `var` member — `*lib.PV = v`, `(*lib.PA)[i] = v`,
+`**lib.PPV = v`, dot-imported `*PV = v` — storing through the member
+into package state with the same dep-free external-mutation record
+and the pointee's identity pinning via the pointer's element fact;
+a non-pointer member behind `*` stays closed (uncompilable), and no
+other unary operator unwraps. Inc/dec on an
+imported member (`lib.V++`, `VA[i]++`, `lib.VS.f++`, `(*lib.PU)++`)
+routes through this same gate. See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
 section.
 
