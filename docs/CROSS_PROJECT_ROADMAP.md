@@ -1137,6 +1137,15 @@ equals — and member types carry no identity usable for consumer-side
 type checks yet. Dot-imported names stay unmodelled: they are plain
 identifiers, not package-qualified selectors.
 
+Member declarations also classify `lib.T(e)` conversion targets: the
+consumer admits the call only when the declared member is a `type`
+whose type fact is integer or boolean, so the result inherits the
+operand's dependencies like a local or predeclared scalar conversion.
+Alias targets (`type A = int64`) take the same path; non-scalar named
+types, non-`type` records and missing declarations keep
+`binding_unavailable`, and generic instantiations `lib.T[int](e)` stay
+closed (the `index_expression` callee is not an admitted expression).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
