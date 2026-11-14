@@ -1133,9 +1133,7 @@ functions (not values) keep `non_parameter_reference` and fail
 closed, as does any read whose member declaration is absent.
 Constant *values* are not modelled — the fragment tracks
 dependencies, not what a constant equals — and member types carry no
-identity usable for consumer-side type checks yet. Dot-imported
-names stay unmodelled: they are plain identifiers, not
-package-qualified selectors.
+identity usable for consumer-side type checks yet.
 
 A package-qualified scalar `var` read `lib.V` is an opaque state
 read: it records a zero-argument imported `CallTransfer`, so the
@@ -1152,6 +1150,14 @@ Alias targets (`type A = int64`) take the same path; non-scalar named
 types, non-`type` records and missing declarations keep
 `binding_unavailable`, and generic instantiations `lib.T[int](e)` stay
 closed (the `index_expression` callee is not an admitted expression).
+
+Dot-imported names take the same declared-member path: the producer
+records `import` references and member records for a `. "lib"`
+import's objects, so a bare `K`, `V` or `T(e)` classifies exactly
+like its package-qualified form — scalar consts dep-free, scalar vars
+as opaque state reads with the same staleness propagation, scalar
+type members admitting conversions. Function values, non-scalars,
+generic instantiations and missing records stay closed.
 
 ### Wave 4 first compiler-backed source-analysis boundary
 
