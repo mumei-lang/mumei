@@ -977,6 +977,16 @@ are unreachable in-fragment and multi-variable ranges stay declared
 gaps. See the
 [Agent integer range loops](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-integer-range-loops).
 
+### Wave 3 multi-name declarations in scalar summaries
+
+Agent's C07 fragment now admits `a, b := e1, e2` and multi-name `var`
+specs: each left-hand name binds its matching right-hand side's
+dependencies, all right-hand sides evaluating in parallel against the
+pre-state, `_` slots discarding their values, and mixed redeclares
+keeping their existing bindings. Non-scalar names and multi-valued
+call results stay declared gaps. See the
+[Agent multi-name declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-multi-name-declarations).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
