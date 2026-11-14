@@ -1333,7 +1333,10 @@ dependencies while the read records the imported transfer, reports
 `effects` as `unknown`, and pins the container's declared identity
 plus the element's named identity (`[]lib.T` pins `T`; a named slice
 type pins itself) so a redeclaration flags the summary via
-`stale_dependents`. Elements must be scalar or pointer-typed — a
+`stale_dependents`. The operand resolves like a member read — a
+package-qualified name, a dot-imported name, or parentheses around
+either (`VA[0]`, `(lib.VA)[0]`). Elements must be scalar or
+pointer-typed — a
 struct or nested-slice element is a value the fragment cannot hold —
 and maps, strings, computed operands (`f()[i]`, `lib.V2[0][0]`) and
 index writes (`lib.VA[i] = v`) stay closed, the last matching the
