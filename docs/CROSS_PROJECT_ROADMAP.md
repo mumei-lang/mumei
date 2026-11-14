@@ -1221,8 +1221,10 @@ type and returns at most one scalar result; the recorded call carries
 — the result depends on the receiver and every argument. Method
 members' signature pins include the receiver's named type, so
 redeclaring it flags every admitted caller. Interface receivers
-(dynamic dispatch), method expressions `lib.T.M`, local methods and
-multi-valued results stay closed. See the
+(dynamic dispatch), method expressions `lib.T.M`, local methods,
+multi-valued results and generic or instantiated receiver types
+(`lib.T[lib.U]` — the pinned identity would miss the type arguments)
+stay closed. See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
 section.
 
