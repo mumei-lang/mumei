@@ -996,6 +996,16 @@ discarding the result, including inside `if`/`switch`/`for`
 initializers. Unsummarizable callees keep their declared gaps. See the
 [Agent expression statements](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-expression-statements).
 
+### Wave 3 alias and resource-state coverage in scalar summaries
+
+Agent's C07 acceptance criterion for aliasing and resource state is now
+exercised as negative fixtures: pointer parameters, `&x` aliases,
+slice/map/channel resource state, package globals touched by a callee,
+constructor state, bound function values and closures all fail closed
+as declared gaps rather than producing summaries that silently miss the
+alias or mutation. See the
+[Agent alias and resource-state fixtures](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-alias-and-resource-state-fixtures).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
