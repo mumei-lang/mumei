@@ -987,6 +987,15 @@ keeping their existing bindings. Non-scalar names and multi-valued
 call results stay declared gaps. See the
 [Agent multi-name declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-multi-name-declarations).
 
+### Wave 3 expression statements in scalar summaries
+
+Agent's C07 fragment now admits statement-position expressions — in Go
+only calls (and receives, unreachable in-fragment) are legal there —
+evaluating the inner expression for its recorded transfer and
+discarding the result, including inside `if`/`switch`/`for`
+initializers. Unsummarizable callees keep their declared gaps. See the
+[Agent expression statements](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-expression-statements).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
