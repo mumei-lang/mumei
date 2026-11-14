@@ -1347,14 +1347,20 @@ a nested index still evaluates whenever it could record a call or an
 imported member read while a literal or plain-name one needs no
 evaluation, and computed operands (`g()[0] = v`, `*g() = v`) stay
 closed. A `*`-dereferenced LHS admits too when it resolves a
-pointer-typed `var` member — `*lib.PV = v`, `(*lib.PA)[i] = v`,
-`**lib.PPV = v`, dot-imported `*PV = v` — storing through the member
-into package state with the same dep-free external-mutation record
-and the pointee's identity pinning via the pointer's element fact;
-a non-pointer member behind `*` stays closed (uncompilable), and no
-other unary operator unwraps. Inc/dec on an
-imported member (`lib.V++`, `VA[i]++`, `lib.VS.f++`, `(*lib.PU)++`)
-routes through this same gate. See the
+pointer-typed `var` member whose pointee is named — `*lib.PV = v`
+and dot-imported `*PV = v` — storing through the member into
+package state with the same dep-free external-mutation record and
+the pointee's identity pinning via the pointer fact's `type_id`.
+Pointer members whose pointee is unnamed (`*lib.PU` on `*int64`,
+`(*lib.PA)[i]` on `*[4]int64`, `*lib.PPV`/`**lib.PPV` on `**T`)
+stay closed because the fact carries no stored-type identity to
+pin; a non-pointer member behind `*` stays closed (uncompilable),
+no other unary operator unwraps, and a `*lib.PV = v` store unions
+the stored value's dependencies into every binding an earlier `&x`
+escaped because the member may point at it. Inc/dec on an
+imported member (`lib.V++`, `VA[i]++`, `lib.VS.f++`, `(*lib.PV)++`)
+routes through this same gate — `(*lib.PU)++` stays closed like
+the write. See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
 section.
 
