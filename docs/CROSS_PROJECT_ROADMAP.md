@@ -1221,7 +1221,13 @@ argument is basic, named or alias (`lib.G(t)` with `t` declared
 arguments (`G[*lib.T](v)`) have no pin channel and stay closed;
 nested named arguments pin every identity they contain
 (`G[other.N[lib.T]](v)` records both `N` and `T`).
-Instantiated generic types, local generics
+Instantiated generic *type* conversions are admitted when the
+target member's underlying is scalar (`lib.S[int64](x)`,
+`type S[A any] int64`): the operand's dependencies flow through
+like any `T(e)`, and the whole type expression is walked so every
+named identity it contains is pinned. A composite underlying or an
+unpinnable constructor inside the type arguments
+(`lib.S[*lib.T](x)`) stays closed. Local generics
 and methods are unchanged. See the
 [Agent imported generic instantiations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-generic-instantiations)
 section.
