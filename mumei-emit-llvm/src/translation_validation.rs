@@ -694,11 +694,8 @@ impl<'ctx> IrEncoder<'ctx> {
                                     self.ctx,
                                     &[
                                         &b._eq(&zero).not(),
-                                        &Bool::and(
-                                            self.ctx,
-                                            &[&a._eq(&min), &b._eq(&minus_one)],
-                                        )
-                                        .not(),
+                                        &Bool::and(self.ctx, &[&a._eq(&min), &b._eq(&minus_one)])
+                                            .not(),
                                     ],
                                 );
                                 self.definedness.push((guard.clone(), defined));

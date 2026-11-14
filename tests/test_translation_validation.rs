@@ -346,11 +346,7 @@ fn guarded_i64_division_and_shifts_are_equivalent_or_refuted() {
     ] {
         let src = source(params, body);
         let report = validate(&src, &emitted(&src));
-        assert_eq!(
-            report.outcome,
-            Outcome::EquivalentWithinProfile,
-            "{body}"
-        );
+        assert_eq!(report.outcome, Outcome::EquivalentWithinProfile, "{body}");
         assert_eq!(
             report.input_domain,
             "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires",
@@ -376,10 +372,7 @@ fn guarded_i64_division_and_shifts_are_equivalent_or_refuted() {
     let ir = emitted(&src);
     let wrong_const = ir.replace("sdiv i64 %0, %1", "sdiv i64 %0, 2");
     assert_ne!(wrong_const, ir);
-    assert_eq!(
-        validate(&src, &wrong_const).outcome,
-        Outcome::Different
-    );
+    assert_eq!(validate(&src, &wrong_const).outcome, Outcome::Different);
     for wrong in [
         ir.replace("sdiv i64", "srem i64"),
         ir.replace("sdiv i64 %0, %1", "sdiv i64 %1, %0"),
@@ -409,10 +402,7 @@ fn llvm_poison_on_a_source_defined_input_is_undefined_behavior() {
     // `x sdiv y` poisons on y = 0, which the source's `else` branch defines.
     let guarded = source("x: i64, y: i64", "if y != 0 { x / y } else { x }");
     let ir = pin("define i64 @f(i64 %x, i64 %y) { %v = sdiv i64 %x, %y\nret i64 %v }");
-    assert_eq!(
-        validate(&guarded, &ir).outcome,
-        Outcome::UndefinedBehavior
-    );
+    assert_eq!(validate(&guarded, &ir).outcome, Outcome::UndefinedBehavior);
     // An out-of-range shift is poison the same way: `x shl 64`.
     let ir = function("%v = shl i64 %x, 64\nret i64 %v");
     assert_eq!(validate(&total, &ir).outcome, Outcome::UndefinedBehavior);
@@ -426,7 +416,14 @@ fn llvm_poison_on_a_source_defined_input_is_undefined_behavior() {
 fn vacuous_and_out_of_profile_division_and_shifts_fail_closed() {
     // A source whose guarded operators bind no input at all is not
     // equivalent — the spec `--bitvec-i64` would reject it outright.
-    for body in ["x / 0", "x % 0", "x / (x - x)", "x << 64", "x >> 64", "x << (0 - 1)"] {
+    for body in [
+        "x / 0",
+        "x % 0",
+        "x / (x - x)",
+        "x << 64",
+        "x >> 64",
+        "x << (0 - 1)",
+    ] {
         let src = source("x: i64", body);
         assert!(
             tv::validate_pure_i64(&src, &emitted(&src), Options::default()).is_err(),
@@ -727,7 +724,11 @@ fn native_snapshot_profile_is_separate_and_pins_exact_target_and_layout() {
     ] {
         assert!(tv::validate_native_main(&src, &bad, Options::default()).is_err());
     }
-    for bad in [source("", "7"), source("x: i64", "x"), native_source("7 / 0")] {
+    for bad in [
+        source("", "7"),
+        source("x: i64", "x"),
+        native_source("7 / 0"),
+    ] {
         assert!(tv::validate_native_main(&bad, &ir, Options::default()).is_err());
     }
     assert!(tv::validate_native_main(&src, &function("ret i64 7"), Options::default()).is_err());

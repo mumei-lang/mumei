@@ -261,9 +261,7 @@ pub fn extract_pure_i64_contract(
         ]
         .into_iter()
         .chain(allow_wrapping_arithmetic.then_some("wrapping_i64_arithmetic"))
-        .chain(
-            allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"),
-        )
+        .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
         .collect(),
         requested_route: "standard_z3_not_executed_by_extractor",
         decomposition: "no_common_obligation_decomposition",
