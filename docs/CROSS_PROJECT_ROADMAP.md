@@ -1432,9 +1432,15 @@ package-qualified name, a dot-imported name, or parentheses around
 either (`VA[0]`, `(lib.VA)[0]`). Elements must be scalar or
 pointer-typed — a
 struct or nested-slice element is a value the fragment cannot hold —
-and strings and computed operands (`f()[i]`, `lib.V2[0][0]`)
+and strings and computed operands (`f()[i]`)
 stay closed; an index write (`lib.VA[i] = v`) takes the
-imported-var-write path instead. A single-value read of an imported
+imported-var-write path instead. A nested index chain
+(`lib.V2[i][j]` on `[][]int64`, `lib.VM2["a"]["b"]` on
+`map[string]map[string]int64`) admits through the same gate: each
+level descends one `elem` fact, the result unions every level's
+index deps evaluated innermost-first in Go's order, intermediate
+containers pin their own named and key identities, and the final
+element keeps the scalar-or-pointer rule. A single-value read of an imported
 map var — `lib.VM[k]` — admits through the same gate: map type facts
 carry a `key` fact beside the `elem` value fact (`map[K]V`), so a
 named key's identity pins alongside the container's and value's.
