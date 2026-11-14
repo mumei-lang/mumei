@@ -1257,9 +1257,15 @@ redeclare stales the call site. Interface receivers (dynamic dispatch —
 values and expressions alike), local methods and generic methods stay
 closed, as do receivers still declared on type parameters and
 instantiated receivers whose arguments contain a composite constructor
-(`lib.GT[*lib.T]`); a result mentioning the receiver's own type
-parameter stays closed too since the scalar check reads the declared
-signature. Multi-valued method results are admitted
+(`lib.GT[*lib.T]`). Promoted selections (`s.GM` through
+`struct{ GT[T] }`, or an embedded interface's method) stay closed
+too — the static receiver is the outer type, so the embedded
+instantiation's type arguments or the dynamic dispatch escape the
+gate. The scalar-result check reads the *instantiated* signature
+the selection reports, so a result mentioning the receiver's own
+type parameter (`func (t GT[P]) MR() P`) is judged after
+substitution — `GT[int64]` yields a scalar `int64` result and
+admits. Multi-valued method results are admitted
 like plain function results (see below).
 
 Pointer-typed parameters and results joined the signature fragment:
