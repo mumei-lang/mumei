@@ -2846,8 +2846,11 @@ checked and
 encoded in order under the
 enclosing guard (partial operations keep their domain obligations) and
 bindings are block-lexical — a branch-local or shadowing `let` cannot
-leak. Reassignment is restricted to names bound on the current linear
-path: assignments inside `if` branches or expression blocks may only
+leak. Nested blocks in leading positions are checked and encoded like
+discarded expressions — their bindings stay lexical. Reassignment is
+restricted to names bound on the current linear
+path: assignments inside `if` branches, expression blocks or nested
+blocks may only
 touch names bound within them, since a rebinding that escapes a
 conditional path cannot be merged in this model. Unbound assignment,
 call statements and other statement forms
