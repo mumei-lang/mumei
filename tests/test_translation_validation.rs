@@ -343,6 +343,10 @@ fn guarded_i64_division_and_shifts_are_equivalent_or_refuted() {
         // that divides, so both sides share the same partial domain.
         ("x: i64, y: i64", "if y != 0 { x / y } else { 0 }"),
         ("x: i64, y: i64", "if y < 64 { x << y } else { 0 }"),
+        // `&&`/`||` short-circuit: the division on the right binds only
+        // where its left operand lets it run — as in `--bitvec-i64`.
+        ("x: i64, y: i64", "if y != 0 && x / y == 0 { 1 } else { 0 }"),
+        ("x: i64, y: i64", "if y == 0 || x / y != 0 { 1 } else { 0 }"),
     ] {
         let src = source(params, body);
         let report = validate(&src, &emitted(&src));
@@ -390,6 +394,23 @@ fn guarded_i64_division_and_shifts_are_equivalent_or_refuted() {
         validate(&shift, &shift_ir.replace("ashr", "shl")).outcome,
         Outcome::EquivalentWithinProfile
     );
+    // A short-circuit branch makes `y = 0` a defined source input: an IR
+    // that produces a wrong value only there must still be refuted.
+    let guarded = source("x: i64, y: i64", "if y != 0 && x / y == 0 { 1 } else { 0 }");
+    let ir = pin("define i64 @f(i64 %x, i64 %y) {\n\
+         entry:\n\
+         %c = icmp ne i64 %y, 0\n\
+         br i1 %c, label %div, label %done\n\
+         div:\n\
+         %v = sdiv i64 %x, %y\n\
+         %e = icmp eq i64 %v, 0\n\
+         %z = zext i1 %e to i64\n\
+         br label %done\n\
+         done:\n\
+         %r = phi i64 [ 1, %entry ], [ %z, %div ]\n\
+         ret i64 %r\n\
+         }");
+    assert_eq!(validate(&guarded, &ir).outcome, Outcome::Different);
 }
 
 #[test]
@@ -444,6 +465,12 @@ fn vacuous_and_out_of_profile_division_and_shifts_fail_closed() {
         "%v = udiv i64 %x, 1\nret i64 %v",
         "%v = urem i64 %x, 1\nret i64 %v",
         "%v = lshr i64 %x, 0\nret i64 %v",
+        // `i1` division/shifts — legal LLVM, but the profile only encodes
+        // i64 semantics; rejecting beats a solver sort mismatch.
+        "%c = icmp eq i64 %x, 0\n%v = sdiv i1 %c, %c\n%z = zext i1 %v to i64\nret i64 %z",
+        "%c = icmp eq i64 %x, 0\n%v = srem i1 %c, %c\n%z = zext i1 %v to i64\nret i64 %z",
+        "%c = icmp eq i64 %x, 0\n%v = shl i1 %c, %c\n%z = zext i1 %v to i64\nret i64 %z",
+        "%c = icmp eq i64 %x, 0\n%v = ashr i1 %c, %c\n%z = zext i1 %v to i64\nret i64 %z",
         "%v = freeze i64 %x\nret i64 %v",
         "%p = alloca i64\nstore i64 %x, ptr %p\n%v = load i64, ptr %p\nret i64 %v",
         "%v = call i64 @f(i64 %x)\nret i64 %v",

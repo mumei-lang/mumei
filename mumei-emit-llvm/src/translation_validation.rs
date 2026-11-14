@@ -377,15 +377,21 @@ unsafe fn check_function(function: LLVMValueRef, params: usize) -> Result<()> {
             }
             match LLVMGetInstructionOpcode(inst) {
                 LLVMOpcode::LLVMRet | LLVMOpcode::LLVMBr => (),
-                LLVMOpcode::LLVMAdd
-                | LLVMOpcode::LLVMSub
-                | LLVMOpcode::LLVMMul
-                | LLVMOpcode::LLVMSDiv
+                LLVMOpcode::LLVMAdd | LLVMOpcode::LLVMSub | LLVMOpcode::LLVMMul => {
+                    unflagged_arithmetic(inst)?;
+                    width(LLVMTypeOf(inst))?;
+                }
+                // Division, remainder and shifts are encoded against the
+                // i64 source semantics; the i1 forms this whitelist also
+                // admits for `add`/`sub`/`mul` have no counterpart there.
+                LLVMOpcode::LLVMSDiv
                 | LLVMOpcode::LLVMSRem
                 | LLVMOpcode::LLVMShl
                 | LLVMOpcode::LLVMAShr => {
                     unflagged_arithmetic(inst)?;
-                    width(LLVMTypeOf(inst))?;
+                    if width(LLVMTypeOf(inst))? != 64 {
+                        return Err(ValidationError("non-i64 division or shift"));
+                    }
                 }
                 LLVMOpcode::LLVMICmp
                 | LLVMOpcode::LLVMAnd

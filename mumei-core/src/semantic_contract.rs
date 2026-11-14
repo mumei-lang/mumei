@@ -658,7 +658,15 @@ fn source_expr<'ctx>(
         Expr::Block(s) => source_stmt(s, ctx, params, guard, definedness, depth + 1)?,
         Expr::BinaryOp(a, op, b) => {
             let a = source_expr(a, ctx, params, guard, definedness, depth + 1)?;
-            let b = source_expr(b, ctx, params, guard, definedness, depth + 1)?;
+            // `&&`/`||`/`=>` short-circuit like the emitter and
+            // `--bitvec-i64` verification: the right operand's partial
+            // operations bind only when the left one lets it run.
+            let b_guard = match (&a, op) {
+                (B(ab), Op::And) | (B(ab), Op::Implies) => Bool::and(ctx, &[guard, ab]),
+                (B(ab), Op::Or) => Bool::and(ctx, &[guard, &ab.not()]),
+                _ => guard.clone(),
+            };
+            let b = source_expr(b, ctx, params, &b_guard, definedness, depth + 1)?;
             match (a, op, b) {
                 (I(a), Op::Eq, I(b)) => B(a._eq(&b)),
                 (I(a), Op::Neq, I(b)) => B(a._eq(&b).not()),
