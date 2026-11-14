@@ -1344,11 +1344,17 @@ accumulate into the base binding — a later `t.M()` can observe the
 write through the pointer). The store is an external
 mutation, so it records a zero-argument imported transfer against
 that identity — `effects` reports `unknown` and a type redeclaration
-flags the summary. A `*t = v` dereference stays closed: `p := &x`
-aliases a tracked local and dep sets carry indices, not identities,
-so an indirected store cannot be proven safe. `&` on non-fragment
-operands and derefs stay outside the fragment; a pointer to an
-unnamed or composite pointee (`*int64`, `**T`) pins nothing but
+flags the summary. A `*t = v` dereference store admits through the
+same escaped-binding fold: `p := &x` may aim the pointer at any
+tracked local, so the store cannot be proven to miss one — unioning
+the stored value's dependencies into every escaped binding is the
+`*lib.PV = v` over-approximation, and the pointee's declared
+identity records the mutation. The operand must be a bound
+identifier whose pointer names a scalar or pointer pointee (`p :=
+&b` on `int64`, `**t = v`, computed pointers stay closed), and
+`(*p)++`/`*t--` admit without a fold — provenance-preserving. `&`
+on non-fragment operands stays outside the fragment; a pointer to
+an unnamed or composite pointee (`*int64`, `**T`) pins nothing but
 still tracks its dep set. Writes to imported `var` members admit
 through the same external-mutation rule — `lib.V = v`,
 `lib.VA[i] = v` and `lib.VS.f = v` (and dot-imported forms) resolve
