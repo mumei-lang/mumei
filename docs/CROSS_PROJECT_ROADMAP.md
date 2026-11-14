@@ -952,7 +952,7 @@ non-scalar targets still fail closed at the binding check. See the
 ### Wave 3 pure builtins in scalar summaries
 
 Agent's C07 fragment now admits the `min`/`max` builtins — the only
-builtins whose operands can be scalars in-fragment — with the result
+pure, result-producing builtins usable in-fragment — with the result
 unioning every argument's dependencies. `panic`, `len`, `cap`,
 `append`, `make`, `new` and the rest stay opaque. See the
 [Agent pure builtins](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-pure-builtins-in-expressions).
