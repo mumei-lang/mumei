@@ -32,6 +32,22 @@ fn validate(source: &str, ir: &str) -> tv::ValidationReport {
     tv::validate_pure_i64(source, ir, Options::default()).unwrap()
 }
 
+/// The widest caller budget: guarded-division equivalences sit near the
+/// default 5s/1M limit and report `Inconclusive` on loaded runners,
+/// though the contract accepts budgets up to 30s. Negative checks below
+/// keep the default budget so they stay honest about timing out.
+fn validate_wide(source: &str, ir: &str) -> tv::ValidationReport {
+    tv::validate_pure_i64(
+        source,
+        ir,
+        Options {
+            timeout_ms: 30_000,
+            resource_limit: 4_000_000,
+        },
+    )
+    .unwrap()
+}
+
 fn function(body: &str) -> String {
     pin(&format!("define i64 @f(i64 %x) {{ {body} }}"))
 }
@@ -777,7 +793,7 @@ fn guarded_i64_division_and_shifts_are_equivalent_or_refuted() {
         ("x: i64, y: i64", "if y == 0 || x / y != 0 { 1 } else { 0 }"),
     ] {
         let src = source(params, body);
-        let report = validate(&src, &emitted(&src));
+        let report = validate_wide(&src, &emitted(&src));
         assert_eq!(report.outcome, Outcome::EquivalentWithinProfile, "{body}");
         assert_eq!(
             report.input_domain,
@@ -804,7 +820,10 @@ fn guarded_i64_division_and_shifts_are_equivalent_or_refuted() {
     let ir = emitted(&src);
     let wrong_const = ir.replace("sdiv i64 %0, %1", "sdiv i64 %0, 2");
     assert_ne!(wrong_const, ir);
-    assert_eq!(validate(&src, &wrong_const).outcome, Outcome::Different);
+    assert_eq!(
+        validate_wide(&src, &wrong_const).outcome,
+        Outcome::Different
+    );
     for wrong in [
         ir.replace("sdiv i64", "srem i64"),
         ir.replace("sdiv i64 %0, %1", "sdiv i64 %1, %0"),
@@ -838,7 +857,7 @@ fn guarded_i64_division_and_shifts_are_equivalent_or_refuted() {
          %r = phi i64 [ 1, %entry ], [ %z, %div ]\n\
          ret i64 %r\n\
          }");
-    assert_eq!(validate(&guarded, &ir).outcome, Outcome::Different);
+    assert_eq!(validate_wide(&guarded, &ir).outcome, Outcome::Different);
 }
 
 #[test]
@@ -851,7 +870,10 @@ fn llvm_poison_on_a_source_defined_input_is_undefined_behavior() {
     // `x sdiv y` poisons on y = 0, which the source's `else` branch defines.
     let guarded = source("x: i64, y: i64", "if y != 0 { x / y } else { x }");
     let ir = pin("define i64 @f(i64 %x, i64 %y) { %v = sdiv i64 %x, %y\nret i64 %v }");
-    assert_eq!(validate(&guarded, &ir).outcome, Outcome::UndefinedBehavior);
+    assert_eq!(
+        validate_wide(&guarded, &ir).outcome,
+        Outcome::UndefinedBehavior
+    );
     // An out-of-range shift is poison the same way: `x shl 64`.
     let ir = function("%v = shl i64 %x, 64\nret i64 %v");
     assert_eq!(validate(&total, &ir).outcome, Outcome::UndefinedBehavior);
