@@ -1094,6 +1094,25 @@ shared package name. File indices are report-internal, not paths. See
 the
 [Agent multi-file package units](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-multi-file-package-units-and-per-file-freshness).
 
+### Wave 3 host-declared import resolution
+
+Agent's package profile accepts `imports: [{path, sources}]` — the host
+declares every source set an import path may resolve to; nothing reads
+disk, the network, or the toolchain, and the stdlib is not provided.
+Resolution is recursive and cycle-safe; an undeclared, uncompilable or
+cyclic import fails the report as `unresolved_import`. Package-qualified
+calls `lib.G(x)` record `direct_import` whose target is the callee's
+identity in the imported unit's own coordinate space — the same
+identity that unit's own package report assigns — so regenerating it
+churns the target and `stale_dependents` flags callers across package
+boundaries. Imported member uses record `import` references; package
+names stay namespace qualifiers. The consumer treats an imported call's
+result as potentially depending on every argument — a documented
+over-approximation; bodies and package-level state stay opaque. Which
+packages exist, their paths and source order stay host decisions; there
+is no shadowing, vendoring or version selection. See the
+[Agent host-declared import resolution](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-host-declared-import-resolution).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
