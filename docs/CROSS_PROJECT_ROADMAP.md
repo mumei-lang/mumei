@@ -1242,9 +1242,13 @@ encoded in order
 under the enclosing guard (keeping their definedness obligations) and
 bindings stay lexical — nested blocks are likewise admitted in leading
 positions with bindings lexical to the nested block; reassignments may
-only rebind names bound on the
-current linear path, so an assignment inside an `if` branch, expression
-block or nested block cannot escape its conditional path;
+rebind names bound on the current linear path, including inside `if`
+branches where each written name merges under the branch condition
+like the emitter's per-name phi (a name written on one side keeps its
+prior value on the other, and branch partial operations keep their
+definedness obligations under the refined guard); writes inside
+operands, `let` initializers, expression blocks and match arms cannot
+escape their conditional path;
 unbound assignment, call statements and trailing `let`s without a value
 statement stay rejected. Declared `bool` parameters and `-> bool`
 results are admitted, completing the Boolean half of the issue's "pure

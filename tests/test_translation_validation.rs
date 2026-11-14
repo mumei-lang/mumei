@@ -245,19 +245,24 @@ fn unsupported_source_is_not_silently_weakened() {
         // Sequences admit `let`s, scalar reassignments and pure
         // expression statements: an unbound assignment, a call statement
         // and a trailing `let` without a value still fail.
-        "x = 1",
         "y = 1; x",
         "f(x); x",
         "let y = x;",
         "let y = f(x); y",
-        // Rebinding cannot escape a conditional path or a nested block:
-        // assignments inside `if` branches or nested blocks may only
-        // touch names bound within them.
-        "if x > 0 { x = 1; 0 } else { 0 }",
-        "let a = x; if x > 0 { a = 1; a } else { a }",
+        // Rebinding cannot escape a nested block, and a name not bound
+        // on the linear path cannot be assigned inside a branch.
         "let a = x; { a = 1; a }; a",
-        // Reassignment keeps the binding's kind.
+        "if x > 0 { y = 1; y } else { 0 }",
+        // Branch writes stay closed in every non-statement position:
+        // operands, `let` initializers and match arms cannot merge an
+        // escaping write.
+        "x + (if x > 0 { x = 1; x } else { x })",
+        "let a = if x > 0 { x = 1; x } else { x }; a",
+        "match x { 0 => { x = 1; x }, _ => { x } }",
+        // Reassignment keeps the binding's kind, inside a branch too.
         "let a = x; a = x > 0; a",
+        "let b = x > 0; if b { x = b; x } else { x }",
+        "if x > 0 { x = x > 1; x } else { x }; x",
     ] {
         assert!(tv::validate_pure_i64(
             &source("x: i64", body),
@@ -635,6 +640,107 @@ fn scalar_reassignment_is_equivalent_and_refuted() {
             "{other}"
         );
     }
+}
+
+#[test]
+fn conditional_path_reassignment_is_equivalent_and_refuted() {
+    for (params, body) in [
+        // A bare assignment yields its assigned value: `x = 1` returns 1.
+        ("x: i64", "x = 1"),
+        ("x: i64", "x = x + 1"),
+        // Both branches rebind a parameter: the value merges under the
+        // branch condition like the emitter's per-name phi.
+        ("x: i64", "if x > 0 { x = 1; x } else { x = 2; x }"),
+        ("x: i64", "if x > 0 { x = 1; x } else { x = 2; x }; x"),
+        // A name written on one side keeps its prior value on the
+        // other — the merge carries the untouched binding through.
+        ("x: i64", "if x > 0 { x = 1; x } else { x }; x"),
+        ("x: i64", "let a = x; if x > 0 { a = 1; a } else { a }; a"),
+        // Several linear-path names merge independently: a reassigned
+        // branch-local `let` also merges for the rest of its block.
+        (
+            "x: i64",
+            "let y = x; if x > 0 { y = 9; x = 1; x } else { x }; x + y",
+        ),
+        // Sequential conditionals see the earlier merges.
+        (
+            "x: i64",
+            "if x > 0 { x = 1; x } else { x }; if x > 2 { x = 3; x } else { x }; x",
+        ),
+        // A nested conditional merges inside the enclosing branch.
+        (
+            "x: i64",
+            "if x > 0 { if x > 1 { x = 5; x } else { x }; x } else { x }; x",
+        ),
+        // A branch-local `let` shadows nothing and stays lexical; the
+        // merged write to `x` still escapes its branch.
+        (
+            "x: i64",
+            "if x > 0 { let a = x; a = a + 1; x = a; x } else { x }; x",
+        ),
+        // A `let` bound in the same block shadows its name for escape:
+        // writes to it merge only inside that block's scope.
+        ("x: i64", "let x = 7; if x > 0 { x = 1; x } else { x }; x"),
+        // Boolean bindings merge the same way.
+        (
+            "x: i64",
+            "let b = x > 0; if x > 1 { b = false; b } else { b }; if b { x } else { 0 }",
+        ),
+    ] {
+        let src = source(params, body);
+        assert_eq!(
+            validate(&src, &emitted(&src)).outcome,
+            Outcome::EquivalentWithinProfile,
+            "{body}"
+        );
+    }
+    // A partial operation inside a branch keeps its definedness
+    // obligation under the refined guard: the shift and division bind
+    // only where their guards let them run — matching the guarded
+    // emitter path.
+    for (params, body) in [
+        (
+            "x: i64, y: i64",
+            "if y < 64 { x = x << y; x } else { x }; x",
+        ),
+        ("x: i64, y: i64", "if y != 0 { x = x / 4; x } else { x }; x"),
+    ] {
+        let src = source(params, body);
+        let report = validate(&src, &emitted(&src));
+        assert_eq!(report.outcome, Outcome::EquivalentWithinProfile, "{body}");
+        assert_eq!(
+            report.input_domain,
+            "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires",
+            "{body}"
+        );
+    }
+    // A variable divisor under a guard is the same solver limit as an
+    // unguarded one: the check stays Inconclusive, failing closed
+    // rather than weakening the claim.
+    let src = source("x: i64, y: i64", "if y != 0 { x = x / y; x } else { x }; x");
+    assert_eq!(
+        validate(&src, &emitted(&src)).outcome,
+        Outcome::Inconclusive
+    );
+    // The merged value, not the pre-branch value, reaches the tail.
+    let src = source("x: i64", "if x > 0 { x = 1; x } else { x }; x");
+    for wrong_ir in [
+        // A return of the untouched parameter ignores the merge.
+        pin("define i64 @f(i64 %x) { ret i64 %x }"),
+        // Phi operands swapped across the condition.
+        pin("define i64 @f(i64 %x) {\nentry:\n  %c = icmp sgt i64 %x, 0\n  br i1 %c, label %t, label %e\nt:\n  br label %m\ne:\n  br label %m\nm:\n  %p = phi i64 [ %x, %t ], [ 1, %e ]\n  ret i64 %p\n}"),
+        // A constant instead of the conditional write.
+        pin("define i64 @f(i64 %x) { ret i64 1 }"),
+    ] {
+        assert_eq!(
+            validate(&src, &wrong_ir).outcome,
+            Outcome::Different,
+            "{wrong_ir}"
+        );
+    }
+    // Merging the wrong literal is different too.
+    let wrong = emitted(&source("x: i64", "if x > 0 { x = 2; x } else { x }; x"));
+    assert_eq!(validate(&src, &wrong).outcome, Outcome::Different);
 }
 
 #[test]
