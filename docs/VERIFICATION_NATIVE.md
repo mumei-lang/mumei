@@ -713,7 +713,8 @@ reassignments on the linear path and inside `if` branches, discarded
 pure expression
 statements, `bool` parameters and results, subrange integer parameter
 types (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`) and `match` on an i64
-scrutinee with literal patterns and a trailing catch-all arm —
+scrutinee with literal patterns, Boolean arm guards and a trailing
+unguarded catch-all arm —
 and one caller-supplied LLVM
 17 textual IR snapshot. The caller must explicitly pin the exact
 `x86_64-unknown-linux-gnu` triple and the profile's `DATA_LAYOUT` on that snapshot;
@@ -787,14 +788,17 @@ profile — a full-width unsigned domain cannot be expressed as an i64
 range bound — and a wider result type (`-> i32`) is not part of the
 slice.
 A `match` on an i64 scrutinee is checked in first-match order: each
-literal pattern contributes one `target == n` test and the arm bodies
-are encoded as an ite chain under the accumulated negations, so an arm
-shadowed by an earlier match never leaks its value. Literal-only
-patterns cannot cover i64, so the contract requires a trailing
-`Wildcard` or `Variable` catch-all arm rather than a solver
-exhaustiveness check; a `Variable` arm binds the scrutinee value for
-its body. Arm guards, non-literal patterns, a non-i64 scrutinee and
-mixed-kind arm results are static errors. On the IR side,
+literal pattern contributes one `target == n` test, an arm may add a
+Boolean guard evaluated in the arm's scope, and an arm hits only when
+`pattern ∧ guard` holds — the arm bodies are encoded as an ite chain
+under the accumulated negations of every earlier hit, so a guarded or
+shadowed arm never leaks its value. Literal-only patterns cannot cover
+i64, so the contract requires a trailing unguarded `Wildcard` or
+`Variable` catch-all arm rather than a solver exhaustiveness check (a
+guarded catch-all could still fall through); a `Variable` arm binds the
+scrutinee value for its guard and body. Non-literal patterns, a non-i64
+scrutinee, a non-Boolean guard and mixed-kind arm results are static
+errors. On the IR side,
 `unreachable` executes LLVM undefined behavior: the encoder records an
 always-unsatisfiable definedness obligation on that path, so an
 `unreachable` reachable on a defined input reports `UndefinedBehavior`
