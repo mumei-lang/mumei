@@ -203,7 +203,15 @@ fn validate(
     // are defined — the same safety domain `--bitvec-i64` verification
     // requires. Inputs outside the source domain are don't-care; inputs the
     // source binds but the IR poisons on are a distinct failure.
-    let src_dom = Bool::and(&context, &model.definedness.iter().collect::<Vec<_>>());
+    // A declared `bool` parameter lowers to i64 carrying 0/1, so the
+    // signature itself bounds its input beside the operation obligations.
+    let src_terms: Vec<Bool> = model
+        .param_domain
+        .iter()
+        .chain(model.definedness.iter())
+        .cloned()
+        .collect();
+    let src_dom = Bool::and(&context, &src_terms.iter().collect::<Vec<_>>());
     let ir_terms: Vec<Bool> = ir_definedness
         .iter()
         .map(|(path, defined)| path.implies(defined))
@@ -269,13 +277,17 @@ fn validate(
         input_domain: if !model.definedness.is_empty() || !ir_definedness.is_empty() {
             if native {
                 "zero_argument_main_i64_body_where_division_and_shift_defined_not_process_exit_status"
-            } else {
+            } else if model.param_domain.is_empty() {
                 "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires"
+            } else {
+                "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_restricted_by_requires"
             }
         } else if native {
             "zero_argument_main_i64_body_not_process_exit_status"
-        } else {
+        } else if model.param_domain.is_empty() {
             "all_signed_i64_inputs_not_restricted_by_requires"
+        } else {
+            "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_restricted_by_requires"
         },
         source_sha256: model.source_sha256,
         llvm_sha256: mumei_core::native_bundle::sha256(llvm_ir.as_bytes()),
@@ -596,8 +608,11 @@ impl<'ctx> IrEncoder<'ctx> {
         let mut values = HashMap::new();
         for (i, input) in inputs.iter().enumerate() {
             let param = LLVMGetParam(function, i as u32);
-            if width(LLVMTypeOf(param))? != 64 {
-                return Err(ValidationError("LLVM i64 parameter expected"));
+            // A parameter's LLVM width must match the source signature:
+            // i64 for every parameter; a declared `bool` carries 0/1 and is
+            // further bounded by `model.param_domain`.
+            if width(LLVMTypeOf(param))? != input.get_size() {
+                return Err(ValidationError("LLVM parameter width mismatch"));
             }
             values.insert(param as usize, input.clone());
         }

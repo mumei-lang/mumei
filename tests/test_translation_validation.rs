@@ -266,7 +266,50 @@ fn unsupported_source_is_not_silently_weakened() {
         )
         .is_err());
     }
-    for params in ["x: u64", "x: bool", "x: [i64]", "x: f64"] {
+    // Boolean parameters carry truth values that are not i64 operands, a
+    // body must still return i64, and reassigning a bool to a non-bool
+    // value keeps the binding's kind.
+    for (params, body) in [
+        ("b: bool", "b + 1"),
+        ("b: bool", "b"),
+        ("b: bool", "if b { b } else { b }"),
+        ("b: bool, x: i64", "b = 1; x"),
+    ] {
+        assert!(tv::validate_pure_i64(
+            &source(params, body),
+            &function("ret i64 0"),
+            Options::default()
+        )
+        .is_err());
+    }
+    // A non-i64 return type stays outside the profile.
+    assert!(tv::validate_pure_i64(
+        "atom f(b: bool) -> bool requires: true; ensures: true; body: { b };",
+        &function("ret i64 0"),
+        Options::default()
+    )
+    .is_err());
+    // An i64 IR parameter is signature-compatible with a declared bool
+    // (both lower to i64) but not interchangeable: ignoring the boolean
+    // input is a value difference on the restricted domain.
+    let bool_src = source("b: bool, x: i64", "if b { x } else { 0 }");
+    assert_eq!(
+        validate(
+            &bool_src,
+            &pin("define i64 @f(i64 %b, i64 %x) { ret i64 %x }")
+        )
+        .outcome,
+        Outcome::Different
+    );
+    // An i1 IR parameter is a different signature than the i64 0/1 a
+    // declared bool lowers to — a signature error, not a value difference.
+    assert!(tv::validate_pure_i64(
+        &bool_src,
+        &pin("define i64 @f(i1 %b, i64 %x) { ret i64 %x }"),
+        Options::default()
+    )
+    .is_err());
+    for params in ["x: u64", "x: i32", "x: [i64]", "x: f64"] {
         assert!(tv::validate_pure_i64(
             &source(params, "0"),
             &function("ret i64 0"),
@@ -274,6 +317,66 @@ fn unsupported_source_is_not_silently_weakened() {
         )
         .is_err());
     }
+}
+
+#[test]
+fn bool_parameters_are_equivalent_and_refuted() {
+    for (params, body) in [
+        // A `bool` parameter lowers to i64 carrying 0/1, usable in guards
+        // and boolean expressions; the result still returns i64.
+        ("b: bool, x: i64", "if b { x } else { 0 }"),
+        ("b: bool", "if b { 1 } else { 0 }"),
+        ("b: bool, x: i64", "let c = b; if c { x } else { x }"),
+        ("b: bool, x: i64", "if b == true { x } else { 0 }"),
+        ("b: bool, x: i64", "if (x > 0) == b { x } else { 0 }"),
+        ("b: bool, x: i64", "b = x < 0; if b { x } else { 0 }"),
+        ("b: bool, x: i64", "if b { x + 1; x } else { 0 }"),
+        ("b: bool, c: bool, x: i64", "if b && c { x } else { 0 }"),
+        (
+            "b: bool, x: i64",
+            "let c = b || x > 0; if c { x } else { 1 }",
+        ),
+        ("b: bool, x: i64", "if !b { x } else { 0 }"),
+        // A boolean guard over a partial operation keeps both domains:
+        // the 0/1 signature bound and the operation's definedness.
+        ("b: bool, x: i64, y: i64", "if b { x / y } else { 0 }"),
+    ] {
+        let src = source(params, body);
+        assert_eq!(
+            validate(&src, &emitted(&src)).outcome,
+            Outcome::EquivalentWithinProfile,
+            "{body}"
+        );
+    }
+    // A `requires` on a boolean input is a source-side obligation; the
+    // comparison domain still covers every input the signature admits.
+    let req = format!(
+        "atom f(b: bool, x: i64) -> i64 requires: b; ensures: true; body: {{ if b {{ x }} else {{ 0 }} }};"
+    );
+    assert_eq!(
+        validate(&req, &emitted(&req)).outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    // The domain label discloses the 0/1-restricted bool signature.
+    let src = source("b: bool, x: i64", "if b { x } else { 0 }");
+    let report = validate(&src, &emitted(&src));
+    assert_eq!(
+        report.input_domain,
+        "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_restricted_by_requires"
+    );
+    // Ignoring the boolean input or swapping its branches is different.
+    assert_eq!(
+        validate(&src, &pin("define i64 @f(i64 %b, i64 %x) { ret i64 %x }")).outcome,
+        Outcome::Different
+    );
+    let swapped = emitted(&source("b: bool, x: i64", "if b { 0 } else { x }"));
+    assert_eq!(validate(&src, &swapped).outcome, Outcome::Different);
+    // Equivalent reorderings still compare equal.
+    let same = emitted(&source("b: bool, x: i64", "if b == false { 0 } else { x }"));
+    assert_eq!(
+        validate(&src, &same).outcome,
+        Outcome::EquivalentWithinProfile
+    );
 }
 
 #[test]

@@ -2854,7 +2854,12 @@ blocks may only
 touch names bound within them, since a rebinding that escapes a
 conditional path cannot be merged in this model. Unbound assignment,
 call statements and other statement forms
-stay unsupported. Unsigned forms and
+stay unsupported. Declared `bool` parameters are admitted as the
+Boolean half of the issue's pure integer/Boolean scope: a `bool`
+parameter lowers to i64 carrying 0/1, so its source value is the truth
+of `input != 0` and the signature bounds that input to `{0, 1}`;
+boolean values stay two-valued (a `bool` binding is not an i64 operand
+and a `-> bool` return stays outside the profile). Unsigned forms and
 flagged variants remain outside the profile. The bounded C03
 recheck/native-bundle fragment stays closed to arithmetic, so build and
 recheck keep agreeing on one source grammar. See the

@@ -113,7 +113,8 @@ pub struct SemanticContract {
 /// partial domain: nonzero divisor, no i64::MIN / -1, shift amount in 0..64),
 /// block-scoped `let` bindings, scalar reassignments on the linear path
 /// (a rebinding cannot escape an `if` branch, expression block or nested
-/// block) and discarded pure expression statements;
+/// block), discarded pure expression statements and `bool` parameters
+/// lowered to i64 carrying 0/1 (the result still returns i64);
 /// the bounded C03
 /// contract always passes `false` so the build
 /// and recheck paths keep agreeing on a fragment with no arithmetic.
@@ -151,12 +152,12 @@ pub fn extract_pure_i64_contract(
     let Some(Item::Atom(mut atom)) = items.pop() else {
         return Err(SemanticContractError::Unsupported("non-atom declarations"));
     };
-    validate_atom(&atom)?;
+    validate_atom(&atom, allow_wrapping_arithmetic)?;
     atom.span.file = source_name.to_owned();
     let scope: BTreeMap<String, ScalarKind> = atom
         .params
         .iter()
-        .map(|p| (p.name.clone(), ScalarKind::I64))
+        .map(|p| (p.name.clone(), param_kind(p)))
         .collect();
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
@@ -188,7 +189,11 @@ pub fn extract_pure_i64_contract(
         .iter()
         .map(|p| TypedBinder {
             name: p.name.clone(),
-            scalar_type: "i64",
+            scalar_type: if param_kind(p) == ScalarKind::Bool {
+                "bool"
+            } else {
+                "i64"
+            },
             role: "parameter",
             provenance: atom.span.clone(),
             span_precision: "atom",
@@ -214,7 +219,15 @@ pub fn extract_pure_i64_contract(
         } else {
             PURE_I64_PROFILE
         },
-        "params": atom.params.iter().map(|p| &p.name).collect::<Vec<_>>(),
+        // The declared parameter types are part of the specification
+        // identity: `b: bool` and `b: i64` admit different input domains
+        // and must not share one specification hash.
+        "params": atom
+            .params
+            .iter()
+            .map(|p| serde_json::json!({"name": p.name, "type": p.type_name}))
+            .collect::<Vec<_>>(),
+        "return_type": atom.return_type,
         "requires": atom.requires, "ensures": atom.ensures,
     }))?;
     let hir = lower_atom_to_hir(&atom);
@@ -290,13 +303,18 @@ pub fn extract_pure_i64_contract(
         .chain(allow_wrapping_arithmetic.then_some("nested_block_sequences"))
         .chain(allow_wrapping_arithmetic.then_some("discarded_pure_expression_statements"))
         .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
+        .chain(allow_wrapping_arithmetic.then_some("bool_parameters_lowered_to_i64_zero_one"))
         .collect(),
         requested_route: "standard_z3_not_executed_by_extractor",
         decomposition: "no_common_obligation_decomposition",
         normalization:
             "checked_parser_comparison_chains_to_conjunction_not_independently_validated",
         correspondence: "unchecked_not_translation_validated",
-        assumptions: vec!["Inputs are representable signed 64-bit integers."],
+        assumptions: vec![if allow_wrapping_arithmetic {
+            "Inputs are representable signed 64-bit integers; declared booleans carry 0/1."
+        } else {
+            "Inputs are representable signed 64-bit integers."
+        }],
         exclusions: vec![
             "Extraction does not prove the postcondition or precondition satisfiability.",
             "HIR/MIR fingerprints identify internal snapshots, not semantic equivalence.",
@@ -310,22 +328,48 @@ pub fn extract_pure_i64_contract(
     })
 }
 
-fn validate_atom(atom: &Atom) -> Result<(), SemanticContractError> {
+/// The scalar kind a declared parameter type gives in this profile, when
+/// the declaration is admissible: `i64` always, `bool` only when
+/// `admit_bool` (the widened profile's `allow_wrapping_arithmetic` flag).
+fn declared_param_kind(param: &crate::parser::ast::Param, admit_bool: bool) -> Option<ScalarKind> {
+    let name = param.type_name.as_deref()?;
+    let kind = match name {
+        "i64" => ScalarKind::I64,
+        "bool" if admit_bool => ScalarKind::Bool,
+        _ => return None,
+    };
+    if param.type_ref.as_ref().is_some_and(|ty| {
+        ty.name != name
+            || !ty.type_args.is_empty()
+            || ty.effect_set.is_some()
+            || ty.capability.is_some()
+    }) || param.consume
+        || param.is_ref
+        || param.is_ref_mut
+        || param.fn_contract_requires.is_some()
+        || param.fn_contract_ensures.is_some()
+    {
+        return None;
+    }
+    Some(kind)
+}
+
+/// The parameter kind inside a contract that already passed
+/// `validate_atom` — unvalidated sources never reach the kind checker.
+fn param_kind(param: &crate::parser::ast::Param) -> ScalarKind {
+    if param.type_name.as_deref() == Some("bool") {
+        ScalarKind::Bool
+    } else {
+        ScalarKind::I64
+    }
+}
+
+fn validate_atom(atom: &Atom, admit_bool: bool) -> Result<(), SemanticContractError> {
     if atom.return_type.as_deref() != Some("i64")
-        || atom.params.iter().any(|p| {
-            p.type_name.as_deref() != Some("i64")
-                || p.type_ref.as_ref().is_some_and(|ty| {
-                    ty.name != "i64"
-                        || !ty.type_args.is_empty()
-                        || ty.effect_set.is_some()
-                        || ty.capability.is_some()
-                })
-                || p.consume
-                || p.is_ref
-                || p.is_ref_mut
-                || p.fn_contract_requires.is_some()
-                || p.fn_contract_ensures.is_some()
-        })
+        || atom
+            .params
+            .iter()
+            .any(|p| declared_param_kind(p, admit_bool).is_none())
     {
         return Err(SemanticContractError::Unsupported(
             "explicit owned scalar i64 signature required",
@@ -579,6 +623,10 @@ pub struct PureI64Body<'ctx> {
     /// `--bitvec-i64` verification requires. Empty unless the caller admitted
     /// those operators; their conjunction is the domain the source binds.
     pub definedness: Vec<Bool<'ctx>>,
+    /// Domain the declared signature itself binds: an admitted `bool`
+    /// parameter lowers to i64 carrying 0/1, so its entry is `input <=u 1`.
+    /// Empty without `bool` parameters.
+    pub param_domain: Vec<Bool<'ctx>>,
 }
 
 type BodyResult<T> = std::result::Result<T, SemanticContractError>;
@@ -628,23 +676,29 @@ pub fn encode_pure_i64_body<'ctx>(
     let inputs: Vec<_> = (0..atom.params.len())
         .map(|i| BV::new_const(context, format!("input_{i}"), 64))
         .collect();
-    let env: HashMap<String, SourceValue> = atom
-        .params
-        .iter()
-        .zip(&inputs)
-        .map(|(p, v)| (p.name.clone(), SourceValue::Integer(v.clone())))
-        .collect();
+    let env: HashMap<String, SourceValue> = param_env(&atom.params, &inputs, context);
     let top = Bool::from_bool(context, true);
     let mut definedness = Vec::new();
     let assignable: BTreeSet<String> = atom.params.iter().map(|p| p.name.clone()).collect();
     let value =
         source_stmt(&body, context, &env, &top, &mut definedness, 0, &assignable)?.integer()?;
+    // A declared `bool` parameter lowers to i64 carrying 0/1, so the
+    // declared signature restricts its input to {0, 1}: without this the
+    // i64 range would make `b == true` look different at `input = 5`.
+    let param_domain: Vec<Bool> = atom
+        .params
+        .iter()
+        .zip(&inputs)
+        .filter(|(p, _)| param_kind(p) == ScalarKind::Bool)
+        .map(|(_, v)| v.bvule(&BV::from_u64(context, 1, 64)))
+        .collect();
     Ok(PureI64Body {
         function_name: atom.name,
         source_sha256: contract.source_sha256,
         inputs,
         value,
         definedness,
+        param_domain,
     })
 }
 
@@ -661,12 +715,7 @@ pub fn encode_pure_i64_obligation<'ctx>(
     let Some(Item::Atom(atom)) = items.pop() else {
         return Err(SemanticContractError::Unsupported("source atom"));
     };
-    let mut env: HashMap<String, SourceValue> = atom
-        .params
-        .iter()
-        .zip(&body.inputs)
-        .map(|(p, v)| (p.name.clone(), SourceValue::Integer(v.clone())))
-        .collect();
+    let mut env: HashMap<String, SourceValue> = param_env(&atom.params, &body.inputs, context);
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
     let top = Bool::from_bool(context, true);
@@ -683,6 +732,29 @@ pub fn encode_pure_i64_obligation<'ctx>(
 enum SourceValue<'ctx> {
     Integer(BV<'ctx>),
     Boolean(Bool<'ctx>),
+}
+
+/// Bind declared parameters to their symbolic inputs: `i64` parameters
+/// are 64-bit integers, `bool` parameters the truth value `input != 0`
+/// (the emitter lowers `bool` to an i64 carrying 0/1, matching its
+/// `icmp ne` condition).
+fn param_env<'ctx>(
+    params: &[crate::parser::ast::Param],
+    inputs: &[BV<'ctx>],
+    ctx: &'ctx Context,
+) -> HashMap<String, SourceValue<'ctx>> {
+    params
+        .iter()
+        .zip(inputs)
+        .map(|(p, v)| {
+            let value = if param_kind(p) == ScalarKind::Bool {
+                SourceValue::Boolean(v._eq(&BV::from_u64(ctx, 0, 64)).not())
+            } else {
+                SourceValue::Integer(v.clone())
+            };
+            (p.name.clone(), value)
+        })
+        .collect()
 }
 impl<'ctx> SourceValue<'ctx> {
     fn integer(self) -> BodyResult<BV<'ctx>> {
@@ -1004,6 +1076,41 @@ mod tests {
             assert!(extract(&source).is_err());
             assert!(extract_pure_i64_contract(&source, "clamp.mm", Some(TARGET), true).is_ok());
         }
+    }
+
+    #[test]
+    fn bool_parameters_stay_outside_the_bounded_c03_fragment() {
+        // The widened equivalence profile admits `bool` parameters
+        // (lowered to i64 carrying 0/1); the bounded C03 contract keeps
+        // its i64-only signature.
+        let bool_atom = "atom f(b: bool, x: i64) -> i64 requires: true; ensures: true; body: { if b { x } else { 0 } };";
+        assert!(extract_pure_i64_contract(bool_atom, "clamp.mm", Some(TARGET), false).is_err());
+        assert!(extract_pure_i64_contract(bool_atom, "clamp.mm", Some(TARGET), true).is_ok());
+    }
+
+    #[test]
+    fn parameter_types_are_part_of_the_specification_identity() {
+        // `b: bool` and `b: i64` admit different input domains; sharing a
+        // specification hash would alias their obligation identities.
+        let bool_contract = extract_pure_i64_contract(
+            "atom f(b: bool, x: i64) -> i64 requires: true; ensures: true; body: { if b { x } else { 0 } };",
+            "clamp.mm",
+            Some(TARGET),
+            true,
+        )
+        .unwrap();
+        let int_contract = extract_pure_i64_contract(
+            "atom f(b: i64, x: i64) -> i64 requires: true; ensures: true; body: { if b > 0 { x } else { 0 } };",
+            "clamp.mm",
+            Some(TARGET),
+            true,
+        )
+        .unwrap();
+        assert_ne!(
+            bool_contract.specification_sha256,
+            int_contract.specification_sha256
+        );
+        assert_ne!(bool_contract.obligation_id, int_contract.obligation_id);
     }
 
     #[test]
