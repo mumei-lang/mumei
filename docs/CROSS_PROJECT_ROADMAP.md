@@ -1006,6 +1006,16 @@ as declared gaps rather than producing summaries that silently miss the
 alias or mutation. See the
 [Agent alias and resource-state fixtures](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-alias-and-resource-state-fixtures).
 
+### Wave 3 dependent invalidation in scalar summaries
+
+Agent's `GoSummarySet.stale_dependents(known)` closes the "callee
+replacement invalidates dependent summaries" criterion: recorded call
+targets are source-anchored binding identities, so a replaced or
+deleted callee never reuses its identity and every summary that
+recorded a call to an absent target is exactly the re-derive set.
+Detection only — the host decides what to rebuild. See the
+[Agent dependent invalidation](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-dependent-invalidation).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
