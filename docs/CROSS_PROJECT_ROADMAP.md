@@ -1134,7 +1134,8 @@ values) keep `non_parameter_reference` and fail closed, as does any
 read whose member declaration is absent. Constant *values* are not
 modelled — the fragment tracks dependencies, not what a constant
 equals — and member types carry no identity usable for consumer-side
-type checks yet.
+type checks yet. Dot-imported names stay unmodelled: they are plain
+identifiers, not package-qualified selectors.
 
 ### Wave 4 first compiler-backed source-analysis boundary
 
