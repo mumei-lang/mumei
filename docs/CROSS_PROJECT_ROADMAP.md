@@ -1248,11 +1248,18 @@ type and every result is scalar; method values carry
 expressions `lib.T.M(recv, args)` record plain `direct_import`
 (the receiver is already the leading argument). Method members'
 signature pins include the receiver's named type, so redeclaring it
-flags every admitted caller. Interface receivers (dynamic dispatch —
-values and expressions alike), local methods and generic or
-instantiated receiver types (`lib.T[lib.U]`,
-`lib.GT[lib.T].GM` — the pinned identity would miss the type
-arguments) stay closed; multi-valued method results are admitted
+flags every admitted caller. Instantiated receivers admit through
+the same gate — `x.GM(y)` on `x: lib.GT[lib.T]` and the method
+expression `lib.GT[lib.T].GM` classify as `direct_import` when every
+receiver type argument is basic, named or alias; the collected
+identities ride on the record's `type_arg_type_ids` so a type-argument
+redeclare stales the call site. Interface receivers (dynamic dispatch —
+values and expressions alike), local methods and generic methods stay
+closed, as do receivers still declared on type parameters and
+instantiated receivers whose arguments contain a composite constructor
+(`lib.GT[*lib.T]`); a result mentioning the receiver's own type
+parameter stays closed too since the scalar check reads the declared
+signature. Multi-valued method results are admitted
 like plain function results (see below).
 
 Pointer-typed parameters and results joined the signature fragment:
