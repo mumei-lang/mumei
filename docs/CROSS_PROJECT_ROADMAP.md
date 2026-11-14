@@ -963,8 +963,9 @@ Agent's C07 fragment now admits compound assignments `x op= e` — the
 result unions the binding's current dependencies with the right-hand
 side's — and parallel tuple assignments `x, y = e1, e2`, where every
 right-hand side evaluates against the pre-state before any store lands.
-Selector/index targets and multi-valued call results stay declared
-gaps. See the
+Selector/index targets and count mismatches stay declared gaps — a
+lone multi-valued imported call of matching arity unpacks (see the
+multi-valued imported call results section below). See the
 [Agent assignment forms](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-compound-and-tuple-assignments).
 
 ### Wave 3 integer range loops in scalar summaries
@@ -983,8 +984,10 @@ Agent's C07 fragment now admits `a, b := e1, e2` and multi-name `var`
 specs: each left-hand name binds its matching right-hand side's
 dependencies, all right-hand sides evaluating in parallel against the
 pre-state, `_` slots discarding their values, and mixed redeclares
-keeping their existing bindings. Non-scalar names and multi-valued
-call results stay declared gaps. See the
+keeping their existing bindings. Non-scalar names stay declared gaps;
+multi-valued calls admit one right-hand expression supplying every
+name only for an imported callee at matching declared arity (see the
+multi-valued imported call results section below). See the
 [Agent multi-name declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-multi-name-declarations).
 
 ### Wave 3 expression statements in scalar summaries
@@ -1116,8 +1119,9 @@ boundaries. Imported member uses record `import` references; package
 names stay namespace qualifiers. The consumer treats an imported call's
 result as potentially depending on every argument — a documented
 over-approximation; bodies and package-level state stay opaque. Only
-zero-result or single-scalar-result callees are `direct_import` —
-composite or multi-valued imported results fail closed; a summary
+callees whose results are all scalar are `direct_import` — a
+composite result at any arity fails closed, and a multi-valued scalar
+callee declares its arity on the record; a summary
 recording an imported transfer reports `effects` as `unknown`; imported
 sources honour the same no-directive contract; identities are
 content-addressed, so identical imported sources across paths share
@@ -1216,18 +1220,40 @@ section.
 
 `recv.M(args)` now classifies as `direct_import` when the method is
 declared in a resolved imported unit on a concrete named receiver
-type and returns at most one scalar result; method values carry
+type and every result is scalar; method values carry
 `method: true` so the consumer evaluates the receiver expression too
-— the result depends on the receiver and every argument. Method
+— each result depends on the receiver and every argument. Method
 expressions `lib.T.M(recv, args)` record plain `direct_import`
 (the receiver is already the leading argument). Method members'
 signature pins include the receiver's named type, so redeclaring it
 flags every admitted caller. Interface receivers (dynamic dispatch —
-values and expressions alike), local methods, multi-valued results
-and generic or instantiated receiver types (`lib.T[lib.U]`,
+values and expressions alike), local methods and generic or
+instantiated receiver types (`lib.T[lib.U]`,
 `lib.GT[lib.T].GM` — the pinned identity would miss the type
-arguments) stay closed. See the
+arguments) stay closed; multi-valued method results are admitted
+like plain function results (see below). See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
+section.
+
+### Wave 3 multi-valued imported call results
+
+An imported callee whose results are all scalar now classifies
+`direct_import` at any arity — the call record declares the arity on
+an optional `results` key (emitted only above one), so the consumer
+admits tuple unpacking `a, b := lib.F(x)` — and the same shape in
+multi-name `var` specs and plain tuple assignments — only when the
+declared arity matches the left-hand width. Each result carries the
+same over-approximated dependency set (the union of the receiver's
+and every argument's), so one evaluation stores to every name.
+Spread calls (`lib.W(lib.G(x))`) need no arity — the inner union
+already covers the outer result — while a spread into a local callee
+stays closed via the parameter-count check. Composite results stay
+`external_or_bodyless`, arity mismatches stay
+`unsupported_statement`, the instantiation gate keeps its
+single-result rule, and `results` validates only on `direct_import`
+records with arity at least two — reports predating the key load
+unchanged. See the
+[Agent multi-valued imported results](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-multi-valued-imported-results)
 section.
 
 ### Wave 4 first compiler-backed source-analysis boundary
