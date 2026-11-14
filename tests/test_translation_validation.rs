@@ -240,9 +240,14 @@ fn unsupported_source_is_not_silently_weakened() {
     for body in [
         "x**2",
         "1.0",
-        "let y = x; y",
         "f(x)",
         "while x > 0 invariant true { x }; x",
+        // Sequences admit `let`s only: a bare expression statement, an
+        // assignment and a trailing `let` without a value still fail.
+        "x + 1; x",
+        "x = 1",
+        "let y = x;",
+        "let y = f(x); y",
     ] {
         assert!(tv::validate_pure_i64(
             &source("x: i64", body),
@@ -339,6 +344,42 @@ fn wrapping_i64_arithmetic_is_equivalent_and_refuted() {
         validate(&self_and, &emitted(&source("x: i64", "x | x"))).outcome,
         Outcome::EquivalentWithinProfile
     );
+}
+
+#[test]
+fn lexical_let_bindings_are_equivalent_scoped_and_refuted() {
+    for (params, body) in [
+        ("x: i64", "let y = x; y"),
+        ("x: i64", "let y = x + 1; y * 2"),
+        ("x: i64", "let x = x + 1; x"),
+        ("x: i64, y: i64", "let a = x & y; let b = a | 1; b"),
+        ("x: i64", "let b = x > 0; if b { x } else { 0 }"),
+        ("x: i64", "if x > 0 { let y = x; y + 1 } else { 0 }"),
+        ("x: i64", "let result = x; result"),
+    ] {
+        let src = source(params, body);
+        assert_eq!(
+            validate(&src, &emitted(&src)).outcome,
+            Outcome::EquivalentWithinProfile,
+            "{body}"
+        );
+    }
+    // A `let` initializer with partial operations keeps its definedness
+    // obligations under the guarding condition — the domain is unchanged.
+    for body in ["let d = x / y; d", "let s = x << y; s"] {
+        let src = source("x: i64, y: i64", body);
+        let report = validate(&src, &emitted(&src));
+        assert_eq!(report.outcome, Outcome::EquivalentWithinProfile, "{body}");
+        assert_eq!(
+            report.input_domain,
+            "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires",
+            "{body}"
+        );
+    }
+    // `let y = x; y` returns x, not x + 1 — the binding is not a rewrite.
+    let src = source("x: i64", "let y = x; y");
+    let wrong = emitted(&source("x: i64", "x + 1"));
+    assert_eq!(validate(&src, &wrong).outcome, Outcome::Different);
 }
 
 #[test]
@@ -707,6 +748,8 @@ fn native_emitter_bodies_and_truncating_wrapper_match_without_rewriting() {
         "7 | 3",
         "7 ^ 3",
         "(7 & 3) | (7 ^ 1)",
+        "let y = 7 & 3; y + 1",
+        "let a = 7; let b = a | 1; a ^ b",
     ]
     .into_iter()
     .map(str::to_owned)
