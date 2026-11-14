@@ -1212,6 +1212,22 @@ and methods are unchanged. See the
 [Agent imported generic instantiations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-generic-instantiations)
 section.
 
+#### Imported method calls on concrete named types
+
+`recv.M(args)` now classifies as `direct_import` when the method is
+declared in a resolved imported unit on a concrete named receiver
+type and returns at most one scalar result; the recorded call carries
+`method: true` so the consumer evaluates the receiver expression too
+— the result depends on the receiver and every argument. Method
+members' signature pins include the receiver's named type, so
+redeclaring it flags every admitted caller. Interface receivers
+(dynamic dispatch), method expressions `lib.T.M`, local methods,
+multi-valued results and generic or instantiated receiver types
+(`lib.T[lib.U]` — the pinned identity would miss the type arguments)
+stay closed. See the
+[Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
+section.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
