@@ -317,6 +317,10 @@ unsafe fn check_function(function: LLVMValueRef, params: usize) -> Result<()> {
             }
             match LLVMGetInstructionOpcode(inst) {
                 LLVMOpcode::LLVMRet | LLVMOpcode::LLVMBr => (),
+                LLVMOpcode::LLVMAdd | LLVMOpcode::LLVMSub | LLVMOpcode::LLVMMul => {
+                    unflagged_arithmetic(inst)?;
+                    width(LLVMTypeOf(inst))?;
+                }
                 LLVMOpcode::LLVMICmp
                 | LLVMOpcode::LLVMAnd
                 | LLVMOpcode::LLVMOr
@@ -332,6 +336,22 @@ unsafe fn check_function(function: LLVMValueRef, params: usize) -> Result<()> {
             inst = LLVMGetNextInstruction(inst);
         }
         block = LLVMGetNextBasicBlock(block);
+    }
+    Ok(())
+}
+
+/// `add`/`sub`/`mul` wrap mod 2^64 on both sides of the comparison — the
+/// Mumei emitter never sets wrap flags. The nsw/nuw flags instead make
+/// overflow produce poison, which this profile rejects wholesale, so a
+/// flagged arithmetic instruction stays unsupported.
+unsafe fn unflagged_arithmetic(inst: LLVMValueRef) -> Result<()> {
+    let printed = LLVMPrintValueToString(inst);
+    let text = std::ffi::CStr::from_ptr(printed)
+        .to_string_lossy()
+        .into_owned();
+    LLVMDisposeMessage(printed);
+    if text.contains("nsw") || text.contains("nuw") {
+        return Err(ValidationError("flagged LLVM arithmetic unsupported"));
     }
     Ok(())
 }
@@ -579,6 +599,9 @@ impl<'ctx> IrEncoder<'ctx> {
                             LLVMOpcode::LLVMAnd => a.bvand(&b),
                             LLVMOpcode::LLVMOr => a.bvor(&b),
                             LLVMOpcode::LLVMXor => a.bvxor(&b),
+                            LLVMOpcode::LLVMAdd => a.bvadd(&b),
+                            LLVMOpcode::LLVMSub => a.bvsub(&b),
+                            LLVMOpcode::LLVMMul => a.bvmul(&b),
                             LLVMOpcode::LLVMICmp => {
                                 use LLVMIntPredicate::*;
                                 let condition = match LLVMGetICmpPredicate(inst) {

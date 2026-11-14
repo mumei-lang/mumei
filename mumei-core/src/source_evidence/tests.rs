@@ -387,8 +387,8 @@ fn false_and_nonliteral_preconditions_cannot_succeed_vacuously() {
 fn malformed_effectful_lossy_or_unsupported_sources_fail_closed() {
     for source in [
         "", "FAKE_PRIVATE_MALFORMED", "atom f(x: i64) -> i64 requires: true; ensures: result == x; body: {",
-        "atom f(x: i64) -> i64 requires: true; ensures: true; body: { x + 1 };",
-        "atom f(x: i64) -> i64 requires: true; ensures: result == x + 0; body: { x };",
+        "atom f(x: i64) -> i64 requires: true; ensures: true; body: { x / 1 };",
+        "atom f(x: i64) -> i64 requires: true; ensures: result == x / 1; body: { x };",
         "atom f(x: i64) -> i64 requires: true; ensures: true; body: { x / 0 };",
         "atom f(x: i64) -> i64 requires: true; ensures: true; body: { f(x) };",
         "atom f(x: i64) -> i64 requires: true; ensures: true; body: { let y = x; y };",

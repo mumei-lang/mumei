@@ -195,7 +195,7 @@ pub fn extract_pure_i64_contract(
             verifier_integer: "mathematical_integer",
             llvm_integer: "i64_twos_complement",
             comparisons: "signed",
-            arithmetic: "unsupported_no_overflow_claim",
+            arithmetic: "wrapping_i64_add_sub_mul_no_overflow_claim",
             division: "unsupported",
             shifts: "unsupported",
             conversions: "unsupported",
@@ -220,6 +220,7 @@ pub fn extract_pure_i64_contract(
             "boolean",
             "signed_comparison",
             "ite",
+            "wrapping_i64_arithmetic",
         ],
         requested_route: "standard_z3_not_executed_by_extractor",
         decomposition: "no_common_obligation_decomposition",
@@ -231,7 +232,7 @@ pub fn extract_pure_i64_contract(
             "Extraction does not prove the postcondition or precondition satisfiability.",
             "HIR/MIR fingerprints identify internal snapshots, not semantic equivalence.",
             "Target availability, LLVM lowering and final machine code are not verified.",
-            "No arithmetic, heap, calls, FFI, ownership, effects or concurrency in this profile.",
+            "No division, shifts, heap, calls, FFI, ownership, effects or concurrency in this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven.",
         ],
     })
 }
@@ -346,6 +347,10 @@ fn expression_kind(
                 }
                 Op::And | Op::Or | Op::Implies if left == ScalarKind::Bool && right == left => {
                     Ok(ScalarKind::Bool)
+                }
+                // i64 arithmetic wraps mod 2^64 — still no overflow claim.
+                Op::Add | Op::Sub | Op::Mul if left == ScalarKind::I64 && right == left => {
+                    Ok(ScalarKind::I64)
                 }
                 _ => Err(SemanticContractError::Unsupported(
                     "operator or operand kinds",
@@ -542,24 +547,29 @@ fn source_expr<'ctx>(
         Expr::BinaryOp(a, op, b) => {
             let a = source_expr(a, ctx, params, depth + 1)?;
             let b = source_expr(b, ctx, params, depth + 1)?;
-            B(match (a, op, b) {
-                (I(a), Op::Eq, I(b)) => a._eq(&b),
-                (I(a), Op::Neq, I(b)) => a._eq(&b).not(),
-                (B(a), Op::Eq, B(b)) => a._eq(&b),
-                (B(a), Op::Neq, B(b)) => a._eq(&b).not(),
-                (I(a), Op::Lt, I(b)) => a.bvslt(&b),
-                (I(a), Op::Le, I(b)) => a.bvsle(&b),
-                (I(a), Op::Gt, I(b)) => a.bvsgt(&b),
-                (I(a), Op::Ge, I(b)) => a.bvsge(&b),
-                (B(a), Op::And, B(b)) => Bool::and(ctx, &[&a, &b]),
-                (B(a), Op::Or, B(b)) => Bool::or(ctx, &[&a, &b]),
-                (B(a), Op::Implies, B(b)) => a.implies(&b),
+            match (a, op, b) {
+                (I(a), Op::Eq, I(b)) => B(a._eq(&b)),
+                (I(a), Op::Neq, I(b)) => B(a._eq(&b).not()),
+                (B(a), Op::Eq, B(b)) => B(a._eq(&b)),
+                (B(a), Op::Neq, B(b)) => B(a._eq(&b).not()),
+                (I(a), Op::Lt, I(b)) => B(a.bvslt(&b)),
+                (I(a), Op::Le, I(b)) => B(a.bvsle(&b)),
+                (I(a), Op::Gt, I(b)) => B(a.bvsgt(&b)),
+                (I(a), Op::Ge, I(b)) => B(a.bvsge(&b)),
+                // i64 arithmetic wraps mod 2^64, matching the emitted
+                // `add`/`sub`/`mul` (the emitter never sets nsw/nuw).
+                (I(a), Op::Add, I(b)) => I(a.bvadd(&b)),
+                (I(a), Op::Sub, I(b)) => I(a.bvsub(&b)),
+                (I(a), Op::Mul, I(b)) => I(a.bvmul(&b)),
+                (B(a), Op::And, B(b)) => B(Bool::and(ctx, &[&a, &b])),
+                (B(a), Op::Or, B(b)) => B(Bool::or(ctx, &[&a, &b])),
+                (B(a), Op::Implies, B(b)) => B(a.implies(&b)),
                 _ => {
                     return Err(SemanticContractError::Unsupported(
                         "unsupported source operator",
                     ))
                 }
-            })
+            }
         }
         Expr::IfThenElse {
             cond,
@@ -745,9 +755,6 @@ mod tests {
     #[test]
     fn fails_closed_on_constructs_outside_the_profile() {
         for body in [
-            "x + 1",
-            "x - 1",
-            "x * 2",
             "x / 2",
             "x % 2",
             "x << 1",

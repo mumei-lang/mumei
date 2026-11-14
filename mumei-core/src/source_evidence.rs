@@ -197,7 +197,7 @@ fn record(contract: &SemanticContract, options: Options) -> Result<Evidence, Sou
         exclusions: strings(&[
             "producer_and_report_authenticity_and_historical_freshness",
             "parser_encoder_and_solver_correctness",
-            "arithmetic_calls_imports_heap_effects_and_concurrency",
+            "division_shifts_calls_imports_heap_effects_and_concurrency",
             "llvm_correspondence_optimizer_object_linker_runtime_and_abi",
             "os_exit_status_and_final_executable_semantics",
             "proof_acceptance_claim_book_seal_grades_and_lean_kernel_checks",

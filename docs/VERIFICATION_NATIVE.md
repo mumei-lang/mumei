@@ -713,19 +713,23 @@ the checker never mutates it, invokes optimization passes or executes code.
 
 The checked relation is equality of the source **body** and LLVM return value
 for **every concrete signed-i64 input**, independently of requires/ensures.
-Because arithmetic is excluded, signed bitvector comparisons encode the C03
-integer comparison meaning without overflow. The LLVM side is separately
+Signed bitvector comparisons and wrapping add/sub/mul encode the C03
+integer meaning over mod-2^64 wrap-around — the emitter never sets
+nsw/nuw, and flagged IR arithmetic is rejected, so overflow still
+carries no check and no claim. The LLVM side is separately
 interpreted from the verified LLVM-C graph, not regenerated from the source HIR.
 Its whitelist is scalar i1/i64 SSA: integer constants, comparisons (including
 unsigned predicates so wrong signedness can be refuted), bitwise Boolean
-operations, i1/i64 zext/trunc, select, phi, acyclic branches and returns. Parameter
+operations, unflagged add/sub/mul, i1/i64 zext/trunc, select, phi, acyclic
+branches and returns. Parameter
 mapping is positional; phi values follow actual predecessor edges.
 The source model includes Boolean implication, but the existing emitter still
 rejects implication in an executable body. Checking manually supplied IR for
 that source form does not add or claim an emitter lowering.
 
 Only one ordinary C-call-convention function with an i64 signature is accepted.
-Memory/pointers, arithmetic, division/remainder/shifts, calls/FFI/intrinsics,
+Memory/pointers, division/remainder/shifts, flagged (nsw/nuw) arithmetic,
+calls/FFI/intrinsics,
 loops, vectors/floats, globals/aliases/ifuncs, inline assembly, attributes,
 metadata, undef/poison and freeze are unsupported. Every block is screened,
 including dead blocks. Unsupported syntax, invalid IR, unmatched identities

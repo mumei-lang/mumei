@@ -238,11 +238,9 @@ fn multiple_returns_and_phi_predecessors_are_not_merged_by_value_name() {
 #[test]
 fn unsupported_source_is_not_silently_weakened() {
     for body in [
-        "x+1",
         "x/2",
         "x%2",
         "x<<1",
-        "x*0",
         "1.0",
         "let y = x; y",
         "f(x)",
@@ -266,13 +264,66 @@ fn unsupported_source_is_not_silently_weakened() {
 }
 
 #[test]
+fn wrapping_i64_arithmetic_is_equivalent_and_refuted() {
+    for (params, body) in [
+        ("x: i64", "x + 1"),
+        ("x: i64", "x - 1"),
+        ("x: i64", "x * 2"),
+        ("x: i64, y: i64", "x + y"),
+        ("x: i64, y: i64", "x - y"),
+        ("x: i64, y: i64", "x * y"),
+        ("x: i64, y: i64", "x * x - y"),
+        ("x: i64, y: i64", "(x + y) * (x - y)"),
+        ("x: i64", "if x + 1 > 0 { x * 2 } else { 0 - x }"),
+        // Wrap: addition of a negative literal lowers to `sub`; -x to `0 - x`.
+        ("x: i64", "x + 0 - 1"),
+    ] {
+        let src = source(params, body);
+        assert_eq!(
+            validate(&src, &emitted(&src)).outcome,
+            Outcome::EquivalentWithinProfile,
+            "{body}"
+        );
+    }
+    // Nonlinear cases that outrun the solver budget fail closed as
+    // inconclusive — never weakened into equivalence or difference.
+    let guarded = source("x: i64", "if x + 1 > 0 { x * x } else { 0 - x }");
+    assert_eq!(
+        validate(&guarded, &emitted(&guarded)).outcome,
+        Outcome::Inconclusive
+    );
+    // Deliberately wrong lowering is detected, including rare-input diffs.
+    let src = source("x: i64, y: i64", "x + y");
+    let ir = emitted(&src);
+    for wrong in [
+        ir.replace("add i64", "sub i64"),
+        ir.replace("add i64 %0, %1", "add i64 %0, 1"),
+        ir.replace("add i64 %0, %1", "add i64 %1, 0"),
+    ] {
+        assert_ne!(wrong, ir);
+        assert_eq!(
+            validate(&src, &wrong).outcome,
+            Outcome::Different,
+            "{wrong}"
+        );
+    }
+    // x*2 and x+x are equal for every input — a textual difference is not a bug.
+    let doubled = source("x: i64", "x + x");
+    assert_eq!(
+        validate(&doubled, &emitted(&source("x: i64", "x * 2"))).outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
 fn unsupported_llvm_memory_calls_arithmetic_division_shift_and_freeze_are_rejected() {
     let src = source("x: i64", "x");
     for body in [
-        "%v = add i64 %x, 0\nret i64 %v",
+        // Flagged arithmetic produces poison on overflow — stays rejected.
         "%v = add nsw i64 %x, 0\nret i64 %v",
-        "%v = sub i64 %x, 0\nret i64 %v",
-        "%v = mul i64 %x, 1\nret i64 %v",
+        "%v = add nuw i64 %x, 0\nret i64 %v",
+        "%v = sub nsw i64 %x, 0\nret i64 %v",
+        "%v = mul nuw i64 %x, 1\nret i64 %v",
         "%v = sdiv i64 %x, 1\nret i64 %v",
         "%v = urem i64 %x, 1\nret i64 %v",
         "%v = shl i64 %x, 0\nret i64 %v",
@@ -560,7 +611,7 @@ fn native_snapshot_profile_is_separate_and_pins_exact_target_and_layout() {
     for bad in [
         source("", "7"),
         source("x: i64", "x"),
-        native_source("7 + 0"),
+        native_source("7 / 1"),
     ] {
         assert!(tv::validate_native_main(&bad, &ir, Options::default()).is_err());
     }
@@ -634,7 +685,7 @@ fn native_module_cannot_hide_extra_functions_globals_metadata_or_instructions() 
         "ret i64 poison",
         "ret i64 undef",
         "%p = alloca i64\nret i64 7",
-        "%x = add i64 6, 1\nret i64 %x",
+        "%x = add nsw i64 6, 1\nret i64 %x",
         "entry: br label %entry",
         "ret i64 7, !private !0\n}\n!0 = !{i64 7}\ndefine i64 @extra() { ret i64 7",
     ] {
