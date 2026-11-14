@@ -1357,7 +1357,12 @@ auto-deref out and admits identically (`(**t).f` stays closed).
 The store is an external
 mutation, so it records a zero-argument imported transfer against
 that identity — `effects` reports `unknown` and a type redeclaration
-flags the summary. A `*t = v` dereference store admits through the
+flags the summary. A nested selection `t.W.f = v` walks the chain
+like the field read: pointer-typed intermediate members (`W *W2`)
+resolve and pin, the deepest pointee records the transfer, and the
+stored value's dependencies fold into the root binding `t`.
+Struct-valued intermediates (`t.A.B = v`) and double derefs stay
+closed. A `*t = v` dereference store admits through the
 same escaped-binding fold: `p := &x` may aim the pointer at any
 tracked local, so the store cannot be proven to miss one — unioning
 the stored value's dependencies into every escaped binding is the
