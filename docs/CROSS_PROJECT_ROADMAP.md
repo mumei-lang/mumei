@@ -1410,11 +1410,13 @@ CI exposes the reviewed Charter, lock, project configuration, and required
 evidence as a snapshot and Git diff for human review. Local hashes and a green
 publishing job are not approval, authenticity, or semantic-equivalence proofs.
 
-Under C13, a required claim may pin `evidence_kind` (exact match), so a
-requirement written for model proof is not satisfied by finite replay or
-another backend's evidence carrying the same grade; the kinds stay distinct.
-The pin is optional and existing contracts without it are unchanged. Synthetic
-reader regressions cover the pinned-match and substituted-kind arms.
+Under C13, a required claim may pin `evidence_kind` (exact match over the claim
+and its dependency coverage), so a requirement written for model proof is not
+satisfied by finite replay or another backend's evidence carrying the same
+grade — including one reached transitively; the kinds stay distinct. The pin is
+optional and existing contracts without it are unchanged. Synthetic reader
+regressions cover the pinned-match and substituted-kind arms; mixed-kind chains
+cannot pin today.
 
 Repository responsibilities stay the same: `mumei` owns proof and dependency
 gates; `mumei-agent` owns harvesting and repair tools; `mumei-lean` remains the
