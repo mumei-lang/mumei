@@ -1311,8 +1311,7 @@ opaque write target when the base is a bound parameter or local
 identifier carrying a declared named-type identity (the RHS still
 evaluates for its calls and the stored value's dependencies
 accumulate into the base binding — a later `t.M()` can observe the
-write through the pointer; imported
-member bases like `lib.VS.f` stay closed). The store is an external
+write through the pointer). The store is an external
 mutation, so it records a zero-argument imported transfer against
 that identity — `effects` reports `unknown` and a type redeclaration
 flags the summary. A `*t = v` dereference stays closed: `p := &x`
@@ -1320,7 +1319,15 @@ aliases a tracked local and dep sets carry indices, not identities,
 so an indirected store cannot be proven safe. `&` on non-fragment
 operands and derefs stay outside the fragment; a pointer to an
 unnamed or composite pointee (`*int64`, `**T`) pins nothing but
-still tracks its dep set. See the
+still tracks its dep set. Writes to imported `var` members admit
+through the same external-mutation rule — `lib.V = v`,
+`lib.VA[i] = v` and `lib.VS.f = v` (and dot-imported forms) resolve
+the LHS until a `var` member names the target, record the imported
+transfer against the member's identity, and pin the member's declared
+type identity (plus a container element's) for `stale_dependents`;
+a nested index still evaluates for its calls while a call-free one
+needs no evaluation, and computed operands (`g()[0] = v`) and
+dereference writes (`*lib.PV = v`) stay closed. See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
 section.
 
@@ -1338,9 +1345,9 @@ package-qualified name, a dot-imported name, or parentheses around
 either (`VA[0]`, `(lib.VA)[0]`). Elements must be scalar or
 pointer-typed — a
 struct or nested-slice element is a value the fragment cannot hold —
-and maps, strings, computed operands (`f()[i]`, `lib.V2[0][0]`) and
-index writes (`lib.VA[i] = v`) stay closed, the last matching the
-imported-var-write rule. See the
+and maps, strings and computed operands (`f()[i]`, `lib.V2[0][0]`)
+stay closed; an index write (`lib.VA[i] = v`) takes the
+imported-var-write path instead. See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
 section.
 
