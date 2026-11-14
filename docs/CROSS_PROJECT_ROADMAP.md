@@ -1346,9 +1346,16 @@ package-qualified name, a dot-imported name, or parentheses around
 either (`VA[0]`, `(lib.VA)[0]`). Elements must be scalar or
 pointer-typed — a
 struct or nested-slice element is a value the fragment cannot hold —
-and maps, strings and computed operands (`f()[i]`, `lib.V2[0][0]`)
+and strings and computed operands (`f()[i]`, `lib.V2[0][0]`)
 stay closed; an index write (`lib.VA[i] = v`) takes the
-imported-var-write path instead. See the
+imported-var-write path instead. A single-value read of an imported
+map var — `lib.VM[k]` — admits through the same gate: map type facts
+carry a `key` fact beside the `elem` value fact (`map[K]V`), so a
+named key's identity pins alongside the container's and value's.
+The index must still be a modelled expression — `lib.VM["k"]` is an
+unmodelled string literal — and the comma-ok form (`v, ok := m[k]`)
+needs a two-name binding the path does not perform; a member write
+(`lib.VM[k] = v`) pins the named key's identity too. See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
 section.
 
