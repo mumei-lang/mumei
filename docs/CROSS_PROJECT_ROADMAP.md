@@ -1216,15 +1216,17 @@ section.
 
 `recv.M(args)` now classifies as `direct_import` when the method is
 declared in a resolved imported unit on a concrete named receiver
-type and returns at most one scalar result; the recorded call carries
+type and returns at most one scalar result; method values carry
 `method: true` so the consumer evaluates the receiver expression too
 — the result depends on the receiver and every argument. Method
-members' signature pins include the receiver's named type, so
-redeclaring it flags every admitted caller. Interface receivers
-(dynamic dispatch), method expressions `lib.T.M`, local methods,
-multi-valued results and generic or instantiated receiver types
-(`lib.T[lib.U]` — the pinned identity would miss the type arguments)
-stay closed. See the
+expressions `lib.T.M(recv, args)` record plain `direct_import`
+(the receiver is already the leading argument). Method members'
+signature pins include the receiver's named type, so redeclaring it
+flags every admitted caller. Interface receivers (dynamic dispatch —
+values and expressions alike), local methods, multi-valued results
+and generic or instantiated receiver types (`lib.T[lib.U]`,
+`lib.GT[lib.T].GM` — the pinned identity would miss the type
+arguments) stay closed. See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
 section.
 
