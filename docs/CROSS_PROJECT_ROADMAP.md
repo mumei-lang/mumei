@@ -1210,7 +1210,8 @@ the caller's analysis, never by the callee's own summary. See the
 
 Explicit instantiations of imported generic functions —
 `lib.G[int64](x)` — now classify as `direct_import` when every type
-argument is basic, named or alias, every instantiated parameter is
+argument is basic, named, alias or a composite constructor of
+those, every instantiated parameter is
 basic-underlying (one `*T` layer unwraps) and every
 instantiated result is scalar, at any arity (see the multi-valued
 section below for the tuple rule). The dependency model is the existing
@@ -1222,18 +1223,24 @@ type-parameter identities included. Named/alias type arguments
 substituted type-parameter identities are declared nowhere else —
 and an *inferred* instantiation `lib.G(x)`/`G(x)` takes the same
 gate through `info.Instances`, admitted when every inferred type
-argument is basic, named or alias (`lib.G(t)` with `t` declared
-`lib.T` admits with the `lib.T` pin on the record). Pointer type
-arguments (`G[*lib.T](v)`) have no pin channel and stay closed;
-nested named arguments pin every identity they contain
+argument is basic, named, alias or a composite constructor of
+those (`lib.G(t)` with `t` declared
+`lib.T` admits with the `lib.T` pin on the record). Composite type
+arguments pin every named identity inside them — `G[*lib.T](v)`,
+`G[[]lib.T](v)` and `G[map[string]lib.T](v)` all record `lib.T` —
+while a signature, struct, interface or type-parameter argument
+carries no pinnable identity and keeps the call closed
+(`G[func()](nil)`); nested named arguments pin every identity they
+contain
 (`G[other.N[lib.T]](v)` records both `N` and `T`).
 Instantiated generic *type* conversions are admitted when the
 target member's underlying is scalar (`lib.S[int64](x)`,
 `type S[A any] int64`): the operand's dependencies flow through
 like any `T(e)`, and the whole type expression is walked so every
-named identity it contains is pinned. A composite underlying or an
-unpinnable constructor inside the type arguments
-(`lib.S[*lib.T](x)`) stays closed. Local generics
+named identity it contains is pinned, composite argument
+constructors included — `lib.S[*lib.T](x)` pins `S` and `T`. A
+composite underlying or an unpinnable argument
+(`lib.S[func() int64](x)`) stays closed. Local generics
 and methods are unchanged. See the
 [Agent imported generic instantiations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-generic-instantiations)
 section.
@@ -1251,13 +1258,16 @@ signature pins include the receiver's named type, so redeclaring it
 flags every admitted caller. Instantiated receivers admit through
 the same gate — `x.GM(y)` on `x: lib.GT[lib.T]` and the method
 expression `lib.GT[lib.T].GM` classify as `direct_import` when every
-receiver type argument is basic, named or alias; the collected
+receiver type argument is basic, named, alias or a composite of
+those; the collected
 identities ride on the record's `type_arg_type_ids` so a type-argument
 redeclare stales the call site. Interface receivers (dynamic dispatch —
 values and expressions alike), local methods and generic methods stay
 closed, as do receivers still declared on type parameters and
-instantiated receivers whose arguments contain a composite constructor
-(`lib.GT[*lib.T]`). Promoted selections (`s.GM` through
+instantiated receivers whose arguments contain an unpinnable shape
+(composite constructors pin their elements — `lib.GT[*lib.T]` pins
+`T`; a signature or interface literal pins nothing and stays closed).
+Promoted selections (`s.GM` through
 `struct{ GT[T] }`, or an embedded interface's method) stay closed
 too — the static receiver is the outer type, so the embedded
 instantiation's type arguments or the dynamic dispatch escape the
@@ -1289,7 +1299,9 @@ state — struct-typed bindings cannot exist in the fragment, so
 `t.f = v` can never overwrite a tracked binding — and admits as an
 opaque write target when the base is a bound parameter or local
 identifier carrying a declared named-type identity (the RHS still
-evaluates for its calls and the result is discarded; imported
+evaluates for its calls and the stored value's dependencies
+accumulate into the base binding — a later `t.M()` can observe the
+write through the pointer; imported
 member bases like `lib.VS.f` stay closed). The store is an external
 mutation, so it records a zero-argument imported transfer against
 that identity — `effects` reports `unknown` and a type redeclaration
