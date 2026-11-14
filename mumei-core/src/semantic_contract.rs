@@ -219,7 +219,14 @@ pub fn extract_pure_i64_contract(
         } else {
             PURE_I64_PROFILE
         },
-        "params": atom.params.iter().map(|p| &p.name).collect::<Vec<_>>(),
+        // The declared parameter types are part of the specification
+        // identity: `b: bool` and `b: i64` admit different input domains
+        // and must not share one specification hash.
+        "params": atom
+            .params
+            .iter()
+            .map(|p| serde_json::json!({"name": p.name, "type": p.type_name}))
+            .collect::<Vec<_>>(),
         "requires": atom.requires, "ensures": atom.ensures,
     }))?;
     let hir = lower_atom_to_hir(&atom);
@@ -1078,6 +1085,31 @@ mod tests {
         let bool_atom = "atom f(b: bool, x: i64) -> i64 requires: true; ensures: true; body: { if b { x } else { 0 } };";
         assert!(extract_pure_i64_contract(bool_atom, "clamp.mm", Some(TARGET), false).is_err());
         assert!(extract_pure_i64_contract(bool_atom, "clamp.mm", Some(TARGET), true).is_ok());
+    }
+
+    #[test]
+    fn parameter_types_are_part_of_the_specification_identity() {
+        // `b: bool` and `b: i64` admit different input domains; sharing a
+        // specification hash would alias their obligation identities.
+        let bool_contract = extract_pure_i64_contract(
+            "atom f(b: bool, x: i64) -> i64 requires: true; ensures: true; body: { if b { x } else { 0 } };",
+            "clamp.mm",
+            Some(TARGET),
+            true,
+        )
+        .unwrap();
+        let int_contract = extract_pure_i64_contract(
+            "atom f(b: i64, x: i64) -> i64 requires: true; ensures: true; body: { if b > 0 { x } else { 0 } };",
+            "clamp.mm",
+            Some(TARGET),
+            true,
+        )
+        .unwrap();
+        assert_ne!(
+            bool_contract.specification_sha256,
+            int_contract.specification_sha256
+        );
+        assert_ne!(bool_contract.obligation_id, int_contract.obligation_id);
     }
 
     #[test]
