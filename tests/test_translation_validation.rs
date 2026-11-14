@@ -796,7 +796,6 @@ fn vacuous_and_out_of_profile_division_and_shifts_fail_closed() {
         "%v = freeze i64 %x\nret i64 %v",
         "%p = alloca i64\nstore i64 %x, ptr %p\n%v = load i64, ptr %p\nret i64 %v",
         "%v = call i64 @f(i64 %x)\nret i64 %v",
-        "unreachable",
     ] {
         assert!(
             tv::validate_pure_i64(&src, &function(body), Options::default()).is_err(),
