@@ -1013,8 +1013,15 @@ replacement invalidates dependent summaries" criterion: recorded call
 targets are source-anchored binding identities, so a replaced or
 deleted callee never reuses its identity and every summary that
 recorded a call to an absent target is exactly the re-derive set.
-Detection only — the host decides what to rebuild. See the
-[Agent dependent invalidation](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-dependent-invalidation).
+Flagging propagates transitively along `call_targets` edges to a
+fixed point — a caller's summary encodes its callee's answer — and a
+summary also pins the named/alias type identities its own declared
+parameter and result type facts carry, so redeclaring a signature
+type flags the function itself, not just its callers. Detection
+only — the host decides what to rebuild. See the
+[Agent dependent invalidation](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-dependent-invalidation)
+and
+[Agent transitive staleness and own-signature pins](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-transitive-staleness-and-own-signature-pins).
 
 ### Wave 3 switch fallthrough in scalar summaries
 
