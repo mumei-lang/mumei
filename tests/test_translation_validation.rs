@@ -384,6 +384,8 @@ fn bool_returns_are_equivalent_and_refuted() {
         "atom f(b: bool) -> bool requires: true; ensures: true; body: { !b };",
         "atom f(b: bool, x: i64) -> bool requires: true; ensures: true; body: { if b { x > 0 } else { false } };",
         "atom f(x: i64) -> bool requires: true; ensures: true; body: { let p = x > 0; p };",
+        "atom f(x: i64) -> bool requires: true; ensures: true; body: { let p = x > 0; p = !p; p };",
+        "atom f(x: i64, y: i64) -> bool requires: true; ensures: true; body: { x / y > 0 };",
         "atom f(x: i64) -> bool requires: x != 0; ensures: result == (x > 0); body: { x > 0 };",
     ] {
         assert_eq!(

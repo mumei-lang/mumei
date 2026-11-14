@@ -1137,6 +1137,27 @@ mod tests {
             int_contract.specification_sha256
         );
         assert_ne!(bool_contract.obligation_id, int_contract.obligation_id);
+        // `-> i64` and `-> bool` are different signatures: identical
+        // params/requires/ensures still admit different result kinds.
+        let int_result = extract_pure_i64_contract(
+            "atom f(x: i64) -> i64 requires: true; ensures: true; body: { x };",
+            "clamp.mm",
+            Some(TARGET),
+            true,
+        )
+        .unwrap();
+        let bool_result = extract_pure_i64_contract(
+            "atom f(x: i64) -> bool requires: true; ensures: true; body: { x > 0 };",
+            "clamp.mm",
+            Some(TARGET),
+            true,
+        )
+        .unwrap();
+        assert_ne!(
+            int_result.specification_sha256,
+            bool_result.specification_sha256
+        );
+        assert_ne!(int_result.obligation_id, bool_result.obligation_id);
     }
 
     #[test]
