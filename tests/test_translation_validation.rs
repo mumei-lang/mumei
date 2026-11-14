@@ -316,7 +316,7 @@ fn unsupported_source_is_not_silently_weakened() {
 fn bool_parameters_are_equivalent_and_refuted() {
     for (params, body) in [
         // A `bool` parameter lowers to i64 carrying 0/1, usable in guards
-        // and boolean expressions; the result still returns i64.
+        // and boolean expressions; these cases keep an i64 result.
         ("b: bool, x: i64", "if b { x } else { 0 }"),
         ("b: bool", "if b { 1 } else { 0 }"),
         ("b: bool, x: i64", "let c = b; if c { x } else { x }"),
