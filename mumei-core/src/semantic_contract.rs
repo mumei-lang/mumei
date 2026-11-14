@@ -114,7 +114,7 @@ pub struct SemanticContract {
 /// block-scoped `let` bindings, scalar reassignments on the linear path
 /// (a rebinding cannot escape an `if` branch, expression block or nested
 /// block), discarded pure expression statements and `bool` parameters
-/// lowered to i64 carrying 0/1 (the result still returns i64);
+/// and results lowered to i64 carrying 0/1;
 /// the bounded C03
 /// contract always passes `false` so the build
 /// and recheck paths keep agreeing on a fragment with no arithmetic.
@@ -169,8 +169,11 @@ pub fn extract_pure_i64_contract(
         expression_kind(&requires, &scope, false, allow_wrapping_arithmetic)?,
         ScalarKind::Bool,
     )?;
+    let result_kind = return_kind(&atom);
+    let mut ensures_scope = scope.clone();
+    ensures_scope.insert("result".to_owned(), result_kind);
     expect_kind(
-        expression_kind(&ensures, &scope, true, allow_wrapping_arithmetic)?,
+        expression_kind(&ensures, &ensures_scope, true, allow_wrapping_arithmetic)?,
         ScalarKind::Bool,
     )?;
     expect_kind(
@@ -181,7 +184,7 @@ pub fn extract_pure_i64_contract(
             allow_wrapping_arithmetic,
             &scope.keys().cloned().collect(),
         )?,
-        ScalarKind::I64,
+        result_kind,
     )?;
 
     let mut binders: Vec<_> = atom
@@ -201,7 +204,11 @@ pub fn extract_pure_i64_contract(
         .collect();
     binders.push(TypedBinder {
         name: "result".to_owned(),
-        scalar_type: "i64",
+        scalar_type: if result_kind == ScalarKind::Bool {
+            "bool"
+        } else {
+            "i64"
+        },
         role: "result",
         provenance: atom.span.clone(),
         span_precision: "atom",
@@ -304,6 +311,7 @@ pub fn extract_pure_i64_contract(
         .chain(allow_wrapping_arithmetic.then_some("discarded_pure_expression_statements"))
         .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
         .chain(allow_wrapping_arithmetic.then_some("bool_parameters_lowered_to_i64_zero_one"))
+        .chain(allow_wrapping_arithmetic.then_some("bool_results_lowered_to_i64_zero_one"))
         .collect(),
         requested_route: "standard_z3_not_executed_by_extractor",
         decomposition: "no_common_obligation_decomposition",
@@ -364,8 +372,23 @@ fn param_kind(param: &crate::parser::ast::Param) -> ScalarKind {
     }
 }
 
+/// The kind the declared return type gives in this profile — `i64`, or
+/// `bool` when the widened profile admitted the declaration.
+fn return_kind(atom: &Atom) -> ScalarKind {
+    if atom.return_type.as_deref() == Some("bool") {
+        ScalarKind::Bool
+    } else {
+        ScalarKind::I64
+    }
+}
+
 fn validate_atom(atom: &Atom, admit_bool: bool) -> Result<(), SemanticContractError> {
-    if atom.return_type.as_deref() != Some("i64")
+    let return_ok = match atom.return_type.as_deref() {
+        Some("i64") => true,
+        Some("bool") => admit_bool,
+        _ => false,
+    };
+    if !return_ok
         || atom
             .params
             .iter()
@@ -680,8 +703,14 @@ pub fn encode_pure_i64_body<'ctx>(
     let top = Bool::from_bool(context, true);
     let mut definedness = Vec::new();
     let assignable: BTreeSet<String> = atom.params.iter().map(|p| p.name.clone()).collect();
-    let value =
-        source_stmt(&body, context, &env, &top, &mut definedness, 0, &assignable)?.integer()?;
+    // A `-> bool` body lowers to i64 carrying 0/1 — the emitter zexts
+    // its i1 result, so the checked value is the same 0/1 materialization.
+    let value = match source_stmt(&body, context, &env, &top, &mut definedness, 0, &assignable)? {
+        SourceValue::Integer(value) => value,
+        SourceValue::Boolean(value) => {
+            value.ite(&BV::from_u64(context, 1, 64), &BV::from_u64(context, 0, 64))
+        }
+    };
     // A declared `bool` parameter lowers to i64 carrying 0/1, so the
     // declared signature restricts its input to {0, 1}: without this the
     // i64 range would make `b == true` look different at `input = 5`.
@@ -757,14 +786,6 @@ fn param_env<'ctx>(
         .collect()
 }
 impl<'ctx> SourceValue<'ctx> {
-    fn integer(self) -> BodyResult<BV<'ctx>> {
-        match self {
-            Self::Integer(v) => Ok(v),
-            _ => Err(SemanticContractError::Unsupported(
-                "source integer expected",
-            )),
-        }
-    }
     fn boolean(self) -> BodyResult<Bool<'ctx>> {
         match self {
             Self::Boolean(v) => Ok(v),
@@ -1086,6 +1107,11 @@ mod tests {
         let bool_atom = "atom f(b: bool, x: i64) -> i64 requires: true; ensures: true; body: { if b { x } else { 0 } };";
         assert!(extract_pure_i64_contract(bool_atom, "clamp.mm", Some(TARGET), false).is_err());
         assert!(extract_pure_i64_contract(bool_atom, "clamp.mm", Some(TARGET), true).is_ok());
+        // A `-> bool` result is likewise widened-profile only; the
+        // bounded fragment keeps its i64-only signature.
+        let bool_return = "atom f(x: i64) -> bool requires: true; ensures: true; body: { x > 0 };";
+        assert!(extract_pure_i64_contract(bool_return, "clamp.mm", Some(TARGET), false).is_err());
+        assert!(extract_pure_i64_contract(bool_return, "clamp.mm", Some(TARGET), true).is_ok());
     }
 
     #[test]
@@ -1111,6 +1137,27 @@ mod tests {
             int_contract.specification_sha256
         );
         assert_ne!(bool_contract.obligation_id, int_contract.obligation_id);
+        // `-> i64` and `-> bool` are different signatures: identical
+        // params/requires/ensures still admit different result kinds.
+        let int_result = extract_pure_i64_contract(
+            "atom f(x: i64) -> i64 requires: true; ensures: true; body: { x };",
+            "clamp.mm",
+            Some(TARGET),
+            true,
+        )
+        .unwrap();
+        let bool_result = extract_pure_i64_contract(
+            "atom f(x: i64) -> bool requires: true; ensures: true; body: { x > 0 };",
+            "clamp.mm",
+            Some(TARGET),
+            true,
+        )
+        .unwrap();
+        assert_ne!(
+            int_result.specification_sha256,
+            bool_result.specification_sha256
+        );
+        assert_ne!(int_result.obligation_id, bool_result.obligation_id);
     }
 
     #[test]
