@@ -967,6 +967,16 @@ Selector/index targets and multi-valued call results stay declared
 gaps. See the
 [Agent assignment forms](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-compound-and-tuple-assignments).
 
+### Wave 3 integer range loops in scalar summaries
+
+Agent's C07 fragment now admits `for` statements with a `range` clause
+over an integer operand — `for i := range e` binds a scoped index
+variable carrying the operand's dependencies, `for i = range e` reuses
+an existing binding, and `_`/bare forms just evaluate. Composite ranges
+are unreachable in-fragment and multi-variable ranges stay declared
+gaps. See the
+[Agent integer range loops](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-integer-range-loops).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
