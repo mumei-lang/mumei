@@ -1036,7 +1036,7 @@ fragment. See the
 Agent's for-clause update no longer requires the `i++`/`i--` inc/dec
 shapes: the update statement runs through the same statement dispatch
 as the body, once per fixed-point pass, so assignments, compound and
-tuple updates, short declarations and calls all admit — assignment RHS
+tuple updates and calls all admit — assignment RHS
 dependencies widen into the loop fixed point like any body statement.
 Update shapes rejected elsewhere still surface as declared gaps;
 condition evaluation stays a once-per-loop approximation and trip
