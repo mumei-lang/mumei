@@ -1204,17 +1204,21 @@ the caller's analysis, never by the callee's own summary. See the
 
 Explicit instantiations of imported generic functions —
 `lib.G[int64](x)` — now classify as `direct_import` when every type
-argument and every instantiated parameter is a basic type and every
+argument is basic, named or alias, every instantiated parameter is
+basic-underlying (one `*T` layer unwraps) and every
 instantiated result is scalar, at any arity (see the multi-valued
 section below for the tuple rule). The dependency model is the existing
 opaque shape (the result depends on every argument) and the member
 record's signature pins cover the generic's declared signature,
-type-parameter identities included. Named/alias type arguments or
-parameters (`lib.G[lib.T](v)`) stay closed — they would add a type
-identity no pin declares — and an *inferred* instantiation
-`lib.G(x)`/`G(x)` takes the same gate through `info.Instances`,
-admitted when every inferred type argument is basic (`lib.G(t)`
-with `t` declared `lib.T` stays `external_or_bodyless`).
+type-parameter identities included. Named/alias type arguments
+(`lib.G[lib.T](v)`) carry their identity on the call record as
+`type_arg_type_ids`, pinning `lib.T` at that call site alone —
+substituted type-parameter identities are declared nowhere else —
+and an *inferred* instantiation `lib.G(x)`/`G(x)` takes the same
+gate through `info.Instances`, admitted when every inferred type
+argument is basic, named or alias (`lib.G(t)` with `t` declared
+`lib.T` admits with the `lib.T` pin on the record). Pointer type
+arguments (`G[*lib.T](v)`) have no pin channel and stay closed.
 Instantiated generic types, local generics
 and methods are unchanged. See the
 [Agent imported generic instantiations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-generic-instantiations)
