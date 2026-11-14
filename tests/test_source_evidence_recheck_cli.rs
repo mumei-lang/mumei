@@ -233,7 +233,8 @@ fn forged_rebound_success_does_not_replace_live_refutation_or_unknown() {
     let (_dir, source, saved) = fixture();
     let original = fs::read(&saved).unwrap();
     let wrong = CLAMP.replace("body: { if x < 0 { 0 } else { x } };", "body: { 1 };");
-    let contract = semantic_contract::extract_pure_i64_contract(&wrong, "source.mm", None).unwrap();
+    let contract =
+        semantic_contract::extract_pure_i64_contract(&wrong, "source.mm", None, false).unwrap();
     let mut forged: Value = serde_json::from_slice(&original).unwrap();
     forged["subject"]["sha256"] = Value::String(contract.source_sha256);
     fs::write(&saved, serde_json::to_vec(&forged).unwrap()).unwrap();

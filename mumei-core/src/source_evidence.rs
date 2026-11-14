@@ -97,7 +97,7 @@ pub fn verify(source: &str, options: Options) -> Result<Outcome, SourceEvidenceE
     // producer extracts identities; do not parse unbounded input first.
     let obligation = semantic_contract::encode_pure_i64_obligation(source, &context)
         .map_err(|_| SourceEvidenceError::UnsupportedSource)?;
-    let contract = semantic_contract::extract_pure_i64_contract(source, SOURCE_LABEL, None)
+    let contract = semantic_contract::extract_pure_i64_contract(source, SOURCE_LABEL, None, false)
         .map_err(|_| SourceEvidenceError::UnsupportedSource)?;
     if contract.specification.requires.trim() != "true" || !explicit_contract_clauses(source)? {
         return Err(SourceEvidenceError::UnsupportedSource);
@@ -181,7 +181,7 @@ fn record(contract: &SemanticContract, options: Options) -> Result<Evidence, Sou
         subject: Subject { id: SOURCE_LABEL.into(), kind: "mumei_source".into(), sha256: contract.source_sha256.clone() },
         specification: Identity { id: "source.postcondition".into(), sha256: contract.specification_sha256.clone() },
         obligation_id: format!("source_postcondition:{}", contract.specification_sha256),
-        semantics: Semantics { profile: PURE_I64_PROFILE.into(), integer_model: "checked_i64".into(), target_triple: None },
+        semantics: Semantics { profile: PURE_I64_PROFILE.into(), integer_model: "wrapping_i64".into(), target_triple: None },
         method: "deductive_proof".into(), execution: "completed".into(), result: "established".into(),
         scope: Scope { kind: "unbounded".into(), bounds: Vec::new() },
         correspondence: Correspondence {

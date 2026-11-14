@@ -131,7 +131,7 @@ pub struct SourceBinding {
 }
 
 pub fn prepare_source(source: &str) -> Result<(SourceBinding, parser::Atom), BundleError> {
-    let contract = semantic_contract::extract_pure_i64_contract(source, SOURCE_LABEL, None)
+    let contract = semantic_contract::extract_pure_i64_contract(source, SOURCE_LABEL, None, false)
         .map_err(|_| BundleError("unsupported or invalid source"))?;
     let mut items =
         parser::parse_module_checked(source).map_err(|_| BundleError("invalid source"))?;

@@ -2828,7 +2828,12 @@ the existing Z3 bitvector library for C03's i64 comparison/conditional fragment.
 It fixes LLVM 17, Linux/x86_64 and target/layout, screens memory-free acyclic
 i1/i64 SSA, and compares all concrete i64 inputs rather than finite observations.
 Wrong lowering is refuted; unsupported semantics, invalid IR and inconclusive
-solver results are not equivalence. See the
+solver results are not equivalence. The fragment now also covers wrapping
+add/sub/mul on both sides (mod 2^64): the emitter never sets nsw/nuw, flagged
+IR arithmetic is rejected, and nonlinear solver timeouts stay `Inconclusive`.
+Division and shifts remain outside the profile. The bounded C03
+recheck/native-bundle fragment stays closed to arithmetic, so build and
+recheck keep agreeing on one source grammar. See the
 [checked snapshot and exclusions](VERIFICATION_NATIVE.md#first-llvm-translation-validation-slice).
 This is partial C09: no postcondition proof, pipeline-history attestation,
 later optimizer/backend/linker/runtime/binary correctness, native-bundle

@@ -141,7 +141,7 @@ pub(super) fn from_recheck(
             make(
                 Subject { id: "native-source.mm".into(), kind: "mumei_source".into(), sha256: report.source_sha256.clone() },
                 Identity { id: "main.contract".into(), sha256: record.source.specification_sha256.clone() },
-                "main_source_postcondition", RECHECK_PROFILE, "checked_i64", None,
+                "main_source_postcondition", RECHECK_PROFILE, "wrapping_i64", None,
                 "deductive_proof", "unbounded",
                 Correspondence { relation: "exact_model".into(), status: "assumed".into(), notes: strings(&["restricted_c03_source_encoding_and_parser_normalization_are_trusted_not_independently_proved"]) },
                 Tool { name: "Z3".into(), version: z3_version.clone() },
@@ -150,7 +150,7 @@ pub(super) fn from_recheck(
             make(
                 Subject { id: "program.ll".into(), kind: "lowered_ir".into(), sha256: report.llvm_sha256.clone() },
                 Identity { id: "native-source.mm#main.body".into(), sha256: report.source_sha256.clone() },
-                "main_source_to_llvm_user_body", report.profile, "checked_i64", Some(report.target),
+                "main_source_to_llvm_user_body", report.profile, "wrapping_i64", Some(report.target),
                 "deductive_proof", "unbounded",
                 Correspondence { relation: "exact_model".into(), status: "validated".into(), notes: strings(&[
                     "full_i64_user_body_compared_to_source_within_the_restricted_profile",

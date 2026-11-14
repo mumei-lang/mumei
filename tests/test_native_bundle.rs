@@ -338,7 +338,7 @@ fn vacuous_preconditions_and_unsupported_sources_cannot_recheck_successfully() {
     }
     let fake = "FAKE_C10_SOURCE_DIAGNOSTIC_ONLY";
     for text in [
-        GOOD.replace("{ 7 }", "{ 7 + 0 }"),
+        GOOD.replace("{ 7 }", "{ 7 / 1 }"),
         GOOD.replace("{ 7 }", "{ 7.0 }"),
         GOOD.replace("{ 7 }", &format!("{{ {fake} }}")),
     ] {

@@ -3,7 +3,7 @@
 
 use inkwell::{context::Context as LlvmContext, memory_buffer::MemoryBuffer, values::AsValueRef};
 use llvm_sys::{core::*, prelude::*, LLVMIntPredicate, LLVMOpcode, LLVMTypeKind};
-use mumei_core::semantic_contract::{encode_pure_i64_body, PURE_I64_PROFILE};
+use mumei_core::semantic_contract::{encode_pure_i64_body, PURE_I64_WRAPPING_PROFILE};
 use std::collections::HashMap;
 use z3::{
     ast::{Ast, Bool, BV},
@@ -148,7 +148,7 @@ fn validate(
     config.set_timeout_msec(options.timeout_ms as u64);
     config.set_param_value("rlimit", &options.resource_limit.to_string());
     let context = Context::new(&config);
-    let model = encode_pure_i64_body(source, &context)
+    let model = encode_pure_i64_body(source, &context, true)
         .map_err(|_| ValidationError("unsupported C03 source"))?;
     if native && (model.function_name != "main" || !model.inputs.is_empty()) {
         return Err(ValidationError(
@@ -204,7 +204,7 @@ fn validate(
     };
     Ok(ValidationReport {
         profile: if native { NATIVE_PROFILE } else { PROFILE },
-        source_profile: PURE_I64_PROFILE,
+        source_profile: PURE_I64_WRAPPING_PROFILE,
         target,
         data_layout: DATA_LAYOUT,
         checked_stage: if native {
@@ -317,6 +317,10 @@ unsafe fn check_function(function: LLVMValueRef, params: usize) -> Result<()> {
             }
             match LLVMGetInstructionOpcode(inst) {
                 LLVMOpcode::LLVMRet | LLVMOpcode::LLVMBr => (),
+                LLVMOpcode::LLVMAdd | LLVMOpcode::LLVMSub | LLVMOpcode::LLVMMul => {
+                    unflagged_arithmetic(inst)?;
+                    width(LLVMTypeOf(inst))?;
+                }
                 LLVMOpcode::LLVMICmp
                 | LLVMOpcode::LLVMAnd
                 | LLVMOpcode::LLVMOr
@@ -332,6 +336,27 @@ unsafe fn check_function(function: LLVMValueRef, params: usize) -> Result<()> {
             inst = LLVMGetNextInstruction(inst);
         }
         block = LLVMGetNextBasicBlock(block);
+    }
+    Ok(())
+}
+
+/// `add`/`sub`/`mul` wrap mod 2^64 on both sides of the comparison — the
+/// Mumei emitter never sets wrap flags. The nsw/nuw flags instead make
+/// overflow produce poison, which this profile rejects wholesale, so a
+/// flagged arithmetic instruction stays unsupported.
+unsafe fn unflagged_arithmetic(inst: LLVMValueRef) -> Result<()> {
+    let printed = LLVMPrintValueToString(inst);
+    let text = std::ffi::CStr::from_ptr(printed)
+        .to_string_lossy()
+        .into_owned();
+    LLVMDisposeMessage(printed);
+    // Wrap flags print as whole tokens after the mnemonic (`add nsw i64`);
+    // a substring test would also trip on SSA names like `%answer`.
+    if text
+        .split_whitespace()
+        .any(|token| token == "nsw" || token == "nuw")
+    {
+        return Err(ValidationError("flagged LLVM arithmetic unsupported"));
     }
     Ok(())
 }
@@ -579,6 +604,9 @@ impl<'ctx> IrEncoder<'ctx> {
                             LLVMOpcode::LLVMAnd => a.bvand(&b),
                             LLVMOpcode::LLVMOr => a.bvor(&b),
                             LLVMOpcode::LLVMXor => a.bvxor(&b),
+                            LLVMOpcode::LLVMAdd => a.bvadd(&b),
+                            LLVMOpcode::LLVMSub => a.bvsub(&b),
+                            LLVMOpcode::LLVMMul => a.bvmul(&b),
                             LLVMOpcode::LLVMICmp => {
                                 use LLVMIntPredicate::*;
                                 let condition = match LLVMGetICmpPredicate(inst) {
