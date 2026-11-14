@@ -1392,9 +1392,12 @@ record's `pointee_type_ids`: a fully unnamed pointee (`*lib.PU` on
 `*int64`, `(*lib.PA)[i]` on `*[4]int64`) resolves to the empty
 list and admits — the member's own identity covers the declaration —
 while a deeper named use (`*lib.PPV`/`**lib.PPV` on `**T`) declares
-and pins `T` like a type argument; only a pointee shape the key
+and pins `T` like a type argument — and every id the list collects
+emits its own `type` member record, since a pin can only match a
+redeclaration when the member record exists; only a pointee shape the key
 cannot declare stays closed (`*lib.PSTR` on `*struct{ F T }`, or a
-signature/chan tree). A non-pointer member behind `*` stays
+signature tree) — a `*chan T` pointee resolves its `T` element
+like a slice or map and admits. A non-pointer member behind `*` stays
 closed (uncompilable), no other unary operator unwraps, and a
 `*lib.PV = v` store unions the stored value's dependencies into
 every binding an earlier `&x` escaped because the member may point
