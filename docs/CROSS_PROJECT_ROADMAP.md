@@ -1218,7 +1218,9 @@ and an *inferred* instantiation `lib.G(x)`/`G(x)` takes the same
 gate through `info.Instances`, admitted when every inferred type
 argument is basic, named or alias (`lib.G(t)` with `t` declared
 `lib.T` admits with the `lib.T` pin on the record). Pointer type
-arguments (`G[*lib.T](v)`) have no pin channel and stay closed.
+arguments (`G[*lib.T](v)`) have no pin channel and stay closed;
+nested named arguments pin every identity they contain
+(`G[other.N[lib.T]](v)` records both `N` and `T`).
 Instantiated generic types, local generics
 and methods are unchanged. See the
 [Agent imported generic instantiations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-generic-instantiations)
