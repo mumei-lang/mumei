@@ -2849,10 +2849,13 @@ bindings are block-lexical — a branch-local or shadowing `let` cannot
 leak. Nested blocks in leading positions are checked and encoded like
 discarded expressions — their bindings stay lexical. Reassignment is
 restricted to names bound on the current linear
-path: assignments inside `if` branches, expression blocks or nested
-blocks may only
-touch names bound within them, since a rebinding that escapes a
-conditional path cannot be merged in this model. Unbound assignment,
+path, but an `if` branch may rebind those names: each written name
+merges under the branch condition like the emitter's per-name phi, a
+name written on one side carries its prior value through the other,
+and a partial operation in a branch keeps its definedness obligation
+under the refined guard. Writes inside operands, `let` initializers,
+expression blocks and match arms may only
+touch names bound within them. Unbound assignment,
 call statements and other statement forms
 stay unsupported. Declared `bool` parameters and `-> bool` results are
 admitted, completing the Boolean half of the issue's pure

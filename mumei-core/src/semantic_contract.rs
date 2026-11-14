@@ -170,14 +170,26 @@ pub fn extract_pure_i64_contract(
     let body =
         parse_body_expr_checked(&atom.body_expr).map_err(|_| SemanticContractError::Parse)?;
     expect_kind(
-        expression_kind(&requires, &scope, false, allow_wrapping_arithmetic)?,
+        expression_kind(
+            &requires,
+            &scope,
+            false,
+            allow_wrapping_arithmetic,
+            &BTreeSet::new(),
+        )?,
         ScalarKind::Bool,
     )?;
     let result_kind = return_kind(&atom);
     let mut ensures_scope = scope.clone();
     ensures_scope.insert("result".to_owned(), result_kind);
     expect_kind(
-        expression_kind(&ensures, &ensures_scope, true, allow_wrapping_arithmetic)?,
+        expression_kind(
+            &ensures,
+            &ensures_scope,
+            true,
+            allow_wrapping_arithmetic,
+            &BTreeSet::new(),
+        )?,
         ScalarKind::Bool,
     )?;
     expect_kind(
@@ -317,6 +329,7 @@ pub fn extract_pure_i64_contract(
         .chain(allow_wrapping_arithmetic.then_some("bool_parameters_lowered_to_i64_zero_one"))
         .chain(allow_wrapping_arithmetic.then_some("bool_results_lowered_to_i64_zero_one"))
         .chain(allow_wrapping_arithmetic.then_some("first_match_order_i64_match_with_catch_all"))
+        .chain(allow_wrapping_arithmetic.then_some("conditional_path_reassignment_ite_merge"))
         .collect(),
         requested_route: "standard_z3_not_executed_by_extractor",
         decomposition: "no_common_obligation_decomposition",
@@ -465,8 +478,28 @@ fn statement_kind(
     assignable: &BTreeSet<String>,
 ) -> Result<ScalarKind, SemanticContractError> {
     match stmt {
-        Stmt::Expr(expr, _) => {
-            expression_kind(expr, scope, result_in_scope, allow_wrapping_arithmetic)
+        Stmt::Expr(expr, _) => expression_kind(
+            expr,
+            scope,
+            result_in_scope,
+            allow_wrapping_arithmetic,
+            assignable,
+        ),
+        Stmt::Assign { var, value, .. } if allow_wrapping_arithmetic => {
+            if !assignable.contains(var) {
+                return Err(SemanticContractError::Unsupported(
+                    "assignment to a name not bound on the linear path",
+                ));
+            }
+            let kind = expression_kind(
+                value,
+                scope,
+                result_in_scope,
+                allow_wrapping_arithmetic,
+                &BTreeSet::new(),
+            )?;
+            expect_kind(kind, scope[var])?;
+            Ok(scope[var])
         }
         Stmt::Block(stmts, _) if stmts.len() == 1 => statement_kind(
             &stmts[0],
@@ -492,6 +525,7 @@ fn statement_kind(
                             &inner,
                             result_in_scope,
                             allow_wrapping_arithmetic,
+                            &BTreeSet::new(),
                         )?;
                         inner.insert(var.clone(), kind);
                         inner_assignable.insert(var.clone());
@@ -507,11 +541,18 @@ fn statement_kind(
                             &inner,
                             result_in_scope,
                             allow_wrapping_arithmetic,
+                            &BTreeSet::new(),
                         )?;
                         expect_kind(kind, inner[var])?;
                     }
                     Stmt::Expr(value, _) => {
-                        expression_kind(value, &inner, result_in_scope, allow_wrapping_arithmetic)?;
+                        expression_kind(
+                            value,
+                            &inner,
+                            result_in_scope,
+                            allow_wrapping_arithmetic,
+                            &inner_assignable,
+                        )?;
                     }
                     _ => {
                         return Err(SemanticContractError::Unsupported(
@@ -534,11 +575,16 @@ fn statement_kind(
     }
 }
 
+/// `assignable` lists the linear-path names an `if` branch may rebind:
+/// assignments to them escape the branch as an `ite` merge on the
+/// encoder side. Every other expression position passes an empty set,
+/// so writes inside operands, guards and match arms stay closed.
 fn expression_kind(
     expr: &Expr,
     scope: &BTreeMap<String, ScalarKind>,
     result_in_scope: bool,
     allow_wrapping_arithmetic: bool,
+    assignable: &BTreeSet<String>,
 ) -> Result<ScalarKind, SemanticContractError> {
     match expr {
         Expr::Number(_) => Ok(ScalarKind::I64),
@@ -554,8 +600,20 @@ fn expression_kind(
                 "expression or unbound name",
             )),
         Expr::BinaryOp(left, op, right) => {
-            let left = expression_kind(left, scope, result_in_scope, allow_wrapping_arithmetic)?;
-            let right = expression_kind(right, scope, result_in_scope, allow_wrapping_arithmetic)?;
+            let left = expression_kind(
+                left,
+                scope,
+                result_in_scope,
+                allow_wrapping_arithmetic,
+                &BTreeSet::new(),
+            )?;
+            let right = expression_kind(
+                right,
+                scope,
+                result_in_scope,
+                allow_wrapping_arithmetic,
+                &BTreeSet::new(),
+            )?;
             match op {
                 Op::Eq | Op::Neq if left == right => Ok(ScalarKind::Bool),
                 Op::Lt | Op::Le | Op::Gt | Op::Ge if left == ScalarKind::I64 && right == left => {
@@ -601,15 +659,24 @@ fn expression_kind(
             else_branch,
         } => {
             expect_kind(
-                expression_kind(cond, scope, result_in_scope, allow_wrapping_arithmetic)?,
+                expression_kind(
+                    cond,
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                )?,
                 ScalarKind::Bool,
             )?;
+            // Branch bodies may rebind names bound on the current
+            // linear path; the encoder merges them under the branch
+            // condition like the emitter's per-variable phi.
             let then_kind = statement_kind(
                 then_branch,
                 scope,
                 result_in_scope,
                 allow_wrapping_arithmetic,
-                &BTreeSet::new(),
+                assignable,
             )?;
             expect_kind(
                 statement_kind(
@@ -617,7 +684,7 @@ fn expression_kind(
                     scope,
                     result_in_scope,
                     allow_wrapping_arithmetic,
-                    &BTreeSet::new(),
+                    assignable,
                 )?,
                 then_kind,
             )?;
@@ -632,7 +699,13 @@ fn expression_kind(
         // scope (reassignments inside an arm cannot escape it).
         Expr::Match { target, arms } if allow_wrapping_arithmetic => {
             expect_kind(
-                expression_kind(target, scope, result_in_scope, allow_wrapping_arithmetic)?,
+                expression_kind(
+                    target,
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                )?,
                 ScalarKind::I64,
             )?;
             let Some(last) = arms.last() else {
@@ -761,7 +834,19 @@ pub fn encode_pure_i64_body<'ctx>(
     let assignable: BTreeSet<String> = atom.params.iter().map(|p| p.name.clone()).collect();
     // A `-> bool` body lowers to i64 carrying 0/1 — the emitter zexts
     // its i1 result, so the checked value is the same 0/1 materialization.
-    let value = match source_stmt(&body, context, &env, &top, &mut definedness, 0, &assignable)? {
+    // Top-level reassignments land in `top_writes`; nothing reads the
+    // body afterwards, so the map is a sink for the write records.
+    let mut top_writes = HashMap::new();
+    let value = match source_stmt(
+        &body,
+        context,
+        &env,
+        &top,
+        &mut definedness,
+        0,
+        &assignable,
+        &mut top_writes,
+    )? {
         SourceValue::Integer(value) => value,
         SourceValue::Boolean(value) => {
             value.ite(&BV::from_u64(context, 1, 64), &BV::from_u64(context, 0, 64))
@@ -805,11 +890,31 @@ pub fn encode_pure_i64_obligation<'ctx>(
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
     let top = Bool::from_bool(context, true);
     let mut sink = Vec::new();
-    let requires = source_expr(&requires, context, &env, &top, &mut sink, 0)?.boolean()?;
+    let requires = source_expr(
+        &requires,
+        context,
+        &env,
+        &top,
+        &mut sink,
+        0,
+        &BTreeSet::new(),
+        &mut HashMap::new(),
+    )?
+    .boolean()?;
     env.insert("result".to_string(), SourceValue::Integer(body.value));
     let ensures =
         parse_expression_checked(&atom.ensures).map_err(|_| SemanticContractError::Parse)?;
-    let ensures = source_expr(&ensures, context, &env, &top, &mut sink, 0)?.boolean()?;
+    let ensures = source_expr(
+        &ensures,
+        context,
+        &env,
+        &top,
+        &mut sink,
+        0,
+        &BTreeSet::new(),
+        &mut HashMap::new(),
+    )?
+    .boolean()?;
     Ok(Bool::and(context, &[&requires, &ensures.not()]))
 }
 
@@ -861,8 +966,10 @@ impl<'ctx> SourceValue<'ctx> {
 }
 
 /// `assignable` mirrors `statement_kind`: only names bound on the
-/// current linear path may be rebound, because the source model cannot
-/// merge an assignment that escapes an `if` branch or expression block.
+/// current linear path may be rebound. `written` collects the final
+/// symbolic value of every assignable name a statement rewrites, so an
+/// enclosing `if` can merge branch writes under its condition and an
+/// enclosing block can re-export the writes that escape it.
 fn source_stmt<'ctx>(
     stmt: &Stmt,
     ctx: &'ctx Context,
@@ -871,12 +978,41 @@ fn source_stmt<'ctx>(
     definedness: &mut Vec<Bool<'ctx>>,
     depth: usize,
     assignable: &BTreeSet<String>,
+    written: &mut HashMap<String, SourceValue<'ctx>>,
 ) -> BodyResult<SourceValue<'ctx>> {
     if depth > MAX_DEPTH {
         return Err(SemanticContractError::Unsupported("source depth limit"));
     }
     match stmt {
-        Stmt::Expr(e, _) => source_expr(e, ctx, env, guard, definedness, depth + 1),
+        Stmt::Expr(e, _) => source_expr(
+            e,
+            ctx,
+            env,
+            guard,
+            definedness,
+            depth + 1,
+            assignable,
+            written,
+        ),
+        Stmt::Assign { var, value, .. } => {
+            if !assignable.contains(var) {
+                return Err(SemanticContractError::Unsupported(
+                    "assignment to a name not bound on the linear path",
+                ));
+            }
+            let bound = source_expr(
+                value,
+                ctx,
+                env,
+                guard,
+                definedness,
+                depth + 1,
+                &BTreeSet::new(),
+                written,
+            )?;
+            written.insert(var.clone(), bound.clone());
+            Ok(bound)
+        }
         Stmt::Block(stmts, _) if stmts.len() == 1 => source_stmt(
             &stmts[0],
             ctx,
@@ -885,6 +1021,7 @@ fn source_stmt<'ctx>(
             definedness,
             depth + 1,
             assignable,
+            written,
         ),
         Stmt::Block(stmts, _) if !stmts.is_empty() => {
             // Sequential blocks bind names lexically: each `let`
@@ -896,13 +1033,26 @@ fn source_stmt<'ctx>(
             // the block value under the wider scope.
             let mut inner = env.clone();
             let mut inner_assignable = assignable.clone();
+            // Names an inner `let` shadowed lose their escaping status
+            // for the rest of this block — writes to them stay local.
+            let mut escapable = assignable.clone();
             let (lets, last) = stmts.split_at(stmts.len() - 1);
             for stmt in lets {
                 match stmt {
                     Stmt::Let { var, value, .. } => {
-                        let bound = source_expr(value, ctx, &inner, guard, definedness, depth + 1)?;
+                        let bound = source_expr(
+                            value,
+                            ctx,
+                            &inner,
+                            guard,
+                            definedness,
+                            depth + 1,
+                            &BTreeSet::new(),
+                            written,
+                        )?;
                         inner.insert(var.clone(), bound);
                         inner_assignable.insert(var.clone());
+                        escapable.remove(var);
                     }
                     Stmt::Assign { var, value, .. } => {
                         if !inner_assignable.contains(var) {
@@ -910,11 +1060,39 @@ fn source_stmt<'ctx>(
                                 "assignment to a name not bound on the linear path",
                             ));
                         }
-                        let bound = source_expr(value, ctx, &inner, guard, definedness, depth + 1)?;
-                        inner.insert(var.clone(), bound);
+                        let bound = source_expr(
+                            value,
+                            ctx,
+                            &inner,
+                            guard,
+                            definedness,
+                            depth + 1,
+                            &BTreeSet::new(),
+                            written,
+                        )?;
+                        inner.insert(var.clone(), bound.clone());
+                        if escapable.contains(var) {
+                            written.insert(var.clone(), bound);
+                        }
                     }
                     Stmt::Expr(value, _) => {
-                        source_expr(value, ctx, &inner, guard, definedness, depth + 1)?;
+                        let mut local = HashMap::new();
+                        source_expr(
+                            value,
+                            ctx,
+                            &inner,
+                            guard,
+                            definedness,
+                            depth + 1,
+                            &inner_assignable,
+                            &mut local,
+                        )?;
+                        for (name, bound) in local {
+                            inner.insert(name.clone(), bound.clone());
+                            if escapable.contains(&name) {
+                                written.insert(name, bound);
+                            }
+                        }
                     }
                     _ => {
                         return Err(SemanticContractError::Unsupported(
@@ -923,7 +1101,8 @@ fn source_stmt<'ctx>(
                     }
                 }
             }
-            source_stmt(
+            let mut tail_writes = HashMap::new();
+            let value = source_stmt(
                 &last[0],
                 ctx,
                 &inner,
@@ -931,7 +1110,14 @@ fn source_stmt<'ctx>(
                 definedness,
                 depth + 1,
                 &inner_assignable,
-            )
+                &mut tail_writes,
+            )?;
+            for (name, bound) in tail_writes {
+                if escapable.contains(&name) {
+                    written.insert(name, bound);
+                }
+            }
+            Ok(value)
         }
         _ => Err(SemanticContractError::Unsupported(
             "unsupported source statement",
@@ -967,6 +1153,8 @@ fn source_expr<'ctx>(
     guard: &Bool<'ctx>,
     definedness: &mut Vec<Bool<'ctx>>,
     depth: usize,
+    assignable: &BTreeSet<String>,
+    written: &mut HashMap<String, SourceValue<'ctx>>,
 ) -> BodyResult<SourceValue<'ctx>> {
     use SourceValue::{Boolean as B, Integer as I};
     if depth > MAX_DEPTH {
@@ -979,11 +1167,27 @@ fn source_expr<'ctx>(
             .get(n.as_str())
             .cloned()
             .ok_or(SemanticContractError::Unsupported("source binding"))?,
-        Expr::Block(s) => {
-            source_stmt(s, ctx, env, guard, definedness, depth + 1, &BTreeSet::new())?
-        }
+        Expr::Block(s) => source_stmt(
+            s,
+            ctx,
+            env,
+            guard,
+            definedness,
+            depth + 1,
+            &BTreeSet::new(),
+            written,
+        )?,
         Expr::BinaryOp(a, op, b) => {
-            let a = source_expr(a, ctx, env, guard, definedness, depth + 1)?;
+            let a = source_expr(
+                a,
+                ctx,
+                env,
+                guard,
+                definedness,
+                depth + 1,
+                &BTreeSet::new(),
+                written,
+            )?;
             // `&&`/`||`/`=>` short-circuit like the emitter and
             // `--bitvec-i64` verification: the right operand's partial
             // operations bind only when the left one lets it run.
@@ -992,7 +1196,16 @@ fn source_expr<'ctx>(
                 (B(ab), Op::Or) => Bool::and(ctx, &[guard, &ab.not()]),
                 _ => guard.clone(),
             };
-            let b = source_expr(b, ctx, env, &b_guard, definedness, depth + 1)?;
+            let b = source_expr(
+                b,
+                ctx,
+                env,
+                &b_guard,
+                definedness,
+                depth + 1,
+                &BTreeSet::new(),
+                written,
+            )?;
             match (a, op, b) {
                 (I(a), Op::Eq, I(b)) => B(a._eq(&b)),
                 (I(a), Op::Neq, I(b)) => B(a._eq(&b).not()),
@@ -1046,8 +1259,25 @@ fn source_expr<'ctx>(
             then_branch,
             else_branch,
         } => {
-            let cond = source_expr(cond, ctx, env, guard, definedness, depth + 1)?.boolean()?;
-            match (
+            let cond = source_expr(
+                cond,
+                ctx,
+                env,
+                guard,
+                definedness,
+                depth + 1,
+                &BTreeSet::new(),
+                written,
+            )?
+            .boolean()?;
+            // Branches may rebind linear-path names: each write merges
+            // under the branch condition like the emitter's per-name
+            // phi; a name written on one side keeps its prior value on
+            // the other. Branch-local `let` bindings are lexical — they
+            // never reach `then_writes`/`else_writes`.
+            let mut then_writes = HashMap::new();
+            let mut else_writes = HashMap::new();
+            let (then_value, else_value) = (
                 source_stmt(
                     then_branch,
                     ctx,
@@ -1055,7 +1285,8 @@ fn source_expr<'ctx>(
                     &Bool::and(ctx, &[guard, &cond]),
                     definedness,
                     depth + 1,
-                    &BTreeSet::new(),
+                    assignable,
+                    &mut then_writes,
                 )?,
                 source_stmt(
                     else_branch,
@@ -1064,9 +1295,34 @@ fn source_expr<'ctx>(
                     &Bool::and(ctx, &[guard, &cond.not()]),
                     definedness,
                     depth + 1,
-                    &BTreeSet::new(),
+                    assignable,
+                    &mut else_writes,
                 )?,
-            ) {
+            );
+            let names: BTreeSet<&String> = then_writes.keys().chain(else_writes.keys()).collect();
+            for name in names {
+                let then_bound = match then_writes.get(name) {
+                    Some(value) => value.clone(),
+                    None => env
+                        .get(name)
+                        .cloned()
+                        .ok_or(SemanticContractError::Unsupported("source binding"))?,
+                };
+                let else_bound = match else_writes.get(name) {
+                    Some(value) => value.clone(),
+                    None => env
+                        .get(name)
+                        .cloned()
+                        .ok_or(SemanticContractError::Unsupported("source binding"))?,
+                };
+                let merged = match (then_bound, else_bound) {
+                    (I(a), I(b)) => I(cond.ite(&a, &b)),
+                    (B(a), B(b)) => B(cond.ite(&a, &b)),
+                    _ => return Err(SemanticContractError::Unsupported("branch write kinds")),
+                };
+                written.insert(name.clone(), merged);
+            }
+            match (then_value, else_value) {
                 (I(a), I(b)) => I(cond.ite(&a, &b)),
                 (B(a), B(b)) => B(cond.ite(&a, &b)),
                 _ => return Err(SemanticContractError::Unsupported("source branch types")),
@@ -1079,7 +1335,17 @@ fn source_expr<'ctx>(
         // any later arm is dead — its guard gets the literal `false`
         // miss term, which encodes it while binding nothing.
         Expr::Match { target, arms } => {
-            let target = source_expr(target, ctx, env, guard, definedness, depth + 1)?.integer()?;
+            let target = source_expr(
+                target,
+                ctx,
+                env,
+                guard,
+                definedness,
+                depth + 1,
+                &BTreeSet::new(),
+                written,
+            )?
+            .integer()?;
             let mut missed: Vec<Bool> = Vec::new();
             let mut selected: Vec<(Bool, SourceValue)> = Vec::new();
             let mut fallback = None;
@@ -1134,6 +1400,7 @@ fn source_expr<'ctx>(
                     definedness,
                     depth + 1,
                     &BTreeSet::new(),
+                    written,
                 )?;
                 if let Some(cond) = hit {
                     selected.push((cond, value));
@@ -1239,6 +1506,7 @@ mod tests {
             "x + 1; x",
             "let a = x; a = a + 1; a",
             "let a = x; { let a = a + 1; a }; a",
+            "if x > 0 { x = 1; x } else { x }; x",
         ] {
             let source = SOURCE.replace("if x < 0 { 0 } else { x }", body);
             assert!(extract(&source).is_err());

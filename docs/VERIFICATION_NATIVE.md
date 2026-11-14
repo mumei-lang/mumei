@@ -709,7 +709,8 @@ in-process C09 pilot, not a new CLI route or common-evidence producer. It consum
 one `mumei.pure-i64-wrapping-scalar/v1` source unit — the C03 comparison fragment
 extended with wrapping add/sub/mul, total bitwise `&`/`|`/`^`, guarded
 signed division/remainder/shifts, block-scoped `let` bindings, scalar
-reassignments on the linear path, discarded pure expression
+reassignments on the linear path and inside `if` branches, discarded
+pure expression
 statements, `bool` parameters and results and `match` on an i64
 scrutinee with literal patterns and a trailing catch-all arm —
 and one caller-supplied LLVM
@@ -747,13 +748,17 @@ and bindings are lexical, so a shadowing or branch-local `let` never
 escapes its block. A discarded expression contributes no value but its
 obligations still hold. A nested block in a leading position is checked
 and encoded like a discarded expression — its value is unused and its
-bindings stay lexical to the nested block. Reassignment rebinding is
-restricted to names
-bound on the current linear path: an assignment inside an `if` branch,
-expression block or nested block may only touch names bound within it,
-because the
-source model cannot merge a rebinding that escapes a conditional path —
-`if x > 0 { x = 1; 0 } else { 0 }` stays rejected. Other statement
+bindings stay lexical to the nested block. An `if` branch may rebind
+names bound on the enclosing linear path: each written name merges
+under the branch condition like the emitter's per-name phi, and a name
+written on one side carries its prior value through the other, so
+`if x > 0 { x = 1; x } else { x }; x` is checked and a partial
+operation in a branch keeps its definedness obligation under the
+refined guard. The merge reaches no other position: writes inside
+operands, `let` initializers, expression blocks, nested blocks and
+match arms may only touch names bound within them —
+`x + (if x > 0 { x = 1; x } else { x })` and `let a = x; { a = 1; a }; a`
+stay rejected. Other statement
 forms (unbound assignment, calls, loops) stay
 unsupported.
 A declared `bool` parameter lowers to i64 carrying 0/1 — the same
