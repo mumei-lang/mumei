@@ -1349,7 +1349,12 @@ same escaped-binding fold: `p := &x` may aim the pointer at any
 tracked local, so the store cannot be proven to miss one — unioning
 the stored value's dependencies into every escaped binding is the
 `*lib.PV = v` over-approximation, and the pointee's declared
-identity records the mutation. The operand must be a bound
+identity records the mutation. Stored deps also accumulate for
+dereference reads to observe — `*t = v; return *t` reports `v`'s
+deps even with nothing escaped — and a local callee with unbounded
+effects hands the same conservative rule to `&x` arguments:
+`Set(&x, y); return x` reports every argument's deps like an
+imported call. The operand must be a bound
 identifier whose pointer names a scalar or pointer pointee (`p :=
 &b` on `int64`, `**t = v`, computed pointers stay closed), and
 `(*p)++`/`*t--` admit without a fold — provenance-preserving. `&`
