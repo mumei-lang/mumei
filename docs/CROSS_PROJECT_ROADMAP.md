@@ -1169,8 +1169,11 @@ records `import` references and member records for a `. "lib"`
 import's objects, so a bare `K`, `V` or `T(e)` classifies exactly
 like its package-qualified form — scalar consts dep-free, scalar vars
 as opaque state reads with the same staleness propagation, scalar
-type members admitting conversions. Function values, non-scalars,
-generic instantiations and missing records stay closed.
+type members admitting conversions. Function values, non-scalars and
+missing records stay closed, as do generic instantiations
+(`T[int](e)`) — the instantiated type-conversion gate resolves its
+member through a `lib.` qualifier, so the dot-imported shape is out
+of scope.
 
 ### Wave 3 imported member type identities
 
