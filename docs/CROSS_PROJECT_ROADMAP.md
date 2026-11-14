@@ -1129,13 +1129,20 @@ it still loads and imported names stay unmodelled. The consumer admits
 a package-qualified read `lib.K` only when the declared member is a
 scalar constant and the record's name matches the source token —
 constants carry no dependencies, like local constants. Imported
-variables (unmodelled package state) and imported functions (not
-values) keep `non_parameter_reference` and fail closed, as does any
-read whose member declaration is absent. Constant *values* are not
-modelled — the fragment tracks dependencies, not what a constant
-equals — and member types carry no identity usable for consumer-side
-type checks yet. Dot-imported names stay unmodelled: they are plain
-identifiers, not package-qualified selectors.
+functions (not values) keep `non_parameter_reference` and fail
+closed, as does any read whose member declaration is absent.
+Constant *values* are not modelled — the fragment tracks
+dependencies, not what a constant equals — and member types carry no
+identity usable for consumer-side type checks yet. Dot-imported
+names stay unmodelled: they are plain identifiers, not
+package-qualified selectors.
+
+A package-qualified scalar `var` read `lib.V` is an opaque state
+read: it records a zero-argument imported `CallTransfer`, so the
+result carries no parameter dependencies while `effects` reports
+`unknown`, and the member identity still propagates staleness to
+readers via `stale_dependents`. A `var` of non-scalar type stays
+closed.
 
 Member declarations also classify `lib.T(e)` conversion targets: the
 consumer admits the call only when the declared member is a `type`
