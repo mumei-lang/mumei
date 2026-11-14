@@ -1158,8 +1158,9 @@ member records the producer already emits: the selection's field is
 itself a `var` member whose `import` reference classifies the read.
 The field is external state like the member itself — dep-free,
 `effects` `unknown`, the transfer records the field's own identity,
-and both the struct var's and the field's declared type identities
-pin for `stale_dependents`. The field's type must be scalar or
+the struct var's own identity pins, and both the struct var's and
+the field's declared type identities pin for `stale_dependents`. The
+field's type must be scalar or
 pointer; method selections (`lib.VS.PF`), non-struct selections and
 bound bases (`t.f`) stay closed.
 
