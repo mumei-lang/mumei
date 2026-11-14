@@ -928,8 +928,9 @@ and unwraps inert `labeled_statement`s. Unlabelled `break`/`continue`
 mark the innermost loop-or-switch body they exit, turning its remaining
 statements into may-assignments that union rather than replace — the
 jump may have skipped them. Labelled jumps, `goto`, `defer` and `go`
-stay declared gaps; an inc/dec operand that is not a bound identifier
-admits through the imported member-write gate (`lib.V++`) instead. See the
+stay declared gaps; an inc/dec operand resolving to an imported
+`var` member admits through the imported member-write gate (`lib.V++`)
+instead, while dereferences and bound-base fields stay closed. See the
 [Agent effect-free control statements](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-effect-free-control-statements).
 
 ### Wave 3 statement initializers in scalar summaries
