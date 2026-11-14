@@ -1132,8 +1132,7 @@ constants carry no dependencies, like local constants. Imported
 functions (not values) keep `non_parameter_reference` and fail
 closed, as does any read whose member declaration is absent.
 Constant *values* are not modelled — the fragment tracks
-dependencies, not what a constant equals — and member types carry no
-identity usable for consumer-side type checks yet.
+dependencies, not what a constant equals.
 
 A package-qualified scalar `var` read `lib.V` is an opaque state
 read: it records a zero-argument imported `CallTransfer`, so the
@@ -1158,6 +1157,23 @@ like its package-qualified form — scalar consts dep-free, scalar vars
 as opaque state reads with the same staleness propagation, scalar
 type members admitting conversions. Function values, non-scalars,
 generic instantiations and missing records stay closed.
+
+### Wave 3 imported member type identities
+
+A member's declared type fact now carries `type_id` when the type is
+a named or alias type the imported unit declares: the producer names
+it with that declaration's own imported-unit binding identity (an
+alias names the alias object); basic and unnamed types carry none.
+The consumer pins the identity on every admitted read or conversion
+whose member type declares one — `FunctionSummary.pinned` joins
+`call_targets` in `stale_dependents(known)`, so redeclaring `type T`
+in the imported unit flags summaries reading `lib.VT` or converting
+through `lib.T` even when the member record is byte-identical. The
+pin names the declared type, not its meaning: a compatible
+redeclaration still flags (detection, not equivalence), members with
+identity-free type facts pin nothing, and reads that fail admission
+record no pin. See the
+[Agent imported member type identities](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-member-type-identities).
 
 ### Wave 4 first compiler-backed source-analysis boundary
 
