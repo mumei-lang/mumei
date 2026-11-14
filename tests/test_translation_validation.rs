@@ -1300,6 +1300,16 @@ fn scalar_match_is_equivalent_and_refuted() {
         source("x: i64, y: i64", "match x { 0 => x / y, _ => 0 }"),
         "atom f(x: i64) -> bool requires: true; ensures: true; body: { match x { 0 => true, _ => false } };".to_string(),
         source("x: i64", "match x { 0 => { let a = x; a + 1 }, _ => 0 }"),
+        // A duplicate literal arm is dead under the accumulated
+        // negation; a second catch-all is unreachable; a partial
+        // scrutinee keeps its domain obligation; reserved names in a
+        // `Variable` pattern bind dead (literals win in the body) or
+        // shadow `result` consistently on both sides.
+        source("x: i64", "match x { 0 => 1, 0 => 2, _ => 3 }"),
+        source("x: i64", "match x { v => v, _ => 0 }"),
+        source("x: i64", "match x / 2 { 0 => 1, _ => 0 }"),
+        source("x: i64", "match x { true => 1, _ => 0 }"),
+        source("x: i64", "match x { result => result }"),
     ] {
         assert_eq!(
             validate(&src, &emitted(&src)).outcome,
