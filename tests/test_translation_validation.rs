@@ -238,9 +238,9 @@ fn multiple_returns_and_phi_predecessors_are_not_merged_by_value_name() {
 #[test]
 fn unsupported_source_is_not_silently_weakened() {
     for body in [
-        "x/2",
-        "x%2",
-        "x<<1",
+        "x&2",
+        "x|2",
+        "x^2",
         "1.0",
         "let y = x; y",
         "f(x)",
@@ -329,18 +329,148 @@ fn ssa_names_containing_flag_substrings_are_not_wrap_flags() {
 }
 
 #[test]
-fn unsupported_llvm_memory_calls_arithmetic_division_shift_and_freeze_are_rejected() {
+fn guarded_i64_division_and_shifts_are_equivalent_or_refuted() {
+    for (params, body) in [
+        ("x: i64, y: i64", "x / y"),
+        ("x: i64, y: i64", "x << y"),
+        ("x: i64, y: i64", "x >> y"),
+        ("x: i64", "x / 4"),
+        ("x: i64", "x % 7"),
+        ("x: i64, y: i64", "x / (y + 1 - y)"),
+        ("x: i64", "x << 3"),
+        ("x: i64", "x >> 5"),
+        // Guarded in source: the divisor is provably nonzero on the path
+        // that divides, so both sides share the same partial domain.
+        ("x: i64, y: i64", "if y != 0 { x / y } else { 0 }"),
+        ("x: i64, y: i64", "if y < 64 { x << y } else { 0 }"),
+        // `&&`/`||` short-circuit: the division on the right binds only
+        // where its left operand lets it run — as in `--bitvec-i64`.
+        ("x: i64, y: i64", "if y != 0 && x / y == 0 { 1 } else { 0 }"),
+        ("x: i64, y: i64", "if y == 0 || x / y != 0 { 1 } else { 0 }"),
+    ] {
+        let src = source(params, body);
+        let report = validate(&src, &emitted(&src));
+        assert_eq!(report.outcome, Outcome::EquivalentWithinProfile, "{body}");
+        assert_eq!(
+            report.input_domain,
+            "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires",
+            "{body}"
+        );
+    }
+    // A variable-divisor `srem` — emitted as `srem x, select(y == -1, 1, y)` —
+    // outruns the bounded solver budget (inconclusive even at 30s/4G rlimit).
+    // The contract fails closed rather than weakening the claim.
+    for body in ["x % y", "if y == 0 { 0 } else { x % y }"] {
+        let src = source("x: i64, y: i64", body);
+        assert_eq!(
+            validate(&src, &emitted(&src)).outcome,
+            Outcome::Inconclusive,
+            "{body}"
+        );
+    }
+    // Deliberately wrong lowering on the shared domain is still refuted —
+    // never reported equivalent. Nonlinear wrong variants (a variable-divisor
+    // `srem`, swapped operands) outrun the budget and fail closed as
+    // inconclusive, which is still not a proof of equivalence.
+    let src = source("x: i64, y: i64", "x / y");
+    let ir = emitted(&src);
+    let wrong_const = ir.replace("sdiv i64 %0, %1", "sdiv i64 %0, 2");
+    assert_ne!(wrong_const, ir);
+    assert_eq!(validate(&src, &wrong_const).outcome, Outcome::Different);
+    for wrong in [
+        ir.replace("sdiv i64", "srem i64"),
+        ir.replace("sdiv i64 %0, %1", "sdiv i64 %1, %0"),
+    ] {
+        assert_ne!(wrong, ir);
+        assert_ne!(
+            validate(&src, &wrong).outcome,
+            Outcome::EquivalentWithinProfile,
+            "{wrong}"
+        );
+    }
+    let shift = source("x: i64, y: i64", "x >> y");
+    let shift_ir = emitted(&shift);
+    assert_ne!(
+        validate(&shift, &shift_ir.replace("ashr", "shl")).outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    // A short-circuit branch makes `y = 0` a defined source input: an IR
+    // that produces a wrong value only there must still be refuted.
+    let guarded = source("x: i64, y: i64", "if y != 0 && x / y == 0 { 1 } else { 0 }");
+    let ir = pin("define i64 @f(i64 %x, i64 %y) {\n\
+         entry:\n\
+         %c = icmp ne i64 %y, 0\n\
+         br i1 %c, label %div, label %done\n\
+         div:\n\
+         %v = sdiv i64 %x, %y\n\
+         %e = icmp eq i64 %v, 0\n\
+         %z = zext i1 %e to i64\n\
+         br label %done\n\
+         done:\n\
+         %r = phi i64 [ 1, %entry ], [ %z, %div ]\n\
+         ret i64 %r\n\
+         }");
+    assert_eq!(validate(&guarded, &ir).outcome, Outcome::Different);
+}
+
+#[test]
+fn llvm_poison_on_a_source_defined_input_is_undefined_behavior() {
+    // `sdiv` by a literal zero is poison on every input, and the source `x`
+    // is defined everywhere — a reachable poison, not a value mismatch.
+    let total = source("x: i64", "x");
+    let ir = function("%v = sdiv i64 %x, 0\nret i64 %v");
+    assert_eq!(validate(&total, &ir).outcome, Outcome::UndefinedBehavior);
+    // `x sdiv y` poisons on y = 0, which the source's `else` branch defines.
+    let guarded = source("x: i64, y: i64", "if y != 0 { x / y } else { x }");
+    let ir = pin("define i64 @f(i64 %x, i64 %y) { %v = sdiv i64 %x, %y\nret i64 %v }");
+    assert_eq!(validate(&guarded, &ir).outcome, Outcome::UndefinedBehavior);
+    // An out-of-range shift is poison the same way: `x shl 64`.
+    let ir = function("%v = shl i64 %x, 64\nret i64 %v");
+    assert_eq!(validate(&total, &ir).outcome, Outcome::UndefinedBehavior);
+    // i64::MIN / -1 is poison in `sdiv`; the source defines nothing there.
+    let ir = function("%v = sdiv i64 %x, -1\nret i64 %v");
+    let src = source("x: i64", "0 - x");
+    assert_eq!(validate(&src, &ir).outcome, Outcome::UndefinedBehavior);
+}
+
+#[test]
+fn vacuous_and_out_of_profile_division_and_shifts_fail_closed() {
+    // A source whose guarded operators bind no input at all is not
+    // equivalent — the spec `--bitvec-i64` would reject it outright.
+    for body in [
+        "x / 0",
+        "x % 0",
+        "x / (x - x)",
+        "x << 64",
+        "x >> 64",
+        "x << (0 - 1)",
+    ] {
+        let src = source("x: i64", body);
+        assert!(
+            tv::validate_pure_i64(&src, &emitted(&src), Options::default()).is_err(),
+            "{body}"
+        );
+    }
     let src = source("x: i64", "x");
     for body in [
-        // Flagged arithmetic produces poison on overflow — stays rejected.
+        // Flagged arithmetic/div/shift strengthens the poison domain — rejected.
         "%v = add nsw i64 %x, 0\nret i64 %v",
         "%v = add nuw i64 %x, 0\nret i64 %v",
         "%v = sub nsw i64 %x, 0\nret i64 %v",
         "%v = mul nuw i64 %x, 1\nret i64 %v",
-        "%v = sdiv i64 %x, 1\nret i64 %v",
-        "%v = urem i64 %x, 1\nret i64 %v",
-        "%v = shl i64 %x, 0\nret i64 %v",
+        "%v = sdiv exact i64 %x, 2\nret i64 %v",
+        "%v = shl nsw i64 %x, 1\nret i64 %v",
         "%v = ashr exact i64 %x, 0\nret i64 %v",
+        // Unsigned forms have no source counterpart — still unsupported.
+        "%v = udiv i64 %x, 1\nret i64 %v",
+        "%v = urem i64 %x, 1\nret i64 %v",
+        "%v = lshr i64 %x, 0\nret i64 %v",
+        // `i1` division/shifts — legal LLVM, but the profile only encodes
+        // i64 semantics; rejecting beats a solver sort mismatch.
+        "%c = icmp eq i64 %x, 0\n%v = sdiv i1 %c, %c\n%z = zext i1 %v to i64\nret i64 %z",
+        "%c = icmp eq i64 %x, 0\n%v = srem i1 %c, %c\n%z = zext i1 %v to i64\nret i64 %z",
+        "%c = icmp eq i64 %x, 0\n%v = shl i1 %c, %c\n%z = zext i1 %v to i64\nret i64 %z",
+        "%c = icmp eq i64 %x, 0\n%v = ashr i1 %c, %c\n%z = zext i1 %v to i64\nret i64 %z",
         "%v = freeze i64 %x\nret i64 %v",
         "%p = alloca i64\nstore i64 %x, ptr %p\n%v = load i64, ptr %p\nret i64 %v",
         "%v = call i64 @f(i64 %x)\nret i64 %v",
@@ -591,6 +721,46 @@ fn native_emitter_bodies_and_truncating_wrapper_match_without_rewriting() {
 }
 
 #[test]
+fn native_guarded_division_and_shifts_match_under_the_same_partial_domain() {
+    for body in [
+        "7 / 1",
+        "8 % 3",
+        "1 << 3",
+        "16 >> 2",
+        "if 1 > 0 { 8 / 2 } else { 0 }",
+    ] {
+        let src = native_source(body);
+        let Item::Atom(atom) = parse_module_checked(&src).unwrap().remove(0) else {
+            panic!("atom")
+        };
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("native.ll");
+        mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
+            &[lower_atom_to_hir(&atom)],
+            &ModuleEnv::default(),
+            &[],
+            &path,
+        )
+        .unwrap();
+        let ir = pin(&std::fs::read_to_string(&path).unwrap());
+        let report = native_validate(&src, &ir);
+        assert_eq!(report.outcome, Outcome::EquivalentWithinProfile, "{body}");
+        assert_eq!(
+            report.input_domain,
+            "zero_argument_main_i64_body_where_division_and_shift_defined_not_process_exit_status",
+            "{body}"
+        );
+    }
+    // Poison inside the wrapped user-main is `UndefinedBehavior`, not success.
+    let src = native_source("7");
+    let ir = native_ir("%v = sdiv i64 7, 0\nret i64 %v");
+    assert_eq!(
+        native_validate(&src, &ir).outcome,
+        Outcome::UndefinedBehavior
+    );
+}
+
+#[test]
 fn native_full_i64_body_must_match_even_when_low_32_bits_are_equal() {
     let src = native_source("7");
     for value in ["8", "4294967303", "9223372036854775807"] {
@@ -624,7 +794,7 @@ fn native_snapshot_profile_is_separate_and_pins_exact_target_and_layout() {
     for bad in [
         source("", "7"),
         source("x: i64", "x"),
-        native_source("7 / 1"),
+        native_source("7 / 0"),
     ] {
         assert!(tv::validate_native_main(&bad, &ir, Options::default()).is_err());
     }

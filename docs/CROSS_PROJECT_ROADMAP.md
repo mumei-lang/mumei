@@ -1224,11 +1224,17 @@ whitelist. Wrong signedness, changed values and phi edges are refuted;
 unsupported/invalid IR, poison/undef, budget exhaustion and inconclusive solver
 results never become equivalence. Unflagged `add`/`sub`/`mul` are admitted as
 mod-2^64 wrapping arithmetic (the emitter never sets nsw/nuw, and flagged IR
-arithmetic stays rejected — overflow is still unproved). Division, shifts and
-nonlinear cases that outrun the solver budget keep failing closed as
-unsupported or `Inconclusive`. The C03 recheck/native-bundle fragment keeps
-arithmetic excluded so build and recheck agree on one grammar; only the
-equivalence source side is widened.
+arithmetic stays rejected — overflow is still unproved). Unflagged
+`sdiv`/`srem`/`shl`/`ashr` are admitted as truncating signed division,
+remainder and shifts under partial-domain refinement: equivalence is claimed
+only on inputs the source's own defined domain binds (nonzero divisor except
+`i64::MIN / -1`, shift amount `0..64`), IR poison on such an input reports
+`UndefinedBehavior` rather than a value difference, a source whose guarded
+operators bind no input is an error, and hard nonlinear queries
+(variable-divisor `srem`) keep failing closed as `Inconclusive`.
+`udiv`/`urem`/`lshr` and any flagged form stay rejected. The C03
+recheck/native-bundle fragment keeps arithmetic excluded so build and recheck
+agree on one grammar; only the equivalence source side is widened.
 
 The real CLI regression supplies emitted pre-optimization IR with an explicitly
 pinned target/layout. The result concerns that exact snapshot, not its origin

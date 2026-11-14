@@ -23,8 +23,10 @@ use z3::{
 pub const SEMANTIC_CONTRACT_VERSION: &str = "mumei.semantic-contract/v1";
 pub const PURE_I64_PROFILE: &str = "mumei.pure-i64-comparison/v1";
 /// The wider source fragment checked inside the LLVM equivalence profile:
-/// the same scalar comparisons plus wrapping i64 add/sub/mul. Kept distinct
-/// from the bounded C03 contract, which still excludes arithmetic.
+/// the same scalar comparisons plus wrapping i64 add/sub/mul and guarded
+/// div/rem/shl/shr (defined only for nonzero divisors excluding
+/// i64::MIN / -1 and shift amounts in 0..64). Kept distinct from the
+/// bounded C03 contract, which still excludes arithmetic.
 pub const PURE_I64_WRAPPING_PROFILE: &str = "mumei.pure-i64-wrapping-scalar/v1";
 
 #[derive(Debug, thiserror::Error)]
@@ -103,7 +105,9 @@ pub struct SemanticContract {
 /// Extract a single explicit-i64 atom without imports, calls, arithmetic or effects.
 /// The target is caller-supplied metadata, not a claim of backend availability.
 /// `allow_wrapping_arithmetic` admits i64 add/sub/mul as mod-2^64 wrapping
-/// operations; the bounded C03 contract always passes `false` so the build
+/// operations plus guarded div/rem/shl/shr (a partial domain: nonzero
+/// divisor, no i64::MIN / -1, shift amount in 0..64); the bounded C03
+/// contract always passes `false` so the build
 /// and recheck paths keep agreeing on a fragment with no arithmetic.
 pub fn extract_pure_i64_contract(
     source: &str,
@@ -222,8 +226,16 @@ pub fn extract_pure_i64_contract(
             } else {
                 "unsupported_no_overflow_claim"
             },
-            division: "unsupported",
-            shifts: "unsupported",
+            division: if allow_wrapping_arithmetic {
+                "signed_i64_truncating_defined_only_for_nonzero_divisor_excluding_min_div_neg1"
+            } else {
+                "unsupported"
+            },
+            shifts: if allow_wrapping_arithmetic {
+                "shl_ashr_defined_only_for_amounts_0_to_63"
+            } else {
+                "unsupported"
+            },
             conversions: "unsupported",
         },
         // HIR has no stable serialization. This v0 diagnostic fingerprint is
@@ -249,6 +261,7 @@ pub fn extract_pure_i64_contract(
         ]
         .into_iter()
         .chain(allow_wrapping_arithmetic.then_some("wrapping_i64_arithmetic"))
+        .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
         .collect(),
         requested_route: "standard_z3_not_executed_by_extractor",
         decomposition: "no_common_obligation_decomposition",
@@ -261,7 +274,7 @@ pub fn extract_pure_i64_contract(
             "HIR/MIR fingerprints identify internal snapshots, not semantic equivalence.",
             "Target availability, LLVM lowering and final machine code are not verified.",
             if allow_wrapping_arithmetic {
-                "No division, shifts, heap, calls, FFI, ownership, effects or concurrency in this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven."
+                "No unsigned division, logical shifts, heap, calls, FFI, ownership, effects or concurrency in this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined."
             } else {
                 "No arithmetic, heap, calls, FFI, ownership, effects or concurrency in this profile."
             },
@@ -388,7 +401,11 @@ fn expression_kind(
                     Ok(ScalarKind::Bool)
                 }
                 // i64 arithmetic wraps mod 2^64 — still no overflow claim.
-                Op::Add | Op::Sub | Op::Mul
+                // Division, remainder and shifts are admitted as partial
+                // operations: the caller's BV encoder records their defined
+                // domain (nonzero divisor excluding i64::MIN / -1, shift
+                // amount in 0..64) as explicit obligations.
+                Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Rem | Op::Shl | Op::Shr
                     if allow_wrapping_arithmetic && left == ScalarKind::I64 && right == left =>
                 {
                     Ok(ScalarKind::I64)
@@ -450,6 +467,11 @@ pub struct PureI64Body<'ctx> {
     pub source_sha256: String,
     pub inputs: Vec<BV<'ctx>>,
     pub value: BV<'ctx>,
+    /// Definedness obligations for division, remainder and shifts, each an
+    /// implication `guard -> operands defined` mirroring the safety rules
+    /// `--bitvec-i64` verification requires. Empty unless the caller admitted
+    /// those operators; their conjunction is the domain the source binds.
+    pub definedness: Vec<Bool<'ctx>>,
 }
 
 type BodyResult<T> = std::result::Result<T, SemanticContractError>;
@@ -505,12 +527,15 @@ pub fn encode_pure_i64_body<'ctx>(
         .zip(&inputs)
         .map(|(p, v)| (p.name.as_str(), v.clone()))
         .collect();
-    let value = source_stmt(&body, context, &params, 0)?.integer()?;
+    let top = Bool::from_bool(context, true);
+    let mut definedness = Vec::new();
+    let value = source_stmt(&body, context, &params, &top, &mut definedness, 0)?.integer()?;
     Ok(PureI64Body {
         function_name: atom.name,
         source_sha256: contract.source_sha256,
         inputs,
         value,
+        definedness,
     })
 }
 
@@ -535,11 +560,13 @@ pub fn encode_pure_i64_obligation<'ctx>(
         .collect();
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
-    let requires = source_expr(&requires, context, &params, 0)?.boolean()?;
+    let top = Bool::from_bool(context, true);
+    let mut sink = Vec::new();
+    let requires = source_expr(&requires, context, &params, &top, &mut sink, 0)?.boolean()?;
     params.insert("result", body.value);
     let ensures =
         parse_expression_checked(&atom.ensures).map_err(|_| SemanticContractError::Parse)?;
-    let ensures = source_expr(&ensures, context, &params, 0)?.boolean()?;
+    let ensures = source_expr(&ensures, context, &params, &top, &mut sink, 0)?.boolean()?;
     Ok(Bool::and(context, &[&requires, &ensures.not()]))
 }
 
@@ -570,24 +597,51 @@ fn source_stmt<'ctx>(
     stmt: &Stmt,
     ctx: &'ctx Context,
     params: &HashMap<&str, BV<'ctx>>,
+    guard: &Bool<'ctx>,
+    definedness: &mut Vec<Bool<'ctx>>,
     depth: usize,
 ) -> BodyResult<SourceValue<'ctx>> {
     if depth > MAX_DEPTH {
         return Err(SemanticContractError::Unsupported("source depth limit"));
     }
     match stmt {
-        Stmt::Expr(e, _) => source_expr(e, ctx, params, depth + 1),
-        Stmt::Block(stmts, _) if stmts.len() == 1 => source_stmt(&stmts[0], ctx, params, depth + 1),
+        Stmt::Expr(e, _) => source_expr(e, ctx, params, guard, definedness, depth + 1),
+        Stmt::Block(stmts, _) if stmts.len() == 1 => {
+            source_stmt(&stmts[0], ctx, params, guard, definedness, depth + 1)
+        }
         _ => Err(SemanticContractError::Unsupported(
             "unsupported source statement",
         )),
     }
 }
 
+/// The domain LLVM and `--bitvec-i64` verification both give `sdiv`/`srem`:
+/// nonzero divisor and not the overflowing `i64::MIN / -1` pair.
+fn div_defined<'ctx>(a: &BV<'ctx>, b: &BV<'ctx>, ctx: &'ctx Context) -> Bool<'ctx> {
+    let zero = BV::from_i64(ctx, 0, 64);
+    let min = BV::from_i64(ctx, i64::MIN, 64);
+    let minus_one = BV::from_i64(ctx, -1, 64);
+    Bool::and(
+        ctx,
+        &[
+            &b._eq(&zero).not(),
+            &Bool::and(ctx, &[&a._eq(&min), &b._eq(&minus_one)]).not(),
+        ],
+    )
+}
+
+/// The domain `shl`/`ashr` share: a shift amount in 0..64 (an unsigned
+/// comparison, so negative amounts are excluded too).
+fn shift_defined<'ctx>(amount: &BV<'ctx>, ctx: &'ctx Context) -> Bool<'ctx> {
+    amount.bvult(&BV::from_i64(ctx, 64, 64))
+}
+
 fn source_expr<'ctx>(
     expr: &Expr,
     ctx: &'ctx Context,
     params: &HashMap<&str, BV<'ctx>>,
+    guard: &Bool<'ctx>,
+    definedness: &mut Vec<Bool<'ctx>>,
     depth: usize,
 ) -> BodyResult<SourceValue<'ctx>> {
     use SourceValue::{Boolean as B, Integer as I};
@@ -601,10 +655,18 @@ fn source_expr<'ctx>(
             .get(n.as_str())
             .ok_or(SemanticContractError::Unsupported("source binding"))?
             .clone()),
-        Expr::Block(s) => source_stmt(s, ctx, params, depth + 1)?,
+        Expr::Block(s) => source_stmt(s, ctx, params, guard, definedness, depth + 1)?,
         Expr::BinaryOp(a, op, b) => {
-            let a = source_expr(a, ctx, params, depth + 1)?;
-            let b = source_expr(b, ctx, params, depth + 1)?;
+            let a = source_expr(a, ctx, params, guard, definedness, depth + 1)?;
+            // `&&`/`||`/`=>` short-circuit like the emitter and
+            // `--bitvec-i64` verification: the right operand's partial
+            // operations bind only when the left one lets it run.
+            let b_guard = match (&a, op) {
+                (B(ab), Op::And) | (B(ab), Op::Implies) => Bool::and(ctx, &[guard, ab]),
+                (B(ab), Op::Or) => Bool::and(ctx, &[guard, &ab.not()]),
+                _ => guard.clone(),
+            };
+            let b = source_expr(b, ctx, params, &b_guard, definedness, depth + 1)?;
             match (a, op, b) {
                 (I(a), Op::Eq, I(b)) => B(a._eq(&b)),
                 (I(a), Op::Neq, I(b)) => B(a._eq(&b).not()),
@@ -619,6 +681,26 @@ fn source_expr<'ctx>(
                 (I(a), Op::Add, I(b)) => I(a.bvadd(&b)),
                 (I(a), Op::Sub, I(b)) => I(a.bvsub(&b)),
                 (I(a), Op::Mul, I(b)) => I(a.bvmul(&b)),
+                // `bvsdiv`/`bvsrem` truncate like the emitted `sdiv`/`srem`;
+                // both sides are partial in the same way, so the defined
+                // domain is an explicit obligation, not an assumption.
+                (I(a), Op::Div, I(b)) => {
+                    definedness.push(guard.implies(&div_defined(&a, &b, ctx)));
+                    I(a.bvsdiv(&b))
+                }
+                (I(a), Op::Rem, I(b)) => {
+                    definedness.push(guard.implies(&div_defined(&a, &b, ctx)));
+                    I(a.bvsrem(&b))
+                }
+                (I(a), Op::Shl, I(b)) => {
+                    definedness.push(guard.implies(&shift_defined(&b, ctx)));
+                    I(a.bvshl(&b))
+                }
+                // `>>` is the arithmetic (sign-propagating) shift `ashr`.
+                (I(a), Op::Shr, I(b)) => {
+                    definedness.push(guard.implies(&shift_defined(&b, ctx)));
+                    I(a.bvashr(&b))
+                }
                 (B(a), Op::And, B(b)) => B(Bool::and(ctx, &[&a, &b])),
                 (B(a), Op::Or, B(b)) => B(Bool::or(ctx, &[&a, &b])),
                 (B(a), Op::Implies, B(b)) => B(a.implies(&b)),
@@ -634,10 +716,24 @@ fn source_expr<'ctx>(
             then_branch,
             else_branch,
         } => {
-            let cond = source_expr(cond, ctx, params, depth + 1)?.boolean()?;
+            let cond = source_expr(cond, ctx, params, guard, definedness, depth + 1)?.boolean()?;
             match (
-                source_stmt(then_branch, ctx, params, depth + 1)?,
-                source_stmt(else_branch, ctx, params, depth + 1)?,
+                source_stmt(
+                    then_branch,
+                    ctx,
+                    params,
+                    &Bool::and(ctx, &[guard, &cond]),
+                    definedness,
+                    depth + 1,
+                )?,
+                source_stmt(
+                    else_branch,
+                    ctx,
+                    params,
+                    &Bool::and(ctx, &[guard, &cond.not()]),
+                    definedness,
+                    depth + 1,
+                )?,
             ) {
                 (I(a), I(b)) => I(cond.ite(&a, &b)),
                 (B(a), B(b)) => B(cond.ite(&a, &b)),
@@ -819,6 +915,7 @@ mod tests {
             "x / 2",
             "x % 2",
             "x << 1",
+            "x >> 1",
             "f(x)",
             "1.5",
             "\"text\"",
