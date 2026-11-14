@@ -1269,7 +1269,9 @@ expressions stay two-valued (a `bool` binding is not an i64 operand, a
 `-> bool` body must produce a Bool kind). Declared subrange integer
 types (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`) lower to an i64 formal the
 same way, so the signature bounds the checked input to the type's
-range; `u64`/`usize`/`isize` and wider result types stay out. `match`
+range; declared subrange result types also lower to an i64 return with
+no truncation; `u64`/`usize`/`isize` and `i128` stay out on both sides.
+`match`
 on an i64 scrutinee
 is admitted in first-match order — literal patterns contribute one
 `target == n` test each, an arm may add a Boolean guard evaluated in
