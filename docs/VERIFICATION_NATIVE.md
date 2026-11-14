@@ -710,7 +710,7 @@ one `mumei.pure-i64-wrapping-scalar/v1` source unit — the C03 comparison fragm
 extended with wrapping add/sub/mul, total bitwise `&`/`|`/`^`, guarded
 signed division/remainder/shifts, block-scoped `let` bindings, scalar
 reassignments on the linear path, discarded pure expression
-statements and `bool` parameters —
+statements and `bool` parameters and results —
 and one caller-supplied LLVM
 17 textual IR snapshot. The caller must explicitly pin the exact
 `x86_64-unknown-linux-gnu` triple and the profile's `DATA_LAYOUT` on that snapshot;
@@ -760,9 +760,14 @@ lowering `resolve_param_type` and the emitter's `icmp ne` condition use —
 so its source value is the truth of `input != 0` and the signature
 itself bounds the checked domain (`input <=u 1`); without that bound a
 declared `b == true` would spuriously differ from `icmp eq i64 %b, 1`
-at `input = 5`, an input the signature never admits. Boolean
+at `input = 5`, an input the signature never admits. A declared
+`-> bool` result lowers the same way — the emitter zexts its i1 result
+to i64 — so the checked source value is the Boolean body's 0/1
+materialization and an `i1` return is a signature error, not a value
+difference. Boolean
 expressions stay two-valued: a `bool` binding is not an i64 operand
-(`b + 1` is rejected), a `-> bool` return stays outside the profile,
+(`b + 1` is rejected), a `-> bool` body must produce a Bool kind
+(`if b { 1 } else { 0 }` is rejected),
 and reassigning a bool to a non-bool value keeps the binding's kind.
 The LLVM side is
 separately

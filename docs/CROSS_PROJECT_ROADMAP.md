@@ -1246,13 +1246,17 @@ only rebind names bound on the
 current linear path, so an assignment inside an `if` branch, expression
 block or nested block cannot escape its conditional path;
 unbound assignment, call statements and trailing `let`s without a value
-statement stay rejected. Declared `bool` parameters are admitted as the
-Boolean half of the issue's "pure integer/Boolean functions": a `bool`
+statement stay rejected. Declared `bool` parameters and `-> bool`
+results are admitted, completing the Boolean half of the issue's "pure
+integer/Boolean functions": a `bool`
 parameter lowers to i64 carrying 0/1 (the emitter's `resolve_param_type`
 and `icmp ne` condition), its source value is `input != 0` and the
-signature itself restricts the checked input to `{0, 1}` — boolean
+signature itself restricts the checked input to `{0, 1}`; a `-> bool`
+result lowers the same way (the emitter zexts its i1 result to i64), so
+the checked source value is the Boolean body's 0/1 materialization and
+an `i1` return is a signature error, not a value difference — boolean
 expressions stay two-valued (a `bool` binding is not an i64 operand, a
-`-> bool` return stays outside the profile). The C03
+`-> bool` body must produce a Bool kind). The C03
 recheck/native-bundle fragment keeps arithmetic and statement sequences
 excluded so build and recheck
 agree on one grammar; only the equivalence source side is widened.

@@ -282,13 +282,6 @@ fn unsupported_source_is_not_silently_weakened() {
         )
         .is_err());
     }
-    // A non-i64 return type stays outside the profile.
-    assert!(tv::validate_pure_i64(
-        "atom f(b: bool) -> bool requires: true; ensures: true; body: { b };",
-        &function("ret i64 0"),
-        Options::default()
-    )
-    .is_err());
     // An i64 IR parameter is signature-compatible with a declared bool
     // (both lower to i64) but not interchangeable: ignoring the boolean
     // input is a value difference on the restricted domain.
@@ -377,6 +370,68 @@ fn bool_parameters_are_equivalent_and_refuted() {
         validate(&src, &same).outcome,
         Outcome::EquivalentWithinProfile
     );
+}
+
+#[test]
+fn bool_returns_are_equivalent_and_refuted() {
+    // A `-> bool` result lowers to i64 carrying 0/1 (the emitter zexts
+    // its i1), so the IR return stays in the i64 profile.
+    for src in [
+        "atom f(b: bool) -> bool requires: true; ensures: true; body: { b };",
+        "atom f(x: i64) -> bool requires: true; ensures: true; body: { x > 0 };",
+        "atom f(x: i64, y: i64) -> bool requires: true; ensures: true; body: { x > y };",
+        "atom f(b: bool, c: bool) -> bool requires: true; ensures: true; body: { b && c };",
+        "atom f(b: bool) -> bool requires: true; ensures: true; body: { !b };",
+        "atom f(b: bool, x: i64) -> bool requires: true; ensures: true; body: { if b { x > 0 } else { false } };",
+        "atom f(x: i64) -> bool requires: true; ensures: true; body: { let p = x > 0; p };",
+        "atom f(x: i64) -> bool requires: x != 0; ensures: result == (x > 0); body: { x > 0 };",
+    ] {
+        assert_eq!(
+            validate(src, &emitted(src)).outcome,
+            Outcome::EquivalentWithinProfile,
+            "{src}"
+        );
+    }
+    // A wrong truth value or a value the signature cannot carry is a
+    // real difference, not a signature error: `ret i64 5` is i64, but
+    // it is not the 0/1 a declared `-> bool` admits.
+    let src = "atom f(x: i64) -> bool requires: true; ensures: true; body: { x > 0 };";
+    for ir in [
+        pin("define i64 @f(i64 %x) { ret i64 %x }"),
+        pin("define i64 @f(i64 %x) { ret i64 5 }"),
+        pin("define i64 @f(i64 %x) { ret i64 0 }"),
+    ] {
+        assert_eq!(validate(src, &ir).outcome, Outcome::Different, "{ir}");
+    }
+    // An i1 return is a different signature than the i64 0/1 the
+    // declared `-> bool` lowers to — a signature error.
+    assert!(tv::validate_pure_i64(
+        src,
+        &pin("define i1 @f(i64 %x) { ret i1 0 }"),
+        Options::default()
+    )
+    .is_err());
+    // Equivalent reorderings still compare equal.
+    let same =
+        emitted("atom f(x: i64) -> bool requires: true; ensures: true; body: { !(x <= 0) };");
+    assert_eq!(
+        validate(src, &same).outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn bool_returns_stay_typed() {
+    // A `-> bool` body must produce a Bool kind; an i64 body is rejected.
+    for src in [
+        "atom f(x: i64) -> bool requires: true; ensures: true; body: { x };",
+        "atom f(b: bool) -> bool requires: true; ensures: true; body: { if b { 1 } else { 0 } };",
+        "atom f(x: i64) -> u64 requires: true; ensures: true; body: { x };",
+        // `result` in ensures has the declared Bool kind, not i64.
+        "atom f(x: i64) -> bool requires: true; ensures: result + 1 > 0; body: { x > 0 };",
+    ] {
+        assert!(tv::validate_pure_i64(src, &function("ret i64 0"), Options::default()).is_err());
+    }
 }
 
 #[test]
