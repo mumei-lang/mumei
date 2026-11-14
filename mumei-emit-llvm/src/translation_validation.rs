@@ -3,7 +3,7 @@
 
 use inkwell::{context::Context as LlvmContext, memory_buffer::MemoryBuffer, values::AsValueRef};
 use llvm_sys::{core::*, prelude::*, LLVMIntPredicate, LLVMOpcode, LLVMTypeKind};
-use mumei_core::semantic_contract::{encode_pure_i64_body, PURE_I64_PROFILE};
+use mumei_core::semantic_contract::{encode_pure_i64_body, PURE_I64_WRAPPING_PROFILE};
 use std::collections::HashMap;
 use z3::{
     ast::{Ast, Bool, BV},
@@ -148,7 +148,7 @@ fn validate(
     config.set_timeout_msec(options.timeout_ms as u64);
     config.set_param_value("rlimit", &options.resource_limit.to_string());
     let context = Context::new(&config);
-    let model = encode_pure_i64_body(source, &context)
+    let model = encode_pure_i64_body(source, &context, true)
         .map_err(|_| ValidationError("unsupported C03 source"))?;
     if native && (model.function_name != "main" || !model.inputs.is_empty()) {
         return Err(ValidationError(
@@ -204,7 +204,7 @@ fn validate(
     };
     Ok(ValidationReport {
         profile: if native { NATIVE_PROFILE } else { PROFILE },
-        source_profile: PURE_I64_PROFILE,
+        source_profile: PURE_I64_WRAPPING_PROFILE,
         target,
         data_layout: DATA_LAYOUT,
         checked_stage: if native {
@@ -350,7 +350,12 @@ unsafe fn unflagged_arithmetic(inst: LLVMValueRef) -> Result<()> {
         .to_string_lossy()
         .into_owned();
     LLVMDisposeMessage(printed);
-    if text.contains("nsw") || text.contains("nuw") {
+    // Wrap flags print as whole tokens after the mnemonic (`add nsw i64`);
+    // a substring test would also trip on SSA names like `%answer`.
+    if text
+        .split_whitespace()
+        .any(|token| token == "nsw" || token == "nuw")
+    {
         return Err(ValidationError("flagged LLVM arithmetic unsupported"));
     }
     Ok(())

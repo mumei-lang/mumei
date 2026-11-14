@@ -1226,7 +1226,9 @@ results never become equivalence. Unflagged `add`/`sub`/`mul` are admitted as
 mod-2^64 wrapping arithmetic (the emitter never sets nsw/nuw, and flagged IR
 arithmetic stays rejected — overflow is still unproved). Division, shifts and
 nonlinear cases that outrun the solver budget keep failing closed as
-unsupported or `Inconclusive`.
+unsupported or `Inconclusive`. The C03 recheck/native-bundle fragment keeps
+arithmetic excluded so build and recheck agree on one grammar; only the
+equivalence source side is widened.
 
 The real CLI regression supplies emitted pre-optimization IR with an explicitly
 pinned target/layout. The result concerns that exact snapshot, not its origin

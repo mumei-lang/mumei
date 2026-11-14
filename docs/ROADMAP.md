@@ -2831,7 +2831,9 @@ Wrong lowering is refuted; unsupported semantics, invalid IR and inconclusive
 solver results are not equivalence. The fragment now also covers wrapping
 add/sub/mul on both sides (mod 2^64): the emitter never sets nsw/nuw, flagged
 IR arithmetic is rejected, and nonlinear solver timeouts stay `Inconclusive`.
-Division and shifts remain outside the profile. See the
+Division and shifts remain outside the profile. The bounded C03
+recheck/native-bundle fragment stays closed to arithmetic, so build and
+recheck keep agreeing on one source grammar. See the
 [checked snapshot and exclusions](VERIFICATION_NATIVE.md#first-llvm-translation-validation-slice).
 This is partial C09: no postcondition proof, pipeline-history attestation,
 later optimizer/backend/linker/runtime/binary correctness, native-bundle

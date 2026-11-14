@@ -316,6 +316,19 @@ fn wrapping_i64_arithmetic_is_equivalent_and_refuted() {
 }
 
 #[test]
+fn ssa_names_containing_flag_substrings_are_not_wrap_flags() {
+    // `%answer`/`%nuwrap` contain nsw/nuw as substrings but carry no wrap flag.
+    let src = source("x: i64", "x + 1");
+    let ir = pin(
+        "define i64 @f(i64 %x) { %answer = add i64 %x, 1\n%nuwrap = add i64 %answer, 0\nret i64 %nuwrap }",
+    );
+    assert_eq!(
+        validate(&src, &ir).outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
 fn unsupported_llvm_memory_calls_arithmetic_division_shift_and_freeze_are_rejected() {
     let src = source("x: i64", "x");
     for body in [

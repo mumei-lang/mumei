@@ -22,6 +22,10 @@ use z3::{
 
 pub const SEMANTIC_CONTRACT_VERSION: &str = "mumei.semantic-contract/v1";
 pub const PURE_I64_PROFILE: &str = "mumei.pure-i64-comparison/v1";
+/// The wider source fragment checked inside the LLVM equivalence profile:
+/// the same scalar comparisons plus wrapping i64 add/sub/mul. Kept distinct
+/// from the bounded C03 contract, which still excludes arithmetic.
+pub const PURE_I64_WRAPPING_PROFILE: &str = "mumei.pure-i64-wrapping-scalar/v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum SemanticContractError {
@@ -98,10 +102,14 @@ pub struct SemanticContract {
 
 /// Extract a single explicit-i64 atom without imports, calls, arithmetic or effects.
 /// The target is caller-supplied metadata, not a claim of backend availability.
+/// `allow_wrapping_arithmetic` admits i64 add/sub/mul as mod-2^64 wrapping
+/// operations; the bounded C03 contract always passes `false` so the build
+/// and recheck paths keep agreeing on a fragment with no arithmetic.
 pub fn extract_pure_i64_contract(
     source: &str,
     source_name: &str,
     target_triple: Option<&str>,
+    allow_wrapping_arithmetic: bool,
 ) -> Result<SemanticContract, SemanticContractError> {
     if source_name.trim().is_empty() || target_triple.is_some_and(|target| target.trim().is_empty())
     {
@@ -141,11 +149,17 @@ pub fn extract_pure_i64_contract(
     let body =
         parse_body_expr_checked(&atom.body_expr).map_err(|_| SemanticContractError::Parse)?;
     expect_kind(
-        expression_kind(&requires, &params, false)?,
+        expression_kind(&requires, &params, false, allow_wrapping_arithmetic)?,
         ScalarKind::Bool,
     )?;
-    expect_kind(expression_kind(&ensures, &params, true)?, ScalarKind::Bool)?;
-    expect_kind(statement_kind(&body, &params, false)?, ScalarKind::I64)?;
+    expect_kind(
+        expression_kind(&ensures, &params, true, allow_wrapping_arithmetic)?,
+        ScalarKind::Bool,
+    )?;
+    expect_kind(
+        statement_kind(&body, &params, false, allow_wrapping_arithmetic)?,
+        ScalarKind::I64,
+    )?;
 
     let mut binders: Vec<_> = atom
         .params
@@ -173,7 +187,11 @@ pub fn extract_pure_i64_contract(
     // Provenance is separate from the logical identity; file relocation does not
     // change the obligation, while the full source digest still binds its text.
     let specification_sha256 = json_digest(&serde_json::json!({
-        "profile": PURE_I64_PROFILE,
+        "profile": if allow_wrapping_arithmetic {
+            PURE_I64_WRAPPING_PROFILE
+        } else {
+            PURE_I64_PROFILE
+        },
         "params": atom.params.iter().map(|p| &p.name).collect::<Vec<_>>(),
         "requires": atom.requires, "ensures": atom.ensures,
     }))?;
@@ -181,7 +199,11 @@ pub fn extract_pure_i64_contract(
     let mir = lower_hir_to_mir(&hir);
     Ok(SemanticContract {
         schema_version: SEMANTIC_CONTRACT_VERSION,
-        profile: PURE_I64_PROFILE,
+        profile: if allow_wrapping_arithmetic {
+            PURE_I64_WRAPPING_PROFILE
+        } else {
+            PURE_I64_PROFILE
+        },
         atom: atom.name.clone(),
         source_sha256: digest(source.as_bytes()),
         atom_content_hash: compute_atom_content_hash_v2(&atom),
@@ -195,7 +217,11 @@ pub fn extract_pure_i64_contract(
             verifier_integer: "mathematical_integer",
             llvm_integer: "i64_twos_complement",
             comparisons: "signed",
-            arithmetic: "wrapping_i64_add_sub_mul_no_overflow_claim",
+            arithmetic: if allow_wrapping_arithmetic {
+                "wrapping_i64_add_sub_mul_no_overflow_claim"
+            } else {
+                "unsupported_no_overflow_claim"
+            },
             division: "unsupported",
             shifts: "unsupported",
             conversions: "unsupported",
@@ -220,8 +246,10 @@ pub fn extract_pure_i64_contract(
             "boolean",
             "signed_comparison",
             "ite",
-            "wrapping_i64_arithmetic",
-        ],
+        ]
+        .into_iter()
+        .chain(allow_wrapping_arithmetic.then_some("wrapping_i64_arithmetic"))
+        .collect(),
         requested_route: "standard_z3_not_executed_by_extractor",
         decomposition: "no_common_obligation_decomposition",
         normalization:
@@ -232,7 +260,11 @@ pub fn extract_pure_i64_contract(
             "Extraction does not prove the postcondition or precondition satisfiability.",
             "HIR/MIR fingerprints identify internal snapshots, not semantic equivalence.",
             "Target availability, LLVM lowering and final machine code are not verified.",
-            "No division, shifts, heap, calls, FFI, ownership, effects or concurrency in this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven.",
+            if allow_wrapping_arithmetic {
+                "No division, shifts, heap, calls, FFI, ownership, effects or concurrency in this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven."
+            } else {
+                "No arithmetic, heap, calls, FFI, ownership, effects or concurrency in this profile."
+            },
         ],
     })
 }
@@ -312,12 +344,18 @@ fn statement_kind(
     stmt: &Stmt,
     params: &BTreeSet<&str>,
     result_in_scope: bool,
+    allow_wrapping_arithmetic: bool,
 ) -> Result<ScalarKind, SemanticContractError> {
     match stmt {
-        Stmt::Expr(expr, _) => expression_kind(expr, params, result_in_scope),
-        Stmt::Block(stmts, _) if stmts.len() == 1 => {
-            statement_kind(&stmts[0], params, result_in_scope)
+        Stmt::Expr(expr, _) => {
+            expression_kind(expr, params, result_in_scope, allow_wrapping_arithmetic)
         }
+        Stmt::Block(stmts, _) if stmts.len() == 1 => statement_kind(
+            &stmts[0],
+            params,
+            result_in_scope,
+            allow_wrapping_arithmetic,
+        ),
         _ => Err(SemanticContractError::Unsupported(
             "statement, mutation or empty body",
         )),
@@ -328,6 +366,7 @@ fn expression_kind(
     expr: &Expr,
     params: &BTreeSet<&str>,
     result_in_scope: bool,
+    allow_wrapping_arithmetic: bool,
 ) -> Result<ScalarKind, SemanticContractError> {
     match expr {
         Expr::Number(_) => Ok(ScalarKind::I64),
@@ -338,8 +377,8 @@ fn expression_kind(
             Ok(ScalarKind::I64)
         }
         Expr::BinaryOp(left, op, right) => {
-            let left = expression_kind(left, params, result_in_scope)?;
-            let right = expression_kind(right, params, result_in_scope)?;
+            let left = expression_kind(left, params, result_in_scope, allow_wrapping_arithmetic)?;
+            let right = expression_kind(right, params, result_in_scope, allow_wrapping_arithmetic)?;
             match op {
                 Op::Eq | Op::Neq if left == right => Ok(ScalarKind::Bool),
                 Op::Lt | Op::Le | Op::Gt | Op::Ge if left == ScalarKind::I64 && right == left => {
@@ -349,7 +388,9 @@ fn expression_kind(
                     Ok(ScalarKind::Bool)
                 }
                 // i64 arithmetic wraps mod 2^64 — still no overflow claim.
-                Op::Add | Op::Sub | Op::Mul if left == ScalarKind::I64 && right == left => {
+                Op::Add | Op::Sub | Op::Mul
+                    if allow_wrapping_arithmetic && left == ScalarKind::I64 && right == left =>
+                {
                     Ok(ScalarKind::I64)
                 }
                 _ => Err(SemanticContractError::Unsupported(
@@ -357,19 +398,31 @@ fn expression_kind(
                 )),
             }
         }
-        Expr::Block(stmt) => statement_kind(stmt, params, result_in_scope),
+        Expr::Block(stmt) => {
+            statement_kind(stmt, params, result_in_scope, allow_wrapping_arithmetic)
+        }
         Expr::IfThenElse {
             cond,
             then_branch,
             else_branch,
         } => {
             expect_kind(
-                expression_kind(cond, params, result_in_scope)?,
+                expression_kind(cond, params, result_in_scope, allow_wrapping_arithmetic)?,
                 ScalarKind::Bool,
             )?;
-            let then_kind = statement_kind(then_branch, params, result_in_scope)?;
+            let then_kind = statement_kind(
+                then_branch,
+                params,
+                result_in_scope,
+                allow_wrapping_arithmetic,
+            )?;
             expect_kind(
-                statement_kind(else_branch, params, result_in_scope)?,
+                statement_kind(
+                    else_branch,
+                    params,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                )?,
                 then_kind,
             )?;
             Ok(then_kind)
@@ -401,9 +454,13 @@ pub struct PureI64Body<'ctx> {
 
 type BodyResult<T> = std::result::Result<T, SemanticContractError>;
 
+/// `allow_wrapping_arithmetic` admits wrapping i64 add/sub/mul in the encoded
+/// body; callers checking the bounded C03 fragment (recheck, evidence) pass
+/// `false` so they keep refusing sources the build path would also refuse.
 pub fn encode_pure_i64_body<'ctx>(
     source: &str,
     context: &'ctx Context,
+    allow_wrapping_arithmetic: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
     if source.len() > 65_536 {
         return Err(SemanticContractError::Unsupported("source size limit"));
@@ -428,7 +485,8 @@ pub fn encode_pure_i64_body<'ctx>(
             _ => (),
         }
     }
-    let contract = extract_pure_i64_contract(source, "scalar-body.mm", None)?;
+    let contract =
+        extract_pure_i64_contract(source, "scalar-body.mm", None, allow_wrapping_arithmetic)?;
     let mut items = parse_module_checked(source).map_err(|_| SemanticContractError::Parse)?;
     let Some(Item::Atom(atom)) = items.pop() else {
         return Err(SemanticContractError::Unsupported("source atom"));
@@ -464,7 +522,7 @@ pub fn encode_pure_i64_obligation<'ctx>(
     source: &str,
     context: &'ctx Context,
 ) -> BodyResult<Bool<'ctx>> {
-    let body = encode_pure_i64_body(source, context)?;
+    let body = encode_pure_i64_body(source, context, false)?;
     let mut items = parse_module_checked(source).map_err(|_| SemanticContractError::Parse)?;
     let Some(Item::Atom(atom)) = items.pop() else {
         return Err(SemanticContractError::Unsupported("source atom"));
@@ -602,7 +660,7 @@ mod tests {
     const TARGET: &str = "x86_64-unknown-linux-gnu";
 
     fn extract(source: &str) -> Result<SemanticContract, SemanticContractError> {
-        extract_pure_i64_contract(source, "clamp.mm", Some(TARGET))
+        extract_pure_i64_contract(source, "clamp.mm", Some(TARGET), false)
     }
 
     #[test]
@@ -653,7 +711,7 @@ mod tests {
         assert_ne!(original.atom_content_hash, different_body.atom_content_hash);
         assert_ne!(original.hir.sha256, different_body.hir.sha256);
         assert_ne!(original.mir.sha256, different_body.mir.sha256);
-        let relocated = extract_pure_i64_contract(SOURCE, "other.mm", Some(TARGET)).unwrap();
+        let relocated = extract_pure_i64_contract(SOURCE, "other.mm", Some(TARGET), false).unwrap();
         assert_eq!(original.obligation_id, relocated.obligation_id);
         assert_eq!(original.source_sha256, relocated.source_sha256);
         assert_ne!(original.source_span, relocated.source_span);
@@ -755,6 +813,9 @@ mod tests {
     #[test]
     fn fails_closed_on_constructs_outside_the_profile() {
         for body in [
+            "x + 1",
+            "x - 1",
+            "x * 2",
             "x / 2",
             "x % 2",
             "x << 1",
@@ -794,9 +855,9 @@ mod tests {
         ] {
             assert!(extract(&source).is_err(), "unexpected acceptance: {source}");
         }
-        assert!(extract_pure_i64_contract(SOURCE, "", Some(TARGET)).is_err());
-        assert!(extract_pure_i64_contract(SOURCE, "clamp.mm", Some("")).is_err());
-        assert!(extract_pure_i64_contract(SOURCE, "clamp.mm", None)
+        assert!(extract_pure_i64_contract(SOURCE, "", Some(TARGET), false).is_err());
+        assert!(extract_pure_i64_contract(SOURCE, "clamp.mm", Some(""), false).is_err());
+        assert!(extract_pure_i64_contract(SOURCE, "clamp.mm", None, false)
             .unwrap()
             .requested_target_triple
             .is_none());

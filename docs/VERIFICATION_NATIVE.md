@@ -706,7 +706,8 @@ Existing source/Z3/Lean bridge lemmas do not already cover LLVM generation.
 
 `mumei_emit_llvm::translation_validation::validate_pure_i64` is an opt-in,
 in-process C09 pilot, not a new CLI route or common-evidence producer. It consumes
-one C03 `mumei.pure-i64-comparison/v1` source unit and one caller-supplied LLVM
+one `mumei.pure-i64-wrapping-scalar/v1` source unit — the C03 comparison fragment
+extended with wrapping add/sub/mul — and one caller-supplied LLVM
 17 textual IR snapshot. The caller must explicitly pin the exact
 `x86_64-unknown-linux-gnu` triple and the profile's `DATA_LAYOUT` on that snapshot;
 the checker never mutates it, invokes optimization passes or executes code.

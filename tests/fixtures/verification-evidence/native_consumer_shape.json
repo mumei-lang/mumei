@@ -84,7 +84,7 @@
       "obligation_id": "main_source_postcondition",
       "semantics": {
         "profile": "mumei.native-source-recheck/v1",
-        "integer_model": "checked_i64",
+        "integer_model": "wrapping_i64",
         "target_triple": null
       },
       "method": "deductive_proof",
@@ -144,7 +144,7 @@
       "obligation_id": "main_source_to_llvm_user_body",
       "semantics": {
         "profile": "mumei.llvm17-native-main-snapshot/v1",
-        "integer_model": "checked_i64",
+        "integer_model": "wrapping_i64",
         "target_triple": "runtime-target"
       },
       "method": "deductive_proof",

@@ -55,7 +55,7 @@ fn scalar_contract_connects_real_z3_certificate_and_llvm_generation_without_prom
     let source = dir.path().join("clamp.mm");
     let certificate = dir.path().join("clamp.proof.json");
     std::fs::write(&source, SOURCE).unwrap();
-    let contract = extract_pure_i64_contract(SOURCE, "clamp.mm", None).unwrap();
+    let contract = extract_pure_i64_contract(SOURCE, "clamp.mm", None, false).unwrap();
 
     succeeds(
         Command::new(env!("CARGO_BIN_EXE_mumei"))
@@ -165,7 +165,7 @@ int main(void) {
     let negative = dir.path().join("false_contract.mm");
     std::fs::write(&negative, &false_source).unwrap();
     let false_contract =
-        extract_pure_i64_contract(&false_source, "false_contract.mm", None).unwrap();
+        extract_pure_i64_contract(&false_source, "false_contract.mm", None, false).unwrap();
     assert_eq!(
         contract.implementation_sha256,
         false_contract.implementation_sha256
@@ -180,7 +180,7 @@ int main(void) {
     let defective = dir.path().join("defective.mm");
     std::fs::write(&defective, &defective_source).unwrap();
     let defective_contract =
-        extract_pure_i64_contract(&defective_source, "defective.mm", None).unwrap();
+        extract_pure_i64_contract(&defective_source, "defective.mm", None, false).unwrap();
     assert_eq!(
         contract.specification_sha256,
         defective_contract.specification_sha256

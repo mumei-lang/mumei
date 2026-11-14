@@ -92,7 +92,7 @@ fn rebound_success_cannot_replace_fresh_refutation_or_inconclusive_queries() {
     let source = CLAMP.replace("body: { if x < 0 { 0 } else { x } };", "body: { 1 };");
     assert_ne!(source, CLAMP);
     let contract =
-        semantic_contract::extract_pure_i64_contract(&source, SOURCE_LABEL, None).unwrap();
+        semantic_contract::extract_pure_i64_contract(&source, SOURCE_LABEL, None, false).unwrap();
     let mut forged = established(CLAMP, Options::default());
     forged.subject.sha256 = contract.source_sha256;
     let bytes = serde_json::to_vec(&forged).unwrap();
@@ -189,13 +189,14 @@ fn established(source: &str, options: Options) -> Evidence {
 #[test]
 fn fresh_record_has_explicit_scope_trust_and_actual_linked_tool_version() {
     let evidence = established(CLAMP, Options::default());
-    let contract = semantic_contract::extract_pure_i64_contract(CLAMP, SOURCE_LABEL, None).unwrap();
+    let contract =
+        semantic_contract::extract_pure_i64_contract(CLAMP, SOURCE_LABEL, None, false).unwrap();
     assert_eq!(evidence.subject.sha256, contract.source_sha256);
     assert_eq!(evidence.specification.sha256, contract.specification_sha256);
     assert_eq!(evidence.subject.id, SOURCE_LABEL);
     assert_eq!(evidence.subject.kind, "mumei_source");
     assert_eq!(evidence.semantics.profile, PURE_I64_PROFILE);
-    assert_eq!(evidence.semantics.integer_model, "checked_i64");
+    assert_eq!(evidence.semantics.integer_model, "wrapping_i64");
     assert_eq!(evidence.semantics.target_triple, None);
     assert_eq!(evidence.method, "deductive_proof");
     assert_eq!(evidence.execution, "completed");
@@ -313,7 +314,7 @@ fn full_i64_domain_not_finite_observations_or_unbounded_integers() {
         Outcome::Refuted
     );
     let context = Context::new(&Config::new());
-    let body = semantic_contract::encode_pure_i64_body(negative, &context).unwrap();
+    let body = semantic_contract::encode_pure_i64_body(negative, &context, false).unwrap();
     let obligation = semantic_contract::encode_pure_i64_obligation(negative, &context).unwrap();
     for value in [i64::MIN, -1] {
         use z3::ast::Ast;
@@ -387,8 +388,8 @@ fn false_and_nonliteral_preconditions_cannot_succeed_vacuously() {
 fn malformed_effectful_lossy_or_unsupported_sources_fail_closed() {
     for source in [
         "", "FAKE_PRIVATE_MALFORMED", "atom f(x: i64) -> i64 requires: true; ensures: result == x; body: {",
-        "atom f(x: i64) -> i64 requires: true; ensures: true; body: { x / 1 };",
-        "atom f(x: i64) -> i64 requires: true; ensures: result == x / 1; body: { x };",
+        "atom f(x: i64) -> i64 requires: true; ensures: true; body: { x + 1 };",
+        "atom f(x: i64) -> i64 requires: true; ensures: result == x + 0; body: { x };",
         "atom f(x: i64) -> i64 requires: true; ensures: true; body: { x / 0 };",
         "atom f(x: i64) -> i64 requires: true; ensures: true; body: { f(x) };",
         "atom f(x: i64) -> i64 requires: true; ensures: true; body: { let y = x; y };",
@@ -493,7 +494,8 @@ fn resource_exhaustion_and_all_non_unsat_outcomes_emit_no_record() {
         .unwrap(),
         Outcome::Inconclusive
     );
-    let contract = semantic_contract::extract_pure_i64_contract(CLAMP, SOURCE_LABEL, None).unwrap();
+    let contract =
+        semantic_contract::extract_pure_i64_contract(CLAMP, SOURCE_LABEL, None, false).unwrap();
     assert_eq!(
         finish(SatResult::Unknown, &contract, Options::default()).unwrap(),
         Outcome::Inconclusive
