@@ -2838,13 +2838,19 @@ source-defined input reports `UndefinedBehavior`, a vacuous source domain is
 an error, and hard nonlinear queries stay `Inconclusive`. Source
 `&`/`|`/`^` are admitted as total i64 bitwise `and`/`or`/`xor` on both
 sides — bitwise ops are defined for every input, so they carry no domain
-obligation. Bodies may sequence `let` bindings and pure expression
+obligation. Bodies may sequence `let` bindings, scalar reassignments and
+pure expression
 statements before the value
-statement: initializers and discarded expressions are checked and
+statement: initializers, rebindings and discarded expressions are
+checked and
 encoded in order under the
 enclosing guard (partial operations keep their domain obligations) and
 bindings are block-lexical — a branch-local or shadowing `let` cannot
-leak. Assignment, call statements and other statement forms
+leak. Reassignment is restricted to names bound on the current linear
+path: assignments inside `if` branches or expression blocks may only
+touch names bound within them, since a rebinding that escapes a
+conditional path cannot be merged in this model. Unbound assignment,
+call statements and other statement forms
 stay unsupported. Unsigned forms and
 flagged variants remain outside the profile. The bounded C03
 recheck/native-bundle fragment stays closed to arithmetic, so build and

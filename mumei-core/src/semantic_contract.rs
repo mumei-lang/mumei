@@ -27,7 +27,8 @@ pub const PURE_I64_PROFILE: &str = "mumei.pure-i64-comparison/v1";
 /// bitwise `&`/`|`/`^`, guarded div/rem/shl/shr (defined only for nonzero
 /// divisors excluding
 /// i64::MIN / -1 and shift amounts in 0..64), block-scoped `let`
-/// bindings and discarded pure expression statements. Kept distinct from the
+/// bindings, scalar reassignments on the linear path and discarded pure
+/// expression statements. Kept distinct from the
 /// bounded C03 contract, which still excludes arithmetic and sequences.
 pub const PURE_I64_WRAPPING_PROFILE: &str = "mumei.pure-i64-wrapping-scalar/v1";
 
@@ -110,7 +111,9 @@ pub struct SemanticContract {
 /// `allow_wrapping_arithmetic` admits i64 add/sub/mul as mod-2^64 wrapping
 /// operations, total bitwise `&`/`|`/`^`, plus guarded div/rem/shl/shr (a
 /// partial domain: nonzero divisor, no i64::MIN / -1, shift amount in 0..64),
-/// block-scoped `let` bindings and discarded pure expression statements;
+/// block-scoped `let` bindings, scalar reassignments on the linear path
+/// (a rebinding cannot escape an `if` branch or expression block) and
+/// discarded pure expression statements;
 /// the bounded C03
 /// contract always passes `false` so the build
 /// and recheck paths keep agreeing on a fragment with no arithmetic.
@@ -170,7 +173,13 @@ pub fn extract_pure_i64_contract(
         ScalarKind::Bool,
     )?;
     expect_kind(
-        statement_kind(&body, &scope, false, allow_wrapping_arithmetic)?,
+        statement_kind(
+            &body,
+            &scope,
+            false,
+            allow_wrapping_arithmetic,
+            &scope.keys().cloned().collect(),
+        )?,
         ScalarKind::I64,
     )?;
 
@@ -277,6 +286,7 @@ pub fn extract_pure_i64_contract(
         .chain(allow_wrapping_arithmetic.then_some("wrapping_i64_arithmetic"))
         .chain(allow_wrapping_arithmetic.then_some("i64_bitwise_total"))
         .chain(allow_wrapping_arithmetic.then_some("lexical_scoped_let_bindings"))
+        .chain(allow_wrapping_arithmetic.then_some("scalar_reassignment_linear_path"))
         .chain(allow_wrapping_arithmetic.then_some("discarded_pure_expression_statements"))
         .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
         .collect(),
@@ -370,26 +380,36 @@ fn expect_kind(actual: ScalarKind, expected: ScalarKind) -> Result<(), SemanticC
     }
 }
 
+/// `assignable` names the bindings an assignment may rebind: parameters
+/// and `let`s bound on the current linear path. `if` branches and
+/// expression blocks get an empty set — the source model cannot merge a
+/// rebinding that escapes a conditional path, so those stay rejected.
 fn statement_kind(
     stmt: &Stmt,
     scope: &BTreeMap<String, ScalarKind>,
     result_in_scope: bool,
     allow_wrapping_arithmetic: bool,
+    assignable: &BTreeSet<String>,
 ) -> Result<ScalarKind, SemanticContractError> {
     match stmt {
         Stmt::Expr(expr, _) => {
             expression_kind(expr, scope, result_in_scope, allow_wrapping_arithmetic)
         }
-        Stmt::Block(stmts, _) if stmts.len() == 1 => {
-            statement_kind(&stmts[0], scope, result_in_scope, allow_wrapping_arithmetic)
-        }
-        // `let` bindings and pure expression statements end in a value
-        // statement; the widened equivalence profile admits them, the
-        // bounded C03 fragment stays closed. Bindings are lexical to the
-        // block and a discarded expression's partial operations still
-        // record definedness obligations.
+        Stmt::Block(stmts, _) if stmts.len() == 1 => statement_kind(
+            &stmts[0],
+            scope,
+            result_in_scope,
+            allow_wrapping_arithmetic,
+            assignable,
+        ),
+        // `let` bindings, scalar reassignments and pure expression
+        // statements end in a value statement; the widened equivalence
+        // profile admits them, the bounded C03 fragment stays closed.
+        // Bindings are lexical to the block and a discarded expression's
+        // partial operations still record definedness obligations.
         Stmt::Block(stmts, _) if !stmts.is_empty() && allow_wrapping_arithmetic => {
             let mut inner = scope.clone();
+            let mut inner_assignable = assignable.clone();
             let (lets, last) = stmts.split_at(stmts.len() - 1);
             for stmt in lets {
                 match stmt {
@@ -401,18 +421,39 @@ fn statement_kind(
                             allow_wrapping_arithmetic,
                         )?;
                         inner.insert(var.clone(), kind);
+                        inner_assignable.insert(var.clone());
+                    }
+                    Stmt::Assign { var, value, .. } => {
+                        if !inner_assignable.contains(var) {
+                            return Err(SemanticContractError::Unsupported(
+                                "assignment to a name not bound on the linear path",
+                            ));
+                        }
+                        let kind = expression_kind(
+                            value,
+                            &inner,
+                            result_in_scope,
+                            allow_wrapping_arithmetic,
+                        )?;
+                        expect_kind(kind, inner[var])?;
                     }
                     Stmt::Expr(value, _) => {
                         expression_kind(value, &inner, result_in_scope, allow_wrapping_arithmetic)?;
                     }
                     _ => {
                         return Err(SemanticContractError::Unsupported(
-                            "statement outside a let/expression sequence",
+                            "statement outside a let/assignment/expression sequence",
                         ));
                     }
                 }
             }
-            statement_kind(&last[0], &inner, result_in_scope, allow_wrapping_arithmetic)
+            statement_kind(
+                &last[0],
+                &inner,
+                result_in_scope,
+                allow_wrapping_arithmetic,
+                &inner_assignable,
+            )
         }
         _ => Err(SemanticContractError::Unsupported(
             "statement, mutation or empty body",
@@ -474,9 +515,13 @@ fn expression_kind(
                 )),
             }
         }
-        Expr::Block(stmt) => {
-            statement_kind(stmt, scope, result_in_scope, allow_wrapping_arithmetic)
-        }
+        Expr::Block(stmt) => statement_kind(
+            stmt,
+            scope,
+            result_in_scope,
+            allow_wrapping_arithmetic,
+            &BTreeSet::new(),
+        ),
         Expr::IfThenElse {
             cond,
             then_branch,
@@ -491,6 +536,7 @@ fn expression_kind(
                 scope,
                 result_in_scope,
                 allow_wrapping_arithmetic,
+                &BTreeSet::new(),
             )?;
             expect_kind(
                 statement_kind(
@@ -498,6 +544,7 @@ fn expression_kind(
                     scope,
                     result_in_scope,
                     allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
                 )?,
                 then_kind,
             )?;
@@ -588,7 +635,9 @@ pub fn encode_pure_i64_body<'ctx>(
         .collect();
     let top = Bool::from_bool(context, true);
     let mut definedness = Vec::new();
-    let value = source_stmt(&body, context, &env, &top, &mut definedness, 0)?.integer()?;
+    let assignable: BTreeSet<String> = atom.params.iter().map(|p| p.name.clone()).collect();
+    let value =
+        source_stmt(&body, context, &env, &top, &mut definedness, 0, &assignable)?.integer()?;
     Ok(PureI64Body {
         function_name: atom.name,
         source_sha256: contract.source_sha256,
@@ -653,6 +702,9 @@ impl<'ctx> SourceValue<'ctx> {
     }
 }
 
+/// `assignable` mirrors `statement_kind`: only names bound on the
+/// current linear path may be rebound, because the source model cannot
+/// merge an assignment that escapes an `if` branch or expression block.
 fn source_stmt<'ctx>(
     stmt: &Stmt,
     ctx: &'ctx Context,
@@ -660,27 +712,46 @@ fn source_stmt<'ctx>(
     guard: &Bool<'ctx>,
     definedness: &mut Vec<Bool<'ctx>>,
     depth: usize,
+    assignable: &BTreeSet<String>,
 ) -> BodyResult<SourceValue<'ctx>> {
     if depth > MAX_DEPTH {
         return Err(SemanticContractError::Unsupported("source depth limit"));
     }
     match stmt {
         Stmt::Expr(e, _) => source_expr(e, ctx, env, guard, definedness, depth + 1),
-        Stmt::Block(stmts, _) if stmts.len() == 1 => {
-            source_stmt(&stmts[0], ctx, env, guard, definedness, depth + 1)
-        }
+        Stmt::Block(stmts, _) if stmts.len() == 1 => source_stmt(
+            &stmts[0],
+            ctx,
+            env,
+            guard,
+            definedness,
+            depth + 1,
+            assignable,
+        ),
         Stmt::Block(stmts, _) if !stmts.is_empty() => {
             // Sequential blocks bind names lexically: each `let`
-            // initializer encodes under the current guard (its partial
-            // operations still record definedness obligations) and a bare
-            // expression statement encodes and discards its value — its
-            // own definedness obligations still apply — then the last
-            // statement yields the block value under the wider scope.
+            // initializer and each reassigning statement encodes under
+            // the current guard (its partial operations still record
+            // definedness obligations) and a bare expression statement
+            // encodes and discards its value — its own definedness
+            // obligations still apply — then the last statement yields
+            // the block value under the wider scope.
             let mut inner = env.clone();
+            let mut inner_assignable = assignable.clone();
             let (lets, last) = stmts.split_at(stmts.len() - 1);
             for stmt in lets {
                 match stmt {
                     Stmt::Let { var, value, .. } => {
+                        let bound = source_expr(value, ctx, &inner, guard, definedness, depth + 1)?;
+                        inner.insert(var.clone(), bound);
+                        inner_assignable.insert(var.clone());
+                    }
+                    Stmt::Assign { var, value, .. } => {
+                        if !inner_assignable.contains(var) {
+                            return Err(SemanticContractError::Unsupported(
+                                "assignment to a name not bound on the linear path",
+                            ));
+                        }
                         let bound = source_expr(value, ctx, &inner, guard, definedness, depth + 1)?;
                         inner.insert(var.clone(), bound);
                     }
@@ -689,12 +760,20 @@ fn source_stmt<'ctx>(
                     }
                     _ => {
                         return Err(SemanticContractError::Unsupported(
-                            "statement outside a let/expression sequence",
+                            "statement outside a let/assignment/expression sequence",
                         ));
                     }
                 }
             }
-            source_stmt(&last[0], ctx, &inner, guard, definedness, depth + 1)
+            source_stmt(
+                &last[0],
+                ctx,
+                &inner,
+                guard,
+                definedness,
+                depth + 1,
+                &inner_assignable,
+            )
         }
         _ => Err(SemanticContractError::Unsupported(
             "unsupported source statement",
@@ -742,7 +821,9 @@ fn source_expr<'ctx>(
             .get(n.as_str())
             .cloned()
             .ok_or(SemanticContractError::Unsupported("source binding"))?,
-        Expr::Block(s) => source_stmt(s, ctx, env, guard, definedness, depth + 1)?,
+        Expr::Block(s) => {
+            source_stmt(s, ctx, env, guard, definedness, depth + 1, &BTreeSet::new())?
+        }
         Expr::BinaryOp(a, op, b) => {
             let a = source_expr(a, ctx, env, guard, definedness, depth + 1)?;
             // `&&`/`||`/`=>` short-circuit like the emitter and
@@ -816,6 +897,7 @@ fn source_expr<'ctx>(
                     &Bool::and(ctx, &[guard, &cond]),
                     definedness,
                     depth + 1,
+                    &BTreeSet::new(),
                 )?,
                 source_stmt(
                     else_branch,
@@ -824,6 +906,7 @@ fn source_expr<'ctx>(
                     &Bool::and(ctx, &[guard, &cond.not()]),
                     definedness,
                     depth + 1,
+                    &BTreeSet::new(),
                 )?,
             ) {
                 (I(a), I(b)) => I(cond.ite(&a, &b)),
@@ -907,9 +990,10 @@ mod tests {
     #[test]
     fn let_bindings_stay_outside_the_bounded_c03_fragment() {
         // The equivalence profile (allow_wrapping_arithmetic = true) admits
-        // `let`/expression sequences; the bounded C03 contract still rejects
-        // them, so build and recheck keep agreeing on one source grammar.
-        for body in ["let y = x; y", "x + 1; x"] {
+        // `let`/expression/assignment sequences; the bounded C03 contract
+        // still rejects them, so build and recheck keep agreeing on one
+        // source grammar.
+        for body in ["let y = x; y", "x + 1; x", "let a = x; a = a + 1; a"] {
             let source = SOURCE.replace("if x < 0 { 0 } else { x }", body);
             assert!(extract(&source).is_err());
             assert!(extract_pure_i64_contract(&source, "clamp.mm", Some(TARGET), true).is_ok());

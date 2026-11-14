@@ -708,8 +708,9 @@ Existing source/Z3/Lean bridge lemmas do not already cover LLVM generation.
 in-process C09 pilot, not a new CLI route or common-evidence producer. It consumes
 one `mumei.pure-i64-wrapping-scalar/v1` source unit — the C03 comparison fragment
 extended with wrapping add/sub/mul, total bitwise `&`/`|`/`^`, guarded
-signed division/remainder/shifts, block-scoped `let` bindings and
-discarded pure expression statements —
+signed division/remainder/shifts, block-scoped `let` bindings, scalar
+reassignments on the linear path and discarded pure expression
+statements —
 and one caller-supplied LLVM
 17 textual IR snapshot. The caller must explicitly pin the exact
 `x86_64-unknown-linux-gnu` triple and the profile's `DATA_LAYOUT` on that snapshot;
@@ -732,15 +733,21 @@ binds no input at all (e.g. `x / 0`) is an error, mirroring the spec
 verifier's rejection. Source `&`/`|`/`^` map to `and`/`or`/`xor` — bitwise
 operations are defined on every i64 input, so they carry no domain
 obligation and are checked for all inputs unconditionally. Source bodies
-may sequence `let` bindings and pure expression statements before the
-final value statement: each `let` initializer and each leading
+may sequence `let` bindings, scalar reassignments and pure expression
+statements before the
+final value statement: each `let` initializer, each rebinding and each
+leading
 expression is kind-checked and encoded in order under the enclosing
 guard — a partial operation (division, shifts) records its definedness
 obligation under that same guard whether or not its value is discarded —
 and bindings are lexical, so a shadowing or branch-local `let` never
 escapes its block. A discarded expression contributes no value but its
-obligations still hold. Other statement
-forms (assignment, calls, mutation, loops) stay
+obligations still hold. Reassignment rebinding is restricted to names
+bound on the current linear path: an assignment inside an `if` branch or
+expression block may only touch names bound within it, because the
+source model cannot merge a rebinding that escapes a conditional path —
+`if x > 0 { x = 1; 0 } else { 0 }` stays rejected. Other statement
+forms (unbound assignment, calls, loops) stay
 unsupported. The LLVM side is
 separately
 interpreted from the verified LLVM-C graph, not regenerated from the source HIR.
