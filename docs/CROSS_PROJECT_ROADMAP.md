@@ -1232,7 +1232,18 @@ values and expressions alike), local methods and generic or
 instantiated receiver types (`lib.T[lib.U]`,
 `lib.GT[lib.T].GM` — the pinned identity would miss the type
 arguments) stay closed; multi-valued method results are admitted
-like plain function results (see below). See the
+like plain function results (see below).
+
+Pointer-typed parameters and results joined the signature fragment:
+a `*lib.T` parameter reports `kind: "pointer"` carrying the
+pointee's named/alias identity on `type_id`, and signature pins
+unwrap one pointer layer. The consumer admits the fact wherever a
+scalar is allowed — parameters, results and `:=`/`var` locals — so
+`t.PM(x)` on a `*lib.T` parameter and the `(*lib.T).PM(t, x)` method
+expression summarize with the receiver-plus-arguments union.
+Dereferences, field access and mutation through the pointer stay
+outside the fragment; a pointer to an unnamed or composite pointee
+(`*int64`, `**T`) pins nothing but still tracks its dep set. See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
 section.
 
