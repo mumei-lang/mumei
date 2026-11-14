@@ -1054,6 +1054,17 @@ stay declared gaps, grouped `const ( ... )` remains a parser gap, and
 this is dependency analysis, not constant evaluation. See the
 [Agent scalar const declarations](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-scalar-const-declarations-and-reads).
 
+### Wave 3 remaining scalar binary operators
+
+Agent's scalar fragment now admits every scalar binary operator —
+`/`, `%`, `<<` and `>>` join the arithmetic, bitwise, comparison and
+logical set — since dependency composition is operation-agnostic. The
+compound forms (`/=`, `%=`, `<<=`, `>>=`) were already admitted, so
+this also removes an inconsistency in the declared boundary; no value,
+overflow, shift-count or division-by-zero semantics are modelled. See
+the
+[Agent remaining scalar operators](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-remaining-scalar-binary-operators).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
