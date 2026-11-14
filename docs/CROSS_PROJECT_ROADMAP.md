@@ -931,6 +931,16 @@ jump may have skipped them. Labelled jumps, `goto`, `defer`, `go` and
 non-identifier inc/dec operands stay declared gaps. See the
 [Agent effect-free control statements](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-effect-free-control-statements).
 
+### Wave 3 statement initializers in scalar summaries
+
+Agent's C07 fragment now accepts a simple-statement `initializer` on
+`if` and expression `switch` — `if v := f(); v > 0 { ... }` and
+`switch v := f(); v { ... }` — dispatched like a for-clause init with
+the bound name scoped to the statement. Multi-name declarations,
+compound assignments and expression/send initializers stay declared
+gaps. See the
+[Agent statement initializers](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-statement-initializers-on-if-and-switch).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
