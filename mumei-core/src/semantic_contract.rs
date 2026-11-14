@@ -441,21 +441,9 @@ fn statement_kind(
                     Stmt::Expr(value, _) => {
                         expression_kind(value, &inner, result_in_scope, allow_wrapping_arithmetic)?;
                     }
-                    // A nested block discards its value like a bare
-                    // expression; its bindings stay lexical to the nested
-                    // block, so nothing bound outside it is assignable.
-                    Stmt::Block(..) => {
-                        statement_kind(
-                            stmt,
-                            &inner,
-                            result_in_scope,
-                            allow_wrapping_arithmetic,
-                            &BTreeSet::new(),
-                        )?;
-                    }
                     _ => {
                         return Err(SemanticContractError::Unsupported(
-                            "statement outside a let/assignment/expression/block sequence",
+                            "statement outside a let/assignment/expression sequence",
                         ));
                     }
                 }
@@ -771,23 +759,9 @@ fn source_stmt<'ctx>(
                     Stmt::Expr(value, _) => {
                         source_expr(value, ctx, &inner, guard, definedness, depth + 1)?;
                     }
-                    // A nested block discards its value like a bare
-                    // expression and keeps its bindings lexical, so it
-                    // gets the same empty assignable set as a branch.
-                    Stmt::Block(..) => {
-                        source_stmt(
-                            stmt,
-                            ctx,
-                            &inner,
-                            guard,
-                            definedness,
-                            depth + 1,
-                            &BTreeSet::new(),
-                        )?;
-                    }
                     _ => {
                         return Err(SemanticContractError::Unsupported(
-                            "statement outside a let/assignment/expression/block sequence",
+                            "statement outside a let/assignment/expression sequence",
                         ));
                     }
                 }
