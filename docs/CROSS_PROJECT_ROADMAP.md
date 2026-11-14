@@ -1266,7 +1266,11 @@ result lowers the same way (the emitter zexts its i1 result to i64), so
 the checked source value is the Boolean body's 0/1 materialization and
 an `i1` return is a signature error, not a value difference — boolean
 expressions stay two-valued (a `bool` binding is not an i64 operand, a
-`-> bool` body must produce a Bool kind). `match` on an i64 scrutinee
+`-> bool` body must produce a Bool kind). Declared subrange integer
+types (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`) lower to an i64 formal the
+same way, so the signature bounds the checked input to the type's
+range; `u64`/`usize`/`isize` and wider result types stay out. `match`
+on an i64 scrutinee
 is admitted in first-match order — literal patterns contribute one
 `target == n` test each, an arm may add a Boolean guard evaluated in
 the arm's scope so it hits only on `pattern ∧ guard`, and arms encode

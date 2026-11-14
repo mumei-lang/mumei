@@ -208,10 +208,15 @@ pub fn extract_pure_i64_contract(
         .iter()
         .map(|p| TypedBinder {
             name: p.name.clone(),
-            scalar_type: if param_kind(p) == ScalarKind::Bool {
-                "bool"
-            } else {
-                "i64"
+            scalar_type: match p.type_name.as_deref() {
+                Some("bool") => "bool",
+                Some("i8") => "i8",
+                Some("i16") => "i16",
+                Some("i32") => "i32",
+                Some("u8") => "u8",
+                Some("u16") => "u16",
+                Some("u32") => "u32",
+                _ => "i64",
             },
             role: "parameter",
             provenance: atom.span.clone(),
@@ -327,6 +332,7 @@ pub fn extract_pure_i64_contract(
         .chain(allow_wrapping_arithmetic.then_some("discarded_pure_expression_statements"))
         .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
         .chain(allow_wrapping_arithmetic.then_some("bool_parameters_lowered_to_i64_zero_one"))
+        .chain(allow_wrapping_arithmetic.then_some("subrange_integer_parameters_lowered_to_i64"))
         .chain(allow_wrapping_arithmetic.then_some("bool_results_lowered_to_i64_zero_one"))
         .chain(allow_wrapping_arithmetic.then_some("first_match_order_i64_match_with_catch_all"))
         .chain(allow_wrapping_arithmetic.then_some("match_arm_boolean_guards"))
@@ -356,13 +362,22 @@ pub fn extract_pure_i64_contract(
 }
 
 /// The scalar kind a declared parameter type gives in this profile, when
-/// the declaration is admissible: `i64` always, `bool` only when
-/// `admit_bool` (the widened profile's `allow_wrapping_arithmetic` flag).
-fn declared_param_kind(param: &crate::parser::ast::Param, admit_bool: bool) -> Option<ScalarKind> {
+/// the declaration is admissible: `i64` always; `bool` and the narrower
+/// subrange integer types only when `admit_widened` (the widened
+/// profile's `allow_wrapping_arithmetic` flag). Subrange types are
+/// carried by i64 like `bool`; the declared signature then bounds the
+/// checked input to the type's range (`param_domain`). `u64`, `usize`
+/// and `isize` stay out: a full-width unsigned domain cannot be
+/// expressed as an i64 range bound.
+fn declared_param_kind(
+    param: &crate::parser::ast::Param,
+    admit_widened: bool,
+) -> Option<ScalarKind> {
     let name = param.type_name.as_deref()?;
     let kind = match name {
         "i64" => ScalarKind::I64,
-        "bool" if admit_bool => ScalarKind::Bool,
+        "bool" if admit_widened => ScalarKind::Bool,
+        "i8" | "i16" | "i32" | "u8" | "u16" | "u32" if admit_widened => ScalarKind::I64,
         _ => return None,
     };
     if param.type_ref.as_ref().is_some_and(|ty| {
@@ -401,17 +416,17 @@ fn return_kind(atom: &Atom) -> ScalarKind {
     }
 }
 
-fn validate_atom(atom: &Atom, admit_bool: bool) -> Result<(), SemanticContractError> {
+fn validate_atom(atom: &Atom, admit_widened: bool) -> Result<(), SemanticContractError> {
     let return_ok = match atom.return_type.as_deref() {
         Some("i64") => true,
-        Some("bool") => admit_bool,
+        Some("bool") => admit_widened,
         _ => false,
     };
     if !return_ok
         || atom
             .params
             .iter()
-            .any(|p| declared_param_kind(p, admit_bool).is_none())
+            .any(|p| declared_param_kind(p, admit_widened).is_none())
     {
         return Err(SemanticContractError::Unsupported(
             "explicit owned scalar i64 signature required",
@@ -793,9 +808,15 @@ pub struct PureI64Body<'ctx> {
     /// those operators; their conjunction is the domain the source binds.
     pub definedness: Vec<Bool<'ctx>>,
     /// Domain the declared signature itself binds: an admitted `bool`
-    /// parameter lowers to i64 carrying 0/1, so its entry is `input <=u 1`.
-    /// Empty without `bool` parameters.
+    /// parameter lowers to i64 carrying 0/1, so its entry is `input <=u 1`;
+    /// an admitted subrange integer type (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`)
+    /// lowers to an i64 formal too, so its entries bound the input to the
+    /// type's range. Empty without such parameters.
     pub param_domain: Vec<Bool<'ctx>>,
+    /// True when a declared subrange integer parameter contributed to
+    /// `param_domain` — a bool-only domain keeps its 0/1 report label,
+    /// while any subrange bound reports the signature-bounded domain.
+    pub subrange_params: bool,
 }
 
 type BodyResult<T> = std::result::Result<T, SemanticContractError>;
@@ -872,13 +893,39 @@ pub fn encode_pure_i64_body<'ctx>(
     // A declared `bool` parameter lowers to i64 carrying 0/1, so the
     // declared signature restricts its input to {0, 1}: without this the
     // i64 range would make `b == true` look different at `input = 5`.
+    // The same applies to the narrower integer types the emitter lowers
+    // to an i64 formal — `x: i32` checks only inputs in `[-2^31, 2^31)`,
+    // so `x == 3_000_000_000` stays equivalent to `false`.
     let param_domain: Vec<Bool> = atom
         .params
         .iter()
         .zip(&inputs)
-        .filter(|(p, _)| param_kind(p) == ScalarKind::Bool)
-        .map(|(_, v)| v.bvule(&BV::from_u64(context, 1, 64)))
+        .flat_map(|(p, v)| match p.type_name.as_deref() {
+            Some("bool") => vec![v.bvule(&BV::from_u64(context, 1, 64))],
+            Some("u8") => vec![v.bvule(&BV::from_u64(context, u8::MAX as u64, 64))],
+            Some("u16") => vec![v.bvule(&BV::from_u64(context, u16::MAX as u64, 64))],
+            Some("u32") => vec![v.bvule(&BV::from_u64(context, u32::MAX as u64, 64))],
+            Some("i8") => vec![
+                v.bvsge(&BV::from_i64(context, i8::MIN as i64, 64)),
+                v.bvsle(&BV::from_i64(context, i8::MAX as i64, 64)),
+            ],
+            Some("i16") => vec![
+                v.bvsge(&BV::from_i64(context, i16::MIN as i64, 64)),
+                v.bvsle(&BV::from_i64(context, i16::MAX as i64, 64)),
+            ],
+            Some("i32") => vec![
+                v.bvsge(&BV::from_i64(context, i32::MIN as i64, 64)),
+                v.bvsle(&BV::from_i64(context, i32::MAX as i64, 64)),
+            ],
+            _ => vec![],
+        })
         .collect();
+    let subrange_params = atom.params.iter().any(|p| {
+        matches!(
+            p.type_name.as_deref(),
+            Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32")
+        )
+    });
     Ok(PureI64Body {
         function_name: atom.name,
         source_sha256: contract.source_sha256,
@@ -886,6 +933,7 @@ pub fn encode_pure_i64_body<'ctx>(
         value,
         definedness,
         param_domain,
+        subrange_params,
     })
 }
 
@@ -1566,6 +1614,33 @@ mod tests {
         let bool_return = "atom f(x: i64) -> bool requires: true; ensures: true; body: { x > 0 };";
         assert!(extract_pure_i64_contract(bool_return, "clamp.mm", Some(TARGET), false).is_err());
         assert!(extract_pure_i64_contract(bool_return, "clamp.mm", Some(TARGET), true).is_ok());
+    }
+
+    #[test]
+    fn subrange_integer_parameters_stay_outside_the_bounded_c03_fragment() {
+        // The widened equivalence profile admits declared subrange
+        // integer types (carried by an i64 formal, the signature
+        // bounding the checked input); the bounded C03 contract keeps
+        // its i64-only signature.
+        let i32_atom = "atom f(x: i32) -> i64 requires: true; ensures: true; body: { x };";
+        assert!(extract_pure_i64_contract(i32_atom, "clamp.mm", Some(TARGET), false).is_err());
+        assert!(extract_pure_i64_contract(i32_atom, "clamp.mm", Some(TARGET), true).is_ok());
+        // Full-width unsigned and target-width types stay out of both
+        // profiles: a `u64`-sized domain cannot be expressed as an i64
+        // range bound, and an i32 result is not part of this slice.
+        for ty in ["u64", "usize", "isize", "i128"] {
+            let atom =
+                format!("atom f(x: {ty}) -> i64 requires: true; ensures: true; body: {{ x }};");
+            assert!(
+                extract_pure_i64_contract(&atom, "clamp.mm", Some(TARGET), true).is_err(),
+                "{ty}"
+            );
+        }
+        let i32_return = "atom f(x: i64) -> i32 requires: true; ensures: true; body: { x };";
+        assert!(extract_pure_i64_contract(i32_return, "clamp.mm", Some(TARGET), true).is_err());
+        // The binder discloses the declared type, not the i64 carrier.
+        let contract = extract_pure_i64_contract(i32_atom, "clamp.mm", Some(TARGET), true).unwrap();
+        assert_eq!(contract.specification.binders[0].scalar_type, "i32");
     }
 
     #[test]

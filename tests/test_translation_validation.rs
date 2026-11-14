@@ -307,7 +307,7 @@ fn unsupported_source_is_not_silently_weakened() {
         Options::default()
     )
     .is_err());
-    for params in ["x: u64", "x: i32", "x: [i64]", "x: f64"] {
+    for params in ["x: u64", "x: [i64]", "x: f64"] {
         assert!(tv::validate_pure_i64(
             &source(params, "0"),
             &function("ret i64 0"),
@@ -1548,5 +1548,79 @@ fn scalar_match_stays_bounded() {
         source("x: i64", "match x { 0 => true, _ => 0 }"),
     ] {
         assert!(tv::validate_pure_i64(&src, &function("ret i64 0"), Options::default()).is_err());
+    }
+}
+
+#[test]
+fn subrange_integer_parameters_are_equivalent_and_refuted() {
+    // Declared subrange integer types lower to an i64 formal like
+    // `bool`, and the declared signature bounds the checked input to
+    // the type's range through `param_domain`.
+    for src in [
+        source("x: i8", "x"),
+        source("x: i8", "x * 2"),
+        source("x: u8", "x + 1"),
+        source("x: i16", "if x < 0 { 0 - x } else { x }"),
+        source("x: i32", "x * x"),
+        source("x: u16", "x & 255"),
+        source("x: u32", "x >> 1"),
+        source("x: u8", "x / 4"),
+        source("x: i8, y: i64", "x + y"),
+        source("x: i32, b: bool", "if b { x } else { 0 }"),
+        source("x: i32", "if x > 100 { x } else { 0 }"),
+    ] {
+        assert_eq!(
+            validate(&src, &emitted(&src)).outcome,
+            Outcome::EquivalentWithinProfile,
+            "{src}"
+        );
+    }
+    // A signature-bounded domain reports as such, not as a bool domain.
+    let src = source("x: i8", "x");
+    assert_eq!(
+        validate(&src, &emitted(&src)).input_domain,
+        "signed_i64_inputs_with_signature_bounded_param_domains_not_restricted_by_requires"
+    );
+    // The declared type bounds the checked inputs: `x == 200` is always
+    // false inside `i8` and `x == 300` inside `u8`, so these bodies are
+    // equivalent to `ret 0` only because `param_domain` rules out the
+    // inputs that would differ.
+    for src in [
+        source("x: i8", "if x == 200 { 1 } else { 0 }"),
+        source("x: u8", "if x == 300 { 1 } else { 0 }"),
+        source("x: i32", "if x == 3000000000 { 1 } else { 0 }"),
+    ] {
+        assert_eq!(
+            validate(&src, &function("ret i64 0")).outcome,
+            Outcome::EquivalentWithinProfile,
+            "{src}"
+        );
+    }
+    // A body that differs inside the domain is still `Different`, and
+    // the same out-of-range literal against a plain `i64` parameter
+    // stays a real difference at `x = 200`.
+    assert_eq!(
+        validate(&source("x: i8", "x + 1"), &function("ret i64 %x")).outcome,
+        Outcome::Different
+    );
+    assert_eq!(
+        validate(
+            &source("x: i64", "if x == 200 { 1 } else { 0 }"),
+            &function("ret i64 0")
+        )
+        .outcome,
+        Outcome::Different
+    );
+    // Full-width unsigned, target-width and unknown types stay outside
+    // the profile, as does a wider result type — all static signature
+    // errors.
+    for src in [
+        "atom f(x: u64) -> i64 requires: true; ensures: true; body: { x };",
+        "atom f(x: usize) -> i64 requires: true; ensures: true; body: { x };",
+        "atom f(x: isize) -> i64 requires: true; ensures: true; body: { x };",
+        "atom f(x: i128) -> i64 requires: true; ensures: true; body: { x };",
+        "atom f(x: i64) -> i32 requires: true; ensures: true; body: { x };",
+    ] {
+        assert!(tv::validate_pure_i64(src, &function("ret i64 0"), Options::default()).is_err());
     }
 }
