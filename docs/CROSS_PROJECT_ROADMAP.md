@@ -1387,16 +1387,20 @@ pointer-typed `var` member whose pointee is named — `*lib.PV = v`
 and dot-imported `*PV = v` — storing through the member into
 package state with the same dep-free external-mutation record and
 the pointee's identity pinning via the pointer fact's `type_id`.
-Pointer members whose pointee is unnamed (`*lib.PU` on `*int64`,
-`(*lib.PA)[i]` on `*[4]int64`, `*lib.PPV`/`**lib.PPV` on `**T`)
-stay closed because the fact carries no stored-type identity to
-pin; a non-pointer member behind `*` stays closed (uncompilable),
-no other unary operator unwraps, and a `*lib.PV = v` store unions
-the stored value's dependencies into every binding an earlier `&x`
-escaped because the member may point at it. Inc/dec on an
-imported member (`lib.V++`, `VA[i]++`, `lib.VS.f++`, `(*lib.PV)++`)
-routes through this same gate — `(*lib.PU)++` stays closed like
-the write. See the
+Deeper pointee trees declare their named uses on the member
+record's `pointee_type_ids`: a fully unnamed pointee (`*lib.PU` on
+`*int64`, `(*lib.PA)[i]` on `*[4]int64`) resolves to the empty
+list and admits — the member's own identity covers the declaration —
+while a deeper named use (`*lib.PPV`/`**lib.PPV` on `**T`) declares
+and pins `T` like a type argument; only a pointee shape the key
+cannot declare stays closed (`*lib.PSTR` on `*struct{ F T }`, or a
+signature/chan tree). A non-pointer member behind `*` stays
+closed (uncompilable), no other unary operator unwraps, and a
+`*lib.PV = v` store unions the stored value's dependencies into
+every binding an earlier `&x` escaped because the member may point
+at it. Inc/dec on an imported member (`lib.V++`, `VA[i]++`,
+`lib.VS.f++`, `(*lib.PV)++`, `(*lib.PU)++`) routes through this
+same gate with the same `pointee_type_ids` rule. See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
 section.
 
