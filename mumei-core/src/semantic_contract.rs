@@ -227,6 +227,7 @@ pub fn extract_pure_i64_contract(
             .iter()
             .map(|p| serde_json::json!({"name": p.name, "type": p.type_name}))
             .collect::<Vec<_>>(),
+        "return_type": atom.return_type,
         "requires": atom.requires, "ensures": atom.ensures,
     }))?;
     let hir = lower_atom_to_hir(&atom);
