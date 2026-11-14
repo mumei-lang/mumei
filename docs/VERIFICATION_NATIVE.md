@@ -707,7 +707,8 @@ Existing source/Z3/Lean bridge lemmas do not already cover LLVM generation.
 `mumei_emit_llvm::translation_validation::validate_pure_i64` is an opt-in,
 in-process C09 pilot, not a new CLI route or common-evidence producer. It consumes
 one `mumei.pure-i64-wrapping-scalar/v1` source unit — the C03 comparison fragment
-extended with wrapping add/sub/mul and guarded signed division/remainder/shifts —
+extended with wrapping add/sub/mul, total bitwise `&`/`|`/`^` and guarded
+signed division/remainder/shifts —
 and one caller-supplied LLVM
 17 textual IR snapshot. The caller must explicitly pin the exact
 `x86_64-unknown-linux-gnu` triple and the profile's `DATA_LAYOUT` on that snapshot;
@@ -727,12 +728,15 @@ is refinement over that partial domain: inputs the source leaves
 unbound are don't-care, matching how the emitter's select-guarded
 `srem` stays defined on `x % -1`. A source whose division or shift
 binds no input at all (e.g. `x / 0`) is an error, mirroring the spec
-verifier's rejection. The LLVM side is separately
+verifier's rejection. Source `&`/`|`/`^` map to `and`/`or`/`xor` — bitwise
+operations are defined on every i64 input, so they carry no domain
+obligation and are checked for all inputs unconditionally. The LLVM side is
+separately
 interpreted from the verified LLVM-C graph, not regenerated from the source HIR.
 Its whitelist is scalar i1/i64 SSA: integer constants, comparisons (including
-unsigned predicates so wrong signedness can be refuted), bitwise Boolean
-operations, unflagged add/sub/mul/sdiv/srem/shl/ashr, i1/i64 zext/trunc, select,
-phi, acyclic branches and returns. Parameter
+unsigned predicates so wrong signedness can be refuted), unflagged
+and/or/xor on i1 and i64, unflagged add/sub/mul/sdiv/srem/shl/ashr, i1/i64
+zext/trunc, select, phi, acyclic branches and returns. Parameter
 mapping is positional; phi values follow actual predecessor edges.
 The source model includes Boolean implication, but the existing emitter still
 rejects implication in an executable body. Checking manually supplied IR for

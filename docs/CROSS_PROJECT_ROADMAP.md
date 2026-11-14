@@ -1232,7 +1232,9 @@ only on inputs the source's own defined domain binds (nonzero divisor except
 `UndefinedBehavior` rather than a value difference, a source whose guarded
 operators bind no input is an error, and hard nonlinear queries
 (variable-divisor `srem`) keep failing closed as `Inconclusive`.
-`udiv`/`urem`/`lshr` and any flagged form stay rejected. The C03
+`udiv`/`urem`/`lshr` and any flagged form stay rejected. Source
+`&`/`|`/`^` are admitted as total i64 bitwise `and`/`or`/`xor` on both
+sides — defined for every input, so no partial domain applies. The C03
 recheck/native-bundle fragment keeps arithmetic excluded so build and recheck
 agree on one grammar; only the equivalence source side is widened.
 
