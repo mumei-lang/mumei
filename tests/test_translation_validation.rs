@@ -694,6 +694,46 @@ fn native_emitter_bodies_and_truncating_wrapper_match_without_rewriting() {
 }
 
 #[test]
+fn native_guarded_division_and_shifts_match_under_the_same_partial_domain() {
+    for body in [
+        "7 / 1",
+        "8 % 3",
+        "1 << 3",
+        "16 >> 2",
+        "if 1 > 0 { 8 / 2 } else { 0 }",
+    ] {
+        let src = native_source(body);
+        let Item::Atom(atom) = parse_module_checked(&src).unwrap().remove(0) else {
+            panic!("atom")
+        };
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("native.ll");
+        mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
+            &[lower_atom_to_hir(&atom)],
+            &ModuleEnv::default(),
+            &[],
+            &path,
+        )
+        .unwrap();
+        let ir = pin(&std::fs::read_to_string(&path).unwrap());
+        let report = native_validate(&src, &ir);
+        assert_eq!(report.outcome, Outcome::EquivalentWithinProfile, "{body}");
+        assert_eq!(
+            report.input_domain,
+            "zero_argument_main_i64_body_where_division_and_shift_defined_not_process_exit_status",
+            "{body}"
+        );
+    }
+    // Poison inside the wrapped user-main is `UndefinedBehavior`, not success.
+    let src = native_source("7");
+    let ir = native_ir("%v = sdiv i64 7, 0\nret i64 %v");
+    assert_eq!(
+        native_validate(&src, &ir).outcome,
+        Outcome::UndefinedBehavior
+    );
+}
+
+#[test]
 fn native_full_i64_body_must_match_even_when_low_32_bits_are_equal() {
     let src = native_source("7");
     for value in ["8", "4294967303", "9223372036854775807"] {
