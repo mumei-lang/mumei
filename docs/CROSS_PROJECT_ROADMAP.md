@@ -1204,8 +1204,9 @@ the caller's analysis, never by the callee's own summary. See the
 
 Explicit instantiations of imported generic functions —
 `lib.G[int64](x)` — now classify as `direct_import` when every type
-argument and every instantiated parameter is a basic type and the
-instantiated result is scalar. The dependency model is the existing
+argument and every instantiated parameter is a basic type and every
+instantiated result is scalar, at any arity (see the multi-valued
+section below for the tuple rule). The dependency model is the existing
 opaque shape (the result depends on every argument) and the member
 record's signature pins cover the generic's declared signature,
 type-parameter identities included. Named/alias type arguments or
@@ -1247,10 +1248,12 @@ same over-approximated dependency set (the union of the receiver's
 and every argument's), so one evaluation stores to every name.
 Spread calls (`lib.W(lib.G(x))`) need no arity — the inner union
 already covers the outer result — while a spread into a local callee
-stays closed via the parameter-count check. Composite results stay
+stays closed via the parameter-count check. A multi-valued
+instantiated callee `a, b := lib.G[T](x)` unpacks at its declared
+arity the same way — composite *instantiated* results still stay
+closed. Composite results stay
 `external_or_bodyless`, arity mismatches stay
-`unsupported_statement`, the instantiation gate keeps its
-single-result rule, and `results` validates only on `direct_import`
+`unsupported_statement`, and `results` validates only on `direct_import`
 records with arity at least two — reports predating the key load
 unchanged. See the
 [Agent multi-valued imported results](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-multi-valued-imported-results)
