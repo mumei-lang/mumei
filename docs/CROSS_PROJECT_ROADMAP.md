@@ -1244,9 +1244,19 @@ unwrap one pointer layer. The consumer admits the fact wherever a
 scalar is allowed — parameters, results and `:=`/`var` locals — so
 `t.PM(x)` on a `*lib.T` parameter and the `(*lib.T).PM(t, x)` method
 expression summarize with the receiver-plus-arguments union.
-Dereferences, field access and mutation through the pointer stay
-outside the fragment; a pointer to an unnamed or composite pointee
-(`*int64`, `**T`) pins nothing but still tracks its dep set. See the
+Pointer *values* also flow: `&x` inherits its operand's deps,
+imported calls may return pointers (`lib.R(t)` — the arg-union dep
+set is identical), and pointer-typed imported `var` reads
+(`lib.PV`) stay dep-free with the staleness transfer. Passing
+`&x` to an imported callee hands it a writable alias of `x`, so
+afterwards `x` conservatively depends on every call argument,
+and a pointer result never admits a generic callee through its
+declared signature — `func G[P any](v P) *P` still goes through
+the instantiation gate. Writes
+through a pointer (`*t = v`, `p.f = v`), `&` on non-fragment
+operands and derefs stay outside the fragment; a pointer to an
+unnamed or composite pointee (`*int64`, `**T`) pins nothing but
+still tracks its dep set. See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
 section.
 
