@@ -1065,6 +1065,18 @@ overflow, shift-count or division-by-zero semantics are modelled. See
 the
 [Agent remaining scalar operators](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-remaining-scalar-binary-operators).
 
+### Wave 3 named scalar result parameters
+
+Agent's scalar fragment now admits a named result —
+`func F(x int64) (r int64)` — as an ordinary dep-free local: body
+statements write to it like any local, a bare `return` yields its
+current dependencies, and `return e` assigns the expression's
+dependencies exactly as an unnamed result. An untouched result stays
+parameter-independent; multiple results, methods and generics stay
+declared signature gaps, and no zero-value semantics beyond
+parameter-independence are modelled. See the
+[Agent named result parameters](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-named-result-parameters).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
