@@ -1281,3 +1281,79 @@ fn native_empty_operand_bundles_are_not_plain_direct_calls() {
         Outcome::EquivalentWithinProfile
     );
 }
+
+#[test]
+fn scalar_match_is_equivalent_and_refuted() {
+    // First-match-order `match` on an i64 scrutinee: literal patterns
+    // test `target == n` and a trailing `Variable`/`Wildcard` arm is the
+    // catch-all that makes the chain exhaustive — a `Variable` arm also
+    // binds the scrutinee value for its body.
+    for src in [
+        source("x: i64", "match x { 0 => 1, _ => x }"),
+        source("x: i64", "match x { 0 => 10, 1 => 20, _ => 0 }"),
+        source("x: i64", "match x { k => k + 1 }"),
+        source("x: i64", "match x { 0 => 1, v => v }"),
+        source("x: i64", "match x { -1 => x, _ => 0 }"),
+        source("x: i64", "match x + 1 { 0 => x, _ => 0 }"),
+        source("x: i64", "let m = match x { 0 => 0, _ => x }; m * 2"),
+        source("x: i64", "match x { 0 => 1, _ => x } + match x { 0 => 0, _ => 1 }"),
+        source("x: i64, y: i64", "match x { 0 => x / y, _ => 0 }"),
+        "atom f(x: i64) -> bool requires: true; ensures: true; body: { match x { 0 => true, _ => false } };".to_string(),
+        source("x: i64", "match x { 0 => { let a = x; a + 1 }, _ => 0 }"),
+    ] {
+        assert_eq!(
+            validate(&src, &emitted(&src)).outcome,
+            Outcome::EquivalentWithinProfile,
+            "{src}"
+        );
+    }
+    // A wrong arm value or test is a real difference, not a signature
+    // error.
+    let src = source("x: i64", "match x { 0 => 1, _ => x }");
+    for ir in [
+        pin("define i64 @f(i64 %x) {\nentry:\n  %c = icmp eq i64 %x, 0\n  br i1 %c, label %a, label %b\na:\n  ret i64 5\nb:\n  ret i64 %x\n}"),
+        pin("define i64 @f(i64 %x) {\nentry:\n  %c = icmp eq i64 %x, 1\n  br i1 %c, label %a, label %b\na:\n  ret i64 1\nb:\n  ret i64 %x\n}"),
+        pin("define i64 @f(i64 %x) { ret i64 %x }"),
+    ] {
+        assert_eq!(validate(&src, &ir).outcome, Outcome::Different, "{ir}");
+    }
+    // An `unreachable` that can execute on a defined input is LLVM UB —
+    // here an IR match that drops the catch-all leaves x = 5 without a
+    // return.
+    assert_eq!(
+        validate(
+            &src,
+            &pin("define i64 @f(i64 %x) {\nentry:\n  %c = icmp eq i64 %x, 0\n  br i1 %c, label %a, label %u\na:\n  ret i64 1\nu:\n  unreachable\n}")
+        )
+        .outcome,
+        Outcome::UndefinedBehavior
+    );
+    // The same first-match chain spelled as `if` compares equal.
+    let same = emitted(&source("x: i64", "if x == 0 { 1 } else { x }"));
+    assert_eq!(
+        validate(&src, &same).outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn scalar_match_stays_bounded() {
+    // Non-admitted shapes are static errors, not silently weakened.
+    for src in [
+        // Literal-only coverage cannot be exhaustive on i64 — a
+        // catch-all arm is required.
+        source("x: i64", "match x { 0 => 1 }"),
+        source("x: i64", "match x { 0 => 1, 1 => 2 }"),
+        // Arm guards stay outside the profile.
+        source("x: i64", "match x { k if k > 0 => k, _ => 0 }"),
+        // A non-i64 scrutinee stays outside the profile.
+        "atom f(b: bool) -> i64 requires: true; ensures: true; body: { match b { _ => 1 } };"
+            .to_string(),
+        // Variant patterns stay outside the profile.
+        source("x: i64", "match x { Some(k) => k, _ => 0 }"),
+        // Arms must agree on one kind.
+        source("x: i64", "match x { 0 => true, _ => 0 }"),
+    ] {
+        assert!(tv::validate_pure_i64(&src, &function("ret i64 0"), Options::default()).is_err());
+    }
+}

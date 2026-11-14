@@ -710,7 +710,8 @@ one `mumei.pure-i64-wrapping-scalar/v1` source unit — the C03 comparison fragm
 extended with wrapping add/sub/mul, total bitwise `&`/`|`/`^`, guarded
 signed division/remainder/shifts, block-scoped `let` bindings, scalar
 reassignments on the linear path, discarded pure expression
-statements and `bool` parameters and results —
+statements, `bool` parameters and results and `match` on an i64
+scrutinee with literal patterns and a trailing catch-all arm —
 and one caller-supplied LLVM
 17 textual IR snapshot. The caller must explicitly pin the exact
 `x86_64-unknown-linux-gnu` triple and the profile's `DATA_LAYOUT` on that snapshot;
@@ -769,13 +770,30 @@ expressions stay two-valued: a `bool` binding is not an i64 operand
 (`b + 1` is rejected), a `-> bool` body must produce a Bool kind
 (`if b { 1 } else { 0 }` is rejected),
 and reassigning a bool to a non-bool value keeps the binding's kind.
+A `match` on an i64 scrutinee is checked in first-match order: each
+literal pattern contributes one `target == n` test and the arm bodies
+are encoded as an ite chain under the accumulated negations, so an arm
+shadowed by an earlier match never leaks its value. Literal-only
+patterns cannot cover i64, so the contract requires a trailing
+`Wildcard` or `Variable` catch-all arm rather than a solver
+exhaustiveness check; a `Variable` arm binds the scrutinee value for
+its body. Arm guards, non-literal patterns, a non-i64 scrutinee and
+mixed-kind arm results are static errors. On the IR side,
+`unreachable` executes LLVM undefined behavior: the encoder records an
+always-unsatisfiable definedness obligation on that path, so an
+`unreachable` reachable on a defined input reports `UndefinedBehavior`
+while a dead `unreachable` block stays harmless. The existing emitter
+lowers `match` to a try-chain whose final else edge is a constant-true
+branch into `match.merge` — it never emits `unreachable` — and the
+checker compares that shape against the same first-match-order model.
 The LLVM side is
 separately
 interpreted from the verified LLVM-C graph, not regenerated from the source HIR.
 Its whitelist is scalar i1/i64 SSA: integer constants, comparisons (including
 unsigned predicates so wrong signedness can be refuted), unflagged
 and/or/xor on i1 and i64, unflagged add/sub/mul/sdiv/srem/shl/ashr, i1/i64
-zext/trunc, select, phi, acyclic branches and returns. Parameter
+zext/trunc, select, phi, acyclic branches and returns and
+`unreachable`. Parameter
 mapping is positional; phi values follow actual predecessor edges.
 The source model includes Boolean implication, but the existing emitter still
 rejects implication in an executable body. Checking manually supplied IR for

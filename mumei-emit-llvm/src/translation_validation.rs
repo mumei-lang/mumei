@@ -388,7 +388,7 @@ unsafe fn check_function(function: LLVMValueRef, params: usize) -> Result<()> {
                 }
             }
             match LLVMGetInstructionOpcode(inst) {
-                LLVMOpcode::LLVMRet | LLVMOpcode::LLVMBr => (),
+                LLVMOpcode::LLVMRet | LLVMOpcode::LLVMBr | LLVMOpcode::LLVMUnreachable => (),
                 LLVMOpcode::LLVMAdd | LLVMOpcode::LLVMSub | LLVMOpcode::LLVMMul => {
                     unflagged_arithmetic(inst)?;
                     width(LLVMTypeOf(inst))?;
@@ -542,7 +542,7 @@ unsafe fn acyclic(block: LLVMBasicBlockRef, colors: &mut HashMap<usize, u8>) -> 
     if term.is_null()
         || !matches!(
             LLVMGetInstructionOpcode(term),
-            LLVMOpcode::LLVMBr | LLVMOpcode::LLVMRet
+            LLVMOpcode::LLVMBr | LLVMOpcode::LLVMRet | LLVMOpcode::LLVMUnreachable
         )
     {
         return Err(ValidationError("unsupported LLVM terminator"));
@@ -648,6 +648,15 @@ impl<'ctx> IrEncoder<'ctx> {
             if op == LLVMOpcode::LLVMRet {
                 let value = self.value(LLVMGetOperand(inst, 0), &values)?;
                 returns.push((guard, value));
+                return Ok(());
+            }
+            if op == LLVMOpcode::LLVMUnreachable {
+                // `unreachable` executes LLVM UB: the path must never run
+                // on a defined input — an always-unsatisfiable
+                // definedness obligation reports it as UndefinedBehavior
+                // and keeps it out of the value comparison.
+                self.definedness
+                    .push((guard.clone(), Bool::from_bool(self.ctx, false)));
                 return Ok(());
             }
             if op == LLVMOpcode::LLVMBr {

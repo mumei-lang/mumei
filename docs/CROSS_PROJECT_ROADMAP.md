@@ -1256,7 +1256,16 @@ result lowers the same way (the emitter zexts its i1 result to i64), so
 the checked source value is the Boolean body's 0/1 materialization and
 an `i1` return is a signature error, not a value difference — boolean
 expressions stay two-valued (a `bool` binding is not an i64 operand, a
-`-> bool` body must produce a Bool kind). The C03
+`-> bool` body must produce a Bool kind). `match` on an i64 scrutinee
+is admitted in first-match order — literal patterns contribute one
+`target == n` test each and arms encode as an ite chain under
+accumulated negations, requiring a trailing `Wildcard`/`Variable`
+catch-all arm (a `Variable` arm binds the scrutinee); arm guards,
+non-literal patterns, a non-i64 scrutinee and mixed-kind arms stay
+rejected. The IR whitelist also admits `unreachable`: reachable on a
+defined input it reports `UndefinedBehavior`, while a dead
+`unreachable` block is harmless — the existing emitter's match lowering
+never emits it (its final else edge is a constant-true branch). The C03
 recheck/native-bundle fragment keeps arithmetic and statement sequences
 excluded so build and recheck
 agree on one grammar; only the equivalence source side is widened.

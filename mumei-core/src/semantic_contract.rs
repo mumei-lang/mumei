@@ -5,7 +5,7 @@ use crate::hir::lower_atom_to_hir;
 use crate::mir::lower_hir_to_mir;
 use crate::parser::{
     parse_body_expr_checked, parse_expression_checked, parse_module_checked, Atom, Expr, Item, Op,
-    Span, Stmt, TrustLevel,
+    Pattern, Span, Stmt, TrustLevel,
 };
 use crate::proof_cert::compute_atom_content_hash_v2;
 use crate::verification::{
@@ -27,8 +27,11 @@ pub const PURE_I64_PROFILE: &str = "mumei.pure-i64-comparison/v1";
 /// bitwise `&`/`|`/`^`, guarded div/rem/shl/shr (defined only for nonzero
 /// divisors excluding
 /// i64::MIN / -1 and shift amounts in 0..64), block-scoped `let`
-/// bindings, scalar reassignments on the linear path, nested blocks and
-/// discarded pure expression statements. Kept distinct from the
+/// bindings, scalar reassignments on the linear path, nested blocks,
+/// discarded pure expression statements, `bool` parameters and results
+/// lowered to i64 carrying 0/1, and first-match-order `match` on an i64
+/// scrutinee with literal patterns and a trailing catch-all arm. Kept
+/// distinct from the
 /// bounded C03 contract, which still excludes arithmetic and sequences.
 pub const PURE_I64_WRAPPING_PROFILE: &str = "mumei.pure-i64-wrapping-scalar/v1";
 
@@ -113,8 +116,9 @@ pub struct SemanticContract {
 /// partial domain: nonzero divisor, no i64::MIN / -1, shift amount in 0..64),
 /// block-scoped `let` bindings, scalar reassignments on the linear path
 /// (a rebinding cannot escape an `if` branch, expression block or nested
-/// block), discarded pure expression statements and `bool` parameters
-/// and results lowered to i64 carrying 0/1;
+/// block), discarded pure expression statements, `bool` parameters
+/// and results lowered to i64 carrying 0/1, and `match` on an i64
+/// scrutinee with literal patterns and a trailing catch-all arm;
 /// the bounded C03
 /// contract always passes `false` so the build
 /// and recheck paths keep agreeing on a fragment with no arithmetic.
@@ -312,6 +316,7 @@ pub fn extract_pure_i64_contract(
         .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
         .chain(allow_wrapping_arithmetic.then_some("bool_parameters_lowered_to_i64_zero_one"))
         .chain(allow_wrapping_arithmetic.then_some("bool_results_lowered_to_i64_zero_one"))
+        .chain(allow_wrapping_arithmetic.then_some("first_match_order_i64_match_with_catch_all"))
         .collect(),
         requested_route: "standard_z3_not_executed_by_extractor",
         decomposition: "no_common_obligation_decomposition",
@@ -618,6 +623,57 @@ fn expression_kind(
             )?;
             Ok(then_kind)
         }
+        // First-match-order `match` on an i64 scrutinee: literal patterns
+        // test `target == n` and a `Variable`/`Wildcard` arm binds or
+        // ignores the value; a trailing catch-all arm is required so the
+        // chain is exhaustive without a solver check. Guards, variant
+        // patterns, a non-i64 scrutinee and a literal last arm stay
+        // outside the profile, and each arm body keeps its own lexical
+        // scope (reassignments inside an arm cannot escape it).
+        Expr::Match { target, arms } if allow_wrapping_arithmetic => {
+            expect_kind(
+                expression_kind(target, scope, result_in_scope, allow_wrapping_arithmetic)?,
+                ScalarKind::I64,
+            )?;
+            let Some(last) = arms.last() else {
+                return Err(SemanticContractError::Unsupported("empty match"));
+            };
+            if !matches!(last.pattern, Pattern::Wildcard | Pattern::Variable(_)) {
+                return Err(SemanticContractError::Unsupported(
+                    "match without a catch-all arm",
+                ));
+            }
+            let mut kind = None;
+            for arm in arms {
+                if arm.guard.is_some() {
+                    return Err(SemanticContractError::Unsupported("match arm guard"));
+                }
+                let mut arm_scope = scope.clone();
+                match &arm.pattern {
+                    Pattern::Literal(_) | Pattern::Wildcard => {}
+                    Pattern::Variable(name) => {
+                        arm_scope.insert(name.clone(), ScalarKind::I64);
+                    }
+                    _ => {
+                        return Err(SemanticContractError::Unsupported(
+                            "match pattern outside literals and catch-all",
+                        ));
+                    }
+                }
+                let arm_kind = statement_kind(
+                    &arm.body,
+                    &arm_scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                )?;
+                match kind {
+                    None => kind = Some(arm_kind),
+                    Some(first) => expect_kind(arm_kind, first)?,
+                }
+            }
+            kind.ok_or(SemanticContractError::Unsupported("empty match"))
+        }
         _ => Err(SemanticContractError::Unsupported(
             "expression or unbound name",
         )),
@@ -786,6 +842,14 @@ fn param_env<'ctx>(
         .collect()
 }
 impl<'ctx> SourceValue<'ctx> {
+    fn integer(self) -> BodyResult<BV<'ctx>> {
+        match self {
+            Self::Integer(v) => Ok(v),
+            _ => Err(SemanticContractError::Unsupported(
+                "source integer expected",
+            )),
+        }
+    }
     fn boolean(self) -> BodyResult<Bool<'ctx>> {
         match self {
             Self::Boolean(v) => Ok(v),
@@ -1007,6 +1071,89 @@ fn source_expr<'ctx>(
                 (B(a), B(b)) => B(cond.ite(&a, &b)),
                 _ => return Err(SemanticContractError::Unsupported("source branch types")),
             }
+        }
+        // First-match order, like the emitter's try-chain and
+        // `--bitvec-i64` verification: a literal arm runs under the
+        // negation of every earlier literal's test plus its own; a
+        // `Variable`/`Wildcard` arm matches everything that remains, so
+        // any later arm is dead — its guard gets the literal `false`
+        // miss term, which encodes it while binding nothing.
+        Expr::Match { target, arms } => {
+            let target = source_expr(target, ctx, env, guard, definedness, depth + 1)?.integer()?;
+            let mut missed: Vec<Bool> = Vec::new();
+            let mut selected: Vec<(Bool, SourceValue)> = Vec::new();
+            let mut fallback = None;
+            for arm in arms {
+                // An arm after a catch-all is never reached: its body is
+                // still encoded (under an unsatisfiable guard, so its
+                // obligations are vacuous) but its value is dropped.
+                let dead = fallback.is_some();
+                let mut arm_guard: Vec<Bool> = missed.clone();
+                let (hit, binding) = match &arm.pattern {
+                    Pattern::Literal(n) => {
+                        let cond = target._eq(&BV::from_i64(ctx, *n, 64));
+                        if dead {
+                            (None, None)
+                        } else {
+                            arm_guard.push(cond.clone());
+                            missed.push(cond.not());
+                            (Some(cond), None)
+                        }
+                    }
+                    Pattern::Variable(name) => {
+                        if !dead {
+                            missed.push(Bool::from_bool(ctx, false));
+                        }
+                        (None, Some(name.clone()))
+                    }
+                    Pattern::Wildcard => {
+                        if !dead {
+                            missed.push(Bool::from_bool(ctx, false));
+                        }
+                        (None, None)
+                    }
+                    _ => {
+                        return Err(SemanticContractError::Unsupported(
+                            "match pattern outside literals and catch-all",
+                        ));
+                    }
+                };
+                let mut terms: Vec<&Bool> = Vec::with_capacity(arm_guard.len() + 1);
+                terms.push(guard);
+                terms.extend(arm_guard.iter());
+                let arm_guard = Bool::and(ctx, &terms);
+                let mut arm_env = env.clone();
+                if let Some(name) = binding {
+                    arm_env.insert(name, I(target.clone()));
+                }
+                let value = source_stmt(
+                    &arm.body,
+                    ctx,
+                    &arm_env,
+                    &arm_guard,
+                    definedness,
+                    depth + 1,
+                    &BTreeSet::new(),
+                )?;
+                if let Some(cond) = hit {
+                    selected.push((cond, value));
+                } else if fallback.is_none() {
+                    fallback = Some(value);
+                }
+            }
+            let Some(mut result) = fallback else {
+                return Err(SemanticContractError::Unsupported(
+                    "match without a catch-all arm",
+                ));
+            };
+            for (cond, value) in selected.into_iter().rev() {
+                result = match (result, value) {
+                    (I(rest), I(v)) => I(cond.ite(&v, &rest)),
+                    (B(rest), B(v)) => B(cond.ite(&v, &rest)),
+                    _ => return Err(SemanticContractError::Unsupported("source match arm kinds")),
+                };
+            }
+            result
         }
         _ => {
             return Err(SemanticContractError::Unsupported(
