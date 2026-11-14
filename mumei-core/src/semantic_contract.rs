@@ -329,6 +329,7 @@ pub fn extract_pure_i64_contract(
         .chain(allow_wrapping_arithmetic.then_some("bool_parameters_lowered_to_i64_zero_one"))
         .chain(allow_wrapping_arithmetic.then_some("bool_results_lowered_to_i64_zero_one"))
         .chain(allow_wrapping_arithmetic.then_some("first_match_order_i64_match_with_catch_all"))
+        .chain(allow_wrapping_arithmetic.then_some("match_arm_boolean_guards"))
         .chain(allow_wrapping_arithmetic.then_some("conditional_path_reassignment_ite_merge"))
         .collect(),
         requested_route: "standard_z3_not_executed_by_extractor",
@@ -693,10 +694,12 @@ fn expression_kind(
         // First-match-order `match` on an i64 scrutinee: literal patterns
         // test `target == n` and a `Variable`/`Wildcard` arm binds or
         // ignores the value; a trailing catch-all arm is required so the
-        // chain is exhaustive without a solver check. Guards, variant
-        // patterns, a non-i64 scrutinee and a literal last arm stay
-        // outside the profile, and each arm body keeps its own lexical
-        // scope (reassignments inside an arm cannot escape it).
+        // chain is exhaustive without a solver check. An arm may add a
+        // Boolean guard evaluated in the arm's scope, but the trailing
+        // catch-all must be unguarded. Variant patterns, a non-i64
+        // scrutinee and a literal last arm stay outside the profile, and
+        // each arm body keeps its own lexical scope (reassignments inside
+        // an arm cannot escape it).
         Expr::Match { target, arms } if allow_wrapping_arithmetic => {
             expect_kind(
                 expression_kind(
@@ -716,11 +719,13 @@ fn expression_kind(
                     "match without a catch-all arm",
                 ));
             }
+            if last.guard.is_some() {
+                return Err(SemanticContractError::Unsupported(
+                    "guarded match catch-all arm",
+                ));
+            }
             let mut kind = None;
             for arm in arms {
-                if arm.guard.is_some() {
-                    return Err(SemanticContractError::Unsupported("match arm guard"));
-                }
                 let mut arm_scope = scope.clone();
                 match &arm.pattern {
                     Pattern::Literal(_) | Pattern::Wildcard => {}
@@ -732,6 +737,18 @@ fn expression_kind(
                             "match pattern outside literals and catch-all",
                         ));
                     }
+                }
+                if let Some(guard) = &arm.guard {
+                    expect_kind(
+                        expression_kind(
+                            guard,
+                            &arm_scope,
+                            result_in_scope,
+                            allow_wrapping_arithmetic,
+                            &BTreeSet::new(),
+                        )?,
+                        ScalarKind::Bool,
+                    )?;
                 }
                 let arm_kind = statement_kind(
                     &arm.body,
@@ -1329,11 +1346,11 @@ fn source_expr<'ctx>(
             }
         }
         // First-match order, like the emitter's try-chain and
-        // `--bitvec-i64` verification: a literal arm runs under the
-        // negation of every earlier literal's test plus its own; a
-        // `Variable`/`Wildcard` arm matches everything that remains, so
-        // any later arm is dead — its guard gets the literal `false`
-        // miss term, which encodes it while binding nothing.
+        // `--bitvec-i64` verification: an arm runs under the negation of
+        // every earlier arm's hit (`pattern ∧ guard`) plus its own; an
+        // unguarded `Variable`/`Wildcard` arm matches everything that
+        // remains, so any later arm is dead — it gets the literal
+        // `false` miss term, which encodes it while binding nothing.
         Expr::Match { target, arms } => {
             let target = source_expr(
                 target,
@@ -1354,49 +1371,71 @@ fn source_expr<'ctx>(
                 // still encoded (under an unsatisfiable guard, so its
                 // obligations are vacuous) but its value is dropped.
                 let dead = fallback.is_some();
-                let mut arm_guard: Vec<Bool> = missed.clone();
-                let (hit, binding) = match &arm.pattern {
-                    Pattern::Literal(n) => {
-                        let cond = target._eq(&BV::from_i64(ctx, *n, 64));
-                        if dead {
-                            (None, None)
-                        } else {
-                            arm_guard.push(cond.clone());
-                            missed.push(cond.not());
-                            (Some(cond), None)
-                        }
-                    }
-                    Pattern::Variable(name) => {
-                        if !dead {
-                            missed.push(Bool::from_bool(ctx, false));
-                        }
-                        (None, Some(name.clone()))
-                    }
-                    Pattern::Wildcard => {
-                        if !dead {
-                            missed.push(Bool::from_bool(ctx, false));
-                        }
-                        (None, None)
-                    }
+                // The try-block reach is the enclosing guard plus the
+                // negation of every earlier arm's hit; the arm hits when
+                // its pattern matches and its Boolean guard holds, like
+                // the emitter's `pattern ∧ guard` full condition. An arm
+                // guard is compiled inside the try block, so its partial
+                // operators bind under the reach alone.
+                let mut terms: Vec<&Bool> = Vec::with_capacity(missed.len() + 1);
+                terms.push(guard);
+                terms.extend(missed.iter());
+                let reach = Bool::and(ctx, &terms);
+                let (pat_cond, binding) = match &arm.pattern {
+                    Pattern::Literal(n) => (Some(target._eq(&BV::from_i64(ctx, *n, 64))), None),
+                    Pattern::Variable(name) => (None, Some(name.clone())),
+                    Pattern::Wildcard => (None, None),
                     _ => {
                         return Err(SemanticContractError::Unsupported(
                             "match pattern outside literals and catch-all",
                         ));
                     }
                 };
-                let mut terms: Vec<&Bool> = Vec::with_capacity(arm_guard.len() + 1);
-                terms.push(guard);
-                terms.extend(arm_guard.iter());
-                let arm_guard = Bool::and(ctx, &terms);
                 let mut arm_env = env.clone();
                 if let Some(name) = binding {
                     arm_env.insert(name, I(target.clone()));
                 }
+                let hit = if dead {
+                    None
+                } else {
+                    let hit = match (&pat_cond, &arm.guard) {
+                        (pattern, Some(g)) => {
+                            let gv = source_expr(
+                                g,
+                                ctx,
+                                &arm_env,
+                                &reach,
+                                definedness,
+                                depth + 1,
+                                &BTreeSet::new(),
+                                written,
+                            )?
+                            .boolean()?;
+                            Some(match pattern {
+                                Some(p) => Bool::and(ctx, &[p, &gv]),
+                                None => gv,
+                            })
+                        }
+                        (Some(p), None) => Some(p.clone()),
+                        (None, None) => None,
+                    };
+                    missed.push(
+                        hit.as_ref()
+                            .map_or(Bool::from_bool(ctx, false), |h| h.not()),
+                    );
+                    hit
+                };
+                // The arm body runs on `reach ∧ hit`: an unguarded
+                // catch-all adds nothing (it matches all that remains).
+                let body_guard = match &hit {
+                    Some(h) => Bool::and(ctx, &[&reach, h]),
+                    None => reach.clone(),
+                };
                 let value = source_stmt(
                     &arm.body,
                     ctx,
                     &arm_env,
-                    &arm_guard,
+                    &body_guard,
                     definedness,
                     depth + 1,
                     &BTreeSet::new(),
