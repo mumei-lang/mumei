@@ -1347,6 +1347,19 @@ fn scalar_match_is_equivalent_and_refuted() {
 }
 
 #[test]
+fn all_unreachable_function_reports_ub_not_a_missing_return() {
+    // With no `ret` edge at all, every path ends in `unreachable` — that
+    // is UB on every defined input, not a missing-return error.
+    let src = source("x: i64", "x");
+    for ir in [
+        pin("define i64 @f(i64 %x) {\nentry:\n  unreachable\n}"),
+        pin("define i64 @f(i64 %x) {\nentry:\n  %c = icmp eq i64 %x, 0\n  br i1 %c, label %u, label %v\nu:\n  unreachable\nv:\n  unreachable\n}"),
+    ] {
+        assert_eq!(validate(&src, &ir).outcome, Outcome::UndefinedBehavior, "{ir}");
+    }
+}
+
+#[test]
 fn scalar_match_stays_bounded() {
     // Non-admitted shapes are static errors, not silently weakened.
     for src in [

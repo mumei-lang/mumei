@@ -625,7 +625,14 @@ impl<'ctx> IrEncoder<'ctx> {
             &mut returns,
         )?;
         if returns.is_empty() {
-            return Err(ValidationError("missing LLVM return"));
+            // Every leaf under the whitelist is a `ret` or an
+            // `unreachable`, so no return edges means every path ends in
+            // `unreachable`. Its recorded obligations still classify the
+            // function — reachable on a defined input it is
+            // UndefinedBehavior rather than a missing-return error.
+            if self.definedness.is_empty() {
+                return Err(ValidationError("missing LLVM return"));
+            }
         }
         Ok(returns)
     }
