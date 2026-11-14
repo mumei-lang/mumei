@@ -1174,8 +1174,11 @@ the operand must be a bound identifier whose pointer names a `type`
 member (the pointee pins for `stale_dependents`), and the field must
 resolve to a scalar-or-pointer `var` member. One explicit
 dereference — `(*t).F` — spells the same auto-deref out and admits
-the same way. A struct pointee can never alias a tracked scalar
-binding, so no escaped union applies. `(**t).F`, `t.W.N`, `t.PF`
+the same way, and intermediate selections walk the chain while each
+field is pointer-typed: `t.W.N` resolves `W`'s `*W2` member to `W2`
+— every traversed `type` member pins. A struct pointee can never
+alias a tracked scalar binding, so no escaped union applies.
+`(**t).F`, struct-valued intermediates (`t.A.B` on `A S3`), `t.PF`
 method values and composite-typed fields stay closed.
 
 Member declarations also classify `lib.T(e)` conversion targets: the
