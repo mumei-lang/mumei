@@ -2866,7 +2866,13 @@ of `input != 0` and the signature bounds that input to `{0, 1}`; a
 so the checked source value is the Boolean body's 0/1 materialization
 and an `i1` return is a signature error, not a value difference;
 boolean values stay two-valued (a `bool` binding is not an i64 operand
-and a `-> bool` body must produce a Bool kind). `match` on an i64
+and a `-> bool` body must produce a Bool kind). Declared subrange
+integer types (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`) are admitted the same
+way: they lower to an i64 formal, so the source value is the input and
+the signature bounds the checked domain to the type's range — `x == 200`
+on an `i8` parameter is equivalent to `false` only because the bound
+rules it out; `u64`/`usize`/`isize` and wider result types stay out.
+`match` on an i64
 scrutinee is checked in first-match order — literal patterns contribute
 one `target == n` test each and arms encode as an ite chain under
 accumulated negations, with a trailing `Wildcard`/`Variable` catch-all

@@ -711,7 +711,8 @@ extended with wrapping add/sub/mul, total bitwise `&`/`|`/`^`, guarded
 signed division/remainder/shifts, block-scoped `let` bindings, scalar
 reassignments on the linear path and inside `if` branches, discarded
 pure expression
-statements, `bool` parameters and results and `match` on an i64
+statements, `bool` parameters and results, subrange integer parameter
+types (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`) and `match` on an i64
 scrutinee with literal patterns and a trailing catch-all arm —
 and one caller-supplied LLVM
 17 textual IR snapshot. The caller must explicitly pin the exact
@@ -775,6 +776,16 @@ expressions stay two-valued: a `bool` binding is not an i64 operand
 (`b + 1` is rejected), a `-> bool` body must produce a Bool kind
 (`if b { 1 } else { 0 }` is rejected),
 and reassigning a bool to a non-bool value keeps the binding's kind.
+Declared subrange integer types — `i8`/`i16`/`i32`/`u8`/`u16`/`u32` —
+lower to an i64 formal the same way `resolve_param_type` lowers every
+non-aggregate type, so their source value is the input itself and the
+signature bounds the checked domain to the type's range (unsigned types
+by `input <=u max`, signed types by `min <=s input <=s max`): `x == 200`
+on an `i8` parameter is equivalent to `false` only because the bound
+rules `x = 200` out. `u64`, `usize` and `isize` stay outside the
+profile — a full-width unsigned domain cannot be expressed as an i64
+range bound — and a wider result type (`-> i32`) is not part of the
+slice.
 A `match` on an i64 scrutinee is checked in first-match order: each
 literal pattern contributes one `target == n` test and the arm bodies
 are encoded as an ite chain under the accumulated negations, so an arm
