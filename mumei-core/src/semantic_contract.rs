@@ -70,6 +70,7 @@ pub struct NumericSemantics {
     pub arithmetic: &'static str,
     pub division: &'static str,
     pub shifts: &'static str,
+    pub bitwise: &'static str,
     pub conversions: &'static str,
 }
 
@@ -105,8 +106,9 @@ pub struct SemanticContract {
 /// Extract a single explicit-i64 atom without imports, calls, arithmetic or effects.
 /// The target is caller-supplied metadata, not a claim of backend availability.
 /// `allow_wrapping_arithmetic` admits i64 add/sub/mul as mod-2^64 wrapping
-/// operations plus guarded div/rem/shl/shr (a partial domain: nonzero
-/// divisor, no i64::MIN / -1, shift amount in 0..64); the bounded C03
+/// operations, total bitwise `&`/`|`/`^`, plus guarded div/rem/shl/shr (a
+/// partial domain: nonzero divisor, no i64::MIN / -1, shift amount in 0..64);
+/// the bounded C03
 /// contract always passes `false` so the build
 /// and recheck paths keep agreeing on a fragment with no arithmetic.
 pub fn extract_pure_i64_contract(
@@ -236,6 +238,11 @@ pub fn extract_pure_i64_contract(
             } else {
                 "unsupported"
             },
+            bitwise: if allow_wrapping_arithmetic {
+                "i64_bitand_bitor_bitxor_total"
+            } else {
+                "unsupported"
+            },
             conversions: "unsupported",
         },
         // HIR has no stable serialization. This v0 diagnostic fingerprint is
@@ -261,6 +268,7 @@ pub fn extract_pure_i64_contract(
         ]
         .into_iter()
         .chain(allow_wrapping_arithmetic.then_some("wrapping_i64_arithmetic"))
+        .chain(allow_wrapping_arithmetic.then_some("i64_bitwise_total"))
         .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
         .collect(),
         requested_route: "standard_z3_not_executed_by_extractor",
@@ -405,7 +413,16 @@ fn expression_kind(
                 // operations: the caller's BV encoder records their defined
                 // domain (nonzero divisor excluding i64::MIN / -1, shift
                 // amount in 0..64) as explicit obligations.
-                Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Rem | Op::Shl | Op::Shr
+                Op::Add
+                | Op::Sub
+                | Op::Mul
+                | Op::Div
+                | Op::Rem
+                | Op::Shl
+                | Op::Shr
+                | Op::BitAnd
+                | Op::BitOr
+                | Op::BitXor
                     if allow_wrapping_arithmetic && left == ScalarKind::I64 && right == left =>
                 {
                     Ok(ScalarKind::I64)
@@ -681,6 +698,10 @@ fn source_expr<'ctx>(
                 (I(a), Op::Add, I(b)) => I(a.bvadd(&b)),
                 (I(a), Op::Sub, I(b)) => I(a.bvsub(&b)),
                 (I(a), Op::Mul, I(b)) => I(a.bvmul(&b)),
+                // Bitwise ops are total on i64 — no definedness obligation.
+                (I(a), Op::BitAnd, I(b)) => I(a.bvand(&b)),
+                (I(a), Op::BitOr, I(b)) => I(a.bvor(&b)),
+                (I(a), Op::BitXor, I(b)) => I(a.bvxor(&b)),
                 // `bvsdiv`/`bvsrem` truncate like the emitted `sdiv`/`srem`;
                 // both sides are partial in the same way, so the defined
                 // domain is an explicit obligation, not an assumption.

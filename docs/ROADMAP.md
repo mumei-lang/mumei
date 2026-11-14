@@ -2835,7 +2835,10 @@ Signed division, remainder and shifts (`sdiv`/`srem`/`shl`/`ashr`) join under
 refinement semantics — both sides bind inputs only where defined (nonzero
 divisor except `i64::MIN / -1`, shift amount `0..64`), IR poison on a
 source-defined input reports `UndefinedBehavior`, a vacuous source domain is
-an error, and hard nonlinear queries stay `Inconclusive`. Unsigned forms and
+an error, and hard nonlinear queries stay `Inconclusive`. Source
+`&`/`|`/`^` are admitted as total i64 bitwise `and`/`or`/`xor` on both
+sides — bitwise ops are defined for every input, so they carry no domain
+obligation. Unsigned forms and
 flagged variants remain outside the profile. The bounded C03
 recheck/native-bundle fragment stays closed to arithmetic, so build and
 recheck keep agreeing on one source grammar. See the

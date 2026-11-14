@@ -238,9 +238,7 @@ fn multiple_returns_and_phi_predecessors_are_not_merged_by_value_name() {
 #[test]
 fn unsupported_source_is_not_silently_weakened() {
     for body in [
-        "x&2",
-        "x|2",
-        "x^2",
+        "x**2",
         "1.0",
         "let y = x; y",
         "f(x)",
@@ -277,6 +275,15 @@ fn wrapping_i64_arithmetic_is_equivalent_and_refuted() {
         ("x: i64", "if x + 1 > 0 { x * 2 } else { 0 - x }"),
         // Wrap: addition of a negative literal lowers to `sub`; -x to `0 - x`.
         ("x: i64", "x + 0 - 1"),
+        // Bitwise ops are total on i64 — no definedness obligation needed.
+        ("x: i64", "x & 3"),
+        ("x: i64", "x | 5"),
+        ("x: i64", "x ^ x"),
+        ("x: i64, y: i64", "x & y"),
+        ("x: i64, y: i64", "x | y"),
+        ("x: i64, y: i64", "x ^ y"),
+        ("x: i64, y: i64", "(x & y) | (x ^ y)"),
+        ("x: i64", "if x & 1 == 0 { x | 2 } else { x ^ 3 }"),
     ] {
         let src = source(params, body);
         assert_eq!(
@@ -311,6 +318,25 @@ fn wrapping_i64_arithmetic_is_equivalent_and_refuted() {
     let doubled = source("x: i64", "x + x");
     assert_eq!(
         validate(&doubled, &emitted(&source("x: i64", "x * 2"))).outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    // A wrong bitwise opcode or operand is a genuine difference, not noise.
+    let masked = source("x: i64", "x & 3");
+    for wrong in [
+        pin("define i64 @f(i64 %x) { %v = or i64 %x, 3\nret i64 %v }"),
+        pin("define i64 @f(i64 %x) { %v = xor i64 %x, 3\nret i64 %v }"),
+        pin("define i64 @f(i64 %x) { %v = and i64 %x, 7\nret i64 %v }"),
+    ] {
+        assert_eq!(
+            validate(&masked, &wrong).outcome,
+            Outcome::Different,
+            "{wrong}"
+        );
+    }
+    // `x & x` and `x | x` are both just `x` — cross-opcode equality still holds.
+    let self_and = source("x: i64", "x & x");
+    assert_eq!(
+        validate(&self_and, &emitted(&source("x: i64", "x | x"))).outcome,
         Outcome::EquivalentWithinProfile
     );
 }
@@ -677,6 +703,10 @@ fn native_emitter_bodies_and_truncating_wrapper_match_without_rewriting() {
         "if 1 < 2 { if false { 99 } else { 7 } } else { 42 }",
         "if (1 < 2) && (7 != 8) { 7 } else { 99 }",
         "if (1 > 2) || (7 == 8) { 99 } else { 7 }",
+        "7 & 3",
+        "7 | 3",
+        "7 ^ 3",
+        "(7 & 3) | (7 ^ 1)",
     ]
     .into_iter()
     .map(str::to_owned)
