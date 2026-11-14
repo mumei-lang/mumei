@@ -1210,7 +1210,8 @@ the caller's analysis, never by the callee's own summary. See the
 
 Explicit instantiations of imported generic functions —
 `lib.G[int64](x)` — now classify as `direct_import` when every type
-argument is basic, named or alias, every instantiated parameter is
+argument is basic, named, alias or a composite constructor of
+those, every instantiated parameter is
 basic-underlying (one `*T` layer unwraps) and every
 instantiated result is scalar, at any arity (see the multi-valued
 section below for the tuple rule). The dependency model is the existing
