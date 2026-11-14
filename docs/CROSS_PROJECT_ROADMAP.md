@@ -1325,8 +1325,9 @@ through the same external-mutation rule — `lib.V = v`,
 the LHS until a `var` member names the target, record the imported
 transfer against the member's identity, and pin the member's declared
 type identity (plus a container element's) for `stale_dependents`;
-a nested index still evaluates for its calls while a call-free one
-needs no evaluation, and computed operands (`g()[0] = v`) and
+a nested index still evaluates whenever it could record a call or an
+imported member read while a literal or plain-name one needs no
+evaluation, and computed operands (`g()[0] = v`) and
 dereference writes (`*lib.PV = v`) stay closed. See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
 section.
