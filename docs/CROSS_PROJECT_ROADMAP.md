@@ -1031,6 +1031,18 @@ Type switches, `select`, labelled jumps and `goto` remain outside the
 fragment. See the
 [Agent switch fallthrough](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-switch-fallthrough).
 
+### Wave 3 general for updates in scalar summaries
+
+Agent's for-clause update no longer requires the `i++`/`i--` inc/dec
+shapes: the update statement runs through the same statement dispatch
+as the body, once per fixed-point pass, so assignments, compound and
+tuple updates and calls all admit — assignment RHS
+dependencies widen into the loop fixed point like any body statement.
+Update shapes rejected elsewhere still surface as declared gaps;
+condition evaluation stays a once-per-loop approximation and trip
+counts remain unmodelled. See the
+[Agent general for updates](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-general-for-updates).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
