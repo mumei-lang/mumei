@@ -941,6 +941,14 @@ compound assignments and expression/send initializers stay declared
 gaps. See the
 [Agent statement initializers](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-statement-initializers-on-if-and-switch).
 
+### Wave 3 scalar conversions in scalar summaries
+
+Agent's C07 fragment now treats conversion calls `T(e)` as effect-free:
+the result inherits the operand's dependencies; the type change
+(truncation, widening, signedness) is not modelled. Conversions to
+non-scalar targets still fail closed at the binding check. See the
+[Agent scalar conversions](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-scalar-conversions-in-expressions).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
