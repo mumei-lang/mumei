@@ -1421,9 +1421,12 @@ Under C13, a required claim may pin `evidence_kind` (exact match over the claim
 and its dependency coverage), so a requirement written for model proof is not
 satisfied by finite replay or another backend's evidence carrying the same
 grade — including one reached transitively; the kinds stay distinct. The pin is
-optional and existing contracts without it are unchanged. Synthetic reader
-regressions cover the pinned-match and substituted-kind arms; mixed-kind chains
-cannot pin today.
+optional and existing contracts without it are unchanged. `dependency_kinds`
+extends the pin per claim atom, so a mixed-kind chain can pin each claim's own
+kind (the selected claim and any reachable dependency may be named; a name
+outside the coverage fails closed), and a per-claim pin composes with a uniform
+`evidence_kind` rather than overriding it. Synthetic reader regressions cover
+the pinned-match, substituted-kind and per-claim-selector arms.
 
 Repository responsibilities stay the same: `mumei` owns proof and dependency
 gates; `mumei-agent` owns harvesting and repair tools; `mumei-lean` remains the
