@@ -1063,6 +1063,12 @@ pub(crate) fn cmd_build(
         }
         if bound_emit.is_ok() {
             run_translation_validation_check(&source, &ll_path, output_dir, file_stem);
+        } else {
+            // The skipped check must not leave an earlier report beside
+            // the new unvalidated binary.
+            let _ = fs::remove_file(
+                output_dir.join(format!("{file_stem}.translation-validation.json")),
+            );
         }
         let _ = fs::remove_file(&ll_path);
 
