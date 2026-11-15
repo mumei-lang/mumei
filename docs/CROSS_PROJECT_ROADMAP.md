@@ -707,6 +707,24 @@ remain open work. C11 stays partial; C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent probe scheduling](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-observation-driven-probe-scheduling).
 
+### Wave 2 probe execution driver
+
+Agent's `adapter_probe.observe_probes(requests, runner=..., cancel_event=...)`
+executes a scheduled `AdapterProbeRequest` tuple through one shared
+`AttemptRunner` and returns the `RuntimeObservation` tuple in request
+order — closing the observe → re-plan loop: `probe_requests_for` emits,
+`observe_probes` executes, and the caller feeds the observations back
+into `registry.plan` (or the next scheduling round) itself.
+
+Normalized attempt results stay inside `run_probe`; only
+availability/stamp/tool_version cross into observations, so probe
+stdout or exit detail cannot leak into a routing decision. The driver
+never plans, reorders or retries. Concurrency, retry policy and
+Evidence acceptance remain open. C11 stays partial; C12's demand gate
+plus existing assurance/Lean/native/LLVM/deferred-WASM policies are
+unchanged. See the
+[Agent probe driver](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-probe-execution-driver).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
