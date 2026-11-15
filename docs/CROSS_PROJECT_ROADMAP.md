@@ -2040,11 +2040,14 @@ section.
 
 The same route family plus the attempt route lands on the in-process
 TypeScript,
-Solidity and Rust adapters (development accumulates on
+Solidity and Rust adapters. The spike work accumulated on
 [mumei-agent#749](https://github.com/mumei-lang/mumei-agent/pull/749),
 [#774](https://github.com/mumei-lang/mumei-agent/pull/774) and
 [#775](https://github.com/mumei-lang/mumei-agent/pull/775) as draft
-branches; no production route is wired yet):
+branches; the Rust and Solidity families are promoted to declared
+routes by their own Wave 3 sections below, and the TypeScript family
+follows the same normalization. What stays unwired is consumption —
+no production verification path calls these routes yet:
 
 - `<lang>-summaries <file>` emits the summary set as JSON — the
   declared manifest shape (`schema_version`, `context_key`,
