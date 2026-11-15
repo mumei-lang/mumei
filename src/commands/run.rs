@@ -41,7 +41,7 @@ pub(crate) fn cmd_run(
     check_z3_available();
     println!("🗡️  Mumei Run: verify → codegen → link → execute");
 
-    let (items, mut module_env, _imports, _source) =
+    let (items, mut module_env, _imports, source) =
         load_and_prepare_with_full_options(input, false, allow_lean_verified);
     let extern_blocks = collect_extern_blocks(&module_env);
 
@@ -174,17 +174,32 @@ pub(crate) fn cmd_run(
         }
         object_path
     } else {
+        let ll_path = tmp_dir.join("mumei_merged.ll");
         let object_path = tmp_dir.join("mumei_output.o");
-        if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_object(
+        if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
             &hir_atoms,
             &module_env,
             &extern_blocks,
-            &object_path,
+            &ll_path,
         ) {
             eprintln!("❌ Codegen failed: {}", e);
             let _ = fs::remove_dir_all(&tmp_dir);
             std::process::exit(1);
         }
+        // Bind the host triple + data layout into the staged IR, then
+        // validate the exact bytes the object emitter consumed (same
+        // check `build --emit binary` runs; the tmp IR is discarded).
+        if let Err(e) =
+            mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ll_path, &object_path)
+        {
+            eprintln!("❌ Codegen failed: {}", e);
+            let _ = fs::remove_dir_all(&tmp_dir);
+            std::process::exit(1);
+        }
+        let report_path = output_path
+            .as_ref()
+            .map(|path| path.with_extension("translation-validation.json"));
+        run_translation_validation_check(&source, &ll_path, report_path.as_deref());
         object_path
     };
 
