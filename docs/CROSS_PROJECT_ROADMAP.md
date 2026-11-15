@@ -505,7 +505,10 @@ serializes as detached metadata under
 Core handoff and returns the record the check produced, distinguishing
 `CoreCheckFailed` (a `ValueError` subclass — a real check failure) from
 request-shape errors, which stay plain `ValueError` and are never
-misrecorded as checked-and-failed. Candidate and output binding are
+misrecorded as checked-and-failed. The checked output must be the
+selected result itself — its manifest fingerprint must equal the
+candidate's, so different bytes under the same attempt record cannot
+borrow the declaration. Candidate, output binding and selection are
 validated before any spawn; static errors propagate and record nothing.
 
 This is a check record, not Evidence: `"valid"` only means Core's
