@@ -712,9 +712,9 @@ signed division/remainder/shifts, block-scoped `let` bindings, scalar
 reassignments on the linear path and inside `if` branches, discarded
 pure expression
 statements, `bool` parameters and results, subrange integer parameter
-and result types (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`) and `match` on an i64
+and result types (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`), `match` on an i64
 scrutinee with literal patterns, Boolean arm guards and a trailing
-unguarded catch-all arm —
+unguarded catch-all arm, and calls to sibling atoms —
 and one caller-supplied LLVM
 17 textual IR snapshot. The caller must explicitly pin the exact
 `x86_64-unknown-linux-gnu` triple and the profile's `DATA_LAYOUT` on that snapshot;
@@ -767,8 +767,9 @@ initializers, expression blocks and nested blocks may only touch
 names bound within them — `x + (if x > 0 { x = 1; x } else { x })`,
 `let a = x; { a = 1; a }; a` and
 `let v = match x { 0 => { r = 1; r }, _ => { r = 2; r } }; v`
-stay rejected. Other statement
-forms (unbound assignment, calls, loops) stay
+stay rejected. Calls are admitted in expression and statement
+position with i64 arguments and an i64 result; other statement
+forms (unbound assignment, loops) stay
 unsupported.
 A declared `bool` parameter lowers to i64 carrying 0/1 — the same
 lowering `resolve_param_type` and the emitter's `icmp ne` condition use —
@@ -833,12 +834,22 @@ The source model includes Boolean implication, but the existing emitter still
 rejects implication in an executable body. Checking manually supplied IR for
 that source form does not add or claim an emitter lowering.
 
-Only one ordinary C-call-convention function with an i64 signature is accepted.
+Every function in the module is an ordinary C-call-convention function
+with an i64 signature, external linkage and a defined body; declarations,
+internal linkage, globals/aliases/ifuncs, inline assembly, attributes and
+metadata are unsupported. A `call` is admitted only as a direct, plain
+call — no operand bundles, tail calls, call-site attributes or
+non-C calling conventions — to a defined in-module function whose
+return and parameters are all i64. Both encoders then model the call as
+the same uninterpreted function of its i64 arguments keyed by callee
+name and arity: the comparison is a call-site comparison, so it holds
+exactly when both sides call the same callee on equal arguments.
+Whether a callee's own body implements its source contract is a
+separate per-function validation obligation, not discharged here.
 Memory/pointers, unsigned `udiv`/`urem`/`lshr`, flagged (nsw/nuw/exact)
 arithmetic — a flag widens the poison domain and is rejected —,
-calls/FFI/intrinsics,
-loops, vectors/floats, globals/aliases/ifuncs, inline assembly, attributes,
-metadata, undef/poison and freeze are unsupported. Every block is screened,
+FFI/intrinsics/indirect calls,
+loops, vectors/floats, undef/poison and freeze are unsupported. Every block is screened,
 including dead blocks. Unsupported syntax, invalid IR, unmatched identities
 and exhausted analysis budgets are errors, never successful partial checks.
 The initial bounds are 64 KiB per input, 256 source tokens, 16 parameters,

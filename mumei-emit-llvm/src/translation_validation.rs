@@ -326,10 +326,90 @@ unsafe fn check_module_environment(module: LLVMModuleRef) -> Result<()> {
     Ok(())
 }
 
-unsafe fn check_module(module: LLVMModuleRef, function: LLVMValueRef) -> Result<()> {
+unsafe fn check_module(module: LLVMModuleRef, _function: LLVMValueRef) -> Result<()> {
     check_module_environment(module)?;
-    if LLVMGetFirstFunction(module) != function || !LLVMGetNextFunction(function).is_null() {
-        return Err(ValidationError("module outside single-function profile"));
+    let mut member = LLVMGetFirstFunction(module);
+    if member.is_null() {
+        return Err(ValidationError("module outside bounded function profile"));
+    }
+    while !member.is_null() {
+        // Every member is a potential call target, so each must satisfy
+        // the same function profile against its own arity. The checked
+        // function's arity against the source signature is asserted
+        // separately at the call site.
+        if LLVMGetLinkage(member) != llvm_sys::LLVMLinkage::LLVMExternalLinkage {
+            return Err(ValidationError("LLVM function linkage unsupported"));
+        }
+        check_function(member, LLVMCountParams(member) as usize)?;
+        member = LLVMGetNextFunction(member);
+    }
+    Ok(())
+}
+
+/// A `call` is admitted only as a direct, plain call to a defined
+/// in-module function with an all-i64 signature — the encoder then
+/// models it as an uninterpreted function of its arguments, and
+/// equivalence holds when both sides call the same callee on equal
+/// arguments. Whether the callee's own body matches its source is a
+/// separate per-function validation obligation.
+unsafe fn check_call(call: LLVMValueRef) -> Result<()> {
+    let callee = LLVMGetCalledValue(call);
+    // `num_operands == args + 1` excludes operand bundles, which the
+    // LLVM 17 C API cannot enumerate (the native wrapper prints instead
+    // because its callee has no arguments at all).
+    if callee.is_null()
+        || LLVMGetValueKind(callee) != llvm_sys::LLVMValueKind::LLVMFunctionValueKind
+        || LLVMGetCalledFunctionType(call) != LLVMGlobalGetValueType(callee)
+        || LLVMIsDeclaration(callee) != 0
+        || LLVMGetNumOperands(call) != LLVMGetNumArgOperands(call) as i32 + 1
+        || LLVMGetInstructionCallConv(call) != 0
+        || LLVMIsTailCall(call) != 0
+        || LLVMGetCallSiteAttributeCount(call, u32::MAX) != 0
+    {
+        return Err(ValidationError("unsupported LLVM call"));
+    }
+    // The operand count excludes empty operand bundles
+    // (`call i64 @g(i64 %x) [ "deopt"() ]`), which the LLVM 17 C API
+    // cannot enumerate at all. A bundle always prints as `[` directly
+    // followed by a quoted tag, so the check keeps quoted SSA names
+    // like `%"value [0]"` working while every bundle shape rejects.
+    let printed = LLVMPrintValueToString(call);
+    let text = std::ffi::CStr::from_ptr(printed)
+        .to_string_lossy()
+        .into_owned();
+    LLVMDisposeMessage(printed);
+    if text
+        .split('[')
+        .skip(1)
+        .any(|rest| rest.trim_start().starts_with('"'))
+    {
+        return Err(ValidationError("unsupported LLVM call"));
+    }
+    // Call-site attribute index 0 is the return value, 1..=num_args are
+    // the parameters: every index must carry no attribute, so `noundef`,
+    // `signext`/`zeroext` and friends never slip in.
+    let arg_count = LLVMGetNumArgOperands(call);
+    for index in 0..=arg_count {
+        if LLVMGetCallSiteAttributeCount(call, index) != 0 {
+            return Err(ValidationError("unsupported LLVM call"));
+        }
+    }
+    let signature = LLVMGetCalledFunctionType(call);
+    if width(LLVMGetReturnType(signature))? != 64
+        || LLVMCountParamTypes(signature) != LLVMGetNumArgOperands(call)
+        || LLVMIsFunctionVarArg(signature) != 0
+    {
+        return Err(ValidationError("unsupported LLVM call signature"));
+    }
+    let count = LLVMCountParamTypes(signature) as usize;
+    let mut params = vec![std::ptr::null_mut(); count];
+    if count != 0 {
+        LLVMGetParamTypes(signature, params.as_mut_ptr());
+    }
+    for param in params {
+        if width(param)? != 64 {
+            return Err(ValidationError("unsupported LLVM call signature"));
+        }
     }
     Ok(())
 }
@@ -380,19 +460,23 @@ unsafe fn check_function(function: LLVMValueRef, params: usize) -> Result<()> {
             if LLVMHasMetadata(inst) != 0 {
                 return Err(ValidationError("LLVM metadata unsupported"));
             }
+            let opcode = LLVMGetInstructionOpcode(inst);
             for i in 0..LLVMGetNumOperands(inst) {
                 let value = LLVMGetOperand(inst, i as u32);
+                // A call's last operand is the callee itself — a
+                // function reference, not an integer value.
+                let is_callee = opcode == LLVMOpcode::LLVMCall && i == LLVMGetNumOperands(inst) - 1;
                 if LLVMIsUndef(value) != 0 || LLVMIsPoison(value) != 0 {
                     return Err(ValidationError("undef or poison unsupported"));
                 }
-                if LLVMValueIsBasicBlock(value) == 0 {
+                if !is_callee && LLVMValueIsBasicBlock(value) == 0 {
                     width(LLVMTypeOf(value))?;
                     if LLVMIsConstant(value) != 0 && LLVMIsAConstantInt(value).is_null() {
                         return Err(ValidationError("unsupported LLVM constant"));
                     }
                 }
             }
-            match LLVMGetInstructionOpcode(inst) {
+            match opcode {
                 LLVMOpcode::LLVMRet | LLVMOpcode::LLVMBr | LLVMOpcode::LLVMUnreachable => (),
                 LLVMOpcode::LLVMAdd | LLVMOpcode::LLVMSub | LLVMOpcode::LLVMMul => {
                     unflagged_arithmetic(inst)?;
@@ -409,6 +493,9 @@ unsafe fn check_function(function: LLVMValueRef, params: usize) -> Result<()> {
                     if width(LLVMTypeOf(inst))? != 64 {
                         return Err(ValidationError("non-i64 division or shift"));
                     }
+                }
+                LLVMOpcode::LLVMCall => {
+                    check_call(inst)?;
                 }
                 LLVMOpcode::LLVMICmp
                 | LLVMOpcode::LLVMAnd
@@ -691,7 +778,35 @@ impl<'ctx> IrEncoder<'ctx> {
                     returns,
                 );
             }
-            let value = if op == LLVMOpcode::LLVMPHI {
+            let value = if op == LLVMOpcode::LLVMCall {
+                // Model the call as an uninterpreted function of its
+                // arguments; `call_decl` gives it the same declaration
+                // the source encoder builds for `Expr::Call` on the
+                // same callee name and arity.
+                let callee = LLVMGetCalledValue(inst);
+                let mut name_len = 0;
+                let raw_name = LLVMGetValueName2(callee, &mut name_len);
+                if raw_name.is_null() {
+                    return Err(ValidationError("unsupported LLVM call"));
+                }
+                let name = String::from_utf8_lossy(std::slice::from_raw_parts(
+                    raw_name as *const u8,
+                    name_len,
+                ))
+                .into_owned();
+                let arity = LLVMGetNumArgOperands(inst) as usize;
+                let mut args = Vec::with_capacity(arity);
+                for index in 0..arity {
+                    args.push(self.value(LLVMGetOperand(inst, index as u32), &values)?);
+                }
+                let refs: Vec<&dyn z3::ast::Ast> =
+                    args.iter().map(|v| v as &dyn z3::ast::Ast).collect();
+                let applied =
+                    mumei_core::semantic_contract::call_decl(self.ctx, &name, arity).apply(&refs);
+                applied
+                    .as_bv()
+                    .ok_or(ValidationError("unsupported LLVM call result"))?
+            } else if op == LLVMOpcode::LLVMPHI {
                 let i = (0..LLVMCountIncoming(inst))
                     .find(|&i| LLVMGetIncomingBlock(inst, i) == previous)
                     .ok_or(ValidationError("missing LLVM phi edge"))?;

@@ -256,15 +256,12 @@ fn unsupported_source_is_not_silently_weakened() {
     for body in [
         "x**2",
         "1.0",
-        "f(x)",
         "while x > 0 invariant true { x }; x",
         // Sequences admit `let`s, scalar reassignments and pure
-        // expression statements: an unbound assignment, a call statement
-        // and a trailing `let` without a value still fail.
+        // expression statements: an unbound assignment and a trailing
+        // `let` without a value still fail.
         "y = 1; x",
-        "f(x); x",
         "let y = x;",
-        "let y = f(x); y",
         // Rebinding cannot escape a nested block, and a name not bound
         // on the linear path cannot be assigned inside a branch.
         "let a = x; { a = 1; a }; a",
@@ -922,7 +919,6 @@ fn vacuous_and_out_of_profile_division_and_shifts_fail_closed() {
         "%c = icmp eq i64 %x, 0\n%v = ashr i1 %c, %c\n%z = zext i1 %v to i64\nret i64 %z",
         "%v = freeze i64 %x\nret i64 %v",
         "%p = alloca i64\nstore i64 %x, ptr %p\n%v = load i64, ptr %p\nret i64 %v",
-        "%v = call i64 @f(i64 %x)\nret i64 %v",
     ] {
         assert!(
             tv::validate_pure_i64(&src, &function(body), Options::default()).is_err(),
@@ -965,7 +961,6 @@ fn target_signature_module_and_metadata_mismatches_are_rejected() {
         format!("{ir}\n@g = global i64 0"),
         format!("{ir}\n@a = alias i64 (i64), ptr @f"),
         format!("{ir}\ndeclare i64 @g(i64)"),
-        format!("{ir}\ndefine i64 @g(i64 %x) {{ret i64 %x}}"),
         format!("{ir}\nmodule asm \"nop\""),
         ir.replace("ret i64 %x", "ret i64 %x, !annotation !0") + "\n!0 = !{!\"excluded\"}",
     ];
@@ -1763,4 +1758,79 @@ fn subrange_integer_parameters_are_equivalent_and_refuted() {
         validate(src, &function("ret i64 %x")).outcome,
         Outcome::Different
     );
+}
+
+const CALLING: &str = "atom g(x: i64) -> i64 requires: true; ensures: true; body: { x }; atom f(y: i64) -> i64 requires: true; ensures: true; body: { g(y) + g(y + 1) };";
+
+fn calling_ir(callee: &str) -> String {
+    pin(&format!(
+        "define i64 @g(i64 %x) {{ ret i64 %x }}
+         define i64 @h(i64 %x) {{ %d = sub i64 0, %x ret i64 %d }}
+         define i64 @f(i64 %y) {{
+           %a = call i64 @{callee}(i64 %y)
+           %b = add i64 %y, 1
+           %c = call i64 @{callee}(i64 %b)
+           %d = add i64 %a, %c
+           ret i64 %d
+         }}"
+    ))
+}
+
+#[test]
+fn direct_calls_to_in_module_functions_are_equivalent_and_refuted() {
+    // Both sides model `g`/`h` as the same uninterpreted function of
+    // their arguments, so identical call sites prove equal and a
+    // different callee refutes.
+    let report = validate(CALLING, &calling_ir("g"));
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+
+    let swapped = validate(CALLING, &calling_ir("h"));
+    assert_eq!(swapped.outcome, Outcome::Different);
+
+    // A quoted SSA name containing a bracket is not an operand
+    // bundle: `%"a [0]"` stays a plain call result.
+    let quoted = pin("define i64 @g(i64 %x) { ret i64 %x }
+         define i64 @f(i64 %y) { %\"a [0]\" = call i64 @g(i64 %y) %b = add i64 %y, 1 %c = call i64 @g(i64 %b) %d = add i64 %\"a [0]\", %c ret i64 %d }");
+    assert_eq!(
+        validate(CALLING, &quoted).outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn calls_require_plain_defined_i64_in_module_targets() {
+    // A declaration-only callee carries no body and stays outside the
+    // profile, and so do mismatched signatures, tail calls and
+    // attribute-carrying call sites.
+    let declared = pin("declare i64 @g(i64)
+         define i64 @f(i64 %y) { %a = call i64 @g(i64 %y) ret i64 %a }");
+    assert!(tv::validate_pure_i64(CALLING, &declared, Options::default()).is_err());
+
+    let narrow = pin("define i32 @g(i32 %x) { ret i32 %x }
+         define i64 @f(i64 %y) { %a = call i32 @g(i32 %y) ret i64 %a }");
+    assert!(tv::validate_pure_i64(CALLING, &narrow, Options::default()).is_err());
+
+    // Call-site attributes — return, parameter and function-index —
+    // stay outside the profile even on an all-i64 signature.
+    let param_attr = pin("define i64 @g(i64 %x) { ret i64 %x }
+         define i64 @h(i64 %x) { %d = sub i64 0, %x ret i64 %d }
+         define i64 @f(i64 %y) { %a = call i64 @g(i64 noundef %y) %b = add i64 %y, 1 %c = call i64 @g(i64 %b) %d = add i64 %a, %c ret i64 %d }");
+    assert!(tv::validate_pure_i64(CALLING, &param_attr, Options::default()).is_err());
+    let tail = pin("define i64 @g(i64 %x) { ret i64 %x }
+         define i64 @f(i64 %y) { %a = tail call i64 @g(i64 %y) %b = add i64 %y, 1 %c = tail call i64 @g(i64 %b) %d = add i64 %a, %c ret i64 %d }");
+    assert!(tv::validate_pure_i64(CALLING, &tail, Options::default()).is_err());
+    // A call whose operand count exceeds args + 1 — an operand bundle
+    // in real IR — is rejected even when its tail looks plain; a
+    // vararg signature and an arity-mismatched call site are too.
+    let vararg = pin("define i64 @g(i64 %x, ...) { ret i64 %x }
+         define i64 @f(i64 %y) { %a = call i64 (i64, ...) @g(i64 %y, i64 %y) %b = add i64 %y, 1 %c = call i64 (i64, ...) @g(i64 %b, i64 %y) %d = add i64 %a, %c ret i64 %d }");
+    assert!(tv::validate_pure_i64(CALLING, &vararg, Options::default()).is_err());
+    let extra_operand = pin("define i64 @g(i64 %x) { ret i64 %x }
+         define i64 @f(i64 %y) { %a = call i64 @g(i64 %y, i64 %y) ret i64 %a }");
+    assert!(tv::validate_pure_i64(CALLING, &extra_operand, Options::default()).is_err());
+    // An empty operand bundle adds no operand — the printed form's
+    // bracket is what rejects it.
+    let bundle = pin("define i64 @g(i64 %x) { ret i64 %x }
+         define i64 @f(i64 %y) { %a = call i64 @g(i64 %y) [ \"deopt\"() ] %b = add i64 %y, 1 %c = call i64 @g(i64 %b) [ \"deopt\"() ] %d = add i64 %a, %c ret i64 %d }");
+    assert!(tv::validate_pure_i64(CALLING, &bundle, Options::default()).is_err());
 }
