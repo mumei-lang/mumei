@@ -4,7 +4,8 @@
 use inkwell::{context::Context as LlvmContext, memory_buffer::MemoryBuffer, values::AsValueRef};
 use llvm_sys::{core::*, prelude::*, LLVMIntPredicate, LLVMOpcode, LLVMTypeKind};
 use mumei_core::semantic_contract::{
-    encode_pure_i64_body, encode_pure_i64_module, PureI64Body, PURE_I64_WRAPPING_PROFILE,
+    encode_pure_i64_body, encode_pure_i64_module, PureI64Body, LOOP_BOUND,
+    PURE_I64_WRAPPING_PROFILE,
 };
 use std::collections::{BTreeMap, HashMap};
 use z3::{
@@ -15,6 +16,14 @@ use z3::{
 pub const PROFILE: &str = "mumei.llvm17-pure-i64-ssa-equivalence/v1";
 pub const NATIVE_PROFILE: &str = "mumei.llvm17-native-main-snapshot/v1";
 pub const NATIVE_MODULE_PROFILE: &str = "mumei.llvm17-native-module-snapshot/v1";
+/// Bounded-loop variants: the source contains an admitted `while`, so
+/// the claim covers only inputs where every loop's guard fails within
+/// `LOOP_BOUND` unrolled iterations — on the LLVM side a path revisiting
+/// a block past the same bound is dropped out of profile.
+pub const BOUNDED_LOOPS_PROFILE: &str = "mumei.llvm17-pure-i64-ssa-equivalence-bounded-loops/v1";
+pub const BOUNDED_LOOPS_NATIVE_PROFILE: &str = "mumei.llvm17-native-main-snapshot-bounded-loops/v1";
+pub const BOUNDED_LOOPS_NATIVE_MODULE_PROFILE: &str =
+    "mumei.llvm17-native-module-snapshot-bounded-loops/v1";
 pub const NATIVE_TARGET: &str = "x86_64-pc-linux-gnu";
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
 pub const DATA_LAYOUT: &str =
@@ -44,7 +53,7 @@ pub struct ValidationReport {
     pub target: &'static str,
     pub data_layout: &'static str,
     pub checked_stage: &'static str,
-    pub input_domain: &'static str,
+    pub input_domain: String,
     pub source_sha256: String,
     pub llvm_sha256: String,
     pub timeout_ms: u32,
@@ -69,7 +78,7 @@ pub struct ModuleValidationReport {
     pub target: &'static str,
     pub data_layout: &'static str,
     pub checked_stage: &'static str,
-    pub input_domain: &'static str,
+    pub input_domain: String,
     pub source_sha256: String,
     pub llvm_sha256: String,
     pub timeout_ms: u32,
@@ -224,8 +233,19 @@ fn validate(
         }
         compare_function(&context, raw, &model, &native_call_renames(native))?
     };
+    let loops = model.loop_bound_exits.is_some();
     Ok(ValidationReport {
-        profile: if native { NATIVE_PROFILE } else { PROFILE },
+        profile: if native {
+            if loops {
+                BOUNDED_LOOPS_NATIVE_PROFILE
+            } else {
+                NATIVE_PROFILE
+            }
+        } else if loops {
+            BOUNDED_LOOPS_PROFILE
+        } else {
+            PROFILE
+        },
         source_profile: PURE_I64_WRAPPING_PROFILE,
         target,
         data_layout: DATA_LAYOUT,
@@ -234,7 +254,7 @@ fn validate(
         } else {
             "supplied_llvm_ir_snapshot_no_pipeline_attestation"
         },
-        input_domain: input_domain_label(native, &model, &ir_definedness),
+        input_domain: loop_domain_label(input_domain_label(native, &model, &ir_definedness), loops),
         source_sha256: model.source_sha256,
         llvm_sha256: mumei_core::native_bundle::sha256(llvm_ir.as_bytes()),
         timeout_ms: options.timeout_ms,
@@ -286,6 +306,7 @@ pub fn validate_pure_i64_module(
     let mut any_definedness = false;
     let mut any_param_domain = false;
     let mut any_subrange = false;
+    let mut any_loops = false;
     let mut outcome = Outcome::EquivalentWithinProfile;
     for model in &models {
         let function = module
@@ -297,6 +318,7 @@ pub fn validate_pure_i64_module(
         any_definedness |= !model.definedness.is_empty() || !ir_definedness.is_empty();
         any_param_domain |= !model.param_domain.is_empty();
         any_subrange |= model.subrange_params;
+        any_loops |= model.loop_bound_exits.is_some();
         // Different outranks UndefinedBehavior for the aggregate: a wrong
         // produced value is a harder failure than a poisoned one, and both
         // outrank an unknown solver result.
@@ -314,26 +336,33 @@ pub fn validate_pure_i64_module(
         });
     }
     Ok(ModuleValidationReport {
-        profile: PROFILE,
+        profile: if any_loops {
+            BOUNDED_LOOPS_PROFILE
+        } else {
+            PROFILE
+        },
         source_profile: PURE_I64_WRAPPING_PROFILE,
         target: TARGET,
         data_layout: DATA_LAYOUT,
         checked_stage: "supplied_llvm_ir_snapshot_no_pipeline_attestation",
-        input_domain: if any_definedness {
-            if any_subrange {
-                "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires"
+        input_domain: loop_domain_label(
+            if any_definedness {
+                if any_subrange {
+                    "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires"
+                } else if any_param_domain {
+                    "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_restricted_by_requires"
+                } else {
+                    "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires"
+                }
+            } else if any_subrange {
+                "signed_i64_inputs_with_signature_bounded_param_domains_not_restricted_by_requires"
             } else if any_param_domain {
-                "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_restricted_by_requires"
+                "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_restricted_by_requires"
             } else {
-                "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires"
-            }
-        } else if any_subrange {
-            "signed_i64_inputs_with_signature_bounded_param_domains_not_restricted_by_requires"
-        } else if any_param_domain {
-            "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_restricted_by_requires"
-        } else {
-            "all_signed_i64_inputs_not_restricted_by_requires"
-        },
+                "all_signed_i64_inputs_not_restricted_by_requires"
+            },
+            any_loops,
+        ),
         source_sha256: models
             .first()
             .map(|model| model.source_sha256.clone())
@@ -420,6 +449,7 @@ pub fn validate_native_module(
     let mut any_definedness = false;
     let mut any_param_domain = false;
     let mut any_subrange = false;
+    let mut any_loops = false;
     let mut outcome = Outcome::EquivalentWithinProfile;
     for model in &models {
         let member_name = if model.function_name == "main" {
@@ -435,6 +465,7 @@ pub fn validate_native_module(
         any_definedness |= !model.definedness.is_empty() || !ir_definedness.is_empty();
         any_param_domain |= !model.param_domain.is_empty();
         any_subrange |= model.subrange_params;
+        any_loops |= model.loop_bound_exits.is_some();
         outcome = match (outcome, member_outcome) {
             (Outcome::Different, _) | (_, Outcome::Different) => Outcome::Different,
             (Outcome::UndefinedBehavior, _) | (_, Outcome::UndefinedBehavior) => {
@@ -449,27 +480,34 @@ pub fn validate_native_module(
         });
     }
     Ok(ModuleValidationReport {
-        profile: NATIVE_MODULE_PROFILE,
+        profile: if any_loops {
+            BOUNDED_LOOPS_NATIVE_MODULE_PROFILE
+        } else {
+            NATIVE_MODULE_PROFILE
+        },
         source_profile: PURE_I64_WRAPPING_PROFILE,
         target,
         data_layout: DATA_LAYOUT,
         checked_stage:
             "native_module_user_bodies_and_truncating_wrapper_snapshot_no_pipeline_attestation",
-        input_domain: if any_definedness {
-            if any_subrange {
-                "module_members_signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_process_exit_status"
+        input_domain: loop_domain_label(
+            if any_definedness {
+                if any_subrange {
+                    "module_members_signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_process_exit_status"
+                } else if any_param_domain {
+                    "module_members_signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_process_exit_status"
+                } else {
+                    "module_members_signed_i64_inputs_where_division_and_shift_defined_not_process_exit_status"
+                }
+            } else if any_subrange {
+                "module_members_signed_i64_inputs_with_signature_bounded_param_domains_not_process_exit_status"
             } else if any_param_domain {
-                "module_members_signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_process_exit_status"
+                "module_members_signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_process_exit_status"
             } else {
-                "module_members_signed_i64_inputs_where_division_and_shift_defined_not_process_exit_status"
-            }
-        } else if any_subrange {
-            "module_members_signed_i64_inputs_with_signature_bounded_param_domains_not_process_exit_status"
-        } else if any_param_domain {
-            "module_members_signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_process_exit_status"
-        } else {
-            "module_members_all_signed_i64_inputs_not_process_exit_status"
-        },
+                "module_members_all_signed_i64_inputs_not_process_exit_status"
+            },
+            any_loops,
+        ),
         source_sha256: models
             .first()
             .map(|model| model.source_sha256.clone())
@@ -508,8 +546,11 @@ unsafe fn compare_function<'ctx>(
     model: &PureI64Body<'ctx>,
     call_renames: &BTreeMap<String, String>,
 ) -> Result<(Outcome, Vec<(Bool<'ctx>, Bool<'ctx>)>)> {
-    check_function(raw, model.inputs.len())?;
-    let mut encoder = IrEncoder::new(context, call_renames);
+    // A source `while` relaxes the CFG gate only for that atom's member:
+    // cycles elsewhere still reject as unsupported.
+    let loops = model.loop_bound_exits.is_some();
+    check_function(raw, model.inputs.len(), loops)?;
+    let mut encoder = IrEncoder::new(context, call_renames, loops);
     let returns = encoder.encode(raw, &model.inputs)?;
     let ir_definedness = encoder.definedness;
     // Division, remainder and shifts bind both sides only where the operands
@@ -519,6 +560,14 @@ unsafe fn compare_function<'ctx>(
     // A declared `bool` or subrange integer parameter lowers to i64, so
     // the signature itself bounds its input beside the operation
     // obligations.
+    // The bounded-exit condition joins the source domain: equivalence is
+    // only claimed on inputs where every `while` exits within the unroll
+    // bound — paths the LLVM encoder dropped for exceeding the same
+    // bound are covered by it on the source side.
+    let exits = model
+        .loop_bound_exits
+        .clone()
+        .unwrap_or_else(|| Bool::from_bool(context, true));
     let src_terms: Vec<Bool> = model
         .param_domain
         .iter()
@@ -536,22 +585,43 @@ unsafe fn compare_function<'ctx>(
         .map(|(guard, value)| {
             Bool::and(
                 context,
-                &[guard, &src_dom, &ir_dom, &value._eq(&model.value).not()],
+                &[
+                    guard,
+                    &src_dom,
+                    &ir_dom,
+                    &exits,
+                    &value._eq(&model.value).not(),
+                ],
             )
         })
         .collect();
+    // A covered input every IR path out of was dropped past the bound
+    // is neither proven divergent — truncation is not divergence — nor
+    // safe to exclude silently: report it as inconclusive below rather
+    // than as a difference or a vacuous equivalence.
+    let covered_no_return = if loops {
+        let covered = Bool::and(context, &[&src_dom, &ir_dom, &exits]);
+        let guards: Vec<_> = returns.iter().map(|(guard, _)| guard).collect();
+        let any_return = Bool::or(context, &guards);
+        Some(Bool::and(context, &[&covered, &any_return.not()]))
+    } else {
+        None
+    };
     let solver = Solver::new(context);
     let outcome = 'check: {
         // A source whose guarded operators have no defined input at all is a
         // spec `--bitvec-i64` verification would already reject; equivalence
-        // over an empty domain would be vacuous.
-        if !model.definedness.is_empty() {
-            solver.assert(&src_dom);
+        // over an empty domain would be vacuous. With bounded loops the
+        // same check extends to the exit domain: a loop that cannot exit
+        // within the bound on any defined input is unsupported, not
+        // vacuously equivalent.
+        if !model.definedness.is_empty() || model.loop_bound_exits.is_some() {
+            solver.assert(&Bool::and(context, &[&src_dom, &exits]));
             match solver.check() {
                 SatResult::Sat => {}
                 SatResult::Unsat => {
                     return Err(ValidationError(
-                        "source division or shift defined on no inputs",
+                        "source domain and loop exits empty on all inputs",
                     ))
                 }
                 SatResult::Unknown => break 'check Outcome::Inconclusive,
@@ -568,17 +638,37 @@ unsafe fn compare_function<'ctx>(
         // on an input inside the source's defined domain.
         let ub: Vec<Bool> = ir_definedness
             .iter()
-            .map(|(path, defined)| Bool::and(context, &[path, &defined.not(), &src_dom]))
+            .map(|(path, defined)| Bool::and(context, &[path, &defined.not(), &src_dom, &exits]))
             .collect();
         solver.reset();
         solver.assert(&Bool::or(context, &ub.iter().collect::<Vec<_>>()));
         match solver.check() {
             SatResult::Sat => Outcome::UndefinedBehavior,
             SatResult::Unknown => Outcome::Inconclusive,
-            SatResult::Unsat => Outcome::EquivalentWithinProfile,
+            SatResult::Unsat => match covered_no_return {
+                Some(term) => {
+                    solver.reset();
+                    solver.assert(&term);
+                    match solver.check() {
+                        SatResult::Unsat => Outcome::EquivalentWithinProfile,
+                        _ => Outcome::Inconclusive,
+                    }
+                }
+                None => Outcome::EquivalentWithinProfile,
+            },
         }
     };
     Ok((outcome, ir_definedness))
+}
+
+/// Append the bounded-loop domain restriction to a base input-domain
+/// label so the report names the actual claim boundary.
+fn loop_domain_label(domain: &'static str, loops: bool) -> String {
+    if loops {
+        format!("{domain}_and_loops_exiting_within_bound_{LOOP_BOUND}")
+    } else {
+        domain.to_owned()
+    }
 }
 
 fn input_domain_label<'ctx>(
@@ -641,14 +731,40 @@ unsafe fn check_module(module: LLVMModuleRef) -> Result<()> {
         // Every member is a potential call target, so each must satisfy
         // the same function profile against its own arity. The checked
         // function's arity against the source signature is asserted
-        // separately at the call site.
+        // separately at the call site. Cycles pass the pre-screen — the
+        // per-atom comparison re-gates them against each model's loop
+        // admission.
         if LLVMGetLinkage(member) != llvm_sys::LLVMLinkage::LLVMExternalLinkage {
             return Err(ValidationError("LLVM function linkage unsupported"));
         }
-        check_function(member, LLVMCountParams(member) as usize)?;
+        // The cancellation-poll declaration is a call target, not an
+        // obligation: every use is constrained by `check_call`.
+        if LLVMIsDeclaration(member) != 0
+            && callee_name(member).as_deref() == Some(CANCEL_POLL_INTRINSIC)
+        {
+            member = LLVMGetNextFunction(member);
+            continue;
+        }
+        check_function(member, LLVMCountParams(member) as usize, true)?;
         member = LLVMGetNextFunction(member);
     }
     Ok(())
+}
+
+/// The emitter plants this poll in every loop header for cooperative
+/// task-group cancellation. Cancellation is an effect the pure profile
+/// does not model: the poll is admitted as a declaration-only runtime
+/// intrinsic whose result binds to 0 — the claim covers executions
+/// where no cancellation is requested.
+const CANCEL_POLL_INTRINSIC: &str = "__mumei_task_group_should_cancel_current";
+
+unsafe fn callee_name(value: LLVMValueRef) -> Option<String> {
+    let mut len = 0;
+    let raw = LLVMGetValueName2(value, &mut len);
+    if raw.is_null() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(std::slice::from_raw_parts(raw as *const u8, len)).into_owned())
 }
 
 /// A `call` is admitted only as a direct, plain call to a defined
@@ -656,7 +772,9 @@ unsafe fn check_module(module: LLVMModuleRef) -> Result<()> {
 /// models it as an uninterpreted function of its arguments, and
 /// equivalence holds when both sides call the same callee on equal
 /// arguments. Whether the callee's own body matches its source is a
-/// separate per-function validation obligation.
+/// separate per-function validation obligation. The one declaration
+/// admitted is `CANCEL_POLL_INTRINSIC`: its result binds to 0 under
+/// the no-cancellation-requested assumption.
 unsafe fn check_call(call: LLVMValueRef) -> Result<()> {
     let callee = LLVMGetCalledValue(call);
     // `num_operands == args + 1` excludes operand bundles, which the
@@ -665,7 +783,8 @@ unsafe fn check_call(call: LLVMValueRef) -> Result<()> {
     if callee.is_null()
         || LLVMGetValueKind(callee) != llvm_sys::LLVMValueKind::LLVMFunctionValueKind
         || LLVMGetCalledFunctionType(call) != LLVMGlobalGetValueType(callee)
-        || LLVMIsDeclaration(callee) != 0
+        || (LLVMIsDeclaration(callee) != 0
+            && callee_name(callee).as_deref() != Some(CANCEL_POLL_INTRINSIC))
         || LLVMGetNumOperands(call) != LLVMGetNumArgOperands(call) as i32 + 1
         || LLVMGetInstructionCallConv(call) != 0
         || LLVMIsTailCall(call) != 0
@@ -743,7 +862,7 @@ unsafe fn check_function_header(function: LLVMValueRef, params: usize) -> Result
     Ok(())
 }
 
-unsafe fn check_function(function: LLVMValueRef, params: usize) -> Result<()> {
+unsafe fn check_function(function: LLVMValueRef, params: usize, allow_cycles: bool) -> Result<()> {
     check_function_header(function, params)?;
     if width(LLVMGetReturnType(LLVMGlobalGetValueType(function)))? != 64 {
         return Err(ValidationError("unsupported LLVM signature"));
@@ -755,7 +874,9 @@ unsafe fn check_function(function: LLVMValueRef, params: usize) -> Result<()> {
     let mut count = 0;
     let mut colors = HashMap::new();
     while !block.is_null() {
-        acyclic(block, &mut colors)?;
+        if !allow_cycles {
+            acyclic(block, &mut colors)?;
+        }
         let mut inst = LLVMGetFirstInstruction(block);
         while !inst.is_null() {
             count += 1;
@@ -890,9 +1011,16 @@ unsafe fn check_native_module_multi(module: LLVMModuleRef, user_main: LLVMValueR
             return Err(ValidationError("LLVM function linkage unsupported"));
         }
         // The wrapper's i32/pointer signature is outside the function
-        // profile; its fixed shape is checked separately.
-        if member != main {
-            check_function(member, LLVMCountParams(member) as usize)?;
+        // profile; its fixed shape is checked separately. Cycles pass
+        // the pre-screen — the per-atom comparison re-gates them
+        // against each model's loop admission. The cancellation-poll
+        // declaration is a call target constrained by `check_call`,
+        // not an obligation.
+        if member != main
+            && !(LLVMIsDeclaration(member) != 0
+                && callee_name(member).as_deref() == Some(CANCEL_POLL_INTRINSIC))
+        {
+            check_function(member, LLVMCountParams(member) as usize, true)?;
         }
         member = LLVMGetNextFunction(member);
     }
@@ -993,14 +1121,26 @@ struct IrEncoder<'ctx, 'renames> {
     /// the instruction's operands must satisfy the condition wherever the
     /// path executes it, or the IR produces poison there.
     definedness: Vec<(Bool<'ctx>, Bool<'ctx>)>,
+    /// Bounded-cycle mode (set only when the source model contains an
+    /// admitted `while`): `depths` counts each block's visits along the
+    /// current path; a revisit past `LOOP_BOUND` drops the path without
+    /// recording a return, mirroring the source's bounded unroll.
+    loops: bool,
+    depths: HashMap<usize, u32>,
 }
 impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
-    fn new(ctx: &'ctx Context, call_renames: &'renames BTreeMap<String, String>) -> Self {
+    fn new(
+        ctx: &'ctx Context,
+        call_renames: &'renames BTreeMap<String, String>,
+        loops: bool,
+    ) -> Self {
         Self {
             ctx,
             call_renames,
             states: 0,
             definedness: Vec::new(),
+            loops,
+            depths: HashMap::new(),
         }
     }
 
@@ -1063,6 +1203,14 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             // `unreachable`. Its recorded obligations still classify the
             // function — reachable on a defined input it is
             // UndefinedBehavior rather than a missing-return error.
+            if self.loops {
+                // Bounded-loop mode also yields no returns when every
+                // path stays inside a cycle past `LOOP_BOUND` — that is
+                // out of profile, not a malformed function.
+                return Err(ValidationError(
+                    "no LLVM path exits a loop within the bound",
+                ));
+            }
             if self.definedness.is_empty() {
                 return Err(ValidationError("missing LLVM return"));
             }
@@ -1070,11 +1218,16 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
         Ok(returns)
     }
 
+    /// Path-state wrapper: counts each entered block (cycles permitted
+    /// under `loops`), then delegates to `walk_block`. A block revisited
+    /// past `LOOP_BOUND` drops the path silently — such a run exceeds
+    /// the source side's unrolled bound too, so it stays outside the
+    /// declared equivalence domain instead of comparing.
     unsafe fn block(
         &mut self,
         block: LLVMBasicBlockRef,
         previous: LLVMBasicBlockRef,
-        mut values: HashMap<usize, BV<'ctx>>,
+        values: HashMap<usize, BV<'ctx>>,
         guard: Bool<'ctx>,
         returns: &mut Vec<(Bool<'ctx>, BV<'ctx>)>,
     ) -> Result<()> {
@@ -1082,9 +1235,51 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
         if self.states > MAX_STATES {
             return Err(ValidationError("LLVM path expansion limit"));
         }
+        if !self.loops {
+            return self.walk_block(block, previous, values, guard, returns);
+        }
+        let depth = self.depths.entry(block as usize).or_insert(0);
+        *depth += 1;
+        if *depth as usize > mumei_core::semantic_contract::LOOP_BOUND {
+            *depth -= 1;
+            return Ok(());
+        }
+        let result = self.walk_block(block, previous, values, guard, returns);
+        *self
+            .depths
+            .get_mut(&(block as usize))
+            .unwrap_or_else(|| unreachable!("depth entry dropped")) -= 1;
+        result
+    }
+
+    unsafe fn walk_block(
+        &mut self,
+        block: LLVMBasicBlockRef,
+        previous: LLVMBasicBlockRef,
+        mut values: HashMap<usize, BV<'ctx>>,
+        guard: Bool<'ctx>,
+        returns: &mut Vec<(Bool<'ctx>, BV<'ctx>)>,
+    ) -> Result<()> {
+        // Phi results commit together after the block's phi run: each
+        // phi's incoming value is resolved against the environment the
+        // block was entered with, so a phi that references a sibling
+        // phi sees the previous iteration's value, not the freshly
+        // bound one. (LLVM requires phi nodes to lead a block.)
+        let mut pending_phis: Vec<(LLVMValueRef, BV<'ctx>)> = Vec::new();
         let mut inst = LLVMGetFirstInstruction(block);
         while !inst.is_null() {
             let op = LLVMGetInstructionOpcode(inst);
+            if op == LLVMOpcode::LLVMPHI {
+                let i = (0..LLVMCountIncoming(inst))
+                    .find(|&i| LLVMGetIncomingBlock(inst, i) == previous)
+                    .ok_or(ValidationError("missing LLVM phi edge"))?;
+                pending_phis.push((inst, self.value(LLVMGetIncomingValue(inst, i), &values)?));
+                inst = LLVMGetNextInstruction(inst);
+                continue;
+            }
+            for (phi, result) in pending_phis.drain(..) {
+                values.insert(phi as usize, result);
+            }
             if op == LLVMOpcode::LLVMRet {
                 let value = self.value(LLVMGetOperand(inst, 0), &values)?;
                 returns.push((guard, value));
@@ -1135,31 +1330,35 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     name_len,
                 ))
                 .into_owned();
-                // An emitted member name maps back to the source atom
-                // name its call sites share with the source encoder
-                // (`__mumei_user_main` back to `main` on native paths).
-                let name = self
-                    .call_renames
-                    .get(name.as_str())
-                    .map(String::as_str)
-                    .unwrap_or(name.as_str());
-                let arity = LLVMGetNumArgOperands(inst) as usize;
-                let mut args = Vec::with_capacity(arity);
-                for index in 0..arity {
-                    args.push(self.value(LLVMGetOperand(inst, index as u32), &values)?);
+                if name == CANCEL_POLL_INTRINSIC && LLVMIsDeclaration(callee) != 0 {
+                    // Cooperative cancellation is an effect outside the
+                    // pure profile: the claim covers executions where
+                    // the poll never fires, so its result binds to 0. A
+                    // defined function that merely shares the name stays
+                    // a normal call site — its body decides the result.
+                    BV::from_i64(self.ctx, 0, 64)
+                } else {
+                    // An emitted member name maps back to the source atom
+                    // name its call sites share with the source encoder
+                    // (`__mumei_user_main` back to `main` on native paths).
+                    let name = self
+                        .call_renames
+                        .get(name.as_str())
+                        .map(String::as_str)
+                        .unwrap_or(name.as_str());
+                    let arity = LLVMGetNumArgOperands(inst) as usize;
+                    let mut args = Vec::with_capacity(arity);
+                    for index in 0..arity {
+                        args.push(self.value(LLVMGetOperand(inst, index as u32), &values)?);
+                    }
+                    let refs: Vec<&dyn z3::ast::Ast> =
+                        args.iter().map(|v| v as &dyn z3::ast::Ast).collect();
+                    let applied = mumei_core::semantic_contract::call_decl(self.ctx, name, arity)
+                        .apply(&refs);
+                    applied
+                        .as_bv()
+                        .ok_or(ValidationError("unsupported LLVM call result"))?
                 }
-                let refs: Vec<&dyn z3::ast::Ast> =
-                    args.iter().map(|v| v as &dyn z3::ast::Ast).collect();
-                let applied =
-                    mumei_core::semantic_contract::call_decl(self.ctx, name, arity).apply(&refs);
-                applied
-                    .as_bv()
-                    .ok_or(ValidationError("unsupported LLVM call result"))?
-            } else if op == LLVMOpcode::LLVMPHI {
-                let i = (0..LLVMCountIncoming(inst))
-                    .find(|&i| LLVMGetIncomingBlock(inst, i) == previous)
-                    .ok_or(ValidationError("missing LLVM phi edge"))?;
-                self.value(LLVMGetIncomingValue(inst, i), &values)?
             } else {
                 let a = self.value(LLVMGetOperand(inst, 0), &values)?;
                 match op {

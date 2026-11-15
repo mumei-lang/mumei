@@ -768,8 +768,22 @@ names bound within them — `x + (if x > 0 { x = 1; x } else { x })`,
 `let a = x; { a = 1; a }; a` and
 `let v = match x { 0 => { r = 1; r }, _ => { r = 2; r } }; v`
 stay rejected. Calls are admitted in expression and statement
-position with i64 arguments and an i64 result; other statement
-forms (unbound assignment, loops) stay
+position with i64 arguments and an i64 result. A `while` is admitted
+mid-block only — inside a `Stmt::Block`'s non-final statements —
+under a Boolean guard and with no nested loop anywhere inside its
+body (nesting would break the shared per-iteration bound). Its
+invariant and decreases expressions are the Z3 verifier's metadata;
+the bounded profile ignores them. The body is unrolled `LOOP_BOUND`
+(4) guard evaluations: each iteration evaluates the guard under
+`entry-guard ∧ ¬exited` (its definedness obligations under the same
+condition), executes the body under `alive ∧ guard`, merges each
+escapable write as `ite(guard, body-value, current)` per name, and
+records `exited |= ¬guard`. The conjunction of every loop's exit
+predicate joins the compared domain, so the claim covers exactly the
+inputs where every loop's guard fails within the bound — deeper
+executions are out of profile, and a source whose exits leave no
+covered input is an error rather than a vacuous equivalence. Other
+statement forms (unbound assignment, value-position `while`) stay
 unsupported.
 A declared `bool` parameter lowers to i64 carrying 0/1 — the same
 lowering `resolve_param_type` and the emitter's `icmp ne` condition use —
@@ -849,7 +863,16 @@ separate per-function validation obligation, not discharged here.
 Memory/pointers, unsigned `udiv`/`urem`/`lshr`, flagged (nsw/nuw/exact)
 arithmetic — a flag widens the poison domain and is rejected —,
 FFI/intrinsics/indirect calls,
-loops, vectors/floats, undef/poison and freeze are unsupported. Every block is screened,
+vectors/floats, undef/poison and freeze are unsupported. Cyclic IR is
+admitted only when the source model carries loops: a path that revisits
+a block beyond `LOOP_BOUND` visits is dropped as out-of-profile, which
+bounds the loop header to the same 4 guard evaluations the source
+unroll performs; a cycle against a loop-free source stays rejected.
+The emitter's per-header `__mumei_task_group_should_cancel_current`
+poll is admitted as a declaration-only runtime intrinsic whose result
+binds to 0 — the claim covers executions where no cooperative
+cancellation is requested. A module member declaring that intrinsic is
+screened by name, not compared as an obligation. Every block is screened,
 including dead blocks. Unsupported syntax, invalid IR, unmatched identities
 and exhausted analysis budgets are errors, never successful partial checks.
 The initial bounds are 64 KiB per input, 256 source tokens, 16 parameters,
