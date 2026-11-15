@@ -1956,6 +1956,29 @@ the
 [Agent summary manifest reuse](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-manifest-reuse-go-summaries-reuse)
 section.
 
+### Wave 3 declared summary strict acceptance (go-summaries-accept)
+
+Agent's `python -m agent go-summaries-accept` is the fourth consumable
+route and the strict counterpart of check and reuse: the same
+provisioned helper, the same declared inputs plus `--manifest` and
+`--binding <ID>`. It emits `mumei.go-summary-accept/v1` — `accepted`
+only when the manifest's declared context key still matches the fresh
+derivation (the monolithic `for_function` whole-set gate) and the
+named binding survives in the fresh report. A refusal names its
+`reason` — `context_mismatch` or `unknown_binding` — and never carries
+a `summary`; an accepted report carries the freshly derived function
+record — under the strict gate it is identical to the declared one,
+and emitting the live record removes any tamper channel in the
+declared record itself.
+
+The weaker identity partition never authorizes here: reuse's
+per-function freshness choice stays the host's, while accept refuses a
+summary after any change anywhere in the unit. `--output` may not
+equal any declared input. C06 stays partially delivered; Evidence
+normalization/acceptance stays open. See the
+[Agent summary strict acceptance](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-strict-acceptance-go-summaries-accept)
+section.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
