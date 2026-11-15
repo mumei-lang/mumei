@@ -754,6 +754,21 @@ The history is replay evidence only: no health verdict, no retry, no
 Evidence acceptance. C11 stays partial. See the
 [Agent probe history](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-probe-outcome-history).
 
+### Wave 2 history-bounded probe retry scheduling
+
+Agent's `adapter_probe.probe_retry_requests(registry, request, policy,
+observations, histories, stamp=..., max_attempts=...)` emits the next
+attempt for every still-excluded declared candidate — attempt 1 with
+no history, `attempt_count + 1` otherwise, skipped once the history
+reaches the bound. A history whose fingerprint does not re-derive from
+the scheduled request fails statically: stale evidence never
+authorizes another attempt.
+
+Scheduling stays declarative — it runs nothing and retries only inside
+the declared bound. Concurrency and Evidence acceptance remain open;
+C11 stays partial. See the
+[Agent probe retry scheduling](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-history-bounded-probe-retry-scheduling).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
