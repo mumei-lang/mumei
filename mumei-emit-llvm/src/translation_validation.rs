@@ -364,10 +364,18 @@ unsafe fn check_call(call: LLVMValueRef) -> Result<()> {
         || LLVMGetNumOperands(call) != LLVMGetNumArgOperands(call) as i32 + 1
         || LLVMGetInstructionCallConv(call) != 0
         || LLVMIsTailCall(call) != 0
-        || LLVMGetCallSiteAttributeCount(call, 0) != 0
         || LLVMGetCallSiteAttributeCount(call, u32::MAX) != 0
     {
         return Err(ValidationError("unsupported LLVM call"));
+    }
+    // Call-site attribute index 0 is the return value, 1..=num_args are
+    // the parameters: every index must carry no attribute, so `noundef`,
+    // `signext`/`zeroext` and friends never slip in.
+    let arg_count = LLVMGetNumArgOperands(call);
+    for index in 0..=arg_count {
+        if LLVMGetCallSiteAttributeCount(call, index) != 0 {
+            return Err(ValidationError("unsupported LLVM call"));
+        }
     }
     let signature = LLVMGetCalledFunctionType(call);
     if width(LLVMGetReturnType(signature))? != 64

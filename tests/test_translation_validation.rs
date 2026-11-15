@@ -1800,4 +1800,23 @@ fn calls_require_plain_defined_i64_in_module_targets() {
     let narrow = pin("define i32 @g(i32 %x) { ret i32 %x }
          define i64 @f(i64 %y) { %a = call i32 @g(i32 %y) ret i64 %a }");
     assert!(tv::validate_pure_i64(CALLING, &narrow, Options::default()).is_err());
+
+    // Call-site attributes — return, parameter and function-index —
+    // stay outside the profile even on an all-i64 signature.
+    let param_attr = pin("define i64 @g(i64 %x) { ret i64 %x }
+         define i64 @h(i64 %x) { %d = sub i64 0, %x ret i64 %d }
+         define i64 @f(i64 %y) { %a = call i64 @g(i64 noundef %y) %b = add i64 %y, 1 %c = call i64 @g(i64 %b) %d = add i64 %a, %c ret i64 %d }");
+    assert!(tv::validate_pure_i64(CALLING, &param_attr, Options::default()).is_err());
+    let tail = pin("define i64 @g(i64 %x) { ret i64 %x }
+         define i64 @f(i64 %y) { %a = tail call i64 @g(i64 %y) %b = add i64 %y, 1 %c = tail call i64 @g(i64 %b) %d = add i64 %a, %c ret i64 %d }");
+    assert!(tv::validate_pure_i64(CALLING, &tail, Options::default()).is_err());
+    // A call whose operand count exceeds args + 1 — an operand bundle
+    // in real IR — is rejected even when its tail looks plain; a
+    // vararg signature and an arity-mismatched call site are too.
+    let vararg = pin("define i64 @g(i64 %x, ...) { ret i64 %x }
+         define i64 @f(i64 %y) { %a = call i64 (i64, ...) @g(i64 %y, i64 %y) %b = add i64 %y, 1 %c = call i64 (i64, ...) @g(i64 %b, i64 %y) %d = add i64 %a, %c ret i64 %d }");
+    assert!(tv::validate_pure_i64(CALLING, &vararg, Options::default()).is_err());
+    let extra_operand = pin("define i64 @g(i64 %x) { ret i64 %x }
+         define i64 @f(i64 %y) { %a = call i64 @g(i64 %y, i64 %y) ret i64 %a }");
+    assert!(tv::validate_pure_i64(CALLING, &extra_operand, Options::default()).is_err());
 }
