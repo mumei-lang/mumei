@@ -551,11 +551,16 @@ run's full binding (fingerprint, ordinal, declared timeout) and events.
 `AttemptOutput` on the reconciled current record (the run's `complete`
 collection claim carried across); a failed, timed-out or cancelled run
 cannot mint a snapshot — output requires an exited record.
+`publish_dispatch(store, dispatch, expected=None)` closes the loop: an
+`exited` run selects its captured output before the terminal lineage is
+atomically published through `AttemptSequenceStore` compare-and-set
+(first `publish` on an empty store), while non-exited terminals publish
+the reconciled lineage without a selection.
 
 The driver composes the declared dispatch boundary with the single-spawn
-runner — no scheduling, ordering, result selection or publication is
-added; hosts still call `select_result` and publish through
-`AttemptSequenceStore`. C11 stays
+runner — no scheduling, ordering or cross-sequence arbitration is
+added; publication keeps the same CAS/first-publish contract, and
+durability plus Evidence remain host duties. C11 stays
 partial: Evidence normalization/acceptance remains open, and C12's demand
 gate plus existing assurance/Lean/native/LLVM/deferred-WASM policies are
 unchanged. See the
