@@ -2396,6 +2396,22 @@ and
 [reuse tools](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-reuse-routes-as-mcp-tools)
 sections.
 
+### Wave 3 declared summary accept routes over MCP
+
+`ts_summaries_accept`, `rust_summaries_accept` and
+`sol_summaries_accept` expose the strict whole-context accept gate
+over MCP through the shared `summary_accept_document`: `context_match`
+first, then a declared-only function resolution
+(`unknown_function` / `ambiguous_function` / `undeclared_function`)
+that emits the freshly derived record — never the declared one, so
+the manifest-forgery channel stays closed. Per-language name
+resolution is preserved exactly (Rust and Solidity keep the
+bare-member-name fallback; TypeScript requires the emitted name).
+The returned document is the acceptance decision; the summary
+inside remains a conservative report, not a proof. See the
+[Agent declared summary accept MCP tools](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-accept-routes-as-mcp-tools)
+section.
+
 ### Wave 3 declared Rust summary route family
 
 `rust-summaries` and its four siblings (`-check`, `-reuse`, `-accept`,
