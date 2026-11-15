@@ -1966,8 +1966,10 @@ only when the manifest's declared context key still matches the fresh
 derivation (the monolithic `for_function` whole-set gate) and the
 named binding survives in the fresh report. A refusal names its
 `reason` — `context_mismatch` or `unknown_binding` — and never carries
-a `summary`; an accepted report carries the declared function record
-verbatim.
+a `summary`; an accepted report carries the freshly derived function
+record — under the strict gate it is identical to the declared one,
+and emitting the live record removes any tamper channel in the
+declared record itself.
 
 The weaker identity partition never authorizes here: reuse's
 per-function freshness choice stays the host's, while accept refuses a
