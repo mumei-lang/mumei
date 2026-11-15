@@ -2188,6 +2188,21 @@ deterministic CI. The demo binds declared routing evidence only: it
 grants no verification, audit or acceptance authority. See the
 [go_summaries scenario](https://github.com/mumei-lang/mumei-demo/blob/develop/scenarios/go_summaries/README.md).
 
+### Wave 3 declared ts-summaries route demo (mumei-demo)
+
+The optional `ts_summaries` scenario in `mumei-demo` runs the declared
+TypeScript route family end to end: `ts-summaries` emits the
+`mumei.ts-scalar-parameter-deps/v1` manifest for a two-function fixture
+unit, `ts-summaries-check` partitions reusable/stale/missing functions
+against a fresh in-process derivation, and `ts-summaries-accept` echoes
+one function's declared summary under the strict whole-context gate.
+The scenario stays in `OPTIONAL_SCENARIOS` — the default sequence is
+unchanged — and needs neither a provisioned toolchain nor fixture
+payloads because the analyzer runs in-process on tree-sitter. The demo
+binds declared routing evidence only: it grants no verification, audit
+or acceptance authority. See the
+[ts_summaries scenario](https://github.com/mumei-lang/mumei-demo/blob/develop/scenarios/ts_summaries/README.md).
+
 ### Wave 3 declared TypeScript summary route family
 
 The TypeScript summary spike accumulated on a draft branch is promoted
