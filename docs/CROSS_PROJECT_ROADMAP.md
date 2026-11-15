@@ -2117,6 +2117,22 @@ manifest; audit/MCP wiring stays open. See the
 [Agent summary-route probe wiring](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-summary-route-probe-wiring)
 section.
 
+### Wave 3 declared Rust summary route family
+
+`rust-summaries` and its four siblings (`-check`, `-reuse`, `-accept`,
+`-attempt`) lift the Rust interprocedural spike to the same declared
+route family Go pioneered: `mumei.rust-scalar-parameter-deps/v1`
+manifests over the bounded scalar fragment with in-process
+tree-sitter parsing (gaps recorded, never dropped silently), the
+check/reuse/accept set under the strict whole-context gate, and a
+`rust-summaries-attempt` produce route inside the C11 lifecycle.
+`rust_summaries_adapter()` registers it as a second
+`summary_derivation` descriptor declaring only `filesystem.read`, so
+the probe-wired planner covers it. Routing evidence only — no
+verification, audit or acceptance authority changes hands. See the
+[Agent Rust summary route family](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-rust-summary-route-family)
+section.
+
 ### Wave 3 declared summary route demo (mumei-demo)
 
 The optional `go_summaries` scenario in `mumei-demo` runs the declared
