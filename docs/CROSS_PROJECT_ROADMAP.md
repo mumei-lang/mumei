@@ -976,9 +976,21 @@ multi-valued imported call results section below). See the
 Agent's C07 fragment now admits `for` statements with a `range` clause
 over an integer operand — `for i := range e` binds a scoped index
 variable carrying the operand's dependencies, `for i = range e` reuses
-an existing binding, and `_`/bare forms just evaluate. Composite ranges
-are unreachable in-fragment and multi-variable ranges stay declared
-gaps. See the
+an existing binding, and `_`/bare forms just evaluate. A `range`
+clause over an imported container member — `for i := range lib.VA`,
+`for k, v := range lib.VMK`, or a `.`-imported operand — also admits:
+the operand names a `var` member whose `type` is a `slice`, `array` or
+`map` fact, the read transfers on the member's identity with `effects`
+`unknown`, and the member's `type_id` plus named key/element
+identities pin. Up to two left-hand names bind dependency-free — the
+yielded values are external — with `_` slots skipped, `:=` binding
+fresh identifiers and `=` storing through the assignment machinery.
+The clause stays closed when a bound name's declared type is not
+scalar-or-pointer (a `map[string]` key or a struct element), when the
+operand is a non-container member (`lib.VStr`, a `chan` var — its
+member fact reports `unsupported`), or when more than two names
+appear. Multi-variable ranges over any other operand shape stay
+declared gaps. See the
 [Agent integer range loops](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-integer-range-loops).
 
 ### Wave 3 multi-name declarations in scalar summaries
