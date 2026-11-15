@@ -839,7 +839,10 @@ required `specification` object), then
 carry the same claims, with no Core run and no fresh query. A
 mismatch is data, not an error; malformed input is a static failure.
 All six `checks_not_performed` entries stay named. C02 stays
-partial. See the
+partial. The route is also reachable as the `evidence_compare` MCP
+tool — validated declared paths, in-process
+`compute_comparison_descriptor`, `_err` with basename-redacted
+paths on declared failures. See the
 [Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-comparison-route-evidence-compare).
 
 ### Wave 2 declared evidence routes as MCP tools (C02)
