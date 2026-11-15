@@ -1897,7 +1897,10 @@ and emits the `mumei.go-scalar-parameter-deps/v1` manifest from
 selects the single-file profile; repeated `--source` selects the
 package profile with each file declared under its unique basename.
 `--target-arch` names the `gc` target and `--timeout` bounds the
-helper spawn.
+helper spawn. `--import <IMPORT_PATH>=<FILE>` declares one file of an
+importable package unit (repeatable per file and path; requires a
+multi-file `--source` unit) — the helper resolves imports only
+through the declared map, never disk, network or the toolchain.
 
 The route stays a host declaration boundary: it never discovers
 projects, resolves imports or chooses tools — the operator provisions
@@ -1906,8 +1909,8 @@ any stderr or a non-`ok` report status fails closed before parsing,
 and the emitted manifest remains declared data — derived properties
 are recomputed by readers and reuse still goes through
 `for_function`/`stale_dependents`. No audit, MCP or planner route is
-wired yet, no imports are supplied, and Evidence
-normalization/acceptance stays open. C06 stays partially delivered.
+wired yet, and Evidence normalization/acceptance stays open. C06
+stays partially delivered.
 See the
 [Agent summary manifest route](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-manifest-route-go-summaries)
 section.
