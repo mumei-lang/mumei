@@ -861,6 +861,28 @@ tool — validated declared paths, in-process
 paths on declared failures. See the
 [Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-comparison-route-evidence-compare).
 
+### Wave 2 declared evidence producer-identity route (C02)
+
+Agent's `python -m agent evidence-producer-check --evidence <path>
+--tool <name> --adapter <id> [--tool-version <v>]
+[--adapter-version <v>]` discharges the `producer_authenticity`
+duty at representation level: the declared record's `provenance`
+block is restored fail-closed under the closed
+`adapter{id, version, protocol_version}` /
+`tool{name, version}` / `configuration_fingerprint` shape, then
+`mumei.evidence-producer-identity/v1` compares each declared
+expectation and answers `match`/`mismatch` with the differing
+field names listed. A mismatch is data, not an error. Versions are
+pinned only when declared — pinning identity without pinning a
+release stays possible — and unknown expectation fields are a
+static error, never a silent pass. A match means the record
+DECLARES these producer values: producer pinning, not
+attestation — the five other semantic checks stay in
+`checks_not_performed`. Also reachable as the
+`evidence_producer_check` MCP tool (empty version arguments mean
+unpinned). C02 stays partial. See the
+[Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-producer-identity-route-evidence-producer-check).
+
 ### Wave 2 declared evidence routes as MCP tools (C02)
 
 The Agent MCP server exposes the two spawn-free consume routes as
