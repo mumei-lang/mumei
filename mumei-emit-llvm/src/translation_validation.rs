@@ -6,7 +6,7 @@ use llvm_sys::{core::*, prelude::*, LLVMIntPredicate, LLVMOpcode, LLVMTypeKind};
 use mumei_core::semantic_contract::{
     encode_pure_i64_body, encode_pure_i64_module, PureI64Body, PURE_I64_WRAPPING_PROFILE,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use z3::{
     ast::{Ast, Bool, BV},
     Config, Context, SatResult, Solver,
@@ -222,7 +222,7 @@ fn validate(
         } else {
             check_module(module.as_mut_ptr())?;
         }
-        compare_function(&context, raw, &model)?
+        compare_function(&context, raw, &model, &native_call_renames(native))?
     };
     Ok(ValidationReport {
         profile: if native { NATIVE_PROFILE } else { PROFILE },
@@ -291,8 +291,9 @@ pub fn validate_pure_i64_module(
         let function = module
             .get_function(&model.function_name)
             .ok_or(ValidationError("missing source function"))?;
-        let (member_outcome, ir_definedness) =
-            unsafe { compare_function(&context, function.as_value_ref(), model)? };
+        let (member_outcome, ir_definedness) = unsafe {
+            compare_function(&context, function.as_value_ref(), model, &BTreeMap::new())?
+        };
         any_definedness |= !model.definedness.is_empty() || !ir_definedness.is_empty();
         any_param_domain |= !model.param_domain.is_empty();
         any_subrange |= model.subrange_params;
@@ -414,6 +415,7 @@ pub fn validate_native_module(
         .get_function("__mumei_user_main")
         .ok_or(ValidationError("missing source function"))?;
     unsafe { check_native_module_multi(module.as_mut_ptr(), user_main.as_value_ref())? };
+    let call_renames = native_call_renames(true);
     let mut functions = Vec::new();
     let mut any_definedness = false;
     let mut any_param_domain = false;
@@ -429,7 +431,7 @@ pub fn validate_native_module(
             .get_function(member_name)
             .ok_or(ValidationError("missing source function"))?;
         let (member_outcome, ir_definedness) =
-            unsafe { compare_function(&context, function.as_value_ref(), model)? };
+            unsafe { compare_function(&context, function.as_value_ref(), model, &call_renames)? };
         any_definedness |= !model.definedness.is_empty() || !ir_definedness.is_empty();
         any_param_domain |= !model.param_domain.is_empty();
         any_subrange |= model.subrange_params;
@@ -483,13 +485,31 @@ pub fn validate_native_module(
 /// Encode one supplied function and run the three solver queries against
 /// its source model. Returns the outcome and the IR definedness entries,
 /// which callers need for the report's input-domain label.
+/// Callee-name mapping from an emitted member name to the source atom
+/// name its call sites compare against: the binary emitter renames the
+/// user `main` atom to `__mumei_user_main`, so a source call `main(...)`
+/// (`mumei_call_main_0`) must meet `call @__mumei_user_main` under the
+/// `main` name — without the mapping, a recursive or sibling call to
+/// `main` compares Different on every native snapshot. Pure paths keep
+/// emitted names, so their map is empty.
+fn native_call_renames(native: bool) -> BTreeMap<String, String> {
+    if native {
+        [("__mumei_user_main".to_owned(), "main".to_owned())]
+            .into_iter()
+            .collect()
+    } else {
+        BTreeMap::new()
+    }
+}
+
 unsafe fn compare_function<'ctx>(
     context: &'ctx Context,
     raw: LLVMValueRef,
     model: &PureI64Body<'ctx>,
+    call_renames: &BTreeMap<String, String>,
 ) -> Result<(Outcome, Vec<(Bool<'ctx>, Bool<'ctx>)>)> {
     check_function(raw, model.inputs.len())?;
-    let mut encoder = IrEncoder::new(context);
+    let mut encoder = IrEncoder::new(context, call_renames);
     let returns = encoder.encode(raw, &model.inputs)?;
     let ir_definedness = encoder.definedness;
     // Division, remainder and shifts bind both sides only where the operands
@@ -965,18 +985,20 @@ unsafe fn acyclic(block: LLVMBasicBlockRef, colors: &mut HashMap<usize, u8>) -> 
     Ok(())
 }
 
-struct IrEncoder<'ctx> {
+struct IrEncoder<'ctx, 'renames> {
     ctx: &'ctx Context,
+    call_renames: &'renames BTreeMap<String, String>,
     states: usize,
     /// `(path condition, defined)` obligations for `sdiv`/`srem`/`shl`/`ashr`:
     /// the instruction's operands must satisfy the condition wherever the
     /// path executes it, or the IR produces poison there.
     definedness: Vec<(Bool<'ctx>, Bool<'ctx>)>,
 }
-impl<'ctx> IrEncoder<'ctx> {
-    fn new(ctx: &'ctx Context) -> Self {
+impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
+    fn new(ctx: &'ctx Context, call_renames: &'renames BTreeMap<String, String>) -> Self {
         Self {
             ctx,
+            call_renames,
             states: 0,
             definedness: Vec::new(),
         }
@@ -1113,6 +1135,14 @@ impl<'ctx> IrEncoder<'ctx> {
                     name_len,
                 ))
                 .into_owned();
+                // An emitted member name maps back to the source atom
+                // name its call sites share with the source encoder
+                // (`__mumei_user_main` back to `main` on native paths).
+                let name = self
+                    .call_renames
+                    .get(name.as_str())
+                    .map(String::as_str)
+                    .unwrap_or(name.as_str());
                 let arity = LLVMGetNumArgOperands(inst) as usize;
                 let mut args = Vec::with_capacity(arity);
                 for index in 0..arity {
@@ -1121,7 +1151,7 @@ impl<'ctx> IrEncoder<'ctx> {
                 let refs: Vec<&dyn z3::ast::Ast> =
                     args.iter().map(|v| v as &dyn z3::ast::Ast).collect();
                 let applied =
-                    mumei_core::semantic_contract::call_decl(self.ctx, &name, arity).apply(&refs);
+                    mumei_core::semantic_contract::call_decl(self.ctx, name, arity).apply(&refs);
                 applied
                     .as_bv()
                     .ok_or(ValidationError("unsupported LLVM call result"))?

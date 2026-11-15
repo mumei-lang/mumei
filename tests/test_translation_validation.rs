@@ -2061,6 +2061,35 @@ fn native_module_validation_requires_main_and_its_wrapper() {
 }
 
 #[test]
+fn native_module_validation_maps_user_main_calls_back_to_main() {
+    // The binary emitter rewrites a call to the `main` atom as
+    // `call @__mumei_user_main`; the call-site comparison must meet it
+    // under the source name — otherwise every correct caller of `main`
+    // reports Different (distinct uninterpreted functions).
+    let callers_main = "atom f() -> i64 requires: true; ensures: true; body: { main() + 1 }; atom main() -> i64 requires: true; ensures: true; body: { 7 };";
+    let ir = pin(
+        "define i64 @f() { %a = call i64 @__mumei_user_main() %r = add i64 %a, 1 ret i64 %r }\n\
+         define i64 @__mumei_user_main() { ret i64 7 }\n\
+         define i32 @main(i32 %argc, ptr %argv) { %result = call i64 @__mumei_user_main() %exit_code = trunc i64 %result to i32 ret i32 %exit_code }",
+    );
+    let report = tv::validate_native_module(callers_main, &ir, Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    // The same rename binds the single-function route: a recursive
+    // `main()` meets `call @__mumei_user_main`.
+    let recursive = native_source("main() + 1");
+    let ir = pin(
+        "define i64 @__mumei_user_main() { %a = call i64 @__mumei_user_main() %r = add i64 %a, 1 ret i64 %r }\n\
+         define i32 @main(i32 %argc, ptr %argv) { %result = call i64 @__mumei_user_main() %exit_code = trunc i64 %result to i32 ret i32 %exit_code }",
+    );
+    assert_eq!(
+        tv::validate_native_main(&recursive, &ir, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
 fn native_module_validation_checks_emitted_snapshot_per_atom() {
     // End to end: the real binary emitter's multi-atom snapshot — a
     // helper plus `main` renamed to `__mumei_user_main` behind the C
