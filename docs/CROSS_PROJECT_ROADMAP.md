@@ -657,6 +657,25 @@ previous outcome — the host declares each next attempt by calling. C11
 stays partial; Evidence normalization/acceptance remains open. See the
 [Agent reserve-and-dispatch driver](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-reserve-and-dispatch-driver-for-the-next-attempt).
 
+### Wave 2 end-to-end dispatch-and-publish driver
+
+Agent's `dispatch_and_publish(store, argv, ...)` closes the attempt
+lifecycle loop: `store.current` supplies the lineage (an empty store is a
+static error), `begin_attempt` reserves the next record, `dispatch_attempt`
+runs it and reconciles the observation, and `publish_dispatch` commits the
+terminal lineage through compare-and-set against the pre-run store value —
+a store another writer touched mid-run fails statically instead of
+clobbering. The canonical lineage, including any `selected_result` the
+publish added, is the store's current value.
+
+A CAS rejection after a completed run surfaces the store's error — the
+process still ran and recovering it is a host decision. The driver adds no
+arbitration across writers, retry policy, durability or Evidence acceptance
+— it composes the declared boundaries only. C11 stays partial: Evidence
+normalization/acceptance remains open, and C12's demand gate plus existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent dispatch-and-publish driver](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-end-to-end-dispatch-and-publish-driver).
+
 ### Wave 2 normalized run-result descriptors
 
 Agent's `AttemptRunResult.normalized()` maps one observed terminal run into
