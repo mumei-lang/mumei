@@ -256,7 +256,12 @@ fn unsupported_source_is_not_silently_weakened() {
     for body in [
         "x**2",
         "1.0",
-        "while x > 0 invariant true { x }; x",
+        // `while` is admitted only mid-block with a boolean guard and
+        // no nested loop: a non-boolean guard, a nested loop and a
+        // loop in value position all stay unsupported.
+        "while x invariant true { x }; x",
+        "while x > 0 invariant true { while x > 0 invariant true { x }; x }; x",
+        "while x > 0 invariant true { x }",
         // Sequences admit `let`s, scalar reassignments and pure
         // expression statements: an unbound assignment and a trailing
         // `let` without a value still fail.
@@ -2173,4 +2178,93 @@ fn loop_scoped_bindings_do_not_leak_into_later_loop_phis() {
     // The recorded emit runs `verify()` on the bound module — the check
     // that originally rejected this program.
     mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ll_path, &obj_path).unwrap();
+}
+
+#[test]
+fn bounded_while_emitted_ir_is_equivalent_within_bound() {
+    // The emitted loop's back-edge is walked up to LOOP_BOUND header
+    // visits; the source is unrolled to the same bound, so inputs whose
+    // loop exits within the bound compare equal.
+    let src = source(
+        "x: i64",
+        "let n = x; while n > 0 invariant: n >= 0 decreases: n { n = n - 1 }; n",
+    );
+    let report = validate(&src, &emitted(&src));
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(report.profile, tv::BOUNDED_LOOPS_PROFILE);
+    assert_eq!(
+        report.input_domain,
+        "all_signed_i64_inputs_not_restricted_by_requires_and_loops_exiting_within_bound_4"
+    );
+}
+
+#[test]
+fn bounded_while_accumulator_emitted_ir_is_equivalent() {
+    // Loop-carried writes other than the guard variable merge through
+    // the same per-name `ite` as branch reassignment.
+    let src = source(
+        "x: i64",
+        "let n = x; let s = 0; while n > 0 invariant: n >= 0 decreases: n { s = s + n; n = n - 1 }; s",
+    );
+    let report = validate(&src, &emitted(&src));
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(report.profile, tv::BOUNDED_LOOPS_PROFILE);
+}
+
+#[test]
+fn bounded_while_divergent_body_is_refuted_on_covered_inputs() {
+    // `n - 2` diverges from `n - 1` for inputs whose loop still exits
+    // within the bound (x = 1 leaves n = -1 instead of 0).
+    let src = source(
+        "x: i64",
+        "let n = x; while n > 0 invariant: n >= 0 decreases: n { n = n - 1 }; n",
+    );
+    let other = source(
+        "x: i64",
+        "let n = x; while n > 0 invariant: n >= 0 decreases: n + 1 { n = n - 2 }; n",
+    );
+    let report = validate(&src, &emitted(&other));
+    assert_eq!(report.outcome, Outcome::Different);
+}
+
+#[test]
+fn while_exceeding_the_bound_stays_equivalent_on_covered_inputs() {
+    // `n < 10` only exits within 4 guard evaluations for x >= 7; those
+    // covered inputs still compare equivalent — deeper executions are
+    // outside the declared domain, not a divergence.
+    let src = source(
+        "x: i64",
+        "let n = x; while n < 10 invariant: n <= 10 decreases: 10 - n { n = n + 1 }; n",
+    );
+    let report = validate(&src, &emitted(&src));
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(report.profile, tv::BOUNDED_LOOPS_PROFILE);
+}
+
+#[test]
+fn while_never_exiting_within_bound_is_out_of_profile() {
+    // A guard that can never fail leaves no covered input: the declared
+    // domain is empty, so validation errors instead of reporting a
+    // vacuous equivalence or a divergence.
+    let src = source(
+        "x: i64",
+        "let n = x; while true invariant: true { n = n + 1 }; n",
+    );
+    assert!(tv::validate_pure_i64(&src, &function("ret i64 0"), Options::default()).is_err());
+}
+
+#[test]
+fn cyclic_ir_still_rejected_for_loop_free_source() {
+    // The bounded-cycle gate is opt-in per atom: a source without `while`
+    // keeps the acyclicity requirement and a back-edge stays unsupported.
+    let ir = pin("define i64 @f(i64 %x) {
+        entry:
+          br label %loop
+        loop:
+          %c = icmp sgt i64 %x, 0
+          br i1 %c, label %loop, label %done
+        done:
+          ret i64 %x
+        }");
+    assert!(tv::validate_pure_i64(&source("x: i64", "x"), &ir, Options::default()).is_err());
 }

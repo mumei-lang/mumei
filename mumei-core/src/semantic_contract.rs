@@ -345,6 +345,7 @@ pub fn extract_pure_i64_contract(
         .chain(allow_wrapping_arithmetic.then_some("match_arm_boolean_guards"))
         .chain(allow_wrapping_arithmetic.then_some("conditional_path_reassignment_ite_merge"))
         .chain(allow_wrapping_arithmetic.then_some("match_arm_reassignment_ite_merge"))
+        .chain(allow_wrapping_arithmetic.then_some("bounded_while_loop_unrolling"))
         .collect(),
         requested_route: "standard_z3_not_executed_by_extractor",
         decomposition: "no_common_obligation_decomposition",
@@ -361,7 +362,7 @@ pub fn extract_pure_i64_contract(
             "HIR/MIR fingerprints identify internal snapshots, not semantic equivalence.",
             "Target availability, LLVM lowering and final machine code are not verified.",
             if allow_wrapping_arithmetic {
-                "No unsigned division, logical shifts, heap, FFI, ownership, effects or concurrency in this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation."
+                "No unsigned division, logical shifts, heap, FFI, ownership, effects or concurrency in this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation. `while` loops are claimed only where every guard fails within the profile bound (4 evaluations); deeper executions are outside the compared domain."
             } else {
                 "No arithmetic, heap, calls, FFI, ownership, effects or concurrency in this profile."
             },
@@ -554,6 +555,72 @@ fn expect_kind(actual: ScalarKind, expected: ScalarKind) -> Result<(), SemanticC
     }
 }
 
+/// True when the statement subtree holds a `while` at any depth —
+/// statements nested inside expression blocks, `if` branches, match
+/// arms and task/acquire bodies all count. Admission uses it to keep
+/// nested loops out of the bounded-unroll profile.
+fn contains_while_stmt(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::While { .. } => true,
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => contains_while_expr(value),
+        Stmt::ArrayStore { index, value, .. } => {
+            contains_while_expr(index) || contains_while_expr(value)
+        }
+        Stmt::Block(stmts, _)
+        | Stmt::TaskGroup {
+            children: stmts, ..
+        } => stmts.iter().any(contains_while_stmt),
+        Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => contains_while_stmt(body),
+        Stmt::Expr(value, _) => contains_while_expr(value),
+        Stmt::Cancel { .. } => false,
+    }
+}
+
+fn contains_while_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Number(_)
+        | Expr::Float(_)
+        | Expr::StringLit(_)
+        | Expr::Variable(_)
+        | Expr::AtomRef { .. } => false,
+        Expr::ArrayLit(items) | Expr::Call(_, items) | Expr::Perform { args: items, .. } => {
+            items.iter().any(contains_while_expr)
+        }
+        Expr::ArrayAccess(_, index) => contains_while_expr(index),
+        Expr::BinaryOp(left, _, right) => contains_while_expr(left) || contains_while_expr(right),
+        Expr::Block(body) | Expr::Async { body } | Expr::Lambda { body, .. } => {
+            contains_while_stmt(body)
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            contains_while_expr(cond)
+                || contains_while_stmt(then_branch)
+                || contains_while_stmt(else_branch)
+        }
+        Expr::StructInit { fields, .. } => {
+            fields.iter().any(|(_, value)| contains_while_expr(value))
+        }
+        Expr::FieldAccess(target, _) | Expr::Await { expr: target } => contains_while_expr(target),
+        Expr::Match { target, arms } => {
+            contains_while_expr(target)
+                || arms.iter().any(|arm| {
+                    arm.guard.as_deref().is_some_and(contains_while_expr)
+                        || contains_while_stmt(&arm.body)
+                })
+        }
+        Expr::CallRef { callee, args } => {
+            contains_while_expr(callee) || args.iter().any(contains_while_expr)
+        }
+        Expr::ChanSend { channel, value } => {
+            contains_while_expr(channel) || contains_while_expr(value)
+        }
+        Expr::ChanRecv { channel } => contains_while_expr(channel),
+    }
+}
+
 /// `assignable` names the bindings an assignment may rebind: parameters
 /// and `let`s bound on the current linear path. `if` branches and
 /// expression blocks get an empty set — the source model cannot merge a
@@ -642,6 +709,41 @@ fn statement_kind(
                     Stmt::Expr(value, _) => {
                         expression_kind(
                             value,
+                            &inner,
+                            result_in_scope,
+                            allow_wrapping_arithmetic,
+                            &inner_assignable,
+                            callees,
+                        )?;
+                    }
+                    // A `while` is admitted only mid-block under the
+                    // widened profile: its unit value can never be the
+                    // block tail, its condition must be `bool`, and its
+                    // body follows the same linear-path rules. A loop
+                    // nested at any depth stays closed — the bounded
+                    // unroll bounds iterations per loop instance, which
+                    // nesting would break.
+                    Stmt::While { cond, body, .. } => {
+                        let kind = expression_kind(
+                            cond,
+                            &inner,
+                            result_in_scope,
+                            allow_wrapping_arithmetic,
+                            &BTreeSet::new(),
+                            callees,
+                        )?;
+                        if kind != ScalarKind::Bool {
+                            return Err(SemanticContractError::Unsupported(
+                                "non-boolean while condition",
+                            ));
+                        }
+                        if contains_while_stmt(body) {
+                            return Err(SemanticContractError::Unsupported(
+                                "nested while outside bounded-loop profile",
+                            ));
+                        }
+                        statement_kind(
+                            body,
                             &inner,
                             result_in_scope,
                             allow_wrapping_arithmetic,
@@ -943,6 +1045,13 @@ pub struct PureI64Body<'ctx> {
     /// `param_domain` — a bool-only domain keeps its 0/1 report label,
     /// while any subrange bound reports the signature-bounded domain.
     pub subrange_params: bool,
+    /// When the body contains a `while`, the conjunction of each loop's
+    /// bounded-exit condition: `true` only on inputs where every loop's
+    /// guard fails within `LOOP_BOUND` unrolled iterations. Equivalence
+    /// is claimed only inside that domain — a path still iterating at
+    /// the bound is outside the profile, matching the LLVM side's
+    /// bounded path drop. `None` for bodies without a `while`.
+    pub loop_bound_exits: Option<Bool<'ctx>>,
 }
 
 type BodyResult<T> = std::result::Result<T, SemanticContractError>;
@@ -1039,6 +1148,7 @@ fn encode_atom_body<'ctx>(
     // Top-level reassignments land in `top_writes`; nothing reads the
     // body afterwards, so the map is a sink for the write records.
     let mut top_writes = HashMap::new();
+    let mut loop_exits = Vec::new();
     let value = match source_stmt(
         &body,
         context,
@@ -1048,6 +1158,7 @@ fn encode_atom_body<'ctx>(
         0,
         &assignable,
         &mut top_writes,
+        &mut loop_exits,
     )? {
         SourceValue::Integer(value) => value,
         SourceValue::Boolean(value) => {
@@ -1090,6 +1201,12 @@ fn encode_atom_body<'ctx>(
             Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32")
         )
     });
+    let loop_bound_exits = if loop_exits.is_empty() {
+        None
+    } else {
+        let refs: Vec<&Bool> = loop_exits.iter().collect();
+        Some(Bool::and(context, &refs))
+    };
     Ok(PureI64Body {
         function_name: atom.name.clone(),
         source_sha256,
@@ -1098,10 +1215,18 @@ fn encode_atom_body<'ctx>(
         definedness,
         param_domain,
         subrange_params,
+        loop_bound_exits,
     })
 }
 
 const MAX_DEPTH: usize = 48;
+
+/// Iterations a `while` is unrolled to on the source side, and the
+/// per-block visit depth the LLVM side explores before dropping a path.
+/// Both sides share one constant so the declared profile is symmetric:
+/// a source loop whose guard fails within the bound meets an LLVM path
+/// that leaves the cycle within the same bound.
+pub const LOOP_BOUND: usize = 4;
 
 /// Encode a counterexample to the C03 source contract, not LLVM correspondence.
 /// Callers must separately guard against vacuous preconditions when required.
@@ -1128,6 +1253,7 @@ pub fn encode_pure_i64_obligation<'ctx>(
         0,
         &BTreeSet::new(),
         &mut HashMap::new(),
+        &mut Vec::new(),
     )?
     .boolean()?;
     env.insert("result".to_string(), SourceValue::Integer(body.value));
@@ -1142,6 +1268,7 @@ pub fn encode_pure_i64_obligation<'ctx>(
         0,
         &BTreeSet::new(),
         &mut HashMap::new(),
+        &mut Vec::new(),
     )?
     .boolean()?;
     Ok(Bool::and(context, &[&requires, &ensures.not()]))
@@ -1209,6 +1336,11 @@ fn source_stmt<'ctx>(
     depth: usize,
     assignable: &BTreeSet<String>,
     written: &mut HashMap<String, SourceValue<'ctx>>,
+    // `while` exits observed under bounded unrolling: one entry per
+    // loop, `true` on every input where that loop's guard fails within
+    // `LOOP_BOUND` iterations. The report bounds its equivalence claim
+    // to inputs satisfying all of them.
+    loop_exits: &mut Vec<Bool<'ctx>>,
 ) -> BodyResult<SourceValue<'ctx>> {
     if depth > MAX_DEPTH {
         return Err(SemanticContractError::Unsupported("source depth limit"));
@@ -1223,6 +1355,7 @@ fn source_stmt<'ctx>(
             depth + 1,
             assignable,
             written,
+            loop_exits,
         ),
         Stmt::Assign { var, value, .. } => {
             if !assignable.contains(var) {
@@ -1239,6 +1372,7 @@ fn source_stmt<'ctx>(
                 depth + 1,
                 &BTreeSet::new(),
                 written,
+                loop_exits,
             )?;
             written.insert(var.clone(), bound.clone());
             Ok(bound)
@@ -1252,6 +1386,7 @@ fn source_stmt<'ctx>(
             depth + 1,
             assignable,
             written,
+            loop_exits,
         ),
         Stmt::Block(stmts, _) if !stmts.is_empty() => {
             // Sequential blocks bind names lexically: each `let`
@@ -1279,6 +1414,7 @@ fn source_stmt<'ctx>(
                             depth + 1,
                             &BTreeSet::new(),
                             written,
+                            loop_exits,
                         )?;
                         inner.insert(var.clone(), bound);
                         inner_assignable.insert(var.clone());
@@ -1299,6 +1435,7 @@ fn source_stmt<'ctx>(
                             depth + 1,
                             &BTreeSet::new(),
                             written,
+                            loop_exits,
                         )?;
                         inner.insert(var.clone(), bound.clone());
                         if escapable.contains(var) {
@@ -1316,6 +1453,28 @@ fn source_stmt<'ctx>(
                             depth + 1,
                             &inner_assignable,
                             &mut local,
+                            loop_exits,
+                        )?;
+                        for (name, bound) in local {
+                            inner.insert(name.clone(), bound.clone());
+                            if escapable.contains(&name) {
+                                written.insert(name, bound);
+                            }
+                        }
+                    }
+                    Stmt::While { cond, body, .. } => {
+                        let mut local = HashMap::new();
+                        source_while(
+                            cond,
+                            body,
+                            ctx,
+                            &inner,
+                            guard,
+                            definedness,
+                            depth + 1,
+                            &inner_assignable,
+                            &mut local,
+                            loop_exits,
                         )?;
                         for (name, bound) in local {
                             inner.insert(name.clone(), bound.clone());
@@ -1341,6 +1500,7 @@ fn source_stmt<'ctx>(
                 depth + 1,
                 &inner_assignable,
                 &mut tail_writes,
+                loop_exits,
             )?;
             for (name, bound) in tail_writes {
                 if escapable.contains(&name) {
@@ -1353,6 +1513,88 @@ fn source_stmt<'ctx>(
             "unsupported source statement",
         )),
     }
+}
+
+/// Bounded unroll of an admitted `while`: each of `LOOP_BOUND` steps
+/// re-evaluates the condition under the merged environment, executes the
+/// body only on paths still looping (`guard ∧ ¬exited ∧ cond` carries
+/// the body's definedness obligations), and merges each escaping write
+/// as `ite(cond, body_value, previous)`. A path still iterating at the
+/// bound is outside the profile: the collected `loop_exits` disjunction
+/// bounds the reported equivalence domain to inputs where the loop
+/// exits, matching the LLVM side's bounded path drop.
+#[allow(clippy::too_many_arguments)]
+fn source_while<'ctx>(
+    cond: &Expr,
+    body: &Stmt,
+    ctx: &'ctx Context,
+    env: &HashMap<String, SourceValue<'ctx>>,
+    guard: &Bool<'ctx>,
+    definedness: &mut Vec<Bool<'ctx>>,
+    depth: usize,
+    assignable: &BTreeSet<String>,
+    written: &mut HashMap<String, SourceValue<'ctx>>,
+    loop_exits: &mut Vec<Bool<'ctx>>,
+) -> BodyResult<()> {
+    use SourceValue::{Boolean as B, Integer as I};
+    let mut cur = env.clone();
+    let mut exited = Bool::from_bool(ctx, false);
+    let mut merged: BTreeMap<String, SourceValue> = BTreeMap::new();
+    for _ in 0..LOOP_BOUND {
+        // The guard evaluates on every path that has not exited yet —
+        // its partial operations obligate only that prefix.
+        let alive = Bool::and(ctx, &[guard, &exited.not()]);
+        let c = match source_expr(
+            cond,
+            ctx,
+            &cur,
+            &alive,
+            definedness,
+            depth + 1,
+            &BTreeSet::new(),
+            &mut HashMap::new(),
+            loop_exits,
+        )? {
+            B(b) => b,
+            _ => {
+                return Err(SemanticContractError::Unsupported(
+                    "non-boolean while condition",
+                ))
+            }
+        };
+        let mut body_writes = HashMap::new();
+        source_stmt(
+            body,
+            ctx,
+            &cur,
+            &Bool::and(ctx, &[&alive, &c]),
+            definedness,
+            depth + 1,
+            assignable,
+            &mut body_writes,
+            loop_exits,
+        )?;
+        for (name, bound) in body_writes {
+            let value = match (cur.get(&name), &bound) {
+                (Some(I(old)), I(new)) => I(c.ite(new, old)),
+                (Some(B(old)), B(new)) => B(c.ite(new, old)),
+                (None, _) => bound.clone(),
+                _ => {
+                    return Err(SemanticContractError::Unsupported(
+                        "while rebinding kind mismatch",
+                    ))
+                }
+            };
+            merged.insert(name.clone(), value.clone());
+            cur.insert(name, value);
+        }
+        exited = Bool::or(ctx, &[&exited, &c.not()]);
+    }
+    loop_exits.push(exited);
+    for (name, bound) in merged {
+        written.insert(name, bound);
+    }
+    Ok(())
 }
 
 /// The domain LLVM and `--bitvec-i64` verification both give `sdiv`/`srem`:
@@ -1403,6 +1645,7 @@ fn source_expr<'ctx>(
     depth: usize,
     assignable: &BTreeSet<String>,
     written: &mut HashMap<String, SourceValue<'ctx>>,
+    loop_exits: &mut Vec<Bool<'ctx>>,
 ) -> BodyResult<SourceValue<'ctx>> {
     use SourceValue::{Boolean as B, Integer as I};
     if depth > MAX_DEPTH {
@@ -1424,6 +1667,7 @@ fn source_expr<'ctx>(
             depth + 1,
             &BTreeSet::new(),
             written,
+            loop_exits,
         )?,
         Expr::BinaryOp(a, op, b) => {
             let a = source_expr(
@@ -1435,6 +1679,7 @@ fn source_expr<'ctx>(
                 depth + 1,
                 &BTreeSet::new(),
                 written,
+                loop_exits,
             )?;
             // `&&`/`||`/`=>` short-circuit like the emitter and
             // `--bitvec-i64` verification: the right operand's partial
@@ -1453,6 +1698,7 @@ fn source_expr<'ctx>(
                 depth + 1,
                 &BTreeSet::new(),
                 written,
+                loop_exits,
             )?;
             match (a, op, b) {
                 (I(a), Op::Eq, I(b)) => B(a._eq(&b)),
@@ -1516,6 +1762,7 @@ fn source_expr<'ctx>(
                 depth + 1,
                 &BTreeSet::new(),
                 written,
+                loop_exits,
             )?
             .boolean()?;
             // Branches may rebind linear-path names: each write merges
@@ -1535,6 +1782,7 @@ fn source_expr<'ctx>(
                     depth + 1,
                     assignable,
                     &mut then_writes,
+                    loop_exits,
                 )?,
                 source_stmt(
                     else_branch,
@@ -1545,6 +1793,7 @@ fn source_expr<'ctx>(
                     depth + 1,
                     assignable,
                     &mut else_writes,
+                    loop_exits,
                 )?,
             );
             let names: BTreeSet<&String> = then_writes.keys().chain(else_writes.keys()).collect();
@@ -1592,6 +1841,7 @@ fn source_expr<'ctx>(
                 depth + 1,
                 &BTreeSet::new(),
                 written,
+                loop_exits,
             )?
             .integer()?;
             let mut missed: Vec<Bool> = Vec::new();
@@ -1651,6 +1901,7 @@ fn source_expr<'ctx>(
                                 depth + 1,
                                 &BTreeSet::new(),
                                 written,
+                                loop_exits,
                             )?
                             .boolean()?;
                             Some(match pattern {
@@ -1683,6 +1934,7 @@ fn source_expr<'ctx>(
                     depth + 1,
                     &arm_assignable,
                     &mut arm_writes,
+                    loop_exits,
                 )?;
                 // Arm writes escape like `if` branch writes: each merges
                 // under the arm-local hit (earlier arms' misses and this
@@ -1745,6 +1997,7 @@ fn source_expr<'ctx>(
                     depth + 1,
                     assignable,
                     written,
+                    loop_exits,
                 )? {
                     I(v) => applied.push(v),
                     B(_) => {
