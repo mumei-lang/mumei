@@ -284,6 +284,7 @@ pub fn validate_pure_i64_module(
     let mut functions = Vec::new();
     let mut any_definedness = false;
     let mut any_param_domain = false;
+    let mut any_subrange = false;
     let mut outcome = Outcome::EquivalentWithinProfile;
     for model in &models {
         let function = module
@@ -293,6 +294,7 @@ pub fn validate_pure_i64_module(
             unsafe { compare_function(&context, function.as_value_ref(), model)? };
         any_definedness |= !model.definedness.is_empty() || !ir_definedness.is_empty();
         any_param_domain |= !model.param_domain.is_empty();
+        any_subrange |= model.subrange_params;
         // Different outranks UndefinedBehavior for the aggregate: a wrong
         // produced value is a harder failure than a poisoned one, and both
         // outrank an unknown solver result.
@@ -316,9 +318,17 @@ pub fn validate_pure_i64_module(
         data_layout: DATA_LAYOUT,
         checked_stage: "supplied_llvm_ir_snapshot_no_pipeline_attestation",
         input_domain: if any_definedness {
-            "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires"
-        } else if any_param_domain {
+            if any_subrange {
+                "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires"
+            } else if any_param_domain {
+                "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_restricted_by_requires"
+            } else {
+                "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires"
+            }
+        } else if any_subrange {
             "signed_i64_inputs_with_signature_bounded_param_domains_not_restricted_by_requires"
+        } else if any_param_domain {
+            "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_restricted_by_requires"
         } else {
             "all_signed_i64_inputs_not_restricted_by_requires"
         },
