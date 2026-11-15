@@ -1979,6 +1979,36 @@ normalization/acceptance stays open. See the
 [Agent summary strict acceptance](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-strict-acceptance-go-summaries-accept)
 section.
 
+### Wave 3 declared summary attempt route (go-summaries-attempt)
+
+Agent's `python -m agent go-summaries-attempt` is the fifth consumable
+route: it runs the produce route itself as one declared attempt inside
+the C11 lifecycle. The route spawns `python -m agent go-summaries`
+with the same declared inputs through `dispatch_and_publish` — a fresh
+`AttemptSequence` keyed to a request fingerprint that binds the helper
+binary's bytes and every declared input file's bytes under
+`mumei.go-summaries-attempt-request/v1`, one reserved attempt observed
+by `AttemptRunner` under the required `--attempt-timeout <MS>` bound
+(plus an optional `--memory-bound-mb` POSIX ceiling), reconcile and
+compare-and-set publication. An `exited` run's captured stdout becomes
+the sequence's selected result; failed, timed-out or cancelled runs
+publish the terminal lineage with no selection.
+
+The emitted `mumei.go-summaries-attempt-report/v1` carries the
+canonical lineage, the `mumei.verifier-run-result/v1` normalized
+descriptor and — only when a result was selected — the
+`mumei.verifier-evidence-candidate/v1` handoff descriptor, so a host
+can restore the lineage through `AttemptSequence.from_dict` and
+evaluate a recorded check against the candidate. The report carries
+no manifest bytes: the child's manifest is observed only through the
+bounded capture claim, a nonzero observed exit is still a completed
+observation and the child inherits only the caller's environment.
+C06 stays partially delivered; no retry policy, scheduling or audit
+route is wired and Evidence normalization/acceptance stays open. See
+the
+[Agent summary attempt route](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-attempt-route-go-summaries-attempt)
+section.
+
 ### Wave 3 multi-language adapter summary routes
 
 The same four-route family lands on the in-process TypeScript,
