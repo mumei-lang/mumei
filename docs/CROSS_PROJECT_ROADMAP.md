@@ -1471,8 +1471,10 @@ a composite-typed element stays closed like the single-value read.
 On a nested chain, comma-ok admits when the outermost index's
 container is still map-typed — `v, ok := lib.VM2[k1][k2]` descends
 one `elem` fact per level and requires the surviving container fact
-to be a `map`; `v, ok := lib.VM2[k]` stays closed since its value
-is a map the model cannot bind.
+to be a `map` (the root need not itself be a map —
+`v, ok := lib.V[i]["k"]` on a `[]map[K]V` admits);
+`v, ok := lib.VM2[k]` stays closed since its value is a map the
+model cannot bind.
 A member write
 (`lib.VM[k] = v`) pins the named key's identity too. See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
