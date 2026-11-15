@@ -886,6 +886,17 @@ status. Like the rest of this slice it attests only the supplied
 snapshot — no object, linking, OS exit-status or final-executable
 semantics.
 
+`mumei build --emit binary` runs `validate_native_module` on the staged
+merged IR after the host triple and data layout are bound — the exact
+bytes the object emitter consumes — and writes an advisory
+`<stem>.translation-validation.json` report
+(`mumei.translation-validation-report/v1`: profile, both hashes,
+per-function outcomes and the aggregate). The check is advisory: a
+`Different` or `UndefinedBehavior` outcome is reported on stderr but
+does not block the link, and a module outside the bounded profile —
+non-i64 atoms, extern declarations, or no `main` — simply leaves no
+report behind.
+
 The existing Z3 library checks a quantifier-free bitvector mismatch query
 restricted to inputs where both sides are defined. Unsat yields
 `EquivalentWithinProfile`; sat yields `Different`; unknown/resource

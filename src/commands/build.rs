@@ -9,8 +9,87 @@ use mumei_core::parser::Item;
 use mumei_core::{
     emitter, manifest, mir, mir_analysis, parser, proof_cert, resolver, verification,
 };
+use mumei_emit_llvm::translation_validation::{self as tv, Options, Outcome};
 use std::fs;
 use std::path::Path;
+
+// `--emit binary` wires the C09 native module validator into the merged
+// snapshot before object emission. The report artifact is advisory: it
+// records each atom's outcome but never blocks the link, and a module
+// outside the bounded profile (externs, non-i64 atoms, no `main`) simply
+// leaves no report behind.
+fn run_translation_validation_check(
+    source: &str,
+    ll_path: &Path,
+    output_dir: &Path,
+    file_stem: &str,
+) {
+    // A rebuild that skips validation (module outside the bounded
+    // profile) must not leave an earlier report beside the new binary.
+    let report_path = output_dir.join(format!("{file_stem}.translation-validation.json"));
+    let _ = fs::remove_file(&report_path);
+    let Ok(llvm_ir) = fs::read_to_string(ll_path) else {
+        return;
+    };
+    let report = match tv::validate_native_module(source, &llvm_ir, Options::default()) {
+        Ok(report) => report,
+        Err(_) => return,
+    };
+    let label = |outcome: &Outcome| match outcome {
+        Outcome::EquivalentWithinProfile => "equivalent_within_profile",
+        Outcome::Different => "different",
+        Outcome::UndefinedBehavior => "undefined_behavior",
+        Outcome::Inconclusive => "inconclusive",
+    };
+    let functions: Vec<serde_json::Value> = report
+        .functions
+        .iter()
+        .map(|function| {
+            serde_json::json!({
+                "function_name": function.function_name,
+                "outcome": label(&function.outcome),
+            })
+        })
+        .collect();
+    let bytes = match serde_json::to_vec_pretty(&serde_json::json!({
+        "schema_version": "mumei.translation-validation-report/v1",
+        "profile": report.profile,
+        "source_profile": report.source_profile,
+        "target": report.target,
+        "data_layout": report.data_layout,
+        "checked_stage": report.checked_stage,
+        "input_domain": report.input_domain,
+        "source_sha256": report.source_sha256,
+        "llvm_sha256": report.llvm_sha256,
+        "timeout_ms": report.timeout_ms,
+        "resource_limit": report.resource_limit,
+        "functions": functions,
+        "outcome": label(&report.outcome),
+    })) {
+        Ok(bytes) => bytes,
+        Err(_) => return,
+    };
+    if fs::write(&report_path, bytes).is_err() {
+        return;
+    }
+    match report.outcome {
+        Outcome::EquivalentWithinProfile => println!(
+            "  ✅ Translation validation: {} function(s) equivalent within profile ({})",
+            report.functions.len(),
+            report_path.display()
+        ),
+        Outcome::Inconclusive => println!(
+            "  ⚠️  Translation validation inconclusive for {} function(s) ({})",
+            report.functions.len(),
+            report_path.display()
+        ),
+        Outcome::Different | Outcome::UndefinedBehavior => eprintln!(
+            "  ⚠️  Translation validation: {} — see {}",
+            label(&report.outcome),
+            report_path.display()
+        ),
+    }
+}
 
 pub(crate) fn cmd_build_command(command: Command) {
     let Command::Build {
@@ -953,16 +1032,28 @@ pub(crate) fn cmd_build(
         let extern_blocks = collect_extern_blocks(&module_env);
         let hir_atoms = collect_binary_hir_atoms(&items, &module_env);
 
+        let ll_path = output_dir.join(format!("{}_merged.ll", file_stem));
         let object_path = output_dir.join(format!("{}_merged.o", file_stem));
-        if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_object(
+        if let Err(e) = mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
             &hir_atoms,
             &module_env,
             &extern_blocks,
-            &object_path,
+            &ll_path,
         ) {
             eprintln!("❌ Binary codegen failed: {}", e);
             std::process::exit(1);
         }
+        // Bind the host triple + data layout into the staged IR (the same
+        // rewrite the native-bundle snapshot path performs), then validate
+        // the exact bytes the object emitter consumed.
+        if let Err(e) =
+            mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ll_path, &object_path)
+        {
+            eprintln!("❌ Binary codegen failed: {}", e);
+            std::process::exit(1);
+        }
+        run_translation_validation_check(&source, &ll_path, output_dir, file_stem);
+        let _ = fs::remove_file(&ll_path);
 
         let binary_output = output_dir.join(file_stem);
         println!(
