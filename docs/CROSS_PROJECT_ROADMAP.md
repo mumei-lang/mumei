@@ -394,6 +394,27 @@ normalization/acceptance remain open, and C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent publication boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-atomic-canonical-lineage-publication).
 
+### Wave 2 declared lineage restoration
+
+Agent's `AttemptEvent.from_dict`, `AttemptRecord.from_dict` and
+`AttemptSequence.from_dict` rebuild the declared
+`mumei.verifier-attempt*/v1` snapshots a host persisted, letting a host
+reinstate its own canonical lineage after a restart without trusting the
+bytes: unknown or missing keys, a foreign `schema_version`, malformed
+members and a record's declared `state` disagreeing with its replayed
+events are static errors, and every constructor invariant — record
+bindings, ordinals, terminal predecessors, the selected-result reference,
+the report stamp — is re-checked, not recovered.
+
+A restored `selected_result` still names a declared fingerprint the
+snapshot cannot re-bind to bytes. Durability itself, canonical-store
+ownership, distribution, crash recovery and Evidence remain host duties:
+this is a parse boundary, not a trust boundary. C11 stays partial:
+Evidence normalization/acceptance remains open, and C12's demand gate
+plus existing assurance/Lean/native/LLVM/deferred-WASM policies are
+unchanged. See the
+[Agent lineage-restoration boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-lineage-restoration).
+
 ### Wave 2 monotonic report stamps for replay detection
 
 Agent's `AttemptSequence.reconcile_report` accepts an optional
