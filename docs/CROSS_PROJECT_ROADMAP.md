@@ -536,14 +536,17 @@ assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 ### Wave 2 declared-dispatch execution driver
 
 Agent's `attempt_runner.dispatch_attempt(sequence, argv, *, runner=None,
-cancel_event=None, memory_bound_mb=None)` runs the sequence's outstanding
-dispatch end-to-end: `next_dispatch()` must yield a request (nothing
-reserved, an attempt in flight or a terminal current record is a static
-error, never a run), `AttemptRunner.run` executes it under the declared
-timeout and the terminal record is reconciled back into the sequence. The
-returned `AttemptDispatch(sequence, run)` pairs the reconciled sequence
-with the observed run, validating that the sequence's current record
-carries the run's binding and events.
+cancel_event=None, memory_bound_mb=None, report_stamp=None)` runs the
+sequence's outstanding dispatch end-to-end: `next_dispatch()` must yield
+a request (nothing reserved, an attempt in flight or a terminal current
+record is a static error, never a run), `AttemptRunner.run` executes it
+under the declared timeout and the terminal record is reconciled back
+into the sequence — a stamped sequence requires a fresh `report_stamp`,
+checked before spawn so a missing or stale stamp fails statically
+instead of discarding an observed run. The returned
+`AttemptDispatch(sequence, run)` pairs the reconciled sequence with the
+observed run, validating that the sequence's current record carries the
+run's full binding (fingerprint, ordinal, declared timeout) and events.
 
 The driver composes the declared dispatch boundary with the single-spawn
 runner — no scheduling, ordering, result selection, output snapshot or
