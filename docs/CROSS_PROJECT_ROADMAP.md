@@ -2293,6 +2293,23 @@ expose the flag. See the
 [Agent declared summaries in directory audits](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summaries-in-directory-audits-audit---enable-summaries)
 section.
 
+### Wave 3 declared audit summaries demo (mumei-demo)
+
+The optional `audit_summaries` scenario in `mumei-demo` exercises
+`audit --enable-summaries` end to end on a mixed TypeScript/Go fixture
+directory: the first step asserts `summary_audits` records
+`ts-summaries` `emitted` for `util.ts` and `go-summaries`
+`skipped_no_helper` for the package directory when no `--go-types` is
+declared, and the second step — gated on `optional_toolchain: "go"` —
+builds the helper, re-runs the audit with `--go-types`, and asserts
+`go-summaries` `emitted` with `function_count` present. Both steps use
+the `rc`-preserving `> file; rc=$?; cat file; test $rc -eq 0 && grep`
+form so a failed audit or refused route cannot pass as exit-0 output.
+The scenario stays in `OPTIONAL_SCENARIOS` — the default sequence is
+unchanged — and `CI_FIXTURE_MODE=1` replays recorded metadata for the
+helper-bound step. The demo binds declared advisory metadata only: it
+grants no verification, audit or acceptance authority.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
