@@ -2113,8 +2113,23 @@ so an unversioned observation still excludes and a structural
 exclusion is never probed. The returned `AdapterProbePlan` carries
 the updated `AdapterProbeHistory` records for retry scheduling.
 Selecting is routing only — nothing runs the route or accepts a
-manifest; audit/MCP wiring stays open. See the
+manifest; audit wiring stays open. See the
 [Agent summary-route probe wiring](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-summary-route-probe-wiring)
+section.
+
+### Wave 3 declared summary MCP tool (go_summaries)
+
+The agent's MCP surface exposes the produce route as
+`go_summaries(source_files, go_types, target_arch='amd64',
+imports_json='{}', timeout_s=30)` — the same declared boundary the
+CLI routes speak: the caller declares every byte (source texts,
+import units, the provisioned helper binary), the shared
+`summarize_declared` entry point builds the helper request, and the
+`mumei.go-scalar-parameter-deps/v1` manifest goes out under
+`manifest`. A summary is a conservative report, not a proof or a
+verdict — consumption (the accept gate and any audit/planner caller)
+stays host-side. See the
+[Agent declared summary MCP tool](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-mcp-tool-go_summaries)
 section.
 
 ### Wave 3 consumable plan route (summaries-plan)
