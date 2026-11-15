@@ -769,6 +769,17 @@ the declared bound. Concurrency and Evidence acceptance remain open;
 C11 stays partial. See the
 [Agent probe retry scheduling](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-history-bounded-probe-retry-scheduling).
 
+### Wave 2 declared probe cancellation
+
+Agent's `AdapterProbeRequest.cancel_request()` returns the declared
+`AttemptCancelRequest` bound to the same fingerprint and attempt
+ordinal as `execution_request()`. The descriptor only names which
+running probe record a host proposes to stop — it never signals a
+process, confirms delivery or proves a stop; dispatch and stop
+observation remain host duties. C11 stays partial; Evidence
+acceptance remains open. See the
+[Agent probe cancellation](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-probe-cancellation).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
