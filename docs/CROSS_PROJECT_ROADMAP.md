@@ -764,13 +764,14 @@ deterministically `accepted:false`. Refuted (exit 1) / inconclusive
 64 KiB input bound are rejected before dispatch. The `acceptance`
 descriptor stays representation-level — `accepted: true` asserts
 nothing about claim truth, freshness, authenticity or correspondence.
-Separately, a selected run discharges four of the six semantic checks
+Separately, a selected run discharges five of the six semantic checks
 for the produced record — also at representation level —
-`file_identity`, `producer_authenticity`, `freshness` and
-`semantic_correspondence`, reported in `discharged_checks` with
-`claim_truth` (establishment is not a truth receipt) and
-`artifact_semantics` (the compiled-artifact layer) left in
-`checks_not_performed`. C02/C11 stay partial.
+`claim_truth` (the `established` verdict is the strongest truth
+receipt the pipeline emits), `file_identity`,
+`producer_authenticity`, `freshness` and `semantic_correspondence`,
+reported in `discharged_checks` with `artifact_semantics` (the
+compiled-artifact layer) left in `checks_not_performed`. C02/C11 stay
+partial.
 
 ### Wave 2 declared verify-recheck route (freshness layer)
 
@@ -792,12 +793,11 @@ so it is claimed only through the lineage's `exit_code`. Mid-run input
 drift suppresses selection and any claimed outcome, reported as
 `inputs_changed`. No evidence_check runs: the recheck diagnostic is
 not verification-evidence-shaped — its exit code IS the verdict.
-A `consistent` outcome discharges `freshness` and
-`semantic_correspondence` at representation level — the record still
-binds the declared source's fresh same-profile verdict — reported in
-`discharged_checks` with the other four duties in
-`checks_not_performed` (`claim_truth` stays unassessed: consistency is
-not a truth receipt).
+A `consistent` outcome discharges `claim_truth`, `freshness` and
+`semantic_correspondence` at representation level — the record's
+bound claims were re-established by the fresh same-profile verdict —
+reported in `discharged_checks` with the other three duties in
+`checks_not_performed`.
 C02/C11 stay partial.
 
 ### Wave 2 declared native-recheck route (C10 consumer)
@@ -818,10 +818,12 @@ source-to-LLVM user-body correspondence). `recheck` names only
 Different/UndefinedBehavior with every static failure, and mid-run
 drift reports `inputs_changed` with no claimed outcome. No
 evidence_check: the envelope's own `acceptance` is `not_evaluated`.
-An `equivalent` outcome discharges `artifact_semantics` at
-representation level — the bundle's user-body LLVM corresponds to the
-declared source's verified semantics, the deepest layer the pipeline
-covers — reported in `discharged_checks` with the other five checks in
+An `equivalent` outcome discharges `artifact_semantics` — the
+bundle's user-body LLVM corresponds to the declared source's verified
+semantics, the deepest layer the pipeline covers — and `claim_truth`
+(the envelope's fresh source postcondition was re-established within
+the declared profile), both at representation level and reported in
+`discharged_checks` with the other four checks in
 `checks_not_performed` (linker, runtime and binary correctness stay
 outside the profile).
 C02/C10 stay partial.
