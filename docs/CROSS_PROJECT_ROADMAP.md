@@ -547,11 +547,15 @@ instead of discarding an observed run. The returned
 `AttemptDispatch(sequence, run)` pairs the reconciled sequence with the
 observed run, validating that the sequence's current record carries the
 run's full binding (fingerprint, ordinal, declared timeout) and events.
+`dispatch.captured_output()` binds the run's bounded stdout as an
+`AttemptOutput` on the reconciled current record (the run's `complete`
+collection claim carried across); a failed, timed-out or cancelled run
+cannot mint a snapshot — output requires an exited record.
 
 The driver composes the declared dispatch boundary with the single-spawn
-runner — no scheduling, ordering, result selection, output snapshot or
-publication is added; hosts still call `select_result`, build
-`AttemptOutput` and publish through `AttemptSequenceStore`. C11 stays
+runner — no scheduling, ordering, result selection or publication is
+added; hosts still call `select_result` and publish through
+`AttemptSequenceStore`. C11 stays
 partial: Evidence normalization/acceptance remains open, and C12's demand
 gate plus existing assurance/Lean/native/LLVM/deferred-WASM policies are
 unchanged. See the
