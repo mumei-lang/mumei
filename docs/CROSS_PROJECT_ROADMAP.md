@@ -845,6 +845,25 @@ spawns, queries Core or decides truth — the six semantic checks stay
 named in `checks_not_performed`. C02 stays partial. See the
 [Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-routes-as-mcp-tools).
 
+### Wave 2 spawn-based declared evidence routes as MCP tools (C02)
+
+The three spawn-based routes are exposed in-process the same way:
+`verify_attempt(core_path, source_path, solver_timeout_ms=5000,
+solver_resource_limit=1000000, attempt_timeout_ms=30000)`,
+`verify_recheck(core_path, evidence_path, source_path, ...)` and
+`native_recheck(core_path, bundle_dir, source_path,
+expected_build_id, attempt_timeout_ms=30000)` each build the
+identical declared request as their CLI route and call the shared
+`run_*(args) -> dict` now factored out of `main_*`, returning the
+same `mumei.verify-attempt-report/v1` / `mumei.verify-recheck-report/v1`
+/ `mumei.native-recheck-report/v1` document under `status: "ok"`.
+The attempt fingerprint still binds the Core executable bytes, input
+bytes and solver budgets; `_check_request` validation (absolute POSIX
+paths, size bounds, timeout ranges) runs before any spawn;
+model-facing errors redact declared paths to basenames. C02 stays
+partial — acceptance remains representation-level. See the
+[Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-routes-as-mcp-tools).
+
 ### Wave 2 normalized run-result descriptors
 
 Agent's `AttemptRunResult.normalized()` maps one observed terminal run into
