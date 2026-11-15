@@ -701,7 +701,10 @@ declared shape. `AttemptEvidenceCheck.from_dict(data)` and
 `mumei.verifier-evidence-check/v1` record and its
 `mumei.verifier-evidence-candidate/v1` handoff descriptor under the
 exact key set and schema, with each constructor re-checking every
-invariant. Then
+invariant, and `AttemptNormalizedResult.from_dict(data)` restores
+the `mumei.verifier-run-result/v1` record the candidate binds
+(exact keys, conditional `exit_code`, `stdout.complete` declared
+only as absent-or-false). Then
 `agent.core_evidence.evaluate_evidence_check(sequence, check)` emits
 `mumei.evidence-check-acceptance/v1`: `candidate_match` holds only when
 the record binds the sequence's CURRENT `evidence_candidate()` — a stale
