@@ -2150,6 +2150,27 @@ deterministic CI. The demo binds declared routing evidence only: it
 grants no verification, audit or acceptance authority. See the
 [go_summaries scenario](https://github.com/mumei-lang/mumei-demo/blob/develop/scenarios/go_summaries/README.md).
 
+### Wave 3 declared TypeScript summary route family
+
+The TypeScript summary spike accumulated on a draft branch is promoted
+to a declared route family, matching the Go, Rust and Solidity
+families: `python -m agent ts-summaries` emits
+`mumei.ts-scalar-parameter-deps/v1` for single-file TypeScript
+(in-process tree-sitter, no helper binary), `ts-summaries-accept`
+applies the strict whole-context gate to one function's declared
+summary, `ts-summaries-check` and `ts-summaries-reuse` partition and
+merge a declared manifest against the fresh derivation, and
+`ts-summaries-attempt` runs the produce route as one declared attempt
+through the C11 lifecycle (`--resolve-modules` is refused because
+implicit resolution names files the request identity cannot bind) and
+emits `mumei.ts-summaries-attempt-report/v1`. The `agent.ts-summaries`
+adapter descriptor declares `filesystem.read` only — the route runs
+in-process, so the `process.spawn` in its `probe_argv` belongs to the
+probe boundary. Producing or accepting a summary is not a proof, an
+audit or a verification verdict. See the
+[Agent declared TypeScript summary route family](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-typescript-summary-route-family)
+section.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
