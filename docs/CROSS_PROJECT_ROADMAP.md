@@ -898,6 +898,28 @@ model-facing errors redact declared paths to basenames. C02 stays
 partial — acceptance remains representation-level. See the
 [Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-routes-as-mcp-tools).
 
+### Wave 2 declared evidence-check route (C02)
+
+Agent's `python -m agent evidence-check --core <path> --evidence
+<path>` is the consume-side companion of `verify-attempt`: it feeds
+a saved `mumei.verification-evidence/v1` record's bytes to
+`<core> evidence check --stdin --json` as one declared attempt under
+a `mumei.evidence-check-request/v1` fingerprint (Core bytes +
+evidence `{path, sha256}`), so the representation check carries the
+canonical attempt lineage instead of running as an inline spawn.
+`AttemptRunner`/`dispatch_attempt` gained a bounded `feed_bytes`
+argument (at most 65536 bytes, written to the child's stdin on a
+daemon feeder thread then closed) to carry the record bytes.
+Selection requires exit 0 AND captured stdout that parses as the one
+accepted `mumei.evidence-representation-check/v1` diagnostic — a
+rejected record exits 1 with no diagnostic to bind — and
+`mumei.evidence-check-report/v1` echoes `representation` plus the
+full six-entry `checks_not_performed` vocabulary only on selection;
+mid-run drift reports `inputs_changed` with no claimed outcome. Also
+reachable as the `evidence_check` MCP tool. C02 stays partial.
+See the
+[Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-check-route-evidence-check).
+
 ### Wave 2 normalized run-result descriptors
 
 Agent's `AttemptRunResult.normalized()` maps one observed terminal run into
