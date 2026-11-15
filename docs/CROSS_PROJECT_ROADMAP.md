@@ -741,6 +741,19 @@ Evidence — it only schedules and observes declared probes. C11 stays
 partial; probe concurrency remains open. See the
 [Agent probe-driven planning](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-probe-driven-planning).
 
+### Wave 2 bounded probe outcome history
+
+Agent's `adapter_probe.AdapterProbeHistory` is a frozen record of probe
+outcomes bound to one declared request fingerprint:
+`start(request)` binds the execution fingerprint and `record(request,
+outcome)` re-derives it per entry, appending the next ordinal — a
+replayed, reordered or foreign outcome fails statically instead of
+contaminating the history. `MAX_PROBE_HISTORY` (8) bounds entries.
+
+The history is replay evidence only: no health verdict, no retry, no
+Evidence acceptance. C11 stays partial. See the
+[Agent probe history](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-probe-outcome-history).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
