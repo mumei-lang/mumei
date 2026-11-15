@@ -1935,3 +1935,19 @@ fn emitted_multi_atom_module_validates_per_atom() {
         .iter()
         .all(|function| function.outcome == Outcome::EquivalentWithinProfile));
 }
+
+#[test]
+fn module_validation_resolves_forward_calls_to_later_atoms() {
+    // Declaration order is irrelevant: `f` (first) calling `g` (last)
+    // resolves the same as the backward direction.
+    let forward = "atom f(y: i64) -> i64 requires: true; ensures: true; body: { g(y) + g(y + 1) }; atom g(x: i64) -> i64 requires: true; ensures: true; body: { x };";
+    let report =
+        tv::validate_pure_i64_module(forward, &calling_ir("g"), Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    // A non-last atom calling an undeclared target still fails closed —
+    // every atom's contract is extracted, not only the checked tail's.
+    let undeclared = "atom g(x: i64) -> i64 requires: true; ensures: true; body: { missing(x) }; atom f(y: i64) -> i64 requires: true; ensures: true; body: { y };";
+    assert!(
+        tv::validate_pure_i64_module(undeclared, &calling_ir("g"), Options::default()).is_err()
+    );
+}
