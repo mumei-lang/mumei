@@ -1311,7 +1311,10 @@ composite imported var receiver (`lib.VS.PF()` on a struct var)
 admits too: it reads external state, so it is dep-free and records
 the imported transfer; a receiver that is an index or call result
 (`lib.VSS[0].PF()`) names no member and stays closed. Method
-expressions `lib.T.M(recv, args)` record plain `direct_import`
+expressions `lib.T.M(recv, args)` record `method_expr: true` — the
+receiver is the leading argument, so the consumer applies the
+receiver rules to it and a composite imported var receiver
+(`lib.S.PF(lib.VS)`) admits the same dep-free read
 (the receiver is already the leading argument). Method members'
 signature pins include the receiver's named type, so redeclaring it
 flags every admitted caller. Instantiated receivers admit through
