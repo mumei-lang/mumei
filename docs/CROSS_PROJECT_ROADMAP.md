@@ -2412,6 +2412,22 @@ inside remains a conservative report, not a proof. See the
 [Agent declared summary accept MCP tools](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-accept-routes-as-mcp-tools)
 section.
 
+### Wave 3 declared summary attempt routes over MCP
+
+`ts_summaries_attempt`, `rust_summaries_attempt` and
+`sol_summaries_attempt` expose the declared attempt routes over
+MCP, completing the summaries-route MCP surface (plan, produce,
+check, reuse, accept, attempt). Each module's lifecycle is shared
+through `run_attempt`: the same `AttemptSequence` keyed to the
+request fingerprint, `dispatch_attempt` observation and drift gate
+— an `exited` run's captured stdout becomes the selected result
+only when every declared input byte is unchanged after the
+observed run. The returned
+`mumei.<lang>-summaries-attempt-report/v1` document is the
+canonical lineage — never an accepted manifest. See the
+[Agent declared summary attempt MCP tools](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-attempt-routes-as-mcp-tools)
+section.
+
 ### Wave 3 declared Rust summary route family
 
 `rust-summaries` and its four siblings (`-check`, `-reuse`, `-accept`,
