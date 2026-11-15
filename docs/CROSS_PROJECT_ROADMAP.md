@@ -964,9 +964,13 @@ unioning every argument's dependencies. `len`/`cap` admit one
 extra shape: a single argument naming an imported container `var`
 (`len(lib.VA)`, `len(lib.VS)` on a `string` var) reads external
 state like the member itself — the result is dep-free, the call
-records the imported transfer, and the declared identity pins.
-Every other operand (`len(xs)` on a binding, `len(f())`, an index
-read like `len(lib.VM2["a"])`, `len(lib.VC)` on a channel) stays
+records the imported transfer, and the declared identity pins. An
+index chain on an imported var whose element is itself a container
+admits the same way (`len(lib.V2[i])` on `[][]int64`,
+`len(lib.VM2["a"])` on a map-valued map): dep-free apart from the
+indexes' own dependencies, with the member's whole fact tree pinned.
+Every other operand (`len(xs)` on a binding, `len(f())`, a field
+like `len(lib.VS2.G)`, `len(lib.VC)` on a channel) stays
 opaque, as do `panic`, `append`, `make`, `new` and the rest. See the
 [Agent pure builtins](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-pure-builtins-in-expressions).
 
