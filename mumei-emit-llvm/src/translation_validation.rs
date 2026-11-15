@@ -1247,9 +1247,26 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
         guard: Bool<'ctx>,
         returns: &mut Vec<(Bool<'ctx>, BV<'ctx>)>,
     ) -> Result<()> {
+        // Phi results commit together after the block's phi run: each
+        // phi's incoming value is resolved against the environment the
+        // block was entered with, so a phi that references a sibling
+        // phi sees the previous iteration's value, not the freshly
+        // bound one. (LLVM requires phi nodes to lead a block.)
+        let mut pending_phis: Vec<(LLVMValueRef, BV<'ctx>)> = Vec::new();
         let mut inst = LLVMGetFirstInstruction(block);
         while !inst.is_null() {
             let op = LLVMGetInstructionOpcode(inst);
+            if op == LLVMOpcode::LLVMPHI {
+                let i = (0..LLVMCountIncoming(inst))
+                    .find(|&i| LLVMGetIncomingBlock(inst, i) == previous)
+                    .ok_or(ValidationError("missing LLVM phi edge"))?;
+                pending_phis.push((inst, self.value(LLVMGetIncomingValue(inst, i), &values)?));
+                inst = LLVMGetNextInstruction(inst);
+                continue;
+            }
+            for (phi, result) in pending_phis.drain(..) {
+                values.insert(phi as usize, result);
+            }
             if op == LLVMOpcode::LLVMRet {
                 let value = self.value(LLVMGetOperand(inst, 0), &values)?;
                 returns.push((guard, value));
@@ -1327,11 +1344,6 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                         .as_bv()
                         .ok_or(ValidationError("unsupported LLVM call result"))?
                 }
-            } else if op == LLVMOpcode::LLVMPHI {
-                let i = (0..LLVMCountIncoming(inst))
-                    .find(|&i| LLVMGetIncomingBlock(inst, i) == previous)
-                    .ok_or(ValidationError("missing LLVM phi edge"))?;
-                self.value(LLVMGetIncomingValue(inst, i), &values)?
             } else {
                 let a = self.value(LLVMGetOperand(inst, 0), &values)?;
                 match op {
