@@ -827,6 +827,24 @@ still binds THESE bytes — full representation validity stays Core's
 query. C02 stays partial. See the
 [Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-file-identity-route-evidence-identity-check).
 
+### Wave 2 declared evidence routes as MCP tools (C02)
+
+The Agent MCP server exposes the two spawn-free consume routes as
+tools a model can call without a shell:
+`evidence_identity_check(evidence_path, source_path)` returns the
+`mumei.evidence-file-identity/v1` descriptor through the same
+bounded reads as the CLI route, and
+`evidence_check_accept(sequence_json, check_json)` restores the two
+declared documents from inline JSON (bounded to the route's 1 MiB
+snapshot limit before parsing) and returns
+`mumei.evidence-check-acceptance/v1`. Both keep the CLI contract:
+malformed or oversized inputs are `status: "error"`, never a
+mismatch/reject answer, and declared checkout-local paths are
+redacted to basenames in model-facing failure text. Neither tool
+spawns, queries Core or decides truth — the six semantic checks stay
+named in `checks_not_performed`. C02 stays partial. See the
+[Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-routes-as-mcp-tools).
+
 ### Wave 2 normalized run-result descriptors
 
 Agent's `AttemptRunResult.normalized()` maps one observed terminal run into
