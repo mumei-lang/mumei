@@ -270,11 +270,12 @@ fn unsupported_source_is_not_silently_weakened() {
         "let a = x; { a = 1; a }; a",
         "if x > 0 { y = 1; y } else { 0 }",
         // Branch writes stay closed in every non-statement position:
-        // operands, `let` initializers and match arms cannot merge an
-        // escaping write.
+        // operands and `let` initializers cannot merge an escaping
+        // write, and a name not bound on the linear path cannot be
+        // written inside a match arm either.
         "x + (if x > 0 { x = 1; x } else { x })",
         "let a = if x > 0 { x = 1; x } else { x }; a",
-        "match x { 0 => { x = 1; x }, _ => { x } }",
+        "match x { 0 => { y = 1; y }, _ => { x } }",
         // Reassignment keeps the binding's kind, inside a branch too.
         "let a = x; a = x > 0; a",
         "let b = x > 0; if b { x = b; x } else { x }",
@@ -364,9 +365,7 @@ fn bool_parameters_are_equivalent_and_refuted() {
     }
     // A `requires` on a boolean input is a source-side obligation; the
     // comparison domain still covers every input the signature admits.
-    let req = format!(
-        "atom f(b: bool, x: i64) -> i64 requires: b; ensures: true; body: {{ if b {{ x }} else {{ 0 }} }};"
-    );
+    let req = "atom f(b: bool, x: i64) -> i64 requires: b; ensures: true; body: { if b { x } else { 0 } };".to_string();
     assert_eq!(
         validate(&req, &emitted(&req)).outcome,
         Outcome::EquivalentWithinProfile
@@ -1537,6 +1536,99 @@ fn match_arm_guards_are_equivalent_and_refuted() {
 }
 
 #[test]
+fn match_arm_reassignment_is_equivalent_and_refuted() {
+    // Arm bodies may rebind linear-path names: each write merges under
+    // the arm-local hit (earlier misses ∧ pattern ∧ guard), matching
+    // the emitter's match.merge per-name phi — a name written on one
+    // arm keeps its prior value on the others.
+    for src in [
+        // Writes on every arm merge under each arm's own hit.
+        source(
+            "x: i64",
+            "let r = 0; match x { 0 => { r = 1; r }, _ => { r = 2; r } }; r",
+        ),
+        // A name written on one arm keeps its prior value elsewhere.
+        source(
+            "x: i64",
+            "let r = x; match x { 0 => { r = 0; r }, _ => r }; r",
+        ),
+        // Sequential matches see the earlier merges.
+        source(
+            "x: i64",
+            "let r = 0; match x { 0 => { r = 1; r }, _ => { r = 2; r } }; match r { 1 => x, _ => x + r }",
+        ),
+        // A guarded arm's writes merge under `pattern ∧ guard`.
+        source(
+            "x: i64, y: i64",
+            "let r = 0; match x { k if y > 0 => { r = k; r }, _ => { r = 1; r } }; r",
+        ),
+        // A `Variable` pattern binding shadows nothing linear: writes
+        // to an outer name still escape.
+        source(
+            "x: i64",
+            "let r = 0; match x { v => { r = v; r } }; r",
+        ),
+        // A match nested in a branch merges inside the enclosing
+        // branch.
+        source(
+            "x: i64",
+            "let r = 0; if x > 0 { match x { 0 => { r = 1; r }, _ => { r = 2; r } }; r } else { r }; r",
+        ),
+        // An arm-local `let` shadows its name: writes to it stay in
+        // the arm, while the outer `r` write still escapes.
+        source(
+            "x: i64",
+            "let r = 0; match x { 0 => { let t = x; t = t + 1; r = t; r }, _ => { r = 9; r } }; r",
+        ),
+        // Boolean bindings merge the same way.
+        source(
+            "x: i64",
+            "let b = false; match x { 0 => { b = true; b }, _ => { b = false; b } }; if b { x } else { 0 }",
+        ),
+    ] {
+        assert_eq!(
+            validate(&src, &emitted(&src)).outcome,
+            Outcome::EquivalentWithinProfile,
+            "{src}"
+        );
+    }
+    // A wrong merged value is a real difference: at x = 0 the source
+    // yields 1, not 2.
+    let src = source(
+        "x: i64",
+        "let r = 0; match x { 0 => { r = 1; r }, _ => { r = 2; r } }; r",
+    );
+    for other in [
+        emitted(&source("x: i64", "2")),
+        emitted(&source("x: i64", "x")),
+        emitted(&source("x: i64", "if x == 0 { 2 } else { 1 }")),
+    ] {
+        assert_eq!(validate(&src, &other).outcome, Outcome::Different);
+    }
+    // The same first-match order spelled as `if` branches compares
+    // equal — including the writes.
+    let as_ifs = emitted(&source(
+        "x: i64",
+        "let r = 0; if x == 0 { r = 1; r } else { r = 2; r }; r",
+    ));
+    assert_eq!(
+        validate(&src, &as_ifs).outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    // A `Variable` pattern binding that shadows an assignable name
+    // keeps that name arm-local: writing it is outside the profile.
+    let shadowed = source("x: i64", "match x { x => { x = 1; x } }");
+    assert!(tv::validate_pure_i64(&shadowed, &function("ret i64 0"), Options::default()).is_err());
+    // A match in operand position keeps its arm writes lexical: a `let`
+    // initializer whose arm rebinds an outer name is unsupported.
+    let operand = source(
+        "x: i64",
+        "let r = 0; let v = match x { 0 => { r = 1; r }, _ => { r = 2; r } }; v + r",
+    );
+    assert!(tv::validate_pure_i64(&operand, &function("ret i64 0"), Options::default()).is_err());
+}
+
+#[test]
 fn all_unreachable_function_reports_ub_not_a_missing_return() {
     // With no `ret` edge at all, every path ends in `unreachable` — that
     // is UB on every defined input, not a missing-return error.
@@ -1658,7 +1750,7 @@ fn subrange_integer_parameters_are_equivalent_and_refuted() {
         "atom f(x: i8, y: i8) -> i32 requires: true; ensures: true; body: { x + y };",
     ] {
         assert_eq!(
-            validate(&src, &emitted(&src)).outcome,
+            validate(src, &emitted(src)).outcome,
             Outcome::EquivalentWithinProfile,
             "{src}"
         );
@@ -1668,7 +1760,7 @@ fn subrange_integer_parameters_are_equivalent_and_refuted() {
     // keeps the same encoder path.
     let src = "atom f(x: i64) -> i32 requires: true; ensures: true; body: { x + 1 };";
     assert_eq!(
-        validate(&src, &function("ret i64 %x")).outcome,
+        validate(src, &function("ret i64 %x")).outcome,
         Outcome::Different
     );
 }
