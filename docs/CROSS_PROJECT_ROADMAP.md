@@ -741,6 +741,30 @@ live Core plus the selected output bytes), so a stale or foreign record
 always yields `accepted: false` — the route cannot forge acceptance.
 C02/C11 stay partial.
 
+### Wave 2 declared verify-attempt route (produce + consume)
+
+Agent's `python -m agent verify-attempt --core <path> --source <path>`
+closes the produce+consume loop the consume-only route could not: it
+runs `<core> evidence verify-source <src> --json` as one declared
+attempt — the `mumei.verify-attempt-request/v1` fingerprint binds the
+Core executable's bytes, the source bytes and the bounded solver
+budgets — publishes the reconciled sequence, and only when a result is
+selected (`exited` with `exit_code == 0`, i.e.
+`EstablishedWithinProfile`) runs `record_evidence_check` +
+`evaluate_evidence_check` against the live Core. Emits
+`mumei.verify-attempt-report/v1` (sequence + normalized + candidate +
+evidence_check + acceptance).
+
+This is the first route where `accepted` can be `true`: the produced
+bytes are `mumei.verification-evidence/v1` — evidence-shaped, unlike
+the summary manifests that made the withdrawn `--evidence-core` wiring
+deterministically `accepted:false`. Refuted (exit 1) / inconclusive
+(exit 3) runs publish the terminal lineage with no selection;
+`--output` may not overwrite declared inputs and sources over Core's
+64 KiB input bound are rejected before dispatch. Acceptance stays
+representation-level — claim truth, freshness, authenticity and
+correspondence remain unassessed duties. C02/C11 stay partial.
+
 ### Wave 2 normalized run-result descriptors
 
 Agent's `AttemptRunResult.normalized()` maps one observed terminal run into
