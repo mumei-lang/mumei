@@ -2595,6 +2595,22 @@ representation-acceptance boundaries only: acceptance beyond
 representation, producer authenticity and correspondence stay
 unassessed.
 
+### Wave 3 declared summary-route planning demo (mumei-demo)
+
+The optional `summaries_plan` scenario in `mumei-demo` exercises
+`python -m agent summaries-plan` end to end. Because every declared
+adapter probes as `python -m agent <route> --help`, availability is
+deterministic wherever the agent runs — no external toolchain needed.
+Three steps assert `plan_selected` (Go adapter selected under
+`--tool-version 1.23.0` with `selected_priority` reason and one
+`mumei.adapter-probe-history/v1` record), `plan_resumes_history`
+(`--histories histories.json` continues `attempt_number` 1→2 rather
+than restarting) and `plan_unpinned` (no declared pin selects nothing
+with `tool_version_unknown`). The scenario stays in
+`OPTIONAL_SCENARIOS` — the default sequence is unchanged — and
+planning is routing only: a selected adapter is not an accepted
+manifest.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
