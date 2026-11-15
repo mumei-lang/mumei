@@ -2038,7 +2038,8 @@ section.
 
 ### Wave 3 multi-language adapter summary routes
 
-The same four-route family lands on the in-process TypeScript,
+The same route family plus the attempt route lands on the in-process
+TypeScript,
 Solidity and Rust adapters (development accumulates on
 [mumei-agent#749](https://github.com/mumei-lang/mumei-agent/pull/749),
 [#774](https://github.com/mumei-lang/mumei-agent/pull/774) and
@@ -2067,6 +2068,15 @@ branches; no production route is wired yet):
   bytes; Solidity and Rust accept `<contract>.<name>` / qualified
   member names and refuse a bare name that resolves to several
   functions (`ambiguous_function`).
+- `<lang>-summaries-attempt <file> --attempt-timeout <MS>` runs the
+  produce route itself as one declared attempt inside the C11
+  lifecycle and emits `mumei.<lang>-summaries-attempt-report/v1` —
+  the canonical lineage, the normalized run-result descriptor and,
+  when a result was selected, the evidence-candidate descriptor. The
+  request fingerprint binds the declared source's bytes
+  (`mumei.<lang>-summaries-attempt-request/v1`); TypeScript refuses
+  `--resolve-modules` here because implicit module resolution names
+  files the request identity cannot cover.
 
 C06 stays partially delivered; scheduling/re-derivation wiring and
 the audit/MCP route stay open for every language.
