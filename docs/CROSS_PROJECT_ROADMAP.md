@@ -728,17 +728,23 @@ unchanged. See the
 ### Wave 2 bounded probe-driven planning
 
 Agent's `adapter_probe.plan_with_probes(registry, request, policy,
-observations, stamp=..., rounds=1)` runs the observe → re-plan loop:
-`plan()`, `probe_requests_for`, `observe_probes`, then `plan()` again
+observations, stamp=..., rounds=1, max_parallel=1, histories=...,
+max_attempts=...)` runs the observe → re-plan loop: `plan()`,
+`probe_retry_requests`, bounded batch execution, then `plan()` again
 with the accumulated observations — incrementing the stamp each round
 so the registry's freshness check accepts them. `rounds` is bounded by
 `MAX_PLAN_ROUNDS` (4); the loop stops early on a selection or an empty
-schedule and returns `AdapterProbePlan(plan, observations)` for the
-caller to chain further planning.
+schedule. Per-adapter `AdapterProbeHistory` records bound attempts
+(`max_attempts` ≤ `MAX_PROBE_HISTORY`): each observed outcome is
+appended and the attempt number advances until the bound stops
+re-probing. The result,
+`AdapterProbePlan(plan, observations, histories)`, hands the caller
+the final plan, the new observations and the updated histories to
+chain further planning.
 
-The driver never authorizes, retries beyond `rounds`, or accepts
-Evidence — it only schedules and observes declared probes. C11 stays
-partial; probe concurrency remains open. See the
+The driver never authorizes, retries beyond `max_attempts`, or
+accepts Evidence — it only schedules and observes declared probes.
+C11 stays partial; Evidence acceptance remains open. See the
 [Agent probe-driven planning](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-bounded-probe-driven-planning).
 
 ### Wave 2 bounded probe outcome history
