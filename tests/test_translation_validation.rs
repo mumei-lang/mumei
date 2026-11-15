@@ -2131,6 +2131,8 @@ fn loop_scoped_bindings_do_not_leak_into_later_loop_phis() {
         let i1 = 0;
         while i1 < 2 invariant: i1 >= 0 && i1 <= 2 decreases: 2 - i1 {
             let t = call(g0, 5);
+            let inner = |x| { t + x };
+            let u = call(inner, 0);
             i1 = i1 + 1
         };
         let g1 = |v| { a[2] = v; 0 };
@@ -2162,8 +2164,12 @@ fn loop_scoped_bindings_do_not_leak_into_later_loop_phis() {
     )
     .unwrap();
     let ir = std::fs::read_to_string(&ll_path).unwrap();
-    // Body-only `t` must not produce a loop phi at all.
+    // Body-only `t`, `inner` and `u` must not produce loop phis at all
+    // (the `inner` lambda marker leaves var_types too, so a later
+    // lambda cannot demand its captured `t` value).
     assert!(!ir.contains("%phi_t"));
+    assert!(!ir.contains("phi_inner"));
+    assert!(!ir.contains("phi_u"));
     // The recorded emit runs `verify()` on the bound module — the check
     // that originally rejected this program.
     mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ll_path, &obj_path).unwrap();

@@ -512,6 +512,7 @@ pub(crate) fn compile_hir_stmt<'a>(
             let after_block = context.append_basic_block(*function, "loop.after");
 
             let pre_loop_vars = variables.clone();
+            let pre_loop_var_types = var_types.clone();
             let pre_loop_arrays = array_ptrs.clone();
             let entry_end_block = builder.get_insert_block().unwrap();
 
@@ -590,8 +591,12 @@ pub(crate) fn compile_hir_stmt<'a>(
             }
             // Names bound only inside the body leave scope here; keeping
             // them would carry a body-block value into a later loop's
-            // phi, whose incoming block it cannot dominate.
+            // phi, whose incoming block it cannot dominate. var_types
+            // follows the same scope — a body-local lambda marker left
+            // behind would stay "callable" and demand capture values
+            // that no longer exist.
             variables.retain(|name, _| pre_loop_vars.contains_key(name));
+            var_types.retain(|name, _| pre_loop_var_types.contains_key(name));
             Ok(context.i64_type().const_int(0, false).into())
         }
         HirStmt::Block { stmts, tail_expr } => {
