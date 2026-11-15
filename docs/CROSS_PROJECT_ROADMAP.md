@@ -2101,6 +2101,22 @@ routes stays open. See the
 [Agent summary adapter descriptor](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-adapter-descriptor)
 section.
 
+### Wave 3 summary-route probe wiring
+
+`plan_summary_route(profile, policy, stamp=...)` composes the summary
+registry (the declared `go-summaries` `AdapterDescriptor`) with
+`plan_with_probes`: an adapter excluded only because nothing observed
+it gets its declared `probe_argv` run through `AttemptRunner` and is
+re-planned with the fresh `RuntimeObservation`. Probing is
+availability only — the version stays host-declared (`tool_version`),
+so an unversioned observation still excludes and a structural
+exclusion is never probed. The returned `AdapterProbePlan` carries
+the updated `AdapterProbeHistory` records for retry scheduling.
+Selecting is routing only — nothing runs the route or accepts a
+manifest; audit/MCP wiring stays open. See the
+[Agent summary-route probe wiring](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-summary-route-probe-wiring)
+section.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
