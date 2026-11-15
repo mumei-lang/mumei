@@ -343,6 +343,7 @@ pub fn extract_pure_i64_contract(
         .chain(allow_wrapping_arithmetic.then_some("first_match_order_i64_match_with_catch_all"))
         .chain(allow_wrapping_arithmetic.then_some("match_arm_boolean_guards"))
         .chain(allow_wrapping_arithmetic.then_some("conditional_path_reassignment_ite_merge"))
+        .chain(allow_wrapping_arithmetic.then_some("match_arm_reassignment_ite_merge"))
         .collect(),
         requested_route: "standard_z3_not_executed_by_extractor",
         decomposition: "no_common_obligation_decomposition",
@@ -723,9 +724,9 @@ fn expression_kind(
         // chain is exhaustive without a solver check. An arm may add a
         // Boolean guard evaluated in the arm's scope, but the trailing
         // catch-all must be unguarded. Variant patterns, a non-i64
-        // scrutinee and a literal last arm stay outside the profile, and
-        // each arm body keeps its own lexical scope (reassignments inside
-        // an arm cannot escape it).
+        // scrutinee and a literal last arm stay outside the profile.
+        // Arm bodies may rebind linear-path names like `if` branches —
+        // each write merges under the arm's own hit-condition.
         Expr::Match { target, arms } if allow_wrapping_arithmetic => {
             expect_kind(
                 expression_kind(
@@ -776,12 +777,19 @@ fn expression_kind(
                         ScalarKind::Bool,
                     )?;
                 }
+                // Arm bodies may rebind linear-path names like `if`
+                // branches; a `Variable` pattern shadows an outer name
+                // for this arm, so it leaves the assignable set.
+                let mut arm_assignable = assignable.clone();
+                if let Pattern::Variable(name) = &arm.pattern {
+                    arm_assignable.remove(name);
+                }
                 let arm_kind = statement_kind(
                     &arm.body,
                     &arm_scope,
                     result_in_scope,
                     allow_wrapping_arithmetic,
-                    &BTreeSet::new(),
+                    &arm_assignable,
                 )?;
                 match kind {
                     None => kind = Some(arm_kind),
@@ -1046,6 +1054,7 @@ impl<'ctx> SourceValue<'ctx> {
 /// symbolic value of every assignable name a statement rewrites, so an
 /// enclosing `if` can merge branch writes under its condition and an
 /// enclosing block can re-export the writes that escape it.
+#[allow(clippy::too_many_arguments)]
 fn source_stmt<'ctx>(
     stmt: &Stmt,
     ctx: &'ctx Context,
@@ -1222,6 +1231,7 @@ fn shift_defined<'ctx>(amount: &BV<'ctx>, ctx: &'ctx Context) -> Bool<'ctx> {
     amount.bvult(&BV::from_i64(ctx, 64, 64))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn source_expr<'ctx>(
     expr: &Expr,
     ctx: &'ctx Context,
@@ -1440,6 +1450,10 @@ fn source_expr<'ctx>(
                 terms.push(guard);
                 terms.extend(missed.iter());
                 let reach = Bool::and(ctx, &terms);
+                // The arm-local part of `reach`: earlier arms' negated
+                // hits, without the enclosing guard (the caller merges
+                // `written` under its own condition).
+                let arm_reach = Bool::and(ctx, &terms[1..]);
                 let (pat_cond, binding) = match &arm.pattern {
                     Pattern::Literal(n) => (Some(target._eq(&BV::from_i64(ctx, *n, 64))), None),
                     Pattern::Variable(name) => (None, Some(name.clone())),
@@ -1450,6 +1464,13 @@ fn source_expr<'ctx>(
                         ));
                     }
                 };
+                // A `Variable` pattern shadows an outer name for this
+                // arm, so it leaves the assignable set and its writes
+                // stay arm-local.
+                let mut arm_assignable = assignable.clone();
+                if let Some(name) = &binding {
+                    arm_assignable.remove(name);
+                }
                 let mut arm_env = env.clone();
                 if let Some(name) = binding {
                     arm_env.insert(name, I(target.clone()));
@@ -1490,6 +1511,7 @@ fn source_expr<'ctx>(
                     Some(h) => Bool::and(ctx, &[&reach, h]),
                     None => reach.clone(),
                 };
+                let mut arm_writes = HashMap::new();
                 let value = source_stmt(
                     &arm.body,
                     ctx,
@@ -1497,9 +1519,35 @@ fn source_expr<'ctx>(
                     &body_guard,
                     definedness,
                     depth + 1,
-                    &BTreeSet::new(),
-                    written,
+                    &arm_assignable,
+                    &mut arm_writes,
                 )?;
+                // Arm writes escape like `if` branch writes: each merges
+                // under the arm-local hit (earlier arms' misses and this
+                // arm's `pattern ∧ guard`), matching the emitter's
+                // match.merge per-name phi; a dead arm's merge condition
+                // is unsatisfiable so its writes never escape.
+                let arm_hit = match &hit {
+                    Some(h) => Bool::and(ctx, &[&arm_reach, h]),
+                    None => arm_reach.clone(),
+                };
+                for (name, bound) in arm_writes {
+                    let prior = written
+                        .get(&name)
+                        .cloned()
+                        .or_else(|| env.get(&name).cloned())
+                        .ok_or(SemanticContractError::Unsupported("source binding"))?;
+                    let merged = match (prior, bound) {
+                        (I(a), I(b)) => I(arm_hit.ite(&b, &a)),
+                        (B(a), B(b)) => B(arm_hit.ite(&b, &a)),
+                        _ => {
+                            return Err(SemanticContractError::Unsupported(
+                                "match arm write kinds",
+                            ));
+                        }
+                    };
+                    written.insert(name, merged);
+                }
                 if let Some(cond) = hit {
                     selected.push((cond, value));
                 } else if fallback.is_none() {

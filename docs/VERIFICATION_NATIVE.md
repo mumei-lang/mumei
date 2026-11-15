@@ -756,10 +756,17 @@ under the branch condition like the emitter's per-name phi, and a name
 written on one side carries its prior value through the other, so
 `if x > 0 { x = 1; x } else { x }; x` is checked and a partial
 operation in a branch keeps its definedness obligation under the
-refined guard. The merge reaches no other position: writes inside
-operands, `let` initializers, expression blocks, nested blocks and
-match arms may only touch names bound within them —
-`x + (if x > 0 { x = 1; x } else { x })` and `let a = x; { a = 1; a }; a`
+refined guard. `match` arms in statement position rebind the same
+way: each write merges under the arm-local hit — the accumulated
+negations of every earlier arm's `pattern ∧ guard` plus this arm's
+own — matching the emitter's match.merge per-name phi; a dead arm's
+merge condition is unsatisfiable so its writes never escape, and a
+`Variable` pattern binding shadows an outer name for its arm. The
+merge reaches no other position: writes inside operands, `let`
+initializers, expression blocks and nested blocks may only touch
+names bound within them — `x + (if x > 0 { x = 1; x } else { x })`,
+`let a = x; { a = 1; a }; a` and
+`let v = match x { 0 => { r = 1; r }, _ => { r = 2; r } }; v`
 stay rejected. Other statement
 forms (unbound assignment, calls, loops) stay
 unsupported.
@@ -796,7 +803,10 @@ literal pattern contributes one `target == n` test, an arm may add a
 Boolean guard evaluated in the arm's scope, and an arm hits only when
 `pattern ∧ guard` holds — the arm bodies are encoded as an ite chain
 under the accumulated negations of every earlier hit, so a guarded or
-shadowed arm never leaks its value. Literal-only patterns cannot cover
+shadowed arm never leaks its value. Linear-path names rebound inside
+an arm body merge the same way — under the arm-local hit — so
+`match x { 0 => { r = 1; r }, _ => { r = 2; r } }; r` is checked
+against the emitted match.merge phi. Literal-only patterns cannot cover
 i64, so the contract requires a trailing unguarded `Wildcard` or
 `Variable` catch-all arm rather than a solver exhaustiveness check (a
 guarded catch-all could still fall through); a `Variable` arm binds the
