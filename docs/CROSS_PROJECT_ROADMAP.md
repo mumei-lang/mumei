@@ -670,7 +670,11 @@ Agent's `AttemptRunner.run()` accepts an optional host-declared
 declared `memory_mb` budget a `VerificationPlan` produces now reaches the
 execution boundary rather than stopping at the plan manifest. The bound is
 validated statically, applies to the child only, and a non-POSIX host
-refuses it outright.
+refuses it outright. The bound is installed by an exec wrapper —
+`prlimit --as=` when available, else a POSIX
+`sh -c 'ulimit -v <KiB> && exec "$@"'` wrapper (the same RLIMIT_AS
+through a pure exec chain), so bounded spawns stay thread-safe on hosts
+without `prlimit`; `preexec_fn` remains only when neither exists.
 
 The bound is best-effort resource enforcement, not a sandbox: it covers no
 CPU, I/O, network or permission policy, and exceeding it surfaces only as
@@ -860,7 +864,11 @@ Agent's `observe_probes(..., max_parallel=N)` bounds how many declared
 probes run at once through a `ThreadPoolExecutor` over the shared,
 stateless `AttemptRunner`; `plan_with_probes` forwards the same bound.
 Returned observations keep request order regardless of completion
-order, and `max_parallel=1` remains the sequential default. C11 stays
+order, and `max_parallel=1` remains the sequential default. Because the
+memory bound now goes through an exec wrapper on every POSIX host
+(`prlimit`, or the `sh`/`ulimit -v` fallback), memory-bound batches
+stay parallel-safe except on hosts with neither, where they still
+fall back to sequential. C11 stays
 partial; Evidence acceptance remains open. See the
 [Agent probe execution driver](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-probe-execution-driver).
 
