@@ -2117,6 +2117,21 @@ manifest; audit/MCP wiring stays open. See the
 [Agent summary-route probe wiring](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-summary-route-probe-wiring)
 section.
 
+### Wave 3 declared summary route demo (mumei-demo)
+
+The optional `go_summaries` scenario in `mumei-demo` runs the declared
+route family end to end: `go build` provisions the go-types helper
+(SKIPPED without a maintained toolchain), `go-summaries` emits the
+`mumei.go-scalar-parameter-deps/v1` manifest for a two-function fixture
+unit, `go-summaries-check` partitions reusable/stale/missing bindings
+against a fresh helper report, and `go-summaries-accept` echoes one
+binding's declared summary under the strict whole-context gate. The
+scenario stays in `OPTIONAL_SCENARIOS` — the default sequence is
+unchanged and `CI_FIXTURE_MODE=1` replays recorded payloads for
+deterministic CI. The demo binds declared routing evidence only: it
+grants no verification, audit or acceptance authority. See the
+[go_summaries scenario](https://github.com/mumei-lang/mumei-demo/blob/develop/scenarios/go_summaries/README.md).
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
