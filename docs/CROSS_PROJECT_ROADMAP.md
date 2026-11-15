@@ -827,6 +827,21 @@ still binds THESE bytes — full representation validity stays Core's
 query. C02 stays partial. See the
 [Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-file-identity-route-evidence-identity-check).
 
+### Wave 2 declared evidence comparison route (C02)
+
+Agent's `python -m agent evidence-compare --evidence-a <path>
+--evidence-b <path>` is the record-vs-record companion: two declared
+`mumei.verification-evidence/v1` records are read under the same
+64 KiB bound and strict shape checks (schema + closed subject +
+required `specification` object), then
+`mumei.evidence-comparison/v1` reports `subject_match`,
+`specification_match` and `claims_match` — whether two saved records
+carry the same claims, with no Core run and no fresh query. A
+mismatch is data, not an error; malformed input is a static failure.
+All six `checks_not_performed` entries stay named. C02 stays
+partial. See the
+[Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-comparison-route-evidence-compare).
+
 ### Wave 2 declared evidence routes as MCP tools (C02)
 
 The Agent MCP server exposes the two spawn-free consume routes as
