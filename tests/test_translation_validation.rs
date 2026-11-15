@@ -1900,3 +1900,38 @@ fn module_validation_requires_every_source_atom_as_a_member() {
     assert_eq!(report.functions.len(), 1);
     assert_eq!(report.functions[0].function_name, "f");
 }
+
+#[test]
+fn emitted_multi_atom_module_validates_per_atom() {
+    // End to end: the real emitter's whole-module output — `f` calling
+    // `@g` — checks per atom, so a sabotaged callee body fails only its
+    // own entry.
+    let items = parse_module_checked(CALLING).unwrap();
+    let hirs: Vec<_> = items
+        .iter()
+        .map(|item| {
+            let Item::Atom(atom) = item else {
+                panic!("atom")
+            };
+            lower_atom_to_hir(atom)
+        })
+        .collect();
+    let context = mumei_emit_llvm::LlvmContext::create();
+    let module = context.create_module("calling");
+    mumei_emit_llvm::codegen::compile_atoms_into_module(
+        &context,
+        &module,
+        &hirs,
+        &ModuleEnv::default(),
+        &[],
+    )
+    .unwrap();
+    let emitted_ir = pin(&module.print_to_string().to_string());
+    let report = tv::validate_pure_i64_module(CALLING, &emitted_ir, Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(report.functions.len(), 2);
+    assert!(report
+        .functions
+        .iter()
+        .all(|function| function.outcome == Outcome::EquivalentWithinProfile));
+}
