@@ -2530,8 +2530,8 @@ acceptance authority beyond the profile.
 
 ### Wave 3 declared evidence route demos (mumei-demo)
 
-Five optional scenarios exercise the declared evidence routes end to
-end against the real `mumei` binary and agent checkout:
+Eight optional scenarios exercise the declared evidence routes end
+to end against the real `mumei` binary and agent checkout:
 
 - `verify_recheck` produces a real `mumei.verification-evidence/v1`
   record with `evidence verify-source` under an explicit solver budget
@@ -2565,13 +2565,35 @@ end against the real `mumei` binary and agent checkout:
   same check against a foreign sequence and asserts
   `candidate_match: false` and `accepted: false` — the consume half of
   produce+consume.
+- `evidence_compare` produces two real records for the same source,
+  runs `python -m agent evidence-compare` and asserts
+  `subject_match`/`specification_match` plus `claims_match: true`,
+  then compares against a foreign-source record and asserts
+  `claims_match: false` — the record-vs-record comparison boundary.
+- `native_attempt` runs `python -m agent native-attempt` and asserts
+  `build_id` equals sha256(native-bundle.json), a non-null
+  `selected_result`, a `mumei.verifier-evidence-candidate/v1`
+  candidate and all five bundle members on disk — the produce half
+  of the native produce/recheck pair — then re-runs on an
+  out-of-profile source and asserts a nonzero normalized exit_code
+  with no `build_id`, no selection and no candidate.
+- `evidence_check` produces a real record, then runs
+  `python -m agent evidence-check` feeding the saved record bytes to
+  `evidence check --stdin --json` as one declared attempt and asserts
+  `representation: "valid"`, the full six-entry
+  `checks_not_performed` vocabulary, a `selected_result` and a
+  `mumei.verifier-evidence-candidate/v1` candidate, then re-runs on
+  corrupt bytes and asserts `normalized.exit_code == 1` with no
+  representation or candidate claimed — the consume-side
+  representation check verify-attempt performs internally.
 
-All five stay in `OPTIONAL_SCENARIOS` — the default sequence is
+All eight stay in `OPTIONAL_SCENARIOS` — the default sequence is
 unchanged — and every step uses the `rc`-preserving
 `> file; rc=$?; cat file; test $rc -eq 0 && grep` form. The demos bind
-the freshness, file-identity and representation-acceptance boundaries
-only: acceptance beyond representation, producer authenticity and
-correspondence stay unassessed.
+the freshness, file-identity, representation-check and
+representation-acceptance boundaries only: acceptance beyond
+representation, producer authenticity and correspondence stay
+unassessed.
 
 ### Wave 4 first compiler-backed source-analysis boundary
 
