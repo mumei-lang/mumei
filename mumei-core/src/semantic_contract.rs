@@ -181,60 +181,28 @@ pub fn extract_pure_i64_contract(
         {
             return Err(SemanticContractError::Unsupported("duplicate atom name"));
         }
+    }
+    // Declaration order is irrelevant to call resolution: the callee map is
+    // complete before any atom's own contract is checked, so a forward call
+    // to a later sibling resolves the same as a backward one.
+    for item in &items {
+        let Item::Atom(sibling) = item else {
+            return Err(SemanticContractError::Unsupported("non-atom declarations"));
+        };
         validate_atom(sibling, allow_wrapping_arithmetic)?;
+        // Every atom's contract is checked against the complete callee map,
+        // not only the tail's: module validation compares each atom
+        // independently, so an undeclared call target in any sibling must
+        // fail closed here rather than encode as an uninterpreted
+        // application that trivially agrees with an external IR member.
+        check_atom_contract(sibling, &callees, allow_wrapping_arithmetic)?;
     }
     let Some(Item::Atom(mut atom)) = items.pop() else {
         return Err(SemanticContractError::Unsupported("non-atom declarations"));
     };
     validate_atom(&atom, allow_wrapping_arithmetic)?;
+    check_atom_contract(&atom, &callees, allow_wrapping_arithmetic)?;
     atom.span.file = source_name.to_owned();
-    let scope: BTreeMap<String, ScalarKind> = atom
-        .params
-        .iter()
-        .map(|p| (p.name.clone(), param_kind(p)))
-        .collect();
-    let requires =
-        parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
-    let ensures =
-        parse_expression_checked(&atom.ensures).map_err(|_| SemanticContractError::Parse)?;
-    let body =
-        parse_body_expr_checked(&atom.body_expr).map_err(|_| SemanticContractError::Parse)?;
-    expect_kind(
-        expression_kind(
-            &requires,
-            &scope,
-            false,
-            allow_wrapping_arithmetic,
-            &BTreeSet::new(),
-            &callees,
-        )?,
-        ScalarKind::Bool,
-    )?;
-    let result_kind = return_kind(&atom);
-    let mut ensures_scope = scope.clone();
-    ensures_scope.insert("result".to_owned(), result_kind);
-    expect_kind(
-        expression_kind(
-            &ensures,
-            &ensures_scope,
-            true,
-            allow_wrapping_arithmetic,
-            &BTreeSet::new(),
-            &callees,
-        )?,
-        ScalarKind::Bool,
-    )?;
-    expect_kind(
-        statement_kind(
-            &body,
-            &scope,
-            false,
-            allow_wrapping_arithmetic,
-            &scope.keys().cloned().collect(),
-            &callees,
-        )?,
-        result_kind,
-    )?;
 
     let mut binders: Vec<_> = atom
         .params
@@ -454,6 +422,65 @@ fn return_kind(atom: &Atom) -> ScalarKind {
     } else {
         ScalarKind::I64
     }
+}
+
+/// The tail-atom contract admission shared by every module atom:
+/// requires/ensures must be boolean expressions and the body a statement
+/// of the declared result kind — all under call resolution against the
+/// complete same-module callee map.
+fn check_atom_contract(
+    atom: &Atom,
+    callees: &BTreeMap<String, usize>,
+    allow_wrapping_arithmetic: bool,
+) -> Result<(), SemanticContractError> {
+    let scope: BTreeMap<String, ScalarKind> = atom
+        .params
+        .iter()
+        .map(|p| (p.name.clone(), param_kind(p)))
+        .collect();
+    let requires =
+        parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
+    let ensures =
+        parse_expression_checked(&atom.ensures).map_err(|_| SemanticContractError::Parse)?;
+    let body =
+        parse_body_expr_checked(&atom.body_expr).map_err(|_| SemanticContractError::Parse)?;
+    expect_kind(
+        expression_kind(
+            &requires,
+            &scope,
+            false,
+            allow_wrapping_arithmetic,
+            &BTreeSet::new(),
+            callees,
+        )?,
+        ScalarKind::Bool,
+    )?;
+    let result_kind = return_kind(atom);
+    let mut ensures_scope = scope.clone();
+    ensures_scope.insert("result".to_owned(), result_kind);
+    expect_kind(
+        expression_kind(
+            &ensures,
+            &ensures_scope,
+            true,
+            allow_wrapping_arithmetic,
+            &BTreeSet::new(),
+            callees,
+        )?,
+        ScalarKind::Bool,
+    )?;
+    expect_kind(
+        statement_kind(
+            &body,
+            &scope,
+            false,
+            allow_wrapping_arithmetic,
+            &scope.keys().cloned().collect(),
+            callees,
+        )?,
+        result_kind,
+    )?;
+    Ok(())
 }
 
 fn validate_atom(atom: &Atom, admit_widened: bool) -> Result<(), SemanticContractError> {
@@ -928,6 +955,39 @@ pub fn encode_pure_i64_body<'ctx>(
     context: &'ctx Context,
     allow_wrapping_arithmetic: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
+    let (source_sha256, mut items) = bounded_pure_i64_module(source, allow_wrapping_arithmetic)?;
+    let Some(Item::Atom(atom)) = items.pop() else {
+        return Err(SemanticContractError::Unsupported("source atom"));
+    };
+    encode_atom_body(&atom, context, source_sha256)
+}
+
+/// Encode every atom of the module under the same profile, in declaration
+/// order. Each entry is an independent per-atom obligation: a call is an
+/// uninterpreted function site, so an atom compares only its own body
+/// against the same-named IR function — never the callee's body.
+pub fn encode_pure_i64_module<'ctx>(
+    source: &str,
+    context: &'ctx Context,
+    allow_wrapping_arithmetic: bool,
+) -> BodyResult<Vec<PureI64Body<'ctx>>> {
+    let (source_sha256, items) = bounded_pure_i64_module(source, allow_wrapping_arithmetic)?;
+    items
+        .iter()
+        .map(|item| match item {
+            Item::Atom(atom) => encode_atom_body(atom, context, source_sha256.clone()),
+            _ => Err(SemanticContractError::Unsupported("non-atom declarations")),
+        })
+        .collect()
+}
+
+/// Shared admission for the per-atom encoders: input bounds, contract
+/// extraction (which itself admits only same-module atoms of the profile)
+/// and the module item list. Returns the module digest and the items.
+fn bounded_pure_i64_module(
+    source: &str,
+    allow_wrapping_arithmetic: bool,
+) -> BodyResult<(String, Vec<Item>)> {
     if source.len() > 65_536 {
         return Err(SemanticContractError::Unsupported("source size limit"));
     }
@@ -953,10 +1013,15 @@ pub fn encode_pure_i64_body<'ctx>(
     }
     let contract =
         extract_pure_i64_contract(source, "scalar-body.mm", None, allow_wrapping_arithmetic)?;
-    let mut items = parse_module_checked(source).map_err(|_| SemanticContractError::Parse)?;
-    let Some(Item::Atom(atom)) = items.pop() else {
-        return Err(SemanticContractError::Unsupported("source atom"));
-    };
+    let items = parse_module_checked(source).map_err(|_| SemanticContractError::Parse)?;
+    Ok((contract.source_sha256, items))
+}
+
+fn encode_atom_body<'ctx>(
+    atom: &crate::parser::ast::Atom,
+    context: &'ctx Context,
+    source_sha256: String,
+) -> BodyResult<PureI64Body<'ctx>> {
     if atom.params.len() > 16 {
         return Err(SemanticContractError::Unsupported("parameter limit"));
     }
@@ -1026,8 +1091,8 @@ pub fn encode_pure_i64_body<'ctx>(
         )
     });
     Ok(PureI64Body {
-        function_name: atom.name,
-        source_sha256: contract.source_sha256,
+        function_name: atom.name.clone(),
+        source_sha256,
         inputs,
         value,
         definedness,

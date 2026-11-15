@@ -857,6 +857,18 @@ The initial bounds are 64 KiB per input, 256 source tokens, 16 parameters,
 expanded path states. Input limits and parser normalization are not independent
 proofs of the parser's correctness.
 
+`validate_pure_i64_module` discharges the per-function obligations a
+call-site comparison leaves open: it runs the same check once per source
+atom against the same-named module member. Each atom is compared
+independently — a callee's body is never inlined into the caller's check —
+and the report carries one outcome per atom in declaration order plus an
+aggregate (`Different` outranks `UndefinedBehavior`, which outranks
+`Inconclusive`; the module is `EquivalentWithinProfile` only when every
+entry is). Every source atom must name a module member or the whole check
+refuses — a missing callee cannot even form its call-site comparison —
+extra members are screened by the module profile but not compared, and
+the solver budget applies per function.
+
 The existing Z3 library checks a quantifier-free bitvector mismatch query
 restricted to inputs where both sides are defined. Unsat yields
 `EquivalentWithinProfile`; sat yields `Different`; unknown/resource

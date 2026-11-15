@@ -3,7 +3,9 @@
 
 use inkwell::{context::Context as LlvmContext, memory_buffer::MemoryBuffer, values::AsValueRef};
 use llvm_sys::{core::*, prelude::*, LLVMIntPredicate, LLVMOpcode, LLVMTypeKind};
-use mumei_core::semantic_contract::{encode_pure_i64_body, PURE_I64_WRAPPING_PROFILE};
+use mumei_core::semantic_contract::{
+    encode_pure_i64_body, encode_pure_i64_module, PureI64Body, PURE_I64_WRAPPING_PROFILE,
+};
 use std::collections::HashMap;
 use z3::{
     ast::{Ast, Bool, BV},
@@ -46,6 +48,32 @@ pub struct ValidationReport {
     pub llvm_sha256: String,
     pub timeout_ms: u32,
     pub resource_limit: u32,
+    pub outcome: Outcome,
+}
+
+/// One atom's outcome inside `validate_pure_i64_module`.
+#[derive(Debug)]
+pub struct FunctionOutcome {
+    pub function_name: String,
+    pub outcome: Outcome,
+}
+
+/// Whole-module report: one outcome per source atom in declaration order
+/// plus the aggregate (`Different` > `UndefinedBehavior` > `Inconclusive`
+/// > `EquivalentWithinProfile`).
+#[derive(Debug)]
+pub struct ModuleValidationReport {
+    pub profile: &'static str,
+    pub source_profile: &'static str,
+    pub target: &'static str,
+    pub data_layout: &'static str,
+    pub checked_stage: &'static str,
+    pub input_domain: &'static str,
+    pub source_sha256: String,
+    pub llvm_sha256: String,
+    pub timeout_ms: u32,
+    pub resource_limit: u32,
+    pub functions: Vec<FunctionOutcome>,
     pub outcome: Outcome,
 }
 
@@ -186,19 +214,148 @@ fn validate(
         })
         .ok_or(ValidationError("missing source function"))?;
     // The module is parsed/verified and remains alive for every raw LLVM query.
-    let returns = unsafe {
+    let (outcome, ir_definedness) = unsafe {
         let raw = function.as_value_ref();
         if native {
             check_native_module(module.as_mut_ptr(), raw)?;
         } else {
-            check_module(module.as_mut_ptr(), raw)?;
+            check_module(module.as_mut_ptr())?;
         }
-        check_function(raw, model.inputs.len())?;
-        let mut encoder = IrEncoder::new(&context);
-        let returns = encoder.encode(raw, &model.inputs)?;
-        (returns, encoder.definedness)
+        compare_function(&context, raw, &model)?
     };
-    let (returns, ir_definedness) = returns;
+    Ok(ValidationReport {
+        profile: if native { NATIVE_PROFILE } else { PROFILE },
+        source_profile: PURE_I64_WRAPPING_PROFILE,
+        target,
+        data_layout: DATA_LAYOUT,
+        checked_stage: if native {
+            "native_user_body_and_truncating_wrapper_snapshot_no_pipeline_attestation"
+        } else {
+            "supplied_llvm_ir_snapshot_no_pipeline_attestation"
+        },
+        input_domain: input_domain_label(native, &model, &ir_definedness),
+        source_sha256: model.source_sha256,
+        llvm_sha256: mumei_core::native_bundle::sha256(llvm_ir.as_bytes()),
+        timeout_ms: options.timeout_ms,
+        resource_limit: options.resource_limit,
+        outcome,
+    })
+}
+
+/// Check every source atom against the same-named function in one supplied
+/// module. Each atom is an independent obligation — a call is an
+/// uninterpreted function site, so the callee's own body is compared as its
+/// own entry, never inlined into the caller's. Every source atom must have
+/// a same-named member or the whole check refuses (a callee's absence can
+/// not be expressed as an outcome: the call-site comparison itself needs it).
+/// Extra module members are screened by `check_module` but not compared.
+/// The solver budget applies per function.
+pub fn validate_pure_i64_module(
+    source: &str,
+    llvm_ir: &str,
+    options: Options,
+) -> Result<ModuleValidationReport> {
+    bounded(llvm_ir)?;
+    if options.timeout_ms == 0 || options.timeout_ms > 30_000 || options.resource_limit == 0 {
+        return Err(ValidationError("invalid solver budget"));
+    }
+    let mut config = Config::new();
+    config.set_timeout_msec(options.timeout_ms as u64);
+    config.set_param_value("rlimit", &options.resource_limit.to_string());
+    let context = Context::new(&config);
+    let models = encode_pure_i64_module(source, &context, true)
+        .map_err(|_| ValidationError("unsupported C03 source"))?;
+    let llvm_context = LlvmContext::create();
+    let module = llvm_context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            llvm_ir.as_bytes(),
+            "translation-validation.ll",
+        ))
+        .map_err(|_| ValidationError("invalid LLVM IR"))?;
+    module
+        .verify()
+        .map_err(|_| ValidationError("invalid LLVM module"))?;
+    if module.get_triple().as_str().to_bytes() != TARGET.as_bytes()
+        || module.get_data_layout().as_str().to_bytes() != DATA_LAYOUT.as_bytes()
+    {
+        return Err(ValidationError("unsupported target or data layout"));
+    }
+    unsafe { check_module(module.as_mut_ptr())? };
+    let mut functions = Vec::new();
+    let mut any_definedness = false;
+    let mut any_param_domain = false;
+    let mut any_subrange = false;
+    let mut outcome = Outcome::EquivalentWithinProfile;
+    for model in &models {
+        let function = module
+            .get_function(&model.function_name)
+            .ok_or(ValidationError("missing source function"))?;
+        let (member_outcome, ir_definedness) =
+            unsafe { compare_function(&context, function.as_value_ref(), model)? };
+        any_definedness |= !model.definedness.is_empty() || !ir_definedness.is_empty();
+        any_param_domain |= !model.param_domain.is_empty();
+        any_subrange |= model.subrange_params;
+        // Different outranks UndefinedBehavior for the aggregate: a wrong
+        // produced value is a harder failure than a poisoned one, and both
+        // outrank an unknown solver result.
+        outcome = match (outcome, member_outcome) {
+            (Outcome::Different, _) | (_, Outcome::Different) => Outcome::Different,
+            (Outcome::UndefinedBehavior, _) | (_, Outcome::UndefinedBehavior) => {
+                Outcome::UndefinedBehavior
+            }
+            (Outcome::Inconclusive, _) | (_, Outcome::Inconclusive) => Outcome::Inconclusive,
+            _ => Outcome::EquivalentWithinProfile,
+        };
+        functions.push(FunctionOutcome {
+            function_name: model.function_name.clone(),
+            outcome: member_outcome,
+        });
+    }
+    Ok(ModuleValidationReport {
+        profile: PROFILE,
+        source_profile: PURE_I64_WRAPPING_PROFILE,
+        target: TARGET,
+        data_layout: DATA_LAYOUT,
+        checked_stage: "supplied_llvm_ir_snapshot_no_pipeline_attestation",
+        input_domain: if any_definedness {
+            if any_subrange {
+                "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires"
+            } else if any_param_domain {
+                "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_restricted_by_requires"
+            } else {
+                "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires"
+            }
+        } else if any_subrange {
+            "signed_i64_inputs_with_signature_bounded_param_domains_not_restricted_by_requires"
+        } else if any_param_domain {
+            "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_restricted_by_requires"
+        } else {
+            "all_signed_i64_inputs_not_restricted_by_requires"
+        },
+        source_sha256: models
+            .first()
+            .map(|model| model.source_sha256.clone())
+            .unwrap_or_default(),
+        llvm_sha256: mumei_core::native_bundle::sha256(llvm_ir.as_bytes()),
+        timeout_ms: options.timeout_ms,
+        resource_limit: options.resource_limit,
+        functions,
+        outcome,
+    })
+}
+
+/// Encode one supplied function and run the three solver queries against
+/// its source model. Returns the outcome and the IR definedness entries,
+/// which callers need for the report's input-domain label.
+unsafe fn compare_function<'ctx>(
+    context: &'ctx Context,
+    raw: LLVMValueRef,
+    model: &PureI64Body<'ctx>,
+) -> Result<(Outcome, Vec<(Bool<'ctx>, Bool<'ctx>)>)> {
+    check_function(raw, model.inputs.len())?;
+    let mut encoder = IrEncoder::new(context);
+    let returns = encoder.encode(raw, &model.inputs)?;
+    let ir_definedness = encoder.definedness;
     // Division, remainder and shifts bind both sides only where the operands
     // are defined — the same safety domain `--bitvec-i64` verification
     // requires. Inputs outside the source domain are don't-care; inputs the
@@ -212,22 +369,22 @@ fn validate(
         .chain(model.definedness.iter())
         .cloned()
         .collect();
-    let src_dom = Bool::and(&context, &src_terms.iter().collect::<Vec<_>>());
+    let src_dom = Bool::and(context, &src_terms.iter().collect::<Vec<_>>());
     let ir_terms: Vec<Bool> = ir_definedness
         .iter()
         .map(|(path, defined)| path.implies(defined))
         .collect();
-    let ir_dom = Bool::and(&context, &ir_terms.iter().collect::<Vec<_>>());
+    let ir_dom = Bool::and(context, &ir_terms.iter().collect::<Vec<_>>());
     let mismatches: Vec<_> = returns
         .iter()
         .map(|(guard, value)| {
             Bool::and(
-                &context,
+                context,
                 &[guard, &src_dom, &ir_dom, &value._eq(&model.value).not()],
             )
         })
         .collect();
-    let solver = Solver::new(&context);
+    let solver = Solver::new(context);
     let outcome = 'check: {
         // A source whose guarded operators have no defined input at all is a
         // spec `--bitvec-i64` verification would already reject; equivalence
@@ -245,7 +402,7 @@ fn validate(
             }
             solver.reset();
         }
-        solver.assert(&Bool::or(&context, &mismatches.iter().collect::<Vec<_>>()));
+        solver.assert(&Bool::or(context, &mismatches.iter().collect::<Vec<_>>()));
         match solver.check() {
             SatResult::Sat => break 'check Outcome::Different,
             SatResult::Unknown => break 'check Outcome::Inconclusive,
@@ -255,51 +412,43 @@ fn validate(
         // on an input inside the source's defined domain.
         let ub: Vec<Bool> = ir_definedness
             .iter()
-            .map(|(path, defined)| Bool::and(&context, &[path, &defined.not(), &src_dom]))
+            .map(|(path, defined)| Bool::and(context, &[path, &defined.not(), &src_dom]))
             .collect();
         solver.reset();
-        solver.assert(&Bool::or(&context, &ub.iter().collect::<Vec<_>>()));
+        solver.assert(&Bool::or(context, &ub.iter().collect::<Vec<_>>()));
         match solver.check() {
             SatResult::Sat => Outcome::UndefinedBehavior,
             SatResult::Unknown => Outcome::Inconclusive,
             SatResult::Unsat => Outcome::EquivalentWithinProfile,
         }
     };
-    Ok(ValidationReport {
-        profile: if native { NATIVE_PROFILE } else { PROFILE },
-        source_profile: PURE_I64_WRAPPING_PROFILE,
-        target,
-        data_layout: DATA_LAYOUT,
-        checked_stage: if native {
-            "native_user_body_and_truncating_wrapper_snapshot_no_pipeline_attestation"
-        } else {
-            "supplied_llvm_ir_snapshot_no_pipeline_attestation"
-        },
-        input_domain: if !model.definedness.is_empty() || !ir_definedness.is_empty() {
-            if native {
-                "zero_argument_main_i64_body_where_division_and_shift_defined_not_process_exit_status"
-            } else if model.param_domain.is_empty() {
-                "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires"
-            } else if model.subrange_params {
-                "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires"
-            } else {
-                "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_restricted_by_requires"
-            }
-        } else if native {
-            "zero_argument_main_i64_body_not_process_exit_status"
+    Ok((outcome, ir_definedness))
+}
+
+fn input_domain_label<'ctx>(
+    native: bool,
+    model: &PureI64Body<'ctx>,
+    ir_definedness: &[(Bool<'ctx>, Bool<'ctx>)],
+) -> &'static str {
+    if !model.definedness.is_empty() || !ir_definedness.is_empty() {
+        if native {
+            "zero_argument_main_i64_body_where_division_and_shift_defined_not_process_exit_status"
         } else if model.param_domain.is_empty() {
-            "all_signed_i64_inputs_not_restricted_by_requires"
+            "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires"
         } else if model.subrange_params {
-            "signed_i64_inputs_with_signature_bounded_param_domains_not_restricted_by_requires"
+            "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires"
         } else {
-            "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_restricted_by_requires"
-        },
-        source_sha256: model.source_sha256,
-        llvm_sha256: mumei_core::native_bundle::sha256(llvm_ir.as_bytes()),
-        timeout_ms: options.timeout_ms,
-        resource_limit: options.resource_limit,
-        outcome,
-    })
+            "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_restricted_by_requires"
+        }
+    } else if native {
+        "zero_argument_main_i64_body_not_process_exit_status"
+    } else if model.param_domain.is_empty() {
+        "all_signed_i64_inputs_not_restricted_by_requires"
+    } else if model.subrange_params {
+        "signed_i64_inputs_with_signature_bounded_param_domains_not_restricted_by_requires"
+    } else {
+        "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_restricted_by_requires"
+    }
 }
 
 unsafe fn width(ty: LLVMTypeRef) -> Result<u32> {
@@ -326,7 +475,7 @@ unsafe fn check_module_environment(module: LLVMModuleRef) -> Result<()> {
     Ok(())
 }
 
-unsafe fn check_module(module: LLVMModuleRef, _function: LLVMValueRef) -> Result<()> {
+unsafe fn check_module(module: LLVMModuleRef) -> Result<()> {
     check_module_environment(module)?;
     let mut member = LLVMGetFirstFunction(module);
     if member.is_null() {

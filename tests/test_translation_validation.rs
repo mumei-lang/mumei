@@ -1834,3 +1834,120 @@ fn calls_require_plain_defined_i64_in_module_targets() {
          define i64 @f(i64 %y) { %a = call i64 @g(i64 %y) [ \"deopt\"() ] %b = add i64 %y, 1 %c = call i64 @g(i64 %b) [ \"deopt\"() ] %d = add i64 %a, %c ret i64 %d }");
     assert!(tv::validate_pure_i64(CALLING, &bundle, Options::default()).is_err());
 }
+
+#[test]
+fn module_validation_checks_each_atom_against_the_same_named_member() {
+    // The callee's body is its own obligation: with both members right
+    // every entry is equivalent — including `h`, an extra member that is
+    // screened but never compared.
+    let report =
+        tv::validate_pure_i64_module(CALLING, &calling_ir("g"), Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(
+        report
+            .functions
+            .iter()
+            .map(|function| (function.function_name.as_str(), function.outcome))
+            .collect::<Vec<_>>(),
+        vec![
+            ("g", Outcome::EquivalentWithinProfile),
+            ("f", Outcome::EquivalentWithinProfile)
+        ]
+    );
+
+    // `f` calling `@h` refutes only f's obligation.
+    let report =
+        tv::validate_pure_i64_module(CALLING, &calling_ir("h"), Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::Different);
+    assert_eq!(
+        report.functions[0].outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    assert_eq!(report.functions[1].outcome, Outcome::Different);
+
+    // A wrong callee body fails only its own entry: the caller still
+    // applies the same uninterpreted `g`, so the modular comparison
+    // keeps `f` equivalent — compositionality is what makes the
+    // per-function obligations independent.
+    let wrong_callee = pin("define i64 @g(i64 %x) { %d = add i64 %x, 1 ret i64 %d }
+         define i64 @f(i64 %y) {
+           %a = call i64 @g(i64 %y)
+           %b = add i64 %y, 1
+           %c = call i64 @g(i64 %b)
+           %d = add i64 %a, %c
+           ret i64 %d
+         }");
+    let report = tv::validate_pure_i64_module(CALLING, &wrong_callee, Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::Different);
+    assert_eq!(report.functions[0].outcome, Outcome::Different);
+    assert_eq!(
+        report.functions[1].outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn module_validation_requires_every_source_atom_as_a_member() {
+    // `f` absent: its call-site comparison cannot even be formed.
+    let missing = pin("define i64 @g(i64 %x) { ret i64 %x }");
+    assert!(tv::validate_pure_i64_module(CALLING, &missing, Options::default()).is_err());
+    // A single-atom module reports exactly one entry, matching the
+    // single-function route's verdict.
+    let single = source("x: i64", "x + 1");
+    let ir = function("%d = add i64 %x, 1 ret i64 %d");
+    let report = tv::validate_pure_i64_module(&single, &ir, Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(report.functions.len(), 1);
+    assert_eq!(report.functions[0].function_name, "f");
+}
+
+#[test]
+fn emitted_multi_atom_module_validates_per_atom() {
+    // End to end: the real emitter's whole-module output — `f` calling
+    // `@g` — checks per atom, so a sabotaged callee body fails only its
+    // own entry.
+    let items = parse_module_checked(CALLING).unwrap();
+    let hirs: Vec<_> = items
+        .iter()
+        .map(|item| {
+            let Item::Atom(atom) = item else {
+                panic!("atom")
+            };
+            lower_atom_to_hir(atom)
+        })
+        .collect();
+    let context = mumei_emit_llvm::LlvmContext::create();
+    let module = context.create_module("calling");
+    mumei_emit_llvm::codegen::compile_atoms_into_module(
+        &context,
+        &module,
+        &hirs,
+        &ModuleEnv::default(),
+        &[],
+    )
+    .unwrap();
+    let emitted_ir = pin(&module.print_to_string().to_string());
+    let report = tv::validate_pure_i64_module(CALLING, &emitted_ir, Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(report.functions.len(), 2);
+    assert!(report
+        .functions
+        .iter()
+        .all(|function| function.outcome == Outcome::EquivalentWithinProfile));
+}
+
+#[test]
+fn module_validation_resolves_forward_calls_to_later_atoms() {
+    // Declaration order is irrelevant: `f` (first) calling `g` (last)
+    // resolves the same as the backward direction.
+    let forward = "atom f(y: i64) -> i64 requires: true; ensures: true; body: { g(y) + g(y + 1) }; atom g(x: i64) -> i64 requires: true; ensures: true; body: { x };";
+    let report =
+        tv::validate_pure_i64_module(forward, &calling_ir("g"), Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    // A non-last atom calling an undeclared target still fails closed —
+    // every atom's contract is extracted, not only the checked tail's.
+    let undeclared = "atom g(x: i64) -> i64 requires: true; ensures: true; body: { missing(x) }; atom f(y: i64) -> i64 requires: true; ensures: true; body: { y };";
+    assert!(
+        tv::validate_pure_i64_module(undeclared, &calling_ir("g"), Options::default()).is_err()
+    );
+}
