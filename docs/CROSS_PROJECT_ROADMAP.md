@@ -1979,6 +1979,41 @@ normalization/acceptance stays open. See the
 [Agent summary strict acceptance](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-strict-acceptance-go-summaries-accept)
 section.
 
+### Wave 3 multi-language adapter summary routes
+
+The same four-route family lands on the in-process TypeScript,
+Solidity and Rust adapters (development accumulates on
+[mumei-agent#749](https://github.com/mumei-lang/mumei-agent/pull/749),
+[#774](https://github.com/mumei-lang/mumei-agent/pull/774) and
+[#775](https://github.com/mumei-lang/mumei-agent/pull/775) as draft
+branches; no production route is wired yet):
+
+- `<lang>-summaries <file>` emits the summary set as JSON — the
+  declared manifest shape (`schema_version`, `context_key`,
+  `functions`) each adapter already round-trips through `to_dict`/
+  `from_dict`, with `from_dict` fail-closed on unknown keys, wrong
+  types and a forged `available` flag.
+- `<lang>-summaries-check <file> --manifest <PATH>` emits
+  `mumei.<lang>-summary-check/v1`: `context_match` plus a name-level
+  `reusable`/`stale`/`missing` partition — the honest partition is
+  per-record equality, since deterministic derivation reproduces an
+  unchanged function's record verbatim.
+- `<lang>-summaries-reuse` merges verbatim records for `reusable`
+  functions with fresh derivations for the rest, keyed to the fresh
+  context — the host's weaker freshness choice, never the strict
+  gate.
+- `<lang>-summaries-accept <file> --manifest <PATH> --function
+  <NAME>` emits `mumei.<lang>-summary-accept/v1` under the strict
+  whole-context gate and echoes the freshly derived record —
+  identical for honest manifests, closing the forgery channel.
+  TypeScript's context key also covers every resolved module's
+  bytes; Solidity and Rust accept `<contract>.<name>` / qualified
+  member names and refuse a bare name that resolves to several
+  functions (`ambiguous_function`).
+
+C06 stays partially delivered; scheduling/re-derivation wiring and
+the audit/MCP route stay open for every language.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
