@@ -763,7 +763,13 @@ deterministically `accepted:false`. Refuted (exit 1) / inconclusive
 `--output` may not overwrite declared inputs and sources over Core's
 64 KiB input bound are rejected before dispatch. Acceptance stays
 representation-level — claim truth, freshness, authenticity and
-correspondence remain unassessed duties. C02/C11 stay partial.
+correspondence remain unassessed duties. A selected run also
+discharges four of the six semantic checks for the produced record at
+representation level — `file_identity`, `producer_authenticity`,
+`freshness` and `semantic_correspondence` — reported in
+`discharged_checks` with `claim_truth` (establishment is not a truth
+receipt) and `artifact_semantics` (the compiled-artifact layer) left
+in `checks_not_performed`. C02/C11 stay partial.
 
 ### Wave 2 declared verify-recheck route (freshness layer)
 
