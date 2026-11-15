@@ -305,7 +305,7 @@ fn compile_native_object(
         module.set_data_layout(&layout);
         module
             .verify()
-            .map_err(|_| MumeiError::codegen("invalid native module".to_owned()))?;
+            .map_err(|e| MumeiError::codegen(format!("invalid native module: {e}")))?;
         module
             .print_to_file(ir_path)
             .map_err(|_| MumeiError::codegen("cannot persist bound native IR".to_owned()))?;

@@ -189,12 +189,21 @@ pub(crate) fn cmd_run(
         // Bind the host triple + data layout into the staged IR, then
         // validate the exact bytes the object emitter consumed (same
         // check `build --emit binary` runs; the tmp IR is discarded).
-        if let Err(e) =
-            mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ll_path, &object_path)
-        {
-            eprintln!("❌ Codegen failed: {}", e);
-            let _ = fs::remove_dir_all(&tmp_dir);
-            std::process::exit(1);
+        // When binding fails — e.g. a module the emitter produced that
+        // does not pass LLVM `verify()` — fall back to the legacy
+        // unbound emit so `run` stays exactly as permissive as before;
+        // no report is produced then, matching the out-of-profile rule.
+        let bound_emit =
+            mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ll_path, &object_path);
+        if let Err(e) = &bound_emit {
+            if let Err(e) =
+                mumei_emit_llvm::codegen::compile_llvm_ir_to_object(&ll_path, &object_path)
+            {
+                eprintln!("❌ Codegen failed: {}", e);
+                let _ = fs::remove_dir_all(&tmp_dir);
+                std::process::exit(1);
+            }
+            eprintln!("  ⚠️  bound IR failed verify; fell back to unbound emit ({e})");
         }
         // Name the report after the full output file name (`app.v1` →
         // `app.v1.translation-validation.json`) so `-o` outputs that
@@ -202,7 +211,9 @@ pub(crate) fn cmd_run(
         let report_path = output_path
             .as_ref()
             .map(|path| PathBuf::from(format!("{}.translation-validation.json", path.display())));
-        run_translation_validation_check(&source, &ll_path, report_path.as_deref());
+        if bound_emit.is_ok() {
+            run_translation_validation_check(&source, &ll_path, report_path.as_deref());
+        }
         object_path
     };
 
