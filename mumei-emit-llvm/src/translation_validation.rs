@@ -580,7 +580,7 @@ unsafe fn compare_function<'ctx>(
         .map(|(path, defined)| path.implies(defined))
         .collect();
     let ir_dom = Bool::and(context, &ir_terms.iter().collect::<Vec<_>>());
-    let mismatches: Vec<_> = returns
+    let mut mismatches: Vec<_> = returns
         .iter()
         .map(|(guard, value)| {
             Bool::and(
@@ -595,6 +595,15 @@ unsafe fn compare_function<'ctx>(
             )
         })
         .collect();
+    if loops {
+        // A covered input the IR never returns on — every path out of
+        // it was dropped for exceeding the bound — diverges where the
+        // source converges: a difference, not an out-of-profile input.
+        let covered = Bool::and(context, &[&src_dom, &ir_dom, &exits]);
+        let guards: Vec<_> = returns.iter().map(|(guard, _)| guard).collect();
+        let any_return = Bool::or(context, &guards);
+        mismatches.push(Bool::and(context, &[&covered, &any_return.not()]));
+    }
     let solver = Solver::new(context);
     let outcome = 'check: {
         // A source whose guarded operators have no defined input at all is a
