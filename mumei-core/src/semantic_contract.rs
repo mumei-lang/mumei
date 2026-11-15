@@ -159,14 +159,28 @@ pub fn extract_pure_i64_contract(
             "expected at least one atom",
         ));
     }
+    // The bounded profile stays a single-atom contract — sibling atoms
+    // only serve as call targets, which the widened profile alone admits.
+    if !allow_wrapping_arithmetic && items.len() != 1 {
+        return Err(SemanticContractError::Unsupported(
+            "expected exactly one atom",
+        ));
+    }
     // Sibling atoms are potential call targets: each must independently
     // satisfy the atom profile, and the last atom is the checked one.
     // A call itself is modeled as an uninterpreted function site — a
     // callee's own contract is a separate per-function obligation.
+    let mut callees = BTreeMap::new();
     for item in &items {
         let Item::Atom(sibling) = item else {
             return Err(SemanticContractError::Unsupported("non-atom declarations"));
         };
+        if callees
+            .insert(sibling.name.clone(), sibling.params.len())
+            .is_some()
+        {
+            return Err(SemanticContractError::Unsupported("duplicate atom name"));
+        }
         validate_atom(sibling, allow_wrapping_arithmetic)?;
     }
     let Some(Item::Atom(mut atom)) = items.pop() else {
@@ -192,6 +206,7 @@ pub fn extract_pure_i64_contract(
             false,
             allow_wrapping_arithmetic,
             &BTreeSet::new(),
+            &callees,
         )?,
         ScalarKind::Bool,
     )?;
@@ -205,6 +220,7 @@ pub fn extract_pure_i64_contract(
             true,
             allow_wrapping_arithmetic,
             &BTreeSet::new(),
+            &callees,
         )?,
         ScalarKind::Bool,
     )?;
@@ -215,6 +231,7 @@ pub fn extract_pure_i64_contract(
             false,
             allow_wrapping_arithmetic,
             &scope.keys().cloned().collect(),
+            &callees,
         )?,
         result_kind,
     )?;
@@ -520,6 +537,7 @@ fn statement_kind(
     result_in_scope: bool,
     allow_wrapping_arithmetic: bool,
     assignable: &BTreeSet<String>,
+    callees: &BTreeMap<String, usize>,
 ) -> Result<ScalarKind, SemanticContractError> {
     match stmt {
         Stmt::Expr(expr, _) => expression_kind(
@@ -528,6 +546,7 @@ fn statement_kind(
             result_in_scope,
             allow_wrapping_arithmetic,
             assignable,
+            callees,
         ),
         Stmt::Assign { var, value, .. } if allow_wrapping_arithmetic => {
             if !assignable.contains(var) {
@@ -541,6 +560,7 @@ fn statement_kind(
                 result_in_scope,
                 allow_wrapping_arithmetic,
                 &BTreeSet::new(),
+                callees,
             )?;
             expect_kind(kind, scope[var])?;
             Ok(scope[var])
@@ -551,6 +571,7 @@ fn statement_kind(
             result_in_scope,
             allow_wrapping_arithmetic,
             assignable,
+            callees,
         ),
         // `let` bindings, scalar reassignments and pure expression
         // statements end in a value statement; the widened equivalence
@@ -570,6 +591,7 @@ fn statement_kind(
                             result_in_scope,
                             allow_wrapping_arithmetic,
                             &BTreeSet::new(),
+                            callees,
                         )?;
                         inner.insert(var.clone(), kind);
                         inner_assignable.insert(var.clone());
@@ -586,6 +608,7 @@ fn statement_kind(
                             result_in_scope,
                             allow_wrapping_arithmetic,
                             &BTreeSet::new(),
+                            callees,
                         )?;
                         expect_kind(kind, inner[var])?;
                     }
@@ -596,6 +619,7 @@ fn statement_kind(
                             result_in_scope,
                             allow_wrapping_arithmetic,
                             &inner_assignable,
+                            callees,
                         )?;
                     }
                     _ => {
@@ -611,6 +635,7 @@ fn statement_kind(
                 result_in_scope,
                 allow_wrapping_arithmetic,
                 &inner_assignable,
+                callees,
             )
         }
         _ => Err(SemanticContractError::Unsupported(
@@ -629,6 +654,7 @@ fn expression_kind(
     result_in_scope: bool,
     allow_wrapping_arithmetic: bool,
     assignable: &BTreeSet<String>,
+    callees: &BTreeMap<String, usize>,
 ) -> Result<ScalarKind, SemanticContractError> {
     match expr {
         Expr::Number(_) => Ok(ScalarKind::I64),
@@ -650,6 +676,7 @@ fn expression_kind(
                 result_in_scope,
                 allow_wrapping_arithmetic,
                 &BTreeSet::new(),
+                callees,
             )?;
             let right = expression_kind(
                 right,
@@ -657,6 +684,7 @@ fn expression_kind(
                 result_in_scope,
                 allow_wrapping_arithmetic,
                 &BTreeSet::new(),
+                callees,
             )?;
             match op {
                 Op::Eq | Op::Neq if left == right => Ok(ScalarKind::Bool),
@@ -696,6 +724,7 @@ fn expression_kind(
             result_in_scope,
             allow_wrapping_arithmetic,
             &BTreeSet::new(),
+            callees,
         ),
         Expr::IfThenElse {
             cond,
@@ -709,6 +738,7 @@ fn expression_kind(
                     result_in_scope,
                     allow_wrapping_arithmetic,
                     &BTreeSet::new(),
+                    callees,
                 )?,
                 ScalarKind::Bool,
             )?;
@@ -721,6 +751,7 @@ fn expression_kind(
                 result_in_scope,
                 allow_wrapping_arithmetic,
                 assignable,
+                callees,
             )?;
             expect_kind(
                 statement_kind(
@@ -729,6 +760,7 @@ fn expression_kind(
                     result_in_scope,
                     allow_wrapping_arithmetic,
                     assignable,
+                    callees,
                 )?,
                 then_kind,
             )?;
@@ -751,6 +783,7 @@ fn expression_kind(
                     result_in_scope,
                     allow_wrapping_arithmetic,
                     &BTreeSet::new(),
+                    callees,
                 )?,
                 ScalarKind::I64,
             )?;
@@ -789,6 +822,7 @@ fn expression_kind(
                             result_in_scope,
                             allow_wrapping_arithmetic,
                             &BTreeSet::new(),
+                            callees,
                         )?,
                         ScalarKind::Bool,
                     )?;
@@ -806,6 +840,7 @@ fn expression_kind(
                     result_in_scope,
                     allow_wrapping_arithmetic,
                     &arm_assignable,
+                    callees,
                 )?;
                 match kind {
                     None => kind = Some(arm_kind),
@@ -814,7 +849,18 @@ fn expression_kind(
             }
             kind.ok_or(SemanticContractError::Unsupported("empty match"))
         }
-        Expr::Call(_, args) if allow_wrapping_arithmetic => {
+        Expr::Call(name, args) if allow_wrapping_arithmetic => {
+            // A call must name an atom of this module with a matching
+            // arity: an undeclared or mismatched callee has no
+            // counterpart to compare a call site against.
+            match callees.get(name.as_str()) {
+                Some(arity) if *arity == args.len() => {}
+                _ => {
+                    return Err(SemanticContractError::Unsupported(
+                        "call target outside module",
+                    ));
+                }
+            }
             // A call is i64-valued with i64 arguments: each argument
             // must kind-check as I64.
             for arg in args {
@@ -825,6 +871,7 @@ fn expression_kind(
                         result_in_scope,
                         allow_wrapping_arithmetic,
                         &BTreeSet::new(),
+                        callees,
                     )?,
                     ScalarKind::I64,
                 )?;
@@ -1740,6 +1787,43 @@ mod tests {
             assert!(extract(&source).is_err());
             assert!(extract_pure_i64_contract(&source, "clamp.mm", Some(TARGET), true).is_ok());
         }
+    }
+
+    #[test]
+    fn calls_resolve_only_to_declared_sibling_atoms_with_matching_arity() {
+        // The widened profile admits calls only as call sites into a
+        // declared sibling atom: an undeclared name, a mismatched arity
+        // or a duplicate atom name has no counterpart to compare
+        // against and stays rejected.
+        let base = |body: &str| {
+            format!(
+                "atom g(x: i64) -> i64 requires: true; ensures: true; body: {{ x }}; atom f(y: i64) -> i64 requires: true; ensures: true; body: {{ {body} }};"
+            )
+        };
+        for body in ["missing(y)", "g(y, y)", "g()"] {
+            assert!(
+                extract_pure_i64_contract(&base(body), "clamp.mm", Some(TARGET), true).is_err(),
+                "unexpected acceptance: {body}"
+            );
+        }
+        // A discarded statement-position call resolves the same way.
+        let discarded = base("missing(y); y");
+        assert!(extract_pure_i64_contract(&discarded, "clamp.mm", Some(TARGET), true).is_err());
+        let duplicate = format!("{SOURCE}\n{SOURCE}");
+        assert!(extract_pure_i64_contract(&duplicate, "clamp.mm", Some(TARGET), true).is_err());
+        // The bounded contract keeps its single-atom gate: sibling
+        // atoms serve only the widened profile's call targets.
+        assert!(extract(&duplicate).is_err());
+        // A declared sibling callee — and a self call — resolve.
+        assert!(extract_pure_i64_contract(
+            &base("g(y) + g(y + 1)"),
+            "clamp.mm",
+            Some(TARGET),
+            true
+        )
+        .is_ok());
+        let self_call = base("f(y)");
+        assert!(extract_pure_i64_contract(&self_call, "clamp.mm", Some(TARGET), true).is_ok());
     }
 
     #[test]

@@ -1819,4 +1819,9 @@ fn calls_require_plain_defined_i64_in_module_targets() {
     let extra_operand = pin("define i64 @g(i64 %x) { ret i64 %x }
          define i64 @f(i64 %y) { %a = call i64 @g(i64 %y, i64 %y) ret i64 %a }");
     assert!(tv::validate_pure_i64(CALLING, &extra_operand, Options::default()).is_err());
+    // An empty operand bundle adds no operand — the printed form's
+    // bracket is what rejects it.
+    let bundle = pin("define i64 @g(i64 %x) { ret i64 %x }
+         define i64 @f(i64 %y) { %a = call i64 @g(i64 %y) [ \"deopt\"() ] %b = add i64 %y, 1 %c = call i64 @g(i64 %b) [ \"deopt\"() ] %d = add i64 %a, %c ret i64 %d }");
+    assert!(tv::validate_pure_i64(CALLING, &bundle, Options::default()).is_err());
 }
