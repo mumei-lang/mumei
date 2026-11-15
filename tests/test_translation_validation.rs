@@ -2117,3 +2117,60 @@ fn native_module_validation_checks_emitted_snapshot_per_atom() {
         .iter()
         .all(|function| function.outcome == Outcome::EquivalentWithinProfile));
 }
+
+#[test]
+fn loop_scoped_bindings_do_not_leak_into_later_loop_phis() {
+    // `let t` exists only inside the first loop's body. When it leaked
+    // into `variables`, the second loop emitted
+    // `phi i64 [ %lam_call, %loop.after ]` — an incoming value defined
+    // in a block that does not dominate the predecessor — and LLVM
+    // `verify()` rejected the merged module (breaking `run`/`build`).
+    let src = "atom main() requires: true; ensures: result == 0; body: {
+        let a = [1, 4, 6];
+        let g0 = |v| { a[0] = v; 0 };
+        let i1 = 0;
+        while i1 < 2 invariant: i1 >= 0 && i1 <= 2 decreases: 2 - i1 {
+            let t = call(g0, 5);
+            let inner = |x| { t + x };
+            let u = call(inner, 0);
+            i1 = i1 + 1
+        };
+        let g1 = |v| { a[2] = v; 0 };
+        let i2 = 0;
+        while i2 < 2 invariant: i2 >= 0 && i2 <= 2 decreases: 2 - i2 {
+            let t = call(g1, 8);
+            i2 = i2 + 1
+        };
+        0
+    };";
+    let items = parse_module_checked(src).unwrap();
+    let hirs: Vec<_> = items
+        .iter()
+        .map(|item| {
+            let Item::Atom(atom) = item else {
+                panic!("atom")
+            };
+            lower_atom_to_hir(atom)
+        })
+        .collect();
+    let root = tempfile::tempdir().unwrap();
+    let ll_path = root.path().join("merged.ll");
+    let obj_path = root.path().join("merged.o");
+    mumei_emit_llvm::binary::compile_atoms_to_binary_ll(
+        &hirs,
+        &ModuleEnv::default(),
+        &[],
+        &ll_path,
+    )
+    .unwrap();
+    let ir = std::fs::read_to_string(&ll_path).unwrap();
+    // Body-only `t`, `inner` and `u` must not produce loop phis at all
+    // (the `inner` lambda marker leaves var_types too, so a later
+    // lambda cannot demand its captured `t` value).
+    assert!(!ir.contains("%phi_t"));
+    assert!(!ir.contains("phi_inner"));
+    assert!(!ir.contains("phi_u"));
+    // The recorded emit runs `verify()` on the bound module — the check
+    // that originally rejected this program.
+    mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ll_path, &obj_path).unwrap();
+}
