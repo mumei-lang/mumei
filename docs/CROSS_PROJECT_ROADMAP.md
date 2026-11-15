@@ -696,9 +696,12 @@ assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 
 Agent adds the mechanical acceptance-normalization step for declared
 evidence-check records — evaluation was previously a host duty with no
-declared shape. `AttemptEvidenceCheck.from_dict(data)` restores a stored
-`mumei.verifier-evidence-check/v1` record under the exact key set and
-schema, with the constructor re-checking every invariant. Then
+declared shape. `AttemptEvidenceCheck.from_dict(data)` and
+`AttemptEvidenceCandidate.from_dict(data)` restore a stored
+`mumei.verifier-evidence-check/v1` record and its
+`mumei.verifier-evidence-candidate/v1` handoff descriptor under the
+exact key set and schema, with each constructor re-checking every
+invariant. Then
 `agent.core_evidence.evaluate_evidence_check(sequence, check)` emits
 `mumei.evidence-check-acceptance/v1`: `candidate_match` holds only when
 the record binds the sequence's CURRENT `evidence_candidate()` — a stale
