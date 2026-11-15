@@ -2277,6 +2277,22 @@ audit or a verification verdict. See the
 [Agent declared Solidity summary route family](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-solidity-summary-route-family)
 section.
 
+### Wave 3 declared summaries in directory audits
+
+`python -m agent audit --code-file <dir> --enable-summaries` connects
+the directory audit to the declared produce routes: every collected
+unit that has a route (`go-summaries` per package directory,
+`ts-summaries` / `rust-summaries` / `sol-summaries` per file) is
+invoked as a bounded subprocess, and the directory result records the
+manifest's declared metadata under `summary_audits` — `route`, `unit`,
+`status` (`emitted`, `skipped_no_helper`, `failed`), `context_key` and
+`function_count` for emitted entries. `--go-types <path>` declares the
+helper; Go units record `skipped_no_helper` without it. Entries are
+advisory, manifest bytes are not stored, and `scan_and_fix` does not
+expose the flag. See the
+[Agent declared summaries in directory audits](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summaries-in-directory-audits-audit---enable-summaries)
+section.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
