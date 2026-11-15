@@ -568,6 +568,39 @@ remains open, and C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent attempt runner](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-real-process-control-for-declared-execution-requests).
 
+### Wave 2 declared-dispatch execution driver
+
+Agent's `attempt_runner.dispatch_attempt(sequence, argv, *, runner=None,
+cancel_event=None, memory_bound_mb=None, report_stamp=None)` runs the
+sequence's outstanding dispatch end-to-end: `next_dispatch()` must yield
+a request (nothing reserved, an attempt in flight or a terminal current
+record is a static error, never a run), `AttemptRunner.run` executes it
+under the declared timeout and the terminal record is reconciled back
+into the sequence — a stamped sequence requires a fresh `report_stamp`,
+checked before spawn so a missing or stale stamp fails statically
+instead of discarding an observed run. The returned
+`AttemptDispatch(sequence, run)` pairs the reconciled sequence with the
+observed run, validating that the sequence's current record carries the
+run's full binding (fingerprint, ordinal, declared timeout) and events.
+`dispatch.captured_output()` binds the run's bounded stdout as an
+`AttemptOutput` on the reconciled current record (the run's `complete`
+collection claim carried across); a failed, timed-out or cancelled run
+cannot mint a snapshot — output requires an exited record.
+`publish_dispatch(store, dispatch, expected=None)` closes the loop: an
+`exited` run selects its captured output before the terminal lineage is
+atomically published through `AttemptSequenceStore` compare-and-set
+(first `publish` on an empty store), while non-exited terminals publish
+the reconciled lineage without a selection.
+
+The driver composes the declared dispatch boundary with the single-spawn
+runner — no scheduling, ordering or cross-sequence arbitration is
+added; publication keeps the same CAS/first-publish contract, and
+durability plus Evidence remain host duties. C11 stays
+partial: Evidence normalization/acceptance remains open, and C12's demand
+gate plus existing assurance/Lean/native/LLVM/deferred-WASM policies are
+unchanged. See the
+[Agent dispatch driver](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-dispatch-execution-driver).
+
 ### Wave 2 normalized run-result descriptors
 
 Agent's `AttemptRunResult.normalized()` maps one observed terminal run into
