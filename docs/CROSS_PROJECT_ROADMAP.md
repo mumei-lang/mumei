@@ -618,6 +618,24 @@ gate plus existing assurance/Lean/native/LLVM/deferred-WASM policies are
 unchanged. See the
 [Agent dispatch driver](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-dispatch-execution-driver).
 
+### Wave 2 reserve-and-dispatch driver for the next attempt
+
+Agent's `attempt_runner.dispatch_next_attempt(sequence, argv, ...)` reserves
+the next attempt and runs it through the same declared-dispatch driver:
+`begin_attempt` supplies the reservation — a sequence closed by a selected
+result fails statically and a running or cancelling current record fails
+because predecessors must be terminal — then `dispatch_attempt` runs it. On
+a fresh sequence this runs attempt one; after a terminal record it is the
+declared retry. A stamped sequence requires a fresh `report_stamp`, checked
+before spawn, and the returned `AttemptDispatch` carries the same
+reconciled-sequence/observed-run pair.
+
+This is still not a retry policy: nothing decides whether another attempt
+is worthwhile, re-picks `argv`, bounds the attempt count or inspects the
+previous outcome — the host declares each next attempt by calling. C11
+stays partial; Evidence normalization/acceptance remains open. See the
+[Agent reserve-and-dispatch driver](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-reserve-and-dispatch-driver-for-the-next-attempt).
+
 ### Wave 2 normalized run-result descriptors
 
 Agent's `AttemptRunResult.normalized()` maps one observed terminal run into
