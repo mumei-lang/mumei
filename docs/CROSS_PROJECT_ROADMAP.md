@@ -785,6 +785,12 @@ so it is claimed only through the lineage's `exit_code`. Mid-run input
 drift suppresses selection and any claimed outcome, reported as
 `inputs_changed`. No evidence_check runs: the recheck diagnostic is
 not verification-evidence-shaped — its exit code IS the verdict.
+A `consistent` outcome discharges `freshness` and
+`semantic_correspondence` at representation level — the record still
+binds the declared source's fresh same-profile verdict — reported in
+`discharged_checks` with the other four duties in
+`checks_not_performed` (`claim_truth` stays unassessed: consistency is
+not a truth receipt).
 C02/C11 stay partial.
 
 ### Wave 2 declared native-recheck route (C10 consumer)
