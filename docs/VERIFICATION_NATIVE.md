@@ -869,6 +869,23 @@ refuses — a missing callee cannot even form its call-site comparison —
 extra members are screened by the module profile but not compared, and
 the solver budget applies per function.
 
+`validate_native_module` applies the same per-atom check to native
+snapshots — the emitted module that keeps its C `main` wrapper. The
+`main` atom is compared against `__mumei_user_main` (the emitter's
+rename of the user `main`) and must be zero-argument, matching the
+wrapper's call shape; every other atom is compared against its
+same-named member. The C `main` wrapper itself is not compared — it is
+screened by the fixed call/trunc/ret shape, as in `validate_native_main`
+— and every member keeps external linkage under the shared function
+profile. A source atom literally named `__mumei_user_main` is rejected
+(the name is the emitter-reserved rename target). The module must
+contain exactly one `main` atom. The report profile is
+`mumei.llvm17-native-module-snapshot/v1`, and its input-domain labels
+mark per-member signed-i64 inputs as not attesting the process exit
+status. Like the rest of this slice it attests only the supplied
+snapshot — no object, linking, OS exit-status or final-executable
+semantics.
+
 The existing Z3 library checks a quantifier-free bitvector mismatch query
 restricted to inputs where both sides are defined. Unsat yields
 `EquivalentWithinProfile`; sat yields `Different`; unknown/resource

@@ -6,7 +6,7 @@ use llvm_sys::{core::*, prelude::*, LLVMIntPredicate, LLVMOpcode, LLVMTypeKind};
 use mumei_core::semantic_contract::{
     encode_pure_i64_body, encode_pure_i64_module, PureI64Body, PURE_I64_WRAPPING_PROFILE,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use z3::{
     ast::{Ast, Bool, BV},
     Config, Context, SatResult, Solver,
@@ -14,6 +14,7 @@ use z3::{
 
 pub const PROFILE: &str = "mumei.llvm17-pure-i64-ssa-equivalence/v1";
 pub const NATIVE_PROFILE: &str = "mumei.llvm17-native-main-snapshot/v1";
+pub const NATIVE_MODULE_PROFILE: &str = "mumei.llvm17-native-module-snapshot/v1";
 pub const NATIVE_TARGET: &str = "x86_64-pc-linux-gnu";
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
 pub const DATA_LAYOUT: &str =
@@ -221,7 +222,7 @@ fn validate(
         } else {
             check_module(module.as_mut_ptr())?;
         }
-        compare_function(&context, raw, &model)?
+        compare_function(&context, raw, &model, &native_call_renames(native))?
     };
     Ok(ValidationReport {
         profile: if native { NATIVE_PROFILE } else { PROFILE },
@@ -290,8 +291,9 @@ pub fn validate_pure_i64_module(
         let function = module
             .get_function(&model.function_name)
             .ok_or(ValidationError("missing source function"))?;
-        let (member_outcome, ir_definedness) =
-            unsafe { compare_function(&context, function.as_value_ref(), model)? };
+        let (member_outcome, ir_definedness) = unsafe {
+            compare_function(&context, function.as_value_ref(), model, &BTreeMap::new())?
+        };
         any_definedness |= !model.definedness.is_empty() || !ir_definedness.is_empty();
         any_param_domain |= !model.param_domain.is_empty();
         any_subrange |= model.subrange_params;
@@ -344,16 +346,170 @@ pub fn validate_pure_i64_module(
     })
 }
 
+/// Native multi-atom variant of `validate_pure_i64_module`: every source
+/// atom is compared against its emitted member — the `main` atom against
+/// `__mumei_user_main` (the emitter's rename of the user `main`), every
+/// other atom against its same-named member. The `main` atom must be
+/// zero-argument, matching the C wrapper's call shape, and the module
+/// must contain exactly one `main` atom. The C `main` wrapper itself is
+/// screened by the fixed call/trunc/ret shape (not compared — its i32
+/// exit-status truncation is the attested artifact edge), and every
+/// member keeps external linkage under the shared function profile.
+/// The solver budget applies per function.
+pub fn validate_native_module(
+    source: &str,
+    llvm_ir: &str,
+    options: Options,
+) -> Result<ModuleValidationReport> {
+    bounded(llvm_ir)?;
+    if options.timeout_ms == 0 || options.timeout_ms > 30_000 || options.resource_limit == 0 {
+        return Err(ValidationError("invalid solver budget"));
+    }
+    let mut config = Config::new();
+    config.set_timeout_msec(options.timeout_ms as u64);
+    config.set_param_value("rlimit", &options.resource_limit.to_string());
+    let context = Context::new(&config);
+    let models = encode_pure_i64_module(source, &context, true)
+        .map_err(|_| ValidationError("unsupported C03 source"))?;
+    let mut mains = 0usize;
+    for model in &models {
+        // `__mumei_user_main` is the emitter-reserved name for the
+        // renamed user `main`; a source atom literally named it would
+        // collide with that member.
+        if model.function_name == "__mumei_user_main" {
+            return Err(ValidationError("source atom uses reserved member name"));
+        }
+        if model.function_name == "main" {
+            mains += 1;
+            if !model.inputs.is_empty() {
+                return Err(ValidationError(
+                    "native profile requires zero-argument main",
+                ));
+            }
+        }
+    }
+    if mains != 1 {
+        return Err(ValidationError(
+            "native module profile requires one main atom",
+        ));
+    }
+    let llvm_context = LlvmContext::create();
+    let module = llvm_context
+        .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+            llvm_ir.as_bytes(),
+            "translation-validation.ll",
+        ))
+        .map_err(|_| ValidationError("invalid LLVM IR"))?;
+    module
+        .verify()
+        .map_err(|_| ValidationError("invalid LLVM module"))?;
+    let target = match module.get_triple().as_str().to_bytes() {
+        bytes if bytes == TARGET.as_bytes() => TARGET,
+        bytes if bytes == NATIVE_TARGET.as_bytes() => NATIVE_TARGET,
+        _ => return Err(ValidationError("unsupported target or data layout")),
+    };
+    if module.get_data_layout().as_str().to_bytes() != DATA_LAYOUT.as_bytes() {
+        return Err(ValidationError("unsupported target or data layout"));
+    }
+    let user_main = module
+        .get_function("__mumei_user_main")
+        .ok_or(ValidationError("missing source function"))?;
+    unsafe { check_native_module_multi(module.as_mut_ptr(), user_main.as_value_ref())? };
+    let call_renames = native_call_renames(true);
+    let mut functions = Vec::new();
+    let mut any_definedness = false;
+    let mut any_param_domain = false;
+    let mut any_subrange = false;
+    let mut outcome = Outcome::EquivalentWithinProfile;
+    for model in &models {
+        let member_name = if model.function_name == "main" {
+            "__mumei_user_main"
+        } else {
+            model.function_name.as_str()
+        };
+        let function = module
+            .get_function(member_name)
+            .ok_or(ValidationError("missing source function"))?;
+        let (member_outcome, ir_definedness) =
+            unsafe { compare_function(&context, function.as_value_ref(), model, &call_renames)? };
+        any_definedness |= !model.definedness.is_empty() || !ir_definedness.is_empty();
+        any_param_domain |= !model.param_domain.is_empty();
+        any_subrange |= model.subrange_params;
+        outcome = match (outcome, member_outcome) {
+            (Outcome::Different, _) | (_, Outcome::Different) => Outcome::Different,
+            (Outcome::UndefinedBehavior, _) | (_, Outcome::UndefinedBehavior) => {
+                Outcome::UndefinedBehavior
+            }
+            (Outcome::Inconclusive, _) | (_, Outcome::Inconclusive) => Outcome::Inconclusive,
+            _ => Outcome::EquivalentWithinProfile,
+        };
+        functions.push(FunctionOutcome {
+            function_name: model.function_name.clone(),
+            outcome: member_outcome,
+        });
+    }
+    Ok(ModuleValidationReport {
+        profile: NATIVE_MODULE_PROFILE,
+        source_profile: PURE_I64_WRAPPING_PROFILE,
+        target,
+        data_layout: DATA_LAYOUT,
+        checked_stage:
+            "native_module_user_bodies_and_truncating_wrapper_snapshot_no_pipeline_attestation",
+        input_domain: if any_definedness {
+            if any_subrange {
+                "module_members_signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_process_exit_status"
+            } else if any_param_domain {
+                "module_members_signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_process_exit_status"
+            } else {
+                "module_members_signed_i64_inputs_where_division_and_shift_defined_not_process_exit_status"
+            }
+        } else if any_subrange {
+            "module_members_signed_i64_inputs_with_signature_bounded_param_domains_not_process_exit_status"
+        } else if any_param_domain {
+            "module_members_signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_process_exit_status"
+        } else {
+            "module_members_all_signed_i64_inputs_not_process_exit_status"
+        },
+        source_sha256: models
+            .first()
+            .map(|model| model.source_sha256.clone())
+            .unwrap_or_default(),
+        llvm_sha256: mumei_core::native_bundle::sha256(llvm_ir.as_bytes()),
+        timeout_ms: options.timeout_ms,
+        resource_limit: options.resource_limit,
+        functions,
+        outcome,
+    })
+}
+
 /// Encode one supplied function and run the three solver queries against
 /// its source model. Returns the outcome and the IR definedness entries,
 /// which callers need for the report's input-domain label.
+/// Callee-name mapping from an emitted member name to the source atom
+/// name its call sites compare against: the binary emitter renames the
+/// user `main` atom to `__mumei_user_main`, so a source call `main(...)`
+/// (`mumei_call_main_0`) must meet `call @__mumei_user_main` under the
+/// `main` name — without the mapping, a recursive or sibling call to
+/// `main` compares Different on every native snapshot. Pure paths keep
+/// emitted names, so their map is empty.
+fn native_call_renames(native: bool) -> BTreeMap<String, String> {
+    if native {
+        [("__mumei_user_main".to_owned(), "main".to_owned())]
+            .into_iter()
+            .collect()
+    } else {
+        BTreeMap::new()
+    }
+}
+
 unsafe fn compare_function<'ctx>(
     context: &'ctx Context,
     raw: LLVMValueRef,
     model: &PureI64Body<'ctx>,
+    call_renames: &BTreeMap<String, String>,
 ) -> Result<(Outcome, Vec<(Bool<'ctx>, Bool<'ctx>)>)> {
     check_function(raw, model.inputs.len())?;
-    let mut encoder = IrEncoder::new(context);
+    let mut encoder = IrEncoder::new(context, call_renames);
     let returns = encoder.encode(raw, &model.inputs)?;
     let ir_definedness = encoder.definedness;
     // Division, remainder and shifts bind both sides only where the operands
@@ -712,6 +868,40 @@ unsafe fn check_native_module(module: LLVMModuleRef, user_main: LLVMValueRef) ->
             "module outside two-function native profile",
         ));
     }
+    check_native_wrapper(main, user_main)
+}
+
+/// Multi-atom variant of `check_native_module`: the C `main` wrapper
+/// keeps its fixed call/trunc/ret shape against `__mumei_user_main`,
+/// and every other member is screened by the shared function profile
+/// against its own arity — each is a potential call target.
+unsafe fn check_native_module_multi(module: LLVMModuleRef, user_main: LLVMValueRef) -> Result<()> {
+    check_module_environment(module)?;
+    let main = LLVMGetNamedFunction(module, c"main".as_ptr());
+    if main.is_null() {
+        return Err(ValidationError("missing native main wrapper"));
+    }
+    let mut member = LLVMGetFirstFunction(module);
+    if member.is_null() {
+        return Err(ValidationError("module outside bounded function profile"));
+    }
+    while !member.is_null() {
+        if LLVMGetLinkage(member) != llvm_sys::LLVMLinkage::LLVMExternalLinkage {
+            return Err(ValidationError("LLVM function linkage unsupported"));
+        }
+        // The wrapper's i32/pointer signature is outside the function
+        // profile; its fixed shape is checked separately.
+        if member != main {
+            check_function(member, LLVMCountParams(member) as usize)?;
+        }
+        member = LLVMGetNextFunction(member);
+    }
+    check_native_wrapper(main, user_main)
+}
+
+/// The C `main` wrapper's fixed shape: `call @__mumei_user_main()`,
+/// `trunc i64 to i32`, `ret` — nothing else.
+unsafe fn check_native_wrapper(main: LLVMValueRef, user_main: LLVMValueRef) -> Result<()> {
     check_function_header(main, 2)?;
     let is_i32 = |ty| {
         LLVMGetTypeKind(ty) == LLVMTypeKind::LLVMIntegerTypeKind && LLVMGetIntTypeWidth(ty) == 32
@@ -795,18 +985,20 @@ unsafe fn acyclic(block: LLVMBasicBlockRef, colors: &mut HashMap<usize, u8>) -> 
     Ok(())
 }
 
-struct IrEncoder<'ctx> {
+struct IrEncoder<'ctx, 'renames> {
     ctx: &'ctx Context,
+    call_renames: &'renames BTreeMap<String, String>,
     states: usize,
     /// `(path condition, defined)` obligations for `sdiv`/`srem`/`shl`/`ashr`:
     /// the instruction's operands must satisfy the condition wherever the
     /// path executes it, or the IR produces poison there.
     definedness: Vec<(Bool<'ctx>, Bool<'ctx>)>,
 }
-impl<'ctx> IrEncoder<'ctx> {
-    fn new(ctx: &'ctx Context) -> Self {
+impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
+    fn new(ctx: &'ctx Context, call_renames: &'renames BTreeMap<String, String>) -> Self {
         Self {
             ctx,
+            call_renames,
             states: 0,
             definedness: Vec::new(),
         }
@@ -943,6 +1135,14 @@ impl<'ctx> IrEncoder<'ctx> {
                     name_len,
                 ))
                 .into_owned();
+                // An emitted member name maps back to the source atom
+                // name its call sites share with the source encoder
+                // (`__mumei_user_main` back to `main` on native paths).
+                let name = self
+                    .call_renames
+                    .get(name.as_str())
+                    .map(String::as_str)
+                    .unwrap_or(name.as_str());
                 let arity = LLVMGetNumArgOperands(inst) as usize;
                 let mut args = Vec::with_capacity(arity);
                 for index in 0..arity {
@@ -951,7 +1151,7 @@ impl<'ctx> IrEncoder<'ctx> {
                 let refs: Vec<&dyn z3::ast::Ast> =
                     args.iter().map(|v| v as &dyn z3::ast::Ast).collect();
                 let applied =
-                    mumei_core::semantic_contract::call_decl(self.ctx, &name, arity).apply(&refs);
+                    mumei_core::semantic_contract::call_decl(self.ctx, name, arity).apply(&refs);
                 applied
                     .as_bv()
                     .ok_or(ValidationError("unsupported LLVM call result"))?
