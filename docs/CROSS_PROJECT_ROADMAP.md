@@ -807,6 +807,22 @@ drift reports `inputs_changed` with no claimed outcome. No
 evidence_check: the envelope's own `acceptance` is `not_evaluated`.
 C02/C10 stay partial.
 
+### Wave 2 declared native-attempt route (C10 producer)
+
+Agent's `python -m agent native-attempt --core <path> --source <path>
+--bundle <dir>` declares a native bundle production as one attempt:
+`<core> native-bundle build <source> -o <dir>` under a
+`mumei.native-attempt-request/v1` fingerprint binding the Core
+executable's bytes, the source's bytes and the declared output path.
+Because the bundle is a side effect rather than a stdout document,
+selection requires three post-conditions: an `exited` run with
+`exit_code == 0`, a parseable `Build ID: <sha256>` line and the full
+declared member set written. The reported `build_id` is the
+Core-computed SHA-256 of `native-bundle.json` — the exact identity
+`native-recheck` pins via `--expected-build-id`, closing the
+produce/recheck pair. Also exposed as the `native_attempt` MCP tool.
+C02/C10 stay partial.
+
 ### Wave 2 declared evidence file-identity route (C02)
 
 Agent's `python -m agent evidence-identity-check --evidence <path>
