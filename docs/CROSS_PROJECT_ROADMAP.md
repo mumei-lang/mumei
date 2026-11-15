@@ -1836,8 +1836,14 @@ serialize as an absent key (never a null reading as
 parameter-independent), and foreign span shapes fail statically.
 Package-unit spans keep their file index.
 
-This is a **handoff surface, not a route** — no I/O, `from_dict`,
-transport, versioning negotiation, evidence semantics, plugin,
+`GoSummarySet.from_dict()` restores a declared set with strict key
+sets per level, exact schema match, bounded lists, unique binding
+identities and dependencies validated as ordinals inside the declared
+parameter count — declared data, not derived truth, so a foreign or
+stale manifest can only describe reuse, never authorize it.
+
+This is a **handoff surface, not a route** — no I/O, transport,
+versioning negotiation, evidence semantics, plugin,
 runner/scheduler or default audit/CLI/MCP route is added; reuse still
 goes through `for_function`/`for_package_function` (which reject on
 any source/target/report change) and `stale_dependents`. It is the
