@@ -2220,6 +2220,22 @@ binds declared routing evidence only: it grants no verification, audit
 or acceptance authority. See the
 [sol_summaries scenario](https://github.com/mumei-lang/mumei-demo/blob/main/scenarios/sol_summaries/README.md).
 
+### Wave 3 declared rust-summaries route demo (mumei-demo)
+
+The optional `rust_summaries` scenario in `mumei-demo` runs the declared
+Rust route family end to end: `rust-summaries` emits the
+`mumei.rust-scalar-parameter-deps/v1` manifest for a two-function fixture
+unit, `rust-summaries-check` partitions reusable/stale/missing functions
+against a fresh in-process derivation, and `rust-summaries-accept` echoes
+one function's declared summary under the strict whole-context gate. The
+check and accept steps `grep` the verdict JSON for the positive verdict so
+an exit-0 refusal fails the step instead of passing. The scenario stays in
+`OPTIONAL_SCENARIOS` — the default sequence is unchanged — and needs
+neither a provisioned toolchain nor fixture payloads because the analyzer
+runs in-process on tree-sitter. The demo binds declared routing evidence
+only: it grants no verification, audit or acceptance authority. See the
+[rust_summaries scenario](https://github.com/mumei-lang/mumei-demo/blob/main/scenarios/rust_summaries/README.md).
+
 ### Wave 3 declared TypeScript summary route family
 
 The TypeScript summary spike accumulated on a draft branch is promoted
