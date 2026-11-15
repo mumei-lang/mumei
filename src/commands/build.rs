@@ -24,6 +24,10 @@ fn run_translation_validation_check(
     output_dir: &Path,
     file_stem: &str,
 ) {
+    // A rebuild that skips validation (module outside the bounded
+    // profile) must not leave an earlier report beside the new binary.
+    let report_path = output_dir.join(format!("{file_stem}.translation-validation.json"));
+    let _ = fs::remove_file(&report_path);
     let Ok(llvm_ir) = fs::read_to_string(ll_path) else {
         return;
     };
@@ -65,7 +69,6 @@ fn run_translation_validation_check(
         Ok(bytes) => bytes,
         Err(_) => return,
     };
-    let report_path = output_dir.join(format!("{file_stem}.translation-validation.json"));
     if fs::write(&report_path, bytes).is_err() {
         return;
     }
