@@ -213,6 +213,10 @@ pub(crate) fn cmd_run(
             .map(|path| PathBuf::from(format!("{}.translation-validation.json", path.display())));
         if bound_emit.is_ok() {
             run_translation_validation_check(&source, &ll_path, report_path.as_deref());
+        } else if let Some(path) = &report_path {
+            // The skipped check must not leave an earlier report beside
+            // the new unvalidated binary.
+            let _ = fs::remove_file(path);
         }
         object_path
     };
