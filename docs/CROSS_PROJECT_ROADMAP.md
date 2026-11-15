@@ -690,6 +690,23 @@ stays partial; C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent manifest probe slice](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-manifest-declared-probe-commands).
 
+### Wave 2 observation-driven probe scheduling
+
+Agent's `adapter_probe.probe_requests_for(registry, request, policy,
+observations, stamp=...)` runs `plan()` and emits an `AdapterProbeRequest`
+for every candidate excluded only by observation-level reasons
+(`availability_unknown`, `tool_missing`, `tool_version_unknown`,
+`tool_version_mismatch`) that declares `probe_argv`. Structural
+exclusions are never probed and the selected adapter is skipped;
+`AdapterRegistry.descriptor(adapter_id)` is now a public read.
+
+Scheduling stays declarative — it decides which declared probes would
+make excluded candidates observable and runs nothing itself. Retry
+policy, concurrency, cross-stamp ordering and Evidence acceptance
+remain open work. C11 stays partial; C12's demand gate plus existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent probe scheduling](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-observation-driven-probe-scheduling).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
