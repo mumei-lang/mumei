@@ -370,14 +370,19 @@ unsafe fn check_call(call: LLVMValueRef) -> Result<()> {
     }
     // The operand count excludes empty operand bundles
     // (`call i64 @g(i64 %x) [ "deopt"() ]`), which the LLVM 17 C API
-    // cannot enumerate at all: any bracket token in the printed form is
-    // a bundle on an admitted call shape and stays unsupported.
+    // cannot enumerate at all. A bundle always prints as `[` directly
+    // followed by a quoted tag, so the check keeps quoted SSA names
+    // like `%"value [0]"` working while every bundle shape rejects.
     let printed = LLVMPrintValueToString(call);
     let text = std::ffi::CStr::from_ptr(printed)
         .to_string_lossy()
         .into_owned();
     LLVMDisposeMessage(printed);
-    if text.split_whitespace().any(|token| token.starts_with('[')) {
+    if text
+        .split('[')
+        .skip(1)
+        .any(|rest| rest.trim_start().starts_with('"'))
+    {
         return Err(ValidationError("unsupported LLVM call"));
     }
     // Call-site attribute index 0 is the return value, 1..=num_args are

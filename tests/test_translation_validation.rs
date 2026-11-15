@@ -1786,6 +1786,15 @@ fn direct_calls_to_in_module_functions_are_equivalent_and_refuted() {
 
     let swapped = validate(CALLING, &calling_ir("h"));
     assert_eq!(swapped.outcome, Outcome::Different);
+
+    // A quoted SSA name containing a bracket is not an operand
+    // bundle: `%"a [0]"` stays a plain call result.
+    let quoted = pin("define i64 @g(i64 %x) { ret i64 %x }
+         define i64 @f(i64 %y) { %\"a [0]\" = call i64 @g(i64 %y) %b = add i64 %y, 1 %c = call i64 @g(i64 %b) %d = add i64 %\"a [0]\", %c ret i64 %d }");
+    assert_eq!(
+        validate(CALLING, &quoted).outcome,
+        Outcome::EquivalentWithinProfile
+    );
 }
 
 #[test]
