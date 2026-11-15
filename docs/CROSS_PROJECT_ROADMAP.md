@@ -811,6 +811,12 @@ source-to-LLVM user-body correspondence). `recheck` names only
 Different/UndefinedBehavior with every static failure, and mid-run
 drift reports `inputs_changed` with no claimed outcome. No
 evidence_check: the envelope's own `acceptance` is `not_evaluated`.
+An `equivalent` outcome discharges `artifact_semantics` at
+representation level — the bundle's user-body LLVM corresponds to the
+declared source's verified semantics, the deepest layer the pipeline
+covers — reported in `discharged_checks` with the other five checks in
+`checks_not_performed` (linker, runtime and binary correctness stay
+outside the profile).
 C02/C10 stay partial.
 
 ### Wave 2 declared native-attempt route (C10 producer)
