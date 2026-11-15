@@ -501,6 +501,13 @@ outside the vocabulary are static errors, not recorded checks. The value
 serializes as detached metadata under
 `mumei.verifier-evidence-check/v1`.
 
+`agent.core_evidence.record_evidence_check` runs the same opt-in POSIX
+Core handoff and returns the record the check produced, distinguishing
+`CoreCheckFailed` (a `ValueError` subclass — a real check failure) from
+request-shape errors, which stay plain `ValueError` and are never
+misrecorded as checked-and-failed. Candidate and output binding are
+validated before any spawn; static errors propagate and record nothing.
+
 This is a check record, not Evidence: `"valid"` only means Core's
 representation check passed for the bytes the host delivered — the
 record carries no bytes, performs no check itself and asserts no truth,
