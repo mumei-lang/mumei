@@ -2268,3 +2268,106 @@ fn cyclic_ir_still_rejected_for_loop_free_source() {
         }");
     assert!(tv::validate_pure_i64(&source("x: i64", "x"), &ir, Options::default()).is_err());
 }
+
+#[test]
+fn ir_still_looping_on_covered_input_is_different() {
+    // Source exits within the bound for x > 0; this IR counts up, so
+    // its path is dropped past the bound — it owes a return on every
+    // covered input and diverging there is a `Different`, not an
+    // out-of-profile input.
+    let src = source(
+        "x: i64",
+        "let n = x; while n > 0 invariant: n >= 0 decreases: n { n = n - 1 }; n",
+    );
+    let ir = pin("define i64 @f(i64 %x) {
+        entry:
+          br label %loop.header
+        loop.header:
+          %n = phi i64 [ %x, %entry ], [ %n2, %loop.body ]
+          %c = icmp sgt i64 %n, 0
+          br i1 %c, label %loop.body, label %loop.after
+        loop.body:
+          %n2 = add i64 %n, 1
+          br label %loop.header
+        loop.after:
+          ret i64 %n
+        }");
+    let report = validate(&src, &ir);
+    assert_eq!(report.outcome, Outcome::Different);
+}
+
+#[test]
+fn sibling_phi_reads_the_previous_iterations_value() {
+    // `%m` reads `%n` on the back-edge: per phi semantics it sees the
+    // previous iteration's `%n`, so for x = 2 the loop returns 1 — a
+    // sequential read of the freshly bound phi would return 0 and
+    // spuriously match the source's `n`.
+    let src = source(
+        "x: i64",
+        "let n = x; while n > 0 invariant: n >= 0 decreases: n { n = n - 1 }; n",
+    );
+    let ir = pin("define i64 @f(i64 %x) {
+        entry:
+          br label %loop.header
+        loop.header:
+          %n = phi i64 [ %x, %entry ], [ %n2, %loop.body ]
+          %m = phi i64 [ %x, %entry ], [ %n, %loop.body ]
+          %c = icmp sgt i64 %n, 0
+          br i1 %c, label %loop.body, label %loop.after
+        loop.body:
+          %n2 = sub i64 %n, 1
+          br label %loop.header
+        loop.after:
+          ret i64 %m
+        }");
+    let report = validate(&src, &ir);
+    assert_eq!(report.outcome, Outcome::Different);
+}
+
+#[test]
+fn defined_cancellation_named_function_stays_a_call_site() {
+    // A function DEFINING `__mumei_task_group_should_cancel_current` is
+    // an ordinary callee, not the bound-to-0 intrinsic: returning 1
+    // exits the loop early, which the source never does.
+    let src = source(
+        "x: i64",
+        "let n = x; while n > 0 invariant: n >= 0 decreases: n { n = n - 1 }; n",
+    );
+    let ir = pin("define i64 @__mumei_task_group_should_cancel_current() {
+        entry:
+          ret i64 1
+        }
+        define i64 @f(i64 %x) {
+        entry:
+          br label %loop.header
+        loop.header:
+          %n = phi i64 [ %x, %entry ], [ %n2, %loop.body ]
+          %poll = call i64 @__mumei_task_group_should_cancel_current()
+          %cancelled = icmp ne i64 %poll, 0
+          br i1 %cancelled, label %loop.after, label %loop.cond
+        loop.cond:
+          %c = icmp sgt i64 %n, 0
+          br i1 %c, label %loop.body, label %loop.after
+        loop.body:
+          %n2 = sub i64 %n, 1
+          br label %loop.header
+        loop.after:
+          ret i64 %n
+        }");
+    let report = validate(&src, &ir);
+    assert_eq!(report.outcome, Outcome::Different);
+}
+
+#[test]
+fn unreached_while_owes_no_exit() {
+    // The loop is inside the `x > 0` branch: its bound obligation is
+    // `reached => exits within bound`, so inputs x <= 0 that skip the
+    // loop stay covered and compare equivalent.
+    let src = source(
+        "x: i64",
+        "let n = x; if x > 0 { while true invariant: true { n = n + 1 }; n } else { n }; n",
+    );
+    let report = validate(&src, &emitted(&src));
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(report.profile, tv::BOUNDED_LOOPS_PROFILE);
+}
