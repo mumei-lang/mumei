@@ -1318,8 +1318,11 @@ type and every result is scalar; method values carry
 — each result depends on the receiver and every argument. A
 composite imported var receiver (`lib.VS.PF()` on a struct var)
 admits too: it reads external state, so it is dep-free and records
-the imported transfer; a receiver that is an index or call result
-(`lib.VSS[0].PF()`) names no member and stays closed. Method
+the imported transfer. The admission reaches a composite *element*
+of an imported container — `lib.VSS[i].PF()` and `lib.VSM[k].VF()`
+carry only the indexes' dependencies, record the transfer on the
+container member and pin its fact tree; a computed operand
+(`g()[0].PF()`) names no member and stays closed. Method
 expressions `lib.T.M(recv, args)` record `method_expr: true` — the
 receiver is the leading argument, so the consumer applies the
 receiver rules to it and a composite imported var receiver
