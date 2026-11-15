@@ -443,6 +443,23 @@ open, and C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent request boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-execution-and-cancellation-requests).
 
+### Wave 2 ready-record withdrawal
+
+Agent's `AttemptSequence.withdraw_attempt()` records a host's decision not to
+run the reserved-but-never-started attempt: the `ready` record is extended
+with a terminal `cancelled` event at elapsed zero, and the direct
+`ready → cancelled` transition is shared lineage vocabulary — a host report
+carrying the same event reconciles to an identical sequence. Only a `ready`
+current can be withdrawn; a running attempt still goes through
+`request_cancellation`, terminal/empty/closed sequences fail statically.
+
+Withdrawal is intent and outcome collapsed into one declaration — no process
+exists to signal — but it is not a crash, timeout, Evidence verdict or
+authorization: the next attempt still needs an explicit `begin_attempt`.
+C11 stays partial: runner/scheduler, actual cancellation effects on running
+records and Evidence normalization/acceptance remain open. See the
+[Agent withdrawal boundary](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-ready-record-withdrawal).
+
 ### Wave 2 declared stream identity and completeness
 
 Agent's `AttemptOutput` declares the collection boundary of its snapshot with
