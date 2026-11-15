@@ -1886,6 +1886,32 @@ first declared output surface a consumable route can bind. See the
 [Agent declared summary manifests](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-manifests)
 section.
 
+### Wave 3 declared summary manifest route (go-summaries)
+
+Agent's `python -m agent go-summaries` is the first consumable route
+over the declared summary manifests: it runs a provisioned
+`tools/go-types` helper on explicitly declared `--source` files,
+validates the compiler report through the fail-closed snapshot reader
+and emits the `mumei.go-scalar-parameter-deps/v1` manifest from
+`GoSummarySet.to_dict()` on stdout (or `--output`). One `--source`
+selects the single-file profile; repeated `--source` selects the
+package profile with each file declared under its unique basename.
+`--target-arch` names the `gc` target and `--timeout` bounds the
+helper spawn.
+
+The route stays a host declaration boundary: it never discovers
+projects, resolves imports or chooses tools — the operator provisions
+the binary and supplies every byte the helper reads. A nonzero exit,
+any stderr or a non-`ok` report status fails closed before parsing,
+and the emitted manifest remains declared data — derived properties
+are recomputed by readers and reuse still goes through
+`for_function`/`stale_dependents`. No audit, MCP or planner route is
+wired yet, no imports are supplied, and Evidence
+normalization/acceptance stays open. C06 stays partially delivered.
+See the
+[Agent summary manifest route](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-manifest-route-go-summaries)
+section.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
