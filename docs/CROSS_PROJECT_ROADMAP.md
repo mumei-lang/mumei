@@ -1296,7 +1296,11 @@ section.
 declared in a resolved imported unit on a concrete named receiver
 type and every result is scalar; method values carry
 `method: true` so the consumer evaluates the receiver expression too
-— each result depends on the receiver and every argument. Method
+— each result depends on the receiver and every argument. A
+composite imported var receiver (`lib.VS.PF()` on a struct var)
+admits too: it reads external state, so it is dep-free and records
+the imported transfer; a receiver that is an index or call result
+(`lib.VSS[0].PF()`) names no member and stays closed. Method
 expressions `lib.T.M(recv, args)` record plain `direct_import`
 (the receiver is already the leading argument). Method members'
 signature pins include the receiver's named type, so redeclaring it
