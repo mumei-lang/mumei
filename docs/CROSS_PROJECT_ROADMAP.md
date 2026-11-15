@@ -960,8 +960,14 @@ non-scalar targets still fail closed at the binding check. See the
 
 Agent's C07 fragment now admits the `min`/`max` builtins — the only
 pure, result-producing builtins usable in-fragment — with the result
-unioning every argument's dependencies. `panic`, `len`, `cap`,
-`append`, `make`, `new` and the rest stay opaque. See the
+unioning every argument's dependencies. `len`/`cap` admit one
+extra shape: a single argument naming an imported container `var`
+(`len(lib.VA)`, `len(lib.VS)` on a `string` var) reads external
+state like the member itself — the result is dep-free, the call
+records the imported transfer, and the declared identity pins.
+Every other operand (`len(xs)` on a binding, `len(f())`, an index
+read like `len(lib.VM2["a"])`, `len(lib.VC)` on a channel) stays
+opaque, as do `panic`, `append`, `make`, `new` and the rest. See the
 [Agent pure builtins](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-pure-builtins-in-expressions).
 
 ### Wave 3 compound and tuple assignments in scalar summaries
