@@ -1244,6 +1244,10 @@ pub fn encode_pure_i64_obligation<'ctx>(
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
     let top = Bool::from_bool(context, true);
     let mut sink = Vec::new();
+    // A `while` inside a requires/ensures block keeps its bound: an
+    // input whose contract loop never exits within `LOOP_BOUND` falls
+    // outside the checked domain instead of comparing a stale value.
+    let mut requires_exits = Vec::new();
     let requires = source_expr(
         &requires,
         context,
@@ -1253,12 +1257,13 @@ pub fn encode_pure_i64_obligation<'ctx>(
         0,
         &BTreeSet::new(),
         &mut HashMap::new(),
-        &mut Vec::new(),
+        &mut requires_exits,
     )?
     .boolean()?;
     env.insert("result".to_string(), SourceValue::Integer(body.value));
     let ensures =
         parse_expression_checked(&atom.ensures).map_err(|_| SemanticContractError::Parse)?;
+    let mut ensures_exits = Vec::new();
     let ensures = source_expr(
         &ensures,
         context,
@@ -1268,10 +1273,14 @@ pub fn encode_pure_i64_obligation<'ctx>(
         0,
         &BTreeSet::new(),
         &mut HashMap::new(),
-        &mut Vec::new(),
+        &mut ensures_exits,
     )?
     .boolean()?;
-    Ok(Bool::and(context, &[&requires, &ensures.not()]))
+    let mut terms = vec![requires, ensures.not()];
+    for exits in requires_exits.iter().chain(ensures_exits.iter()) {
+        terms.push(exits.clone());
+    }
+    Ok(Bool::and(context, &terms.iter().collect::<Vec<_>>()))
 }
 
 #[derive(Clone)]
@@ -1519,7 +1528,7 @@ fn source_stmt<'ctx>(
 /// re-evaluates the condition under the merged environment, executes the
 /// body only on paths still looping (`guard ∧ ¬exited ∧ cond` carries
 /// the body's definedness obligations), and merges each escaping write
-/// as `ite(cond, body_value, previous)`. A path still iterating at the
+/// under that same body guard. A path still iterating at the
 /// bound is outside the profile: the collected `loop_exits` disjunction
 /// bounds the reported equivalence domain to inputs where the loop
 /// exits, matching the LLVM side's bounded path drop.
@@ -1562,12 +1571,13 @@ fn source_while<'ctx>(
                 ))
             }
         };
+        let body_guard = Bool::and(ctx, &[&alive, &c]);
         let mut body_writes = HashMap::new();
         source_stmt(
             body,
             ctx,
             &cur,
-            &Bool::and(ctx, &[&alive, &c]),
+            &body_guard,
             definedness,
             depth + 1,
             assignable,
@@ -1575,9 +1585,12 @@ fn source_while<'ctx>(
             loop_exits,
         )?;
         for (name, bound) in body_writes {
+            // Writes escape only where the body actually ran: an
+            // already-exited path keeps its entry values however the
+            // stale condition evaluates.
             let value = match (cur.get(&name), &bound) {
-                (Some(I(old)), I(new)) => I(c.ite(new, old)),
-                (Some(B(old)), B(new)) => B(c.ite(new, old)),
+                (Some(I(old)), I(new)) => I(body_guard.ite(new, old)),
+                (Some(B(old)), B(new)) => B(body_guard.ite(new, old)),
                 (None, _) => bound.clone(),
                 _ => {
                     return Err(SemanticContractError::Unsupported(
