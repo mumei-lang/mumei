@@ -2435,10 +2435,10 @@ scenario runs the real `mumei` binary (no fixture payload) and stays in
 the advisory report artifact only: it grants no verification, audit or
 acceptance authority beyond the profile.
 
-### Wave 3 declared recheck route demos (mumei-demo)
+### Wave 3 declared evidence route demos (mumei-demo)
 
-Two optional scenarios exercise the declared recheck routes end to end
-against the real `mumei` binary and agent checkout:
+Four optional scenarios exercise the declared evidence routes end to
+end against the real `mumei` binary and agent checkout:
 
 - `verify_recheck` produces a real `mumei.verification-evidence/v1`
   record with `evidence verify-source` under an explicit solver budget
@@ -2456,12 +2456,22 @@ against the real `mumei` binary and agent checkout:
   `recheck == "equivalent"` plus the same candidate handoff, then
   re-runs with one flipped hex digit of `--expected-build-id` and
   asserts exit 1 with no claimed outcome.
+- `verify_attempt` runs `python -m agent verify-attempt` on an
+  established source and asserts `acceptance.accepted: true`,
+  `candidate_match` and the live `mumei.verifier-evidence-check/v1`
+  record — the first end-to-end `accepted: true` path — then runs a
+  refuted source and asserts no selection.
+- `evidence_identity` produces a real record, then runs
+  `python -m agent evidence-identity-check`: the bound source reports
+  `identity == "match"` and a foreign source reports `"mismatch"` —
+  byte-level file_identity, no Core re-run.
 
-Both scenarios stay in `OPTIONAL_SCENARIOS` — the default sequence is
+All four stay in `OPTIONAL_SCENARIOS` — the default sequence is
 unchanged — and every step uses the `rc`-preserving
 `> file; rc=$?; cat file; test $rc -eq 0 && grep` form. The demos bind
-the freshness boundary only: acceptance, producer authenticity and
-correspondence stay unassessed.
+the freshness and file-identity boundaries only: acceptance beyond
+representation, producer authenticity and correspondence stay
+unassessed.
 
 ### Wave 4 first compiler-backed source-analysis boundary
 
