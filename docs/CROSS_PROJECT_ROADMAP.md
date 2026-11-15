@@ -676,6 +676,22 @@ normalization/acceptance remains open, and C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent dispatch-and-publish driver](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-end-to-end-dispatch-and-publish-driver).
 
+### Wave 2 declared lifecycle composition coverage
+
+Agent's `tests/test_attempt_lifecycle.py` exercises the declared
+boundaries as one chain rather than separate gates: manifest-declared
+probe → observed outcome → history-bounded retry scheduling →
+probe-driven planning → canonical store lineage →
+`dispatch_and_publish` → captured output → `selected_result` →
+`evidence_candidate` → detached snapshots. A regression in any
+composition fails one test. Every value in the chain remains a host
+declaration — probing proves a command ran, selection names a declared
+snapshot and the evidence candidate is a handoff descriptor, never
+acceptance. C11 stays partial: Evidence normalization/acceptance remains
+open, and C12's demand gate plus existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent lifecycle composition coverage](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-lifecycle-composition-coverage).
+
 ### Wave 2 normalized run-result descriptors
 
 Agent's `AttemptRunResult.normalized()` maps one observed terminal run into
