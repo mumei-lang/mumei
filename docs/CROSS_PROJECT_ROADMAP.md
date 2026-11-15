@@ -1412,7 +1412,12 @@ like a slice or map and admits. A non-pointer member behind `*` stays
 closed (uncompilable), no other unary operator unwraps, and a
 `*lib.PV = v` store unions the stored value's dependencies into
 every binding an earlier `&x` escaped because the member may point
-at it. Inc/dec on an imported member (`lib.V++`, `VA[i]++`,
+at it. A deref through a pointer-typed *field* member resolves
+the same way: `*lib.VS2.P = v` resolves the field like a field
+read, records the field member's identity as the write target,
+and pins the base member's identity beside the pointee's — a
+field whose pointee is unnamed (`*lib.VS3.PU` on `PU *int64`)
+stays closed like `*lib.PU`. Inc/dec on an imported member (`lib.V++`, `VA[i]++`,
 `lib.VS.f++`, `(*lib.PV)++`, `(*lib.PU)++`) routes through this
 same gate with the same `pointee_type_ids` rule. See the
 [Agent imported method calls](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-imported-method-calls-on-concrete-named-types)
