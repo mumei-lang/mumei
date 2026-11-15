@@ -2044,7 +2044,9 @@ Solidity and Rust adapters. The spike work accumulated on
 [mumei-agent#749](https://github.com/mumei-lang/mumei-agent/pull/749),
 [#774](https://github.com/mumei-lang/mumei-agent/pull/774) and
 [#775](https://github.com/mumei-lang/mumei-agent/pull/775) as draft
-branches; the Rust and Solidity families are promoted to declared
+branches — those accumulation spikes stay draft-only by design and are
+never merged; the declared routes land as their own PRs. The Rust and
+Solidity families are promoted to declared
 routes by their own Wave 3 sections below, and the TypeScript family
 follows the same normalization. What stays unwired is consumption —
 no production verification path calls these routes yet:
