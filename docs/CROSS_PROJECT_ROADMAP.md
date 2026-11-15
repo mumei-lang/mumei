@@ -780,6 +780,16 @@ observation remain host duties. C11 stays partial; Evidence
 acceptance remains open. See the
 [Agent probe cancellation](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-probe-cancellation).
 
+### Wave 2 bounded parallel probe execution
+
+Agent's `observe_probes(..., max_parallel=N)` bounds how many declared
+probes run at once through a `ThreadPoolExecutor` over the shared,
+stateless `AttemptRunner`; `plan_with_probes` forwards the same bound.
+Returned observations keep request order regardless of completion
+order, and `max_parallel=1` remains the sequential default. C11 stays
+partial; Evidence acceptance remains open. See the
+[Agent probe execution driver](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-probe-execution-driver).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
