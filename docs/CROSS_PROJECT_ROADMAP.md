@@ -1203,6 +1203,15 @@ alias a tracked scalar binding, so no escaped union applies.
 `(**t).F`, struct-valued intermediates (`t.A.B` on `A S3`), `t.PF`
 method values and composite-typed fields stay closed.
 
+A field read through an index chain admits the same way:
+`lib.VSM[k].F` on `map[string]S` or `lib.VSS[i].F` on `[]S` reads a
+field of external state — dep-free apart from the indexes' own
+dependencies (literal indexes carry none), recording the imported
+transfer against the field's identity and pinning the container
+member's whole fact tree so the element's named type flags
+`stale_dependents` too. A computed operand (`g()[0].F`) names no
+member and stays closed; a scalar element cannot compile anyway.
+
 Member declarations also classify `lib.T(e)` conversion targets: the
 consumer admits the call only when the declared member is a `type`
 whose type fact is integer or boolean, so the result inherits the
