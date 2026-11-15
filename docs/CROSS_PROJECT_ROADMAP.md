@@ -1821,6 +1821,30 @@ unchanged. See the
 [Agent multi-valued imported results](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-multi-valued-imported-results)
 section.
 
+### Wave 3 declared summary manifests
+
+`GoSummarySet.to_dict()` serializes a derived Go summary set into a
+detached manifest under `mumei.go-scalar-parameter-deps/v1`: the
+context key plus each function's declared fields — type facts with
+element/key chains, sorted return dependencies, call transfers
+(target, per-argument dependency sets, result set, span, `imported`
+marker), gaps (reason, span, callee) and pinned type identities.
+Serialization is detached metadata, not a claim: it carries no bytes
+and grants no acceptance, derived properties (`available`, `effects`)
+are recomputed by the reader rather than stored, `None` dependencies
+serialize as an absent key (never a null reading as
+parameter-independent), and foreign span shapes fail statically.
+Package-unit spans keep their file index.
+
+This is a **handoff surface, not a route** — no I/O, `from_dict`,
+transport, versioning negotiation, evidence semantics, plugin,
+runner/scheduler or default audit/CLI/MCP route is added; reuse still
+goes through `for_function`/`for_package_function` (which reject on
+any source/target/report change) and `stale_dependents`. It is the
+first declared output surface a consumable route can bind. See the
+[Agent declared summary manifests](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-manifests)
+section.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
