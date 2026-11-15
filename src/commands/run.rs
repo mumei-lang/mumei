@@ -196,9 +196,12 @@ pub(crate) fn cmd_run(
             let _ = fs::remove_dir_all(&tmp_dir);
             std::process::exit(1);
         }
+        // Name the report after the full output file name (`app.v1` →
+        // `app.v1.translation-validation.json`) so `-o` outputs that
+        // differ only in extension keep distinct reports.
         let report_path = output_path
             .as_ref()
-            .map(|path| path.with_extension("translation-validation.json"));
+            .map(|path| PathBuf::from(format!("{}.translation-validation.json", path.display())));
         run_translation_validation_check(&source, &ll_path, report_path.as_deref());
         object_path
     };
