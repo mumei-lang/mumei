@@ -883,6 +883,23 @@ attestation — the five other semantic checks stay in
 unpinned). C02 stays partial. See the
 [Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-producer-identity-route-evidence-producer-check).
 
+### Wave 2/3 declared producer + reuse demo coverage (mumei-demo)
+
+The optional `evidence_producer` scenario exercises the
+producer-identity route end to end: `evidence verify-source`
+produces a real `mumei.verification-evidence/v1` record, the route
+answers `match` for the record's own declared provenance values
+(extracted from the produced record, not hardcoded) and `mismatch`
+naming `adapter.id` for a foreign expectation. Separately, the four
+summaries demos (`ts_summaries`, `rust_summaries`,
+`sol_summaries`, `go_summaries`) gained a `reuse_manifest` step
+covering the declared `*-summaries-reuse` routes: under zero
+source drift the merged manifest must be byte-identical to the
+declared one, asserted with `cmp` — the go variant replays the
+recorded manifest bytes under `CI_FIXTURE_MODE=1`. All stay in
+`OPTIONAL_SCENARIOS`. See the
+[evidence_producer scenario](https://github.com/mumei-lang/mumei-demo/blob/main/scenarios/evidence_producer/scenario.json).
+
 ### Wave 2 declared evidence routes as MCP tools (C02)
 
 The Agent MCP server exposes the two spawn-free consume routes as
