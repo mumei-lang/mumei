@@ -580,7 +580,7 @@ unsafe fn compare_function<'ctx>(
         .map(|(path, defined)| path.implies(defined))
         .collect();
     let ir_dom = Bool::and(context, &ir_terms.iter().collect::<Vec<_>>());
-    let mut mismatches: Vec<_> = returns
+    let mismatches: Vec<_> = returns
         .iter()
         .map(|(guard, value)| {
             Bool::and(
@@ -595,15 +595,18 @@ unsafe fn compare_function<'ctx>(
             )
         })
         .collect();
-    if loops {
-        // A covered input the IR never returns on — every path out of
-        // it was dropped for exceeding the bound — diverges where the
-        // source converges: a difference, not an out-of-profile input.
+    // A covered input every IR path out of was dropped past the bound
+    // is neither proven divergent — truncation is not divergence — nor
+    // safe to exclude silently: report it as inconclusive below rather
+    // than as a difference or a vacuous equivalence.
+    let covered_no_return = if loops {
         let covered = Bool::and(context, &[&src_dom, &ir_dom, &exits]);
         let guards: Vec<_> = returns.iter().map(|(guard, _)| guard).collect();
         let any_return = Bool::or(context, &guards);
-        mismatches.push(Bool::and(context, &[&covered, &any_return.not()]));
-    }
+        Some(Bool::and(context, &[&covered, &any_return.not()]))
+    } else {
+        None
+    };
     let solver = Solver::new(context);
     let outcome = 'check: {
         // A source whose guarded operators have no defined input at all is a
@@ -642,7 +645,17 @@ unsafe fn compare_function<'ctx>(
         match solver.check() {
             SatResult::Sat => Outcome::UndefinedBehavior,
             SatResult::Unknown => Outcome::Inconclusive,
-            SatResult::Unsat => Outcome::EquivalentWithinProfile,
+            SatResult::Unsat => match covered_no_return {
+                Some(term) => {
+                    solver.reset();
+                    solver.assert(&term);
+                    match solver.check() {
+                        SatResult::Unsat => Outcome::EquivalentWithinProfile,
+                        _ => Outcome::Inconclusive,
+                    }
+                }
+                None => Outcome::EquivalentWithinProfile,
+            },
         }
     };
     Ok((outcome, ir_definedness))

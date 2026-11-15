@@ -2270,11 +2270,11 @@ fn cyclic_ir_still_rejected_for_loop_free_source() {
 }
 
 #[test]
-fn ir_still_looping_on_covered_input_is_different() {
+fn ir_still_looping_on_covered_input_is_inconclusive() {
     // Source exits within the bound for x > 0; this IR counts up, so
-    // its path is dropped past the bound — it owes a return on every
-    // covered input and diverging there is a `Different`, not an
-    // out-of-profile input.
+    // its path is dropped past the bound. Bound truncation cannot tell
+    // divergence apart from a loop that would return the same value a
+    // few iterations later — neither `Equivalent` nor `Different`.
     let src = source(
         "x: i64",
         "let n = x; while n > 0 invariant: n >= 0 decreases: n { n = n - 1 }; n",
@@ -2293,7 +2293,7 @@ fn ir_still_looping_on_covered_input_is_different() {
           ret i64 %n
         }");
     let report = validate(&src, &ir);
-    assert_eq!(report.outcome, Outcome::Different);
+    assert_eq!(report.outcome, Outcome::Inconclusive);
 }
 
 #[test]
