@@ -2428,6 +2428,29 @@ canonical lineage — never an accepted manifest. See the
 [Agent declared summary attempt MCP tools](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-attempt-routes-as-mcp-tools)
 section.
 
+### Wave 3 declared summary go routes over MCP
+
+`go_summaries_attempt`, `go_summaries_check`,
+`go_summaries_reuse` and `go_summaries_accept` extend the go
+summary route family to MCP, completing the summaries MCP surface
+for every declared language (go alongside ts/rust/sol). The go
+consume routes keep their distinct shape — the live report needs
+the provisioned go-types helper — so each tool rebuilds the
+route's argument namespace from the same JSON encodings
+(`source_files` array, `imports_json` object) through the shared
+`_go_summaries_declared_args`, then calls the identical document
+constructor the CLI emits: `run_attempt` for the attempt report,
+`summary_check_document` for the `reusable`/`stale`/`missing`
+partition, `summary_reuse_set` for the per-function freshness
+merge (manifest-architecture guard included) and
+`summary_accept_document` for the strict whole-set gate — where
+`binding` names the binding identity, not a function name, and the
+emitted `summary` is the freshly derived record. Declared-input
+failures return `error` with checkout-local paths redacted to
+basenames. See the
+[Agent declared summary go consume MCP tools](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-consume-mcp-tools-go_summaries_check--go_summaries_reuse--go_summaries_accept)
+section.
+
 ### Wave 3 declared Rust summary route family
 
 `rust-summaries` and its four siblings (`-check`, `-reuse`, `-accept`,
