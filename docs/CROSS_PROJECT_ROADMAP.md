@@ -2373,7 +2373,7 @@ report, never an accepted artifact. See the
 [Agent declared summary MCP tools](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-produce-routes-as-mcp-tools)
 section.
 
-### Wave 3 declared summary check routes over MCP
+### Wave 3 declared summary check and reuse routes over MCP
 
 `ts_summaries_check`, `rust_summaries_check` and `sol_summaries_check`
 extend the same surface to the check routes. Each tool reads both
@@ -2384,9 +2384,17 @@ manifest at 8 MiB), restores the manifest through the strict
 `reusable`/`stale`/`missing` partition. The document construction is
 shared with the CLI route through `summary_check_document`, so the
 partition is bit-identical; detection only — nothing is merged or
-accepted. See the
+accepted. `ts_summaries_reuse`, `rust_summaries_reuse` and
+`sol_summaries_reuse` extend it to the reuse routes: the shared
+`summary_reuse_set` merge reuses a declared function's record
+verbatim when the fresh record is identical, derives every other
+live function fresh and drops `missing` entries — the weaker
+per-function freshness merge, keyed to the fresh context, never the
+strict whole-context gate that stays `accept`'s alone. See the
 [Agent declared summary check MCP tools](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-check-routes-as-mcp-tools)
-section.
+and
+[reuse tools](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-reuse-routes-as-mcp-tools)
+sections.
 
 ### Wave 3 declared Rust summary route family
 
