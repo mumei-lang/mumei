@@ -2014,6 +2014,26 @@ branches; no production route is wired yet):
 C06 stays partially delivered; scheduling/re-derivation wiring and
 the audit/MCP route stay open for every language.
 
+### Wave 3 declared summary adapter descriptor
+
+`summary_derivation` joins the planner's declared method vocabulary —
+deriving a dependency-summary manifest is an evidence method distinct
+from every verification method — and `agent.summaries_adapters`
+registers the `go-summaries` produce route as an `AdapterDescriptor`
+(profile `mumei.go-scalar-parameter-deps/v1`,
+`mumei.source-text/v1` input, `filesystem.read` + `process.spawn`
+permissions, a `bounded`/`declared-inputs` result contract with
+`conservative-summary` correspondence at `assumed` status, and a
+`probe_argv` the C11 probe boundary can observe).
+`summary_requirements(profile)` builds the matching
+`RouteRequirements` query so `AdapterRegistry.plan()` and
+`prepare_source()` select and bind the adapter like any declared
+capability. The descriptor is routing metadata only — it spawns no
+process and accepts no manifest; planner/audit wiring for the summary
+routes stays open. See the
+[Agent summary adapter descriptor](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-adapter-descriptor)
+section.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
