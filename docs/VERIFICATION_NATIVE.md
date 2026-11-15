@@ -891,7 +891,10 @@ merged IR after the host triple and data layout are bound — the exact
 bytes the object emitter consumes — and writes an advisory
 `<stem>.translation-validation.json` report
 (`mumei.translation-validation-report/v1`: profile, both hashes,
-per-function outcomes and the aggregate). The check is advisory: a
+per-function outcomes and the aggregate). `mumei run` performs the same
+check on its staged merged IR, printing the advisory and writing the
+report next to `-o` output when one is given (a default `run` leaves
+no artifact). The check is advisory: a
 `Different` or `UndefinedBehavior` outcome is reported on stderr but
 does not block the link, and a module outside the bounded profile —
 non-i64 atoms, extern declarations, or no `main` — simply leaves no
