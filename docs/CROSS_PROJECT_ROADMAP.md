@@ -692,6 +692,33 @@ open, and C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent lifecycle composition coverage](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-lifecycle-composition-coverage).
 
+### Wave 2 declared evidence-check acceptance normalization
+
+Agent adds the mechanical acceptance-normalization step for declared
+evidence-check records — evaluation was previously a host duty with no
+declared shape. `AttemptEvidenceCheck.from_dict(data)` and
+`AttemptEvidenceCandidate.from_dict(data)` restore a stored
+`mumei.verifier-evidence-check/v1` record and its
+`mumei.verifier-evidence-candidate/v1` handoff descriptor under the
+exact key set and schema, with each constructor re-checking every
+invariant, and `AttemptNormalizedResult.from_dict(data)` restores
+the `mumei.verifier-run-result/v1` record the candidate binds
+(exact keys, conditional `exit_code`, `stdout.complete` declared
+only as absent-or-false). Then
+`agent.core_evidence.evaluate_evidence_check(sequence, check)` emits
+`mumei.evidence-check-acceptance/v1`: `candidate_match` holds only when
+the record binds the sequence's CURRENT `evidence_candidate()` — a stale
+or foreign check never counts — and `accepted` holds only when the
+record is current AND its outcome is `"valid"`. This is
+representation-level acceptance: the six semantic checks stay listed in
+`checks_not_performed`, and the descriptor is not Evidence, a verdict or
+a grade promotion. Evaluation reads declared values only — no I/O,
+spawn or Core call — and a sequence with no selected result is a static
+error. Freshness beyond record currency, cross-sequence ordering and
+every `checks_not_performed` entry remain unassessed host/Core duties.
+C02/C11 stay partial. See the
+[Agent evidence-check acceptance normalization](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-check-acceptance-normalization).
+
 ### Wave 2 normalized run-result descriptors
 
 Agent's `AttemptRunResult.normalized()` maps one observed terminal run into
