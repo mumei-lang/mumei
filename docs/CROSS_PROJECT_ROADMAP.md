@@ -1936,6 +1936,26 @@ delivered; Evidence normalization/acceptance stays open. See the
 [Agent summary manifest reuse check](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-manifest-reuse-check-go-summaries-check)
 section.
 
+### Wave 3 declared summary manifest reuse (go-summaries-reuse)
+
+Agent's `python -m agent go-summaries-reuse` is the third consumable
+route: the same provisioned helper, the same declared inputs plus
+`--manifest <PATH>`. It applies the check's identity partition and
+emits a merged `mumei.go-scalar-parameter-deps/v1` manifest — a
+`reusable` function's declared summary carries over verbatim, every
+other live function is freshly derived, a `missing` entry is dropped,
+and the merged set is keyed to the fresh context.
+
+Reuse stays detection, not authorization: carrying a declared summary
+forward is the host's per-function freshness choice under the weaker
+identity-survival rule — `for_function`/`for_package_function` remains
+the strict whole-set gate and `stale_dependents` still flags what must
+be re-derived. `--output` may not equal any declared input. C06 stays
+partially delivered; Evidence normalization/acceptance stays open. See
+the
+[Agent summary manifest reuse](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-manifest-reuse-go-summaries-reuse)
+section.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
