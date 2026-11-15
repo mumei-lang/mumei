@@ -671,6 +671,25 @@ stays partial; C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent probe slice](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-availability-probes).
 
+### Wave 2 manifest-declared probe commands
+
+Agent's `AdapterDescriptor.probe_argv` lets a manifest declare its own
+probe command (a nonempty list of nonempty strings; other shapes are
+static manifest errors). `adapter_probe.probe_request_for(descriptor,
+stamp)` binds the declared argv to the descriptor's `max_timeout_ms` /
+`max_memory_mb` budgets — a manifest pins how much room its own probe
+gets — and a host-declared `tool_version` passes through so the
+observation can satisfy the planner's version gate. A descriptor without
+`probe_argv` is a static binding error, never a wildcard probe.
+
+The argv stays verbatim host-declared text — never parsed, expanded or
+PATH-resolved — and the observation stays an untrusted, stamp-ordered
+claim. Plugin loading, adapter execution beyond the declared probe,
+stdout interpretation and Evidence acceptance remain open work. C11
+stays partial; C12's demand gate plus existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent manifest probe slice](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-manifest-declared-probe-commands).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
