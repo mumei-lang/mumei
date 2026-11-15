@@ -807,6 +807,26 @@ drift reports `inputs_changed` with no claimed outcome. No
 evidence_check: the envelope's own `acceptance` is `not_evaluated`.
 C02/C10 stay partial.
 
+### Wave 2 declared evidence file-identity route (C02)
+
+Agent's `python -m agent evidence-identity-check --evidence <path>
+--source <path>` discharges the `file_identity` duty at
+representation level: it reads a declared
+`mumei.verification-evidence/v1` record — fail-closed on a foreign
+schema or a `subject` outside the closed `{id, kind, sha256}` shape —
+and a declared source file, then emits
+`mumei.evidence-file-identity/v1` comparing the record's bound
+`subject.sha256` (the source digest Core binds at production) against
+the sha256 of the current source bytes. `identity` is `"match"` or
+`"mismatch"`; a mismatch is data, not an error. Both inputs are
+bounded at Core's 64 KiB read limit. A match only means the record
+still binds THESE bytes — full representation validity stays Core's
+`evidence check` duty and the other five checks stay in
+`checks_not_performed`. It is the byte-level staleness companion of
+`verify-recheck`'s query-level freshness: no Core run, no fresh
+query. C02 stays partial. See the
+[Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-file-identity-route-evidence-identity-check).
+
 ### Wave 2 normalized run-result descriptors
 
 Agent's `AttemptRunResult.normalized()` maps one observed terminal run into
