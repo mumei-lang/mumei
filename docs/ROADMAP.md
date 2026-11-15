@@ -2883,7 +2883,22 @@ encode as an ite chain under the accumulated negations of earlier hits;
 a trailing unguarded `Wildcard`/`Variable` catch-all is required for
 exhaustive coverage (a `Variable` arm binds the scrutinee for its guard
 and body). A guarded catch-all, non-literal patterns, a non-i64
-scrutinee, a non-Boolean guard and mixed-kind arms stay rejected. The IR side admits `unreachable` —
+scrutinee, a non-Boolean guard and mixed-kind arms stay rejected.
+Mid-block `while` loops join under a bounded-unrolling profile: the
+source side unrolls `LOOP_BOUND` (4) guard evaluations, merges
+escapable writes per name under `alive ∧ cond`, and charges each
+reached loop an exit obligation `guard ⇒ exited-within-bound`, so the
+compared domain is the inputs on which every reached loop exits within
+the bound — a `while` inside an untaken branch owes no exit. The LLVM
+side walks cyclic CFGs by tracking per-block visit depth along each
+path, drops a path whose depth exceeds the bound, models the emitted
+`__mumei_task_group_should_cancel_current` poll as `0` only when it is
+a bare declaration (a defined same-named function stays an ordinary
+call site), and reports a covered input whose every path was dropped
+as `Inconclusive` — bound truncation is neither a proven divergence
+nor a license for vacuous equivalence. Nested `while`s at any depth,
+a `while` in value position and a non-Boolean condition stay rejected,
+and cyclic IR against a loop-free source still fails acyclicity. The IR side admits `unreachable` —
 reachable on a defined input it reports `UndefinedBehavior`, and a dead
 `unreachable` block stays harmless; the existing emitter's match
 lowering never emits it (its final else edge is a constant-true branch).
