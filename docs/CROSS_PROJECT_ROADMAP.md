@@ -649,6 +649,28 @@ adapter failed or that the new route works, and it carries no attempt
 outcome or Evidence. See the
 [Agent runtime fallback](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c04c11-declared-runtime-fallback-replanning).
 
+### Wave 2 declared availability probes
+
+Agent's `agent.adapter_probe` connects a host-declared probe command to
+`AttemptRunner` and maps the observed terminal outcome to a
+`RuntimeObservation` that `AdapterRegistry.plan()` consumes — the "actual
+probing" phrase of C11 closed at the observation level. `AdapterProbeRequest`
+declares `adapter_id`, an immutable `argv`, `timeout_ms`, the registry's
+monotonic `stamp`, an attempt number and an optional bounded
+`memory_bound_mb`; `run_probe` runs exactly one attempt and returns
+`AdapterProbeOutcome{observation, result}`.
+
+The declared mapping is a convention, not a verdict: exit 0 observes
+`"available"`, nonzero exit or a refused spawn observes `"missing"`,
+timeout and cancellation observe `"unknown"`. No stdout is parsed,
+`tool_version` stays host-declared, and nothing authorizes, schedules,
+retries or accepts — a lying probe records a lying observation.
+Actual plugin loading, adapter execution beyond the declared probe,
+output interpretation and Evidence acceptance remain open work. C11
+stays partial; C12's demand gate plus existing
+assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
+[Agent probe slice](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-availability-probes).
+
 ### Wave 3 first supported boundaries
 
 The [Agent C05 slice](https://github.com/mumei-lang/mumei-agent/pull/656)
