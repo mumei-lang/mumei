@@ -2437,7 +2437,7 @@ acceptance authority beyond the profile.
 
 ### Wave 3 declared evidence route demos (mumei-demo)
 
-Four optional scenarios exercise the declared evidence routes end to
+Five optional scenarios exercise the declared evidence routes end to
 end against the real `mumei` binary and agent checkout:
 
 - `verify_recheck` produces a real `mumei.verification-evidence/v1`
@@ -2465,13 +2465,20 @@ end against the real `mumei` binary and agent checkout:
   `python -m agent evidence-identity-check`: the bound source reports
   `identity == "match"` and a foreign source reports `"mismatch"` —
   byte-level file_identity, no Core re-run.
+- `evidence_check_accept` restores a stored attempt sequence and its
+  `mumei.verifier-evidence-check/v1` record through
+  `python -m agent evidence-check-accept` and asserts
+  `accepted: true` for the attempt's own sequence, then evaluates the
+  same check against a foreign sequence and asserts
+  `candidate_match: false` and `accepted: false` — the consume half of
+  produce+consume.
 
-All four stay in `OPTIONAL_SCENARIOS` — the default sequence is
+All five stay in `OPTIONAL_SCENARIOS` — the default sequence is
 unchanged — and every step uses the `rc`-preserving
 `> file; rc=$?; cat file; test $rc -eq 0 && grep` form. The demos bind
-the freshness and file-identity boundaries only: acceptance beyond
-representation, producer authenticity and correspondence stay
-unassessed.
+the freshness, file-identity and representation-acceptance boundaries
+only: acceptance beyond representation, producer authenticity and
+correspondence stay unassessed.
 
 ### Wave 4 first compiler-backed source-analysis boundary
 
