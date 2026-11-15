@@ -719,6 +719,28 @@ every `checks_not_performed` entry remain unassessed host/Core duties.
 C02/C11 stay partial. See the
 [Agent evidence-check acceptance normalization](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-check-acceptance-normalization).
 
+### Wave 2 declared evidence-check acceptance route
+
+Agent wires the acceptance normalization to a consume route,
+`python -m agent evidence-check-accept --sequence <path> --check <path>`
+(`--output <path>` optional). The route restores a declared
+`mumei.verifier-attempt-sequence/v1` snapshot through
+`AttemptSequence.from_dict` and a declared
+`mumei.verifier-evidence-check/v1` record through
+`AttemptEvidenceCheck.from_dict`, then emits
+`mumei.evidence-check-acceptance/v1` — `accepted` only when the record
+binds the sequence's CURRENT evidence candidate AND declares
+`outcome: "valid"`. Declared documents are bounded reads (1 MiB), a
+malformed or foreign-schema document is a static error, and `--output`
+may not overwrite either declared input.
+
+Representation-level acceptance only — the route runs no Core check and
+`checks_not_performed` still names the six unassessed semantic duties.
+Producing a record stays in-library (`record_evidence_check` needs the
+live Core plus the selected output bytes), so a stale or foreign record
+always yields `accepted: false` — the route cannot forge acceptance.
+C02/C11 stay partial.
+
 ### Wave 2 normalized run-result descriptors
 
 Agent's `AttemptRunResult.normalized()` maps one observed terminal run into
