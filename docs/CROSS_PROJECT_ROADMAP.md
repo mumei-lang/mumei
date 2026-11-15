@@ -2310,6 +2310,23 @@ unchanged — and `CI_FIXTURE_MODE=1` replays recorded metadata for the
 helper-bound step. The demo binds declared advisory metadata only: it
 grants no verification, audit or acceptance authority.
 
+### Wave 3 translation validation build demo (mumei-demo)
+
+The optional `translation_validation` scenario in `mumei-demo` exercises
+the C09 advisory wiring from `mumei build --emit binary`: the first step
+builds a two-atom fixture and asserts the emitted
+`<name>.translation-validation.json` binds
+`mumei.translation-validation-report/v1` with
+`equivalent_within_profile` for every function; the second runs the
+produced binary and checks its exit code against `main`'s return value;
+the third builds an extern-declaring module that links cleanly but is
+outside the bounded pure-i64 profile, so it must leave no report — the
+check's honest coverage boundary, not a fabricated equivalence. The
+scenario runs the real `mumei` binary (no fixture payload) and stays in
+`OPTIONAL_SCENARIOS` — the default sequence is unchanged. The demo binds
+the advisory report artifact only: it grants no verification, audit or
+acceptance authority beyond the profile.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
