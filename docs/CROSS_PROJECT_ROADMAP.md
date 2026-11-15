@@ -2373,6 +2373,21 @@ report, never an accepted artifact. See the
 [Agent declared summary MCP tools](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-produce-routes-as-mcp-tools)
 section.
 
+### Wave 3 declared summary check routes over MCP
+
+`ts_summaries_check`, `rust_summaries_check` and `sol_summaries_check`
+extend the same surface to the check routes. Each tool reads both
+declared inputs under the route's byte bounds (source per route,
+manifest at 8 MiB), restores the manifest through the strict
+`from_dict` gate, derives a fresh summary set and returns the shared
+`mumei.<lang>-summary-check/v1` document — `context_match` plus the
+`reusable`/`stale`/`missing` partition. The document construction is
+shared with the CLI route through `summary_check_document`, so the
+partition is bit-identical; detection only — nothing is merged or
+accepted. See the
+[Agent declared summary check MCP tools](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-check-routes-as-mcp-tools)
+section.
+
 ### Wave 3 declared Rust summary route family
 
 `rust-summaries` and its four siblings (`-check`, `-reuse`, `-accept`,
