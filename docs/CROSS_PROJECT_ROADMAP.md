@@ -2135,7 +2135,6 @@ the
 [Agent consumable plan route](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-consumable-plan-route-summaries-plan)
 section.
 
->>>>>>> origin/develop
 ### Wave 3 declared Rust summary route family
 
 `rust-summaries` and its four siblings (`-check`, `-reuse`, `-accept`,
@@ -2143,10 +2142,10 @@ section.
 route family Go pioneered: `mumei.rust-scalar-parameter-deps/v1`
 manifests over the bounded scalar fragment with in-process
 tree-sitter parsing (gaps recorded, never dropped silently). `-accept`
-applies the strict whole-context gate — `context_key` identical plus
-the binding alive — while `-check` is a record-level comparison and
-`-reuse` a weaker per-function freshness merge, and `-attempt` runs
-the produce route inside the C11 lifecycle.
+alone applies the strict whole-context gate (`context_key` identical
+plus the binding alive); `-check` is a record-level comparison and
+`-reuse` a weaker per-function freshness merge; `-attempt` runs the
+produce route inside the C11 lifecycle.
 `rust_summaries_adapter()` registers it as a second
 `summary_derivation` descriptor declaring only `filesystem.read`, so
 the probe-wired planner covers it. Routing evidence only — no
