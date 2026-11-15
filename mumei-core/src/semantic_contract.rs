@@ -928,6 +928,39 @@ pub fn encode_pure_i64_body<'ctx>(
     context: &'ctx Context,
     allow_wrapping_arithmetic: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
+    let (source_sha256, mut items) = bounded_pure_i64_module(source, allow_wrapping_arithmetic)?;
+    let Some(Item::Atom(atom)) = items.pop() else {
+        return Err(SemanticContractError::Unsupported("source atom"));
+    };
+    encode_atom_body(&atom, context, source_sha256)
+}
+
+/// Encode every atom of the module under the same profile, in declaration
+/// order. Each entry is an independent per-atom obligation: a call is an
+/// uninterpreted function site, so an atom compares only its own body
+/// against the same-named IR function — never the callee's body.
+pub fn encode_pure_i64_module<'ctx>(
+    source: &str,
+    context: &'ctx Context,
+    allow_wrapping_arithmetic: bool,
+) -> BodyResult<Vec<PureI64Body<'ctx>>> {
+    let (source_sha256, items) = bounded_pure_i64_module(source, allow_wrapping_arithmetic)?;
+    items
+        .iter()
+        .map(|item| match item {
+            Item::Atom(atom) => encode_atom_body(atom, context, source_sha256.clone()),
+            _ => Err(SemanticContractError::Unsupported("non-atom declarations")),
+        })
+        .collect()
+}
+
+/// Shared admission for the per-atom encoders: input bounds, contract
+/// extraction (which itself admits only same-module atoms of the profile)
+/// and the module item list. Returns the module digest and the items.
+fn bounded_pure_i64_module(
+    source: &str,
+    allow_wrapping_arithmetic: bool,
+) -> BodyResult<(String, Vec<Item>)> {
     if source.len() > 65_536 {
         return Err(SemanticContractError::Unsupported("source size limit"));
     }
@@ -953,10 +986,15 @@ pub fn encode_pure_i64_body<'ctx>(
     }
     let contract =
         extract_pure_i64_contract(source, "scalar-body.mm", None, allow_wrapping_arithmetic)?;
-    let mut items = parse_module_checked(source).map_err(|_| SemanticContractError::Parse)?;
-    let Some(Item::Atom(atom)) = items.pop() else {
-        return Err(SemanticContractError::Unsupported("source atom"));
-    };
+    let items = parse_module_checked(source).map_err(|_| SemanticContractError::Parse)?;
+    Ok((contract.source_sha256, items))
+}
+
+fn encode_atom_body<'ctx>(
+    atom: &crate::parser::ast::Atom,
+    context: &'ctx Context,
+    source_sha256: String,
+) -> BodyResult<PureI64Body<'ctx>> {
     if atom.params.len() > 16 {
         return Err(SemanticContractError::Unsupported("parameter limit"));
     }
@@ -1026,8 +1064,8 @@ pub fn encode_pure_i64_body<'ctx>(
         )
     });
     Ok(PureI64Body {
-        function_name: atom.name,
-        source_sha256: contract.source_sha256,
+        function_name: atom.name.clone(),
+        source_sha256,
         inputs,
         value,
         definedness,
