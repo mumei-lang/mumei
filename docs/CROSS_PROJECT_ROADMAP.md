@@ -2117,6 +2117,24 @@ manifest; audit/MCP wiring stays open. See the
 [Agent summary-route probe wiring](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-summary-route-probe-wiring)
 section.
 
+### Wave 3 consumable plan route (summaries-plan)
+
+`python -m agent summaries-plan --profile <id> --stamp <n>` is the
+first consumable caller over `plan_summary_route`: it plans the
+summary route for a declared profile through the probe boundary and
+prints `mumei.summaries-plan/v1` — the `mumei.verification-plan/v1`
+document, the recorded `RuntimeObservation`s and the updated
+`AdapterProbeHistory` records. `--tool-version`, `--rounds` and
+`--max-parallel` pass through to the observe-and-replan loop, and
+`--histories <file>` resumes persisted
+`mumei.adapter-probe-history/v1` records via the new
+`AdapterProbeHistory.to_dict()` / `from_dict()` record schema, so a
+host can persist probe histories between runs. Routing only — a
+selected adapter grants no verification or acceptance authority. See
+the
+[Agent consumable plan route](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-consumable-plan-route-summaries-plan)
+section.
+
 ### Wave 3 declared summary route demo (mumei-demo)
 
 The optional `go_summaries` scenario in `mumei-demo` runs the declared
