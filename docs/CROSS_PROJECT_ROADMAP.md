@@ -2040,11 +2040,16 @@ section.
 
 The same route family plus the attempt route lands on the in-process
 TypeScript,
-Solidity and Rust adapters (development accumulates on
+Solidity and Rust adapters. The spike work accumulated on
 [mumei-agent#749](https://github.com/mumei-lang/mumei-agent/pull/749),
 [#774](https://github.com/mumei-lang/mumei-agent/pull/774) and
 [#775](https://github.com/mumei-lang/mumei-agent/pull/775) as draft
-branches; no production route is wired yet):
+branches — those accumulation spikes stay draft-only by design and are
+never merged; the declared routes land as their own PRs. The Rust and
+Solidity families are promoted to declared
+routes by their own Wave 3 sections below, and the TypeScript family
+follows the same normalization. What stays unwired is consumption —
+no production verification path calls these routes yet:
 
 - `<lang>-summaries <file>` emits the summary set as JSON — the
   declared manifest shape (`schema_version`, `context_key`,
@@ -2202,6 +2207,26 @@ in-process, so the `process.spawn` in its `probe_argv` belongs to the
 probe boundary. Producing or accepting a summary is not a proof, an
 audit or a verification verdict. See the
 [Agent declared TypeScript summary route family](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-typescript-summary-route-family)
+section.
+
+### Wave 3 declared Solidity summary route family
+
+The Solidity summary spike accumulated on a draft branch is promoted
+to a declared route family, matching the Go and Rust families:
+`python -m agent sol-summaries` emits
+`mumei.sol-scalar-parameter-deps/v1` for single-file Solidity (in-process
+tree-sitter, no helper binary), `sol-summaries-accept` applies the
+strict whole-context gate to one function's declared summary,
+`sol-summaries-check` and `sol-summaries-reuse` partition and merge a
+declared manifest against the fresh derivation, and
+`sol-summaries-attempt` runs the produce route as one declared attempt
+through the C11 lifecycle and emits
+`mumei.sol-summaries-attempt-report/v1`. The `agent.sol-summaries`
+adapter descriptor declares `filesystem.read` only — the route runs
+in-process, so the `process.spawn` in its `probe_argv` belongs to the
+probe boundary. Producing or accepting a summary is not a proof, an
+audit or a verification verdict. See the
+[Agent declared Solidity summary route family](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-solidity-summary-route-family)
 section.
 
 ### Wave 4 first compiler-backed source-analysis boundary
