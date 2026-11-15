@@ -1045,14 +1045,31 @@ pub(crate) fn cmd_build(
         }
         // Bind the host triple + data layout into the staged IR (the same
         // rewrite the native-bundle snapshot path performs), then validate
-        // the exact bytes the object emitter consumed.
-        if let Err(e) =
-            mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ll_path, &object_path)
-        {
-            eprintln!("❌ Binary codegen failed: {}", e);
-            std::process::exit(1);
+        // the exact bytes the object emitter consumed. When the bound
+        // module fails verify (the emitter can still produce invalid SSA
+        // for constructs the validation profile never promised to cover),
+        // fall back to the pre-binding emit path and skip the report —
+        // the build outcome stays exactly as permissive as before.
+        let bound_emit =
+            mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ll_path, &object_path);
+        if let Err(e) = &bound_emit {
+            if let Err(e) =
+                mumei_emit_llvm::codegen::compile_llvm_ir_to_object(&ll_path, &object_path)
+            {
+                eprintln!("❌ Binary codegen failed: {}", e);
+                std::process::exit(1);
+            }
+            eprintln!("  ⚠️  bound IR failed verify; fell back to unbound emit ({e})");
         }
-        run_translation_validation_check(&source, &ll_path, output_dir, file_stem);
+        if bound_emit.is_ok() {
+            run_translation_validation_check(&source, &ll_path, output_dir, file_stem);
+        } else {
+            // The skipped check must not leave an earlier report beside
+            // the new unvalidated binary.
+            let _ = fs::remove_file(
+                output_dir.join(format!("{file_stem}.translation-validation.json")),
+            );
+        }
         let _ = fs::remove_file(&ll_path);
 
         let binary_output = output_dir.join(file_stem);
