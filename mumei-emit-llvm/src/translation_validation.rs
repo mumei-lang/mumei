@@ -1317,10 +1317,12 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     name_len,
                 ))
                 .into_owned();
-                if name == CANCEL_POLL_INTRINSIC {
+                if name == CANCEL_POLL_INTRINSIC && LLVMIsDeclaration(callee) != 0 {
                     // Cooperative cancellation is an effect outside the
                     // pure profile: the claim covers executions where
-                    // the poll never fires, so its result binds to 0.
+                    // the poll never fires, so its result binds to 0. A
+                    // defined function that merely shares the name stays
+                    // a normal call site — its body decides the result.
                     BV::from_i64(self.ctx, 0, 64)
                 } else {
                     // An emitted member name maps back to the source atom
