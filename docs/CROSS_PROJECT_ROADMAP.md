@@ -2415,6 +2415,34 @@ scenario runs the real `mumei` binary (no fixture payload) and stays in
 the advisory report artifact only: it grants no verification, audit or
 acceptance authority beyond the profile.
 
+### Wave 3 declared recheck route demos (mumei-demo)
+
+Two optional scenarios exercise the declared recheck routes end to end
+against the real `mumei` binary and agent checkout:
+
+- `verify_recheck` produces a real `mumei.verification-evidence/v1`
+  record with `evidence verify-source` under an explicit solver budget
+  (the route forwards its declared budget, so produce and recheck must
+  agree), re-checks it through `python -m agent verify-recheck` and
+  asserts `recheck == "consistent"` plus a
+  `mumei.verifier-evidence-candidate/v1` handoff, then flips one hex
+  digit of the saved `specification.sha256` and asserts the route exits
+  1 with no `recheck` field and no selection — exit 1 conflates
+  refutation with `InconsistentSavedEvidence`, so tampering surfaces as
+  no claimed outcome rather than a mislabel.
+- `native_recheck` builds a real `mumei.native-bundle/v1` directory
+  with `native-bundle build` and captures the printed Build ID, re-checks
+  it through `python -m agent native-recheck` and asserts
+  `recheck == "equivalent"` plus the same candidate handoff, then
+  re-runs with one flipped hex digit of `--expected-build-id` and
+  asserts exit 1 with no claimed outcome.
+
+Both scenarios stay in `OPTIONAL_SCENARIOS` — the default sequence is
+unchanged — and every step uses the `rc`-preserving
+`> file; rc=$?; cat file; test $rc -eq 0 && grep` form. The demos bind
+the freshness boundary only: acceptance, producer authenticity and
+correspondence stay unassessed.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
