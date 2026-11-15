@@ -2356,6 +2356,23 @@ the
 [Agent consumable plan route](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-consumable-plan-route-summaries-plan)
 section.
 
+### Wave 3 declared planning and produce routes over MCP
+
+`summaries_plan` exposes the same planning boundary over MCP through a
+shared `run_plan(args)` — identical request binding, identical
+`mumei.summaries-plan/v1` document — with declared-argument
+validation and basename-redacted failure text. `ts_summaries`,
+`rust_summaries` and `sol_summaries` expose the three in-process
+produce routes: each tool validates the declared `source_path`, reads
+under the same per-route byte bound (64 KiB / 64 KiB / 256 KiB) and
+returns the emitted `mumei.<lang>-scalar-parameter-deps/v1` manifest;
+`ts_summaries` carries the `resolve_modules` opt-in. Together with
+`go_summaries` the family's planning and produce surfaces are now
+uniformly reachable over MCP — a manifest is still a conservative
+report, never an accepted artifact. See the
+[Agent declared summary MCP tools](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-declared-summary-produce-routes-as-mcp-tools)
+section.
+
 ### Wave 3 declared Rust summary route family
 
 `rust-summaries` and its four siblings (`-check`, `-reuse`, `-accept`,
