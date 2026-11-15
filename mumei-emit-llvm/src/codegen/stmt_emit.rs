@@ -588,6 +588,10 @@ pub(crate) fn compile_hir_stmt<'a>(
             for (name, phi) in &phi_nodes {
                 variables.insert(name.clone(), phi.as_basic_value());
             }
+            // Names bound only inside the body leave scope here; keeping
+            // them would carry a body-block value into a later loop's
+            // phi, whose incoming block it cannot dominate.
+            variables.retain(|name, _| pre_loop_vars.contains_key(name));
             Ok(context.i64_type().const_int(0, false).into())
         }
         HirStmt::Block { stmts, tail_expr } => {
