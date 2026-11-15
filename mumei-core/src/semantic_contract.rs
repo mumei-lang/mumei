@@ -1603,7 +1603,9 @@ fn source_while<'ctx>(
         }
         exited = Bool::or(ctx, &[&exited, &c.not()]);
     }
-    loop_exits.push(exited);
+    // The bound only applies where the loop is reached: a `while` inside
+    // an untaken branch owes no exit on the paths that skip it.
+    loop_exits.push(guard.implies(&exited));
     for (name, bound) in merged {
         written.insert(name, bound);
     }
