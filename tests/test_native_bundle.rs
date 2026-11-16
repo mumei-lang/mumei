@@ -2404,6 +2404,55 @@ fn multifile_std_member_shared_by_two_importers_emits_its_atoms_once() {
 }
 
 #[test]
+fn multifile_member_key_collision_across_files_fails_honestly() {
+    let root = tempfile::tempdir().unwrap();
+    let std_dir = tempfile::tempdir().unwrap();
+    // The fallback member's own `import "helper"` resolves beside its
+    // real file (std_dir/helper.mm), while the root's
+    // `import "std/helper"` resolves to the project's std/helper.mm.
+    // Both land on the `std/helper.mm` member key but name DIFFERENT
+    // files — the language binds them to different modules, which the
+    // bundle member namespace cannot express, so the build must fail
+    // honestly instead of bundling the wrong implementation.
+    fs::write(
+        std_dir.path().join("helper.mm"),
+        "atom h() -> i64 requires: true; ensures: result == 1; body: { 1 };\n",
+    )
+    .unwrap();
+    fs::write(
+        std_dir.path().join("probe_dep.mm"),
+        "import \"helper\";\n\natom std_helper(x: i64) -> i64 requires: true; ensures: result == x + 1; body: { x + helper::h() };",
+    )
+    .unwrap();
+    let project_std = root.path().join("std");
+    fs::create_dir(&project_std).unwrap();
+    fs::write(
+        project_std.join("helper.mm"),
+        "atom h() -> i64 requires: true; ensures: result == 2; body: { 2 };\n",
+    )
+    .unwrap();
+    let source = root.path().join("app.mm");
+    fs::write(
+        &source,
+        "import \"std/helper\";\nimport \"std/probe_dep\";\n\natom main() -> i64 requires: true; ensures: result == 7; body: { probe_dep::std_helper(5) + helper::h() };",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args([
+            "native-bundle",
+            "build",
+            source.to_str().unwrap(),
+            "-o",
+            root.path().join("bundle").to_str().unwrap(),
+        ])
+        .env("MUMEI_STD_PATH", std_dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
 fn multifile_bundle_builds_and_rechecks_with_honest_consumer_rejections() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_multifile(root.path());

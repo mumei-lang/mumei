@@ -715,10 +715,12 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
     // importer-directory step below and again by the post-build drift
     // check, since a fallback member's bytes can live outside the
     // root's directory entirely.
-    let mut resolved_paths = BTreeMap::<String, PathBuf>::from([(
-        root.clone(),
-        input.canonicalize().unwrap_or_else(|_| input.to_path_buf()),
-    )]);
+    // The root's recorded path is `input` AS GIVEN, not canonicalized:
+    // the pipeline resolves a root's imports beside the caller-named
+    // path (src/pipeline.rs), so canonicalizing here would resolve a
+    // symlinked root's neighbours beside the target instead.
+    let mut resolved_paths =
+        BTreeMap::<String, PathBuf>::from([(root.clone(), input.to_path_buf())]);
     let mut queue = std::collections::VecDeque::from([root.clone()]);
     while let Some(current) = queue.pop_front() {
         let text = members[&current].clone();
@@ -736,14 +738,30 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
                 continue;
             };
             let member = resolve_member(&current, &decl.path)?;
-            if members.contains_key(&member) {
-                continue;
+            let resolved = resolver::resolve_path(&decl.path, &importer_dir)
+                .map_err(|_| BundleError("cannot read source members"))?;
+            if let Some(existing) = resolved_paths.get(&member) {
+                // `resolved` comes canonicalized out of resolve_path;
+                // compare on the same footing — the root's recorded
+                // path stays as-given for importer_dir (see above), so
+                // canonicalize lazily here instead.
+                if existing.canonicalize().unwrap_or_else(|_| existing.clone()) == resolved {
+                    continue;
+                }
+                // The member namespace derives keys from the bundle-root
+                // tree, but fallback members resolve imports beside
+                // their REAL files — so one key can name two different
+                // files (e.g. the root's `import "std/helper"` picks the
+                // project file while a fallback member's `import
+                // "helper"` picks its stdlib neighbour). The language
+                // binds them to different modules; the bundle cannot
+                // express that, so reject honestly rather than bundle
+                // the wrong implementation.
+                return Err(BundleError("import resolution collides outside profile"));
             }
             if members.len() >= MAX_SOURCE_FILES {
                 return Err(BundleError("too many source members"));
             }
-            let resolved = resolver::resolve_path(&decl.path, &importer_dir)
-                .map_err(|_| BundleError("cannot read source members"))?;
             members.insert(member.clone(), bounded_source_text(&resolved)?);
             resolved_paths.insert(member.clone(), resolved);
             queue.push_back(member);
