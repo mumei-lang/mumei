@@ -1326,15 +1326,21 @@ When the source file declares `import` statements,
 mutually unparseable with the single-atom and module schemas. The
 file-level import closure admits a deliberately small shape:
 
-- every member's imports resolve file-relative against that member's
-  own directory, exactly like the language resolver: `import "helpers"`
-  in `sub/a.mm` reads `sub/helpers.mm`, and `import "sub/dep"` descends
-  into subdirectories of the root's directory. `..` segments, absolute
-  paths, drive letters, `\`, leading-dot and empty segments are
-  rejected, so member keys can only name files inside the root's
-  subtree (at most 16 `/`-separated segments; the producer's own
-  filesystem resolution follows the OS, exactly like the resolver's
-  `canonicalize`);
+- every member's imports resolve through the language resolver's own
+  chain, file-relative against that member's own directory first:
+  `import "helpers"` in `sub/a.mm` reads `sub/helpers.mm`, and
+  `import "sub/dep"` descends into subdirectories of the root's
+  directory. `..` segments, absolute paths, drive letters, `\`,
+  leading-dot and empty segments are rejected, so member keys can only
+  name files inside the root's subtree (at most 16 `/`-separated
+  segments; the producer's own filesystem resolution follows the OS,
+  exactly like the resolver's `canonicalize`). `std/`-prefixed imports
+  additionally fall back to the language's shipped-stdlib chain
+  (compiler-adjacent `std/`, working-directory `std/`), and any still
+  unresolved import falls back to `MUMEI_STD_PATH` — the producer
+  delegates to the language's own `resolve_path`, so every fallback
+  matches the resolver byte-for-byte. Resolved bytes pin under the
+  importer-prefixed member key, so consumers never re-resolve;
 - each import sits alone on its line as `import "<member>" [as <alias>];`;
 - members contain atoms and imports only — no other top-level items —
   and the root needs at least one import; nested and transitive imports
@@ -1396,9 +1402,12 @@ keep the same honesty about what stays unchecked.
 Nothing is claimed beyond the module scopes: same identity-plus-recheck
 boundaries, no authenticity, no import-alias pinning (the alias is
 namespace sugar the merge erases), and non-atom member items and
-alias pinning stay outside this slice. A `std/` member names an
-ordinary local subdirectory, matching the resolver's local-first
-lookup; toolchain `std` fallback remains outside the closure.
+alias pinning stay outside this slice. `std/` members follow the
+language's own fallback chain: importer-relative first (a `std/`
+member beside the root is an ordinary local subdirectory), then the
+shipped toolchain stdlib and `MUMEI_STD_PATH`, which also serves as
+the last-resort fallback for any still-unresolved import — each
+fallback member then resolves its own imports beside its real file.
 
 ### Pinned toolchain artifact recheck
 

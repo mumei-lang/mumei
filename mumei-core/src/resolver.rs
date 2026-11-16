@@ -57,7 +57,7 @@ pub use dependencies::{
 };
 pub use imports::{
     resolve_imports, resolve_imports_with_full_options,
-    resolve_imports_with_full_options_and_persistence, resolve_imports_with_options,
+    resolve_imports_with_full_options_and_persistence, resolve_imports_with_options, resolve_path,
     resolve_prelude, resolve_prelude_with_persistence, IMPORT_ALIAS_METADATA_KEY,
     PRELUDE_METADATA_KEY,
 };
