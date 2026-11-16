@@ -3772,6 +3772,29 @@ line rather than an evidence record, so no
 selects the captured output into lineage only. Also exposed as the
 `native_source_recheck` MCP tool. C02/C10 stay partial.
 
+### Wave 5 pinned executable exit-status recheck (C10 consumer)
+
+Core's `mumei native-bundle recheck-exit-status <bundle> <source>
+--expected-build-id <id>` is the execution slice of the consumer
+chain: it runs the whole `recheck-artifact` chain — pinned identity,
+fresh source postcondition, fresh LLVM snapshot and byte-identical
+object/executable reproduction — then executes the reproduced
+`program` once with no arguments and closed stdio, comparing its OS
+exit status against the record's `link_build.expected_exit_status`
+pin the producer wrote at build time (one run under the same
+conditions, 30-second cap). A status mismatch fails closed as
+`Different` after reproduction succeeds; spawn failure, timeout,
+signal termination and pre-field records carrying no pin exit 3 as
+inconclusive rather than claiming an unevaluated comparison. The
+scope is `artifact_reproduction_and_os_exit_status_observation_only`
+— an OS-level observation with no runtime, ABI, process-semantics
+or historical-execution claim. Agent's declared
+`native-exit-status-recheck` route / `native_exit_status_recheck`
+MCP tool rides the same wiring: `exit_status_recheck` claims only
+`0 → reproduced` and `3 → inconclusive`, discharging
+`artifact_semantics` + `claim_truth` on reproduction (the OS
+observation discharges no further category). C02/C10 stay partial.
+
 
 ## No-`.mm` front door and V1 order
 
