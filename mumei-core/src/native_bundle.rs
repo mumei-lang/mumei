@@ -554,6 +554,12 @@ pub fn check_module_identity(
         let Some(atom_binding) = binding.atoms.get(&atom.name) else {
             return Err(BundleError("certificate binding mismatch"));
         };
+        // The certificate annotates its translator IR with the
+        // manual-lemma reason (`match`/inductive bodies always carry
+        // one); the binding pins the extraction gate's IR identity,
+        // which never carries that annotation.
+        let mut cert_translator_ir = cert_atom.translator_ir.clone();
+        cert_translator_ir.manual_lemma_reason = None;
         if cert_atom.name != atom.name
             || cert_atom.content_hash != atom_binding.atom_content_hash
             || cert_atom.requires != atom.requires
@@ -563,7 +569,7 @@ pub fn check_module_identity(
             || !cert_atom.forall_constraints.is_empty()
             || !cert_atom.effects.is_empty()
             || sha256(
-                &serde_json::to_vec(&cert_atom.translator_ir)
+                &serde_json::to_vec(&cert_translator_ir)
                     .map_err(|_| BundleError("IR encoding failed"))?,
             ) != atom_binding.translator_ir_sha256
             || cert_atom.status != proof_cert::status::VERIFIED
@@ -599,18 +605,31 @@ pub fn recheck_module_source(
     config.set_timeout_msec(BuildSettings::default().solver_timeout_ms);
     config.set_param_value("rlimit", &RECHECK_RESOURCE_LIMIT.to_string());
     let context = Context::new(&config);
-    let obligations = semantic_contract::encode_pure_i64_module_obligations(source, &context)
+    let atoms = semantic_contract::encode_pure_i64_module_obligations(source, &context)
         .map_err(|_| BundleError("source outside bounded module recheck profile"))?;
     check_module_identity(record_bytes, expected_id, source, files)?;
     let solver = Solver::new(&context);
     let mut inconclusive = false;
-    for obligation in obligations {
+    for atom in &atoms {
+        // An atom whose declared domain is empty — every guarded
+        // operator poisoned or no input inside its signature bounds —
+        // is outside the profile: its obligations would be vacuous,
+        // matching the LLVM side's empty-domain rejection.
         solver.reset();
-        solver.assert(&obligation);
+        solver.assert(&atom.domain);
         match solver.check() {
-            z3::SatResult::Unsat => (),
-            z3::SatResult::Sat => return Ok(SourceRecheck::Refuted),
+            z3::SatResult::Sat => (),
+            z3::SatResult::Unsat => return Err(BundleError("empty source domain")),
             z3::SatResult::Unknown => inconclusive = true,
+        }
+        for obligation in &atom.obligations {
+            solver.reset();
+            solver.assert(obligation);
+            match solver.check() {
+                z3::SatResult::Unsat => (),
+                z3::SatResult::Sat => return Ok(SourceRecheck::Refuted),
+                z3::SatResult::Unknown => inconclusive = true,
+            }
         }
     }
     Ok(if inconclusive {

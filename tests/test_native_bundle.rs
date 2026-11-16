@@ -1562,6 +1562,19 @@ fn module_bundle_builds_checks_and_rechecks_within_its_own_profile() {
 }
 
 #[test]
+fn module_bundle_with_match_atom_builds_and_rechecks() {
+    // Certificate generation annotates match bodies with a
+    // manual-lemma reason in the translator IR; the binding pins the
+    // extraction gate's IR identity, which never carries that
+    // annotation. Comparing them unnormalized made every match module
+    // fail `certificate binding mismatch` at build.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), "atom pick(x: i64) -> i64 requires: true; ensures: result >= 0; body: { match x { 0 => 0, _ => 1 } };\natom main() -> i64 requires: true; ensures: result >= 0; body: { pick(1) };");
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+}
+
+#[test]
 fn module_source_recheck_refutes_wrapped_i64_arithmetic() {
     // `verify` works over mathematical integers, but the source recheck
     // encodes the widened wrapping i64 profile: `id(i64::MAX) + 1`

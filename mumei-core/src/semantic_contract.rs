@@ -1241,36 +1241,7 @@ fn encode_atom_body<'ctx>(
             value.ite(&BV::from_u64(context, 1, 64), &BV::from_u64(context, 0, 64))
         }
     };
-    // A declared `bool` parameter lowers to i64 carrying 0/1, so the
-    // declared signature restricts its input to {0, 1}: without this the
-    // i64 range would make `b == true` look different at `input = 5`.
-    // The same applies to the narrower integer types the emitter lowers
-    // to an i64 formal — `x: i32` checks only inputs in `[-2^31, 2^31)`,
-    // so `x == 3_000_000_000` stays equivalent to `false`.
-    let param_domain: Vec<Bool> = atom
-        .params
-        .iter()
-        .zip(&inputs)
-        .flat_map(|(p, v)| match p.type_name.as_deref() {
-            Some("bool") => vec![v.bvule(&BV::from_u64(context, 1, 64))],
-            Some("u8") => vec![v.bvule(&BV::from_u64(context, u8::MAX as u64, 64))],
-            Some("u16") => vec![v.bvule(&BV::from_u64(context, u16::MAX as u64, 64))],
-            Some("u32") => vec![v.bvule(&BV::from_u64(context, u32::MAX as u64, 64))],
-            Some("i8") => vec![
-                v.bvsge(&BV::from_i64(context, i8::MIN as i64, 64)),
-                v.bvsle(&BV::from_i64(context, i8::MAX as i64, 64)),
-            ],
-            Some("i16") => vec![
-                v.bvsge(&BV::from_i64(context, i16::MIN as i64, 64)),
-                v.bvsle(&BV::from_i64(context, i16::MAX as i64, 64)),
-            ],
-            Some("i32") => vec![
-                v.bvsge(&BV::from_i64(context, i32::MIN as i64, 64)),
-                v.bvsle(&BV::from_i64(context, i32::MAX as i64, 64)),
-            ],
-            _ => vec![],
-        })
-        .collect();
+    let param_domain = signature_domain(&atom.params, &inputs, context);
     let subrange_params = atom.params.iter().any(|p| {
         matches!(
             p.type_name.as_deref(),
@@ -1294,6 +1265,42 @@ fn encode_atom_body<'ctx>(
         subrange_params,
         loop_bound_exits,
     })
+}
+
+/// Bounds the declared signature places on each formal: `bool` and
+/// subrange integer parameters lower to i64 formals carrying the type's
+/// range — `bool` restricts the input to {0, 1} (without it `b == true`
+/// would look different at `input = 5`) and `x: i32` checks only inputs
+/// in `[-2^31, 2^31)`. Shared between an atom's own body encoding (as
+/// `param_domain`) and a module call site's callee arguments.
+fn signature_domain<'ctx>(
+    params: &[crate::parser::ast::Param],
+    inputs: &[BV<'ctx>],
+    context: &'ctx Context,
+) -> Vec<Bool<'ctx>> {
+    params
+        .iter()
+        .zip(inputs)
+        .flat_map(|(p, v)| match p.type_name.as_deref() {
+            Some("bool") => vec![v.bvule(&BV::from_u64(context, 1, 64))],
+            Some("u8") => vec![v.bvule(&BV::from_u64(context, u8::MAX as u64, 64))],
+            Some("u16") => vec![v.bvule(&BV::from_u64(context, u16::MAX as u64, 64))],
+            Some("u32") => vec![v.bvule(&BV::from_u64(context, u32::MAX as u64, 64))],
+            Some("i8") => vec![
+                v.bvsge(&BV::from_i64(context, i8::MIN as i64, 64)),
+                v.bvsle(&BV::from_i64(context, i8::MAX as i64, 64)),
+            ],
+            Some("i16") => vec![
+                v.bvsge(&BV::from_i64(context, i16::MIN as i64, 64)),
+                v.bvsle(&BV::from_i64(context, i16::MAX as i64, 64)),
+            ],
+            Some("i32") => vec![
+                v.bvsge(&BV::from_i64(context, i32::MIN as i64, 64)),
+                v.bvsle(&BV::from_i64(context, i32::MAX as i64, 64)),
+            ],
+            _ => vec![],
+        })
+        .collect()
 }
 
 const MAX_DEPTH: usize = 48;
@@ -1334,7 +1341,7 @@ pub fn encode_pure_i64_obligation<'ctx>(
 pub fn encode_pure_i64_module_obligations<'ctx>(
     source: &str,
     context: &'ctx Context,
-) -> BodyResult<Vec<Bool<'ctx>>> {
+) -> BodyResult<Vec<ModuleAtomObligations<'ctx>>> {
     let (_, items) = bounded_pure_i64_module(source, true)?;
     let bodies = encode_pure_i64_module(source, context, true)?;
     let callees: BTreeMap<String, &crate::parser::ast::Atom> = items
@@ -1344,16 +1351,27 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
             _ => None,
         })
         .collect();
-    let mut obligations = Vec::new();
+    let mut atoms = Vec::new();
     for (item, body) in items.iter().zip(bodies.iter()) {
         match item {
-            Item::Atom(atom) => {
-                obligations.extend(module_atom_obligations(atom, body, &callees, context)?)
-            }
+            Item::Atom(atom) => atoms.push(module_atom_obligations(atom, body, &callees, context)?),
             _ => return Err(SemanticContractError::Unsupported("non-atom declarations")),
         }
     }
-    Ok(obligations)
+    Ok(atoms)
+}
+
+/// One module atom's counterexample obligations plus the input domain
+/// the profile binds for it. Every `obligations` entry must be `unsat`;
+/// `domain` must be satisfiable for that to mean anything — an atom
+/// whose signature bounds, guarded-operator definedness or
+/// bounded-while exits leave no input is outside the profile, matching
+/// the LLVM side's empty-domain rejection rather than reading vacuous
+/// obligations as proven.
+pub struct ModuleAtomObligations<'ctx> {
+    pub atom: String,
+    pub domain: Bool<'ctx>,
+    pub obligations: Vec<Bool<'ctx>>,
 }
 
 /// The module-atom obligation family — every entry must be `unsat`:
@@ -1376,7 +1394,22 @@ fn module_atom_obligations<'ctx>(
     body: &PureI64Body<'ctx>,
     callees: &BTreeMap<String, &crate::parser::ast::Atom>,
     context: &'ctx Context,
-) -> BodyResult<Vec<Bool<'ctx>>> {
+) -> BodyResult<ModuleAtomObligations<'ctx>> {
+    // The domain the widened profile binds for this atom: declared
+    // signature bounds (bool/subrange parameters), guarded-operator
+    // definedness and bounded-while exits — the same `src_dom` the
+    // LLVM-side equivalence binds. Inputs outside it are not
+    // counterexamples, so every obligation below carries the same
+    // conjuncts.
+    let mut source_domain: Vec<Bool> = body
+        .param_domain
+        .iter()
+        .chain(body.definedness.iter())
+        .cloned()
+        .collect();
+    if let Some(exits) = &body.loop_bound_exits {
+        source_domain.push(exits.clone());
+    }
     let mut env: HashMap<String, SourceValue> = param_env(&atom.params, &body.inputs, context);
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
@@ -1398,7 +1431,12 @@ fn module_atom_obligations<'ctx>(
     .boolean()?;
     env.insert(
         "result".to_string(),
-        SourceValue::Integer(body.value.clone()),
+        match return_kind(atom) {
+            ScalarKind::Bool => {
+                SourceValue::Boolean(body.value._eq(&BV::from_u64(context, 0, 64)).not())
+            }
+            ScalarKind::I64 => SourceValue::Integer(body.value.clone()),
+        },
     );
     let ensures =
         parse_expression_checked(&atom.ensures).map_err(|_| SemanticContractError::Parse)?;
@@ -1444,8 +1482,22 @@ fn module_atom_obligations<'ctx>(
         // A domain counterexample counts only where the callee's own
         // bounded-while encodings actually exited — same domain
         // convention the single-atom obligation applies to `requires`.
-        let mut domain_terms = vec![requires.clone(), site.guard.clone(), callee_requires.not()];
+        // The callee's declared signature bounds its arguments the same
+        // way the caller's `param_domain` binds its inputs: a reached
+        // call whose arguments fall outside the callee's declared
+        // domain is a domain violation — the callee's own obligations
+        // were only ever checked inside it.
+        let mut callee_precondition = vec![callee_requires];
+        callee_precondition.extend(signature_domain(&callee.params, &site.args, context));
+        let callee_precondition =
+            Bool::and(context, &callee_precondition.iter().collect::<Vec<_>>());
+        let mut domain_terms = vec![
+            requires.clone(),
+            site.guard.clone(),
+            callee_precondition.not(),
+        ];
         domain_terms.extend(site_exits);
+        domain_terms.extend(source_domain.iter().cloned());
         domain_obligations.push(Bool::and(context, &domain_terms.iter().collect::<Vec<_>>()));
         let mut ensures_env = site_env;
         ensures_env.insert(
@@ -1473,20 +1525,30 @@ fn module_atom_obligations<'ctx>(
             &mut Vec::new(),
         )?
         .boolean()?;
-        // The assumption binds only where the callee's ensures encoding
-        // stayed inside its bounded-while domain: outside it nothing is
-        // claimed, matching the fragment's exit-domain convention.
+        // The assumption binds only where the call is actually reached
+        // (its guard) and the callee's ensures encoding stayed inside
+        // its bounded-while domain: outside the guard the site result
+        // is discarded by the caller's `ite`, so assuming the ensures
+        // unconditionally would let an ensures that is unsatisfiable at
+        // off-guard arguments — outside the domain obligation's reach —
+        // falsify the whole formula and mask a real violation.
         let exits_domain = Bool::and(context, &ensures_site_exits.iter().collect::<Vec<_>>());
-        assumptions.push(exits_domain.implies(&callee_ensures));
+        let site_domain = Bool::and(context, &[&site.guard, &exits_domain]);
+        assumptions.push(site_domain.implies(&callee_ensures));
     }
     let assumption = Bool::and(context, &assumptions.iter().collect::<Vec<_>>());
     let mut terms = vec![requires, Bool::and(context, &[&assumption, &ensures.not()])];
     for exits in requires_exits.iter().chain(ensures_exits.iter()) {
         terms.push(exits.clone());
     }
+    terms.extend(source_domain.iter().cloned());
     let mut obligations = vec![Bool::and(context, &terms.iter().collect::<Vec<_>>())];
     obligations.extend(domain_obligations);
-    Ok(obligations)
+    Ok(ModuleAtomObligations {
+        atom: atom.name.clone(),
+        domain: Bool::and(context, &source_domain.iter().collect::<Vec<_>>()),
+        obligations,
+    })
 }
 
 /// The per-atom `requires ∧ ¬ensures` obligation — shared by the
@@ -2711,15 +2773,19 @@ mod tests {
         config.set_timeout_msec(crate::verification::VerificationConfig::default().timeout_ms);
         let context = z3::Context::new(&config);
         let solver = z3::Solver::new(&context);
-        let obligations = encode_pure_i64_module_obligations(source, &context).unwrap();
-        obligations
-            .iter()
-            .map(|obligation| {
+        let atoms = encode_pure_i64_module_obligations(source, &context).unwrap();
+        let mut outcomes = Vec::new();
+        for atom in &atoms {
+            solver.reset();
+            solver.assert(&atom.domain);
+            assert_eq!(solver.check(), z3::SatResult::Sat);
+            for obligation in &atom.obligations {
                 solver.reset();
                 solver.assert(obligation);
-                solver.check()
-            })
-            .collect()
+                outcomes.push(solver.check());
+            }
+        }
+        outcomes
     }
 
     #[test]
@@ -2747,5 +2813,67 @@ mod tests {
         assert!(outcomes
             .iter()
             .all(|result| *result != z3::SatResult::Unknown));
+    }
+
+    #[test]
+    fn module_obligations_bind_the_call_assumption_to_the_site_guard() {
+        // `f`'s ensures is unsatisfiable exactly where its `requires`
+        // does not hold — `x <= 0`. The call in `helper` is reached only
+        // under `x > 0`, so its domain check closes; but assuming the
+        // ensures unconditionally would make the whole postcondition
+        // formula vacuous and hide that `helper` returns 0 for `x < 0`.
+        let source = "atom f(y: i64) -> i64 requires: y > 0; ensures: result >= 0 && (y > 0 || result < 0); body: { y };\natom helper(x: i64) -> i64 requires: true; ensures: result == x; body: { if x > 0 { f(x) } else { 0 } };\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
+        let outcomes = module_outcomes(source);
+        assert!(outcomes.iter().any(|result| *result == z3::SatResult::Sat));
+        // The same module with a correct postcondition stays verified —
+        // the guarded assumption still binds where the call executes.
+        let fixed = source.replace("ensures: result == x;", "ensures: result >= 0;");
+        assert!(module_outcomes(&fixed)
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
+    }
+
+    #[test]
+    fn module_obligations_keep_bool_results_boolean() {
+        // A `-> bool` sibling's own ensures must see `result` as a
+        // Boolean: the widened profile admits bool results for non-main
+        // atoms, and `result == true` encodes only against the 0/1
+        // materialization.
+        let source = "atom pick(x: i64) -> bool requires: true; ensures: result == true; body: { x == x };\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
+        let outcomes = module_outcomes(source);
+        assert!(outcomes
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
+    }
+
+    #[test]
+    fn module_obligations_apply_the_signature_domain() {
+        // `x: u8` is checked only over [0, 255]: without the param
+        // domain conjunct `x = -1` refutes a contract that holds on
+        // every declared input.
+        let source = "atom idu(x: u8) -> i64 requires: true; ensures: result >= 0; body: { x };\natom main() -> i64 requires: true; ensures: result >= 0; body: { idu(1) };";
+        let outcomes = module_outcomes(source);
+        assert!(outcomes
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
+        // A call site argument outside the callee's declared domain is
+        // a domain violation of its own: the callee's obligations were
+        // only ever checked inside its signature bounds.
+        let out_of_range = source.replace("idu(1)", "idu(300)");
+        assert!(module_outcomes(&out_of_range)
+            .iter()
+            .any(|result| *result == z3::SatResult::Sat));
+    }
+
+    #[test]
+    fn module_obligations_apply_the_bounded_while_exit_domain() {
+        // For `x > LOOP_BOUND` the unrolled loop still runs at the
+        // bound: the model value says nothing there, so only inputs
+        // where the loop exits may refute the postcondition.
+        let source = "atom count(x: i64) -> i64 requires: x >= 0; ensures: result == x; body: { let i = 0; while i < x invariant: i >= 0 decreases: x - i { i = i + 1 }; i };\natom main() -> i64 requires: true; ensures: result == 0; body: { count(0) };";
+        let outcomes = module_outcomes(source);
+        assert!(outcomes
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
     }
 }
