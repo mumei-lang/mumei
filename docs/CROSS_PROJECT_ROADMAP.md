@@ -3452,6 +3452,44 @@ performed. Acceptance is byte reproduction — not execution, exit-status,
 ABI/runtime or optimizer-semantics proof. See the
 [artifact acceptance contract](VERIFICATION_NATIVE.md#native-artifact-acceptance-evaluation).
 
+### Wave 5 multifile import-closure bundles
+
+The third record family, `mumei.native-multifile-bundle/v1` under
+`mumei.native-pure-i64-multifile-linux-x86_64/v1`, closes the same-directory
+import closure: the producer merges imported members (in declaration order,
+then the root minus its import lines, with `alias::`/`stem::` call
+qualifiers normalized to bare names) into the canonical text the module
+pipeline compiles. Original members pin byte-for-byte in the record's
+`sources` map, `source_files` pins the root name and
+`import_graph_sha256` — the file-level `{member: [sorted imports]}` graph
+under the same canonical-JSON convention as the atom-level
+`source_dependencies_sha256` pin. Consumers never touch a filesystem
+beyond `--source`: every recheck re-derives the merge from the pinned
+members and binds the checked text to the record. The merge is
+comment-aware — `//` line comments never strip qualifiers — and import
+lines must be single strict `import "..." [as x];` statements.
+
+This is a profile boundary, not a new verification strength: subdirectory/
+`std`, nested and transitive imports, non-atom members and alias pinning
+stay outside the slice.
+
+### Wave 5 multifile consumer Evidence
+
+The multifile family emits `mumei.native-multifile-consumer-evidence/v1` —
+the module envelope shape plus one merge-correspondence record
+(`2 + 2·atoms`): an `identity_check`/`identity`-scoped record binds the
+`import_graph_sha256` pin to the re-derived merged text the LLVM snapshot
+was validated against. `recheck-llvm --json` emits it, `recheck-evidence`
+compares a saved envelope against the fresh one, and `accept-evidence`/
+`accept-artifact` report multifile acceptance scopes naming
+`pinned_member_merge_rederivation` among `checks_performed`. The
+descriptor family is picked from the inputs the chain itself classified —
+the saved envelope's `schema_version` for `accept-evidence`, the
+`RecordFamily` the artifact recheck ran for `accept-artifact` — so a
+mid-command record swap cannot make a descriptor claim a merge that
+never ran. Same assumptions/exclusions otherwise: `acceptance:
+not_evaluated` in emitted envelopes, no authenticity or execution claims.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
