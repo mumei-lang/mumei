@@ -3514,8 +3514,8 @@ artifact acceptance as one attempt: `<core> native-bundle
 accept-artifact --expected-build-id <id> --json <bundle> <source>`
 under a `mumei.native-accept-request/v1` fingerprint binding the Core
 executable's bytes, every bundle member the record declares, the
-source's bytes and the trusted-channel build ID. Where `native-recheck`
-binds a fixed member set, this route enumerates members from
+source's bytes and the trusted-channel build ID. Like
+`native-recheck`, this route enumerates members from
 `native-bundle.json` — the `files` map plus, for
 `mumei.native-multifile-bundle/v1`, each `sources/<member>` the merge
 is re-derived from — with every member name validated against the
