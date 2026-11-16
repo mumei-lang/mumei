@@ -1279,12 +1279,13 @@ stamp's job. See the
 
 ### Wave 2 declared probe-history evaluation
 
-Agent's `evaluate_probe_history(request, history)` folds a recorded
+Agent's `evaluate_probe_history(history)` folds a recorded
 `AdapterProbeHistory` into `mumei.probe-history-evaluation/v1` — the
 history-level counterpart of probe-acceptance's single-outcome
-normalization. The history must bind the presented request's
-adapter and command fingerprint (a foreign history is a static
-error); the descriptor reports `outcome_count`,
+normalization. The record itself carries the binding (every outcome
+bound its request's fingerprint and ordinal at `record()` time), so
+the fold needs no presented request; the descriptor reports
+`outcome_count`,
 `latest_attempt`/`latest_kind`, `latest_availability` re-derived
 through the same outcome mapping, `ordered` (declared stamps never
 regress) and `decisive` (the latest outcome is conclusive).
