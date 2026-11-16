@@ -286,6 +286,32 @@ errors. The JSON diagnostic is `mumei.evidence-representation-check/v1` with
 anonymous diagnostic, not reusable Evidence, a certificate or an acceptance
 receipt, and is not accepted as an Evidence input.
 
+### Cross-record identity-pin consistency
+
+`mumei evidence check-consistency <list>` (or `--stdin`) accepts the same
+`mumei.verification-evidence-list/v1` envelope and checks syntactic
+agreement on the identity pins records declare:
+
+- records naming the same `subject.id` *and* `subject.sha256` must pin the
+  same `subject.kind` — one claimed subject cannot carry two kinds. A
+  `subject.id` alone is a producer label, not an identity: standalone
+  source records all use `"source.mm"`, so two records sharing the id but
+  pinning different content describe different subjects and stay
+  independent;
+- records naming the same `obligation_id` must pin the same `subject.id`,
+  `subject.sha256`, `specification.id`/`sha256`, `semantics` and `method`
+  — one claimed obligation cannot bind two subjects or specifications.
+
+Outcome fields (`result`, `execution`, `scope`, `correspondence`) are never
+compared: they are each record's claim, and a fresh record may legitimately
+disagree with an older one there. Records sharing no pin are independent,
+not conflicting. The JSON diagnostic `mumei.evidence-consistency-check/v1`
+reports `consistent`, a bounded `conflicts` list (`index_a`, `index_b`,
+`field`; at most 64 entries) with the true total in `conflict_count`, and
+`record_count`, and still states `acceptance: not_evaluated` — agreement is
+structural only. A forged pair that agrees passes: pin correctness, truth,
+freshness and authenticity stay in `checks_not_performed`.
+
 ### Standalone fresh source Evidence producer
 
 ```sh

@@ -17,6 +17,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei evidence verify-source` | 3 | Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance |
 | `mumei evidence check` | 2 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
 | `mumei evidence check-list` | 2 | Validate a bounded Evidence list envelope's representation — every record individually, not their truth or consistency |
+| `mumei evidence check-consistency` | 2 | Check a bounded Evidence list envelope's cross-record identity-pin agreement, not pin correctness or truth |
 | `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
 | `mumei native-bundle accept-evidence` | 2 | Evaluate a saved native consumer Evidence report against fresh pinned source/LLVM checks into a bounded acceptance descriptor |
 | `mumei native-bundle accept-artifact` | 2 | Evaluate pinned artifact reproduction under the recorded toolchain into a bounded acceptance descriptor |
@@ -205,6 +206,29 @@ Usage: mumei evidence check-list [OPTIONS] [INPUT]
 |---|---|---|---|
 | `--stdin` | false | — | Read one common Evidence list envelope from standard input (at most 65,536 bytes); never infer stdin from a missing file |
 | `--json` | false | — | Print a static representation-only diagnostic, not accepted Evidence or a certificate |
+
+## `mumei evidence check-consistency`
+
+Check a bounded Evidence list envelope's cross-record identity-pin agreement, not pin correctness or truth
+
+Usage:
+
+```text
+Usage: mumei evidence check-consistency [OPTIONS] [INPUT]
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `INPUT` | No | Regular JSON file (at most 65,536 bytes); not a native report envelope or proof certificate |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--stdin` | false | — | Read one common Evidence list envelope from standard input (at most 65,536 bytes); never infer stdin from a missing file |
+| `--json` | false | — | Print a static structural-consistency diagnostic, not accepted Evidence or a certificate |
 
 ## `mumei native-bundle`
 

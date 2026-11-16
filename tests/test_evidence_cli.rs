@@ -779,3 +779,109 @@ fn check_list_supports_stdin_and_still_emits_no_acceptance_receipt() {
     assert!(diagnostic.get("accepted").is_none());
     assert!(diagnostic.get("evidence").is_none());
 }
+
+fn check_consistency(path: &Path, json: bool) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+    command.arg("evidence").arg("check-consistency").arg(path);
+    if json {
+        command.arg("--json");
+    }
+    command.output().unwrap()
+}
+
+#[test]
+fn check_consistency_reports_identical_and_independent_records_as_consistent() {
+    let dir = tempfile::tempdir().unwrap();
+    // Identical duplicates and records sharing no pin are both consistent:
+    // the second record names a different subject and obligation.
+    let mut independent = base();
+    independent["subject"]["id"] = json!("other.mm");
+    independent["subject"]["sha256"] = json!("b".repeat(64));
+    independent["obligation_id"] = json!("other-obligation");
+    for elements in [
+        vec![base()],
+        vec![base(), base()],
+        vec![base(), independent],
+    ] {
+        let path = dir.path().join("list.json");
+        write(&path, &list_envelope(elements));
+        for json_mode in [true, false] {
+            let output = check_consistency(&path, json_mode);
+            assert!(output.status.success(), "stderr: {:?}", output.stderr);
+            if json_mode {
+                let diagnostic: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(
+                    diagnostic["schema_version"],
+                    "mumei.evidence-consistency-check/v1"
+                );
+                assert_eq!(diagnostic["consistent"], true);
+                assert_eq!(diagnostic["conflicts"], json!([]));
+                assert_eq!(diagnostic["acceptance"], "not_evaluated");
+            }
+        }
+    }
+}
+
+#[test]
+fn check_consistency_names_conflicting_identity_pins() {
+    let dir = tempfile::tempdir().unwrap();
+    // Two records claiming the same obligation but different subject content
+    // are a named conflict. The shared subject.id is only a producer label
+    // (standalone source records all use "source.mm"), so the obligation
+    // rule — not the subject-id rule — reports the divergence.
+    let mut drifted = base();
+    drifted["subject"]["sha256"] = json!("a".repeat(64));
+    let path = dir.path().join("list.json");
+    write(&path, &list_envelope(vec![base(), drifted]));
+    let output = check_consistency(&path, true);
+    assert!(output.status.success(), "stderr: {:?}", output.stderr);
+    let diagnostic: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(diagnostic["consistent"], false);
+    assert_eq!(diagnostic["conflict_count"], 1);
+    let conflicts = diagnostic["conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0]["field"], "subject.sha256");
+    assert_eq!(conflicts[0]["index_a"], 0);
+    assert_eq!(conflicts[0]["index_b"], 1);
+
+    // Same obligation_id with a different specification pin is a conflict,
+    // even with no shared subject.
+    let mut rebound = base();
+    rebound["subject"]["id"] = json!("other.mm");
+    rebound["subject"]["sha256"] = json!("b".repeat(64));
+    rebound["specification"]["sha256"] = json!("c".repeat(64));
+    write(&path, &list_envelope(vec![base(), rebound]));
+    let diagnostic: Value = serde_json::from_slice(&check_consistency(&path, true).stdout).unwrap();
+    assert_eq!(diagnostic["consistent"], false);
+    assert_eq!(diagnostic["conflict_count"], 3);
+    let fields: Vec<&str> = diagnostic["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|conflict| conflict["field"].as_str().unwrap())
+        .collect();
+    assert!(fields.contains(&"subject.id"));
+    assert!(fields.contains(&"specification.sha256"));
+}
+
+#[test]
+fn check_consistency_rejects_malformed_envelopes_like_check_list() {
+    let dir = tempfile::tempdir().unwrap();
+    for (index, value) in [
+        base(),
+        list_envelope(vec![base(), json!({"shape": "not-a-record"})]),
+        list_envelope(vec![base(); 65]),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let path = dir.path().join(format!("list-{index}.json"));
+        write(&path, value);
+        let output = check_consistency(&path, true);
+        assert!(!output.status.success(), "case {index} unexpectedly passed");
+        assert!(output.stdout.is_empty(), "case {index} emitted stdout");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.starts_with("Evidence consistency check failed:"));
+        assert!(!error.contains("FAKE_PRIVATE"), "case {index}: {error}");
+    }
+}

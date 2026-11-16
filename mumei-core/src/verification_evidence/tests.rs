@@ -458,3 +458,67 @@ fn list_envelope_admits_zero_or_more_records_each_through_the_single_gate() {
         format!("{{\"schema_version\": \"{LIST_SCHEMA_VERSION}\", \"evidence\": [{dup}]}}");
     assert!(decode_list(envelope.as_bytes()).is_err());
 }
+
+#[test]
+fn consistency_check_compares_identity_pins_never_outcomes() {
+    let decode_one = |value: &Value| decode(&serde_json::to_vec(value).unwrap()).unwrap();
+    let first = decode_one(&base());
+
+    // Identical records, and records sharing no pin, are consistent.
+    let mut independent = base();
+    independent["subject"]["id"] = json!("other.mm");
+    independent["subject"]["sha256"] = json!("b".repeat(64));
+    independent["obligation_id"] = json!("other-obligation");
+    assert!(consistency_check(&[first.clone(), first.clone()]).consistent);
+    assert!(consistency_check(&[first.clone(), decode_one(&independent)]).consistent);
+
+    // The subject id is a producer label, not an identity: two records with
+    // the same `subject.id` but different content pins describe different
+    // subjects and stay independent — standalone source records all use
+    // "source.mm", so comparing on the id alone would flag them falsely.
+    let mut other_subject = base();
+    other_subject["subject"]["sha256"] = json!("a".repeat(64));
+    other_subject["obligation_id"] = json!("other-obligation");
+    assert!(consistency_check(&[first.clone(), decode_one(&other_subject)]).consistent);
+
+    // Same claimed subject (id + sha256) with a different kind is a named
+    // conflict.
+    let mut reclassified = base();
+    reclassified["subject"]["kind"] = json!("mumei_source");
+    reclassified["obligation_id"] = json!("other-obligation");
+    assert_eq!(
+        consistency_check(&[first.clone(), decode_one(&reclassified)]).conflicts,
+        vec![ConsistencyConflict {
+            index_a: 0,
+            index_b: 1,
+            field: "subject.kind",
+        }]
+    );
+
+    // Same obligation_id with rebound pins is a conflict even when the
+    // subjects differ — including a different subject content pin.
+    let mut rebound = base();
+    rebound["subject"]["id"] = json!("other.mm");
+    rebound["subject"]["sha256"] = json!("b".repeat(64));
+    rebound["specification"]["sha256"] = json!("c".repeat(64));
+    let fields: Vec<&str> = consistency_check(&[first.clone(), decode_one(&rebound)])
+        .conflicts
+        .iter()
+        .map(|conflict| conflict.field)
+        .collect();
+    assert!(fields.contains(&"subject.id"));
+    assert!(fields.contains(&"subject.sha256"));
+    assert!(fields.contains(&"specification.sha256"));
+
+    // Outcome fields are claims, not identity: differing only there is
+    // consistent.
+    let mut other = base();
+    other["subject"]["id"] = json!("other.mm");
+    other["subject"]["sha256"] = json!("b".repeat(64));
+    other["obligation_id"] = json!("other-obligation");
+    other["result"] = json!("unknown");
+    other["execution"] = json!("not_run");
+    other["correspondence"]["relation"] = json!("unchecked");
+    other["correspondence"]["status"] = json!("unverified");
+    assert!(consistency_check(&[first, decode_one(&other)]).consistent);
+}
