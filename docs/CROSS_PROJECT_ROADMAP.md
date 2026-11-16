@@ -1990,11 +1990,13 @@ and alias facts record distinct type_id's per alias so no type
 check narrows the set (`p := &x; x = y; *p` reads x's updated
 value, and the same may-read covers `*lib.PV` after `lib.PV =
 &x`); `p := &t` inherits the same
-`*T` identity, so `*p` reads the same way, while an unnamed-pointee
-binding (`p := &x` on a builtin `int64`), a computed pointer
+`*T` identity, so `*p` reads the same way, while a computed pointer
 (`*g()`), a nested deref (`**t`) and a pointee naming a local
 `type` stay closed, matching the `*t = v` write side (dep sets
-track binding indices, not pointee contents). Recording a pointer-typed
+track binding indices, not pointee contents). An unnamed-pointee
+binding (`p := &x` on a builtin `int64`) admits through the
+pointer fact's `elem` on both sides, recording the synthetic
+per-binding `<binding_id>/pointee` identity described below. Recording a pointer-typed
 `var` member now also declares its named pointee as a `type`
 member so the consumer can classify it. Passing
 `&x` to an imported callee hands it a writable alias of `x`, so
