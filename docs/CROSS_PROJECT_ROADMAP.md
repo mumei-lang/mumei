@@ -1999,9 +1999,19 @@ package-local `type` admits identically since the local-named-types
 slice (the `type_id` falls back to the unit's own `type` bindings —
 a real identity in `known`, so staleness stays honest both
 directions) — while a computed pointer
-(`*g()`), a nested deref (`**t`) and composite pointees stay
-closed, matching the `*t = v` write side (dep sets
-track binding indices, not pointee contents). An unnamed-pointee
+(`*g()`) and a nested deref (`**t`) stay
+closed. Composite pointees now admit the external-state model for
+index access and stores — dep sets still
+track binding indices, not pointee contents: `(*p)[i]`/`p[i]` on a
+bound `p *[]T`/`*map[K]V`/`*[N]T` (named `p *S` alike) reads with
+the pointer's provenance ∪ index deps ∪ escaped ∪ indirect stores,
+recording the pointee identity (named `type_id`, else the
+synthetic `<binding_id>/pointee`); `(*p)[i] = v` and any
+whole-pointee `*p = v` store fold the stored deps like `*p = v`
+always did — and `(*GP)[i]`/`GP[i]` on a package-level pointer var
+records the var's own identity like `GA[i]`. Element-field reads
+(`(*p)[i].F`), `for range *p` and anonymous `*struct{...}`
+pointees stay closed, as does a bare `*p` composite-value read. An unnamed-pointee
 binding (`p := &x` on a builtin `int64`) admits through the
 pointer fact's `elem` on both sides, recording the synthetic
 per-binding `<binding_id>/pointee` identity described below. Recording a pointer-typed
