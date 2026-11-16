@@ -3795,6 +3795,25 @@ MCP tool rides the same wiring: `exit_status_recheck` claims only
 `artifact_semantics` + `claim_truth` on reproduction (the OS
 observation discharges no further category). C02/C10 stay partial.
 
+### Wave 5 pinned executable exit-status acceptance (C10 consumer)
+
+Core's `mumei native-bundle accept-exit-status <bundle> <source>
+--expected-build-id <id> [--json]` is the acceptance face of the
+exit-status stage: it runs the same chain — the full
+`recheck-artifact` reproduction plus one no-argument, closed-stdio,
+30-second-capped execution of the byte-identical reproduced
+`program` — and on a matching OS-exit-status observation emits the
+anonymous `mumei.native-evidence-acceptance/v1` descriptor with
+`os_exit_status_observation` moved into `checks_performed`. One run
+under one environment is an observation, not a history:
+`historical_execution`, `abi_runtime_semantics`, optimizer and
+process semantics stay in `checks_not_performed`, and
+`accept-artifact` keeps `os_exit_status` excluded — it performs no
+execution, so each descriptor names exactly what it ran. Exit
+mapping mirrors the recheck (match → 0, mismatch → 1,
+inconclusive → 3); the descriptor is anonymous and cannot be
+replayed as Evidence. C02/C10 stay partial.
+
 
 ## No-`.mm` front door and V1 order
 
