@@ -1634,11 +1634,11 @@ initializers. Unsummarizable callees keep their declared gaps. See the
 
 Agent's C07 acceptance criterion for aliasing and resource state is
 exercised as negative fixtures: pointer parameters, `&x` aliases,
-slice/map/channel resource state, composite package globals,
+slice/map/channel resource state,
 constructor state, bound function values and closures all fail closed
 as declared gaps rather than producing summaries that silently miss the
-alias or mutation (scalar package-level `var`s admit since the
-package-globals slice — see below). See the
+alias or mutation (package-level `var`s — scalar and composite —
+admit since the package-globals slices — see below). See the
 [Agent alias and resource-state fixtures](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-alias-and-resource-state-fixtures).
 
 ### Wave 3 dependent invalidation in scalar summaries
@@ -2073,7 +2073,13 @@ an imported transfer (dep-free value, `effects` unknown) and
 dropped and `G++`/`G--` admit like `lib.V++` — but the target is
 the var's own binding identity in
 `known`, so `stale_dependents` flags honestly in both directions.
-Composite globals (`var G []int64`, `var G string`) and untracked
+Composite globals admit the same way since the composite-package-
+globals slice: `G.V`/`G.A.N` field reads record the field's
+identity, `GA[i]`/`GM[k]` index reads and `*GP` derefs record the
+var's, and `G.V = v`, `GA[i] = v`, `G = P{...}`, `*GP = v`,
+`G.V++`/`GA[i]++` and `for ... := range GA`/`GM` all admit — a
+`*GP` store still folds the stored deps through the alias fold
+because `GP = p` may aim it at any escaped binding. Untracked
 function-local `var`s stay closed.
 A function-local value bound to a named composite type —
 `st := P{...}` or `var st P` on a `type P struct{...}` in the unit
