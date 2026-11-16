@@ -392,3 +392,41 @@ fn paths_are_untrusted_labels_and_grade_or_command_channels_do_not_exist() {
         check_rejected(&value);
     }
 }
+
+fn list_envelope(elements: Vec<Value>) -> Value {
+    json!({"schema_version": LIST_SCHEMA_VERSION, "evidence": elements})
+}
+
+#[test]
+fn list_envelope_admits_zero_or_more_records_each_through_the_single_gate() {
+    for count in [0, 1, 3] {
+        let records =
+            decode_list(&serde_json::to_vec(&list_envelope(vec![base(); count])).unwrap()).unwrap();
+        assert_eq!(records.len(), count);
+    }
+    // The record cap and byte cap both bound the envelope — whichever trips
+    // first, over-limit input is rejected, never silently truncated.
+    let oversized = list_envelope(vec![base(); MAX_EVIDENCE_RECORDS + 1]);
+    assert!(decode_list(&serde_json::to_vec(&oversized).unwrap()).is_err());
+    // A single record is not a list envelope, and vice versa.
+    assert!(decode_list(&serde_json::to_vec(&base()).unwrap()).is_err());
+    assert!(decode(&serde_json::to_vec(&list_envelope(vec![base()])).unwrap()).is_err());
+    for envelope in [
+        json!({"schema_version": SCHEMA_VERSION, "evidence": [base()]}),
+        json!({"schema_version": LIST_SCHEMA_VERSION}),
+        json!({"schema_version": LIST_SCHEMA_VERSION, "evidence": [], "extra": null}),
+        json!({"schema_version": LIST_SCHEMA_VERSION, "evidence": [base(), {"shape": "not-a-record"}]}),
+    ] {
+        assert!(decode_list(&serde_json::to_vec(&envelope).unwrap()).is_err());
+    }
+    // A record that would fail standalone fails inside the list too.
+    let mut bad = base();
+    bad["method"] = json!("FAKE_PRIVATE_METHOD");
+    assert!(decode_list(&serde_json::to_vec(&list_envelope(vec![base(), bad])).unwrap()).is_err());
+    // Duplicate keys inside an element are still rejected by the inner gate.
+    let record = String::from_utf8(serde_json::to_vec(&base()).unwrap()).unwrap();
+    let dup = record.replace("\"result\":", "\"execution\": \"completed\",\"result\":");
+    let envelope =
+        format!("{{\"schema_version\": \"{LIST_SCHEMA_VERSION}\", \"evidence\": [{dup}]}}");
+    assert!(decode_list(envelope.as_bytes()).is_err());
+}

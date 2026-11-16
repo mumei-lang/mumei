@@ -676,3 +676,106 @@ fn help_distinguishes_representation_checking_from_proof_and_native_replay() {
         assert!(help.contains(text), "missing help contract: {text}");
     }
 }
+
+fn list_envelope(elements: Vec<Value>) -> Value {
+    json!({"schema_version": "mumei.verification-evidence-list/v1", "evidence": elements})
+}
+
+fn check_list(path: &Path, json: bool) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+    command.arg("evidence").arg("check-list").arg(path);
+    if json {
+        command.arg("--json");
+    }
+    command.output().unwrap()
+}
+
+#[test]
+fn check_list_admits_a_bounded_envelope_of_records_with_a_count_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    for (count, json_mode) in [(0, true), (2, true), (2, false)] {
+        let path = dir.path().join("evidence-list.json");
+        write(&path, &list_envelope(vec![base(); count]));
+        let output = check_list(&path, json_mode);
+        assert!(output.status.success(), "stderr: {:?}", output.stderr);
+        if json_mode {
+            let diagnostic: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                diagnostic["schema_version"],
+                "mumei.evidence-representation-check/v1"
+            );
+            assert_eq!(
+                diagnostic["evidence_schema_version"],
+                "mumei.verification-evidence-list/v1"
+            );
+            assert_eq!(diagnostic["representation"], "valid");
+            assert_eq!(diagnostic["record_count"], count);
+            assert_eq!(diagnostic["acceptance"], "not_evaluated");
+            assert!(diagnostic["checks_not_performed"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("cross_record_consistency")));
+        } else {
+            let text = String::from_utf8(output.stdout).unwrap();
+            assert!(text.contains("2 record(s)"));
+            assert!(text.contains("not evaluated"));
+        }
+    }
+}
+
+#[test]
+fn check_list_rejects_single_records_bad_elements_and_envelope_abuse() {
+    let dir = tempfile::tempdir().unwrap();
+    let cases: Vec<Value> = vec![
+        // A standalone record is not a list envelope.
+        base(),
+        // Wrong envelope schema, missing keys, unknown keys, oversized fan-out.
+        json!({"schema_version": "mumei.verification-evidence/v1", "evidence": [base()]}),
+        json!({"schema_version": "mumei.verification-evidence-list/v1"}),
+        json!({"schema_version": "mumei.verification-evidence-list/v1", "evidence": [], "extra": null}),
+        list_envelope(vec![base(); 65]),
+        // One malformed element poisons the whole envelope.
+        list_envelope(vec![base(), json!({"shape": "not-a-record"})]),
+        list_envelope(vec![{
+            let mut bad = base();
+            bad["method"] = json!("FAKE_PRIVATE_METHOD");
+            bad
+        }]),
+    ];
+    for (index, value) in cases.iter().enumerate() {
+        let path = dir.path().join(format!("list-{index}.json"));
+        write(&path, value);
+        let output = check_list(&path, true);
+        assert!(!output.status.success(), "case {index} unexpectedly passed");
+        assert!(output.stdout.is_empty(), "case {index} emitted stdout");
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.starts_with("Evidence list representation check failed:"));
+        assert!(!error.contains("FAKE_PRIVATE"), "case {index}: {error}");
+    }
+    // The single-record gate does not recognize the list envelope either.
+    let path = dir.path().join("as-single.json");
+    write(&path, &list_envelope(vec![base()]));
+    let output = run(&path, true);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn check_list_supports_stdin_and_still_emits_no_acceptance_receipt() {
+    let body = serde_json::to_vec(&list_envelope(vec![base(), base()])).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+    command.args(["evidence", "check-list", "--stdin", "--json"]);
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&body).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let diagnostic: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(diagnostic["record_count"], 2);
+    assert!(diagnostic.get("accepted").is_none());
+    assert!(diagnostic.get("evidence").is_none());
+}

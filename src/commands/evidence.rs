@@ -51,6 +51,10 @@ pub(crate) fn run(command: EvidenceCommand) {
             check(input.as_deref().map(Path::new), stdin, json, &mut output).map(|()| 0),
             "Evidence representation check failed",
         ),
+        EvidenceCommand::CheckList { input, stdin, json } => (
+            check_list(input.as_deref().map(Path::new), stdin, json, &mut output).map(|()| 0),
+            "Evidence list representation check failed",
+        ),
         EvidenceCommand::VerifySource {
             input,
             json,
@@ -273,6 +277,44 @@ fn check(
         bytes
     } else {
         TEXT.as_bytes().to_vec()
+    };
+    output
+        .write_all(&diagnostic)
+        .map_err(|_| "cannot write representation diagnostic")
+}
+
+fn check_list(
+    input: Option<&Path>,
+    stdin: bool,
+    json: bool,
+    output: &mut impl Write,
+) -> Result<(), &'static str> {
+    let bytes = match (input, stdin) {
+        (Some(path), false) => super::input::read_regular(path, MAX_INPUT_BYTES as u64)?,
+        (None, true) => super::input::read_stdin(MAX_INPUT_BYTES as u64)?,
+        _ => return Err("choose exactly one evidence input"),
+    };
+    let records = verification_evidence::decode_list(&bytes)
+        .map_err(|_| "invalid evidence representation")?;
+    let diagnostic = if json {
+        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "mumei.evidence-representation-check/v1",
+            "evidence_schema_version": verification_evidence::LIST_SCHEMA_VERSION,
+            "representation": "valid",
+            "record_count": records.len(),
+            "acceptance": "not_evaluated",
+            "checks_not_performed": ["claim_truth", "file_identity", "freshness",
+                "producer_authenticity", "semantic_correspondence", "artifact_semantics",
+                "cross_record_consistency"],
+        }))
+        .map_err(|_| "cannot encode representation diagnostic")?;
+        bytes.push(b'\n');
+        bytes
+    } else {
+        format!("Evidence list representation valid: {} record(s) each pass the v1 gate.\n\
+Scope: representation only; no claim truth, file identity, freshness, producer authenticity, semantic correspondence, artifact semantics or cross-record consistency checked.\n\
+Evidence acceptance: not evaluated.\n", records.len())
+        .into_bytes()
     };
     output
         .write_all(&diagnostic)

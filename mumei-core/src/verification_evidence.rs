@@ -9,7 +9,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::{collections::HashSet, fmt};
 
 pub const SCHEMA_VERSION: &str = "mumei.verification-evidence/v1";
+pub const LIST_SCHEMA_VERSION: &str = "mumei.verification-evidence-list/v1";
 pub const MAX_INPUT_BYTES: usize = 65_536;
+/// Bound on records admitted by one list envelope — the same bounded-input
+/// posture as the single-record gate, not an unbounded report.
+pub const MAX_EVIDENCE_RECORDS: usize = 64;
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -145,6 +149,41 @@ pub fn decode(bytes: &[u8]) -> Result<Evidence, RepresentationError> {
         serde_json::from_slice(bytes).map_err(|_| RepresentationError::InvalidShape)?;
     evidence.validate()?;
     Ok(evidence)
+}
+
+/// Closed list-envelope shape; only `schema_version` and `evidence` may
+/// appear, and the schema must name the list envelope — elements keep their
+/// raw bytes so the inner gate sees exactly what the input carried.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceList {
+    schema_version: String,
+    evidence: Vec<Box<serde_json::value::RawValue>>,
+}
+
+/// Admits a bounded `mumei.verification-evidence-list/v1` envelope: every
+/// element's raw bytes go through the single-record `decode`, so
+/// duplicate-key, unknown-field and combination checks apply inside each
+/// record exactly as they do standalone — a `Value` element would have
+/// already collapsed duplicate keys before the inner gate could see them.
+/// Representation only — no cross-record consistency, truth or acceptance
+/// is implied.
+pub fn decode_list(bytes: &[u8]) -> Result<Vec<Evidence>, RepresentationError> {
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(RepresentationError::InputTooLarge);
+    }
+    let envelope: EvidenceList =
+        serde_json::from_slice(bytes).map_err(|_| RepresentationError::InvalidShape)?;
+    if envelope.schema_version != LIST_SCHEMA_VERSION
+        || envelope.evidence.len() > MAX_EVIDENCE_RECORDS
+    {
+        return Err(RepresentationError::InvalidList);
+    }
+    envelope
+        .evidence
+        .iter()
+        .map(|element| decode(element.get().as_bytes()))
+        .collect()
 }
 
 impl Evidence {

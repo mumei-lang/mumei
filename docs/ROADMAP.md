@@ -3050,6 +3050,17 @@ Native pins/fresh rechecks and certificate/grade/Lean policies remain unchanged.
 General acceptance/mapping and artifact assurance stay open. See the
 [standalone CLI contract](VERIFICATION_NATIVE.md#standalone-representation-only-cli-consumer).
 
+The multi-record C02/C13 admission is `mumei evidence check-list
+<envelope> [--json]` over `mumei.verification-evidence-list/v1`: each element's
+raw bytes pass the single-record gate independently — duplicate keys,
+unknown fields and invalid combinations fail closed exactly as standalone —
+bounded at 64 records within the shared 65,536-byte limit. The static
+diagnostic reports `record_count` and declares cross-record consistency
+unchecked; an empty list is representation-valid. No deduplication, ordering,
+coverage, truth or acceptance is implied, and the envelope is not reusable
+Evidence or a receipt. See the
+[list check contract](VERIFICATION_NATIVE.md#bounded-multi-record-representation-check).
+
 The first standalone C02/C13 source producer now connects the existing bounded
 C03 bitvector model to fresh linked-Z3 queries without a Native bundle:
 `mumei evidence verify-source <source> [--json]`. Only fresh unsat emits one
