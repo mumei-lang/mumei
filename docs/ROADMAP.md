@@ -2993,10 +2993,28 @@ scope is toolchain determinism plus pinned-artifact correspondence — link
 argument vectors stay build-time observations, and execution, OS exit-status,
 ABI/runtime, optimizer-path and attestation claims remain out of scope. See
 the [artifact recheck boundary](VERIFICATION_NATIVE.md#pinned-toolchain-artifact-recheck).
-General optimizer/ABI/runtime assurance, producer authenticity and the
-file-level `import` dependency closure stay open — the records now pin the
-intra-source call graph as `source_dependencies_sha256`, the canonical JSON
-of the Claim Book `{atom: [sorted direct callees]}` map.
+General optimizer/ABI/runtime assurance and producer authenticity stay
+open — the records now pin the intra-source call graph as
+`source_dependencies_sha256`, the canonical JSON of the Claim Book
+`{atom: [sorted direct callees]}` map, and the file-level `import`
+dependency closure is partially closed by the multifile slice below.
+
+The next C10 stage closes the file-level `import` dependency closure for
+same-directory, single-level imports: `native-bundle build` on a source
+declaring `import` items takes the multifile path and records
+`mumei.native-multifile-bundle/v1` under
+`mumei.native-pure-i64-multifile-linux-x86_64/v1`, pinning every original
+member byte-for-byte under `sources/` plus a file-level
+`import_graph_sha256`, and merging the closure — imported members in
+order, then the root minus its import lines — into the canonical text
+the module pipeline compiles, with `alias::`/`stem::` call qualifiers
+normalized to bare names. `check`, `recheck-source`, `recheck-llvm` and
+`recheck-artifact` re-derive the merge from the pinned members; the
+`--json`/`recheck-evidence`/`accept-*` surfaces reject the family
+honestly until a multifile consumer Evidence vocabulary exists.
+Subdirectory/`std` paths, nested and transitive imports, non-atom
+members and alias pinning stay outside this slice. See the
+[multifile bundle boundary](VERIFICATION_NATIVE.md#multifile-import-closure-bundles).
 
 Consumer Evidence reaches module bundles through the sibling envelope
 `mumei.native-module-consumer-evidence/v1`: `recheck-llvm --json` emits one

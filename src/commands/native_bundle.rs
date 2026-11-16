@@ -14,11 +14,19 @@ enum LlvmRecheck {
     /// Module bundles carry the per-atom consumer evidence format; the
     /// payload is the translation profile plus that report.
     ModuleRechecked(&'static str, Box<evidence::NativeModuleConsumerEvidence>),
+    /// Multifile bundles pass the same recheck chain over the merged
+    /// source but emit no consumer Evidence yet — the payload is the
+    /// recheck profile only, so a `--json` request fails closed.
+    MultifileRechecked(&'static str),
     Different,
     Inconclusive,
 }
 
 const MAX_COMPONENT_BYTES: u64 = 32 * 1024 * 1024;
+/// The per-source byte bound the bounded recheck profile declares:
+/// consumer commands re-read `--source` (and each pinned multifile
+/// member) under this cap, not the loose component cap.
+const SOURCE_BYTES: u64 = 65_536;
 /// Bounded like the record, not the single-atom evidence size: a module
 /// report carries `1 + 2·atoms` records.
 const MAX_EVIDENCE_BYTES: u64 = 1024 * 1024;
@@ -63,7 +71,20 @@ pub(crate) fn run(command: NativeBundleCommand) {
             }
         }
         NativeBundleCommand::AcceptArtifact { bundle, source, expected_build_id, json } => {
-            match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id)
+            // Multifile bundles run the same artifact chain, but their
+            // consumer Evidence vocabulary is not emitted yet — the
+            // acceptance descriptor stays single/module-only this slice.
+            let family = read_regular(&Path::new(&bundle).join(RECORD_FILE), 1024 * 1024)
+                .and_then(|bytes| record_family(&bytes));
+            let recheck = family.and_then(|family| match family {
+                RecordFamily::Multifile => Err(BundleError(
+                    "multifile consumer Evidence is not emitted yet",
+                )),
+                RecordFamily::Single | RecordFamily::Module => {
+                    recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id)
+                }
+            });
+            match recheck
                 .map(|artifact| match artifact {
                     ArtifactRecheck::Rechecked => Outcome::EquivalentWithinProfile,
                     ArtifactRecheck::Different => Outcome::Different,
@@ -191,6 +212,18 @@ fn write_llvm_recheck(
                 .map_err(|_| BundleError("cannot write consumer evidence"))?;
             Ok(Outcome::EquivalentWithinProfile)
         }
+        LlvmRecheck::MultifileRechecked(profile) => {
+            if json {
+                return Err(BundleError(
+                    "multifile consumer Evidence is not emitted yet",
+                ));
+            }
+            let bytes = format!("Pinned snapshot identities consistent; merged module source postconditions and native LLVM bodies freshly rechecked.\nProfile: {profile}\nScope: {LLVM_RECHECK_SCOPE}\nWrapper: checked call/trunc/ret shape, returning low 32 bits of the i64 body.\nConsumer Evidence/object/linker/runtime/OS exit-status/executable semantics: not checked.\n").into_bytes();
+            output
+                .write_all(&bytes)
+                .map_err(|_| BundleError("cannot write consumer evidence"))?;
+            Ok(Outcome::EquivalentWithinProfile)
+        }
         LlvmRecheck::Different => Ok(Outcome::Different),
         LlvmRecheck::Inconclusive => Ok(Outcome::Inconclusive),
     }
@@ -267,18 +300,74 @@ fn write_native_acceptance(
 }
 
 /// Read only the record's `schema` field — the dispatch key between the
-/// single-atom and module record families. Unknown schemas error here so
-/// the family loaders never see a cross-parsed record.
-fn is_module_record(record: &[u8]) -> Result<bool, BundleError> {
+/// record families. Unknown schemas error here so the family loaders
+/// never see a cross-parsed record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordFamily {
+    Single,
+    Module,
+    Multifile,
+}
+
+fn record_family(record: &[u8]) -> Result<RecordFamily, BundleError> {
     match serde_json::from_slice::<serde_json::Value>(record)
         .map_err(|_| BundleError("invalid record"))?
         .get("schema")
         .and_then(|schema| schema.as_str())
     {
-        Some(MODULE_SCHEMA) => Ok(true),
-        Some(SCHEMA) => Ok(false),
+        Some(MODULE_SCHEMA) => Ok(RecordFamily::Module),
+        Some(MULTIFILE_SCHEMA) => Ok(RecordFamily::Multifile),
+        Some(SCHEMA) => Ok(RecordFamily::Single),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
+}
+
+/// Read the pinned original member texts of a multifile bundle — every
+/// `sources/<name>.mm` must pass the member-name grammar (a bare basename
+/// in this slice) and the member count stays bounded.
+fn source_members(bundle: &Path) -> Result<BTreeMap<String, String>, BundleError> {
+    let mut members = BTreeMap::new();
+    for entry in fs::read_dir(bundle.join(SOURCES_DIR))
+        .map_err(|_| BundleError("cannot read source members"))?
+    {
+        let entry = entry.map_err(|_| BundleError("cannot read source members"))?;
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            return Err(BundleError("unexpected source member"));
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| BundleError("invalid source member name"))?;
+        if member_name(&name).ok().as_deref() != Some(name.as_str()) {
+            return Err(BundleError("invalid source member name"));
+        }
+        if members.len() >= MAX_SOURCE_FILES {
+            return Err(BundleError("too many source members"));
+        }
+        members.insert(name, bounded_source_text(&entry.path())?);
+    }
+    Ok(members)
+}
+
+/// The multifile inputs a consumer supplies: the `--source` file is the
+/// ROOT member — its basename names the root and its bytes must equal
+/// the pinned member, so a consumer cannot point the check at a
+/// different file while the bundle's pins do the work.
+fn multifile_inputs(
+    bundle: &Path,
+    source: &Path,
+) -> Result<(BTreeMap<String, String>, String), BundleError> {
+    let members = source_members(bundle)?;
+    let root = member_name(
+        source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(BundleError("invalid source member name"))?,
+    )?;
+    if members.get(&root) != Some(&bounded_source_text(source)?) {
+        return Err(BundleError("root source member not pinned"));
+    }
+    Ok((members, root))
 }
 
 fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, BundleError> {
@@ -287,6 +376,11 @@ fn read_regular(path: &Path, limit: u64) -> Result<Vec<u8>, BundleError> {
 
 fn source_text(path: &Path) -> Result<String, BundleError> {
     String::from_utf8(read_regular(path, MAX_COMPONENT_BYTES)?)
+        .map_err(|_| BundleError("source is not UTF-8"))
+}
+
+fn bounded_source_text(path: &Path) -> Result<String, BundleError> {
+    String::from_utf8(read_regular(path, SOURCE_BYTES)?)
         .map_err(|_| BundleError("source is not UTF-8"))
 }
 
@@ -314,9 +408,17 @@ fn build(input: &Path, output: &Path) -> Result<(String, &'static str), BundleEr
         return Err(BundleError("output already exists"));
     }
     let source = source_text(input)?;
-    let atoms = parser::parse_module_checked(&source)
-        .map_err(|_| BundleError("invalid source"))?
-        .into_iter()
+    // `parse_module` (lenient) — the checked pipeline consumes `import`
+    // items, so it could never see this dispatch key.
+    let items = parser::parse_module(&source);
+    if items
+        .iter()
+        .any(|item| matches!(item, parser::Item::Import(_)))
+    {
+        return build_multifile(&source, input, output).map(|id| (id, MODULE_SCOPE));
+    }
+    let atoms = items
+        .iter()
         .filter(|item| matches!(item, parser::Item::Atom(_)))
         .count();
     if atoms > 1 {
@@ -404,34 +506,32 @@ fn build_single(source: &str, input: &Path, output: &Path) -> Result<String, Bun
     Ok(id)
 }
 
-fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, BundleError> {
-    let (binding, atoms) = prepare_module_source(source)?;
-    let parent = output
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let stage = tempfile::Builder::new()
-        .prefix(".mumei-native-")
-        .tempdir_in(parent)
-        .map_err(|_| BundleError("cannot stage bundle"))?;
-    let proof_work = tempfile::Builder::new()
-        .prefix(".mumei-proof-")
-        .tempdir_in(parent)
-        .map_err(|_| BundleError("cannot stage proof"))?;
+/// The emit pipeline's products: the pinned component snapshot plus the
+/// object/link toolchain observations the record carries.
+type EmittedModule = (BTreeMap<BundleFile, Vec<u8>>, ObjectBuild, LinkBuild);
+
+/// Verify every admitted atom, emit the shared IR/object/executable into
+/// `stage` and return the component snapshot plus toolchain
+/// observations — the pipeline the module and multifile records both pin.
+fn emit_module(
+    atoms: &[parser::Atom],
+    stage: &Path,
+    proof_work: &Path,
+) -> Result<EmittedModule, BundleError> {
     let mut env = verification::ModuleEnv::default();
-    for atom in &atoms {
+    for atom in atoms {
         env.register_atom(atom);
     }
     // Callees are admitted by contract (extract_pure_i64_module_contracts
-    // already ran the profile gates in prepare_module_source), so sibling
+    // already ran the profile gates in the prepare step), so sibling
     // calls verify in any declaration order; mark_verified keeps the env
     // consistent for the certificate.
     let mut lowered = Vec::with_capacity(atoms.len());
-    for atom in &atoms {
+    for atom in atoms {
         let hir_atom = hir::lower_atom_to_hir(atom);
         verification::verify_with_verification_config(
             &hir_atom,
-            proof_work.path(),
+            proof_work,
             &env,
             &verification::VerificationConfig::default(),
         )
@@ -462,22 +562,37 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         None,
     );
     write(
-        &stage.path().join(BundleFile::Certificate.file_name()),
+        &stage.join(BundleFile::Certificate.file_name()),
         &serde_json::to_vec_pretty(&cert)
             .map_err(|_| BundleError("certificate encoding failed"))?,
     )?;
-    let ir = stage.path().join(BundleFile::LlvmIr.file_name());
-    let object = stage.path().join(BundleFile::Object.file_name());
+    let ir = stage.join(BundleFile::LlvmIr.file_name());
+    let object = stage.join(BundleFile::Object.file_name());
     mumei_emit_llvm::binary::compile_atoms_to_binary_ll(&lowered, &env, &[], &ir)
         .map_err(|_| BundleError("native IR emission failed"))?;
     let object_build = mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir, &object)
         .map_err(|_| BundleError("native object emission failed"))?;
-    let link_build = linker::link_recorded(
-        &[object],
-        &stage.path().join(BundleFile::Executable.file_name()),
-    )
-    .map_err(|_| BundleError("native link or toolchain observation failed"))?;
-    let files = components(stage.path())?;
+    let link_build =
+        linker::link_recorded(&[object], &stage.join(BundleFile::Executable.file_name()))
+            .map_err(|_| BundleError("native link or toolchain observation failed"))?;
+    Ok((components(stage)?, object_build, link_build))
+}
+
+fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, BundleError> {
+    let (binding, atoms) = prepare_module_source(source)?;
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let stage = tempfile::Builder::new()
+        .prefix(".mumei-native-")
+        .tempdir_in(parent)
+        .map_err(|_| BundleError("cannot stage bundle"))?;
+    let proof_work = tempfile::Builder::new()
+        .prefix(".mumei-proof-")
+        .tempdir_in(parent)
+        .map_err(|_| BundleError("cannot stage proof"))?;
+    let (files, object_build, link_build) = emit_module(&atoms, stage.path(), proof_work.path())?;
     let record = ModuleNativeBundleRecord {
         schema: MODULE_SCHEMA.into(),
         profile: MODULE_PROFILE.into(),
@@ -505,26 +620,130 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
     Ok(id)
 }
 
+/// Build a multifile bundle: read the root file's single-level imports
+/// from its own directory, merge the closure into the canonical text the
+/// module pipeline compiles, and pin every original member under
+/// `sources/`. Slice-1 admits same-directory basenames only.
+fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, BundleError> {
+    if source.len() as u64 > SOURCE_BYTES {
+        return Err(BundleError("unsupported component type or size"));
+    }
+    let root = member_name(
+        input
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(BundleError("invalid source member name"))?,
+    )?;
+    let directory = input
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let items = parser::parse_module(source);
+    let mut members = BTreeMap::from([(root.clone(), source.to_owned())]);
+    for item in &items {
+        let parser::Item::Import(decl) = item else {
+            continue;
+        };
+        let member = member_name(&decl.path)?;
+        if members.len() >= MAX_SOURCE_FILES {
+            return Err(BundleError("too many source members"));
+        }
+        members
+            .entry(member.clone())
+            .or_insert(bounded_source_text(&directory.join(&member))?);
+    }
+    let (binding, graph, atoms, _merged) = prepare_multifile_source(&root, &members)?;
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let stage = tempfile::Builder::new()
+        .prefix(".mumei-native-")
+        .tempdir_in(parent)
+        .map_err(|_| BundleError("cannot stage bundle"))?;
+    let proof_work = tempfile::Builder::new()
+        .prefix(".mumei-proof-")
+        .tempdir_in(parent)
+        .map_err(|_| BundleError("cannot stage proof"))?;
+    let (files, object_build, link_build) = emit_module(&atoms, stage.path(), proof_work.path())?;
+    let sources_dir = stage.path().join(SOURCES_DIR);
+    fs::create_dir(&sources_dir).map_err(|_| BundleError("cannot stage source members"))?;
+    for (name, text) in &members {
+        write(&sources_dir.join(name), text.as_bytes())?;
+    }
+    let record = MultifileNativeBundleRecord {
+        schema: MULTIFILE_SCHEMA.into(),
+        profile: MULTIFILE_PROFILE.into(),
+        scope: MODULE_SCOPE.into(),
+        system_scope: SYSTEM_SCOPE.into(),
+        source: binding,
+        source_files: SourceFilesPin {
+            root: root.clone(),
+            import_graph_sha256: graph,
+        },
+        object_build,
+        link_build,
+        settings: BuildSettings::default(),
+        files: files
+            .iter()
+            .map(|(role, bytes)| (*role, ContentIdentity::of(bytes)))
+            .collect(),
+        sources: members
+            .iter()
+            .map(|(name, text)| (name.clone(), ContentIdentity::of(text.as_bytes())))
+            .collect(),
+    };
+    let bytes =
+        serde_json::to_vec_pretty(&record).map_err(|_| BundleError("record encoding failed"))?;
+    let id = sha256(&bytes);
+    check_multifile_identity(&bytes, &id, &root, &members, &files)?;
+    if bounded_source_text(input)? != *source {
+        return Err(BundleError("source changed during build"));
+    }
+    for item in &items {
+        if let parser::Item::Import(decl) = item {
+            let member = member_name(&decl.path)?;
+            if bounded_source_text(&directory.join(&member))? != members[&member] {
+                return Err(BundleError("source changed during build"));
+            }
+        }
+    }
+    write(&stage.path().join(RECORD_FILE), &bytes)?;
+    publish(stage.path(), output)?;
+    let _ = stage.keep();
+    Ok(id)
+}
+
 fn check(bundle: &Path, source: &Path, expected_id: &str) -> Result<&'static str, BundleError> {
     let record = read_regular(&bundle.join(RECORD_FILE), 1024 * 1024)?;
-    if is_module_record(&record)? {
-        load_pinned_module_record(&record, expected_id)?;
-        check_module_identity(
-            &record,
-            expected_id,
-            &source_text(source)?,
-            &components(bundle)?,
-        )?;
-        return Ok(MODULE_SCOPE);
+    match record_family(&record)? {
+        RecordFamily::Multifile => {
+            load_pinned_multifile_record(&record, expected_id)?;
+            let (members, root) = multifile_inputs(bundle, source)?;
+            check_multifile_identity(&record, expected_id, &root, &members, &components(bundle)?)?;
+            Ok(MODULE_SCOPE)
+        }
+        RecordFamily::Module => {
+            load_pinned_module_record(&record, expected_id)?;
+            check_module_identity(
+                &record,
+                expected_id,
+                &source_text(source)?,
+                &components(bundle)?,
+            )?;
+            Ok(MODULE_SCOPE)
+        }
+        RecordFamily::Single => {
+            load_pinned_record(&record, expected_id)?;
+            check_identity(
+                &record,
+                expected_id,
+                &source_text(source)?,
+                &components(bundle)?,
+            )?;
+            Ok(SCOPE)
+        }
     }
-    load_pinned_record(&record, expected_id)?;
-    check_identity(
-        &record,
-        expected_id,
-        &source_text(source)?,
-        &components(bundle)?,
-    )?;
-    Ok(SCOPE)
 }
 
 fn recheck(
@@ -533,12 +752,30 @@ fn recheck(
     expected_id: &str,
 ) -> Result<(SourceRecheck, &'static str), BundleError> {
     let record = read_regular(&bundle.join(RECORD_FILE), 1024 * 1024)?;
-    let source = String::from_utf8(read_regular(source, 65_536)?)
-        .map_err(|_| BundleError("source is not UTF-8"))?;
-    if is_module_record(&record)? {
-        return recheck_module_source(&record, expected_id, &source, &components(bundle)?)
+    match record_family(&record)? {
+        RecordFamily::Multifile => {
+            let (members, root) = multifile_inputs(bundle, source)?;
+            return recheck_multifile_source(
+                &record,
+                expected_id,
+                &root,
+                &members,
+                &components(bundle)?,
+            )
+            .map(|result| (result, MULTIFILE_RECHECK_PROFILE));
+        }
+        RecordFamily::Module => {
+            return recheck_module_source(
+                &record,
+                expected_id,
+                &bounded_source_text(source)?,
+                &components(bundle)?,
+            )
             .map(|result| (result, MODULE_RECHECK_PROFILE));
+        }
+        RecordFamily::Single => (),
     }
+    let source = bounded_source_text(source)?;
     load_pinned_record(&record, expected_id)?;
     recheck_source(&record, expected_id, &source, &components(bundle)?)
         .map(|result| (result, RECHECK_PROFILE))
@@ -562,10 +799,49 @@ fn recheck_llvm_loaded(
     expected_id: &str,
 ) -> Result<(LlvmRecheck, LoadedBundle), BundleError> {
     let bytes = read_regular(&bundle.join(RECORD_FILE), 1024 * 1024)?;
-    let source = String::from_utf8(read_regular(source, 65_536)?)
-        .map_err(|_| BundleError("source is not UTF-8"))?;
     let files = components(bundle)?;
-    if is_module_record(&bytes)? {
+    if record_family(&bytes)? == RecordFamily::Multifile {
+        let record = load_pinned_multifile_record(&bytes, expected_id)?;
+        let loaded = LoadedBundle {
+            object_build: record.object_build.clone(),
+            link_build: record.link_build.clone(),
+            files,
+        };
+        let (members, root) = multifile_inputs(bundle, source)?;
+        match recheck_multifile_source(&bytes, expected_id, &root, &members, &loaded.files)? {
+            SourceRecheck::Refuted => return Err(BundleError("source postcondition refuted")),
+            SourceRecheck::Inconclusive => {
+                return Ok((LlvmRecheck::Inconclusive, loaded));
+            }
+            SourceRecheck::RecheckedWithinProfile => (),
+        }
+        let merged = merge_import_closure(&root, &members)
+            .map_err(|_| BundleError("import closure merge failed"))?
+            .0;
+        let llvm_ir = std::str::from_utf8(&loaded.files[&BundleFile::LlvmIr])
+            .map_err(|_| BundleError("native LLVM snapshot is not UTF-8"))?;
+        let report = tv::validate_native_module(&merged, llvm_ir, Options::default())
+            .map_err(|_| BundleError("native LLVM snapshot outside bounded module profile"))?;
+        if loaded.object_build.target_triple != report.target
+            || loaded.object_build.data_layout != report.data_layout
+        {
+            return Err(BundleError(
+                "native LLVM snapshot/toolchain observation mismatch",
+            ));
+        }
+        return Ok((
+            match report.outcome {
+                Outcome::EquivalentWithinProfile => {
+                    LlvmRecheck::MultifileRechecked(MULTIFILE_RECHECK_PROFILE)
+                }
+                Outcome::Different | Outcome::UndefinedBehavior => LlvmRecheck::Different,
+                Outcome::Inconclusive => LlvmRecheck::Inconclusive,
+            },
+            loaded,
+        ));
+    }
+    let source = bounded_source_text(source)?;
+    if record_family(&bytes)? == RecordFamily::Module {
         let record = load_pinned_module_record(&bytes, expected_id)?;
         let loaded = LoadedBundle {
             object_build: record.object_build.clone(),
@@ -695,6 +971,11 @@ fn compare_evidence(
         (LlvmRecheck::Rechecked(_) | LlvmRecheck::ModuleRechecked(..), _) => Err(BundleError(
             "saved native evidence belongs to the other bundle family",
         )),
+        // Multifile bundles emit no consumer Evidence yet — nothing saved
+        // can be bound to this family, so the check fails closed.
+        (LlvmRecheck::MultifileRechecked(_), _) => Err(BundleError(
+            "multifile bundles emit no consumer Evidence yet",
+        )),
         (LlvmRecheck::Different, _) => Ok(Outcome::Different),
         (LlvmRecheck::Inconclusive, _) => Ok(Outcome::Inconclusive),
     }
@@ -725,7 +1006,9 @@ fn recheck_artifact(
     // self-consistent foreign IR/object/executable set.
     let (result, loaded) = recheck_llvm_loaded(bundle, source, expected_id)?;
     match result {
-        LlvmRecheck::Rechecked(_) | LlvmRecheck::ModuleRechecked(..) => (),
+        LlvmRecheck::Rechecked(_)
+        | LlvmRecheck::ModuleRechecked(..)
+        | LlvmRecheck::MultifileRechecked(_) => (),
         LlvmRecheck::Different => return Ok(ArtifactRecheck::Different),
         LlvmRecheck::Inconclusive => return Ok(ArtifactRecheck::Inconclusive),
     }
