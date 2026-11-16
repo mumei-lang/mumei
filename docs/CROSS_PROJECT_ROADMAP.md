@@ -3403,6 +3403,18 @@ acceptance/mapping, authenticity and final-artifact assurance remain open.
 See the
 [native acceptance contract](VERIFICATION_NATIVE.md#native-evidence-acceptance-evaluation).
 
+`mumei native-bundle accept-artifact <bundle> <source> --expected-build-id
+<id> [--json]` extends the same vocabulary to the deepest verifiable chain:
+the `recheck-artifact` evaluation adds pinned `program.ll`→object re-emission
+and `program.o`→executable relinking byte-identical to the pinned artifacts
+under the recorded toolchain, so its descriptor scope is
+`native_bundle_source_llvm_and_toolchain_artifact_reproduction` with
+`toolchain_object_executable_reproduction` performed and
+`link_argument_vector_reproduction` honestly named among the checks not
+performed. Acceptance is byte reproduction — not execution, exit-status,
+ABI/runtime or optimizer-semantics proof. See the
+[artifact acceptance contract](VERIFICATION_NATIVE.md#native-artifact-acceptance-evaluation).
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
