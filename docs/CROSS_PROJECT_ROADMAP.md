@@ -886,6 +886,40 @@ reported `build_id` is the Core-computed SHA-256 of
 produce/recheck pair. Also exposed as the `native_attempt` MCP tool.
 C02/C10 stay partial.
 
+### Wave 2 declared native-evidence-recheck route (C10 consumer)
+
+Agent's `python -m agent native-evidence-recheck --core <path>
+--bundle <dir> --source <path> --evidence <path>
+--expected-build-id <sha256>` declares a saved consumer-Evidence
+replay as one attempt: `<core> native-bundle recheck-evidence
+--expected-build-id <id> <bundle> <source> <evidence>` under a
+`mumei.native-evidence-recheck-request/v1` fingerprint binding the
+Core executable's bytes, every bundle member the record declares —
+the `files` map's component members plus, for
+`mumei.native-multifile-bundle/v1`, each `sources/<member>` the merge
+re-derivation consumes, enumerated from `native-bundle.json` and
+validated against the member grammar before joining — the source's
+bytes, the saved envelope's bytes (bounded at Core's 1 MiB evidence
+limit) and the trusted-channel build ID. The post-run drift check
+re-enumerates members from the current record and re-fingerprints all
+four inputs, so a mid-run swap reports `inputs_changed` rather than
+claiming an outcome on unbound bytes. `evidence_recheck` names only
+`0 → consistent` and `3 → inconclusive`; exit 1 conflates a tampered
+or mismatched envelope with every static failure, and no outcome is
+claimed on drift. Only an `exited` run with `exit_code == 0` selects
+the produced `mumei.native-evidence-recheck-report/v1` report; no
+evidence candidate is emitted — the saved envelope is the replayed
+input, not a produced artifact, so there is nothing to hand off. A
+`consistent` outcome discharges `artifact_semantics` — the saved
+envelope still matches the bundle's user-body LLVM and the declared
+source's freshly re-verified semantics, replaying the deepest
+comparison the pipeline covers — and `claim_truth`, both at
+representation level with the other four checks in
+`checks_not_performed` (producer authenticity, freshness against an
+external clock and runtime semantics stay outside the profile). Also
+exposed as the `native_evidence_recheck` MCP tool. C02/C10 stay
+partial.
+
 ### Wave 2 declared evidence file-identity route (C02)
 
 Agent's `python -m agent evidence-identity-check --evidence <path>
