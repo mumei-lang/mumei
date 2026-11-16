@@ -406,6 +406,13 @@ fn build_binds_actual_native_output_and_source_certificate_without_proving_artif
     assert!(stdout.contains(native_bundle::SCOPE));
     let record: serde_json::Value =
         serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    // Single-atom profile: main cannot call, so the dependency map is the
+    // one-entry `{"main": []}` — same canonical-JSON pin convention as the
+    // module family.
+    assert_eq!(
+        record["source"]["source_dependencies_sha256"],
+        native_bundle::sha256(&serde_json::to_vec(&serde_json::json!({"main": []})).unwrap())
+    );
     assert!(record["object_build"]["target_triple"]
         .as_str()
         .unwrap()
@@ -1669,6 +1676,13 @@ fn module_bundle_builds_checks_and_rechecks_within_its_own_profile() {
     assert_eq!(record["schema"], native_bundle::MODULE_SCHEMA);
     assert_eq!(record["profile"], native_bundle::MODULE_PROFILE);
     assert_eq!(record["source"]["atoms"].as_object().unwrap().len(), 2);
+    // The dependency pin is the claimbook convention: sha256 of the
+    // canonical JSON map {atom: [sorted direct callees]}.
+    let dependencies = serde_json::json!({"helper": [], "main": ["helper"]});
+    assert_eq!(
+        record["source"]["source_dependencies_sha256"],
+        native_bundle::sha256(&serde_json::to_vec(&dependencies).unwrap())
+    );
     assert_success(&check(&source, &bundle, &id));
     let recheck = recheck(&source, &bundle, &id);
     assert_success(&recheck);

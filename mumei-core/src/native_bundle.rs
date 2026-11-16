@@ -172,9 +172,31 @@ pub fn prepare_source(source: &str) -> Result<(SourceBinding, parser::Atom), Bun
             translator_version: contract.translator_version.to_owned(),
             bridge_lemma_hash: contract.bridge_lemma_hash.to_owned(),
             compiler_version: contract.compiler_version.to_owned(),
-            source_dependencies_sha256: sha256(b"[]"),
+            source_dependencies_sha256: source_dependencies_sha256(std::slice::from_ref(&atom))?,
         },
         atom,
+    ))
+}
+
+/// Pin the intra-source dependency map the same way the Claim Book records
+/// it: every declared atom maps to its sorted direct callees via
+/// `resolver::collect_callees_from_atom`, and `BTreeMap` keeps the JSON
+/// encoding canonical. This is a call-graph pin, not a file-level import
+/// closure — the restricted profiles admit no `import` items.
+fn source_dependencies_sha256(atoms: &[parser::Atom]) -> Result<String, BundleError> {
+    let dependencies: BTreeMap<String, Vec<String>> = atoms
+        .iter()
+        .map(|atom| {
+            let mut callees: Vec<String> = crate::resolver::collect_callees_from_atom(atom)
+                .into_iter()
+                .collect();
+            callees.sort();
+            (atom.name.clone(), callees)
+        })
+        .collect();
+    Ok(sha256(
+        &serde_json::to_vec(&dependencies)
+            .map_err(|_| BundleError("dependency encoding failed"))?,
     ))
 }
 
@@ -464,7 +486,7 @@ pub fn prepare_module_source(
             translator_version: first.translator_version.to_owned(),
             bridge_lemma_hash: first.bridge_lemma_hash.to_owned(),
             compiler_version: first.compiler_version.to_owned(),
-            source_dependencies_sha256: sha256(b"[]"),
+            source_dependencies_sha256: source_dependencies_sha256(&atoms)?,
         },
         atoms,
     ))
