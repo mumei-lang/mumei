@@ -2,6 +2,7 @@
 
 use mumei_core::native_bundle::{self, BundleFile, RECORD_FILE};
 use std::{
+    collections::BTreeMap,
     fs,
     path::Path,
     process::{Command, Output},
@@ -2106,6 +2107,98 @@ fn multifile_nested_closure_merges_and_cycles_fail_honestly() {
         root.path().join("cyc1.mm").to_str().unwrap(),
         "-o",
         root.path().join("cyc.bundle").to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn multifile_subdirectory_members_merge_and_escape_paths_fail_honestly() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    let sub = root.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    // `sub/helpers` resolves file-relative: its own `import "deep"`
+    // anchors at `sub/`, not the root's directory — exactly the
+    // language resolver's base_dir semantics.
+    fs::write(
+        sub.join("deep.mm"),
+        "atom deep(x: i64) -> i64 requires: true; ensures: result == x + 1; body: { x + 1 };\n",
+    )
+    .unwrap();
+    fs::write(
+        sub.join("helpers.mm"),
+        "import \"deep\" as d;\n\natom helper(x: i64) -> i64 requires: x > 0; ensures: result == x + 2; body: { d::deep(x) + 1 };\n",
+    )
+    .unwrap();
+    // Unaliased subdirectory import: the qualifier is the member's
+    // last-segment stem (`deep`), not the directory prefix.
+    fs::write(
+        sub.join("extra.mm"),
+        "atom extra(x: i64) -> i64 requires: true; ensures: result == x - 1; body: { x - 1 };\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"sub/helpers\" as h;\nimport \"sub/extra\";\n\natom main() -> i64 requires: true; ensures: result == 12; body: { h::helper(5) + extra(6) };",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    // Nested members pin at their `/`-separated key and land under
+    // `sources/` as real directories.
+    assert!(record["sources"]["sub/deep.mm"]["sha256"].is_string());
+    assert!(record["sources"]["sub/helpers.mm"]["sha256"].is_string());
+    assert!(record["sources"]["sub/extra.mm"]["sha256"].is_string());
+    assert!(bundle.join("sources/sub/deep.mm").is_file());
+    assert!(bundle.join("sources/sub/extra.mm").is_file());
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    let json = consume("recheck-llvm --json", &source, &bundle, &id);
+    assert_success(&json);
+    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        envelope["evidence"].as_array().unwrap().len(),
+        2 + 2 * 4 // identity + merge correspondence + 4 atoms × 2
+    );
+    // The import graph pins the file-relative resolution.
+    assert_eq!(
+        record["source_files"]["import_graph_sha256"]
+            .as_str()
+            .unwrap(),
+        native_bundle::import_graph_sha256(&BTreeMap::from([
+            (
+                "app.mm".to_string(),
+                vec!["sub/extra.mm".to_string(), "sub/helpers.mm".to_string()]
+            ),
+            ("sub/deep.mm".to_string(), vec![]),
+            ("sub/extra.mm".to_string(), vec![]),
+            (
+                "sub/helpers.mm".to_string(),
+                vec!["sub/deep.mm".to_string()]
+            ),
+        ]))
+    );
+    // `..` cannot escape the importer's subtree — honest rejection.
+    fs::write(
+        root.path().join("esc.mm"),
+        "import \"../outside\";\natom fa() -> i64 requires: true; ensures: result == 1; body: { 1 };",
+    )
+    .unwrap();
+    let output = cli(&[
+        "native-bundle",
+        "build",
+        root.path().join("esc.mm").to_str().unwrap(),
+        "-o",
+        root.path().join("esc.bundle").to_str().unwrap(),
     ]);
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());

@@ -2999,26 +2999,32 @@ open — the records now pin the intra-source call graph as
 `{atom: [sorted direct callees]}` map, and the file-level `import`
 dependency closure is partially closed by the multifile slice below.
 
-The next C10 stage closes the file-level `import` dependency closure for
-same-directory imports, including nested and transitive ones:
+The next C10 stage closes the file-level `import` dependency closure,
+including nested, transitive and subdirectory members:
 `native-bundle build` on a source declaring `import` items takes the
 multifile path and records
 `mumei.native-multifile-bundle/v1` under
 `mumei.native-pure-i64-multifile-linux-x86_64/v1`, pinning every original
-member byte-for-byte under `sources/` plus a file-level
+member byte-for-byte under `sources/` at its `/`-separated member key
+plus a file-level
 `import_graph_sha256` (`{member: [sorted direct imports]}` over the
 whole closure), and merging the closure — a post-order walk emits each
 member after its own imports, diamonds once, cycles honestly rejected —
 into the canonical text the module pipeline compiles, with each member's
 `alias::`/`stem::` call qualifiers normalized to bare names file-locally
-and duplicate qualifiers per file rejected. `check`, `recheck-source`,
+and duplicate qualifiers per file rejected. Imports resolve
+file-relative against each member's own directory (the language
+resolver's `base_dir` semantics), so `sub/dep.mm` members merge with an
+unaliased qualifier of the last-segment stem, and `..`/absolute/`\\`/`:`
+segments are rejected to confine the closure to the root's subtree.
+`check`, `recheck-source`,
 `recheck-llvm` and `recheck-artifact` re-derive the merge from the
 pinned members.
 Consumer Evidence lands as `mumei.native-multifile-consumer-evidence/v1`
 — the module envelope shape plus a merge-correspondence record binding
 the `import_graph_sha256` pin to the re-derived merged text — so
 `--json`/`recheck-evidence`/`accept-*` all serve the family.
-Subdirectory/`std` paths, non-atom member items and alias pinning stay
+Non-atom member items and alias pinning stay
 outside this slice. See the
 [multifile bundle boundary](VERIFICATION_NATIVE.md#multifile-import-closure-bundles).
 

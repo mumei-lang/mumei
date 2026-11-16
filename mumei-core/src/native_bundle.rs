@@ -544,19 +544,55 @@ pub fn prepare_module_source(
     ))
 }
 
-/// Normalize an import path or member key to its `<stem>.mm` member name
-/// under the slice-1 grammar: a bare basename — no directory component,
-/// dot segments, or host/drive qualifiers, and a nonempty stem. `std/`
-/// and subdirectory or parent-relative imports all fail the no-`/` rule.
+/// Normalize an import path or member key to its `<dir>/<stem>.mm`
+/// member name under the member-path grammar: `/`-separated nonempty
+/// segments, each free of `\\`, `:` and a leading dot, the last with a
+/// nonempty stem. Absolute paths and `..`/`.`/leading-dot segments all
+/// fail the grammar honestly (`std/` is an ordinary subdirectory —
+/// the language resolver tries local files before the toolchain std
+/// fallback). Members resolve file-relative: the key for an import in
+/// `sub/b.mm` is `sub/` + the normalized path (see `resolve_member`).
 pub fn member_name(path: &str) -> Result<String, BundleError> {
+    const MAX_MEMBER_SEGMENTS: usize = 16;
     let stem = path.strip_suffix(".mm").unwrap_or(path);
-    if stem.is_empty()
-        || stem.starts_with('.')
-        || stem.bytes().any(|b| matches!(b, b'/' | b'\\' | b':'))
-    {
-        return Err(BundleError("import outside same-directory profile"));
+    let bad = stem.is_empty()
+        || stem.split('/').count() > MAX_MEMBER_SEGMENTS
+        || stem.split('/').any(|seg| {
+            seg.is_empty() || seg.starts_with('.') || seg.bytes().any(|b| matches!(b, b'\\' | b':'))
+        });
+    if bad {
+        return Err(BundleError("import outside member-path profile"));
     }
     Ok(format!("{stem}.mm"))
+}
+
+/// Resolve an import declared inside `importer` to its member key.
+/// Imports are file-relative (the language's resolver uses the
+/// importing file's directory), so the importer's own directory
+/// prefix joins in front; `..` is outside the grammar, so a dep can
+/// never escape the importing directory's subtree.
+pub fn resolve_member(importer: &str, path: &str) -> Result<String, BundleError> {
+    let prefix = importer
+        .rsplit_once('/')
+        .map(|(dir, _)| format!("{dir}/"))
+        .unwrap_or_default();
+    // The composed path goes through the grammar so producer and
+    // consumer agree on every bound — segment count included — for the
+    // full key, not just the import's own suffix.
+    member_name(&format!("{prefix}{path}"))
+}
+
+/// The qualifier an unaliased import binds: the LAST segment's stem,
+/// so `import "sub/dep"` introduces `dep` (not `sub/dep`).
+/// `trim_end_matches` (not a single `strip_suffix`) keeps the result a
+/// spellable identifier: `dep.mm.mm` qualifies as `dep` since a
+/// `.`-containing qualifier could never appear in source anyway.
+fn member_stem(member: &str) -> &str {
+    member
+        .rsplit('/')
+        .next()
+        .unwrap_or(member)
+        .trim_end_matches(".mm")
 }
 
 /// Derive the canonical merged text for an import closure: a
@@ -649,18 +685,19 @@ fn visit_member(
     Ok(())
 }
 
-/// A member's gated imports: member names in declaration order, the
+/// A member's gated imports: member keys in declaration order, the
 /// qualifier each brings into scope, and the import lines to strip.
 type MemberImports = (Vec<String>, Vec<String>, std::collections::BTreeSet<usize>);
 
-/// Parse a member's `import` items and gate them: bare-basename
-/// members pinned in `sources`, no duplicate imports, no self-import,
+/// Parse a member's `import` items and gate them: member keys resolved
+/// file-relative and pinned in `sources`, no duplicate imports, no
+/// self-import (post-resolution, so `sub/a.mm` importing `"a"` counts),
 /// distinct qualifiers (alias or stem — two members bound to the same
 /// namespace sugar would strip to the same bare-name space
 /// ambiguously), atoms the only other allowed item, and every import
 /// alone on its line as one strict `import "..." [as x];` statement
 /// (a trailing `//` comment is trivia).
-fn member_imports(member_name: &str, text: &str) -> Result<MemberImports, BundleError> {
+fn member_imports(member_key: &str, text: &str) -> Result<MemberImports, BundleError> {
     // `parse_module` (not the checked entry point) because the checked
     // pipeline consumes `import` items; whatever the lenient scan cannot
     // see stays in the text and fails the merged admission downstream.
@@ -672,8 +709,8 @@ fn member_imports(member_name: &str, text: &str) -> Result<MemberImports, Bundle
     for item in &items {
         match item {
             parser::Item::Import(decl) => {
-                let member = crate::native_bundle::member_name(&decl.path)?;
-                if member == member_name {
+                let member = resolve_member(member_key, &decl.path)?;
+                if member == member_key {
                     return Err(BundleError("self-import outside profile"));
                 }
                 if imports.contains(&member) {
@@ -682,7 +719,7 @@ fn member_imports(member_name: &str, text: &str) -> Result<MemberImports, Bundle
                 let qualifier = decl
                     .alias
                     .clone()
-                    .unwrap_or_else(|| member.trim_end_matches(".mm").to_owned());
+                    .unwrap_or_else(|| member_stem(&member).to_owned());
                 if !seen_qualifiers.insert(qualifier.clone()) {
                     return Err(BundleError("duplicate import qualifier outside profile"));
                 }
@@ -787,7 +824,7 @@ fn strip_qualifier(text: &str, qualifier: &str) -> String {
 /// convention the atom-level `source_dependencies_sha256` pin uses:
 /// `{member: [sorted direct imports]}` for every member in the
 /// closure.
-fn import_graph_sha256(graph: &BTreeMap<String, Vec<String>>) -> String {
+pub fn import_graph_sha256(graph: &BTreeMap<String, Vec<String>>) -> String {
     sha256(&serde_json::to_vec(graph).expect("member names serialize"))
 }
 
@@ -1142,17 +1179,40 @@ mod multifile_tests {
     fn member_name_grammar() {
         assert_eq!(member_name("helpers").unwrap(), "helpers.mm");
         assert_eq!(member_name("helpers.mm").unwrap(), "helpers.mm");
+        // Slash-separated member paths (subdirectories of the root's
+        // directory) are admitted; `std/` names a local subdirectory
+        // exactly as the language resolver tries local files first.
+        assert_eq!(member_name("a/b.mm").unwrap(), "a/b.mm");
+        assert_eq!(member_name("a/b").unwrap(), "a/b.mm");
+        assert_eq!(member_name("std/x.mm").unwrap(), "std/x.mm");
         for bad in [
             "../up.mm",
-            "a/b.mm",
-            "std/x.mm",
+            "a/../b.mm",
+            "a//b.mm",
+            "a/./b.mm",
             "/abs.mm",
             ".mm",
             ".hidden.mm",
+            "a/.hidden.mm",
             "",
+            "a\\b.mm",
+            "a:b.mm",
         ] {
             assert!(member_name(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn resolve_member_anchors_at_the_importing_file() {
+        // File-relative: a member's imports resolve against its own
+        // directory, mirroring resolver::imports resolve_path.
+        assert_eq!(resolve_member("app.mm", "dep").unwrap(), "dep.mm");
+        assert_eq!(resolve_member("app.mm", "sub/dep").unwrap(), "sub/dep.mm");
+        assert_eq!(resolve_member("sub/dep.mm", "leaf").unwrap(), "sub/leaf.mm");
+        assert_eq!(resolve_member("sub/dep.mm", "a/b").unwrap(), "sub/a/b.mm");
+        // Confinement: escaping the root's directory is rejected.
+        assert!(resolve_member("sub/dep.mm", "../escape").is_err());
+        assert!(resolve_member("app.mm", "..").is_err());
     }
 
     const DEEP: &str =

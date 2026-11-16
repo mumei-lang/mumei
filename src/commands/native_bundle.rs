@@ -4,7 +4,7 @@ use mumei_emit_llvm::translation_validation::{self as tv, Options, Outcome};
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 mod evidence;
@@ -353,30 +353,57 @@ fn record_family(record: &[u8]) -> Result<RecordFamily, BundleError> {
 }
 
 /// Read the pinned original member texts of a multifile bundle — every
-/// `sources/<name>.mm` must pass the member-name grammar (a bare basename
-/// in this slice) and the member count stays bounded.
+/// file under `sources/` is keyed by its `/`-separated relative path and
+/// must pass the member-name grammar; the member count stays bounded.
 fn source_members(bundle: &Path) -> Result<BTreeMap<String, String>, BundleError> {
     let mut members = BTreeMap::new();
-    for entry in fs::read_dir(bundle.join(SOURCES_DIR))
-        .map_err(|_| BundleError("cannot read source members"))?
-    {
+    collect_source_members(bundle.join(SOURCES_DIR), "", 0, &mut members)?;
+    Ok(members)
+}
+
+/// Walk `sources/` recursively: directories descend, files become
+/// members keyed by their `/`-separated relative path, anything else
+/// (symlinks, sockets) is rejected honestly. `depth` caps the walk at
+/// the member grammar's segment bound — deeper trees can only hold
+/// member keys the grammar would reject anyway, so a hostile bundle
+/// cannot exhaust the stack.
+fn collect_source_members(
+    dir: PathBuf,
+    prefix: &str,
+    depth: usize,
+    members: &mut BTreeMap<String, String>,
+) -> Result<(), BundleError> {
+    if depth > 16 {
+        return Err(BundleError("source member path too deep"));
+    }
+    for entry in fs::read_dir(&dir).map_err(|_| BundleError("cannot read source members"))? {
         let entry = entry.map_err(|_| BundleError("cannot read source members"))?;
-        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
-            return Err(BundleError("unexpected source member"));
-        }
         let name = entry
             .file_name()
             .into_string()
             .map_err(|_| BundleError("invalid source member name"))?;
-        if member_name(&name).ok().as_deref() != Some(name.as_str()) {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            collect_source_members(
+                entry.path(),
+                &format!("{prefix}{name}/"),
+                depth + 1,
+                members,
+            )?;
+            continue;
+        }
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            return Err(BundleError("unexpected source member"));
+        }
+        let key = format!("{prefix}{name}");
+        if member_name(&key).ok().as_deref() != Some(key.as_str()) {
             return Err(BundleError("invalid source member name"));
         }
         if members.len() >= MAX_SOURCE_FILES {
             return Err(BundleError("too many source members"));
         }
-        members.insert(name, bounded_source_text(&entry.path())?);
+        members.insert(key, bounded_source_text(&entry.path())?);
     }
-    Ok(members)
+    Ok(())
 }
 
 /// The multifile inputs a consumer supplies: the `--source` file is the
@@ -650,10 +677,11 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
     Ok(id)
 }
 
-/// Build a multifile bundle: read the root file's single-level imports
-/// from its own directory, merge the closure into the canonical text the
-/// module pipeline compiles, and pin every original member under
-/// `sources/`. Slice-1 admits same-directory basenames only.
+/// Build a multifile bundle: read the root file's transitive imports
+/// file-relative from its own directory, merge the closure into the
+/// canonical text the module pipeline compiles, and pin every original
+/// member under `sources/`. Members may live in subdirectories of the
+/// root's directory (`import "sub/dep"`), never outside it.
 fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, BundleError> {
     if source.len() as u64 > SOURCE_BYTES {
         return Err(BundleError("unsupported component type or size"));
@@ -680,7 +708,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
             let parser::Item::Import(decl) = item else {
                 continue;
             };
-            let member = member_name(&decl.path)?;
+            let member = resolve_member(&current, &decl.path)?;
             if members.contains_key(&member) {
                 continue;
             }
@@ -711,7 +739,11 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
     let sources_dir = stage.path().join(SOURCES_DIR);
     fs::create_dir(&sources_dir).map_err(|_| BundleError("cannot stage source members"))?;
     for (name, text) in &members {
-        write(&sources_dir.join(name), text.as_bytes())?;
+        let member_path = sources_dir.join(name);
+        if let Some(parent) = member_path.parent() {
+            fs::create_dir_all(parent).map_err(|_| BundleError("cannot stage source members"))?;
+        }
+        write(&member_path, text.as_bytes())?;
     }
     let record = MultifileNativeBundleRecord {
         schema: MULTIFILE_SCHEMA.into(),
