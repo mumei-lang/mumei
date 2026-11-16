@@ -1003,7 +1003,12 @@ pub(crate) fn register_imported_alias_names(
 ///
 /// これにより `import "std/option";` のようなインポートが、
 /// プロジェクト内に `std/` ディレクトリがなくても解決できる。
-pub(crate) fn resolve_path(import_path: &str, base_dir: &Path) -> MumeiResult<PathBuf> {
+/// Resolve `import_path` for a file living in `base_dir` using the
+/// language's full chain (importer-relative, then the `std/` fallbacks
+/// documented above). Public so producers that must mirror the
+/// language's file resolution (e.g. native-bundle member collection)
+/// share it instead of duplicating the chain.
+pub fn resolve_path(import_path: &str, base_dir: &Path) -> MumeiResult<PathBuf> {
     let mut path = PathBuf::from(import_path);
     if path.extension().is_none() {
         path.set_extension("mm");

@@ -3590,7 +3590,12 @@ module pipeline compiles. Imports resolve file-relative against each
 member's own directory — the language resolver's `base_dir` semantics —
 so `sub/dep.mm` members merge with an unaliased qualifier of the
 last-segment stem, and `..`/absolute/`\\`/`:` segments are rejected so
-member keys stay inside the root's subtree (≤16 segments). Original
+member keys stay inside the root's subtree namespace (≤16 segments);
+`std/`-prefixed imports additionally fall back to the language's
+shipped-stdlib chain (compiler-adjacent `std/`, working-directory
+`std/`) and any still-unresolved import to `MUMEI_STD_PATH` — the
+producer delegates to the language's own `resolve_path` — pinned under
+the importer-prefixed member key. Original
 members pin byte-for-byte in the record's `sources` map at their
 `/`-separated member keys, `source_files` pins the root name and
 `import_graph_sha256` — the file-level `{member: [sorted imports]}`

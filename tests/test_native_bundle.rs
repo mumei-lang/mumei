@@ -2204,6 +2204,96 @@ fn multifile_subdirectory_members_merge_and_escape_paths_fail_honestly() {
     assert!(output.stdout.is_empty());
 }
 
+const STD_DEP: &str =
+    "atom std_helper(x: i64) -> i64 requires: true; ensures: result == x + 1; body: { x + 1 };\n";
+
+#[test]
+fn multifile_std_members_resolve_through_the_language_chain() {
+    let root = tempfile::tempdir().unwrap();
+    let std_dir = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    // The project carries no `std/` directory: `import "std/probe_dep"`
+    // falls through importer-relative and the compiler-adjacent /
+    // working-directory candidates to MUMEI_STD_PATH, exactly like the
+    // language resolver. `probe_dep` is a name no shipped stdlib uses.
+    fs::write(std_dir.path().join("probe_dep.mm"), STD_DEP).unwrap();
+    fs::write(
+        &source,
+        "import \"std/probe_dep\";\n\natom main() -> i64 requires: true; ensures: result == 6; body: { probe_dep::std_helper(5) };",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args([
+            "native-bundle",
+            "build",
+            source.to_str().unwrap(),
+            "-o",
+            bundle.to_str().unwrap(),
+        ])
+        .env("MUMEI_STD_PATH", std_dir.path())
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let record = module_record(&bundle);
+    // Std-supplied bytes pin under the importer-prefixed member key —
+    // the consumer re-derives the merge from `sources/` alone.
+    assert!(record["sources"]["std/probe_dep.mm"]["sha256"].is_string());
+    assert_eq!(
+        record["source_files"]["import_graph_sha256"]
+            .as_str()
+            .unwrap(),
+        native_bundle::import_graph_sha256(&BTreeMap::from([
+            ("app.mm".to_string(), vec!["std/probe_dep.mm".to_string()]),
+            ("std/probe_dep.mm".to_string(), vec![]),
+        ]))
+    );
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+
+    // Importer-relative precedence: a project `std/probe_dep.mm`
+    // shadows the stdlib fallback — its bytes pin instead.
+    let root2 = tempfile::tempdir().unwrap();
+    let project_std = root2.path().join("std");
+    fs::create_dir(&project_std).unwrap();
+    fs::write(
+        project_std.join("probe_dep.mm"),
+        "atom std_helper(x: i64) -> i64 requires: true; ensures: result == x + 2; body: { x + 2 };\n",
+    )
+    .unwrap();
+    let source2 = root2.path().join("app.mm");
+    fs::write(
+        &source2,
+        "import \"std/probe_dep\";\n\natom main() -> i64 requires: true; ensures: result == 7; body: { probe_dep::std_helper(5) };",
+    )
+    .unwrap();
+    let bundle2 = root2.path().join("bundle");
+    let output2 = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args([
+            "native-bundle",
+            "build",
+            source2.to_str().unwrap(),
+            "-o",
+            bundle2.to_str().unwrap(),
+        ])
+        .env("MUMEI_STD_PATH", std_dir.path())
+        .output()
+        .unwrap();
+    assert_success(&output2);
+    let record2 = module_record(&bundle2);
+    assert_eq!(
+        record2["sources"]["std/probe_dep.mm"]["sha256"]
+            .as_str()
+            .unwrap(),
+        native_bundle::sha256(
+            fs::read_to_string(project_std.join("probe_dep.mm"))
+                .unwrap()
+                .as_bytes()
+        )
+    );
+}
+
 #[test]
 fn multifile_bundle_builds_and_rechecks_with_honest_consumer_rejections() {
     let root = tempfile::tempdir().unwrap();

@@ -1,5 +1,5 @@
 use crate::{cli::NativeBundleCommand, linker};
-use mumei_core::{hir, native_bundle::*, parser, proof_cert, verification};
+use mumei_core::{hir, native_bundle::*, parser, proof_cert, resolver, verification};
 use mumei_emit_llvm::translation_validation::{self as tv, Options, Outcome};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -678,10 +678,15 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
 }
 
 /// Build a multifile bundle: read the root file's transitive imports
-/// file-relative from its own directory, merge the closure into the
-/// canonical text the module pipeline compiles, and pin every original
-/// member under `sources/`. Members may live in subdirectories of the
-/// root's directory (`import "sub/dep"`), never outside it.
+/// through the language's own resolution chain — file-relative to the
+/// importing member's directory first, then the `std/` fallbacks —
+/// merge the closure into the canonical text the module pipeline
+/// compiles, and pin every original member under `sources/`. Members
+/// may live in subdirectories of the root's directory
+/// (`import "sub/dep"`) or come from the compiler-shipped /
+/// MUMEI_STD_PATH stdlib (`import "std/option"`, pinned under its
+/// importer-prefixed member key); `..` and absolute paths stay outside
+/// the member grammar.
 fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, BundleError> {
     if source.len() as u64 > SOURCE_BYTES {
         return Err(BundleError("unsupported component type or size"));
@@ -697,13 +702,26 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     // Collect the transitive import closure: each member's own imports
-    // are resolved from the same directory, bounded by MAX_SOURCE_FILES.
-    // Visited members are never requeued, so cycles cannot loop here —
-    // merge_import_closure rejects them honestly afterward.
+    // resolve file-relative to the IMPORTING member's directory —
+    // through the language's own `resolver::resolve_path`, so the
+    // producer shares the full resolution chain (importer-relative
+    // first, then the `std/` fallbacks for shipped or MUMEI_STD_PATH
+    // modules) instead of duplicating it — bounded by
+    // MAX_SOURCE_FILES. Visited members are never requeued, so cycles
+    // cannot loop here — merge_import_closure rejects them honestly
+    // afterward.
     let mut members = BTreeMap::from([(root.clone(), source.to_owned())]);
+    // The path each member's bytes were read from — needed again by the
+    // post-build drift check, since a `std/` member's bytes can live
+    // outside the root's directory entirely.
+    let mut resolved_paths = BTreeMap::<String, PathBuf>::new();
     let mut queue = std::collections::VecDeque::from([root.clone()]);
     while let Some(current) = queue.pop_front() {
         let text = members[&current].clone();
+        let importer_dir = current
+            .rsplit_once('/')
+            .map(|(dir, _)| directory.join(dir))
+            .unwrap_or_else(|| directory.to_path_buf());
         for item in parser::parse_module(&text) {
             let parser::Item::Import(decl) = item else {
                 continue;
@@ -715,10 +733,10 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
             if members.len() >= MAX_SOURCE_FILES {
                 return Err(BundleError("too many source members"));
             }
-            members.insert(
-                member.clone(),
-                bounded_source_text(&directory.join(&member))?,
-            );
+            let resolved = resolver::resolve_path(&decl.path, &importer_dir)
+                .map_err(|_| BundleError("cannot read source members"))?;
+            members.insert(member.clone(), bounded_source_text(&resolved)?);
+            resolved_paths.insert(member.clone(), resolved);
             queue.push_back(member);
         }
     }
@@ -778,7 +796,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
         if member == &root {
             continue;
         }
-        if bounded_source_text(&directory.join(member))? != members[member] {
+        if bounded_source_text(&resolved_paths[member])? != members[member] {
             return Err(BundleError("source changed during build"));
         }
     }

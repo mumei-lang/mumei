@@ -3016,7 +3016,13 @@ and duplicate qualifiers per file rejected. Imports resolve
 file-relative against each member's own directory (the language
 resolver's `base_dir` semantics), so `sub/dep.mm` members merge with an
 unaliased qualifier of the last-segment stem, and `..`/absolute/`\\`/`:`
-segments are rejected to confine the closure to the root's subtree.
+segments are rejected to keep member keys inside the root's
+subtree namespace; `std/`-prefixed imports additionally fall back to
+the language's shipped-stdlib chain (compiler-adjacent `std/`,
+working-directory `std/`) and any still-unresolved import to
+`MUMEI_STD_PATH` — the producer delegates to the language's own
+`resolve_path` — pinned under the importer-prefixed member key so
+consumers never re-resolve.
 `check`, `recheck-source`,
 `recheck-llvm` and `recheck-artifact` re-derive the merge from the
 pinned members.
