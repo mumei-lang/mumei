@@ -284,6 +284,58 @@ fn authorized_non_executable_bytes_are_not_promoted_to_binary_assurance() {
 }
 
 #[test]
+fn canonical_link_arguments_are_pinned_and_reproduced() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    // New records pin the canonical argument vector — reproducible by a
+    // recheck on fresh staging paths, unlike the raw argv.
+    let canonical = record["link_build"]["canonical_arguments_sha256"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(canonical.len(), 64);
+    assert!(canonical.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_ne!(
+        canonical,
+        record["link_build"]["arguments_sha256"].as_str().unwrap()
+    );
+    let artifact = |source: &Path, bundle: &Path, id: &str| {
+        Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .args([
+                "native-bundle",
+                "recheck-artifact",
+                bundle.to_str().unwrap(),
+                source.to_str().unwrap(),
+                "--expected-build-id",
+                id,
+            ])
+            .output()
+            .unwrap()
+    };
+    assert_success(&artifact(&source, &bundle, &id));
+
+    // A record pinned before the field existed carries no pin — the
+    // recheck skips the comparison honestly rather than failing.
+    record["link_build"]
+        .as_object_mut()
+        .unwrap()
+        .remove("canonical_arguments_sha256");
+    let bytes = serde_json::to_vec(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert_success(&artifact(&source, &bundle, &native_bundle::sha256(&bytes)));
+
+    // A wrong pin fails the reproduction check.
+    record["link_build"]["canonical_arguments_sha256"] = serde_json::json!("0".repeat(64));
+    let bytes = serde_json::to_vec(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!artifact(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn bounded_source_and_symlinks_cannot_bypass_the_consumer() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build(root.path());
@@ -482,6 +534,7 @@ fn consumer_rejects_missing_replaced_stale_source_settings_and_unpinned_records(
         "/object_build/target_triple",
         "/source/compiler_version",
         "/link_build/driver_version",
+        "/link_build/canonical_arguments_sha256",
         "/scope",
     ] {
         let mut record: serde_json::Value = serde_json::from_slice(&original).unwrap();

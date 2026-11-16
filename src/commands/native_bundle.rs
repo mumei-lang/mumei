@@ -271,16 +271,16 @@ const MULTIFILE_EVIDENCE_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
 
 const MULTIFILE_ARTIFACT_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     scope: "native_multifile_bundle_source_llvm_and_toolchain_artifact_reproduction",
-    performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction"],
-    not_performed: &["producer_authenticity", "historical_execution", "link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
-    text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically.\nAcceptance scope excludes producer authenticity, historical execution, link argument-vector reproduction, optimizer/ABI/runtime/OS exit-status semantics, grade and Lean promotion.\n",
+    performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction"],
+    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
+    text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, canonical link argument vector re-derived when the record pins it.\nAcceptance scope excludes producer authenticity, historical execution, raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/OS exit-status semantics, grade and Lean promotion.\n",
 };
 
 const ARTIFACT_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     scope: "native_bundle_source_llvm_and_toolchain_artifact_reproduction",
-    performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction"],
-    not_performed: &["producer_authenticity", "historical_execution", "link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
-    text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically.\nAcceptance scope excludes producer authenticity, historical execution, link argument-vector reproduction, optimizer/ABI/runtime/OS exit-status semantics, grade and Lean promotion.\n",
+    performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction"],
+    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
+    text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, canonical link argument vector re-derived when the record pins it.\nAcceptance scope excludes producer authenticity, historical execution, raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/OS exit-status semantics, grade and Lean promotion.\n",
 };
 
 /// On an accepted outcome emits one anonymous acceptance descriptor — the
@@ -1125,9 +1125,11 @@ fn compare_evidence(
 ///
 /// `link_build.arguments_sha256` is deliberately not compared: it pins
 /// the build-time argument vector including absolute staging paths, so
-/// it is a build observation no recheck can reproduce. The executable's
-/// byte identity is what binds the link. Executing either artifact,
-/// checking OS exit status and ABI/runtime semantics stay out of scope.
+/// it is a build observation no recheck can reproduce. The optional
+/// `canonical_arguments_sha256` pins the same vector with those paths
+/// replaced by stable placeholders — re-derived here and compared when
+/// the record carries it. Executing either artifact, checking OS exit
+/// status and ABI/runtime semantics stay out of scope.
 fn recheck_artifact(
     bundle: &Path,
     source: &Path,
@@ -1178,6 +1180,15 @@ fn recheck_artifact(
         || fresh_link.linker != link_build.linker
         || fresh_link.linker_version != link_build.linker_version
         || read_regular(&executable_path, MAX_COMPONENT_BYTES)? != files[&BundleFile::Executable]
+    {
+        return Ok((ArtifactRecheck::Different, family));
+    }
+    // Records pinned before `canonical_arguments_sha256` existed carry
+    // no pin to compare — the comparison is honest-absent for them.
+    if link_build
+        .canonical_arguments_sha256
+        .as_deref()
+        .is_some_and(|pinned| fresh_link.canonical_arguments_sha256.as_deref() != Some(pinned))
     {
         return Ok((ArtifactRecheck::Different, family));
     }

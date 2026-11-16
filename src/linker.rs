@@ -263,6 +263,37 @@ pub fn link_recorded(
         .map(|arg| arg.as_encoded_bytes().to_vec())
         .collect();
     let arguments_sha256 = sha256(&serde_json::to_vec(&args).map_err(|_| fail())?);
+    // The raw vector carries absolute staging paths and the user-local
+    // bundled-z3 dir, so no recheck can reproduce it — pin the same
+    // vector with those arguments replaced by stable placeholders, which
+    // a recheck CAN recompute and compare.
+    let z3_dir = find_bundled_z3_lib_dir().map(|dir| dir.to_string_lossy().into_owned());
+    let canonical: Vec<Vec<u8>> = args
+        .iter()
+        .map(|arg| {
+            let arg = arg.as_slice();
+            if arg == output.as_os_str().as_encoded_bytes() {
+                return b"{output}".to_vec();
+            }
+            if let Some(index) = inputs
+                .iter()
+                .position(|input| input.as_os_str().as_encoded_bytes() == arg)
+            {
+                return format!("{{input:{index}}}").into_bytes();
+            }
+            if let Some(dir) = &z3_dir {
+                if arg == format!("-L{dir}").as_bytes() {
+                    return b"-L{toolchain}".to_vec();
+                }
+                if arg == format!("-Wl,-rpath,{dir}").as_bytes() {
+                    return b"-Wl,-rpath,{toolchain}".to_vec();
+                }
+            }
+            arg.to_vec()
+        })
+        .collect();
+    let canonical_arguments_sha256 =
+        Some(sha256(&serde_json::to_vec(&canonical).map_err(|_| fail())?));
     let mut probe = link_command(&linker, inputs, output, None);
     let result = probe.arg("-Wl,--version").output().map_err(|_| fail())?;
     if !result.status.success() {
@@ -287,6 +318,7 @@ pub fn link_recorded(
         linker: linker_family.to_owned(),
         linker_version,
         arguments_sha256,
+        canonical_arguments_sha256,
     })
 }
 

@@ -574,6 +574,7 @@ mod tests {
                 linker: "gnu-ld".into(),
                 linker_version: "1".into(),
                 arguments_sha256: "args".into(),
+                canonical_arguments_sha256: None,
             },
             settings: BuildSettings::default(),
             files,
