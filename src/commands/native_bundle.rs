@@ -44,6 +44,22 @@ struct LoadedBundle {
 
 pub(crate) fn run(command: NativeBundleCommand) {
     let result = match command {
+        NativeBundleCommand::AcceptEvidence { bundle, source, evidence, expected_build_id, json } => {
+            match recheck_evidence(Path::new(&bundle), Path::new(&source), Path::new(&evidence), &expected_build_id)
+                .and_then(|outcome| write_native_acceptance(outcome, json, &mut std::io::stdout().lock()))
+            {
+                Ok(Outcome::EquivalentWithinProfile) => Ok(()),
+                Ok(Outcome::Different) => Err(BundleError("native LLVM body differs from source")),
+                Ok(Outcome::UndefinedBehavior) => Err(BundleError(
+                    "native LLVM body reaches undefined behavior on an input the source defines",
+                )),
+                Ok(Outcome::Inconclusive) => {
+                    eprintln!("Native source/LLVM recheck inconclusive; evidence not accepted.");
+                    std::process::exit(3);
+                }
+                Err(error) => Err(error),
+            }
+        }
         NativeBundleCommand::RecheckEvidence { bundle, source, evidence, expected_build_id } => {
             match recheck_evidence(Path::new(&bundle), Path::new(&source), Path::new(&evidence), &expected_build_id) {
                 Ok(Outcome::EquivalentWithinProfile) => {
@@ -156,6 +172,38 @@ fn write_llvm_recheck(
         LlvmRecheck::Different => Ok(Outcome::Different),
         LlvmRecheck::Inconclusive => Ok(Outcome::Inconclusive),
     }
+}
+
+/// On an accepted outcome emits one anonymous acceptance descriptor — the
+/// same evaluation `recheck-evidence` runs, reported in the acceptance
+/// vocabulary. The descriptor binds no subject, digest or provenance so it
+/// cannot be replayed as Evidence; non-accepted outcomes write nothing.
+fn write_native_acceptance(
+    outcome: Outcome,
+    json: bool,
+    output: &mut impl std::io::Write,
+) -> Result<Outcome, BundleError> {
+    if outcome != Outcome::EquivalentWithinProfile {
+        return Ok(outcome);
+    }
+    let bytes = if json {
+        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "mumei.native-evidence-acceptance/v1",
+            "acceptance": "evaluated",
+            "accepted": true,
+            "scope": "native_bundle_identity_source_llvm_and_saved_evidence_consistency",
+            "checks_performed": ["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "saved_evidence_consistency"],
+            "checks_not_performed": ["producer_authenticity", "historical_execution", "object_linker_artifact_recheck", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
+        })).map_err(|_| BundleError("cannot encode native acceptance descriptor"))?;
+        bytes.push(b'\n');
+        bytes
+    } else {
+        b"Native Evidence accepted within the pinned bundle/source/LLVM profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, saved report consistent.\nAcceptance scope excludes producer authenticity, historical execution, artifact/object/linker recheck, optimizer/ABI/runtime/OS semantics, grade and Lean promotion.\n".to_vec()
+    };
+    output
+        .write_all(&bytes)
+        .map_err(|_| BundleError("cannot write native acceptance descriptor"))?;
+    Ok(outcome)
 }
 
 /// Read only the record's `schema` field — the dispatch key between the
