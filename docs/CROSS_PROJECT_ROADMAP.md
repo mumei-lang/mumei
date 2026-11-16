@@ -1800,7 +1800,10 @@ pointer; method selections (`lib.VS.PF`) and non-struct selections
 stay closed. A bound base admits through the same dep-free model:
 `t.F` on a `*S` parameter or local auto-dereferences caller state —
 the operand must be a bound identifier whose pointer names a `type`
-member (the pointee pins for `stale_dependents`), and the field must
+member — or, since the local-named-types slice, a package-local
+`type` binding, with the field resolving through its `local`
+reference to the field's own `variable` binding (the `scope`-less
+marker) — and the field must
 resolve to a scalar-or-pointer `var` member. One explicit
 dereference — `(*t).F` — spells the same auto-deref out and admits
 the same way, and intermediate selections walk the chain while each
@@ -1991,9 +1994,13 @@ and alias facts record distinct type_id's per alias so no type
 check narrows the set (`p := &x; x = y; *p` reads x's updated
 value, and the same may-read covers `*lib.PV` after `lib.PV =
 &x`); `p := &t` inherits the same
-`*T` identity, so `*p` reads the same way, while a computed pointer
-(`*g()`), a nested deref (`**t`) and a pointee naming a local
-`type` stay closed, matching the `*t = v` write side (dep sets
+`*T` identity, so `*p` reads the same way — a pointee naming a
+package-local `type` admits identically since the local-named-types
+slice (the `type_id` falls back to the unit's own `type` bindings —
+a real identity in `known`, so staleness stays honest both
+directions) — while a computed pointer
+(`*g()`), a nested deref (`**t`) and composite pointees stay
+closed, matching the `*t = v` write side (dep sets
 track binding indices, not pointee contents). An unnamed-pointee
 binding (`p := &x` on a builtin `int64`) admits through the
 pointer fact's `elem` on both sides, recording the synthetic
