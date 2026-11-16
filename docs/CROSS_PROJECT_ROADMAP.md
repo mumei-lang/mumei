@@ -1226,6 +1226,21 @@ the declared bound. Concurrency and Evidence acceptance remain open;
 C11 stays partial. See the
 [Agent probe retry scheduling](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-history-bounded-probe-retry-scheduling).
 
+### Wave 2 declared probe retry gate
+
+Agent's `probe_retry_requests` and `plan_with_probes` accept
+`retry_on=frozenset({...})` — a declared subset of the terminal outcome
+vocabulary (`PROBE_OUTCOME_KINDS`: `exited`, `failed`, `timed_out`,
+`cancelled`) gating which still-excluded candidates are re-asked. An
+adapter whose last recorded outcome kind is outside the set is skipped:
+a policy that retries `timed_out` never re-asks after a `failed`
+spawn. First attempts are unaffected and `None` keeps the unfiltered
+behavior. The gate stays declarative — it emits or withholds requests
+and accepts no Evidence; the `summaries-plan` route surface is
+unchanged. C11 stays partial; Evidence acceptance remains open. See
+the
+[Agent probe retry gate](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-probe-retry-gate).
+
 ### Wave 2 declared probe cancellation
 
 Agent's `AdapterProbeRequest.cancel_request()` returns the declared
