@@ -2913,6 +2913,54 @@ with `tool_version_unknown`). The scenario stays in
 planning is routing only: a selected adapter is not an accepted
 manifest.
 
+### Wave 3 channel state in scalar summaries (mumei-agent)
+
+The Go fragment now admits channel state under a conflated
+queue model: `ch := make(chan T)` / `var ch chan T` (scalar
+element only) tracks one dependency set — `ch <- x` unions the
+sent deps into the queue, `<-ch` and `for v := range ch` hand it
+back, `close(ch)` is a no-dep sync fact, and `v, ok := <-ch`
+binds the comma-ok pair with the same set. Channel bindings may
+not be re-aliased (`ch2 := ch` stays closed — one queue, one dep
+set). `chan`-typed parameters admit under the external
+sync-resource model: sends/receives/close on a parameter record
+an imported transfer (effects unknown) and reads return
+deps(param) ∪ indirect writes. `select`, non-scalar elements,
+chan results and `len`/`cap` stay closed.
+
+### Wave 3 per-statement read attribution (mumei-agent)
+
+`FunctionSummary.statement_reads` now carries one
+`{span, deps}` record per walked statement — the union of every
+dependency set its evaluation read, including implicit reads
+that never route through `expression()` (inc/dec operands, `op=`
+old values, bare `return` named results, store destinations
+resolved against pre-state). Closed functions emit nothing; the
+field is descriptive only — `for_function`/`stale_dependents`
+semantics are unchanged.
+
+### Wave 3 cross-file summaries via the resolver contract (mumei-agent)
+
+Rust and Solidity summaries now resolve cross-file dependencies
+through the same host-declared resolver contract TypeScript
+already used: `summarize_rust(source, resolver, source_path)`
+and `summarize_solidity(source, resolver, source_path)` accept
+`resolver(spec[, importer_path]) -> source | Path | None`, where
+None keeps the directive's symbols opaque instead of degrading
+the unit. Rust resolves `mod NAME;` declarations plus `use`
+bindings (`use b::f`, `use b::{f,g as h}`, `crate::`/`self::`/
+`super::` paths); Solidity resolves `import "b.sol"` (star),
+`import {f, C as C2}` (named+rename) and `import ... as D` /
+`import * as D` (namespace `D.f()`). Every resolved module's
+bytes fold into `context_key`, so a changed module invalidates
+strict reuse; resolution is bounded by `MAX_MODULE_DEPTH`, per-
+module byte caps and cycle guards. `--resolve-modules` exposes
+the filesystem resolver on the produce/check/reuse/accept routes
+(sandboxed to the importer's directory tree); the attempt routes
+refuse it because the attempt fingerprint cannot bind undeclared
+bytes. Re-exports, glob imports, remappings, `#[path]` and
+cyclic imports stay closed; ambiguous names never wrong-pick.
+
 ### Wave 4 first compiler-backed source-analysis boundary
 
 The [C06 Go adapter](https://github.com/mumei-lang/mumei-agent/pull/657) adds an
@@ -2968,8 +3016,10 @@ process/runtime behavior, resource state or authority; hashes do not establish
 authenticity. Existing function-local dataflow and audit/grade/Lean gates stay
 authoritative. No external verifier is adopted.
 
-This is **partial C07**, not general value/SSA/fixed-point analysis, cross-file
-freshness, alias/resource semantics or production audit integration. Those
+This is **partial C07**, not general value/SSA/fixed-point analysis,
+alias/resource semantics or production audit integration — resolved modules
+fold into the context key, so cross-file freshness now holds for the
+resolver-covered fragment. Those
 remain open alongside broader C06 resolution. C09 is still a separate limited
 LLVM translation-validation pilot; neither dependency summaries nor C08 hashes
 establish executable semantic correctness.
