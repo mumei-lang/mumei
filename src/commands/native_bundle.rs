@@ -45,8 +45,10 @@ struct LoadedBundle {
 pub(crate) fn run(command: NativeBundleCommand) {
     let result = match command {
         NativeBundleCommand::AcceptEvidence { bundle, source, evidence, expected_build_id, json } => {
-            match recheck_evidence(Path::new(&bundle), Path::new(&source), Path::new(&evidence), &expected_build_id)
-                .and_then(|outcome| write_native_acceptance(outcome, json, &EVIDENCE_ACCEPTANCE, &mut std::io::stdout().lock()))
+            match read_regular(Path::new(&evidence), MAX_EVIDENCE_BYTES)
+                .and_then(|saved| recheck_evidence(Path::new(&bundle), Path::new(&source), Path::new(&evidence), &expected_build_id)
+                    .map(|outcome| (outcome, saved)))
+                .and_then(|(outcome, saved)| write_native_acceptance(outcome, json, &EVIDENCE_ACCEPTANCE, Some(&saved), &mut std::io::stdout().lock()))
             {
                 Ok(Outcome::EquivalentWithinProfile) => Ok(()),
                 Ok(Outcome::Different) => Err(BundleError("native LLVM body differs from source")),
@@ -67,7 +69,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
                     ArtifactRecheck::Different => Outcome::Different,
                     ArtifactRecheck::Inconclusive => Outcome::Inconclusive,
                 })
-                .and_then(|outcome| write_native_acceptance(outcome, json, &ARTIFACT_ACCEPTANCE, &mut std::io::stdout().lock()))
+                .and_then(|outcome| write_native_acceptance(outcome, json, &ARTIFACT_ACCEPTANCE, None, &mut std::io::stdout().lock()))
             {
                 Ok(Outcome::EquivalentWithinProfile) => Ok(()),
                 Ok(Outcome::Inconclusive) => {
@@ -227,21 +229,32 @@ fn write_native_acceptance(
     outcome: Outcome,
     json: bool,
     acceptance: &NativeAcceptance,
+    evidence_bytes: Option<&[u8]>,
     output: &mut impl std::io::Write,
 ) -> Result<Outcome, BundleError> {
     if outcome != Outcome::EquivalentWithinProfile {
         return Ok(outcome);
     }
     let bytes = if json {
-        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        let mut value = serde_json::json!({
             "schema_version": "mumei.native-evidence-acceptance/v1",
             "acceptance": "evaluated",
             "accepted": true,
             "scope": acceptance.scope,
             "checks_performed": acceptance.performed,
             "checks_not_performed": acceptance.not_performed,
-        }))
-        .map_err(|_| BundleError("cannot encode native acceptance descriptor"))?;
+        });
+        // Optional binding: sha256 of the accepted record's bytes lets a
+        // holder prove WHICH record this descriptor evaluated, without the
+        // descriptor echoing any claim or digest it could replay as identity.
+        // Artifact acceptance has no record input, so the key stays absent.
+        if let Some(bytes) = evidence_bytes {
+            use sha2::{Digest, Sha256};
+            value["evidence_fingerprint"] =
+                serde_json::json!(format!("{:x}", Sha256::digest(bytes)));
+        }
+        let mut bytes = serde_json::to_vec_pretty(&value)
+            .map_err(|_| BundleError("cannot encode native acceptance descriptor"))?;
         bytes.push(b'\n');
         bytes
     } else {

@@ -1199,6 +1199,13 @@ fn accept_evidence_emits_anonymous_acceptance_descriptor_only_on_acceptance() {
             );
             assert_eq!(descriptor["acceptance"], "evaluated");
             assert_eq!(descriptor["accepted"], true);
+            // The binding fingerprint is the sha256 of the accepted
+            // record's bytes — a holder can prove which record was
+            // evaluated without the descriptor echoing any claim.
+            assert_eq!(
+                descriptor["evidence_fingerprint"],
+                native_bundle::sha256(&fs::read(&saved).unwrap())
+            );
             for check in [
                 "bundle_identity_binding",
                 "fresh_same_profile_source_recheck",
@@ -1971,6 +1978,9 @@ fn accept_artifact_emits_descriptor_only_when_artifacts_reproduce() {
                 .unwrap()
                 .iter()
                 .any(|entry| entry == "os_exit_status"));
+            // Artifact acceptance evaluates no record, so the binding
+            // fingerprint key stays absent rather than emitted as null.
+            assert!(descriptor.get("evidence_fingerprint").is_none());
             assert!(mumei_core::verification_evidence::decode(&output.stdout).is_err());
         } else {
             assert!(String::from_utf8_lossy(&output.stdout).contains("accepted"));
