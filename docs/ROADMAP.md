@@ -3131,6 +3131,18 @@ stays syntactic — pin correctness, truth, freshness and authenticity remain
 unperformed. See the
 [consistency check contract](VERIFICATION_NATIVE.md#cross-record-identity-pin-consistency).
 
+`evidence check`, `evidence check-list` and `evidence check-consistency`
+now accept `--expected-adapter <id>`: after the representation gate, every
+record's declared `provenance.adapter.id` must equal the externally
+supplied expectation, mirroring how `--expected-build-id` binds a native
+record to a trusted channel. A mismatch fails with a static diagnostic
+before any success output; gated JSON diagnostics add `checks_performed`
+with `declared_producer_identity`, while `producer_authenticity` stays
+unperformed — a declared id match is identity, not signed or attested
+authenticity. The deep `accept-*` consumers bind provenance already through
+`fresh == saved`, so no flag is added there. See the
+[declared producer-identity gate](VERIFICATION_NATIVE.md#declared-producer-identity-gate).
+
 The first standalone C02/C13 source producer now connects the existing bounded
 C03 bitvector model to fresh linked-Z3 queries without a Native bundle:
 `mumei evidence verify-source <source> [--json]`. Only fresh unsat emits one

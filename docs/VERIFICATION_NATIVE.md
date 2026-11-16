@@ -312,6 +312,27 @@ reports `consistent`, a bounded `conflicts` list (`index_a`, `index_b`,
 structural only. A forged pair that agrees passes: pin correctness, truth,
 freshness and authenticity stay in `checks_not_performed`.
 
+### Declared producer-identity gate
+
+`evidence check`, `evidence check-list` and `evidence check-consistency`
+each accept `--expected-adapter <id>`: after the representation gate, every
+record's declared `provenance.adapter.id` must equal the expected value,
+obtained through a separately trusted channel like `--expected-build-id`.
+A record declaring any other adapter fails with a static diagnostic before
+the success output, and an empty expectation is a request error — the
+closed schema never admits an empty adapter id.
+
+When the gate runs, the JSON diagnostic adds `checks_performed` naming
+`representation_gate` (plus `cross_record_pin_agreement` for
+`check-consistency`) and `declared_producer_identity`; without the flag the
+diagnostic is byte-identical to the ungated form. `producer_authenticity`
+stays in `checks_not_performed`: a matching *declared* id proves only that
+the record names the expected adapter — nothing establishes the adapter
+actually ran, which needs signed or attested provenance. The deep
+`accept-*` consumers need no such flag: their fresh same-profile
+`fresh == saved` comparison already binds the whole provenance block,
+adapter included, to the rechecking toolchain.
+
 ### Standalone fresh source Evidence producer
 
 ```sh

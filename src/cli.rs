@@ -485,6 +485,9 @@ pub(crate) enum EvidenceCommand {
         /// Print a static representation-only diagnostic, not an accepted Evidence record or certificate
         #[arg(long)]
         json: bool,
+        /// Require the record's declared producer adapter id; declared identity only, not producer authenticity
+        #[arg(long)]
+        expected_adapter: Option<String>,
     },
     /// Validate a bounded Evidence list envelope's representation — every record individually, not their truth or consistency
     CheckList {
@@ -497,6 +500,9 @@ pub(crate) enum EvidenceCommand {
         /// Print a static representation-only diagnostic, not accepted Evidence or a certificate
         #[arg(long)]
         json: bool,
+        /// Require every record's declared producer adapter id; declared identity only, not producer authenticity
+        #[arg(long)]
+        expected_adapter: Option<String>,
     },
     /// Check a bounded Evidence list envelope's cross-record identity-pin agreement, not pin correctness or truth
     CheckConsistency {
@@ -509,6 +515,9 @@ pub(crate) enum EvidenceCommand {
         /// Print a static structural-consistency diagnostic, not accepted Evidence or a certificate
         #[arg(long)]
         json: bool,
+        /// Require every record's declared producer adapter id; declared identity only, not producer authenticity
+        #[arg(long)]
+        expected_adapter: Option<String>,
     },
 }
 
