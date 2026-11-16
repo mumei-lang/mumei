@@ -3046,8 +3046,9 @@ Consumer Evidence lands as `mumei.native-multifile-consumer-evidence/v1`
 — the module envelope shape plus a merge-correspondence record binding
 the `import_graph_sha256` pin to the re-derived merged text — so
 `--json`/`recheck-evidence`/`accept-*` all serve the family.
-Non-atom member items and alias pinning stay
-outside this slice. See the
+Refined scalar `type` members are
+admitted by the later v2 profiles; struct/enum member items and
+alias pinning stay outside this slice. See the
 [multifile bundle boundary](VERIFICATION_NATIVE.md#multifile-import-closure-bundles).
 
 Consumer Evidence reaches module bundles through the sibling envelope
@@ -3255,6 +3256,22 @@ representation-only diagnostics, bounds stdin reads to 65,536 bytes plus one
 overflow byte, and adds no Agent runner, acceptance or grade promotion. Host
 deadlines and input closure remain required. See the
 [canonical stdin milestone](CROSS_PROJECT_ROADMAP.md#wave-2-original-byte-core-stdin-representation-checks).
+
+The next C10 profile slice admits refined scalar members: modules may
+declare `type <Name> = <scalar> where <operand> <predicate>;` aliases and
+use them in atom signatures, building under
+`mumei.pure-i64-refined-scalar/v1` and the `/v2` module/multifile
+profiles. The alias gate stays fail-closed — `unit` metadata, non-scalar
+or undeclared bases, cycles and atom-name collisions are rejected — and
+each alias's predicates fold into the obligations the module already
+proves: parameters strengthen the signature domain established at every
+call site, and results strengthen the postcondition the callee
+guarantees. Undeclared signature type names are now rejected rather than
+silently modeled as `i64`. Recheckers dispatch on the pinned profile
+name, so v1 records keep the strict admission. Struct/enum member items,
+deeper optimizer/ABI/runtime assurance and producer authenticity remain
+open. See the
+[refined scalar member profiles](VERIFICATION_NATIVE.md#refined-scalar-member-profiles-v2).
 
 ## Related Documents
 

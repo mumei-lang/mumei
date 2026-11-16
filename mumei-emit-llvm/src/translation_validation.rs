@@ -5,7 +5,7 @@ use inkwell::{context::Context as LlvmContext, memory_buffer::MemoryBuffer, valu
 use llvm_sys::{core::*, prelude::*, LLVMIntPredicate, LLVMOpcode, LLVMTypeKind};
 use mumei_core::semantic_contract::{
     encode_pure_i64_body, encode_pure_i64_module, PureI64Body, LOOP_BOUND,
-    PURE_I64_WRAPPING_PROFILE,
+    PURE_I64_REFINED_PROFILE, PURE_I64_WRAPPING_PROFILE,
 };
 use std::collections::{BTreeMap, HashMap};
 use z3::{
@@ -284,7 +284,7 @@ pub fn validate_pure_i64_module(
     config.set_timeout_msec(options.timeout_ms as u64);
     config.set_param_value("rlimit", &options.resource_limit.to_string());
     let context = Context::new(&config);
-    let models = encode_pure_i64_module(source, &context, true)
+    let models = encode_pure_i64_module(source, &context, true, false)
         .map_err(|_| ValidationError("unsupported C03 source"))?;
     let llvm_context = LlvmContext::create();
     let module = llvm_context
@@ -384,11 +384,15 @@ pub fn validate_pure_i64_module(
 /// screened by the fixed call/trunc/ret shape (not compared — its i32
 /// exit-status truncation is the attested artifact edge), and every
 /// member keeps external linkage under the shared function profile.
-/// The solver budget applies per function.
+/// `admit_refined` runs the refined-scalar admission the pinned v2
+/// record names: refined type declarations and signature members typed
+/// by them join the encoded domain/postcondition. The solver budget
+/// applies per function.
 pub fn validate_native_module(
     source: &str,
     llvm_ir: &str,
     options: Options,
+    admit_refined: bool,
 ) -> Result<ModuleValidationReport> {
     bounded(llvm_ir)?;
     if options.timeout_ms == 0 || options.timeout_ms > 30_000 || options.resource_limit == 0 {
@@ -398,7 +402,7 @@ pub fn validate_native_module(
     config.set_timeout_msec(options.timeout_ms as u64);
     config.set_param_value("rlimit", &options.resource_limit.to_string());
     let context = Context::new(&config);
-    let models = encode_pure_i64_module(source, &context, true)
+    let models = encode_pure_i64_module(source, &context, true, admit_refined)
         .map_err(|_| ValidationError("unsupported C03 source"))?;
     let mut mains = 0usize;
     for model in &models {
@@ -450,6 +454,7 @@ pub fn validate_native_module(
     let mut any_param_domain = false;
     let mut any_subrange = false;
     let mut any_loops = false;
+    let mut any_refined = false;
     let mut outcome = Outcome::EquivalentWithinProfile;
     for model in &models {
         let member_name = if model.function_name == "main" {
@@ -466,6 +471,7 @@ pub fn validate_native_module(
         any_param_domain |= !model.param_domain.is_empty();
         any_subrange |= model.subrange_params;
         any_loops |= model.loop_bound_exits.is_some();
+        any_refined |= model.refined_signature;
         outcome = match (outcome, member_outcome) {
             (Outcome::Different, _) | (_, Outcome::Different) => Outcome::Different,
             (Outcome::UndefinedBehavior, _) | (_, Outcome::UndefinedBehavior) => {
@@ -485,13 +491,19 @@ pub fn validate_native_module(
         } else {
             NATIVE_MODULE_PROFILE
         },
-        source_profile: PURE_I64_WRAPPING_PROFILE,
+        source_profile: if any_refined {
+            PURE_I64_REFINED_PROFILE
+        } else {
+            PURE_I64_WRAPPING_PROFILE
+        },
         target,
         data_layout: DATA_LAYOUT,
         checked_stage:
             "native_module_user_bodies_and_truncating_wrapper_snapshot_no_pipeline_attestation",
         input_domain: loop_domain_label(
-            if any_definedness {
+            if any_refined {
+                "module_members_signed_i64_inputs_with_refined_scalar_signature_predicate_domains_not_process_exit_status"
+            } else if any_definedness {
                 if any_subrange {
                     "module_members_signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_process_exit_status"
                 } else if any_param_domain {

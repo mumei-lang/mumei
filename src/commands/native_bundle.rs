@@ -1,5 +1,7 @@
 use crate::{cli::NativeBundleCommand, linker};
-use mumei_core::{hir, native_bundle::*, parser, proof_cert, resolver, verification};
+use mumei_core::{
+    hir, native_bundle::*, parser, proof_cert, resolver, semantic_contract, verification,
+};
 use mumei_emit_llvm::translation_validation::{self as tv, Options, Outcome};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -802,10 +804,17 @@ type EmittedModule = (BTreeMap<BundleFile, Vec<u8>>, ObjectBuild, LinkBuild);
 /// observations — the pipeline the module and multifile records both pin.
 fn emit_module(
     atoms: &[parser::Atom],
+    types: &[parser::RefinedType],
     stage: &Path,
     proof_work: &Path,
 ) -> Result<EmittedModule, BundleError> {
     let mut env = verification::ModuleEnv::default();
+    // Register the module's refined scalar declarations before the
+    // atoms — signature members typed by an alias resolve through the
+    // env the same way `mumei verify`'s module environment does.
+    for typedef in types {
+        env.register_type(typedef);
+    }
     for atom in atoms {
         env.register_atom(atom);
     }
@@ -868,7 +877,10 @@ fn emit_module(
 }
 
 fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, BundleError> {
-    let (binding, atoms) = prepare_module_source(source)?;
+    // The producer always runs the refined admission; the record's
+    // `profile` names v2 only when the source actually declares or uses
+    // refined scalar types, so a plain module keeps pinning v1.
+    let (binding, atoms, types) = prepare_module_source(source, true)?;
     let parent = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -881,10 +893,15 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         .prefix(".mumei-proof-")
         .tempdir_in(parent)
         .map_err(|_| BundleError("cannot stage proof"))?;
-    let (files, object_build, link_build) = emit_module(&atoms, stage.path(), proof_work.path())?;
+    let (files, object_build, link_build) =
+        emit_module(&atoms, &types, stage.path(), proof_work.path())?;
     let record = ModuleNativeBundleRecord {
         schema: MODULE_SCHEMA.into(),
-        profile: MODULE_PROFILE.into(),
+        profile: if binding.source_profile == semantic_contract::PURE_I64_REFINED_PROFILE {
+            MODULE_PROFILE_V2.into()
+        } else {
+            MODULE_PROFILE.into()
+        },
         scope: MODULE_SCOPE.into(),
         system_scope: SYSTEM_SCOPE.into(),
         source: binding,
@@ -999,7 +1016,13 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
             queue.push_back(member);
         }
     }
-    let (binding, graph, atoms, _merged) = prepare_multifile_source(&root, &members)?;
+    let prepared = prepare_multifile_source(&root, &members, true)?;
+    let (binding, graph, atoms, types) = (
+        prepared.binding,
+        prepared.import_graph_sha256,
+        prepared.atoms,
+        prepared.types,
+    );
     let parent = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -1012,7 +1035,8 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
         .prefix(".mumei-proof-")
         .tempdir_in(parent)
         .map_err(|_| BundleError("cannot stage proof"))?;
-    let (files, object_build, link_build) = emit_module(&atoms, stage.path(), proof_work.path())?;
+    let (files, object_build, link_build) =
+        emit_module(&atoms, &types, stage.path(), proof_work.path())?;
     let sources_dir = stage.path().join(SOURCES_DIR);
     fs::create_dir(&sources_dir).map_err(|_| BundleError("cannot stage source members"))?;
     for (name, text) in &members {
@@ -1024,7 +1048,11 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
     }
     let record = MultifileNativeBundleRecord {
         schema: MULTIFILE_SCHEMA.into(),
-        profile: MULTIFILE_PROFILE.into(),
+        profile: if binding.source_profile == semantic_contract::PURE_I64_REFINED_PROFILE {
+            MULTIFILE_PROFILE_V2.into()
+        } else {
+            MULTIFILE_PROFILE.into()
+        },
         scope: MODULE_SCOPE.into(),
         system_scope: SYSTEM_SCOPE.into(),
         source: binding,
@@ -1171,8 +1199,13 @@ fn recheck_llvm_loaded(
             .0;
         let llvm_ir = std::str::from_utf8(&loaded.files[&BundleFile::LlvmIr])
             .map_err(|_| BundleError("native LLVM snapshot is not UTF-8"))?;
-        let report = tv::validate_native_module(&merged, llvm_ir, Options::default())
-            .map_err(|_| BundleError("native LLVM snapshot outside bounded module profile"))?;
+        let report = tv::validate_native_module(
+            &merged,
+            llvm_ir,
+            Options::default(),
+            record.profile == MULTIFILE_PROFILE_V2,
+        )
+        .map_err(|_| BundleError("native LLVM snapshot outside bounded module profile"))?;
         if loaded.object_build.target_triple != report.target
             || loaded.object_build.data_layout != report.data_layout
         {
@@ -1215,8 +1248,13 @@ fn recheck_llvm_loaded(
         }
         let llvm_ir = std::str::from_utf8(&loaded.files[&BundleFile::LlvmIr])
             .map_err(|_| BundleError("native LLVM snapshot is not UTF-8"))?;
-        let report = tv::validate_native_module(&source, llvm_ir, Options::default())
-            .map_err(|_| BundleError("native LLVM snapshot outside bounded module profile"))?;
+        let report = tv::validate_native_module(
+            &source,
+            llvm_ir,
+            Options::default(),
+            record.profile == MODULE_PROFILE_V2,
+        )
+        .map_err(|_| BundleError("native LLVM snapshot outside bounded module profile"))?;
         if loaded.object_build.target_triple != report.target
             || loaded.object_build.data_layout != report.data_layout
         {

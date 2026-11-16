@@ -25,7 +25,7 @@ pub(crate) fn run_translation_validation_check(
     let Ok(llvm_ir) = fs::read_to_string(ll_path) else {
         return;
     };
-    let report = match tv::validate_native_module(source, &llvm_ir, Options::default()) {
+    let report = match tv::validate_native_module(source, &llvm_ir, Options::default(), true) {
         Ok(report) => report,
         Err(_) => return,
     };

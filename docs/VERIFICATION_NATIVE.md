@@ -1421,14 +1421,64 @@ the pinned-member merge re-derivation among the performed checks and
 keep the same honesty about what stays unchecked.
 
 Nothing is claimed beyond the module scopes: same identity-plus-recheck
-boundaries, no authenticity, no import-alias pinning (the alias is
-namespace sugar the merge erases), and non-atom member items and
-alias pinning stay outside this slice. `std/` members follow the
+boundaries, no authenticity, and no import-alias pinning (the alias is
+namespace sugar the merge erases). Refined scalar `type` declarations
+are admitted under the v2 profiles described below; struct/enum member
+items and alias pinning stay outside this slice. `std/` members follow the
 language's own fallback chain: importer-relative first (a `std/`
 member beside the root is an ordinary local subdirectory), then the
 shipped toolchain stdlib and `MUMEI_STD_PATH`, which also serves as
 the last-resort fallback for any still-unresolved import — each
 fallback member then resolves its own imports beside its real file.
+
+### Refined scalar member profiles (v2)
+
+A member that declares refined scalar aliases —
+`type Port = i64 where v >= 1 && v <= 65535;` — widens the admitted
+fragment under `mumei.pure-i64-refined-scalar/v1`, and a bundle using
+them records `mumei.native-pure-i64-module-linux-x86_64/v2` or
+`mumei.native-pure-i64-multifile-linux-x86_64/v2`. The profile name is
+part of the pinned identity: a module without type declarations still
+pins `/v1`, so the record itself says which admission produced it, and
+`check`/`recheck-source`/`recheck-llvm` dispatch on the pinned name —
+a v1 record is re-admitted under the strict fragment, a v2 record under
+the refined one, and a v2-pinned record cannot be passed off as v1.
+
+Admission stays deliberately small and fail-closed. A `type` member is
+accepted only under the refined profile (v1 still rejects every non-atom
+item) and only when it carries no `unit` metadata — the profile does
+not model units, so it refuses to discard them silently. The base must
+resolve to the scalar vocabulary (`i64`, `bool`, `i8`–`u32`), either
+directly or through another declared alias; alias chains accumulate
+their predicates as conjuncts, cycles are rejected, and a base naming
+nothing declared fails closed. The `where` predicate must check as
+`Bool` over its declared operand under the existing `expression_kind`
+gate, with no calls admitted inside it. Duplicate type names and a type
+named like an atom are rejected, so `T(` is never ambiguous between a
+type position and a call.
+
+Signatures resolve through the declared environment: `x: Port` binds
+`x` as the base scalar carrying `Port`'s predicates. As part of the
+same fix, an undeclared signature type name is now rejected instead of
+falling back to `i64` — `x: Anything` can no longer silently verify as
+an integer parameter. Alias predicates fold into the obligations the
+profile already proves: a parameter's predicates join the signature
+domain, so the atom assumes them as an antecedent and every call site
+must establish them alongside the callee's `requires` (the same
+`callee_precondition` obligation, with the conjuncts instantiated at
+the site's argument values); a result's predicates join the
+postcondition, so the callee must guarantee them at its `result`.
+A predicate whose domain can be empty is refused by the existing
+empty-domain gate.
+
+Nothing deeper is claimed: the fragment admitted by the profile grew,
+the guarantees did not — the same identity-plus-recheck scopes apply,
+with no optimizer/object/linker/runtime/ABI/final-executable semantics
+and no producer authenticity or attestation. Struct/enum declarations
+and `unit`-carrying aliases stay outside the profile.
+
+Regression gate:
+`LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo test --test test_native_bundle --test test_translation_validation -p mumei-core`.
 
 ### Pinned toolchain artifact recheck
 

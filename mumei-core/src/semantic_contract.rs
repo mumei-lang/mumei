@@ -36,6 +36,15 @@ pub const PURE_I64_PROFILE: &str = "mumei.pure-i64-comparison/v1";
 /// distinct from the
 /// bounded C03 contract, which still excludes arithmetic and sequences.
 pub const PURE_I64_WRAPPING_PROFILE: &str = "mumei.pure-i64-wrapping-scalar/v1";
+/// The widened fragment's refined-scalar extension: module-level
+/// `type Name = <scalar> where <predicate>;` declarations and their use
+/// in atom signatures. A declaration's predicate joins the value's
+/// domain — a refined parameter constrains the checked input, a refined
+/// result constrains the checked postcondition and a call site must
+/// establish the callee's refined precondition. The predicates are
+/// producer-declared obligations under the same encoder, not claims
+/// about wider language semantics.
+pub const PURE_I64_REFINED_PROFILE: &str = "mumei.pure-i64-refined-scalar/v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum SemanticContractError {
@@ -140,7 +149,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let items = admit_pure_i64_atoms(source, allow_wrapping_arithmetic)?;
+    let (items, refined) = admit_pure_i64_atoms(source, allow_wrapping_arithmetic, false)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
     if !allow_wrapping_arithmetic && items.len() != 1 {
@@ -157,6 +166,8 @@ pub fn extract_pure_i64_contract(
         source_name,
         target_triple,
         allow_wrapping_arithmetic,
+        &refined,
+        &ModuleEnv::default(),
     )
 }
 
@@ -170,6 +181,7 @@ pub fn extract_pure_i64_module_contracts(
     source: &str,
     source_name: &str,
     target_triple: Option<&str>,
+    admit_refined: bool,
 ) -> Result<Vec<SemanticContract>, SemanticContractError> {
     if source_name.trim().is_empty() || target_triple.is_some_and(|target| target.trim().is_empty())
     {
@@ -177,23 +189,47 @@ pub fn extract_pure_i64_module_contracts(
             "missing source or target identity",
         ));
     }
-    admit_pure_i64_atoms(source, true)?
+    let (items, refined) = admit_pure_i64_atoms(source, true, admit_refined)?;
+    // The translator-IR pin must see the same type environment the
+    // verifier's certificate does — a `Port`-typed binder carries its
+    // refinement annotation only when the alias is registered.
+    let mut cert_env = ModuleEnv::default();
+    for item in &items {
+        if let Item::TypeDef(typedef) = item {
+            cert_env.register_type(typedef);
+        }
+    }
+    items
         .into_iter()
-        .map(|item| match item {
-            Item::Atom(atom) => atom_contract(atom, source, source_name, target_triple, true),
-            _ => Err(SemanticContractError::Unsupported("non-atom declarations")),
+        .filter_map(|item| match item {
+            Item::Atom(atom) => Some(atom_contract(
+                atom,
+                source,
+                source_name,
+                target_triple,
+                true,
+                &refined,
+                &cert_env,
+            )),
+            // Type declarations carry no per-atom contract; their
+            // admission was the gate above.
+            _ => None,
         })
         .collect()
 }
 
 /// Shared module admission for the pure-i64 fragment: float reject, parse,
 /// nonempty, callee-map construction and the per-atom
-/// `validate_atom`/`check_atom_contract` gates. Returns the atom items in
-/// declaration order. The caller decides the arity gate.
+/// `validate_atom`/`check_atom_contract` gates. Returns the admitted items
+/// in declaration order plus the module's resolved refined-alias map;
+/// `admit_refined` widens the item vocabulary to `Item::TypeDef`
+/// declarations (`PURE_I64_REFINED_PROFILE`) while the scalar fragment
+/// itself is unchanged. The caller decides the arity gate.
 fn admit_pure_i64_atoms(
     source: &str,
     allow_wrapping_arithmetic: bool,
-) -> Result<Vec<Item>, SemanticContractError> {
+    admit_refined: bool,
+) -> Result<(Vec<Item>, RefinedEnv), SemanticContractError> {
     // Item text reconstruction can print 1.0 as 1. Reject float tokens before
     // that normalization erases the category required by this integer profile.
     let tokens = crate::parser::lexer::Lexer::new(source)
@@ -219,62 +255,102 @@ fn admit_pure_i64_atoms(
     // per-function obligation.
     let mut callees = BTreeMap::new();
     for item in &items {
-        let Item::Atom(sibling) = item else {
-            return Err(SemanticContractError::Unsupported("non-atom declarations"));
-        };
-        if callees
-            .insert(sibling.name.clone(), sibling.params.len())
-            .is_some()
-        {
-            return Err(SemanticContractError::Unsupported("duplicate atom name"));
+        match item {
+            Item::Atom(sibling) => {
+                if callees
+                    .insert(sibling.name.clone(), sibling.params.len())
+                    .is_some()
+                {
+                    return Err(SemanticContractError::Unsupported("duplicate atom name"));
+                }
+            }
+            Item::TypeDef(_) if admit_refined => (),
+            _ => {
+                return Err(SemanticContractError::Unsupported("non-atom declarations"));
+            }
         }
+    }
+    // Refined declarations share the module's name space with atoms: a
+    // type named like an atom would make `T(` ambiguous between a type
+    // position and a call, so the admission is closed over both maps.
+    let refined = build_refined_env(&items)?;
+    if refined.keys().any(|name| callees.contains_key(name)) {
+        return Err(SemanticContractError::Unsupported(
+            "type name collides with an atom name",
+        ));
     }
     // Declaration order is irrelevant to call resolution: the callee map is
     // complete before any atom's own contract is checked, so a forward call
     // to a later sibling resolves the same as a backward one.
     for item in &items {
         let Item::Atom(sibling) = item else {
-            return Err(SemanticContractError::Unsupported("non-atom declarations"));
+            continue;
         };
-        validate_atom(sibling, allow_wrapping_arithmetic)?;
+        validate_atom(sibling, allow_wrapping_arithmetic, &refined)?;
         // Every atom's contract is checked against the complete callee map,
         // not only the tail's: module validation compares each atom
         // independently, so an undeclared call target in any sibling must
         // fail closed here rather than encode as an uninterpreted
         // application that trivially agrees with an external IR member.
-        check_atom_contract(sibling, &callees, allow_wrapping_arithmetic)?;
+        check_atom_contract(sibling, &callees, allow_wrapping_arithmetic, &refined)?;
     }
-    Ok(items)
+    Ok((items, refined))
 }
 
 /// Build the `SemanticContract` for one already-admitted atom — binders,
 /// specification hash, HIR/MIR/translator-IR identities and the profile
 /// fields all describe this atom while `source_sha256` binds the whole
 /// module text.
+/// The scalar type a binder reports for its declared type name: literal
+/// scalar names map directly; a declared refined alias reports the literal
+/// its chain resolves to (`x: Port` lowers to `i64` like the emitter).
+/// Anything else is unreachable past admission — kept `"i64"` so a
+/// non-admitted caller still gets the lowered default instead of a panic.
+fn binder_scalar_type(type_name: Option<&str>, refined: &RefinedEnv) -> &'static str {
+    match type_name {
+        Some("bool") => "bool",
+        Some("i8") => "i8",
+        Some("i16") => "i16",
+        Some("i32") => "i32",
+        Some("u8") => "u8",
+        Some("u16") => "u16",
+        Some("u32") => "u32",
+        Some(name) => refined.get(name).map(|alias| alias.base).unwrap_or("i64"),
+        None => "i64",
+    }
+}
+
+/// The fragment profile a module's contracts name: the bounded C03
+/// fragment, the widened wrapping fragment, or its refined-scalar
+/// extension when the module admitted any `type` declarations.
+fn fragment_profile(allow_wrapping_arithmetic: bool, refined: &RefinedEnv) -> &'static str {
+    if !allow_wrapping_arithmetic {
+        PURE_I64_PROFILE
+    } else if refined.is_empty() {
+        PURE_I64_WRAPPING_PROFILE
+    } else {
+        PURE_I64_REFINED_PROFILE
+    }
+}
+
 fn atom_contract(
     mut atom: Atom,
     source: &str,
     source_name: &str,
     target_triple: Option<&str>,
     allow_wrapping_arithmetic: bool,
+    refined: &RefinedEnv,
+    cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
+    let profile = fragment_profile(allow_wrapping_arithmetic, refined);
 
     let mut binders: Vec<_> = atom
         .params
         .iter()
         .map(|p| TypedBinder {
             name: p.name.clone(),
-            scalar_type: match p.type_name.as_deref() {
-                Some("bool") => "bool",
-                Some("i8") => "i8",
-                Some("i16") => "i16",
-                Some("i32") => "i32",
-                Some("u8") => "u8",
-                Some("u16") => "u16",
-                Some("u32") => "u32",
-                _ => "i64",
-            },
+            scalar_type: binder_scalar_type(p.type_name.as_deref(), refined),
             role: "parameter",
             provenance: atom.span.clone(),
             span_precision: "atom",
@@ -282,16 +358,7 @@ fn atom_contract(
         .collect();
     binders.push(TypedBinder {
         name: "result".to_owned(),
-        scalar_type: match atom.return_type.as_deref() {
-            Some("bool") => "bool",
-            Some("i8") => "i8",
-            Some("i16") => "i16",
-            Some("i32") => "i32",
-            Some("u8") => "u8",
-            Some("u16") => "u16",
-            Some("u32") => "u32",
-            _ => "i64",
-        },
+        scalar_type: binder_scalar_type(atom.return_type.as_deref(), refined),
         role: "result",
         provenance: atom.span.clone(),
         span_precision: "atom",
@@ -304,11 +371,7 @@ fn atom_contract(
     // Provenance is separate from the logical identity; file relocation does not
     // change the obligation, while the full source digest still binds its text.
     let specification_sha256 = json_digest(&serde_json::json!({
-        "profile": if allow_wrapping_arithmetic {
-            PURE_I64_WRAPPING_PROFILE
-        } else {
-            PURE_I64_PROFILE
-        },
+        "profile": profile,
         // The declared parameter types are part of the specification
         // identity: `b: bool` and `b: i64` admit different input domains
         // and must not share one specification hash.
@@ -324,11 +387,7 @@ fn atom_contract(
     let mir = lower_hir_to_mir(&hir);
     Ok(SemanticContract {
         schema_version: SEMANTIC_CONTRACT_VERSION,
-        profile: if allow_wrapping_arithmetic {
-            PURE_I64_WRAPPING_PROFILE
-        } else {
-            PURE_I64_PROFILE
-        },
+        profile,
         atom: atom.name.clone(),
         source_sha256: digest(source.as_bytes()),
         atom_content_hash: compute_atom_content_hash_v2(&atom),
@@ -374,7 +433,7 @@ fn atom_contract(
             encoding: "mumei.mir-body.json/v0",
             sha256: json_digest(&mir)?,
         },
-        translator_ir: build_translator_ir_metadata(&atom, &ModuleEnv::default()),
+        translator_ir: build_translator_ir_metadata(&atom, cert_env),
         translator_version: LEAN_TRANSLATOR_VERSION,
         bridge_lemma_hash: LEAN_BRIDGE_LEMMA_HASH,
         compiler_version: env!("CARGO_PKG_VERSION"),
@@ -437,13 +496,17 @@ fn atom_contract(
 fn declared_param_kind(
     param: &crate::parser::ast::Param,
     admit_widened: bool,
+    refined: &RefinedEnv,
 ) -> Option<ScalarKind> {
     let name = param.type_name.as_deref()?;
+    // A declared refined alias resolves to its scalar base; any other
+    // undeclared type name stays outside the profile rather than fall to
+    // the `i64` default.
     let kind = match name {
         "i64" => ScalarKind::I64,
         "bool" if admit_widened => ScalarKind::Bool,
         "i8" | "i16" | "i32" | "u8" | "u16" | "u32" if admit_widened => ScalarKind::I64,
-        _ => return None,
+        other => refined.get(other)?.kind,
     };
     if param.type_ref.as_ref().is_some_and(|ty| {
         ty.name != name
@@ -463,21 +526,30 @@ fn declared_param_kind(
 
 /// The parameter kind inside a contract that already passed
 /// `validate_atom` — unvalidated sources never reach the kind checker.
-fn param_kind(param: &crate::parser::ast::Param) -> ScalarKind {
-    if param.type_name.as_deref() == Some("bool") {
-        ScalarKind::Bool
-    } else {
-        ScalarKind::I64
+/// A refined alias reports its resolved base kind (`Port` → `i64`,
+/// `type Flag = bool where v` → `bool`).
+fn param_kind(param: &crate::parser::ast::Param, refined: &RefinedEnv) -> ScalarKind {
+    match param.type_name.as_deref() {
+        Some("bool") => ScalarKind::Bool,
+        Some(name) => refined
+            .get(name)
+            .map(|alias| alias.kind)
+            .unwrap_or(ScalarKind::I64),
+        None => ScalarKind::I64,
     }
 }
 
-/// The kind the declared return type gives in this profile — `i64`, or
-/// `bool` when the widened profile admitted the declaration.
-fn return_kind(atom: &Atom) -> ScalarKind {
-    if atom.return_type.as_deref() == Some("bool") {
-        ScalarKind::Bool
-    } else {
-        ScalarKind::I64
+/// The kind the declared return type gives in this profile — `i64`,
+/// `bool` when the widened profile admitted the declaration, or a refined
+/// alias's resolved base kind.
+fn return_kind(atom: &Atom, refined: &RefinedEnv) -> ScalarKind {
+    match atom.return_type.as_deref() {
+        Some("bool") => ScalarKind::Bool,
+        Some(name) => refined
+            .get(name)
+            .map(|alias| alias.kind)
+            .unwrap_or(ScalarKind::I64),
+        None => ScalarKind::I64,
     }
 }
 
@@ -489,11 +561,12 @@ fn check_atom_contract(
     atom: &Atom,
     callees: &BTreeMap<String, usize>,
     allow_wrapping_arithmetic: bool,
+    refined: &RefinedEnv,
 ) -> Result<(), SemanticContractError> {
     let scope: BTreeMap<String, ScalarKind> = atom
         .params
         .iter()
-        .map(|p| (p.name.clone(), param_kind(p)))
+        .map(|p| (p.name.clone(), param_kind(p, refined)))
         .collect();
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
@@ -512,7 +585,7 @@ fn check_atom_contract(
         )?,
         ScalarKind::Bool,
     )?;
-    let result_kind = return_kind(atom);
+    let result_kind = return_kind(atom, refined);
     let mut ensures_scope = scope.clone();
     ensures_scope.insert("result".to_owned(), result_kind);
     expect_kind(
@@ -540,22 +613,29 @@ fn check_atom_contract(
     Ok(())
 }
 
-fn validate_atom(atom: &Atom, admit_widened: bool) -> Result<(), SemanticContractError> {
+fn validate_atom(
+    atom: &Atom,
+    admit_widened: bool,
+    refined: &RefinedEnv,
+) -> Result<(), SemanticContractError> {
     // A declared subrange integer result lowers to an i64 return like
     // the parameters — the emitter emits no truncation, so the checked
     // result is the body's full i64 value. `u64`-sized results stay out
     // on the same signature boundary as the parameters. Admitting them
-    // is likewise widened-profile only.
+    // is likewise widened-profile only. A declared refined alias admits
+    // its resolved scalar base — which is never `u64`-sized by
+    // construction (`build_refined_env` rejects non-scalar bases).
     let return_ok = match atom.return_type.as_deref() {
         Some("i64") => true,
         Some("bool") | Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32") => admit_widened,
-        _ => false,
+        Some(name) => refined.contains_key(name),
+        None => false,
     };
     if !return_ok
         || atom
             .params
             .iter()
-            .any(|p| declared_param_kind(p, admit_widened).is_none())
+            .any(|p| declared_param_kind(p, admit_widened, refined).is_none())
     {
         return Err(SemanticContractError::Unsupported(
             "explicit owned scalar i64 signature required",
@@ -609,6 +689,145 @@ fn expect_kind(actual: ScalarKind, expected: ScalarKind) -> Result<(), SemanticC
     } else {
         Err(SemanticContractError::Unsupported("scalar kind mismatch"))
     }
+}
+
+/// One admitted refined scalar type declaration resolved against the
+/// module's declaration map: the literal scalar name its alias chain ends
+/// at, the kind that literal carries in this profile, and the refinement
+/// conjuncts collected along the chain — each conjunct's declared operand
+/// name is substituted with the use-site value at encoding time.
+struct ResolvedAlias {
+    base: &'static str,
+    kind: ScalarKind,
+    conjuncts: Vec<(String, String)>,
+}
+
+/// The module's admitted refined scalar declarations by type name. An
+/// empty map is the plain wrapping fragment — a nonempty one is exactly
+/// what `PURE_I64_REFINED_PROFILE` adds over `PURE_I64_WRAPPING_PROFILE`.
+type RefinedEnv = BTreeMap<String, ResolvedAlias>;
+
+/// The literal scalar name and kind a profile scalar type gives, or
+/// `None` outside the vocabulary (`u64`/`usize`/unknown names — an
+/// unsigned full-width domain cannot be expressed as an i64 bound).
+fn scalar_base(name: &str, admit_widened: bool) -> Option<(ScalarKind, &'static str)> {
+    match name {
+        "i64" => Some((ScalarKind::I64, "i64")),
+        "bool" if admit_widened => Some((ScalarKind::Bool, "bool")),
+        "i8" if admit_widened => Some((ScalarKind::I64, "i8")),
+        "i16" if admit_widened => Some((ScalarKind::I64, "i16")),
+        "i32" if admit_widened => Some((ScalarKind::I64, "i32")),
+        "u8" if admit_widened => Some((ScalarKind::I64, "u8")),
+        "u16" if admit_widened => Some((ScalarKind::I64, "u16")),
+        "u32" if admit_widened => Some((ScalarKind::I64, "u32")),
+        _ => None,
+    }
+}
+
+/// Collect the module's `Item::TypeDef` declarations into the resolved
+/// alias map — two phases like the callee map, so a declaration's base
+/// may name a later sibling. Rejected honestly: `unit` tags (metadata
+/// this profile does not model — dropping it would silently change the
+/// admitted fragment), type names shadowing scalar profile names,
+/// duplicates, cycles, bases outside the scalar vocabulary, and
+/// predicates that are not boolean scalar-vocabulary expressions over
+/// their operand (checked with no call targets, so a refinement cannot
+/// reach a sibling atom).
+fn build_refined_env(items: &[Item]) -> Result<RefinedEnv, SemanticContractError> {
+    let mut defs = BTreeMap::new();
+    for item in items {
+        let Item::TypeDef(def) = item else {
+            continue;
+        };
+        if def.unit.is_some() {
+            return Err(SemanticContractError::Unsupported(
+                "unit-tagged type declarations",
+            ));
+        }
+        if matches!(
+            def.name.as_str(),
+            "i64"
+                | "bool"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "usize"
+                | "isize"
+        ) {
+            return Err(SemanticContractError::Unsupported(
+                "type name shadows a scalar profile name",
+            ));
+        }
+        if defs.insert(def.name.as_str(), def).is_some() {
+            return Err(SemanticContractError::Unsupported("duplicate type name"));
+        }
+    }
+    let mut env = RefinedEnv::new();
+    for name in defs.keys().copied().collect::<Vec<_>>() {
+        resolve_alias(name, &defs, &mut env, &mut BTreeSet::new())?;
+    }
+    Ok(env)
+}
+
+fn resolve_alias(
+    name: &str,
+    defs: &BTreeMap<&str, &crate::parser::ast::RefinedType>,
+    env: &mut RefinedEnv,
+    visiting: &mut BTreeSet<String>,
+) -> Result<(), SemanticContractError> {
+    if env.contains_key(name) {
+        return Ok(());
+    }
+    let def = defs[name];
+    if !visiting.insert(name.to_owned()) {
+        return Err(SemanticContractError::Unsupported(
+            "cyclic type declaration",
+        ));
+    }
+    let (kind, base, mut conjuncts) = match defs.get(def._base_type.as_str()) {
+        Some(base_def) => {
+            resolve_alias(&base_def.name, defs, env, visiting)?;
+            let resolved = &env[base_def.name.as_str()];
+            (resolved.kind, resolved.base, resolved.conjuncts.clone())
+        }
+        None => {
+            let (kind, base) = scalar_base(&def._base_type, true).ok_or(
+                SemanticContractError::Unsupported("type outside the scalar profile"),
+            )?;
+            (kind, base, Vec::new())
+        }
+    };
+    visiting.remove(name);
+    // The declaration's own predicate must be a scalar-vocabulary boolean
+    // expression over its operand. The operand's kind is the resolved
+    // base kind — every step of an alias chain lowers to the same scalar.
+    let predicate =
+        parse_expression_checked(&def.predicate_raw).map_err(|_| SemanticContractError::Parse)?;
+    expect_kind(
+        expression_kind(
+            &predicate,
+            &BTreeMap::from([(def.operand.clone(), kind)]),
+            false,
+            true,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        )?,
+        ScalarKind::Bool,
+    )?;
+    conjuncts.push((def.operand.clone(), def.predicate_raw.clone()));
+    env.insert(
+        name.to_owned(),
+        ResolvedAlias {
+            base,
+            kind,
+            conjuncts,
+        },
+    );
+    Ok(())
 }
 
 /// True when the statement subtree holds a `while` at any depth —
@@ -1120,6 +1339,10 @@ pub struct PureI64Body<'ctx> {
     /// `param_domain` — a bool-only domain keeps its 0/1 report label,
     /// while any subrange bound reports the signature-bounded domain.
     pub subrange_params: bool,
+    /// True when the atom's signature resolves through a refined scalar
+    /// type declaration — its domain bound then also carries the
+    /// declaration predicates encoded into `param_domain`.
+    pub refined_signature: bool,
     /// When the body contains a `while`, the conjunction of each loop's
     /// bounded-exit condition: `true` only on inputs where every loop's
     /// guard fails within `LOOP_BOUND` unrolled iterations. Equivalence
@@ -1139,11 +1362,12 @@ pub fn encode_pure_i64_body<'ctx>(
     context: &'ctx Context,
     allow_wrapping_arithmetic: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
-    let (source_sha256, mut items) = bounded_pure_i64_module(source, allow_wrapping_arithmetic)?;
+    let (source_sha256, mut items, refined) =
+        bounded_pure_i64_module(source, allow_wrapping_arithmetic, false)?;
     let Some(Item::Atom(atom)) = items.pop() else {
         return Err(SemanticContractError::Unsupported("source atom"));
     };
-    encode_atom_body(&atom, context, source_sha256)
+    encode_atom_body(&atom, context, source_sha256, &refined)
 }
 
 /// Encode every atom of the module under the same profile, in declaration
@@ -1154,24 +1378,34 @@ pub fn encode_pure_i64_module<'ctx>(
     source: &str,
     context: &'ctx Context,
     allow_wrapping_arithmetic: bool,
+    admit_refined: bool,
 ) -> BodyResult<Vec<PureI64Body<'ctx>>> {
-    let (source_sha256, items) = bounded_pure_i64_module(source, allow_wrapping_arithmetic)?;
+    let (source_sha256, items, refined) =
+        bounded_pure_i64_module(source, allow_wrapping_arithmetic, admit_refined)?;
     items
         .iter()
-        .map(|item| match item {
-            Item::Atom(atom) => encode_atom_body(atom, context, source_sha256.clone()),
-            _ => Err(SemanticContractError::Unsupported("non-atom declarations")),
+        .filter_map(|item| match item {
+            Item::Atom(atom) => Some(encode_atom_body(
+                atom,
+                context,
+                source_sha256.clone(),
+                &refined,
+            )),
+            _ => None,
         })
         .collect()
 }
 
-/// Shared admission for the per-atom encoders: input bounds, contract
-/// extraction (which itself admits only same-module atoms of the profile)
-/// and the module item list. Returns the module digest and the items.
+/// Shared admission for the per-atom encoders: input bounds, module
+/// admission (which itself gates every declared item of the profile)
+/// and the module item list. Returns the module digest, the items and
+/// the resolved refined-alias map — empty for callers that keep the
+/// plain fragment (`admit_refined = false`).
 fn bounded_pure_i64_module(
     source: &str,
     allow_wrapping_arithmetic: bool,
-) -> BodyResult<(String, Vec<Item>)> {
+    admit_refined: bool,
+) -> BodyResult<(String, Vec<Item>, RefinedEnv)> {
     if source.len() > 65_536 {
         return Err(SemanticContractError::Unsupported("source size limit"));
     }
@@ -1195,16 +1429,22 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let contract =
-        extract_pure_i64_contract(source, "scalar-body.mm", None, allow_wrapping_arithmetic)?;
-    let items = parse_module_checked(source).map_err(|_| SemanticContractError::Parse)?;
-    Ok((contract.source_sha256, items))
+    let (items, refined) = admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admit_refined)?;
+    // The bounded profile keeps its single-atom arity gate here the same
+    // way `extract_pure_i64_contract` applies it.
+    if !allow_wrapping_arithmetic && items.len() != 1 {
+        return Err(SemanticContractError::Unsupported(
+            "expected exactly one atom",
+        ));
+    }
+    Ok((digest(source.as_bytes()), items, refined))
 }
 
 fn encode_atom_body<'ctx>(
     atom: &crate::parser::ast::Atom,
     context: &'ctx Context,
     source_sha256: String,
+    refined: &RefinedEnv,
 ) -> BodyResult<PureI64Body<'ctx>> {
     if atom.params.len() > 16 {
         return Err(SemanticContractError::Unsupported("parameter limit"));
@@ -1214,7 +1454,7 @@ fn encode_atom_body<'ctx>(
     let inputs: Vec<_> = (0..atom.params.len())
         .map(|i| BV::new_const(context, format!("input_{i}"), 64))
         .collect();
-    let env: HashMap<String, SourceValue> = param_env(&atom.params, &inputs, context);
+    let env: HashMap<String, SourceValue> = param_env(&atom.params, &inputs, context, refined);
     let top = Bool::from_bool(context, true);
     let mut definedness = Vec::new();
     let assignable: BTreeSet<String> = atom.params.iter().map(|p| p.name.clone()).collect();
@@ -1242,13 +1482,21 @@ fn encode_atom_body<'ctx>(
             value.ite(&BV::from_u64(context, 1, 64), &BV::from_u64(context, 0, 64))
         }
     };
-    let param_domain = signature_domain(&atom.params, &inputs, context);
+    let param_domain = signature_domain(&atom.params, &inputs, context, refined)?;
     let subrange_params = atom.params.iter().any(|p| {
         matches!(
             p.type_name.as_deref(),
             Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32")
         )
     });
+    let refined_signature = atom.params.iter().any(|p| {
+        p.type_name
+            .as_deref()
+            .is_some_and(|n| refined.contains_key(n))
+    }) || atom
+        .return_type
+        .as_deref()
+        .is_some_and(|n| refined.contains_key(n));
     let loop_bound_exits = if loop_exits.is_empty() {
         None
     } else {
@@ -1264,6 +1512,7 @@ fn encode_atom_body<'ctx>(
         definedness,
         param_domain,
         subrange_params,
+        refined_signature,
         loop_bound_exits,
     })
 }
@@ -1278,30 +1527,113 @@ fn signature_domain<'ctx>(
     params: &[crate::parser::ast::Param],
     inputs: &[BV<'ctx>],
     context: &'ctx Context,
-) -> Vec<Bool<'ctx>> {
-    params
-        .iter()
-        .zip(inputs)
-        .flat_map(|(p, v)| match p.type_name.as_deref() {
-            Some("bool") => vec![v.bvule(&BV::from_u64(context, 1, 64))],
-            Some("u8") => vec![v.bvule(&BV::from_u64(context, u8::MAX as u64, 64))],
-            Some("u16") => vec![v.bvule(&BV::from_u64(context, u16::MAX as u64, 64))],
-            Some("u32") => vec![v.bvule(&BV::from_u64(context, u32::MAX as u64, 64))],
-            Some("i8") => vec![
+    refined: &RefinedEnv,
+) -> BodyResult<Vec<Bool<'ctx>>> {
+    let mut domain = Vec::new();
+    for (p, v) in params.iter().zip(inputs) {
+        match p.type_name.as_deref() {
+            Some("bool") => domain.push(v.bvule(&BV::from_u64(context, 1, 64))),
+            Some("u8") => domain.push(v.bvule(&BV::from_u64(context, u8::MAX as u64, 64))),
+            Some("u16") => domain.push(v.bvule(&BV::from_u64(context, u16::MAX as u64, 64))),
+            Some("u32") => domain.push(v.bvule(&BV::from_u64(context, u32::MAX as u64, 64))),
+            Some("i8") => domain.extend([
                 v.bvsge(&BV::from_i64(context, i8::MIN as i64, 64)),
                 v.bvsle(&BV::from_i64(context, i8::MAX as i64, 64)),
-            ],
-            Some("i16") => vec![
+            ]),
+            Some("i16") => domain.extend([
                 v.bvsge(&BV::from_i64(context, i16::MIN as i64, 64)),
                 v.bvsle(&BV::from_i64(context, i16::MAX as i64, 64)),
-            ],
-            Some("i32") => vec![
+            ]),
+            Some("i32") => domain.extend([
                 v.bvsge(&BV::from_i64(context, i32::MIN as i64, 64)),
                 v.bvsle(&BV::from_i64(context, i32::MAX as i64, 64)),
-            ],
-            _ => vec![],
-        })
-        .collect()
+            ]),
+            Some(name) => {
+                if let Some(alias) = refined.get(name) {
+                    domain.extend(alias_predicates(
+                        alias,
+                        scalar_operand(alias.kind, v, context),
+                        context,
+                    )?);
+                }
+            }
+            None => (),
+        }
+    }
+    Ok(domain)
+}
+
+/// The symbolic operand a refined declaration's conjuncts evaluate over:
+/// the same i64-carried materialization `param_env` binds for the
+/// signature — `bool`-based aliases see `input != 0`, integer-based ones
+/// the raw bit-vector.
+fn scalar_operand<'ctx>(
+    kind: ScalarKind,
+    value: &BV<'ctx>,
+    context: &'ctx Context,
+) -> SourceValue<'ctx> {
+    match kind {
+        ScalarKind::Bool => SourceValue::Boolean(value._eq(&BV::from_u64(context, 0, 64)).not()),
+        ScalarKind::I64 => SourceValue::Integer(value.clone()),
+    }
+}
+
+/// Encode one resolved alias's refinement conjuncts at a use-site value:
+/// each conjunct's declared operand binds the value and the predicate
+/// text runs through the same `source_expr` the contract clauses use.
+/// The definedness conditions the encoder raises for partial operations
+/// inside a predicate join the output too — the refinement only holds
+/// where the predicate is defined. Calls stay out by admission (the
+/// declaration gate checked predicates with no call targets).
+fn alias_predicates<'ctx>(
+    alias: &ResolvedAlias,
+    operand_value: SourceValue<'ctx>,
+    context: &'ctx Context,
+) -> BodyResult<Vec<Bool<'ctx>>> {
+    let mut out = Vec::new();
+    for (operand, text) in &alias.conjuncts {
+        let predicate = parse_expression_checked(text).map_err(|_| SemanticContractError::Parse)?;
+        let scope = HashMap::from([(operand.clone(), operand_value.clone())]);
+        let top = Bool::from_bool(context, true);
+        let mut definedness = Vec::new();
+        let mut exits = Vec::new();
+        let encoded = source_expr(
+            &predicate,
+            context,
+            &scope,
+            &top,
+            &mut definedness,
+            0,
+            &BTreeSet::new(),
+            &mut HashMap::new(),
+            &mut exits,
+            &mut Vec::new(),
+        )?
+        .boolean()?;
+        out.extend(definedness);
+        out.extend(exits);
+        out.push(encoded);
+    }
+    Ok(out)
+}
+
+/// The refinement conjuncts a declared type name contributes at one
+/// symbolic value — parameters at their input, results at the body's
+/// encoded value, call-site arguments at the actual argument. Empty for
+/// literal scalar types and undeclared names.
+fn refined_conjuncts_at<'ctx>(
+    type_name: Option<&str>,
+    value: SourceValue<'ctx>,
+    refined: &RefinedEnv,
+    context: &'ctx Context,
+) -> BodyResult<Vec<Bool<'ctx>>> {
+    let Some(name) = type_name else {
+        return Ok(Vec::new());
+    };
+    let Some(alias) = refined.get(name) else {
+        return Ok(Vec::new());
+    };
+    alias_predicates(alias, value, context)
 }
 
 const MAX_DEPTH: usize = 48;
@@ -1324,7 +1656,7 @@ pub fn encode_pure_i64_obligation<'ctx>(
     let Some(Item::Atom(atom)) = items.pop() else {
         return Err(SemanticContractError::Unsupported("source atom"));
     };
-    atom_obligation(&atom, &body, context)
+    atom_obligation(&atom, &body, context, &RefinedEnv::new())
 }
 
 /// Counterexample obligations for a multi-atom module under the widened
@@ -1342,36 +1674,39 @@ pub fn encode_pure_i64_obligation<'ctx>(
 pub fn encode_pure_i64_module_obligations<'ctx>(
     source: &str,
     context: &'ctx Context,
+    admit_refined: bool,
 ) -> BodyResult<Vec<ModuleAtomObligations<'ctx>>> {
-    let (_, items) = bounded_pure_i64_module(source, true)?;
-    let bodies = encode_pure_i64_module(source, context, true)?;
-    let callees: BTreeMap<String, &crate::parser::ast::Atom> = items
+    let (source_sha256, items, refined) = bounded_pure_i64_module(source, true, admit_refined)?;
+    let atom_items: Vec<&crate::parser::ast::Atom> = items
         .iter()
         .filter_map(|item| match item {
-            Item::Atom(atom) => Some((atom.name.clone(), atom)),
+            Item::Atom(atom) => Some(atom),
             _ => None,
         })
         .collect();
-    let callee_bodies: BTreeMap<String, &PureI64Body> = items
+    let bodies: Vec<PureI64Body> = atom_items
+        .iter()
+        .map(|atom| encode_atom_body(atom, context, source_sha256.clone(), &refined))
+        .collect::<BodyResult<_>>()?;
+    let callees: BTreeMap<String, &crate::parser::ast::Atom> = atom_items
+        .iter()
+        .map(|atom| (atom.name.clone(), *atom))
+        .collect();
+    let callee_bodies: BTreeMap<String, &PureI64Body> = atom_items
         .iter()
         .zip(bodies.iter())
-        .filter_map(|(item, body)| match item {
-            Item::Atom(atom) => Some((atom.name.clone(), body)),
-            _ => None,
-        })
+        .map(|(atom, body)| (atom.name.clone(), body))
         .collect();
     let mut atoms = Vec::new();
-    for (item, body) in items.iter().zip(bodies.iter()) {
-        match item {
-            Item::Atom(atom) => atoms.push(module_atom_obligations(
-                atom,
-                body,
-                &callees,
-                &callee_bodies,
-                context,
-            )?),
-            _ => return Err(SemanticContractError::Unsupported("non-atom declarations")),
-        }
+    for (atom, body) in atom_items.iter().zip(bodies.iter()) {
+        atoms.push(module_atom_obligations(
+            atom,
+            body,
+            &callees,
+            &callee_bodies,
+            context,
+            &refined,
+        )?);
     }
     Ok(atoms)
 }
@@ -1413,6 +1748,7 @@ fn module_atom_obligations<'ctx>(
     callees: &BTreeMap<String, &crate::parser::ast::Atom>,
     callee_bodies: &BTreeMap<String, &PureI64Body<'ctx>>,
     context: &'ctx Context,
+    refined: &RefinedEnv,
 ) -> BodyResult<ModuleAtomObligations<'ctx>> {
     // The domain the widened profile binds for this atom: declared
     // signature bounds (bool/subrange parameters), guarded-operator
@@ -1429,7 +1765,8 @@ fn module_atom_obligations<'ctx>(
     if let Some(exits) = &body.loop_bound_exits {
         source_domain.push(exits.clone());
     }
-    let mut env: HashMap<String, SourceValue> = param_env(&atom.params, &body.inputs, context);
+    let mut env: HashMap<String, SourceValue> =
+        param_env(&atom.params, &body.inputs, context, refined);
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
     let top = Bool::from_bool(context, true);
@@ -1450,7 +1787,7 @@ fn module_atom_obligations<'ctx>(
     .boolean()?;
     env.insert(
         "result".to_string(),
-        match return_kind(atom) {
+        match return_kind(atom, refined) {
             ScalarKind::Bool => {
                 SourceValue::Boolean(body.value._eq(&BV::from_u64(context, 0, 64)).not())
             }
@@ -1473,6 +1810,17 @@ fn module_atom_obligations<'ctx>(
         &mut Vec::new(),
     )?
     .boolean()?;
+    // A refined result type adds its declaration conjuncts to the
+    // postcondition the atom must satisfy — `-> Port` guarantees
+    // `ensures` AND `v >= 1 && v <= 65535` at the encoded result.
+    let mut post = vec![ensures];
+    post.extend(refined_conjuncts_at(
+        atom.return_type.as_deref(),
+        env["result"].clone(),
+        refined,
+        context,
+    )?);
+    let post = Bool::and(context, &post.iter().collect::<Vec<_>>());
     let mut assumptions = Vec::new();
     let mut domain_obligations = Vec::new();
     for site in &body.call_sites {
@@ -1481,7 +1829,7 @@ fn module_atom_obligations<'ctx>(
                 "call target outside module",
             ));
         };
-        let site_env = param_env(&callee.params, &site.args, context);
+        let site_env = param_env(&callee.params, &site.args, context, refined);
         let callee_requires =
             parse_expression_checked(&callee.requires).map_err(|_| SemanticContractError::Parse)?;
         let mut site_exits = Vec::new();
@@ -1516,7 +1864,12 @@ fn module_atom_obligations<'ctx>(
         let substitutions: Vec<(&BV, &BV)> =
             callee_body.inputs.iter().zip(site.args.iter()).collect();
         let mut callee_precondition = vec![callee_requires];
-        callee_precondition.extend(signature_domain(&callee.params, &site.args, context));
+        callee_precondition.extend(signature_domain(
+            &callee.params,
+            &site.args,
+            context,
+            refined,
+        )?);
         callee_precondition.extend(
             callee_body
                 .definedness
@@ -1539,7 +1892,7 @@ fn module_atom_obligations<'ctx>(
         let mut ensures_env = site_env;
         ensures_env.insert(
             "result".to_string(),
-            match return_kind(callee) {
+            match return_kind(callee, refined) {
                 ScalarKind::Bool => {
                     SourceValue::Boolean(site.result._eq(&BV::from_u64(context, 0, 64)).not())
                 }
@@ -1562,6 +1915,18 @@ fn module_atom_obligations<'ctx>(
             &mut Vec::new(),
         )?
         .boolean()?;
+        // A refined callee result type strengthens the assumption the
+        // site makes the same way it strengthens the callee's own
+        // postcondition: the site result satisfies the declaration's
+        // conjuncts at the call's actual result value.
+        let mut callee_post = vec![callee_ensures];
+        callee_post.extend(refined_conjuncts_at(
+            callee.return_type.as_deref(),
+            ensures_env["result"].clone(),
+            refined,
+            context,
+        )?);
+        let callee_post = Bool::and(context, &callee_post.iter().collect::<Vec<_>>());
         // The assumption binds only where the call is actually reached
         // (its guard) and the callee's ensures encoding stayed inside
         // its bounded-while domain: outside the guard the site result
@@ -1571,10 +1936,10 @@ fn module_atom_obligations<'ctx>(
         // falsify the whole formula and mask a real violation.
         let exits_domain = Bool::and(context, &ensures_site_exits.iter().collect::<Vec<_>>());
         let site_domain = Bool::and(context, &[&site.guard, &exits_domain]);
-        assumptions.push(site_domain.implies(&callee_ensures));
+        assumptions.push(site_domain.implies(&callee_post));
     }
     let assumption = Bool::and(context, &assumptions.iter().collect::<Vec<_>>());
-    let mut terms = vec![requires, Bool::and(context, &[&assumption, &ensures.not()])];
+    let mut terms = vec![requires, Bool::and(context, &[&assumption, &post.not()])];
     for exits in requires_exits.iter().chain(ensures_exits.iter()) {
         terms.push(exits.clone());
     }
@@ -1595,8 +1960,10 @@ fn atom_obligation<'ctx>(
     atom: &Atom,
     body: &PureI64Body<'ctx>,
     context: &'ctx Context,
+    refined: &RefinedEnv,
 ) -> BodyResult<Bool<'ctx>> {
-    let mut env: HashMap<String, SourceValue> = param_env(&atom.params, &body.inputs, context);
+    let mut env: HashMap<String, SourceValue> =
+        param_env(&atom.params, &body.inputs, context, refined);
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
     let top = Bool::from_bool(context, true);
@@ -1659,12 +2026,13 @@ fn param_env<'ctx>(
     params: &[crate::parser::ast::Param],
     inputs: &[BV<'ctx>],
     ctx: &'ctx Context,
+    refined: &RefinedEnv,
 ) -> HashMap<String, SourceValue<'ctx>> {
     params
         .iter()
         .zip(inputs)
         .map(|(p, v)| {
-            let value = if param_kind(p) == ScalarKind::Bool {
+            let value = if param_kind(p, refined) == ScalarKind::Bool {
                 SourceValue::Boolean(v._eq(&BV::from_u64(ctx, 0, 64)).not())
             } else {
                 SourceValue::Integer(v.clone())
@@ -2810,7 +3178,7 @@ mod tests {
         config.set_timeout_msec(crate::verification::VerificationConfig::default().timeout_ms);
         let context = z3::Context::new(&config);
         let solver = z3::Solver::new(&context);
-        let atoms = encode_pure_i64_module_obligations(source, &context).unwrap();
+        let atoms = encode_pure_i64_module_obligations(source, &context, false).unwrap();
         let mut outcomes = Vec::new();
         for atom in &atoms {
             solver.reset();
@@ -2930,5 +3298,142 @@ mod tests {
         assert!(module_outcomes(&out_of_bound)
             .iter()
             .any(|result| *result == z3::SatResult::Sat));
+    }
+
+    fn refined_module_outcomes(source: &str) -> Vec<z3::SatResult> {
+        let mut config = z3::Config::new();
+        config.set_timeout_msec(crate::verification::VerificationConfig::default().timeout_ms);
+        let context = z3::Context::new(&config);
+        let solver = z3::Solver::new(&context);
+        let atoms = encode_pure_i64_module_obligations(source, &context, true).unwrap();
+        let mut outcomes = Vec::new();
+        for atom in &atoms {
+            solver.reset();
+            solver.assert(&atom.domain);
+            assert_eq!(solver.check(), z3::SatResult::Sat);
+            for obligation in &atom.obligations {
+                solver.reset();
+                solver.assert(obligation);
+                outcomes.push(solver.check());
+            }
+        }
+        outcomes
+    }
+
+    #[test]
+    fn refined_typedef_admission_gates_the_fragment() {
+        let port = "type Port = i64 where v >= 1 && v <= 65535;\n\
+             atom listen(x: Port) -> Port requires: true; ensures: result == x; body: { x };\n\
+             atom main() -> i64 requires: true; ensures: result == 80; body: { listen(80) };";
+        // The refined profile admits the declaration and signature use.
+        let contracts = extract_pure_i64_module_contracts(port, "m.mm", None, true).unwrap();
+        assert_eq!(contracts.len(), 2);
+        assert_eq!(contracts[0].profile, PURE_I64_REFINED_PROFILE);
+        // The strict fragment keeps refusing the same source — a record
+        // pinned v1 could never describe it.
+        assert!(extract_pure_i64_module_contracts(port, "m.mm", None, false).is_err());
+        // Alias chains compose: Tiny is Small's `v < 10` plus its own
+        // `v > 0` — admitted as a member signature type too.
+        let chained = "type Small = i64 where v < 10;\n\
+             type Tiny = Small where v > 0;\n\
+             atom t(x: Tiny) -> i64 requires: true; ensures: result == x; body: { x };\n\
+             atom main() -> i64 requires: true; ensures: result == 4; body: { t(4) };";
+        assert_eq!(
+            extract_pure_i64_module_contracts(chained, "m.mm", None, true).unwrap()[0].profile,
+            PURE_I64_REFINED_PROFILE
+        );
+        // A declaration-only module of typedefs plus atoms is fine.
+        let unused_alias = "type Unused = i64 where v > 0;\n\
+             atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
+        assert_eq!(
+            extract_pure_i64_module_contracts(unused_alias, "m.mm", None, true).unwrap()[0].profile,
+            PURE_I64_REFINED_PROFILE
+        );
+        // Fail-closed gates: every malformed declaration stays out.
+        for source in [
+            // unit metadata the profile does not model
+            "type Speed = i64 @unit(\"m/s\") where v > 0;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+            // scalar-vocabulary shadowing
+            "type i64 = bool where v;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+            // duplicate declaration names
+            "type P = i64 where v > 0;\ntype P = i64 where v < 10;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+            // cyclic alias
+            "type A = B where v > 0;\ntype B = A where v < 10;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+            // non-scalar base
+            "type T = f64 where v > 0;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+            // undeclared base name
+            "type T = Missing where v > 0;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+            // type name collides with an atom name
+            "type helper = i64 where v > 0;\natom helper() -> i64 requires: true; ensures: result == 0; body: { 0 };\natom main() -> i64 requires: true; ensures: result == 0; body: { helper() };",
+            // undeclared signature type stays rejected under both modes
+            "atom f(x: Missing) -> i64 requires: true; ensures: result == x; body: { x };",
+            // non-Bool predicate
+            "type P = i64 where v + 1;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+            // predicate referencing a name beyond its declared operand
+            "type P = i64 where v > w;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(source, "m.mm", None, true).is_err(),
+                "unexpected acceptance: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn refined_obligations_fold_param_result_and_call_site_predicates() {
+        // The parameter refinement is an input domain the callee may
+        // assume: `p >= 1` holds inside `widen` without a `requires`.
+        let domain = "type Port = i64 where v >= 1 && v <= 65535;\n\
+             atom widen(p: Port) -> i64 requires: true; ensures: result >= 1; body: { p };\n\
+             atom main() -> i64 requires: true; ensures: result == 80; body: { 80 };";
+        assert!(refined_module_outcomes(domain)
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
+        // But the domain bounds only what the predicate says: `result
+        // >= 2` fails at `p = 1` — the refinement is really checked,
+        // not vacuously assumed.
+        let too_strong = domain.replace("result >= 1", "result >= 2");
+        assert!(refined_module_outcomes(&too_strong)
+            .iter()
+            .any(|result| *result == z3::SatResult::Sat));
+        // The result refinement is a postcondition the body must
+        // satisfy: `x + 1` meets its own `ensures` but leaves Port at
+        // `x = 65535`, so the obligation is refutable.
+        let result_out_of_range = "type Port = i64 where v >= 1 && v <= 65535;\n\
+             atom bump(x: Port) -> Port requires: true; ensures: result == x + 1; body: { x + 1 };\n\
+             atom main() -> i64 requires: true; ensures: result == 2; body: { bump(1) };";
+        assert!(refined_module_outcomes(result_out_of_range)
+            .iter()
+            .any(|result| *result == z3::SatResult::Sat));
+        // And a conforming body — the `requires` bounds `x` so `x + 1`
+        // stays inside Port — keeps every obligation closed.
+        let in_range = "type Port = i64 where v >= 1 && v <= 65535;\n\
+             atom bump(x: Port) -> Port requires: x <= 65534; ensures: result == x + 1; body: { x + 1 };\n\
+             atom main() -> i64 requires: true; ensures: result == 2; body: { bump(1) };";
+        assert!(refined_module_outcomes(&in_range)
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
+        // A call site must establish the callee's refined domain:
+        // `check(70000)` is outside Port, so a domain obligation is
+        // refutable; `check(80)` closes it.
+        let call_site = "type Port = i64 where v >= 1 && v <= 65535;\n\
+             atom check(p: Port) -> i64 requires: true; ensures: result == p; body: { p };\n\
+             atom main() -> i64 requires: true; ensures: result == 80; body: { check(80) };";
+        assert!(refined_module_outcomes(call_site)
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
+        let bad_call = call_site.replace("check(80)", "check(70000)");
+        assert!(refined_module_outcomes(&bad_call)
+            .iter()
+            .any(|result| *result == z3::SatResult::Sat));
+        // The callee's refined result type also strengthens what the
+        // call site may assume — `make()` yields a Port, so its caller
+        // can rely on `>= 1`.
+        let assumed = "type Port = i64 where v >= 1 && v <= 65535;\n\
+             atom make() -> Port requires: true; ensures: result == 80; body: { 80 };\n\
+             atom main() -> i64 requires: true; ensures: result >= 1; body: { make() };";
+        assert!(refined_module_outcomes(assumed)
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
     }
 }

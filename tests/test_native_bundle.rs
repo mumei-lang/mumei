@@ -1886,6 +1886,41 @@ fn module_bundle_builds_checks_and_rechecks_within_its_own_profile() {
 }
 
 #[test]
+fn module_bundle_with_refined_scalar_members_builds_as_v2() {
+    // A module declaring a refined scalar alias and using it in a
+    // signature builds under the v2 profile: the record names the
+    // refined admission, and check/recheck/recheck-llvm all re-derive
+    // under that same gate.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "type Port = i64 where v >= 1 && v <= 65535;\n\
+         atom listen(x: Port) -> Port requires: true; ensures: result == x; body: { x };\n\
+         atom main() -> i64 requires: true; ensures: result == 80; body: { listen(80) };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MODULE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V2);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_REFINED_PROFILE
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A v2 record re-pinned under the v1 name is not a v1 record —
+    // the identity check refuses it rather than silently re-admitting
+    // under the narrower gate.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn module_bundle_with_match_atom_builds_and_rechecks() {
     // Certificate generation annotates match bodies with a
     // manual-lemma reason in the translator IR; the binding pins the

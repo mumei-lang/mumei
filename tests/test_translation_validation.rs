@@ -1980,6 +1980,7 @@ fn native_module_validation_compares_each_atom_against_its_member() {
         NATIVE_CALLING,
         &native_module_ir("%d = add i64 %x, 1 ret i64 %d"),
         Options::default(),
+        false,
     )
     .unwrap();
     assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
@@ -2002,6 +2003,7 @@ fn native_module_validation_compares_each_atom_against_its_member() {
         NATIVE_CALLING,
         &native_module_ir("%d = add i64 %x, 2 ret i64 %d"),
         Options::default(),
+        false,
     )
     .unwrap();
     assert_eq!(report.outcome, Outcome::Different);
@@ -2019,7 +2021,8 @@ fn native_module_validation_requires_main_and_its_wrapper() {
     assert!(tv::validate_native_module(
         helpers,
         &native_module_ir("ret i64 %x"),
-        Options::default()
+        Options::default(),
+        false,
     )
     .is_err());
     // A `main` atom with inputs cannot back the zero-argument wrapper call.
@@ -2027,7 +2030,8 @@ fn native_module_validation_requires_main_and_its_wrapper() {
     assert!(tv::validate_native_module(
         parametrized,
         &native_module_ir("ret i64 %x"),
-        Options::default()
+        Options::default(),
+        false,
     )
     .is_err());
     // `__mumei_user_main` is the emitter-reserved rename target.
@@ -2035,7 +2039,8 @@ fn native_module_validation_requires_main_and_its_wrapper() {
     assert!(tv::validate_native_module(
         reserved,
         &native_module_ir("ret i64 %x"),
-        Options::default()
+        Options::default(),
+        false,
     )
     .is_err());
     // The C `main` wrapper must be present with its fixed shape.
@@ -2043,7 +2048,9 @@ fn native_module_validation_requires_main_and_its_wrapper() {
         "define i64 @g(i64 %x) { ret i64 %x }\n\
          define i64 @__mumei_user_main() { %a = call i64 @g(i64 40) %r = add i64 %a, 2 ret i64 %r }",
     );
-    assert!(tv::validate_native_module(NATIVE_CALLING, &no_wrapper, Options::default()).is_err());
+    assert!(
+        tv::validate_native_module(NATIVE_CALLING, &no_wrapper, Options::default(), false).is_err()
+    );
     // A wrapper that calls a different target is rejected.
     let wrong_wrapper = pin(
         "define i64 @g(i64 %x) { ret i64 %x }\n\
@@ -2051,18 +2058,23 @@ fn native_module_validation_requires_main_and_its_wrapper() {
          define i32 @main(i32 %argc, ptr %argv) { %result = call i64 @g(i64 0) %exit_code = trunc i64 %result to i32 ret i32 %exit_code }",
     );
     assert!(
-        tv::validate_native_module(NATIVE_CALLING, &wrong_wrapper, Options::default()).is_err()
+        tv::validate_native_module(NATIVE_CALLING, &wrong_wrapper, Options::default(), false)
+            .is_err()
     );
     // A missing helper member cannot even form the call-site comparison.
     let missing = pin(
         "define i64 @__mumei_user_main() { %a = call i64 @g(i64 40) %r = add i64 %a, 2 ret i64 %r }\n\
          define i32 @main(i32 %argc, ptr %argv) { %result = call i64 @__mumei_user_main() %exit_code = trunc i64 %result to i32 ret i32 %exit_code }",
     );
-    assert!(tv::validate_native_module(NATIVE_CALLING, &missing, Options::default()).is_err());
+    assert!(
+        tv::validate_native_module(NATIVE_CALLING, &missing, Options::default(), false).is_err()
+    );
     // Members keep external linkage.
     let internal =
         native_module_ir("ret i64 %x").replace("define i64 @g(", "define internal i64 @g(");
-    assert!(tv::validate_native_module(NATIVE_CALLING, &internal, Options::default()).is_err());
+    assert!(
+        tv::validate_native_module(NATIVE_CALLING, &internal, Options::default(), false).is_err()
+    );
 }
 
 #[test]
@@ -2077,7 +2089,7 @@ fn native_module_validation_maps_user_main_calls_back_to_main() {
          define i64 @__mumei_user_main() { ret i64 7 }\n\
          define i32 @main(i32 %argc, ptr %argv) { %result = call i64 @__mumei_user_main() %exit_code = trunc i64 %result to i32 ret i32 %exit_code }",
     );
-    let report = tv::validate_native_module(callers_main, &ir, Options::default()).unwrap();
+    let report = tv::validate_native_module(callers_main, &ir, Options::default(), false).unwrap();
     assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
     // The same rename binds the single-function route: a recursive
     // `main()` meets `call @__mumei_user_main`.
@@ -2114,7 +2126,8 @@ fn native_module_validation_checks_emitted_snapshot_per_atom() {
     mumei_emit_llvm::binary::compile_atoms_to_binary_ll(&hirs, &ModuleEnv::default(), &[], &path)
         .unwrap();
     let ir = pin(&std::fs::read_to_string(&path).unwrap());
-    let report = tv::validate_native_module(NATIVE_CALLING, &ir, Options::default()).unwrap();
+    let report =
+        tv::validate_native_module(NATIVE_CALLING, &ir, Options::default(), false).unwrap();
     assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
     assert_eq!(report.functions.len(), 2);
     assert!(report
