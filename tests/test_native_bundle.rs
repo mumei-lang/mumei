@@ -1649,3 +1649,106 @@ fn module_build_rejects_sources_without_a_single_trivially_gated_main() {
         assert!(!output.status.success());
     }
 }
+
+fn recheck_artifact(source: &Path, bundle: &Path, id: &str) -> Output {
+    consume("recheck-artifact", source, bundle, id)
+}
+
+fn repin_module(bundle: &Path) -> String {
+    let mut record: native_bundle::ModuleNativeBundleRecord =
+        serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    for role in BundleFile::ALL {
+        record.files.insert(
+            role,
+            native_bundle::ContentIdentity::of(&fs::read(bundle.join(role.file_name())).unwrap()),
+        );
+    }
+    let bytes = serde_json::to_vec(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    native_bundle::sha256(&bytes)
+}
+
+#[test]
+fn artifact_recheck_reproduces_pinned_object_and_executable() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let output = recheck_artifact(&source, &bundle, &id);
+    assert_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("toolchain_identity_only"));
+    assert!(stdout.contains("no_execution_or_runtime_semantics"));
+}
+
+#[test]
+fn module_artifact_recheck_reproduces_pinned_object_and_executable() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), MODULE);
+    let output = recheck_artifact(&source, &bundle, &id);
+    assert_success(&output);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("toolchain_identity_only"));
+}
+
+#[test]
+fn artifact_recheck_rejects_a_repinned_foreign_object() {
+    // A bundle repinned around a *valid but foreign* object — one this
+    // toolchain did not emit from the pinned `program.ll` — fails the
+    // object stage, not just the identity stage.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, _) = build(root.path());
+    let other_root = tempfile::tempdir().unwrap();
+    let other_source = other_root.path().join("other.mm");
+    fs::write(
+        &other_source,
+        "atom main() -> i64 requires: true; ensures: result == 9; body: { 9 };",
+    )
+    .unwrap();
+    let other_bundle = other_root.path().join("bundle");
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        other_source.to_str().unwrap(),
+        "-o",
+        other_bundle.to_str().unwrap(),
+    ]));
+    fs::copy(
+        other_bundle.join(BundleFile::Object.file_name()),
+        bundle.join(BundleFile::Object.file_name()),
+    )
+    .unwrap();
+    let id = repin(&bundle, None);
+    let output = recheck_artifact(&source, &bundle, &id);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("differs"));
+}
+
+#[test]
+fn artifact_recheck_rejects_a_repinned_foreign_executable() {
+    // The pinned object is genuine, so the object stage passes; the
+    // relinked executable must still equal the pinned `program`.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, _) = build(root.path());
+    fs::write(
+        bundle.join(BundleFile::Executable.file_name()),
+        b"repinned non-executable bytes",
+    )
+    .unwrap();
+    let id = repin(&bundle, None);
+    let output = recheck_artifact(&source, &bundle, &id);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("differs"));
+}
+
+#[test]
+fn module_artifact_recheck_rejects_a_repinned_foreign_executable() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, _) = build_source(root.path(), MODULE);
+    fs::write(
+        bundle.join(BundleFile::Executable.file_name()),
+        b"repinned non-executable bytes",
+    )
+    .unwrap();
+    let id = repin_module(&bundle);
+    let output = recheck_artifact(&source, &bundle, &id);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("differs"));
+}

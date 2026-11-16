@@ -516,6 +516,14 @@ pub(crate) enum NativeBundleCommand {
         #[arg(long)]
         expected_build_id: String,
     },
+    /// Recheck that the toolchain reproduces the pinned object and executable; does not execute or check runtime/ABI semantics
+    RecheckArtifact {
+        bundle: String,
+        source: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel
+        #[arg(long)]
+        expected_build_id: String,
+    },
 }
 
 #[derive(Subcommand)]
