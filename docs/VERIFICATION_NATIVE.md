@@ -1317,6 +1317,64 @@ toolchain versions.
 Regression gate:
 `LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo test --test test_native_bundle --test test_translation_validation -p mumei-core`.
 
+### Multifile import-closure bundles
+
+When the source file declares `import` statements,
+`mumei native-bundle build` takes the multifile path and records
+`mumei.native-multifile-bundle/v1` under profile
+`mumei.native-pure-i64-multifile-linux-x86_64/v1` — a third record family,
+mutually unparseable with the single-atom and module schemas. Slice-1 of
+the file-level import closure admits a deliberately small shape:
+
+- the root file's imports must be same-directory basenames
+  (`import "helpers" as h;` reads `helpers.mm` next to the root — no
+  `../`, absolute paths, `std/` prefixes or subdirectories);
+- each import sits alone on its line as `import "<member>" [as <alias>];`;
+- imported members contain atoms only — no nested imports and no other
+  top-level items — and at least one import is required;
+- at most 64 members of at most 64 KiB each, named by the member grammar
+  (bare `.mm` basenames — no separators, drive letters or leading dots);
+- duplicate imports and self-imports are rejected.
+
+```sh
+# app.mm
+# import "helpers" as h;
+# atom main() -> i64 requires: true; ensures: result > 0; body: { h::helper(0) };
+mumei native-bundle build app.mm -o app-bundle   # reads helpers.mm from app.mm's directory
+mumei native-bundle check app-bundle app.mm --expected-build-id <trusted-id>
+mumei native-bundle recheck-source app-bundle app.mm --expected-build-id <trusted-id>
+mumei native-bundle recheck-llvm app-bundle app.mm --expected-build-id <trusted-id>
+mumei native-bundle recheck-artifact app-bundle app.mm --expected-build-id <trusted-id>
+```
+
+The producer merges the closure into one canonical text — imported member
+texts in import order followed by the root minus its import lines — and
+the module pipeline compiles that text. Qualified calls are namespace
+syntax, not contract: `h::helper(0)` merges as `helper(0)`, the same
+normalization the language's resolved `ModuleEnv` performs. Every
+original member is written under `sources/<name>.mm` and pinned
+byte-for-byte in the record's `sources` map; `source_files` pins the
+root name plus `import_graph_sha256`, the file-level
+`{member: [sorted imports]}` graph under the same canonical-JSON
+convention as the atom-level `source_dependencies_sha256` pin.
+
+Consumers never read a filesystem beyond the `--source` argument: its
+basename names the root and its bytes must equal the pinned root member —
+the remaining members come from the bundle's pinned `sources/`, and
+every recheck re-derives the merge from them, so the checked text is
+always the one the record binds. `check`, `recheck-source`,
+`recheck-llvm` and `recheck-artifact` run the same module-scope
+verification over the merged text, wrapping-i64 semantics included.
+`recheck-llvm --json`, `recheck-evidence` and the `accept-*` commands
+reject multifile records honestly — the multifile consumer Evidence
+vocabulary is not emitted yet, so nothing reports an envelope it cannot
+produce.
+
+Nothing is claimed beyond the module scopes: same identity-plus-recheck
+boundaries, no authenticity, no import-alias pinning (the alias is
+namespace sugar the merge erases), and subdirectory/`std`, nested and
+transitive imports stay outside this slice.
+
 ### Pinned toolchain artifact recheck
 
 `mumei native-bundle recheck-artifact` is the next C10 consumer stage. It runs
