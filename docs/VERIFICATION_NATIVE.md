@@ -250,6 +250,42 @@ certificate/Claim Book/Seal Grade/Lean gates, general acceptance/mapping and
 final-artifact assurance remain separate/open. No external verifier, new
 environment variable, proof grade or WASM support is introduced.
 
+### Bounded multi-record representation check
+
+```sh
+mumei evidence check-list evidence-list.json
+mumei evidence check-list evidence-list.json --json
+mumei evidence check-list --stdin --json < evidence-list.json
+```
+
+`evidence check` admits exactly one common v1 record, yet native report
+envelopes already carry `1 + 2·N` records under family-specific schemas, so a
+producer needing several records in one bounded input has no common gate.
+`check-list` fills that gap with a **closed list envelope**
+`mumei.verification-evidence-list/v1`: an object with only `schema_version` and
+`evidence`, whose elements are common v1 records — not a three-record native
+report envelope, a proof certificate or an arbitrary JSON array of values.
+
+Every element keeps its raw input bytes and passes the same single-record gate
+as `evidence check`, so duplicate-key, unknown-field and combination checks
+apply inside each record exactly as they do standalone (a parsed `Value`
+element would already have collapsed duplicate keys before the inner gate could
+see them). Two bounds apply: the envelope is at most 65,536 bytes — the same
+shared input limit — and carries at most 64 records, whichever trips first.
+An empty `evidence` array is representation-valid: the gate states each
+admitted record's shape, not that any record exists. The diagnostic adds
+`record_count` and lists `cross_record_consistency` among the checks not
+performed — no deduplication, ordering, agreement or coverage claim is implied,
+and no record's truth is evaluated.
+
+Input selection, rejection posture and exit codes are identical to
+`evidence check`: one regular file or explicit `--stdin`, exit 0 only for a
+fully valid envelope, exit 1 with no stdout otherwise, clap exit 2 on usage
+errors. The JSON diagnostic is `mumei.evidence-representation-check/v1` with
+`evidence_schema_version: mumei.verification-evidence-list/v1`; it remains an
+anonymous diagnostic, not reusable Evidence, a certificate or an acceptance
+receipt, and is not accepted as an Evidence input.
+
 ### Standalone fresh source Evidence producer
 
 ```sh
