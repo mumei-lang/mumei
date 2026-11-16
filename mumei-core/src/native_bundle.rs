@@ -559,48 +559,128 @@ pub fn member_name(path: &str) -> Result<String, BundleError> {
     Ok(format!("{stem}.mm"))
 }
 
-/// Derive the canonical merged text for an import closure: parse the
-/// root member, walk its single-level `import` declarations in
-/// declaration order, and concatenate each imported member's text
-/// (atoms only — nested imports stay outside this profile) followed by
-/// the root's text with its import lines stripped. Returns the merged
-/// text and the imported member names in order. Determinism comes from
-/// the pinned member map, so a recheck re-derives byte-identical text.
+/// Derive the canonical merged text for an import closure: a
+/// post-order depth-first walk from the root over the pinned member
+/// map emits each member after its own imports (dependencies first,
+/// siblings in declaration order), so a diamond member emits once at
+/// its first visit and cycles fail honestly. Each member's own import
+/// lines are stripped and its own import qualifiers normalized to bare
+/// callee names — a member's namespace is file-local, matching the
+/// language's resolved ModuleEnv. Returns the merged text and the full
+/// `{member: [sorted imports]}` graph. Determinism comes from the
+/// pinned member map, so a recheck re-derives byte-identical text.
 pub fn merge_import_closure(
     root_name: &str,
     sources: &BTreeMap<String, String>,
-) -> Result<(String, Vec<String>), BundleError> {
-    let root = sources
-        .get(root_name)
-        .ok_or(BundleError("root source member not pinned"))?;
+) -> Result<(String, BTreeMap<String, Vec<String>>), BundleError> {
+    if !sources.contains_key(root_name) {
+        return Err(BundleError("root source member not pinned"));
+    }
+    let mut visiting = std::collections::BTreeSet::new();
+    let mut emitted = std::collections::BTreeSet::new();
+    let mut graph = BTreeMap::new();
+    let mut parts = Vec::new();
+    visit_member(
+        root_name,
+        sources,
+        &mut visiting,
+        &mut emitted,
+        &mut graph,
+        &mut parts,
+    )?;
+    if graph[root_name].is_empty() {
+        return Err(BundleError("expected at least one import"));
+    }
+    Ok((format!("{}\n", parts.join("\n")), graph))
+}
+
+/// One DFS node: gather the member's imports under the same gates as
+/// the root (single-line strict grammar, no duplicates, no
+/// self-import, distinct qualifiers), recurse into them, then emit the
+/// member's text with its import lines removed and its own qualifiers
+/// stripped.
+fn visit_member(
+    member: &str,
+    sources: &BTreeMap<String, String>,
+    visiting: &mut std::collections::BTreeSet<String>,
+    emitted: &mut std::collections::BTreeSet<String>,
+    graph: &mut BTreeMap<String, Vec<String>>,
+    parts: &mut Vec<String>,
+) -> Result<(), BundleError> {
+    if emitted.contains(member) {
+        return Ok(());
+    }
+    if !visiting.insert(member.to_owned()) {
+        return Err(BundleError("circular import outside profile"));
+    }
+    let text = sources
+        .get(member)
+        .ok_or(BundleError("imported source member not pinned"))?;
+    let (imports, qualifiers, import_lines) = member_imports(member, text)?;
+    let mut sorted = imports.clone();
+    sorted.sort();
+    graph.insert(member.to_owned(), sorted);
+    for dep in &imports {
+        visit_member(dep, sources, visiting, emitted, graph, parts)?;
+    }
+    visiting.remove(member);
+    // Qualified calls are namespace syntax, not part of the atom
+    // contract: the callee map keys on bare names, so `h::helper(`
+    // merges as `helper(` — the same normalization the language's own
+    // resolved ModuleEnv performs.
+    let mut body = text
+        .lines()
+        .enumerate()
+        .filter(|(n, _)| !import_lines.contains(&(n + 1)))
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for qualifier in &qualifiers {
+        body = strip_qualifier(&body, qualifier);
+    }
+    parts.push(body.trim_end().to_owned());
+    emitted.insert(member.to_owned());
+    Ok(())
+}
+
+/// A member's gated imports: member names in declaration order, the
+/// qualifier each brings into scope, and the import lines to strip.
+type MemberImports = (Vec<String>, Vec<String>, std::collections::BTreeSet<usize>);
+
+/// Parse a member's `import` items and gate them: bare-basename
+/// members pinned in `sources`, no duplicate imports, no self-import,
+/// distinct qualifiers (alias or stem — two members bound to the same
+/// namespace sugar would strip to the same bare-name space
+/// ambiguously), atoms the only other allowed item, and every import
+/// alone on its line as one strict `import "..." [as x];` statement
+/// (a trailing `//` comment is trivia).
+fn member_imports(member_name: &str, text: &str) -> Result<MemberImports, BundleError> {
     // `parse_module` (not the checked entry point) because the checked
     // pipeline consumes `import` items; whatever the lenient scan cannot
     // see stays in the text and fails the merged admission downstream.
-    let items = parser::parse_module(root);
-    let mut imports: Vec<String> = Vec::new();
+    let items = parser::parse_module(text);
+    let mut imports = Vec::new();
+    let mut qualifiers = Vec::new();
+    let mut seen_qualifiers = std::collections::BTreeSet::new();
     let mut import_lines = std::collections::BTreeSet::new();
-    // The qualifier each import brings into scope — its alias when
-    // declared, else the member stem — so merged calls resolve as the
-    // bare callee names the module profile's callee map keys on.
-    let mut qualifiers: Vec<String> = Vec::new();
     for item in &items {
         match item {
             parser::Item::Import(decl) => {
-                let member = member_name(&decl.path)?;
-                if member == root_name {
+                let member = crate::native_bundle::member_name(&decl.path)?;
+                if member == member_name {
                     return Err(BundleError("self-import outside profile"));
                 }
                 if imports.contains(&member) {
                     return Err(BundleError("duplicate import"));
                 }
-                if !sources.contains_key(&member) {
-                    return Err(BundleError("imported source member not pinned"));
+                let qualifier = decl
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| member.trim_end_matches(".mm").to_owned());
+                if !seen_qualifiers.insert(qualifier.clone()) {
+                    return Err(BundleError("duplicate import qualifier outside profile"));
                 }
-                qualifiers.push(
-                    decl.alias
-                        .clone()
-                        .unwrap_or_else(|| member.trim_end_matches(".mm").to_owned()),
-                );
+                qualifiers.push(qualifier);
                 imports.push(member);
                 import_lines.insert(decl.span.line);
             }
@@ -608,15 +688,12 @@ pub fn merge_import_closure(
             _ => return Err(BundleError("declaration outside multifile profile")),
         }
     }
-    if imports.is_empty() {
-        return Err(BundleError("expected at least one import"));
-    }
     // Every import must sit alone on its line so stripping cannot leave
     // residue: the line the decl's span names must parse as exactly one
     // `import "..." [as x];` statement — an `import "a"; atom f()`
     // line would silently drop `f` from the merge otherwise.
     for line in &import_lines {
-        let text = root
+        let text = text
             .lines()
             .nth(line.saturating_sub(1))
             .map(str::trim)
@@ -634,36 +711,7 @@ pub fn merge_import_closure(
             return Err(BundleError("multiline or embedded import outside profile"));
         }
     }
-    let mut parts = Vec::with_capacity(imports.len() + 1);
-    for member in &imports {
-        let text = &sources[member];
-        let imported = parser::parse_module(text);
-        if imported
-            .iter()
-            .any(|item| !matches!(item, parser::Item::Atom(_)))
-        {
-            return Err(BundleError(
-                "nested imports or non-atom declarations outside profile",
-            ));
-        }
-        parts.push(text.trim_end().to_owned());
-    }
-    let stripped: Vec<&str> = root
-        .lines()
-        .enumerate()
-        .filter(|(n, _)| !import_lines.contains(&(n + 1)))
-        .map(|(_, line)| line)
-        .collect();
-    // Qualified calls are namespace syntax, not part of the atom
-    // contract: the callee map keys on bare names, so `h::helper(`
-    // merges as `helper(` — the same normalization the language's own
-    // resolved ModuleEnv performs.
-    let mut merged_root = stripped.join("\n");
-    for qualifier in &qualifiers {
-        merged_root = strip_qualifier(&merged_root, qualifier);
-    }
-    parts.push(merged_root.trim_end().to_owned());
-    Ok((format!("{}\n", parts.join("\n")), imports))
+    Ok((imports, qualifiers, import_lines))
 }
 
 /// Remove every `<qualifier> <ws>* :: <ws>*` prefix where the qualifier
@@ -730,15 +778,11 @@ fn strip_qualifier(text: &str, qualifier: &str) -> String {
 }
 
 /// Pin the file-level import graph under the same canonical-JSON
-/// convention the atom-level `source_dependencies_sha256` pin uses.
-fn import_graph_sha256(root_name: &str, imports: &[String]) -> String {
-    let mut sorted = imports.to_vec();
-    sorted.sort();
-    let mut graph = BTreeMap::from([(root_name.to_owned(), sorted)]);
-    for member in imports {
-        graph.insert(member.clone(), Vec::new());
-    }
-    sha256(&serde_json::to_vec(&graph).expect("member names serialize"))
+/// convention the atom-level `source_dependencies_sha256` pin uses:
+/// `{member: [sorted direct imports]}` for every member in the
+/// closure.
+fn import_graph_sha256(graph: &BTreeMap<String, Vec<String>>) -> String {
+    sha256(&serde_json::to_vec(graph).expect("member names serialize"))
 }
 
 /// The full multifile derivation: merge the import closure, admit the
@@ -749,14 +793,9 @@ pub fn prepare_multifile_source(
     root_name: &str,
     sources: &BTreeMap<String, String>,
 ) -> Result<(ModuleSourceBinding, String, Vec<parser::Atom>, String), BundleError> {
-    let (merged, imports) = merge_import_closure(root_name, sources)?;
+    let (merged, graph) = merge_import_closure(root_name, sources)?;
     let (binding, atoms) = prepare_module_source(&merged)?;
-    Ok((
-        binding,
-        import_graph_sha256(root_name, &imports),
-        atoms,
-        merged,
-    ))
+    Ok((binding, import_graph_sha256(&graph), atoms, merged))
 }
 
 /// Pin a module record the same way `load_pinned_record` pins a
@@ -1084,8 +1123,9 @@ mod multifile_tests {
 
     #[test]
     fn merge_strips_imports_and_orders_imported_first() {
-        let (merged, imports) = merge_import_closure("app.mm", &members()).unwrap();
-        assert_eq!(imports, ["helpers.mm"]);
+        let (merged, graph) = merge_import_closure("app.mm", &members()).unwrap();
+        assert_eq!(graph["app.mm"], ["helpers.mm"]);
+        assert!(graph["helpers.mm"].is_empty());
         assert!(merged.starts_with(HELPERS.trim_end()));
         assert!(merged.contains("atom main"));
         assert!(merged.contains("body: { helper(0) };"));
@@ -1109,17 +1149,113 @@ mod multifile_tests {
         }
     }
 
+    const DEEP: &str =
+        "atom deep() -> i64\n    requires: true;\n    ensures: result == 1;\n    body: { 1 };";
+
     #[test]
-    fn nested_imports_and_unpinned_members_rejected() {
+    fn nested_imports_merge_in_post_order() {
+        // app -> helpers -> deep: deep emits first, helpers next, root last.
         let mut nested = members();
+        nested.insert("deep.mm".into(), DEEP.into());
         nested.insert(
-            "deep.mm".into(),
-            "atom deep()\n    requires: true;\n    ensures: result == 1;\n    body: { 1 };".into(),
+            "helpers.mm".into(),
+            format!("import \"deep\" as d;\n{HELPERS}"),
         );
-        nested.insert("helpers.mm".into(), format!("import \"deep\";\n{HELPERS}"));
-        assert!(merge_import_closure("app.mm", &nested).is_err());
+        let (merged, graph) = merge_import_closure("app.mm", &nested).unwrap();
+        assert_eq!(graph["app.mm"], ["helpers.mm"]);
+        assert_eq!(graph["helpers.mm"], ["deep.mm"]);
+        assert!(graph["deep.mm"].is_empty());
+        let deep_at = merged.find("atom deep").unwrap();
+        let helper_at = merged.find("atom helper").unwrap();
+        let main_at = merged.find("atom main").unwrap();
+        assert!(deep_at < helper_at && helper_at < main_at);
+        assert!(!merged.contains("import"));
+    }
+
+    #[test]
+    fn nested_member_strips_its_own_qualifier() {
+        // A member's namespace is file-local: helpers calls `d::deep(0)`
+        // which merges as bare `deep(0)`, and the root's `h` never leaks
+        // into the member's text.
+        let mut nested = members();
+        nested.insert("deep.mm".into(), DEEP.into());
+        nested.insert(
+            "helpers.mm".into(),
+            "import \"deep\" as d;\natom helper(x: i64) -> i64\n    requires: true;\n    ensures: result == x + 1;\n    body: { x + d::deep(0) };".into(),
+        );
+        let (merged, _) = merge_import_closure("app.mm", &nested).unwrap();
+        assert!(merged.contains("body: { x + deep(0) };"));
+        assert!(!merged.contains("d::") && !merged.contains("h::"));
+    }
+
+    #[test]
+    fn diamond_imports_emit_each_member_once() {
+        // a -> b, c; b -> shared; c -> shared: shared emits once.
+        let shared =
+            "atom shared() -> i64\n    requires: true;\n    ensures: result == 1;\n    body: { 1 };";
+        let b = "import \"shared\" as s;\natom fb() -> i64\n    requires: true;\n    ensures: result == 1;\n    body: { s::shared() };";
+        let c = "import \"shared\" as t;\natom fc() -> i64\n    requires: true;\n    ensures: result == 1;\n    body: { t::shared() };";
+        let a = "import \"b\";\nimport \"c\";\natom main() -> i64\n    requires: true;\n    ensures: result > 0;\n    body: { fb() + fc() };";
+        let sources = BTreeMap::from([
+            ("app.mm".to_owned(), a.to_owned()),
+            ("b.mm".to_owned(), b.to_owned()),
+            ("c.mm".to_owned(), c.to_owned()),
+            ("shared.mm".to_owned(), shared.to_owned()),
+        ]);
+        let (merged, graph) = merge_import_closure("app.mm", &sources).unwrap();
+        assert_eq!(merged.matches("atom shared").count(), 1);
+        assert_eq!(graph["b.mm"], ["shared.mm"]);
+        assert_eq!(graph["c.mm"], ["shared.mm"]);
+        assert!(merged.contains("body: { shared() };") && merged.contains("shared() }"));
+    }
+
+    #[test]
+    fn cyclic_imports_are_rejected_honestly() {
+        let a = "import \"b\";\natom fa() -> i64\n    requires: true;\n    ensures: result == 1;\n    body: { 1 };";
+        let b = "import \"app\";\natom fb() -> i64\n    requires: true;\n    ensures: result == 1;\n    body: { 1 };";
+        let sources = BTreeMap::from([
+            ("app.mm".to_owned(), a.to_owned()),
+            ("b.mm".to_owned(), b.to_owned()),
+        ]);
+        assert!(merge_import_closure("app.mm", &sources).is_err());
+    }
+
+    #[test]
+    fn duplicate_qualifiers_are_rejected() {
+        // `import "a" as k; import "b" as k;` binds both members to the
+        // same namespace sugar: every `k::f` would strip to bare `f`
+        // ambiguously.
+        let member =
+            "atom f() -> i64\n    requires: true;\n    ensures: result == 1;\n    body: { 1 };";
+        let dup = BTreeMap::from([
+            (
+                "app.mm".to_owned(),
+                "import \"a\" as k;\nimport \"b\" as k;\natom main() -> i64\n    requires: true;\n    ensures: result == 1;\n    body: { k::f() };".to_owned(),
+            ),
+            ("a.mm".to_owned(), member.to_owned()),
+            ("b.mm".to_owned(), member.to_owned()),
+        ]);
+        assert!(merge_import_closure("app.mm", &dup).is_err());
+        // The same ambiguity without aliases: `import "a"; import
+        // "b";` is fine (qualifiers `a`/`b` differ), but a member named
+        // `k.mm` aliased as `k` collides with an unaliased `k`.
+        let alias_stem_dup = BTreeMap::from([
+            (
+                "app.mm".to_owned(),
+                "import \"k\";\nimport \"a\" as k;\natom main() -> i64\n    requires: true;\n    ensures: result == 1;\n    body: { 1 };".to_owned(),
+            ),
+            ("a.mm".to_owned(), member.to_owned()),
+            ("k.mm".to_owned(), member.to_owned()),
+        ]);
+        assert!(merge_import_closure("app.mm", &alias_stem_dup).is_err());
+    }
+
+    #[test]
+    fn unpinned_and_missing_members_rejected() {
         let only_root = BTreeMap::from([("app.mm".to_owned(), ROOT.to_owned())]);
         assert!(merge_import_closure("app.mm", &only_root).is_err());
+        let missing_deep = BTreeMap::from([("app.mm".to_owned(), "import \"deep\";\natom main() -> i64\n    requires: true;\n    ensures: result == 1;\n    body: { 1 };".to_owned())]);
+        assert!(merge_import_closure("app.mm", &missing_deep).is_err());
     }
 
     #[test]
@@ -1169,8 +1305,8 @@ mod multifile_tests {
             ),
             ("helpers.mm".to_owned(), HELPERS.to_owned()),
         ]);
-        let (merged, imports) = merge_import_closure("app.mm", &commented).unwrap();
-        assert_eq!(imports, ["helpers.mm"]);
+        let (merged, graph) = merge_import_closure("app.mm", &commented).unwrap();
+        assert_eq!(graph["app.mm"], ["helpers.mm"]);
         // The comment survives verbatim and `atom main` is not folded
         // into it.
         assert!(merged.contains("// h :: is not a call"));
