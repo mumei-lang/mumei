@@ -3639,7 +3639,15 @@ members follow the language's fallback chain — importer-relative first
 (a `std/` member beside the root is an ordinary local subdirectory),
 then the shipped toolchain stdlib and `MUMEI_STD_PATH`, which is also
 the last-resort fallback for any unresolved import — while non-atom
-members and alias pinning stay outside the slice.
+members and alias pinning stay outside the slice. A fallback member
+resolves its own imports beside its REAL file (the producer records
+each member's resolved path for exactly this), and the merge emits
+byte-identical member bodies once — the language loads a resolved path
+once and folds same-name atoms in ModuleEnv. One member key resolving
+to two different files across importers (e.g. the root's
+`import "std/helper"` naming the project file while a fallback
+member's `import "helper"` names its stdlib neighbour) fails honestly:
+the member namespace cannot express two modules under one key.
 
 ### Wave 5 multifile consumer Evidence
 
