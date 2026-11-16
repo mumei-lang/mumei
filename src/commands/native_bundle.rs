@@ -276,9 +276,10 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
     for atom in &atoms {
         env.register_atom(atom);
     }
-    // Callees are admitted by contract (check_atom_contract already ran in
-    // prepare_module_source), so every atom verifies against the same env;
-    // declaration order keeps callees proven before their callers.
+    // Callees are admitted by contract (extract_pure_i64_module_contracts
+    // already ran the profile gates in prepare_module_source), so sibling
+    // calls verify in any declaration order; mark_verified keeps the env
+    // consistent for the certificate.
     let mut lowered = Vec::with_capacity(atoms.len());
     for atom in &atoms {
         let hir_atom = hir::lower_atom_to_hir(atom);

@@ -2283,9 +2283,9 @@ fn source_expr<'ctx>(
             result
         }
         Expr::Call(name, args) => {
-            // An i64-only fragment: each argument must lower to a
-            // bitvector; a `bool` argument would need an i1 domain and
-            // is outside this profile.
+            // The declared profile admits i64 call arguments only (the
+            // extraction gate enforces it); a `bool` here is unreachable
+            // and stays rejected so encoder and gate never drift apart.
             let mut applied = Vec::with_capacity(args.len());
             for arg in args {
                 match source_expr(

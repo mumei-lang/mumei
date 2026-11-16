@@ -1619,6 +1619,9 @@ fn module_build_rejects_sources_without_a_single_trivially_gated_main() {
         "atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
         // A gated main keeps the single-atom contract convention.
         "atom main() -> i64 requires: 1 > 0; ensures: result == 0; body: { 0 };\natom helper(x: i64) -> i64 requires: true; ensures: result == x; body: { x };",
+        // The entry point keeps the `-> i64` signature the C wrapper
+        // attests even though siblings may return other scalars.
+        "atom main() -> bool requires: true; ensures: result; body: { 1 > 0 };\natom helper(x: i64) -> i64 requires: true; ensures: result == x; body: { x };",
     ] {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("source.mm");

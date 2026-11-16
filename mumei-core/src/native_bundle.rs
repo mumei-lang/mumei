@@ -416,9 +416,15 @@ pub fn prepare_module_source(
         };
         if atom.name == "main" {
             mains += 1;
-            if !atom.params.is_empty() || atom.requires.trim() != "true" {
+            // The C `main` wrapper attests an i64 user body — the widened
+            // profile admits other scalar returns for siblings, but the
+            // entry point keeps the single-atom `-> i64` signature.
+            if !atom.params.is_empty()
+                || atom.requires.trim() != "true"
+                || atom.return_type.as_deref() != Some("i64")
+            {
                 return Err(BundleError(
-                    "profile requires zero-argument main with literal true precondition",
+                    "profile requires zero-argument i64 main with literal true precondition",
                 ));
             }
         }
