@@ -1323,18 +1323,22 @@ When the source file declares `import` statements,
 `mumei native-bundle build` takes the multifile path and records
 `mumei.native-multifile-bundle/v1` under profile
 `mumei.native-pure-i64-multifile-linux-x86_64/v1` — a third record family,
-mutually unparseable with the single-atom and module schemas. Slice-1 of
-the file-level import closure admits a deliberately small shape:
+mutually unparseable with the single-atom and module schemas. The
+file-level import closure admits a deliberately small shape:
 
-- the root file's imports must be same-directory basenames
+- every member's imports must be same-directory basenames
   (`import "helpers" as h;` reads `helpers.mm` next to the root — no
   `../`, absolute paths, `std/` prefixes or subdirectories);
 - each import sits alone on its line as `import "<member>" [as <alias>];`;
-- imported members contain atoms only — no nested imports and no other
-  top-level items — and at least one import is required;
+- members contain atoms and imports only — no other top-level items —
+  and the root needs at least one import; nested and transitive imports
+  close over the whole pinned member set, diamonds are merged once, and
+  import cycles are rejected honestly;
 - at most 64 members of at most 64 KiB each, named by the member grammar
   (bare `.mm` basenames — no separators, drive letters or leading dots);
-- duplicate imports and self-imports are rejected.
+- duplicate imports and self-imports are rejected, and no two imports in
+  one file may bind the same qualifier — `import "a" as k; import "b" as k;`
+  would merge every `k::f` into the same ambiguous bare name.
 
 ```sh
 # app.mm
@@ -1347,11 +1351,14 @@ mumei native-bundle recheck-llvm app-bundle app.mm --expected-build-id <trusted-
 mumei native-bundle recheck-artifact app-bundle app.mm --expected-build-id <trusted-id>
 ```
 
-The producer merges the closure into one canonical text — imported member
-texts in import order followed by the root minus its import lines — and
-the module pipeline compiles that text. Qualified calls are namespace
-syntax, not contract: `h::helper(0)` merges as `helper(0)`, the same
-normalization the language's resolved `ModuleEnv` performs. Every
+The producer merges the closure into one canonical text — a post-order
+walk emits each member after its own imports (dependencies first,
+siblings in declaration order), the root last — and the module pipeline
+compiles that text. A member's namespace is file-local: its own import
+lines are stripped and its own call qualifiers normalized, so
+`h::helper(0)` merges as `helper(0)` — the same normalization the
+language's resolved `ModuleEnv` performs. Qualified calls are namespace
+syntax, not contract. Every
 original member is written under `sources/<name>.mm` and pinned
 byte-for-byte in the record's `sources` map; `source_files` pins the
 root name plus `import_graph_sha256`, the file-level
@@ -1378,8 +1385,8 @@ keep the same honesty about what stays unchecked.
 
 Nothing is claimed beyond the module scopes: same identity-plus-recheck
 boundaries, no authenticity, no import-alias pinning (the alias is
-namespace sugar the merge erases), and subdirectory/`std`, nested and
-transitive imports stay outside this slice.
+namespace sugar the merge erases), and subdirectory/`std` paths, non-atom
+member items and alias pinning stay outside this slice.
 
 ### Pinned toolchain artifact recheck
 
