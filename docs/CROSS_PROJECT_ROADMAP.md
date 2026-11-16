@@ -3752,6 +3752,27 @@ declared-attempt route: `build` (`native-attempt`), `check`,
 (`native-recheck`), `recheck-artifact`, `recheck-evidence`,
 `accept-evidence` and `accept-artifact` (`native-accept`).
 
+### Wave 5 declared native-source-recheck route (C10 consumer)
+
+Agent's `python -m agent native-source-recheck --core <path>
+--bundle <dir> --source <path> --expected-build-id <sha256>` declares
+the Stage A native consumer as one attempt: `<core> native-bundle
+recheck-source --expected-build-id <id> <bundle> <source>` under a
+`mumei.native-source-recheck-request/v1` fingerprint binding the Core
+executable's bytes, every member the record declares and the declared
+source's bytes — the same member enumeration and post-run drift
+re-enumeration as the other native routes. `source_recheck` names
+only `0 → rechecked` and `3 → inconclusive`; exit 1 conflates a
+refuted postcondition with every static failure and claims nothing. A
+`rechecked` run reports `discharged_checks` — `file_identity` and
+`claim_truth` — at representation level with the remaining checks in
+`checks_not_performed`. The command's stdout is a fixed diagnostic
+line rather than an evidence record, so no
+`mumei.verifier-evidence-candidate/v1` is emitted and a clean run
+selects the captured output into lineage only. Also exposed as the
+`native_source_recheck` MCP tool. C02/C10 stay partial.
+
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
