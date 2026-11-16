@@ -2071,8 +2071,15 @@ fn multifile_bundle_builds_and_rechecks_with_honest_consumer_rejections() {
     let json = consume("recheck-llvm --json", &source, &bundle, &id);
     assert_eq!(json.status.code(), Some(1));
     assert!(json.stdout.is_empty());
+    // A valid single-family Evidence report must reach the multifile
+    // rejection — a malformed file would fail decode earlier and prove
+    // nothing about the family branch.
+    let single = tempfile::tempdir().unwrap();
+    let (single_source, single_bundle, single_id) = build(single.path());
+    let report = recheck_llvm_json(&single_source, &single_bundle, &single_id);
+    assert_success(&report);
     let evidence = root.path().join("evidence.json");
-    fs::write(&evidence, b"{}").unwrap();
+    fs::write(&evidence, &report.stdout).unwrap();
     let accept_evidence = cli(&[
         "native-bundle",
         "accept-evidence",
@@ -2084,6 +2091,7 @@ fn multifile_bundle_builds_and_rechecks_with_honest_consumer_rejections() {
     ]);
     assert_eq!(accept_evidence.status.code(), Some(1));
     assert!(accept_evidence.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&accept_evidence.stderr).contains("multifile"));
     let output = consume("accept-artifact", &source, &bundle, &id);
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());

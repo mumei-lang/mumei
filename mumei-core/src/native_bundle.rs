@@ -622,7 +622,11 @@ pub fn merge_import_closure(
             .map(str::trim)
             .unwrap_or_default();
         let items = parser::parse_module(text);
-        if items.len() != 1 || !matches!(items[0], parser::Item::Import(_)) {
+        // The lenient parser tolerates a missing `;`, but the profile
+        // requires the strict statement form so a malformed member
+        // cannot ride the merge into a verified bundle.
+        if items.len() != 1 || !matches!(items[0], parser::Item::Import(_)) || !text.ends_with(';')
+        {
             return Err(BundleError("multiline or embedded import outside profile"));
         }
     }
@@ -658,25 +662,57 @@ pub fn merge_import_closure(
     Ok((format!("{}\n", parts.join("\n")), imports))
 }
 
-/// Remove every `<qualifier>::` prefix at an identifier boundary — the
-/// byte before the qualifier must not be an identifier character, so
-/// `ph::f` survives a `h` qualifier and a non-qualifier `x::` anywhere
-/// is left for merged admission to reject.
+/// Remove every `<qualifier> <ws>* :: <ws>*` prefix where the qualifier
+/// sits at an identifier boundary and the `::` introduces a callee name.
+/// Boundary rules treat every non-ASCII byte as an identifier byte, so
+/// `ph::f`, `xhelpers::f` and `éh::f` all survive a `h` qualifier; the
+/// whitespace-tolerant match mirrors the parser, which accepts
+/// `h :: helper` as the same qualified call as `h::helper`. A `::` not
+/// followed by an identifier start is left alone so malformed syntax
+/// still reaches merged admission and fails closed.
 fn strip_qualifier(text: &str, qualifier: &str) -> String {
-    let pattern = format!("{qualifier}::");
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(pos) = rest.find(&pattern) {
-        let boundary = rest.as_bytes()[..pos]
-            .last()
-            .is_none_or(|b| !b.is_ascii_alphanumeric() && *b != b'_');
-        out.push_str(&rest[..pos]);
-        if !boundary {
-            out.push_str(&pattern);
-        }
-        rest = &rest[pos + pattern.len()..];
+    fn is_ident_byte(byte: u8) -> bool {
+        !byte.is_ascii() || byte.is_ascii_alphanumeric() || byte == b'_'
     }
-    out.push_str(rest);
+    fn is_ident_start(byte: u8) -> bool {
+        !byte.is_ascii() || byte.is_ascii_alphabetic() || byte == b'_'
+    }
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let ws = |c: char| c.is_ascii_whitespace();
+    // `i` is the copy cursor and `j` the scan cursor: a non-qualifying
+    // occurrence advances only `j`, keeping `i` behind so the text up to
+    // it is still emitted, while the boundary check sees the byte that
+    // precedes the match in the original text.
+    let mut i = 0;
+    let mut j = 0;
+    while let Some(rel) = text[j..].find(qualifier) {
+        let pos = j + rel;
+        let boundary = pos == 0 || !is_ident_byte(bytes[pos - 1]);
+        let after = &text[pos + qualifier.len()..];
+        let tail = after.trim_start_matches(ws);
+        // `<qualifier> ws* :: ws* <ident-start>` — the ident-start keeps
+        // `q :: 5` malformed syntax on its way to merged admission.
+        let ws2 = (boundary && tail.starts_with("::"))
+            .then(|| &tail["::".len()..])
+            .and_then(|t| {
+                let callee = t.trim_start_matches(ws);
+                callee
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|b| is_ident_start(*b))
+                    .then(|| t.len() - callee.len())
+            });
+        if let Some(ws2) = ws2 {
+            let ws1 = after.len() - tail.len();
+            out.push_str(&text[i..pos]);
+            i = pos + qualifier.len() + ws1 + "::".len() + ws2;
+            j = i;
+        } else {
+            j = pos + qualifier.len();
+        }
+    }
+    out.push_str(&text[i..]);
     out
 }
 
@@ -1080,6 +1116,33 @@ mod multifile_tests {
         assert_eq!(strip_qualifier("ph::f", "h"), "ph::f");
         assert_eq!(strip_qualifier("_h::f", "h"), "_h::f");
         assert_eq!(strip_qualifier("helpers::f", "h"), "helpers::f");
+        // A longer identifier starting with the qualifier keeps its `::`.
+        assert_eq!(strip_qualifier("hh::f", "h"), "hh::f");
+        // Non-ASCII bytes count as identifier bytes: `éh::f` is a call
+        // through qualifier `éh`, not `h`.
+        assert_eq!(strip_qualifier("éh::f", "h"), "éh::f");
+        // The parser accepts whitespace around `::` in a qualified call.
+        assert_eq!(strip_qualifier("h :: f(0)", "h"), "f(0)");
+        assert_eq!(strip_qualifier("h  ::  f(0)", "h"), "f(0)");
+        assert_eq!(strip_qualifier("h ::\nf(0)", "h"), "f(0)");
+        // `q ::` not followed by a callee name is not qualified syntax —
+        // left intact so merged admission rejects it.
+        assert_eq!(strip_qualifier("x = h :: 5", "h"), "x = h :: 5");
+        assert_eq!(strip_qualifier("x = h ::", "h"), "x = h ::");
+        // A bare qualifier with no `::` is never touched.
+        assert_eq!(strip_qualifier("let h = 3; h + 1", "h"), "let h = 3; h + 1");
+    }
+
+    #[test]
+    fn import_without_semicolon_is_rejected() {
+        let missing = BTreeMap::from([
+            (
+                "app.mm".to_owned(),
+                ROOT.replacen("import \"helpers\" as h;", "import \"helpers\" as h", 1),
+            ),
+            ("helpers.mm".to_owned(), HELPERS.to_owned()),
+        ]);
+        assert!(merge_import_closure("app.mm", &missing).is_err());
     }
 
     #[test]
