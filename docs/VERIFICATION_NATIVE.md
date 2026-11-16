@@ -357,6 +357,46 @@ acceptance. Grade/Claim Book/Lean and Native consumer policies are unchanged.
 Wider producers/consumers and C02 acceptance/mapping remain open; external
 verifier adoption and WASM remain separate/deferred.
 
+### Standalone source Evidence acceptance evaluation
+
+```sh
+mumei evidence accept-source source-evidence.json --source source.mm
+mumei evidence accept-source source-evidence.json --source source.mm --json
+```
+
+`mumei_core::source_evidence::accept(source, saved_bytes, Options)` and this
+opt-in CLI evaluate the **same bounded pipeline** as the consistency recheck —
+the common representation gate, a fresh caller-budgeted source query, and
+equality of every decoded field — but report the result in the acceptance
+vocabulary: `Accepted` only when representation is valid **and** the fresh
+same-profile query agrees, `Rejected` on refutation, `Inconclusive` on
+unknown/resource exhaustion; malformed/unsupported/mismatched inputs remain
+static errors. Acceptance here means representation validity plus fresh
+same-profile consistency under the declared restricted profile — nothing
+stronger.
+
+On acceptance, `--json` emits one static anonymous descriptor
+`mumei.source-evidence-acceptance/v1` with `acceptance: evaluated`,
+`accepted: true`, the restricted scope, `checks_performed`
+(`representation_gate`, `fresh_same_profile_source_query`) and
+`checks_not_performed` naming what stays unassessed: producer authenticity,
+historical execution, record freshness, parser/encoder/solver correctness,
+*independent* model correspondence (the same producer re-derives the record —
+no second verifier runs), LLVM correspondence, artifact semantics, grade
+promotion and Lean kernel checks. Text mode prints the same scope in prose.
+The descriptor echoes no subject, digest or provenance: it is a diagnostic,
+not reusable Evidence, a certificate or a grade. Non-acceptance paths emit no
+stdout, including JSON mode; refutation and rejection exit 1, inconclusive
+exits 3.
+
+This is the first Core-side `acceptance: evaluated` surface, bounded to the
+one profile it names. It is not a general acceptance engine, mapping between
+profiles, multi-record admission, producer/record authentication, historical
+freshness, an independent-verifier correspondence, artifact/final-executable
+assurance, or a Claim Book/Seal Grade/Lean decision. Saved fields never select
+files, tools, queries or budgets; existing commands and native/module evidence
+paths are unchanged.
+
 ## 5. Minimal semantic contract (C03)
 
 Start with a pure integer/Boolean function: for a signed 64-bit input, return

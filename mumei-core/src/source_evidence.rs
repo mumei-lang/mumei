@@ -44,6 +44,13 @@ pub enum RecheckOutcome {
     Inconclusive,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum AcceptOutcome {
+    Accepted,
+    Rejected,
+    Inconclusive,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SourceEvidenceError {
     #[error("invalid bounded source-query budget")]
@@ -75,6 +82,24 @@ pub fn recheck(
         Outcome::Refuted => Ok(RecheckOutcome::Refuted),
         Outcome::Inconclusive => Ok(RecheckOutcome::Inconclusive),
     }
+}
+
+/// Same bounded evaluation as `recheck`, reported in the acceptance
+/// vocabulary: `Accepted` only when the representation gate passes and the
+/// fresh same-profile query agrees with every saved field. Acceptance here is
+/// representation plus fresh same-profile consistency — not producer
+/// authenticity, historical execution, freshness, independent model
+/// correspondence or artifact/grade assurance.
+pub fn accept(
+    source: &str,
+    saved: &[u8],
+    options: Options,
+) -> Result<AcceptOutcome, SourceEvidenceError> {
+    Ok(match recheck(source, saved, options)? {
+        RecheckOutcome::Consistent => AcceptOutcome::Accepted,
+        RecheckOutcome::Refuted => AcceptOutcome::Rejected,
+        RecheckOutcome::Inconclusive => AcceptOutcome::Inconclusive,
+    })
 }
 
 /// Check one C03 atom over all its signed-i64 inputs. Only fresh unsat yields a

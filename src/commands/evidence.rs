@@ -1,5 +1,5 @@
 use crate::cli::EvidenceCommand;
-use mumei_core::source_evidence::{self, Options, Outcome, RecheckOutcome};
+use mumei_core::source_evidence::{self, AcceptOutcome, Options, Outcome, RecheckOutcome};
 use mumei_core::verification_evidence::{self, MAX_INPUT_BYTES, SCHEMA_VERSION};
 use std::{io::Write, path::Path};
 
@@ -28,6 +28,24 @@ pub(crate) fn run(command: EvidenceCommand) {
                 )
             }),
             "Source evidence recheck failed",
+        ),
+        EvidenceCommand::AcceptSource {
+            input,
+            source,
+            json,
+            solver_timeout,
+            solver_resource_limit,
+        } => (
+            source_options(&solver_timeout, &solver_resource_limit).and_then(|options| {
+                accept_source(
+                    Path::new(&input),
+                    Path::new(&source),
+                    json,
+                    options,
+                    &mut output,
+                )
+            }),
+            "Source evidence acceptance failed",
         ),
         EvidenceCommand::Check { input, stdin, json } => (
             check(input.as_deref().map(Path::new), stdin, json, &mut output).map(|()| 0),
@@ -117,6 +135,63 @@ fn write_recheck(
     output
         .write_all(&bytes)
         .map_err(|_| "cannot write source recheck diagnostic")?;
+    Ok(0)
+}
+
+fn accept_source(
+    input: &Path,
+    source: &Path,
+    json: bool,
+    options: Options,
+    output: &mut impl Write,
+) -> Result<i32, &'static str> {
+    let saved = super::input::read_regular(input, MAX_INPUT_BYTES as u64)?;
+    let source = super::input::read_regular(source, MAX_INPUT_BYTES as u64)?;
+    let source = String::from_utf8(source).map_err(|_| "source is not UTF-8")?;
+    let outcome =
+        source_evidence::accept(&source, &saved, options).map_err(|error| match error {
+            source_evidence::SourceEvidenceError::InvalidBudget => {
+                "invalid bounded source-query budget"
+            }
+            source_evidence::SourceEvidenceError::InvalidSavedEvidence => {
+                "invalid saved source evidence representation"
+            }
+            source_evidence::SourceEvidenceError::InconsistentSavedEvidence => {
+                "saved source evidence differs from fresh same-profile result"
+            }
+            _ => "source outside restricted profile or cannot encode evidence",
+        })?;
+    write_accept(outcome, json, output)
+}
+
+fn write_accept(
+    outcome: AcceptOutcome,
+    json: bool,
+    output: &mut impl Write,
+) -> Result<i32, &'static str> {
+    match outcome {
+        AcceptOutcome::Rejected => return Ok(1),
+        AcceptOutcome::Inconclusive => return Ok(3),
+        AcceptOutcome::Accepted => (),
+    }
+    let bytes = if json {
+        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "mumei.source-evidence-acceptance/v1",
+            "evidence_schema_version": SCHEMA_VERSION,
+            "acceptance": "evaluated",
+            "accepted": true,
+            "scope": "restricted_c03_source_postcondition_and_same_profile_record_consistency",
+            "checks_performed": ["representation_gate", "fresh_same_profile_source_query"],
+            "checks_not_performed": ["producer_authenticity", "historical_execution", "record_freshness", "parser_encoder_solver_correctness", "independent_model_correspondence", "llvm_correspondence", "artifact_semantics", "grade_promotion", "lean_kernel_checks"],
+        })).map_err(|_| "cannot encode source acceptance descriptor")?;
+        bytes.push(b'\n');
+        bytes
+    } else {
+        b"Source Evidence accepted within restricted C03 source-postcondition profile: representation valid and consistent with a fresh same-profile query.\nAcceptance scope excludes producer authenticity, historical execution, record freshness, independent correspondence, LLVM, artifact, grade and final-executable assurance.\n".to_vec()
+    };
+    output
+        .write_all(&bytes)
+        .map_err(|_| "cannot write source acceptance descriptor")?;
     Ok(0)
 }
 
@@ -246,6 +321,40 @@ mod tests {
                 write_recheck(RecheckOutcome::Consistent, json, &mut BrokenOutput).unwrap_err(),
                 "cannot write source recheck diagnostic"
             );
+        }
+    }
+
+    #[test]
+    fn source_acceptance_only_writes_anonymous_descriptor_on_acceptance() {
+        for json in [false, true] {
+            for (outcome, code) in [
+                (AcceptOutcome::Rejected, 1),
+                (AcceptOutcome::Inconclusive, 3),
+            ] {
+                let mut output = Vec::new();
+                assert_eq!(write_accept(outcome, json, &mut output).unwrap(), code);
+                assert!(output.is_empty());
+            }
+            assert_eq!(
+                write_accept(AcceptOutcome::Accepted, json, &mut BrokenOutput).unwrap_err(),
+                "cannot write source acceptance descriptor"
+            );
+            let mut output = Vec::new();
+            assert_eq!(
+                write_accept(AcceptOutcome::Accepted, json, &mut output).unwrap(),
+                0
+            );
+            let text = String::from_utf8(output).unwrap();
+            assert!(!text.contains("FAKE_PRIVATE"));
+            if json {
+                let diagnostic: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(
+                    diagnostic["schema_version"],
+                    "mumei.source-evidence-acceptance/v1"
+                );
+                assert_eq!(diagnostic["acceptance"], "evaluated");
+                assert_eq!(diagnostic["accepted"], true);
+            }
         }
     }
 
