@@ -458,3 +458,58 @@ fn list_envelope_admits_zero_or_more_records_each_through_the_single_gate() {
         format!("{{\"schema_version\": \"{LIST_SCHEMA_VERSION}\", \"evidence\": [{dup}]}}");
     assert!(decode_list(envelope.as_bytes()).is_err());
 }
+
+#[test]
+fn consistency_conflicts_compares_identity_pins_never_outcomes() {
+    let decode_one = |value: &Value| decode(&serde_json::to_vec(value).unwrap()).unwrap();
+    let first = decode_one(&base());
+
+    // Identical records, and records sharing no pin, are consistent.
+    let mut independent = base();
+    independent["subject"]["id"] = json!("other.mm");
+    independent["subject"]["sha256"] = json!("b".repeat(64));
+    independent["obligation_id"] = json!("other-obligation");
+    assert!(consistency_conflicts(&[first.clone(), first.clone()]).is_empty());
+    assert!(consistency_conflicts(&[first.clone(), decode_one(&independent)]).is_empty());
+
+    // Same subject.id with a different content pin: one named conflict.
+    let mut drifted = base();
+    drifted["subject"]["sha256"] = json!("a".repeat(64));
+    assert_eq!(
+        consistency_conflicts(&[first.clone(), decode_one(&drifted)]),
+        vec![ConsistencyConflict {
+            index_a: 0,
+            index_b: 1,
+            field: "subject.sha256",
+        }]
+    );
+
+    // Same obligation_id with a rebound specification is a conflict even
+    // when the subjects differ.
+    let mut rebound = base();
+    rebound["subject"]["id"] = json!("other.mm");
+    rebound["subject"]["sha256"] = json!("b".repeat(64));
+    rebound["specification"]["sha256"] = json!("c".repeat(64));
+    let fields: Vec<&str> = consistency_conflicts(&[first.clone(), decode_one(&rebound)])
+        .iter()
+        .map(|conflict| conflict.field)
+        .collect();
+    assert!(fields.contains(&"subject.id"));
+    assert!(fields.contains(&"specification.sha256"));
+
+    // Outcome fields are claims, not identity: a record disagreeing only on
+    // result/execution/scope/correspondence is consistent — such a pair is
+    // rejected by the v1 gate anyway (inconsistent outcome), so compare on
+    // the admissible axis: same obligation, different result is impossible
+    // under one method's result set, but an unrelated subject's record
+    // differs in every outcome field and still conflicts on nothing.
+    let mut other = base();
+    other["subject"]["id"] = json!("other.mm");
+    other["subject"]["sha256"] = json!("b".repeat(64));
+    other["obligation_id"] = json!("other-obligation");
+    other["result"] = json!("unknown");
+    other["execution"] = json!("not_run");
+    other["correspondence"]["relation"] = json!("unchecked");
+    other["correspondence"]["status"] = json!("unverified");
+    assert!(consistency_conflicts(&[first, decode_one(&other)]).is_empty());
+}

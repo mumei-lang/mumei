@@ -3063,6 +3063,17 @@ coverage, truth or acceptance is implied, and the envelope is not reusable
 Evidence or a receipt. See the
 [list check contract](VERIFICATION_NATIVE.md#bounded-multi-record-representation-check).
 
+The declared cross-record gap now has its own structural check:
+`mumei evidence check-consistency <envelope> [--json]` reads the same list
+envelope and reports `mumei.evidence-consistency-check/v1` — `consistent`,
+a bounded `conflicts` list naming each disagreeing pair's indices and field,
+and `record_count`. Records sharing `subject.id` must pin one
+`subject.kind`/`sha256`; records sharing `obligation_id` must pin one
+subject, specification, semantics and method. Outcome fields are claims,
+not identity, and are never compared. Agreement stays syntactic — pin
+correctness, truth, freshness and authenticity remain unperformed. See the
+[consistency check contract](VERIFICATION_NATIVE.md#cross-record-identity-pin-consistency).
+
 The first standalone C02/C13 source producer now connects the existing bounded
 C03 bitvector model to fresh linked-Z3 queries without a Native bundle:
 `mumei evidence verify-source <source> [--json]`. Only fresh unsat emits one

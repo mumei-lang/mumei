@@ -498,6 +498,18 @@ pub(crate) enum EvidenceCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Check a bounded Evidence list envelope's cross-record identity-pin agreement, not pin correctness or truth
+    CheckConsistency {
+        /// Regular JSON file (at most 65,536 bytes); not a native report envelope or proof certificate
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        input: Option<String>,
+        /// Read one common Evidence list envelope from standard input (at most 65,536 bytes); never infer stdin from a missing file
+        #[arg(long)]
+        stdin: bool,
+        /// Print a static structural-consistency diagnostic, not accepted Evidence or a certificate
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

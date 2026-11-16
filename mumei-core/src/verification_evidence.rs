@@ -199,6 +199,82 @@ pub fn decode_list(bytes: &[u8]) -> Result<Vec<Evidence>, RepresentationError> {
         .collect()
 }
 
+/// One syntactic disagreement between two records that claim the same
+/// identity pin: the record indices inside the list and the field whose
+/// values differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ConsistencyConflict {
+    pub index_a: usize,
+    pub index_b: usize,
+    pub field: &'static str,
+}
+
+/// Cap on reported conflicts — the diagnostic stays bounded like every
+/// other surface, even though records admit at most 64·63/2 pairs.
+pub const MAX_CONSISTENCY_CONFLICTS: usize = 64;
+
+/// Syntactic cross-record agreement on declared identity pins: records
+/// naming the same `subject.id` must pin the same `subject.kind`/`sha256`,
+/// and records naming the same `obligation_id` must pin the same subject,
+/// specification, semantics and method. Outcomes (`result`, `execution`,
+/// `scope`, `correspondence`) are claims, not identity — a fresh record may
+/// legitimately disagree with an older one there, so they are never
+/// compared. This is structural agreement only; it does not check that any
+/// pin is correct, current or authentic.
+pub fn consistency_conflicts(records: &[Evidence]) -> Vec<ConsistencyConflict> {
+    let mut conflicts = Vec::new();
+    for (index_a, a) in records.iter().enumerate() {
+        for (index_b, b) in records.iter().enumerate().skip(index_a + 1) {
+            if a.subject.id == b.subject.id {
+                for (field, equal) in [
+                    ("subject.kind", a.subject.kind == b.subject.kind),
+                    ("subject.sha256", a.subject.sha256 == b.subject.sha256),
+                ] {
+                    if !equal && conflicts.len() < MAX_CONSISTENCY_CONFLICTS {
+                        conflicts.push(ConsistencyConflict {
+                            index_a,
+                            index_b,
+                            field,
+                        });
+                    }
+                }
+            }
+            if a.obligation_id == b.obligation_id {
+                for (field, equal) in [
+                    ("subject.id", a.subject.id == b.subject.id),
+                    ("specification.id", a.specification.id == b.specification.id),
+                    (
+                        "specification.sha256",
+                        a.specification.sha256 == b.specification.sha256,
+                    ),
+                    (
+                        "semantics.profile",
+                        a.semantics.profile == b.semantics.profile,
+                    ),
+                    (
+                        "semantics.integer_model",
+                        a.semantics.integer_model == b.semantics.integer_model,
+                    ),
+                    (
+                        "semantics.target_triple",
+                        a.semantics.target_triple == b.semantics.target_triple,
+                    ),
+                    ("method", a.method == b.method),
+                ] {
+                    if !equal && conflicts.len() < MAX_CONSISTENCY_CONFLICTS {
+                        conflicts.push(ConsistencyConflict {
+                            index_a,
+                            index_b,
+                            field,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    conflicts
+}
+
 impl Evidence {
     /// Checks the standalone v1 schema rules, not the meaning or truth of a claim.
     pub fn validate(&self) -> Result<(), RepresentationError> {

@@ -55,6 +55,11 @@ pub(crate) fn run(command: EvidenceCommand) {
             check_list(input.as_deref().map(Path::new), stdin, json, &mut output).map(|()| 0),
             "Evidence list representation check failed",
         ),
+        EvidenceCommand::CheckConsistency { input, stdin, json } => (
+            check_consistency(input.as_deref().map(Path::new), stdin, json, &mut output)
+                .map(|()| 0),
+            "Evidence consistency check failed",
+        ),
         EvidenceCommand::VerifySource {
             input,
             json,
@@ -323,6 +328,56 @@ Evidence acceptance: not evaluated.\n", records.len())
     output
         .write_all(&diagnostic)
         .map_err(|_| "cannot write representation diagnostic")
+}
+
+fn check_consistency(
+    input: Option<&Path>,
+    stdin: bool,
+    json: bool,
+    output: &mut impl Write,
+) -> Result<(), &'static str> {
+    let bytes = match (input, stdin) {
+        (Some(path), false) => super::input::read_regular(path, MAX_INPUT_BYTES as u64)?,
+        (None, true) => super::input::read_stdin(MAX_INPUT_BYTES as u64)?,
+        _ => return Err("choose exactly one evidence input"),
+    };
+    let records = verification_evidence::decode_list(&bytes)
+        .map_err(|_| "invalid evidence representation")?;
+    let conflicts = verification_evidence::consistency_conflicts(&records);
+    let consistent = conflicts.is_empty();
+    let diagnostic = if json {
+        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": "mumei.evidence-consistency-check/v1",
+            "evidence_schema_version": verification_evidence::LIST_SCHEMA_VERSION,
+            "representation": "valid",
+            "record_count": records.len(),
+            "consistent": consistent,
+            "conflicts": conflicts,
+            "acceptance": "not_evaluated",
+            "checks_not_performed": ["claim_truth", "file_identity", "freshness",
+                "producer_authenticity", "semantic_correspondence", "artifact_semantics",
+                "pin_correctness"],
+        }))
+        .map_err(|_| "cannot encode consistency diagnostic")?;
+        bytes.push(b'\n');
+        bytes
+    } else {
+        format!(
+            "Evidence list consistency: {} record(s), {}.\n\
+Scope: syntactic identity-pin agreement only; no claim truth, file identity, freshness, producer authenticity, semantic correspondence, artifact semantics or pin correctness checked.\n\
+Evidence acceptance: not evaluated.\n",
+            records.len(),
+            if consistent {
+                "no conflicts".to_owned()
+            } else {
+                format!("{} conflict(s)", conflicts.len())
+            }
+        )
+        .into_bytes()
+    };
+    output
+        .write_all(&diagnostic)
+        .map_err(|_| "cannot write consistency diagnostic")
 }
 
 #[cfg(test)]
