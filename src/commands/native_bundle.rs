@@ -353,22 +353,29 @@ fn record_family(record: &[u8]) -> Result<RecordFamily, BundleError> {
 }
 
 /// Read the pinned original member texts of a multifile bundle — every
-/// `sources/<name>.mm` must pass the member-name grammar (a bare basename
-/// in this slice) and the member count stays bounded.
+/// file under `sources/` is keyed by its `/`-separated relative path and
+/// must pass the member-name grammar; the member count stays bounded.
 fn source_members(bundle: &Path) -> Result<BTreeMap<String, String>, BundleError> {
     let mut members = BTreeMap::new();
-    collect_source_members(bundle.join(SOURCES_DIR), "", &mut members)?;
+    collect_source_members(bundle.join(SOURCES_DIR), "", 0, &mut members)?;
     Ok(members)
 }
 
 /// Walk `sources/` recursively: directories descend, files become
 /// members keyed by their `/`-separated relative path, anything else
-/// (symlinks, sockets) is rejected honestly.
+/// (symlinks, sockets) is rejected honestly. `depth` caps the walk at
+/// the member grammar's segment bound — deeper trees can only hold
+/// member keys the grammar would reject anyway, so a hostile bundle
+/// cannot exhaust the stack.
 fn collect_source_members(
     dir: PathBuf,
     prefix: &str,
+    depth: usize,
     members: &mut BTreeMap<String, String>,
 ) -> Result<(), BundleError> {
+    if depth > 16 {
+        return Err(BundleError("source member path too deep"));
+    }
     for entry in fs::read_dir(&dir).map_err(|_| BundleError("cannot read source members"))? {
         let entry = entry.map_err(|_| BundleError("cannot read source members"))?;
         let name = entry
@@ -376,7 +383,12 @@ fn collect_source_members(
             .into_string()
             .map_err(|_| BundleError("invalid source member name"))?;
         if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            collect_source_members(entry.path(), &format!("{prefix}{name}/"), members)?;
+            collect_source_members(
+                entry.path(),
+                &format!("{prefix}{name}/"),
+                depth + 1,
+                members,
+            )?;
             continue;
         }
         if !entry.file_type().is_ok_and(|kind| kind.is_file()) {

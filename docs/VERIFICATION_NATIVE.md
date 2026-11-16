@@ -1331,7 +1331,10 @@ file-level import closure admits a deliberately small shape:
   in `sub/a.mm` reads `sub/helpers.mm`, and `import "sub/dep"` descends
   into subdirectories of the root's directory. `..` segments, absolute
   paths, drive letters, `\`, leading-dot and empty segments are
-  rejected, so the closure is confined to the root's subtree;
+  rejected, so member keys can only name files inside the root's
+  subtree (at most 16 `/`-separated segments; the producer's own
+  filesystem resolution follows the OS, exactly like the resolver's
+  `canonicalize`);
 - each import sits alone on its line as `import "<member>" [as <alias>];`;
 - members contain atoms and imports only — no other top-level items —
   and the root needs at least one import; nested and transitive imports

@@ -547,14 +547,16 @@ pub fn prepare_module_source(
 /// Normalize an import path or member key to its `<dir>/<stem>.mm`
 /// member name under the member-path grammar: `/`-separated nonempty
 /// segments, each free of `\\`, `:` and a leading dot, the last with a
-/// nonempty stem. Absolute paths, `..`/`.` segments, `std/` —
-/// well, any leading dot — and host/drive qualifiers all fail the
-/// grammar honestly. Members resolve file-relative: the key for an
-/// import in `sub/b.mm` is `sub/` + the normalized path (see
-/// `resolve_member`).
+/// nonempty stem. Absolute paths and `..`/`.`/leading-dot segments all
+/// fail the grammar honestly (`std/` is an ordinary subdirectory —
+/// the language resolver tries local files before the toolchain std
+/// fallback). Members resolve file-relative: the key for an import in
+/// `sub/b.mm` is `sub/` + the normalized path (see `resolve_member`).
 pub fn member_name(path: &str) -> Result<String, BundleError> {
+    const MAX_MEMBER_SEGMENTS: usize = 16;
     let stem = path.strip_suffix(".mm").unwrap_or(path);
     let bad = stem.is_empty()
+        || stem.split('/').count() > MAX_MEMBER_SEGMENTS
         || stem.split('/').any(|seg| {
             seg.is_empty() || seg.starts_with('.') || seg.bytes().any(|b| matches!(b, b'\\' | b':'))
         });
@@ -574,11 +576,17 @@ pub fn resolve_member(importer: &str, path: &str) -> Result<String, BundleError>
         .rsplit_once('/')
         .map(|(dir, _)| format!("{dir}/"))
         .unwrap_or_default();
-    Ok(format!("{prefix}{}", member_name(path)?))
+    // The composed path goes through the grammar so producer and
+    // consumer agree on every bound — segment count included — for the
+    // full key, not just the import's own suffix.
+    member_name(&format!("{prefix}{path}"))
 }
 
 /// The qualifier an unaliased import binds: the LAST segment's stem,
 /// so `import "sub/dep"` introduces `dep` (not `sub/dep`).
+/// `trim_end_matches` (not a single `strip_suffix`) keeps the result a
+/// spellable identifier: `dep.mm.mm` qualifies as `dep` since a
+/// `.`-containing qualifier could never appear in source anyway.
 fn member_stem(member: &str) -> &str {
     member
         .rsplit('/')
@@ -677,18 +685,19 @@ fn visit_member(
     Ok(())
 }
 
-/// A member's gated imports: member names in declaration order, the
+/// A member's gated imports: member keys in declaration order, the
 /// qualifier each brings into scope, and the import lines to strip.
 type MemberImports = (Vec<String>, Vec<String>, std::collections::BTreeSet<usize>);
 
-/// Parse a member's `import` items and gate them: bare-basename
-/// members pinned in `sources`, no duplicate imports, no self-import,
+/// Parse a member's `import` items and gate them: member keys resolved
+/// file-relative and pinned in `sources`, no duplicate imports, no
+/// self-import (post-resolution, so `sub/a.mm` importing `"a"` counts),
 /// distinct qualifiers (alias or stem — two members bound to the same
 /// namespace sugar would strip to the same bare-name space
 /// ambiguously), atoms the only other allowed item, and every import
 /// alone on its line as one strict `import "..." [as x];` statement
 /// (a trailing `//` comment is trivia).
-fn member_imports(member_name: &str, text: &str) -> Result<MemberImports, BundleError> {
+fn member_imports(member_key: &str, text: &str) -> Result<MemberImports, BundleError> {
     // `parse_module` (not the checked entry point) because the checked
     // pipeline consumes `import` items; whatever the lenient scan cannot
     // see stays in the text and fails the merged admission downstream.
@@ -700,8 +709,8 @@ fn member_imports(member_name: &str, text: &str) -> Result<MemberImports, Bundle
     for item in &items {
         match item {
             parser::Item::Import(decl) => {
-                let member = resolve_member(member_name, &decl.path)?;
-                if member == member_name {
+                let member = resolve_member(member_key, &decl.path)?;
+                if member == member_key {
                     return Err(BundleError("self-import outside profile"));
                 }
                 if imports.contains(&member) {
