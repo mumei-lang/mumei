@@ -1111,6 +1111,33 @@ admission of a multi-record envelope, not record agreement or
 acceptance. See the
 [Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-check-list-route-evidence-check-list).
 
+### Wave 2 declared evidence-check-consistency route (C02)
+
+Agent's `python -m agent evidence-check-consistency --core <path>
+--evidence <path>` declares Core's `evidence check-consistency`
+(cross-record identity-pin agreement) as one attempt — the envelope
+bytes flow through the same bounded `feed_bytes` stdin wiring under a
+`mumei.evidence-check-consistency-request/v1` fingerprint, with the
+post-run drift re-hash and compare-and-set publication shared across
+the evidence routes. Both `consistent` outcomes select: the completed
+check IS the contract — Core exits 0 with the
+`mumei.evidence-consistency-check/v1` diagnostic whether or not
+conflicts were found, so the route binds the produced bytes whenever
+the diagnostic parses and is internally coherent: `consistent` must
+equal `conflict_count == 0`, `conflicts` must be exactly
+`min(conflict_count, 64)` well-formed `{index_a, index_b, field}`
+entries with `index_a < index_b < record_count` and `field` inside
+the nine-name comparison vocabulary, and the fixed fields must match
+the expected shape. Contradictory or out-of-vocabulary diagnostics
+bind nothing. `mumei.evidence-check-consistency-report/v1` echoes
+`representation`, `record_count`, `consistent`, `conflict_count`,
+the bounded `conflicts` and `checks_not_performed` (seven names
+ending `pin_correctness` — agreement on pins is not pin correctness)
+plus the evidence candidate, only on selection; drift reports
+`inputs_changed` with no claimed outcome. Also reachable as the
+`evidence_check_consistency` MCP tool. C02 stays partial. See the
+[Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-check-consistency-route-evidence-check-consistency).
+
 ### Wave 2 normalized run-result descriptors
 
 Agent's `AttemptRunResult.normalized()` maps one observed terminal run into
