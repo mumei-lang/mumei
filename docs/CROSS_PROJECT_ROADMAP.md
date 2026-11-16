@@ -3455,23 +3455,30 @@ ABI/runtime or optimizer-semantics proof. See the
 ### Wave 5 multifile import-closure bundles
 
 The third record family, `mumei.native-multifile-bundle/v1` under
-`mumei.native-pure-i64-multifile-linux-x86_64/v1`, closes the same-directory
-import closure: the producer merges imported members (in declaration order,
-then the root minus its import lines, with `alias::`/`stem::` call
-qualifiers normalized to bare names) into the canonical text the module
-pipeline compiles. Original members pin byte-for-byte in the record's
-`sources` map, `source_files` pins the root name and
-`import_graph_sha256` — the file-level `{member: [sorted imports]}` graph
-under the same canonical-JSON convention as the atom-level
+`mumei.native-pure-i64-multifile-linux-x86_64/v1`, closes the import
+closure over the whole pinned member set — nested, transitive and
+subdirectory members included: the producer merges members via a
+post-order walk (each member after its own imports, diamonds once,
+cycles honestly rejected) with `alias::`/`stem::` call qualifiers
+normalized to bare names file-locally, into the canonical text the
+module pipeline compiles. Imports resolve file-relative against each
+member's own directory — the language resolver's `base_dir` semantics —
+so `sub/dep.mm` members merge with an unaliased qualifier of the
+last-segment stem, and `..`/absolute/`\\`/`:` segments are rejected so
+member keys stay inside the root's subtree (≤16 segments). Original
+members pin byte-for-byte in the record's `sources` map at their
+`/`-separated member keys, `source_files` pins the root name and
+`import_graph_sha256` — the file-level `{member: [sorted imports]}`
+graph under the same canonical-JSON convention as the atom-level
 `source_dependencies_sha256` pin. Consumers never touch a filesystem
 beyond `--source`: every recheck re-derives the merge from the pinned
 members and binds the checked text to the record. The merge is
 comment-aware — `//` line comments never strip qualifiers — and import
 lines must be single strict `import "..." [as x];` statements.
 
-This is a profile boundary, not a new verification strength: subdirectory/
-`std`, nested and transitive imports, non-atom members and alias pinning
-stay outside the slice.
+This is a profile boundary, not a new verification strength: `std`
+toolchain fallback (a `std/` member is an ordinary local subdirectory),
+non-atom members and alias pinning stay outside the slice.
 
 ### Wave 5 multifile consumer Evidence
 
