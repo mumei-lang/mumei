@@ -250,6 +250,9 @@ pub(crate) fn run(command: NativeBundleCommand) {
                         )),
                         None => {
                             eprintln!("Executable exit-status observation inconclusive; spawn failed, timed out or terminated by signal.");
+                            // `exit` skips destructors — clean the staged
+                            // reproduction up explicitly first.
+                            drop(stage);
                             std::process::exit(3);
                         }
                     }
@@ -257,9 +260,11 @@ pub(crate) fn run(command: NativeBundleCommand) {
                 ArtifactRecheckResult {
                     result: ArtifactRecheck::Rechecked,
                     expected_exit_status: None,
+                    stage,
                     ..
                 } => {
                     eprintln!("Record pins no expected exit status; inconclusive.");
+                    drop(stage);
                     std::process::exit(3);
                 }
                 ArtifactRecheckResult {
