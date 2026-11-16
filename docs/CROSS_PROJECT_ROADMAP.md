@@ -1573,7 +1573,9 @@ admits the same way (`len(lib.V2[i])` on `[][]int64`,
 indexes' own dependencies, with the member's whole fact tree pinned.
 Every other operand (`len(xs)` on a binding, `len(f())`, a field
 like `len(lib.VS2.G)`, `len(lib.VC)` on a channel) stays
-opaque, as do `panic`, `append`, `make`, `new` and the rest. See the
+opaque, as do `panic`, `append` and `make` — `new(T)` is the one
+exception, admitting as a dep-free `*T` allocation whose type
+argument pins (see the resource-state section below). See the
 [Agent pure builtins](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-pure-builtins-in-expressions).
 
 ### Wave 3 compound and tuple assignments in scalar summaries
@@ -1634,10 +1636,12 @@ initializers. Unsummarizable callees keep their declared gaps. See the
 
 Agent's C07 acceptance criterion for aliasing and resource state is
 exercised as negative fixtures: pointer parameters, `&x` aliases,
-slice/map/channel resource state,
-constructor state, bound function values and closures all fail closed
+slice/map/channel resource state and
+unbound function values still fail closed
 as declared gaps rather than producing summaries that silently miss the
-alias or mutation (package-level `var`s — scalar and composite —
+alias or mutation — `new(T)` admits as a dep-free `*T` allocation
+and bound function literals admit via the captured-dep call model
+below (package-level `var`s — scalar and composite —
 admit since the package-globals slices — see below). See the
 [Agent alias and resource-state fixtures](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-alias-and-resource-state-fixtures).
 
@@ -1999,8 +2003,13 @@ package-local `type` admits identically since the local-named-types
 slice (the `type_id` falls back to the unit's own `type` bindings —
 a real identity in `known`, so staleness stays honest both
 directions) — while a computed pointer
-(`*g()`) and a nested deref (`**t`) stay
-closed. Composite pointees now admit the external-state model for
+(`*g()`) stays closed. A nested deref admits one level — `**t`
+reads and `**t = v` stores admit when the inner `*t` operand is a
+bare identifier and the pointee chain resolves pointer →
+scalar/pointer under a `<binding>/pointee/pointee` identity or a
+named deep type, while `***t` and named-alias pointer chains
+(`type PP *T`, whose producer facts stay opaque) fail closed.
+Composite pointees now admit the external-state model for
 index access and stores — dep sets still
 track binding indices, not pointee contents: `(*p)[i]`/`p[i]` on a
 bound `p *[]T`/`*map[K]V`/`*[N]T` (named `p *S` alike) reads with
@@ -2010,8 +2019,18 @@ synthetic `<binding_id>/pointee`); `(*p)[i] = v` and any
 whole-pointee `*p = v` store fold the stored deps like `*p = v`
 always did — and `(*GP)[i]`/`GP[i]` on a package-level pointer var
 records the var's own identity like `GA[i]`. Element-field reads
-(`(*p)[i].F`), `for range *p` and anonymous `*struct{...}`
-pointees stay closed, as does a bare `*p` composite-value read. An unnamed-pointee
+and stores admit too — `(*p)[i].F`/`p[i].F` reads and
+`(*p)[i].F = v`/`+=`/`++` stores on a named-struct element (the
+store folds the value's deps into `indirect_writes` so an aliased
+`(*q)[j].F` observes them), plus `GA[i].V`/`M["k"].V` on a package
+container `var` and `(*GA[i]).V`/`(*GP).V` on a package pointer
+var; container iteration and element inc/dec admit as well —
+`for range *p`/`for range p`/`for range *GP`/`for range GP` (the
+element name carries deps(p) ∪ indirect stores for a bound
+pointer, dep-free for a package var) and `(*p)[i]++`/`--` — while
+nested element fields (`(*p)[i].F.G` reads or stores), anonymous
+`*struct{...}` pointees and a bare `*p` composite-value read stay
+closed. An unnamed-pointee
 binding (`p := &x` on a builtin `int64`) admits through the
 pointer fact's `elem` on both sides, recording the synthetic
 per-binding `<binding_id>/pointee` identity described below. Recording a pointer-typed
@@ -2055,7 +2074,8 @@ imported call. The operand must be a bound
 identifier whose pointer names a resolvable pointee — named
 through its `type_id`, or classified through the pointer fact's
 `elem` since the unnamed scalar pointee slice (`p := &b` on `int64`
-admits through `elem`; `**t = v` and computed pointers stay
+admits through `elem`; `**t = v` admits through the same alias
+fold while computed pointers stay
 closed). The store folds unconditionally, so composite pointees
 admit identically — `*p = v` on `p *[]T`/`*struct{...}` writes
 external memory as soundly as a scalar store; only the read side
@@ -2123,6 +2143,33 @@ on both sides — the deref reads or writes caller memory the
 conflated set cannot represent — while a pointer-typed leaf field
 (`st.A = p`) just folds the value in. Method values (`f := st.M`),
 method calls (`st.M()`), `st[i]` and `*st.V` stay closed.
+A bound function literal — `h := func(...) T { ... }`,
+`h = func(){...}` or `var h = func(){...}` — admits since the
+bound-function-literals slice under a captured-dependency call
+model. The literal itself only pins: its subtree is walked to keep
+calls, writes, `go`/`defer` and `send` closed inside it, while
+each captured enclosing-scope binding id is recorded on the bound
+name. The call `h()` resolves every captured binding id's CURRENT
+dep set at the call site — locals before params — so `z := x;
+h := func(){z}; z = y; h()` reports `y`, and a captured parameter
+reassigned before the call reports its reassigned deps. A literal
+capturing a pointer-typed binding records an imported CallTransfer
+at each call and unions every escaped binding's current deps —
+the honest `*p`-read model, since `*p` inside the literal may
+observe post-bind writes through the pointer — and `effects`
+reports `unknown`. Copies propagate the record: `h2 := h`,
+`h2 = h` and `var h2 = h` carry the captures and the pointer flag
+through pre-loop snapshots so `h, g = g, h` tuple swaps transfer
+each name's pre-state captures, and a non-pointer rebind clears
+the flag. A rebind on a maybe-skipped path (branch, loop body,
+post-`break`/`continue` statements) unions its capture record with
+the skipped path's like `_store` unions deps. Closed shapes stay
+closed: calls or writes inside the literal, `go`/`defer`, a
+function-name bind (`h := G`), a computed or parenthesized callee
+(`(func(){...})()`, `(h)()`), a recursive literal (`h := func(){
+h()}` — `h` is not yet bound when the literal evaluates), package
+`var` aliases (reassignable, hence opaque) and function-typed
+parameters (the signature gate).
 Deeper pointee trees declare their named uses on the member
 record's `pointee_type_ids`: a fully unnamed pointee (`*lib.PU` on
 `*int64`, `(*lib.PA)[i]` on `*[4]int64`) resolves to the empty
