@@ -612,12 +612,18 @@ pub fn merge_import_closure(
         return Err(BundleError("expected at least one import"));
     }
     // Every import must sit alone on its line so stripping cannot leave
-    // residue: the line the decl's span names must be the whole
-    // `import "..." [as x];` statement.
+    // residue: the line the decl's span names must parse as exactly one
+    // `import "..." [as x];` statement — an `import "a"; atom f()`
+    // line would silently drop `f` from the merge otherwise.
     for line in &import_lines {
-        match root.lines().nth(line.saturating_sub(1)).map(str::trim) {
-            Some(text) if text.starts_with("import ") && text.ends_with(';') => (),
-            _ => return Err(BundleError("multiline or embedded import outside profile")),
+        let text = root
+            .lines()
+            .nth(line.saturating_sub(1))
+            .map(str::trim)
+            .unwrap_or_default();
+        let items = parser::parse_module(text);
+        if items.len() != 1 || !matches!(items[0], parser::Item::Import(_)) {
+            return Err(BundleError("multiline or embedded import outside profile"));
         }
     }
     let mut parts = Vec::with_capacity(imports.len() + 1);
@@ -646,10 +652,32 @@ pub fn merge_import_closure(
     // resolved ModuleEnv performs.
     let mut merged_root = stripped.join("\n");
     for qualifier in &qualifiers {
-        merged_root = merged_root.replace(&format!("{qualifier}::"), "");
+        merged_root = strip_qualifier(&merged_root, qualifier);
     }
     parts.push(merged_root.trim_end().to_owned());
     Ok((format!("{}\n", parts.join("\n")), imports))
+}
+
+/// Remove every `<qualifier>::` prefix at an identifier boundary — the
+/// byte before the qualifier must not be an identifier character, so
+/// `ph::f` survives a `h` qualifier and a non-qualifier `x::` anywhere
+/// is left for merged admission to reject.
+fn strip_qualifier(text: &str, qualifier: &str) -> String {
+    let pattern = format!("{qualifier}::");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find(&pattern) {
+        let boundary = rest.as_bytes()[..pos]
+            .last()
+            .is_none_or(|b| !b.is_ascii_alphanumeric() && *b != b'_');
+        out.push_str(&rest[..pos]);
+        if !boundary {
+            out.push_str(&pattern);
+        }
+        rest = &rest[pos + pattern.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Pin the file-level import graph under the same canonical-JSON
@@ -1043,6 +1071,29 @@ mod multifile_tests {
         assert!(merge_import_closure("app.mm", &nested).is_err());
         let only_root = BTreeMap::from([("app.mm".to_owned(), ROOT.to_owned())]);
         assert!(merge_import_closure("app.mm", &only_root).is_err());
+    }
+
+    #[test]
+    fn qualifier_stripping_respects_identifier_boundaries() {
+        assert_eq!(strip_qualifier("h::f(0)", "h"), "f(0)");
+        assert_eq!(strip_qualifier("x + h::f(0)", "h"), "x + f(0)");
+        assert_eq!(strip_qualifier("ph::f", "h"), "ph::f");
+        assert_eq!(strip_qualifier("_h::f", "h"), "_h::f");
+        assert_eq!(strip_qualifier("helpers::f", "h"), "helpers::f");
+    }
+
+    #[test]
+    fn import_sharing_a_line_with_another_declaration_is_rejected() {
+        let shared = BTreeMap::from([
+            (
+                "app.mm".to_owned(),
+                format!(
+                    "import \"helpers\" as h; atom main() -> i64 requires: true; ensures: result > 0; body: {{ h::helper(0) }};"
+                ),
+            ),
+            ("helpers.mm".to_owned(), HELPERS.to_owned()),
+        ]);
+        assert!(merge_import_closure("app.mm", &shared).is_err());
     }
 
     #[test]

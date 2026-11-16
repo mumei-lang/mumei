@@ -2027,3 +2027,79 @@ fn accept_artifact_accepts_module_bundles() {
     );
     assert_eq!(descriptor["accepted"], true);
 }
+
+const MF_HELPERS: &str =
+    "atom helper(x: i64) -> i64 requires: x > 0; ensures: result == x + 1; body: { x + 1 };\n";
+const MF_ROOT: &str = "import \"helpers\" as h;\n\natom main() -> i64 requires: true; ensures: result == 6; body: { h::helper(5) };";
+
+fn build_multifile(root: &Path) -> (std::path::PathBuf, std::path::PathBuf, String) {
+    let source = root.join("app.mm");
+    let bundle = root.join("bundle");
+    fs::write(root.join("helpers.mm"), MF_HELPERS).unwrap();
+    fs::write(&source, MF_ROOT).unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    (source, bundle, id)
+}
+
+#[test]
+fn multifile_bundle_builds_and_rechecks_with_honest_consumer_rejections() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_multifile(root.path());
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], "mumei.native-multifile-bundle/v1");
+    assert_eq!(record["source_files"]["root"], "app.mm");
+    assert!(record["sources"]["app.mm"]["sha256"].is_string());
+    assert!(record["sources"]["helpers.mm"]["sha256"].is_string());
+    assert!(bundle.join("sources/app.mm").is_file());
+    assert!(bundle.join("sources/helpers.mm").is_file());
+
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    let artifact = consume("recheck-artifact", &source, &bundle, &id);
+    assert_success(&artifact);
+
+    // Multifile consumer Evidence is not emitted yet: the JSON surface
+    // and both accept-* commands reject the family honestly.
+    let json = consume("recheck-llvm --json", &source, &bundle, &id);
+    assert_eq!(json.status.code(), Some(1));
+    assert!(json.stdout.is_empty());
+    let evidence = root.path().join("evidence.json");
+    fs::write(&evidence, b"{}").unwrap();
+    let accept_evidence = cli(&[
+        "native-bundle",
+        "accept-evidence",
+        bundle.to_str().unwrap(),
+        source.to_str().unwrap(),
+        evidence.to_str().unwrap(),
+        "--expected-build-id",
+        &id,
+    ]);
+    assert_eq!(accept_evidence.status.code(), Some(1));
+    assert!(accept_evidence.stdout.is_empty());
+    let output = consume("accept-artifact", &source, &bundle, &id);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+
+    // A pinned member that is not the root cannot pose as `--source`.
+    let wrong = consume("check", &root.path().join("helpers.mm"), &bundle, &id);
+    assert_eq!(wrong.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&wrong.stderr).contains("root source member"));
+
+    // A member swapped inside the pinned sources/ directory is detected.
+    fs::write(
+        bundle.join("sources/helpers.mm"),
+        MF_HELPERS.replace("x + 1", "x + 2"),
+    )
+    .unwrap();
+    let tampered = consume("check", &source, &bundle, &id);
+    assert_eq!(tampered.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&tampered.stderr).contains("source member"));
+}
