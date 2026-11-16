@@ -2044,9 +2044,10 @@ scalar field access — `p.V`/`(*p).V` reads and `p.V = v`/`+=`/`++`
 stores — since the producer emits a `struct` fact for every
 struct underlying and each field resolves through its own
 binding; the synthetic `<binding>/pointee` identity records the
-store, while whole-struct derefs, nested selections (`p.A.N`),
-pointer-typed struct fields and anonymous `struct{...}` values
-(`st := struct{...}{...}`) stay closed. An unnamed-pointee
+store, while whole-struct derefs, nested selections (`p.A.N`) and
+pointer-typed struct fields stay closed — anonymous `struct{...}`
+values (`st := struct{...}{...}`) admit separately under the
+conflated dep-set model described below. An unnamed-pointee
 binding (`p := &x` on a builtin `int64`) admits through the
 pointer fact's `elem` on both sides, recording the synthetic
 per-binding `<binding_id>/pointee` identity described below. Recording a pointer-typed
@@ -2145,8 +2146,17 @@ in via the existing accumulate slot — never a transfer, because a
 local mutation is not an external effect — and `st = P{...}`
 replaces the set wholesale. Admission gates on
 `type.kind == "unsupported"` with a `type_id` resolving to a `type`
-declaration: anonymous `struct{...}`, named `[]T`/`map` and
-`type_id`-less bindings stay `binding_unavailable`, and struct
+declaration, or — since the anonymous-struct-values slice — on
+`type.kind == "struct"` with no `type_id` at all: `st := struct{...}{...}`
+and `var st struct{...}` conflate the same way, enumerating fields
+in source order right after the declaring name's span (a named
+type's fields follow its `type` name; nothing pins since no `type`
+identity exists to redeclare). Nested anonymous fields admit too —
+`st.A.N` where `A` is itself `struct{...}` resolves each field
+against its own declaring name's window — and a package-level
+`var GS struct{...}` admits through the composite-globals model.
+Named `[]T`/`map`/`string` and other `type_id`-less bindings stay
+`binding_unavailable`, and struct
 params/results stay closed at the signature gate. The hard boundary
 is the aliasing invariant the dep-free bound-pointer field read
 relies on — a bound pointer must never alias a tracked composite —
