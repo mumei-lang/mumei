@@ -505,3 +505,43 @@ fn resource_exhaustion_and_all_non_unsat_outcomes_emit_no_record() {
         Outcome::Refuted
     );
 }
+
+#[test]
+fn acceptance_reports_the_same_evaluation_in_the_acceptance_vocabulary() {
+    let bytes = saved(CLAMP, Options::default());
+    assert_eq!(
+        accept(CLAMP, &bytes, Options::default()).unwrap(),
+        AcceptOutcome::Accepted
+    );
+    let source = CLAMP.replace("body: { if x < 0 { 0 } else { x } };", "body: { 1 };");
+    assert_ne!(source, CLAMP);
+    let contract =
+        semantic_contract::extract_pure_i64_contract(&source, SOURCE_LABEL, None, false).unwrap();
+    let mut rebound = established(CLAMP, Options::default());
+    rebound.subject.sha256 = contract.source_sha256;
+    let rebound = serde_json::to_vec(&rebound).unwrap();
+    assert_eq!(
+        accept(&source, &rebound, Options::default()).unwrap(),
+        AcceptOutcome::Rejected
+    );
+    assert_eq!(
+        accept(
+            CLAMP,
+            &bytes,
+            Options {
+                resource_limit: 1,
+                ..Options::default()
+            }
+        )
+        .unwrap(),
+        AcceptOutcome::Inconclusive
+    );
+    assert_eq!(
+        accept(CLAMP, b"FAKE_PRIVATE_MALFORMED", Options::default()),
+        Err(SourceEvidenceError::InvalidSavedEvidence)
+    );
+    assert_eq!(
+        accept(CLAMP, &bytes, Options::default()),
+        accept(CLAMP, &bytes, Options::default())
+    );
+}

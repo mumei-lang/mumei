@@ -3047,6 +3047,20 @@ execution, grade/Lean promotion, LLVM/native semantics or common acceptance.
 Native consumers and Agent ownership remain unchanged. See the
 [source consistency contract](VERIFICATION_NATIVE.md#standalone-source-evidence-consistency-recheck).
 
+The first Core-side `acceptance: evaluated` surface is
+`mumei evidence accept-source <record> --source <source> [--json]` and
+`mumei_core::source_evidence::accept`: the same bounded pipeline as the
+consistency recheck (representation gate, fresh caller-budgeted query, full
+field equality) reported in the acceptance vocabulary — `Accepted`,
+`Rejected`, `Inconclusive`. Accepted emits one anonymous
+`mumei.source-evidence-acceptance/v1` descriptor naming
+`checks_performed`/`checks_not_performed` (authenticity, historical execution,
+record freshness, independent correspondence, LLVM/artifact/grade/Lean stay
+unassessed); it echoes no digest and is not reusable Evidence or a
+certificate. Non-acceptance emits nothing; acceptance remains bounded to the
+one restricted profile. See the
+[acceptance contract](VERIFICATION_NATIVE.md#standalone-source-evidence-acceptance-evaluation).
+
 The Agent C04/C11 planner also adds optional exact result-contract routing:
 one profile/method pair, scope, bound/assumption identifiers and correspondence
 relation/status must match one complete declared offer. Explicit/automatic
