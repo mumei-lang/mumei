@@ -2052,11 +2052,14 @@ deps even with nothing escaped — and a local callee with unbounded
 effects hands the same conservative rule to `&x` arguments:
 `Set(&x, y); return x` reports every argument's deps like an
 imported call. The operand must be a bound
-identifier whose pointer names a scalar or pointer pointee — named
+identifier whose pointer names a resolvable pointee — named
 through its `type_id`, or classified through the pointer fact's
 `elem` since the unnamed scalar pointee slice (`p := &b` on `int64`
-admits through `elem`; `**t = v`, computed pointers and composite
-pointees stay closed) — and
+admits through `elem`; `**t = v` and computed pointers stay
+closed). The store folds unconditionally, so composite pointees
+admit identically — `*p = v` on `p *[]T`/`*struct{...}` writes
+external memory as soundly as a scalar store; only the read side
+keeps its scalar-or-pointer classification — and
 `(*p)++`/`*t--` admit without a fold — provenance-preserving. `&`
 on non-fragment operands stays outside the fragment; a pointer to
 an unnamed or composite pointee (`*int64`, `**T`) pins nothing but
