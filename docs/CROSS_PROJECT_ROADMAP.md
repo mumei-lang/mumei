@@ -3823,6 +3823,30 @@ scenarios exercise both routes end to end — every `native-bundle`
 consumer subcommand now has a declared route and a demo scenario.
 C02/C10 stay partial.
 
+### Wave 5 declared producer-identity gate (C02 consumer)
+
+Core's `mumei evidence check|check-list|check-consistency`
+`--expected-adapter <id>` closes the declaration-level half of the
+producer gap: the descriptor's `checks_not_performed` always named
+`producer_authenticity`, yet nothing checked even which producer the
+record declares. The flag follows the `--expected-build-id`
+trusted-channel convention — a mismatched record exits 1 with a
+static error and no diagnostic, while a matching run gains
+`checks_performed` naming `representation_gate` (plus
+`cross_record_pin_agreement` on consistency) and
+`declared_producer_identity`. `producer_authenticity` stays
+not_performed: declared identity is what the record says, not
+whether it is true. `accept-*` routes need no flag — `fresh ==
+saved` byte equality already binds the whole provenance block.
+
+Agent mirrors the flag on the `evidence-check`, `evidence-check-list`
+and `evidence-check-consistency` routes / MCP tools: the expectation
+joins the attempt fingerprint only when given, the gated and ungated
+diagnostic shapes are distinct accepted documents, and the report
+lifts `checks_performed` on selection. See
+[VERIFICATION_NATIVE.md](VERIFICATION_NATIVE.md#declared-producer-identity-gate).
+C02 stays partial — real authenticity/attestation remains open.
+
 
 ## No-`.mm` front door and V1 order
 
