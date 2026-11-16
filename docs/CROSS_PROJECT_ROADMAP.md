@@ -1990,11 +1990,13 @@ and alias facts record distinct type_id's per alias so no type
 check narrows the set (`p := &x; x = y; *p` reads x's updated
 value, and the same may-read covers `*lib.PV` after `lib.PV =
 &x`); `p := &t` inherits the same
-`*T` identity, so `*p` reads the same way, while an unnamed-pointee
-binding (`p := &x` on a builtin `int64`), a computed pointer
+`*T` identity, so `*p` reads the same way, while a computed pointer
 (`*g()`), a nested deref (`**t`) and a pointee naming a local
 `type` stay closed, matching the `*t = v` write side (dep sets
-track binding indices, not pointee contents). Recording a pointer-typed
+track binding indices, not pointee contents). An unnamed-pointee
+binding (`p := &x` on a builtin `int64`) admits through the
+pointer fact's `elem` on both sides, recording the synthetic
+per-binding `<binding_id>/pointee` identity described below. Recording a pointer-typed
 `var` member now also declares its named pointee as a `type`
 member so the consumer can classify it. Passing
 `&x` to an imported callee hands it a writable alias of `x`, so
@@ -2030,12 +2032,17 @@ deps even with nothing escaped — and a local callee with unbounded
 effects hands the same conservative rule to `&x` arguments:
 `Set(&x, y); return x` reports every argument's deps like an
 imported call. The operand must be a bound
-identifier whose pointer names a scalar or pointer pointee (`p :=
-&b` on `int64`, `**t = v`, computed pointers stay closed), and
+identifier whose pointer names a scalar or pointer pointee — named
+through its `type_id`, or classified through the pointer fact's
+`elem` since the unnamed scalar pointee slice (`p := &b` on `int64`
+admits through `elem`; `**t = v`, computed pointers and composite
+pointees stay closed) — and
 `(*p)++`/`*t--` admit without a fold — provenance-preserving. `&`
 on non-fragment operands stays outside the fragment; a pointer to
 an unnamed or composite pointee (`*int64`, `**T`) pins nothing but
-still tracks its dep set. Writes to imported `var` members admit
+still tracks its dep set — an unnamed pointee records the mutation
+against a synthetic per-binding `<binding_id>/pointee` identity
+that can never be pinned nor redeclared. Writes to imported `var` members admit
 through the same external-mutation rule — `lib.V = v`,
 `lib.VA[i] = v` and `lib.VS.f = v` (and dot-imported forms) resolve
 the LHS until a `var` member names the target, record the imported
