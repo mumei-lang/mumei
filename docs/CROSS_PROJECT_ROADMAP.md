@@ -293,6 +293,21 @@ Core-owned Evidence meaning/acceptance remain separate open work. C11 is partial
 C12, assurance/Lean/native/LLVM and deferred-WASM policies are unchanged, with no
 external verifier adoption. See the [Core consumer](VERIFICATION_NATIVE.md#standalone-representation-only-cli-consumer).
 
+### Wave 5 bounded multi-record representation check
+
+`mumei evidence check-list <envelope> [--json]` admits one closed
+`mumei.verification-evidence-list/v1` envelope holding up to 64 records
+inside the shared 65,536-byte limit. Each element's raw bytes pass the
+single-record gate independently: duplicate keys, unknown fields and invalid
+combinations fail closed exactly as standalone, and field-ordered JSON
+sequences are rejected by both gates. The static diagnostic reports
+`record_count`, keeps `acceptance: not_evaluated` and names
+`cross_record_consistency` among checks not performed; an empty list is
+representation-valid. No deduplication, ordering, coverage, truth or
+acceptance is implied, and the envelope is not reusable Evidence or a
+receipt. See the
+[list check contract](VERIFICATION_NATIVE.md#bounded-multi-record-representation-check).
+
 ### Wave 2 explicit Agent-to-Core representation handoff
 
 Agent adds a separately invoked POSIX-only local Core handoff. The host must
