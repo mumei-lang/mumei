@@ -1153,8 +1153,9 @@ exclusions are never probed and the selected adapter is skipped;
 
 Scheduling stays declarative — it decides which declared probes would
 make excluded candidates observable and runs nothing itself. Retry
-policy, concurrency, cross-stamp ordering and Evidence acceptance
-remain open work. C11 stays partial; C12's demand gate plus existing
+policy, concurrency and Evidence acceptance
+remain open work (cross-stamp ordering is covered by its own section
+below). C11 stays partial; C12's demand gate plus existing
 assurance/Lean/native/LLVM/deferred-WASM policies are unchanged. See the
 [Agent probe scheduling](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-observation-driven-probe-scheduling).
 
@@ -1275,6 +1276,25 @@ the MCP `summaries_plan` keep working. Ordering is declared per
 `command_fingerprint`; cross-adapter ordering stays the registry
 stamp's job. See the
 [Agent probe-history stamp ordering](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-probe-history-stamp-ordering).
+
+### Wave 2 declared probe-history evaluation
+
+Agent's `evaluate_probe_history(request, history)` folds a recorded
+`AdapterProbeHistory` into `mumei.probe-history-evaluation/v1` — the
+history-level counterpart of probe-acceptance's single-outcome
+normalization. The history must bind the presented request's
+adapter and command fingerprint (a foreign history is a static
+error); the descriptor reports `outcome_count`,
+`latest_attempt`/`latest_kind`, `latest_availability` re-derived
+through the same outcome mapping, `ordered` (declared stamps never
+regress) and `decisive` (the latest outcome is conclusive).
+Acceptance stays a single-outcome property and is not emitted
+here; `checks_not_performed` names what the fold leaves unassessed
+(freshness beyond the last stamp, cross-adapter ordering, stdout
+interpretation, tool-version truth, availability semantics,
+producer authenticity, Evidence acceptance). Declaration-level
+evaluation, not a verdict or routing authority. See the
+[Agent probe-history evaluation](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-probe-history-evaluation).
 
 ### Wave 2 declared probe cancellation
 
