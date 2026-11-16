@@ -490,6 +490,7 @@ fn recheck_llvm_loaded(
                         expected_id,
                         &record,
                         &report,
+                        &source,
                     )?),
                 ),
                 Outcome::Different | Outcome::UndefinedBehavior => LlvmRecheck::Different,

@@ -2,8 +2,10 @@
 
 use mumei_core::native_bundle::{
     sha256, BuildSettings, BundleError, BundleFile, ModuleNativeBundleRecord, NativeBundleRecord,
-    PROFILE, RECHECK_PROFILE, RECHECK_RESOURCE_LIMIT,
+    MODULE_PROFILE, MODULE_RECHECK_PROFILE, PROFILE, RECHECK_PROFILE, RECHECK_RESOURCE_LIMIT,
 };
+use mumei_core::parser::{parse_body_expr_checked, parse_module_checked, Item};
+use mumei_core::semantic_contract::{contains_while_stmt, LOOP_BOUND};
 use mumei_core::verification_evidence::{
     Adapter, Correspondence, Evidence, Identity, Provenance, Scope, Semantics, Subject, Tool,
     SCHEMA_VERSION,
@@ -113,6 +115,7 @@ fn make_evidence(
     target_triple: Option<&str>,
     method: &str,
     scope: &str,
+    bounds: &[&str],
     correspondence: Correspondence,
     tool: Tool,
     artifact_paths: &[&str],
@@ -132,7 +135,7 @@ fn make_evidence(
         result: "established".into(),
         scope: Scope {
             kind: scope.into(),
-            bounds: Vec::new(),
+            bounds: strings(bounds),
         },
         correspondence,
         assumptions: strings(ASSUMPTIONS),
@@ -152,7 +155,10 @@ fn make_evidence(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn configuration_fingerprint(
+    identity_profile: &str,
+    recheck_profile: &str,
     source_profile: &str,
     llvm_profile: &str,
     llvm_timeout_ms: u32,
@@ -161,10 +167,10 @@ fn configuration_fingerprint(
     data_layout: &str,
 ) -> Result<String, BundleError> {
     let configuration = serde_json::to_vec(&serde_json::json!({
-        "identity_profile": PROFILE,
+        "identity_profile": identity_profile,
         "semantic_contract_version": mumei_core::semantic_contract::SEMANTIC_CONTRACT_VERSION,
         "source_semantic_profile": source_profile,
-        "source_profile": RECHECK_PROFILE,
+        "source_profile": recheck_profile,
         "source_timeout_ms": BuildSettings::default().solver_timeout_ms,
         "source_resource_limit": RECHECK_RESOURCE_LIMIT,
         "llvm_profile": llvm_profile,
@@ -183,6 +189,8 @@ pub(super) fn from_recheck(
     report: &ValidationReport,
 ) -> Result<NativeConsumerEvidence, BundleError> {
     let fingerprint = configuration_fingerprint(
+        PROFILE,
+        RECHECK_PROFILE,
         report.source_profile,
         report.profile,
         report.timeout_ms,
@@ -199,6 +207,7 @@ pub(super) fn from_recheck(
                 target_triple: Option<&str>,
                 method: &str,
                 scope: &str,
+                bounds: &[&str],
                 correspondence: Correspondence,
                 tool: Tool,
                 artifact_paths: &[&str]|
@@ -214,6 +223,7 @@ pub(super) fn from_recheck(
             target_triple,
             method,
             scope,
+            bounds,
             correspondence,
             tool,
             artifact_paths,
@@ -229,7 +239,7 @@ pub(super) fn from_recheck(
                 Subject { id: "program".into(), kind: "native_artifact".into(), sha256: record.files[&BundleFile::Executable].sha256.clone() },
                 Identity { id: "native-bundle.json".into(), sha256: expected_id.to_owned() },
                 "native_bundle_identity_consistency", PROFILE, "not_applicable", Some(report.target),
-                "identity_check", "identity",
+                "identity_check", "identity", &[],
                 Correspondence { relation: "unchecked".into(), status: "unverified".into(), notes: strings(&["pinned_source_certificate_and_bundle_member_identities_only_not_semantic_correspondence"]) },
                 Tool { name: "mumei".into(), version: env!("CARGO_PKG_VERSION").to_owned() },
                 &["native-bundle.json", "program.ll", "program.o", "proof-cert.json", "program"],
@@ -238,7 +248,7 @@ pub(super) fn from_recheck(
                 Subject { id: "native-source.mm".into(), kind: "mumei_source".into(), sha256: report.source_sha256.clone() },
                 Identity { id: "main.contract".into(), sha256: record.source.specification_sha256.clone() },
                 "main_source_postcondition", RECHECK_PROFILE, "wrapping_i64", None,
-                "deductive_proof", "unbounded",
+                "deductive_proof", "unbounded", &[],
                 Correspondence { relation: "exact_model".into(), status: "assumed".into(), notes: strings(&["restricted_c03_source_encoding_and_parser_normalization_are_trusted_not_independently_proved"]) },
                 Tool { name: "Z3".into(), version: z3_version.clone() },
                 &[],
@@ -247,7 +257,7 @@ pub(super) fn from_recheck(
                 Subject { id: "program.ll".into(), kind: "lowered_ir".into(), sha256: report.llvm_sha256.clone() },
                 Identity { id: "native-source.mm#main.body".into(), sha256: report.source_sha256.clone() },
                 "main_source_to_llvm_user_body", report.profile, "wrapping_i64", Some(report.target),
-                "deductive_proof", "unbounded",
+                "deductive_proof", "unbounded", &[],
                 Correspondence { relation: "exact_model".into(), status: "validated".into(), notes: strings(&[
                     "full_i64_user_body_compared_to_source_within_the_restricted_profile",
                     "wrapper_call_trunc_ret_shape_only_returns_low_32_bits_not_an_os_exit_status_proof",
@@ -270,8 +280,32 @@ pub(super) fn from_module_recheck(
     expected_id: &str,
     record: &ModuleNativeBundleRecord,
     report: &ModuleValidationReport,
+    source: &str,
 ) -> Result<NativeModuleConsumerEvidence, BundleError> {
+    // Atoms carrying a `while` are verified only where the guard fails
+    // within the profile bound, so their records claim a bounded scope
+    // rather than the unbounded claim a loop-free atom earns. The
+    // record family does not gate on this — a bundle assembled outside
+    // `native-bundle build` could carry loop atoms — so the scope is
+    // re-derived from the source here instead of trusting the report.
+    let loop_bound_label = format!("while_loop_guard_evaluations <= {LOOP_BOUND}");
+    let bound_label: &str = &loop_bound_label;
+    let mut bounded_atoms = std::collections::BTreeSet::new();
+    for item in
+        parse_module_checked(source).map_err(|_| BundleError("module source is not parseable"))?
+    {
+        let Item::Atom(atom) = item else {
+            continue;
+        };
+        let body = parse_body_expr_checked(&atom.body_expr)
+            .map_err(|_| BundleError("module atom body is not parseable"))?;
+        if contains_while_stmt(&body) {
+            bounded_atoms.insert(atom.name);
+        }
+    }
     let fingerprint = configuration_fingerprint(
+        MODULE_PROFILE,
+        MODULE_RECHECK_PROFILE,
         report.source_profile,
         report.profile,
         report.timeout_ms,
@@ -288,6 +322,7 @@ pub(super) fn from_module_recheck(
                 target_triple: Option<&str>,
                 method: &str,
                 scope: &str,
+                bounds: &[&str],
                 correspondence: Correspondence,
                 tool: Tool,
                 artifact_paths: &[&str]|
@@ -303,6 +338,7 @@ pub(super) fn from_module_recheck(
             target_triple,
             method,
             scope,
+            bounds,
             correspondence,
             tool,
             artifact_paths,
@@ -312,18 +348,23 @@ pub(super) fn from_module_recheck(
     evidence.push(make(
         Subject { id: "program".into(), kind: "native_artifact".into(), sha256: record.files[&BundleFile::Executable].sha256.clone() },
         Identity { id: "native-bundle.json".into(), sha256: expected_id.to_owned() },
-        "native_bundle_identity_consistency", PROFILE, "not_applicable", Some(report.target),
-        "identity_check", "identity",
+        "native_bundle_identity_consistency", MODULE_PROFILE, "not_applicable", Some(report.target),
+        "identity_check", "identity", &[],
         Correspondence { relation: "unchecked".into(), status: "unverified".into(), notes: strings(&["pinned_source_certificate_and_bundle_member_identities_only_not_semantic_correspondence"]) },
         Tool { name: "mumei".into(), version: env!("CARGO_PKG_VERSION").to_owned() },
         &["native-bundle.json", "program.ll", "program.o", "proof-cert.json", "program"],
     ));
     for (atom, binding) in &record.source.atoms {
+        let (scope, bounds): (&str, &[&str]) = if bounded_atoms.contains(atom) {
+            ("bounded", std::slice::from_ref(&bound_label))
+        } else {
+            ("unbounded", &[])
+        };
         evidence.push(make(
             Subject { id: format!("native-source.mm#{atom}"), kind: "mumei_source".into(), sha256: report.source_sha256.clone() },
             Identity { id: format!("{atom}.contract"), sha256: binding.specification_sha256.clone() },
-            &format!("{atom}_source_postcondition"), RECHECK_PROFILE, "wrapping_i64", None,
-            "deductive_proof", "unbounded",
+            &format!("{atom}_source_postcondition"), MODULE_RECHECK_PROFILE, "wrapping_i64", None,
+            "deductive_proof", scope, bounds,
             Correspondence { relation: "exact_model".into(), status: "assumed".into(), notes: strings(&["restricted_c03_source_encoding_and_parser_normalization_are_trusted_not_independently_proved"]) },
             Tool { name: "Z3".into(), version: z3_version.clone() },
             &[],
@@ -332,7 +373,7 @@ pub(super) fn from_module_recheck(
             Subject { id: "program.ll".into(), kind: "lowered_ir".into(), sha256: report.llvm_sha256.clone() },
             Identity { id: format!("native-source.mm#{atom}.body"), sha256: report.source_sha256.clone() },
             &format!("{atom}_source_to_llvm_user_body"), report.profile, "wrapping_i64", Some(report.target),
-            "deductive_proof", "unbounded",
+            "deductive_proof", scope, bounds,
             Correspondence { relation: "exact_model".into(), status: "validated".into(), notes: strings(&[
                 "full_i64_user_body_compared_to_source_within_the_restricted_profile",
                 "wrapper_call_trunc_ret_shape_only_returns_low_32_bits_not_an_os_exit_status_proof",
@@ -350,4 +391,141 @@ pub(super) fn from_module_recheck(
     };
     validate(&evidence.evidence)?;
     Ok(evidence)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mumei_core::native_bundle::{
+        ContentIdentity, LinkBuild, ModuleAtomBinding, ModuleSourceBinding, ObjectBuild,
+    };
+    use mumei_emit_llvm::translation_validation::{FunctionOutcome, Outcome};
+    use std::collections::BTreeMap;
+
+    const WHILE_MODULE: &str = "atom count(x: i64) -> i64 requires: x >= 0; ensures: result == x; body: { let i = 0; while i < x invariant: i >= 0 && i <= x decreases: x - i { i = i + 1 }; i };\natom main() -> i64 requires: true; ensures: result == 0; body: { count(0) };";
+    const LOOP_FREE_MODULE: &str = "atom helper(x: i64) -> i64 requires: x > 0; ensures: result == x + 1; body: { x + 1 };\natom main() -> i64 requires: true; ensures: result == 6; body: { helper(5) };";
+
+    fn module_record(atoms: &[&str]) -> ModuleNativeBundleRecord {
+        let mut bindings = BTreeMap::new();
+        for atom in atoms {
+            bindings.insert(
+                (*atom).to_owned(),
+                ModuleAtomBinding {
+                    atom_content_hash: "a".repeat(64),
+                    specification_sha256: "b".repeat(64),
+                    implementation_sha256: "c".repeat(64),
+                    hir_sha256: "d".repeat(64),
+                    mir_sha256: "e".repeat(64),
+                    translator_ir_sha256: "f".repeat(64),
+                },
+            );
+        }
+        let mut files = BTreeMap::new();
+        files.insert(
+            BundleFile::Executable,
+            ContentIdentity {
+                sha256: "1".repeat(64),
+                bytes: 1,
+            },
+        );
+        ModuleNativeBundleRecord {
+            schema: "mumei.native-module-bundle/v1".into(),
+            profile: MODULE_PROFILE.into(),
+            scope: "identity_consistency_only".into(),
+            system_scope: "none".into(),
+            source: ModuleSourceBinding {
+                source_sha256: "2".repeat(64),
+                source_profile: "p".into(),
+                atoms: bindings,
+                hir_encoding: "json".into(),
+                mir_encoding: "json".into(),
+                translator_version: "v".into(),
+                bridge_lemma_hash: "b".into(),
+                compiler_version: "c".into(),
+                source_dependencies_sha256: "d".into(),
+            },
+            object_build: ObjectBuild {
+                target_triple: "x86_64-unknown-linux-gnu".into(),
+                data_layout: "e".into(),
+                llvm_version: "17".into(),
+            },
+            link_build: LinkBuild {
+                driver: "cc".into(),
+                driver_version: "1".into(),
+                driver_target: "x86_64-linux".into(),
+                linker: "gnu-ld".into(),
+                linker_version: "1".into(),
+                arguments_sha256: "args".into(),
+            },
+            settings: BuildSettings::default(),
+            files,
+        }
+    }
+
+    fn module_report(atoms: &[&str]) -> ModuleValidationReport {
+        ModuleValidationReport {
+            profile: "mumei.native-module-source-to-llvm-tv/v1",
+            source_profile: "mumei.native-module-pure-i64/v1",
+            target: "x86_64-unknown-linux-gnu",
+            data_layout: "e",
+            checked_stage: "llvm",
+            input_domain: "i64".into(),
+            source_sha256: "3".repeat(64),
+            llvm_sha256: "4".repeat(64),
+            timeout_ms: 10_000,
+            resource_limit: 0,
+            functions: atoms
+                .iter()
+                .map(|name| FunctionOutcome {
+                    function_name: (*name).to_owned(),
+                    outcome: Outcome::EquivalentWithinProfile,
+                })
+                .collect(),
+            outcome: Outcome::EquivalentWithinProfile,
+        }
+    }
+
+    #[test]
+    fn module_evidence_uses_module_profiles_and_bounded_scope_for_loop_atoms() {
+        let record = module_record(&["count", "main"]);
+        let report = module_report(&["count", "main"]);
+        let evidence =
+            from_module_recheck(&"5".repeat(64), &record, &report, WHILE_MODULE).unwrap();
+        assert_eq!(evidence.evidence.len(), 5);
+        assert_eq!(evidence.evidence[0].semantics.profile, MODULE_PROFILE);
+        let count_post = evidence
+            .evidence
+            .iter()
+            .find(|record| record.obligation_id == "count_source_postcondition")
+            .unwrap();
+        assert_eq!(count_post.semantics.profile, MODULE_RECHECK_PROFILE);
+        assert_eq!(count_post.scope.kind, "bounded");
+        assert_eq!(count_post.scope.bounds.len(), 1);
+        let count_tv = evidence
+            .evidence
+            .iter()
+            .find(|record| record.obligation_id == "count_source_to_llvm_user_body")
+            .unwrap();
+        assert_eq!(count_tv.scope.kind, "bounded");
+        let main_post = evidence
+            .evidence
+            .iter()
+            .find(|record| record.obligation_id == "main_source_postcondition")
+            .unwrap();
+        assert_eq!(main_post.semantics.profile, MODULE_RECHECK_PROFILE);
+        assert_eq!(main_post.scope.kind, "unbounded");
+        assert!(main_post.scope.bounds.is_empty());
+    }
+
+    #[test]
+    fn module_evidence_is_unbounded_for_loop_free_atoms() {
+        let record = module_record(&["helper", "main"]);
+        let report = module_report(&["helper", "main"]);
+        let evidence =
+            from_module_recheck(&"5".repeat(64), &record, &report, LOOP_FREE_MODULE).unwrap();
+        assert!(evidence
+            .evidence
+            .iter()
+            .all(|record| record.scope.kind != "bounded"));
+    }
 }

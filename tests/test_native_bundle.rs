@@ -1617,6 +1617,23 @@ fn module_recheck_llvm_json_emits_per_atom_consumer_evidence() {
         assert!(obligations.contains(&format!("{atom}_source_postcondition").as_str()));
         assert!(obligations.contains(&format!("{atom}_source_to_llvm_user_body").as_str()));
     }
+    // The identity record names the module bundle profile and every
+    // per-atom postcondition record names the module recheck profile —
+    // never the single-atom family strings.
+    assert_eq!(
+        evidence[0]["semantics"]["profile"],
+        native_bundle::MODULE_PROFILE
+    );
+    for record in evidence.iter().skip(1) {
+        let obligation = record["obligation_id"].as_str().unwrap();
+        if obligation.ends_with("_source_postcondition") {
+            assert_eq!(
+                record["semantics"]["profile"],
+                native_bundle::MODULE_RECHECK_PROFILE
+            );
+        }
+        assert_eq!(record["scope"]["kind"], "unbounded");
+    }
 }
 
 #[test]

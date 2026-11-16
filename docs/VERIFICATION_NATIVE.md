@@ -1307,6 +1307,16 @@ identity record, then per atom in the record's sorted binding map a
 digest; specification: the atom's contract identity) and a
 `<atom>_source_to_llvm_user_body` record (subject: `program.ll`;
 specification: `native-source.mm#<atom>.body` bound to the module source digest).
+Records name the module profiles —
+`mumei.native-pure-i64-module-linux-x86_64/v1` for identity,
+`mumei.native-module-source-recheck/v1` for source postconditions and
+`mumei.llvm17-native-module-snapshot/v1` for LLVM comparisons — so a module
+report never carries single-atom profile strings, and the configuration
+fingerprint records the same pair. An atom whose body contains a `while` is
+verified only where the guard fails within the profile bound (4 evaluations),
+so its postcondition and translation records claim `bounded` scope with a
+`while_loop_guard_evaluations <= 4` bound rather than `unbounded`; the scope
+is re-derived from the source text, not trusted from the report.
 Module evidence is emitted only on aggregate equivalence, so every atom's
 record reports `established`; there is no partial-success module report.
 Scope, assumptions, exclusions and `acceptance: not_evaluated` are unchanged.

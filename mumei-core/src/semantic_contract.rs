@@ -614,8 +614,9 @@ fn expect_kind(actual: ScalarKind, expected: ScalarKind) -> Result<(), SemanticC
 /// True when the statement subtree holds a `while` at any depth —
 /// statements nested inside expression blocks, `if` branches, match
 /// arms and task/acquire bodies all count. Admission uses it to keep
-/// nested loops out of the bounded-unroll profile.
-fn contains_while_stmt(stmt: &Stmt) -> bool {
+/// nested loops out of the bounded-unroll profile; consumers use it to
+/// describe which atoms carry the bounded loop-exit domain.
+pub fn contains_while_stmt(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::While { .. } => true,
         Stmt::Let { value, .. } | Stmt::Assign { value, .. } => contains_while_expr(value),
