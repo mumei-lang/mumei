@@ -2295,6 +2295,115 @@ fn multifile_std_members_resolve_through_the_language_chain() {
 }
 
 #[test]
+fn multifile_std_member_imports_resolve_beside_their_real_files() {
+    let root = tempfile::tempdir().unwrap();
+    let std_dir = tempfile::tempdir().unwrap();
+    // A fallback member's own imports resolve beside the member's real
+    // file — never beside the virtual project `std/` directory. The
+    // decoy project `std/helper.mm` would shadow the real helper if
+    // the producer resolved the std member's imports against the
+    // bundle-key namespace instead of the resolved path's directory.
+    fs::write(
+        std_dir.path().join("helper.mm"),
+        "atom h() -> i64 requires: true; ensures: result == 1; body: { 1 };\n",
+    )
+    .unwrap();
+    fs::write(
+        std_dir.path().join("probe_dep.mm"),
+        "import \"helper\";\n\natom std_helper(x: i64) -> i64 requires: true; ensures: result == x + 1; body: { x + helper::h() };",
+    )
+    .unwrap();
+    let project_std = root.path().join("std");
+    fs::create_dir(&project_std).unwrap();
+    fs::write(
+        project_std.join("helper.mm"),
+        "atom h() -> i64 requires: true; ensures: result == 99; body: { 99 };\n",
+    )
+    .unwrap();
+    let source = root.path().join("app.mm");
+    fs::write(
+        &source,
+        "import \"std/probe_dep\";\n\natom main() -> i64 requires: true; ensures: result == 6; body: { probe_dep::std_helper(5) };",
+    )
+    .unwrap();
+    let bundle = root.path().join("bundle");
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args([
+            "native-bundle",
+            "build",
+            source.to_str().unwrap(),
+            "-o",
+            bundle.to_str().unwrap(),
+        ])
+        .env("MUMEI_STD_PATH", std_dir.path())
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let record = module_record(&bundle);
+    // The pinned `std/helper.mm` member carries the REAL stdlib
+    // helper's bytes, not the project decoy's.
+    assert_eq!(
+        record["sources"]["std/helper.mm"]["sha256"]
+            .as_str()
+            .unwrap(),
+        native_bundle::sha256(
+            fs::read_to_string(std_dir.path().join("helper.mm"))
+                .unwrap()
+                .as_bytes()
+        )
+    );
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+}
+
+#[test]
+fn multifile_std_member_shared_by_two_importers_emits_its_atoms_once() {
+    let root = tempfile::tempdir().unwrap();
+    let std_dir = tempfile::tempdir().unwrap();
+    fs::write(std_dir.path().join("probe_dep.mm"), STD_DEP).unwrap();
+    // `sub/dep.mm` imports the same stdlib member the root does. Both
+    // member keys pin the file (the consumer re-derives the merge from
+    // `sources/` alone), but the merge emits the identical body once —
+    // the language loads a resolved path once and its ModuleEnv folds
+    // same-name atoms silently.
+    let sub = root.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(
+        sub.join("dep.mm"),
+        "import \"std/probe_dep\";\n\natom dep_add(x: i64) -> i64 requires: true; ensures: result == x + 1; body: { probe_dep::std_helper(x) };",
+    )
+    .unwrap();
+    let source = root.path().join("app.mm");
+    fs::write(
+        &source,
+        "import \"std/probe_dep\";\nimport \"sub/dep\";\n\natom main() -> i64 requires: true; ensures: result == 6; body: { dep::dep_add(5) };",
+    )
+    .unwrap();
+    let bundle = root.path().join("bundle");
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args([
+            "native-bundle",
+            "build",
+            source.to_str().unwrap(),
+            "-o",
+            bundle.to_str().unwrap(),
+        ])
+        .env("MUMEI_STD_PATH", std_dir.path())
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let record = module_record(&bundle);
+    // Both member keys pin the stdlib bytes — the merge re-derivation
+    // looks each up under its own importer-prefixed name.
+    assert!(record["sources"]["std/probe_dep.mm"]["sha256"].is_string());
+    assert!(record["sources"]["sub/std/probe_dep.mm"]["sha256"].is_string());
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+}
+
+#[test]
 fn multifile_bundle_builds_and_rechecks_with_honest_consumer_rejections() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_multifile(root.path());

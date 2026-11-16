@@ -711,16 +711,25 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
     // cannot loop here — merge_import_closure rejects them honestly
     // afterward.
     let mut members = BTreeMap::from([(root.clone(), source.to_owned())]);
-    // The path each member's bytes were read from — needed again by the
-    // post-build drift check, since a `std/` member's bytes can live
-    // outside the root's directory entirely.
-    let mut resolved_paths = BTreeMap::<String, PathBuf>::new();
+    // The path each member's bytes were read from — needed by the
+    // importer-directory step below and again by the post-build drift
+    // check, since a fallback member's bytes can live outside the
+    // root's directory entirely.
+    let mut resolved_paths = BTreeMap::<String, PathBuf>::from([(
+        root.clone(),
+        input.canonicalize().unwrap_or_else(|_| input.to_path_buf()),
+    )]);
     let mut queue = std::collections::VecDeque::from([root.clone()]);
     while let Some(current) = queue.pop_front() {
         let text = members[&current].clone();
-        let importer_dir = current
-            .rsplit_once('/')
-            .map(|(dir, _)| directory.join(dir))
+        // Imports resolve relative to the DIRECTORY THE MEMBER'S BYTES
+        // WERE ACTUALLY READ FROM — not the bundle-key namespace — so a
+        // member pulled in via a fallback keeps resolving its own
+        // imports beside its real file (the language's resolver does
+        // the same for the resolved file's parent).
+        let importer_dir = resolved_paths
+            .get(&current)
+            .and_then(|path| path.parent().map(Path::to_path_buf))
             .unwrap_or_else(|| directory.to_path_buf());
         for item in parser::parse_module(&text) {
             let parser::Item::Import(decl) = item else {

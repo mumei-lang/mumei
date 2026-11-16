@@ -614,6 +614,7 @@ pub fn merge_import_closure(
     }
     let mut visiting = std::collections::BTreeSet::new();
     let mut emitted = std::collections::BTreeSet::new();
+    let mut emitted_hashes = std::collections::BTreeSet::new();
     let mut graph = BTreeMap::new();
     let mut parts = Vec::new();
     visit_member(
@@ -621,6 +622,7 @@ pub fn merge_import_closure(
         sources,
         &mut visiting,
         &mut emitted,
+        &mut emitted_hashes,
         &mut graph,
         &mut parts,
     )?;
@@ -640,6 +642,7 @@ fn visit_member(
     sources: &BTreeMap<String, String>,
     visiting: &mut std::collections::BTreeSet<String>,
     emitted: &mut std::collections::BTreeSet<String>,
+    emitted_hashes: &mut std::collections::BTreeSet<String>,
     graph: &mut BTreeMap<String, Vec<String>>,
     parts: &mut Vec<String>,
 ) -> Result<(), BundleError> {
@@ -657,7 +660,15 @@ fn visit_member(
     sorted.sort();
     graph.insert(member.to_owned(), sorted);
     for dep in &imports {
-        visit_member(dep, sources, visiting, emitted, graph, parts)?;
+        visit_member(
+            dep,
+            sources,
+            visiting,
+            emitted,
+            emitted_hashes,
+            graph,
+            parts,
+        )?;
     }
     visiting.remove(member);
     // Qualified calls are namespace syntax, not part of the atom
@@ -680,7 +691,18 @@ fn visit_member(
     for qualifier in &qualifiers {
         body = strip_qualifier(&body, qualifier);
     }
-    parts.push(body.trim_end().to_owned());
+    let body = body.trim_end().to_owned();
+    // Two member keys can pin the same bytes — one real file reached
+    // by two importers through the fallback chain (e.g. `import
+    // "std/x"` from root and from `sub/dep.mm`, both falling back to
+    // the shipped stdlib). The language loads a resolved path once
+    // and ModuleEnv registration folds same-name atoms silently, so
+    // emitting the body twice would only trip the merged module's
+    // duplicate-atom gate: emit identical bodies once. Distinct
+    // member texts still emit side by side and keep that gate.
+    if emitted_hashes.insert(sha256(body.as_bytes())) {
+        parts.push(body);
+    }
     emitted.insert(member.to_owned());
     Ok(())
 }

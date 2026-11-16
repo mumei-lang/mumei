@@ -1402,9 +1402,12 @@ keep the same honesty about what stays unchecked.
 Nothing is claimed beyond the module scopes: same identity-plus-recheck
 boundaries, no authenticity, no import-alias pinning (the alias is
 namespace sugar the merge erases), and non-atom member items and
-alias pinning stay outside this slice. A `std/` member names an
-ordinary local subdirectory, matching the resolver's local-first
-lookup; toolchain `std` fallback remains outside the closure.
+alias pinning stay outside this slice. `std/` members follow the
+language's own fallback chain: importer-relative first (a `std/`
+member beside the root is an ordinary local subdirectory), then the
+shipped toolchain stdlib and `MUMEI_STD_PATH`, which also serves as
+the last-resort fallback for any still-unresolved import — each
+fallback member then resolves its own imports beside its real file.
 
 ### Pinned toolchain artifact recheck
 

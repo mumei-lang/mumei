@@ -3606,9 +3606,12 @@ members and binds the checked text to the record. The merge is
 comment-aware — `//` line comments never strip qualifiers — and import
 lines must be single strict `import "..." [as x];` statements.
 
-This is a profile boundary, not a new verification strength: `std`
-toolchain fallback (a `std/` member is an ordinary local subdirectory),
-non-atom members and alias pinning stay outside the slice.
+This is a profile boundary, not a new verification strength: `std/`
+members follow the language's fallback chain — importer-relative first
+(a `std/` member beside the root is an ordinary local subdirectory),
+then the shipped toolchain stdlib and `MUMEI_STD_PATH`, which is also
+the last-resort fallback for any unresolved import — while non-atom
+members and alias pinning stay outside the slice.
 
 ### Wave 5 multifile consumer Evidence
 
