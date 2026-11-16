@@ -1518,3 +1518,118 @@ fn replay_of_rebound_garbage_artifacts_never_executes_or_promotes_binary_assuran
     assert!(!stdout.contains("artifact_verified"));
     assert!(!marker.exists());
 }
+
+const MODULE: &str = "atom helper(x: i64) -> i64 requires: x > 0; ensures: result == x + 1; body: { x + 1 };\natom main() -> i64 requires: true; ensures: result == 6; body: { helper(5) };";
+
+const WRAPPED: &str = "atom id(x: i64) -> i64 requires: true; ensures: result == x; body: { x };\natom main() -> i64 requires: true; ensures: result > 0; body: { id(9223372036854775807) + 1 };";
+
+fn build_source(root: &Path, text: &str) -> (std::path::PathBuf, std::path::PathBuf, String) {
+    let source = root.join("source.mm");
+    let bundle = root.join("bundle");
+    fs::write(&source, text).unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    (source, bundle, id)
+}
+
+fn module_record(bundle: &Path) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap()
+}
+
+#[test]
+fn module_bundle_builds_checks_and_rechecks_within_its_own_profile() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), MODULE);
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MODULE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE);
+    assert_eq!(record["source"]["atoms"].as_object().unwrap().len(), 2);
+    assert_success(&check(&source, &bundle, &id));
+    let recheck = recheck(&source, &bundle, &id);
+    assert_success(&recheck);
+    let stdout = String::from_utf8_lossy(&recheck.stdout);
+    assert!(stdout.contains(native_bundle::MODULE_RECHECK_PROFILE));
+    let llvm = recheck_llvm(&source, &bundle, &id);
+    assert_success(&llvm);
+    let stdout = String::from_utf8_lossy(&llvm.stdout);
+    assert!(stdout.contains(mumei_emit_llvm::translation_validation::NATIVE_MODULE_PROFILE));
+}
+
+#[test]
+fn module_source_recheck_refutes_wrapped_i64_arithmetic() {
+    // `verify` works over mathematical integers, but the source recheck
+    // encodes the widened wrapping i64 profile: `id(i64::MAX) + 1`
+    // wraps below zero, so the postcondition obligation is refutable
+    // even though the call domain is trivially closed.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), WRAPPED);
+    assert_success(&check(&source, &bundle, &id));
+    let output = recheck(&source, &bundle, &id);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refuted"));
+}
+
+#[test]
+fn module_records_stay_off_the_single_atom_consumer_surfaces() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), MODULE);
+    for args in [
+        vec![
+            "native-bundle",
+            "recheck-llvm",
+            bundle.to_str().unwrap(),
+            source.to_str().unwrap(),
+            "--expected-build-id",
+            &id,
+            "--json",
+        ],
+        vec![
+            "native-bundle",
+            "recheck-evidence",
+            bundle.to_str().unwrap(),
+            source.to_str().unwrap(),
+            "--expected-build-id",
+            &id,
+            root.path().join("evidence.json").to_str().unwrap(),
+        ],
+    ] {
+        let output = cli(&args);
+        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("single-atom"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn module_build_rejects_sources_without_a_single_trivially_gated_main() {
+    for text in [
+        // No zero-argument `main` atom among the siblings.
+        "atom helper(x: i64) -> i64 requires: x > 0; ensures: result == x + 1; body: { x + 1 };\natom other(x: i64) -> i64 requires: true; ensures: result == x; body: { x };",
+        // Two mains leave the entry point ambiguous.
+        "atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+        // A gated main keeps the single-atom contract convention.
+        "atom main() -> i64 requires: 1 > 0; ensures: result == 0; body: { 0 };\natom helper(x: i64) -> i64 requires: true; ensures: result == x; body: { x };",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.mm");
+        fs::write(&source, text).unwrap();
+        let output = cli(&[
+            "native-bundle",
+            "build",
+            source.to_str().unwrap(),
+            "-o",
+            root.path().join("bundle").to_str().unwrap(),
+        ]);
+        assert!(!output.status.success());
+    }
+}
