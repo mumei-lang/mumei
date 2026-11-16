@@ -1445,7 +1445,12 @@ verification.
 
 `link_build.arguments_sha256` is deliberately not compared: it pins the
 build-time argument vector including absolute staging paths, so it is a
-build-time observation no recheck can reproduce. The executable's byte
+build-time observation no recheck can reproduce. Records also pin the
+optional `canonical_arguments_sha256` — the same vector with every
+path-dependent argument replaced by a stable placeholder (`{output}`,
+`{input:i}`, `{toolchain}`) — which the artifact recheck re-derives
+from a fresh `link_command` and compares when the record carries it;
+pre-field records skip the comparison honestly. The executable's byte
 identity is what binds the link.
 
 The success scope is
@@ -1638,12 +1643,15 @@ On acceptance it emits one anonymous `mumei.native-evidence-acceptance/v1`
 descriptor with scope
 `native_bundle_source_llvm_and_toolchain_artifact_reproduction` and
 `checks_performed` naming `bundle_identity_binding`,
-`fresh_same_profile_source_recheck`, `llvm_snapshot_translation_recheck` and
-`toolchain_object_executable_reproduction`. `checks_not_performed` keeps
-producer authenticity, historical execution, optimizer/ABI/runtime/OS
-semantics, grade and Lean, and honestly names
-`link_argument_vector_reproduction` — the `arguments_sha256` build
-observation no recheck can reproduce, as `recheck-artifact` documents.
+`fresh_same_profile_source_recheck`, `llvm_snapshot_translation_recheck`,
+`toolchain_object_executable_reproduction` and
+`canonical_link_argument_vector_reproduction` — claimed only when the
+record pins it; for a pre-field record the descriptor names it among
+the checks not performed instead. `checks_not_performed` keeps producer
+authenticity, historical execution, optimizer/ABI/runtime/OS semantics,
+grade and Lean, and honestly names `raw_link_argument_vector_reproduction`
+— the raw `arguments_sha256` build observation no recheck can
+reproduce, as `recheck-artifact` documents.
 Because artifact acceptance evaluates no record input, the descriptor emits
 no `evidence_fingerprint` key; the bundle identity pin is its binding.
 

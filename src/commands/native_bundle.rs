@@ -88,22 +88,27 @@ pub(crate) fn run(command: NativeBundleCommand) {
         NativeBundleCommand::AcceptArtifact { bundle, source, expected_build_id, json } => {
             // The descriptor names the checks the chain ran: the
             // multifile variant adds the pinned-member merge to
-            // `checks_performed`. The family comes back from the recheck
-            // itself so the descriptor cannot claim a merge a mid-command
-            // record swap left unrun.
+            // `checks_performed`, and the canonical link argument-vector
+            // reproduction is claimed only when the recheck actually
+            // compared a pin — a pre-field record carries none. Both
+            // facts come back from the recheck itself so the descriptor
+            // cannot claim a check a mid-command record swap left unrun.
             let recheck = recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id);
             match recheck
-                .map(|(artifact, family)| (
+                .map(|(artifact, family, argv_compared)| (
                     match artifact {
                         ArtifactRecheck::Rechecked => Outcome::EquivalentWithinProfile,
                         ArtifactRecheck::Different => Outcome::Different,
                         ArtifactRecheck::Inconclusive => Outcome::Inconclusive,
                     },
                     family,
+                    argv_compared,
                 ))
-                .and_then(|(outcome, family)| write_native_acceptance(outcome, json, match family {
-                    RecordFamily::Multifile => &MULTIFILE_ARTIFACT_ACCEPTANCE,
-                    RecordFamily::Single | RecordFamily::Module => &ARTIFACT_ACCEPTANCE,
+                .and_then(|(outcome, family, argv_compared)| write_native_acceptance(outcome, json, match (family, argv_compared) {
+                    (RecordFamily::Multifile, true) => &MULTIFILE_ARTIFACT_ACCEPTANCE,
+                    (RecordFamily::Multifile, false) => &MULTIFILE_ARTIFACT_ACCEPTANCE_ARGV_UNPINNED,
+                    (RecordFamily::Single | RecordFamily::Module, true) => &ARTIFACT_ACCEPTANCE,
+                    (RecordFamily::Single | RecordFamily::Module, false) => &ARTIFACT_ACCEPTANCE_ARGV_UNPINNED,
                 }, None, &mut std::io::stdout().lock()))
             {
                 Ok(Outcome::EquivalentWithinProfile) => Ok(()),
@@ -171,14 +176,14 @@ pub(crate) fn run(command: NativeBundleCommand) {
         }),
         NativeBundleCommand::RecheckArtifact { bundle, source, expected_build_id } => {
             match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id) {
-                Ok((ArtifactRecheck::Rechecked, _)) => {
+                Ok((ArtifactRecheck::Rechecked, ..)) => {
                     println!("Pinned toolchain outputs reproduce the pinned object and executable.\nScope: {ARTIFACT_RECHECK_SCOPE}");
                     Ok(())
                 }
-                Ok((ArtifactRecheck::Different, _)) => Err(BundleError(
+                Ok((ArtifactRecheck::Different, ..)) => Err(BundleError(
                     "pinned artifact differs from the toolchain's output for the pinned inputs",
                 )),
-                Ok((ArtifactRecheck::Inconclusive, _)) => {
+                Ok((ArtifactRecheck::Inconclusive, ..)) => {
                     eprintln!("Native source/LLVM recheck inconclusive; no artifact result established.");
                     std::process::exit(3);
                 }
@@ -271,16 +276,30 @@ const MULTIFILE_EVIDENCE_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
 
 const MULTIFILE_ARTIFACT_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     scope: "native_multifile_bundle_source_llvm_and_toolchain_artifact_reproduction",
+    performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction"],
+    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
+    text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, canonical link argument vector re-derived.\nAcceptance scope excludes producer authenticity, historical execution, raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/OS exit-status semantics, grade and Lean promotion.\n",
+};
+
+const MULTIFILE_ARTIFACT_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance {
+    scope: "native_multifile_bundle_source_llvm_and_toolchain_artifact_reproduction",
     performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction"],
-    not_performed: &["producer_authenticity", "historical_execution", "link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
-    text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically.\nAcceptance scope excludes producer authenticity, historical execution, link argument-vector reproduction, optimizer/ABI/runtime/OS exit-status semantics, grade and Lean promotion.\n",
+    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
+    text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically.\nAcceptance scope excludes producer authenticity, historical execution, canonical link argument-vector reproduction (the record pins no canonical argv), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/OS exit-status semantics, grade and Lean promotion.\n",
 };
 
 const ARTIFACT_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     scope: "native_bundle_source_llvm_and_toolchain_artifact_reproduction",
+    performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction"],
+    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
+    text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, canonical link argument vector re-derived.\nAcceptance scope excludes producer authenticity, historical execution, raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/OS exit-status semantics, grade and Lean promotion.\n",
+};
+
+const ARTIFACT_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance {
+    scope: "native_bundle_source_llvm_and_toolchain_artifact_reproduction",
     performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction"],
-    not_performed: &["producer_authenticity", "historical_execution", "link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
-    text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically.\nAcceptance scope excludes producer authenticity, historical execution, link argument-vector reproduction, optimizer/ABI/runtime/OS exit-status semantics, grade and Lean promotion.\n",
+    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
+    text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically.\nAcceptance scope excludes producer authenticity, historical execution, canonical link argument-vector reproduction (the record pins no canonical argv), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/OS exit-status semantics, grade and Lean promotion.\n",
 };
 
 /// On an accepted outcome emits one anonymous acceptance descriptor — the
@@ -1125,14 +1144,16 @@ fn compare_evidence(
 ///
 /// `link_build.arguments_sha256` is deliberately not compared: it pins
 /// the build-time argument vector including absolute staging paths, so
-/// it is a build observation no recheck can reproduce. The executable's
-/// byte identity is what binds the link. Executing either artifact,
-/// checking OS exit status and ABI/runtime semantics stay out of scope.
+/// it is a build observation no recheck can reproduce. The optional
+/// `canonical_arguments_sha256` pins the same vector with those paths
+/// replaced by stable placeholders — re-derived here and compared when
+/// the record carries it. Executing either artifact, checking OS exit
+/// status and ABI/runtime semantics stay out of scope.
 fn recheck_artifact(
     bundle: &Path,
     source: &Path,
     expected_id: &str,
-) -> Result<(ArtifactRecheck, RecordFamily), BundleError> {
+) -> Result<(ArtifactRecheck, RecordFamily, bool), BundleError> {
     // Everything the artifact stage compares comes from the same
     // once-read snapshot `recheck-llvm` verified — re-reading the record
     // or any component here would let a mid-command swap substitute a
@@ -1142,8 +1163,8 @@ fn recheck_artifact(
         LlvmRecheck::Rechecked(_)
         | LlvmRecheck::ModuleRechecked(..)
         | LlvmRecheck::MultifileRechecked(..) => (),
-        LlvmRecheck::Different => return Ok((ArtifactRecheck::Different, family)),
-        LlvmRecheck::Inconclusive => return Ok((ArtifactRecheck::Inconclusive, family)),
+        LlvmRecheck::Different => return Ok((ArtifactRecheck::Different, family, false)),
+        LlvmRecheck::Inconclusive => return Ok((ArtifactRecheck::Inconclusive, family, false)),
     }
     let LoadedBundle {
         object_build,
@@ -1167,7 +1188,7 @@ fn recheck_artifact(
     if fresh_object != object_build
         || read_regular(&object_path, MAX_COMPONENT_BYTES)? != files[&BundleFile::Object]
     {
-        return Ok((ArtifactRecheck::Different, family));
+        return Ok((ArtifactRecheck::Different, family, false));
     }
     let executable_path = stage.path().join(BundleFile::Executable.file_name());
     let fresh_link = linker::link_recorded(&[object_path], &executable_path)
@@ -1179,9 +1200,24 @@ fn recheck_artifact(
         || fresh_link.linker_version != link_build.linker_version
         || read_regular(&executable_path, MAX_COMPONENT_BYTES)? != files[&BundleFile::Executable]
     {
-        return Ok((ArtifactRecheck::Different, family));
+        return Ok((ArtifactRecheck::Different, family, false));
     }
-    Ok((ArtifactRecheck::Rechecked, family))
+    // Records pinned before `canonical_arguments_sha256` existed carry
+    // no pin to compare — the comparison is honest-absent for them.
+    if link_build
+        .canonical_arguments_sha256
+        .as_deref()
+        .is_some_and(|pinned| fresh_link.canonical_arguments_sha256.as_deref() != Some(pinned))
+    {
+        return Ok((ArtifactRecheck::Different, family, false));
+    }
+    // Report whether the canonical argv comparison actually ran so the
+    // acceptance descriptor never claims it for a pinless record.
+    Ok((
+        ArtifactRecheck::Rechecked,
+        family,
+        link_build.canonical_arguments_sha256.is_some(),
+    ))
 }
 
 #[cfg(target_os = "linux")]

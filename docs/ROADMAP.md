@@ -2989,8 +2989,11 @@ record families: after the full identity/source/LLVM chain, the pinned
 `program.ll` is re-emitted to an object and the pinned `program.o` is
 re-linked, each under the recorded toolchain, and both produced byte streams
 must equal the pinned artifacts with matching toolchain observations. The
-scope is toolchain determinism plus pinned-artifact correspondence — link
-argument vectors stay build-time observations, and execution, OS exit-status,
+scope is toolchain determinism plus pinned-artifact correspondence — the
+raw link argument vector stays a build-time observation while the optional
+canonical pin (`canonical_arguments_sha256`, path-dependent arguments
+replaced by `{output}`/`{input:i}`/`{toolchain}` placeholders) is
+re-derived and compared when present — and execution, OS exit-status,
 ABI/runtime, optimizer-path and attestation claims remain out of scope. See
 the [artifact recheck boundary](VERIFICATION_NATIVE.md#pinned-toolchain-artifact-recheck).
 General optimizer/ABI/runtime assurance and producer authenticity stay
@@ -3062,10 +3065,13 @@ the `recheck-artifact` evaluation (identity pin, fresh source/LLVM rechecks,
 then object re-emission and executable relinking byte-identical to the pinned
 artifacts under the recorded toolchain) with an acceptance scope of
 `native_bundle_source_llvm_and_toolchain_artifact_reproduction`.
-`checks_not_performed` keeps authenticity, historical execution,
-optimizer/ABI/runtime/OS semantics, grade/Lean and — honestly —
-`link_argument_vector_reproduction`, the `arguments_sha256` build observation
-no recheck can reproduce. Acceptance is byte reproduction, not execution or
+`checks_performed` gains `canonical_link_argument_vector_reproduction`
+(the placeholder-normalized argv re-derived and compared when the record
+pins it — a pre-field record instead names it among the checks not
+performed) while `checks_not_performed` keeps authenticity, historical
+execution, optimizer/ABI/runtime/OS semantics, grade/Lean and — honestly —
+`raw_link_argument_vector_reproduction`, the raw `arguments_sha256` build
+observation no recheck can reproduce. Acceptance is byte reproduction, not execution or
 exit-status proof. See the
 [artifact acceptance contract](VERIFICATION_NATIVE.md#native-artifact-acceptance-evaluation).
 

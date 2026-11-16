@@ -3469,7 +3469,10 @@ rather than re-reading bundle files after they were verified.
 
 `link_build.arguments_sha256` is intentionally not re-compared — it pins the
 build-time absolute staging paths, which no recheck reproduces; the
-executable's byte identity is the real binding. Artifacts are never executed:
+executable's byte identity is the real binding. Records additionally pin the
+optional `canonical_arguments_sha256` — the argv with path-dependent
+arguments replaced by `{output}`/`{input:i}`/`{toolchain}` placeholders —
+which the artifact recheck re-derives and compares when present. Artifacts are never executed:
 OS exit-status, ABI/runtime, optimizer-path and attestation stay out of scope
 (the scope string says so), and inconclusive upstream queries still exit 3.
 
@@ -3599,9 +3602,11 @@ the `recheck-artifact` evaluation adds pinned `program.ll`→object re-emission
 and `program.o`→executable relinking byte-identical to the pinned artifacts
 under the recorded toolchain, so its descriptor scope is
 `native_bundle_source_llvm_and_toolchain_artifact_reproduction` with
-`toolchain_object_executable_reproduction` performed and
-`link_argument_vector_reproduction` honestly named among the checks not
-performed. Acceptance is byte reproduction — not execution, exit-status,
+`toolchain_object_executable_reproduction` and
+`canonical_link_argument_vector_reproduction` performed (claimed only when
+the record pins it — a pre-field record names it among the checks not
+performed) and `raw_link_argument_vector_reproduction` honestly named
+among the checks not performed. Acceptance is byte reproduction — not execution, exit-status,
 ABI/runtime or optimizer-semantics proof. See the
 [artifact acceptance contract](VERIFICATION_NATIVE.md#native-artifact-acceptance-evaluation).
 

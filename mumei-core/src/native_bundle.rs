@@ -233,6 +233,13 @@ pub struct LinkBuild {
     pub linker: String,
     pub linker_version: String,
     pub arguments_sha256: String,
+    /// sha256 of the argv with every path-dependent argument replaced by
+    /// a stable placeholder (`{output}`, `{input:i}`, `{toolchain}`) —
+    /// reproducible by a recheck on fresh staging paths, unlike the raw
+    /// vector. Optional so records pinned before the field existed still
+    /// deserialize; a recheck skips the comparison when it is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_arguments_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,6 +402,11 @@ pub fn load_pinned_record(
         || !["cc", "gcc", "clang", "clang-17"].contains(&record.link_build.driver.as_str())
         || !["gnu-ld", "lld"].contains(&record.link_build.linker.as_str())
         || !is_digest(&record.link_build.arguments_sha256)
+        || record
+            .link_build
+            .canonical_arguments_sha256
+            .as_deref()
+            .is_some_and(|pin| !is_digest(pin))
         || [
             &record.object_build.llvm_version,
             &record.link_build.driver_version,
@@ -896,6 +908,11 @@ pub fn load_pinned_module_record(
         || !["cc", "gcc", "clang", "clang-17"].contains(&record.link_build.driver.as_str())
         || !["gnu-ld", "lld"].contains(&record.link_build.linker.as_str())
         || !is_digest(&record.link_build.arguments_sha256)
+        || record
+            .link_build
+            .canonical_arguments_sha256
+            .as_deref()
+            .is_some_and(|pin| !is_digest(pin))
         || [
             &record.object_build.llvm_version,
             &record.link_build.driver_version,
@@ -955,6 +972,11 @@ pub fn load_pinned_multifile_record(
         || !["cc", "gcc", "clang", "clang-17"].contains(&record.link_build.driver.as_str())
         || !["gnu-ld", "lld"].contains(&record.link_build.linker.as_str())
         || !is_digest(&record.link_build.arguments_sha256)
+        || record
+            .link_build
+            .canonical_arguments_sha256
+            .as_deref()
+            .is_some_and(|pin| !is_digest(pin))
         || [
             &record.object_build.llvm_version,
             &record.link_build.driver_version,

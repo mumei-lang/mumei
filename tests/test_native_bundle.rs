@@ -284,6 +284,83 @@ fn authorized_non_executable_bytes_are_not_promoted_to_binary_assurance() {
 }
 
 #[test]
+fn canonical_link_arguments_are_pinned_and_reproduced() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    // New records pin the canonical argument vector — reproducible by a
+    // recheck on fresh staging paths, unlike the raw argv.
+    let canonical = record["link_build"]["canonical_arguments_sha256"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(canonical.len(), 64);
+    assert!(canonical.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_ne!(
+        canonical,
+        record["link_build"]["arguments_sha256"].as_str().unwrap()
+    );
+    let artifact = |source: &Path, bundle: &Path, id: &str| {
+        Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .args([
+                "native-bundle",
+                "recheck-artifact",
+                bundle.to_str().unwrap(),
+                source.to_str().unwrap(),
+                "--expected-build-id",
+                id,
+            ])
+            .output()
+            .unwrap()
+    };
+    assert_success(&artifact(&source, &bundle, &id));
+    // …and the acceptance descriptor claims the comparison that ran.
+    let output = consume("accept-artifact --json", &source, &bundle, &id);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(descriptor["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry == "canonical_link_argument_vector_reproduction"));
+
+    // A record pinned before the field existed carries no pin — the
+    // recheck skips the comparison honestly rather than failing, and the
+    // acceptance descriptor names the check among the ones not performed
+    // rather than claiming it.
+    record["link_build"]
+        .as_object_mut()
+        .unwrap()
+        .remove("canonical_arguments_sha256");
+    let bytes = serde_json::to_vec(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    let unpinned_id = native_bundle::sha256(&bytes);
+    assert_success(&artifact(&source, &bundle, &unpinned_id));
+    let output = consume("accept-artifact --json", &source, &bundle, &unpinned_id);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!descriptor["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry == "canonical_link_argument_vector_reproduction"));
+    assert!(descriptor["checks_not_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry == "canonical_link_argument_vector_reproduction"));
+
+    // A wrong pin fails the reproduction check.
+    record["link_build"]["canonical_arguments_sha256"] = serde_json::json!("0".repeat(64));
+    let bytes = serde_json::to_vec(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!artifact(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn bounded_source_and_symlinks_cannot_bypass_the_consumer() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build(root.path());
@@ -482,6 +559,7 @@ fn consumer_rejects_missing_replaced_stale_source_settings_and_unpinned_records(
         "/object_build/target_triple",
         "/source/compiler_version",
         "/link_build/driver_version",
+        "/link_build/canonical_arguments_sha256",
         "/scope",
     ] {
         let mut record: serde_json::Value = serde_json::from_slice(&original).unwrap();
