@@ -2013,8 +2013,10 @@ and a pointer result never admits a generic callee through its
 declared signature — `func G[P any](v P) *P` still goes through
 the instantiation gate. A field
 write *through* a pointer-typed parameter lands only in caller
-state — struct-typed bindings cannot exist in the fragment, so
-`t.f = v` can never overwrite a tracked binding — and admits as an
+state — a bound pointer can never alias a tracked composite
+(`&st`/`&st.V` stay closed since the struct-local-values slice),
+so `t.f = v` can never overwrite a tracked binding's conflated
+set — and admits as an
 opaque write target when the base is a bound parameter or local
 identifier carrying a declared named-type identity (the RHS still
 evaluates for its calls and the stored value's dependencies
@@ -2073,6 +2075,35 @@ the var's own binding identity in
 `known`, so `stale_dependents` flags honestly in both directions.
 Composite globals (`var G []int64`, `var G string`) and untracked
 function-local `var`s stay closed.
+A function-local value bound to a named composite type —
+`st := P{...}` or `var st P` on a `type P struct{...}` in the unit
+or imported — admits since the struct-local-values slice under a
+conflated dependency model: the binding carries ONE dependency set
+covering every field, a sound over-approximation in both directions.
+The declaration unions every literal field value's deps into `st`
+(the composite-literal arms evaluate only the stored elements —
+keys are field names, never expressions), a field read `st.V` or a
+nested chain `st.A.N` returns the whole set (local state, so no
+transfer records and `effects` stays honest), a partial store
+`st.V = y` / `st.V += y` / `st.A.N = y` / `st.V++` unions the RHS
+in via the existing accumulate slot — never a transfer, because a
+local mutation is not an external effect — and `st = P{...}`
+replaces the set wholesale. Admission gates on
+`type.kind == "unsupported"` with a `type_id` resolving to a `type`
+declaration: anonymous `struct{...}`, named `[]T`/`map` and
+`type_id`-less bindings stay `binding_unavailable`, and struct
+params/results stay closed at the signature gate. The hard boundary
+is the aliasing invariant the dep-free bound-pointer field read
+relies on — a bound pointer must never alias a tracked composite —
+so `&st`, `&st.V`, `&st.A.N` raise `unsupported_operator` (the `&`
+operand's root is walked through parens/selectors/indexes), and
+`&P{...}` stays closed too since the fresh literal's initializer
+deps would be invisible to the dep-free read. A chain through a
+*pointer-typed intermediate* (`st.A.N` where `A *P2`) stays closed
+on both sides — the deref reads or writes caller memory the
+conflated set cannot represent — while a pointer-typed leaf field
+(`st.A = p`) just folds the value in. Method values (`f := st.M`),
+method calls (`st.M()`), `st[i]` and `*st.V` stay closed.
 Deeper pointee trees declare their named uses on the member
 record's `pointee_type_ids`: a fully unnamed pointee (`*lib.PU` on
 `*int64`, `(*lib.PA)[i]` on `*[4]int64`) resolves to the empty
