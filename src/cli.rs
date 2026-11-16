@@ -502,6 +502,17 @@ pub(crate) enum NativeBundleCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Evaluate pinned artifact reproduction under the recorded toolchain into a bounded acceptance descriptor
+    AcceptArtifact {
+        bundle: String,
+        source: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel
+        #[arg(long)]
+        expected_build_id: String,
+        /// Emit a static acceptance descriptor, not reusable Evidence or a certificate
+        #[arg(long)]
+        json: bool,
+    },
     /// Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance
     RecheckEvidence {
         bundle: String,

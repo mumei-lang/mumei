@@ -1453,6 +1453,35 @@ no new trust over the replay consumer — it names what was checked, nothing
 more. General acceptance/mapping, authenticity, and final-artifact assurance
 remain open.
 
+### Native artifact acceptance evaluation
+
+```sh
+mumei native-bundle accept-artifact bundle source.mm --expected-build-id <trusted-id> [--json]
+```
+
+`accept-artifact` runs **the same evaluation** as `recheck-artifact` —
+identity pin, fresh source and LLVM-snapshot rechecks, then pinned
+`program.ll` re-emitted to an object and `program.o` re-linked to an
+executable under the recorded toolchain, with the produced bytes required to
+equal the pinned artifacts — and reports it in the acceptance vocabulary.
+Both bundle families are supported.
+
+On acceptance it emits one anonymous `mumei.native-evidence-acceptance/v1`
+descriptor with scope
+`native_bundle_source_llvm_and_toolchain_artifact_reproduction` and
+`checks_performed` naming `bundle_identity_binding`,
+`fresh_same_profile_source_recheck`, `llvm_snapshot_translation_recheck` and
+`toolchain_object_executable_reproduction`. `checks_not_performed` keeps
+producer authenticity, historical execution, optimizer/ABI/runtime/OS
+semantics, grade and Lean, and honestly names
+`link_argument_vector_reproduction` — the `arguments_sha256` build
+observation no recheck can reproduce, as `recheck-artifact` documents.
+
+Acceptance is byte reproduction under the recorded toolchain, not execution,
+exit-status, ABI/runtime or optimizer-semantics proof. Non-acceptance paths
+emit no stdout: difference or failure exits 1, an inconclusive fresh query
+exits 3.
+
 ## 9. External verifier candidates, not adoption decisions
 
 Before any adoption check current maintenance, license/distribution/commercial

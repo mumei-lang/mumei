@@ -46,7 +46,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
     let result = match command {
         NativeBundleCommand::AcceptEvidence { bundle, source, evidence, expected_build_id, json } => {
             match recheck_evidence(Path::new(&bundle), Path::new(&source), Path::new(&evidence), &expected_build_id)
-                .and_then(|outcome| write_native_acceptance(outcome, json, &mut std::io::stdout().lock()))
+                .and_then(|outcome| write_native_acceptance(outcome, json, &EVIDENCE_ACCEPTANCE, &mut std::io::stdout().lock()))
             {
                 Ok(Outcome::EquivalentWithinProfile) => Ok(()),
                 Ok(Outcome::Different) => Err(BundleError("native LLVM body differs from source")),
@@ -57,6 +57,26 @@ pub(crate) fn run(command: NativeBundleCommand) {
                     eprintln!("Native source/LLVM recheck inconclusive; evidence not accepted.");
                     std::process::exit(3);
                 }
+                Err(error) => Err(error),
+            }
+        }
+        NativeBundleCommand::AcceptArtifact { bundle, source, expected_build_id, json } => {
+            match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id)
+                .map(|artifact| match artifact {
+                    ArtifactRecheck::Rechecked => Outcome::EquivalentWithinProfile,
+                    ArtifactRecheck::Different => Outcome::Different,
+                    ArtifactRecheck::Inconclusive => Outcome::Inconclusive,
+                })
+                .and_then(|outcome| write_native_acceptance(outcome, json, &ARTIFACT_ACCEPTANCE, &mut std::io::stdout().lock()))
+            {
+                Ok(Outcome::EquivalentWithinProfile) => Ok(()),
+                Ok(Outcome::Inconclusive) => {
+                    eprintln!("Native source/LLVM recheck inconclusive; artifact not accepted.");
+                    std::process::exit(3);
+                }
+                Ok(_) => Err(BundleError(
+                    "pinned artifact differs from the toolchain's output for the pinned inputs",
+                )),
                 Err(error) => Err(error),
             }
         }
@@ -174,13 +194,39 @@ fn write_llvm_recheck(
     }
 }
 
+/// Static content of one `mumei.native-evidence-acceptance/v1` descriptor:
+/// what a successful evaluation checked, and the checks it did not run. One
+/// scope per command keeps each descriptor's claim unambiguous.
+struct NativeAcceptance {
+    scope: &'static str,
+    performed: &'static [&'static str],
+    not_performed: &'static [&'static str],
+    text: &'static str,
+}
+
+const EVIDENCE_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
+    scope: "native_bundle_identity_source_llvm_and_saved_evidence_consistency",
+    performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "saved_evidence_consistency"],
+    not_performed: &["producer_authenticity", "historical_execution", "object_linker_artifact_recheck", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
+    text: "Native Evidence accepted within the pinned bundle/source/LLVM profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, saved report consistent.\nAcceptance scope excludes producer authenticity, historical execution, artifact/object/linker recheck, optimizer/ABI/runtime/OS semantics, grade and Lean promotion.\n",
+};
+
+const ARTIFACT_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
+    scope: "native_bundle_source_llvm_and_toolchain_artifact_reproduction",
+    performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction"],
+    not_performed: &["producer_authenticity", "historical_execution", "link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
+    text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically.\nAcceptance scope excludes producer authenticity, historical execution, link argument-vector reproduction, optimizer/ABI/runtime/OS exit-status semantics, grade and Lean promotion.\n",
+};
+
 /// On an accepted outcome emits one anonymous acceptance descriptor — the
-/// same evaluation `recheck-evidence` runs, reported in the acceptance
-/// vocabulary. The descriptor binds no subject, digest or provenance so it
-/// cannot be replayed as Evidence; non-accepted outcomes write nothing.
+/// same evaluation the paired `recheck-*` command runs, reported in the
+/// acceptance vocabulary. The descriptor binds no subject, digest or
+/// provenance so it cannot be replayed as Evidence; non-accepted outcomes
+/// write nothing.
 fn write_native_acceptance(
     outcome: Outcome,
     json: bool,
+    acceptance: &NativeAcceptance,
     output: &mut impl std::io::Write,
 ) -> Result<Outcome, BundleError> {
     if outcome != Outcome::EquivalentWithinProfile {
@@ -191,14 +237,15 @@ fn write_native_acceptance(
             "schema_version": "mumei.native-evidence-acceptance/v1",
             "acceptance": "evaluated",
             "accepted": true,
-            "scope": "native_bundle_identity_source_llvm_and_saved_evidence_consistency",
-            "checks_performed": ["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "saved_evidence_consistency"],
-            "checks_not_performed": ["producer_authenticity", "historical_execution", "object_linker_artifact_recheck", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
-        })).map_err(|_| BundleError("cannot encode native acceptance descriptor"))?;
+            "scope": acceptance.scope,
+            "checks_performed": acceptance.performed,
+            "checks_not_performed": acceptance.not_performed,
+        }))
+        .map_err(|_| BundleError("cannot encode native acceptance descriptor"))?;
         bytes.push(b'\n');
         bytes
     } else {
-        b"Native Evidence accepted within the pinned bundle/source/LLVM profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, saved report consistent.\nAcceptance scope excludes producer authenticity, historical execution, artifact/object/linker recheck, optimizer/ABI/runtime/OS semantics, grade and Lean promotion.\n".to_vec()
+        acceptance.text.as_bytes().to_vec()
     };
     output
         .write_all(&bytes)

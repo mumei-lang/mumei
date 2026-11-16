@@ -18,6 +18,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei evidence check` | 2 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
 | `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
 | `mumei native-bundle accept-evidence` | 2 | Evaluate a saved native consumer Evidence report against fresh pinned source/LLVM checks into a bounded acceptance descriptor |
+| `mumei native-bundle accept-artifact` | 2 | Evaluate pinned artifact reproduction under the recorded toolchain into a bounded acceptance descriptor |
 | `mumei native-bundle recheck-evidence` | 1 | Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance |
 | `mumei native-bundle recheck-llvm` | 2 | Recheck the C03 source and pinned native LLVM body/wrapper snapshot, not object or binary semantics |
 | `mumei native-bundle recheck-source` | 1 | Check pinned snapshots and freshly recheck the C03 source postcondition, not LLVM or binary semantics |
@@ -214,6 +215,30 @@ Usage: mumei native-bundle accept-evidence [OPTIONS] --expected-build-id <EXPECT
 | Option | Default | Possible values | Description |
 |---|---|---|---|
 | `--expected-build-id <EXPECTED_BUILD_ID>` | — | — | SHA-256 of native-bundle.json obtained through a separately trusted channel, not the report |
+| `--json` | false | — | Emit a static acceptance descriptor, not reusable Evidence or a certificate |
+
+## `mumei native-bundle accept-artifact`
+
+Evaluate pinned artifact reproduction under the recorded toolchain into a bounded acceptance descriptor
+
+Usage:
+
+```text
+Usage: mumei native-bundle accept-artifact [OPTIONS] --expected-build-id <EXPECTED_BUILD_ID> <BUNDLE> <SOURCE>
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `BUNDLE` | Yes | — |
+| `SOURCE` | Yes | — |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--expected-build-id <EXPECTED_BUILD_ID>` | — | — | SHA-256 of native-bundle.json obtained through a separately trusted channel |
 | `--json` | false | — | Emit a static acceptance descriptor, not reusable Evidence or a certificate |
 
 ## `mumei native-bundle recheck-evidence`
