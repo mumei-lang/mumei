@@ -2426,9 +2426,12 @@ fn multifile_member_key_collision_across_files_fails_honestly() {
     .unwrap();
     let project_std = root.path().join("std");
     fs::create_dir(&project_std).unwrap();
+    // The project helper returns the SAME value as the stdlib one, so
+    // only the member-key collision gate — not a postcondition
+    // mismatch — distinguishes this build from a valid one.
     fs::write(
         project_std.join("helper.mm"),
-        "atom h() -> i64 requires: true; ensures: result == 2; body: { 2 };\n",
+        "atom h() -> i64 requires: true; ensures: result == 1; body: { 1 };\n",
     )
     .unwrap();
     let source = root.path().join("app.mm");
@@ -2450,6 +2453,7 @@ fn multifile_member_key_collision_across_files_fails_honestly() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("collides"));
 }
 
 #[test]
