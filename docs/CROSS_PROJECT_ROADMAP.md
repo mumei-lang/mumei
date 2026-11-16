@@ -1086,6 +1086,31 @@ reachable as the `evidence_check` MCP tool. C02 stays partial.
 See the
 [Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-check-route-evidence-check).
 
+### Wave 2 declared evidence-check-list route (C02)
+
+Agent's `python -m agent evidence-check-list --core <path> --evidence
+<path>` is the multi-record companion of `evidence-check`: it feeds a
+saved `mumei.verification-evidence-list/v1` envelope's bytes to
+`<core> evidence check-list --stdin --json` as one declared attempt
+under a `mumei.evidence-check-list-request/v1` fingerprint (Core
+bytes + envelope `{path, sha256}`), through the same bounded
+`feed_bytes` stdin wiring and post-run drift re-hash. Selection
+requires exit 0 AND captured stdout that parses as the list-family
+`mumei.evidence-representation-check/v1` diagnostic —
+`evidence_schema_version` pinned to the list schema and
+`record_count` lifted out, then the remaining document compared
+field-for-field; a single-record v1 diagnostic or unrecognised bytes
+bind nothing. `mumei.evidence-check-list-report/v1` echoes
+`representation`, `record_count` and the seven-entry
+`checks_not_performed` — including `cross_record_consistency`, which
+stays Core's `evidence check-consistency` duty — plus the evidence
+candidate, only on selection; mid-run drift reports `inputs_changed`
+with no claimed outcome. Also reachable as the
+`evidence_check_list` MCP tool. C02 stays partial: representation
+admission of a multi-record envelope, not record agreement or
+acceptance. See the
+[Agent roadmap](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c02-declared-evidence-check-list-route-evidence-check-list).
+
 ### Wave 2 normalized run-result descriptors
 
 Agent's `AttemptRunResult.normalized()` maps one observed terminal run into
