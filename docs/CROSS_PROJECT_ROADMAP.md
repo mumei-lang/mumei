@@ -2622,8 +2622,11 @@ section.
 first consumable caller over `plan_summary_route`: it plans the
 summary route for a declared profile through the probe boundary and
 prints `mumei.summaries-plan/v1` — the `mumei.verification-plan/v1`
-document, the recorded `RuntimeObservation`s and the updated
-`AdapterProbeHistory` records. `--tool-version`, `--rounds` and
+document, the recorded `RuntimeObservation`s, the updated
+`AdapterProbeHistory` records, and a
+`mumei.probe-history-evaluation/v1` descriptor per history so a host
+reads ordering and decisiveness checks rather than assuming them.
+`--tool-version`, `--rounds` and
 `--max-parallel` pass through to the observe-and-replan loop, and
 `--histories <file>` resumes persisted
 `mumei.adapter-probe-history` records (v2 emitted, v1 still
