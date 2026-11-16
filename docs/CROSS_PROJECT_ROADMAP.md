@@ -3016,8 +3016,10 @@ process/runtime behavior, resource state or authority; hashes do not establish
 authenticity. Existing function-local dataflow and audit/grade/Lean gates stay
 authoritative. No external verifier is adopted.
 
-This is **partial C07**, not general value/SSA/fixed-point analysis, cross-file
-freshness, alias/resource semantics or production audit integration. Those
+This is **partial C07**, not general value/SSA/fixed-point analysis,
+alias/resource semantics or production audit integration — resolved modules
+fold into the context key, so cross-file freshness now holds for the
+resolver-covered fragment. Those
 remain open alongside broader C06 resolution. C09 is still a separate limited
 LLVM translation-validation pilot; neither dependency summaries nor C08 hashes
 establish executable semantic correctness.
