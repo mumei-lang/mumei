@@ -47,17 +47,52 @@ pub(crate) fn run(command: EvidenceCommand) {
             }),
             "Source evidence acceptance failed",
         ),
-        EvidenceCommand::Check { input, stdin, json } => (
-            check(input.as_deref().map(Path::new), stdin, json, &mut output).map(|()| 0),
+        EvidenceCommand::Check {
+            input,
+            stdin,
+            json,
+            expected_adapter,
+        } => (
+            check(
+                input.as_deref().map(Path::new),
+                stdin,
+                json,
+                expected_adapter.as_deref(),
+                &mut output,
+            )
+            .map(|()| 0),
             "Evidence representation check failed",
         ),
-        EvidenceCommand::CheckList { input, stdin, json } => (
-            check_list(input.as_deref().map(Path::new), stdin, json, &mut output).map(|()| 0),
+        EvidenceCommand::CheckList {
+            input,
+            stdin,
+            json,
+            expected_adapter,
+        } => (
+            check_list(
+                input.as_deref().map(Path::new),
+                stdin,
+                json,
+                expected_adapter.as_deref(),
+                &mut output,
+            )
+            .map(|()| 0),
             "Evidence list representation check failed",
         ),
-        EvidenceCommand::CheckConsistency { input, stdin, json } => (
-            check_consistency(input.as_deref().map(Path::new), stdin, json, &mut output)
-                .map(|()| 0),
+        EvidenceCommand::CheckConsistency {
+            input,
+            stdin,
+            json,
+            expected_adapter,
+        } => (
+            check_consistency(
+                input.as_deref().map(Path::new),
+                stdin,
+                json,
+                expected_adapter.as_deref(),
+                &mut output,
+            )
+            .map(|()| 0),
             "Evidence consistency check failed",
         ),
         EvidenceCommand::VerifySource {
@@ -260,10 +295,31 @@ fn write_source(
     Ok(0)
 }
 
+fn declared_adapter_gate(
+    records: &[verification_evidence::Evidence],
+    expected_adapter: Option<&str>,
+) -> Result<bool, &'static str> {
+    let Some(expected) = expected_adapter else {
+        return Ok(false);
+    };
+    if expected.is_empty() {
+        return Err("expected adapter id must not be empty");
+    }
+    if records
+        .iter()
+        .all(|record| record.provenance.adapter.id == expected)
+    {
+        Ok(true)
+    } else {
+        Err("declared producer does not match the expected adapter")
+    }
+}
+
 fn check(
     input: Option<&Path>,
     stdin: bool,
     json: bool,
+    expected_adapter: Option<&str>,
     output: &mut impl Write,
 ) -> Result<(), &'static str> {
     let bytes = match (input, stdin) {
@@ -271,19 +327,32 @@ fn check(
         (None, true) => super::input::read_stdin(MAX_INPUT_BYTES as u64)?,
         _ => return Err("choose exactly one evidence input"),
     };
-    verification_evidence::decode(&bytes).map_err(|_| "invalid evidence representation")?;
+    let record =
+        verification_evidence::decode(&bytes).map_err(|_| "invalid evidence representation")?;
+    let gated = declared_adapter_gate(std::slice::from_ref(&record), expected_adapter)?;
     let diagnostic = if json {
-        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        let mut body = serde_json::json!({
             "schema_version": "mumei.evidence-representation-check/v1",
             "evidence_schema_version": SCHEMA_VERSION,
             "representation": "valid",
             "acceptance": "not_evaluated",
             "checks_not_performed": ["claim_truth", "file_identity", "freshness",
                 "producer_authenticity", "semantic_correspondence", "artifact_semantics"],
-        }))
-        .map_err(|_| "cannot encode representation diagnostic")?;
+        });
+        if gated {
+            body["checks_performed"] =
+                serde_json::json!(["representation_gate", "declared_producer_identity"]);
+        }
+        let mut bytes = serde_json::to_vec_pretty(&body)
+            .map_err(|_| "cannot encode representation diagnostic")?;
         bytes.push(b'\n');
         bytes
+    } else if gated {
+        format!(
+            "{}Declared producer identity: every record names the expected adapter.\n",
+            TEXT
+        )
+        .into_bytes()
     } else {
         TEXT.as_bytes().to_vec()
     };
@@ -296,6 +365,7 @@ fn check_list(
     input: Option<&Path>,
     stdin: bool,
     json: bool,
+    expected_adapter: Option<&str>,
     output: &mut impl Write,
 ) -> Result<(), &'static str> {
     let bytes = match (input, stdin) {
@@ -305,8 +375,9 @@ fn check_list(
     };
     let records = verification_evidence::decode_list(&bytes)
         .map_err(|_| "invalid evidence representation")?;
+    let gated = declared_adapter_gate(&records, expected_adapter)?;
     let diagnostic = if json {
-        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        let mut body = serde_json::json!({
             "schema_version": "mumei.evidence-representation-check/v1",
             "evidence_schema_version": verification_evidence::LIST_SCHEMA_VERSION,
             "representation": "valid",
@@ -315,14 +386,26 @@ fn check_list(
             "checks_not_performed": ["claim_truth", "file_identity", "freshness",
                 "producer_authenticity", "semantic_correspondence", "artifact_semantics",
                 "cross_record_consistency"],
-        }))
-        .map_err(|_| "cannot encode representation diagnostic")?;
+        });
+        if gated {
+            body["checks_performed"] =
+                serde_json::json!(["representation_gate", "declared_producer_identity"]);
+        }
+        let mut bytes = serde_json::to_vec_pretty(&body)
+            .map_err(|_| "cannot encode representation diagnostic")?;
         bytes.push(b'\n');
         bytes
     } else {
         format!("Evidence list representation valid: {} record(s) each pass the v1 gate.\n\
 Scope: representation only; no claim truth, file identity, freshness, producer authenticity, semantic correspondence, artifact semantics or cross-record consistency checked.\n\
-Evidence acceptance: not evaluated.\n", records.len())
+{}{}\n",
+            records.len(),
+            if gated {
+                "Declared producer identity: every record names the expected adapter.\n"
+            } else {
+                ""
+            },
+            "Evidence acceptance: not evaluated.")
         .into_bytes()
     };
     output
@@ -334,6 +417,7 @@ fn check_consistency(
     input: Option<&Path>,
     stdin: bool,
     json: bool,
+    expected_adapter: Option<&str>,
     output: &mut impl Write,
 ) -> Result<(), &'static str> {
     let bytes = match (input, stdin) {
@@ -343,9 +427,10 @@ fn check_consistency(
     };
     let records = verification_evidence::decode_list(&bytes)
         .map_err(|_| "invalid evidence representation")?;
+    let gated = declared_adapter_gate(&records, expected_adapter)?;
     let report = verification_evidence::consistency_check(&records);
     let diagnostic = if json {
-        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        let mut body = serde_json::json!({
             "schema_version": "mumei.evidence-consistency-check/v1",
             "evidence_schema_version": verification_evidence::LIST_SCHEMA_VERSION,
             "representation": "valid",
@@ -357,20 +442,33 @@ fn check_consistency(
             "checks_not_performed": ["claim_truth", "file_identity", "freshness",
                 "producer_authenticity", "semantic_correspondence", "artifact_semantics",
                 "pin_correctness"],
-        }))
-        .map_err(|_| "cannot encode consistency diagnostic")?;
+        });
+        if gated {
+            body["checks_performed"] = serde_json::json!([
+                "representation_gate",
+                "cross_record_pin_agreement",
+                "declared_producer_identity"
+            ]);
+        }
+        let mut bytes =
+            serde_json::to_vec_pretty(&body).map_err(|_| "cannot encode consistency diagnostic")?;
         bytes.push(b'\n');
         bytes
     } else {
         format!(
             "Evidence list consistency: {} record(s), {}.\n\
 Scope: syntactic identity-pin agreement only; no claim truth, file identity, freshness, producer authenticity, semantic correspondence, artifact semantics or pin correctness checked.\n\
-Evidence acceptance: not evaluated.\n",
+{}Evidence acceptance: not evaluated.\n",
             records.len(),
             if report.consistent {
                 "no conflicts".to_owned()
             } else {
                 format!("{} conflict(s)", report.conflict_count)
+            },
+            if gated {
+                "Declared producer identity: every record names the expected adapter.\n"
+            } else {
+                ""
             }
         )
         .into_bytes()
@@ -392,7 +490,7 @@ mod tests {
             let stdin = input.is_some();
             for json in [false, true] {
                 assert_eq!(
-                    check(input, stdin, json, &mut BrokenOutput).unwrap_err(),
+                    check(input, stdin, json, None, &mut BrokenOutput).unwrap_err(),
                     "choose exactly one evidence input"
                 );
             }
@@ -491,7 +589,7 @@ mod tests {
         std::fs::write(&path, b"FAKE_PRIVATE_MALFORMED").unwrap();
         for json in [false, true] {
             let mut output = Vec::new();
-            let error = check(Some(&path), false, json, &mut output).unwrap_err();
+            let error = check(Some(&path), false, json, None, &mut output).unwrap_err();
             assert!(!error.contains("FAKE_PRIVATE"));
             assert!(output.is_empty());
         }
@@ -506,9 +604,75 @@ mod tests {
         .unwrap();
         for json in [false, true] {
             assert_eq!(
-                check(Some(&path), false, json, &mut BrokenOutput).unwrap_err(),
+                check(Some(&path), false, json, None, &mut BrokenOutput).unwrap_err(),
                 "cannot write representation diagnostic"
             );
+        }
+    }
+
+    #[test]
+    fn declared_adapter_gate_matches_mismatches_and_stays_static() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("FAKE_PRIVATE_INPUT");
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/verification-evidence/synthetic_cases.json"
+        ))
+        .unwrap();
+        let record = &fixtures["cases"][0]["evidence"];
+        assert_eq!(record["provenance"]["adapter"]["id"], "synthetic-adapter");
+        std::fs::write(&path, serde_json::to_vec(record).unwrap()).unwrap();
+
+        for json in [false, true] {
+            let mut output = Vec::new();
+            check(
+                Some(&path),
+                false,
+                json,
+                Some("synthetic-adapter"),
+                &mut output,
+            )
+            .unwrap();
+            let text = String::from_utf8(output).unwrap();
+            if json {
+                let diagnostic: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(
+                    diagnostic["checks_performed"],
+                    serde_json::json!(["representation_gate", "declared_producer_identity"])
+                );
+                assert!(diagnostic["checks_not_performed"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("producer_authenticity")));
+            } else {
+                assert!(text.contains("Declared producer identity"));
+            }
+
+            let mut output = Vec::new();
+            assert_eq!(
+                check(
+                    Some(&path),
+                    false,
+                    json,
+                    Some("different-adapter"),
+                    &mut output,
+                )
+                .unwrap_err(),
+                "declared producer does not match the expected adapter"
+            );
+            assert!(output.is_empty());
+            assert_eq!(
+                check(Some(&path), false, json, Some(""), &mut output).unwrap_err(),
+                "expected adapter id must not be empty"
+            );
+
+            let mut output = Vec::new();
+            check(Some(&path), false, json, None, &mut output).unwrap();
+            let text = String::from_utf8(output).unwrap();
+            assert!(!text.contains("Declared producer identity"));
+            if json {
+                let diagnostic: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert!(diagnostic["checks_performed"].is_null());
+            }
         }
     }
 }

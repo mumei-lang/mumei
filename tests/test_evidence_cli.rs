@@ -885,3 +885,105 @@ fn check_consistency_rejects_malformed_envelopes_like_check_list() {
         assert!(!error.contains("FAKE_PRIVATE"), "case {index}: {error}");
     }
 }
+
+#[test]
+fn expected_adapter_gates_every_check_command_on_the_declared_producer_only() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(base()["provenance"]["adapter"]["id"], "synthetic-adapter");
+    let single = dir.path().join("record.json");
+    write(&single, &base());
+    let list = dir.path().join("list.json");
+    write(&list, &list_envelope(vec![base(), base()]));
+
+    let commands: Vec<(&str, &Path, &str)> = vec![
+        ("check", &single, "Evidence representation check failed:"),
+        (
+            "check-list",
+            &list,
+            "Evidence list representation check failed:",
+        ),
+        (
+            "check-consistency",
+            &list,
+            "Evidence consistency check failed:",
+        ),
+    ];
+    for (name, path, prefix) in &commands {
+        for json in [false, true] {
+            let mut matched = Command::new(env!("CARGO_BIN_EXE_mumei"));
+            matched
+                .args(["evidence", name])
+                .arg(path)
+                .args(["--expected-adapter", "synthetic-adapter"]);
+            if json {
+                matched.arg("--json");
+            }
+            let output = matched.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{name} json={json} rejected a matching adapter: {:?}",
+                output.stderr
+            );
+            if json {
+                let diagnostic: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(
+                    diagnostic["checks_performed"]
+                        .as_array()
+                        .unwrap()
+                        .last()
+                        .unwrap(),
+                    "declared_producer_identity"
+                );
+                assert!(diagnostic["checks_not_performed"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("producer_authenticity")));
+            } else {
+                let text = String::from_utf8(output.stdout).unwrap();
+                assert!(text.contains("Declared producer identity"), "{name}");
+            }
+
+            let mut mismatched = Command::new(env!("CARGO_BIN_EXE_mumei"));
+            mismatched
+                .args(["evidence", name])
+                .arg(path)
+                .args(["--expected-adapter", "other-adapter"]);
+            if json {
+                mismatched.arg("--json");
+            }
+            let output = mismatched.output().unwrap();
+            assert!(!output.status.success(), "{name} json={json}");
+            assert!(output.stdout.is_empty(), "{name} emitted stdout");
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.starts_with(prefix), "{name}: {error}");
+            assert!(error.contains("expected adapter"), "{name}: {error}");
+            assert!(!error.contains("synthetic-adapter"), "{name}: {error}");
+
+            let mut empty = Command::new(env!("CARGO_BIN_EXE_mumei"));
+            empty
+                .args(["evidence", name])
+                .arg(path)
+                .args(["--expected-adapter", ""]);
+            let output = empty.output().unwrap();
+            assert!(!output.status.success(), "{name} accepted empty adapter");
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.starts_with(prefix), "{name}: {error}");
+        }
+    }
+
+    // One record declaring another producer poisons the whole list.
+    let mut foreign = base();
+    foreign["provenance"]["adapter"]["id"] = json!("other-adapter");
+    let mixed = dir.path().join("mixed.json");
+    write(&mixed, &list_envelope(vec![base(), foreign]));
+    for name in ["check-list", "check-consistency"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .args(["evidence", name])
+            .arg(&mixed)
+            .args(["--expected-adapter", "synthetic-adapter"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{name} passed a poisoned list");
+        assert!(output.stdout.is_empty(), "{name} emitted stdout");
+    }
+}
