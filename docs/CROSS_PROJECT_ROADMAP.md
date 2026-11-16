@@ -3248,6 +3248,59 @@ broader profiles and common acceptance/mapping remain open. Existing commands,
 schema, Claim Book/Seal Grade/Lean gates, Mumei/Agent ownership and the decision
 not to adopt external verifiers are unchanged.
 
+### Wave 5 multi-atom native module bundles
+
+The first wider C10 profile adds `mumei.native-module-bundle/v1` records under
+`mumei.native-pure-i64-module-linux-x86_64/v1`: a whole-source module binding
+whose sorted per-atom map pins each atom's contract/implementation/HIR/MIR/IR
+digests, so atom sets cannot be shuffled into another source snapshot. The
+widened source profile keeps wrapping-i64 semantics and admits sibling calls
+(call-site comparisons only — each callee's own contract is a separate
+obligation) and single-level `while` loops whose exits are claimed only within
+the profile bound. `check`/`recheck-source`/`recheck-llvm` dispatch on the
+record's own profile, and the LLVM stage runs the module snapshot TV
+(`mumei.llvm17-native-module-snapshot/v1`, per-atom body comparison).
+
+This is a wider profile boundary, not a new acceptance path: entry-point
+`main` keeps the zero-argument i64 shape, `source_dependencies_sha256` stays an
+honest empty pin (no import closure exists today), optimizer/ABI/runtime and
+final-artifact semantics remain open, and single-atom bundles are unchanged.
+
+### Wave 5 pinned toolchain artifact recheck
+
+`native-bundle recheck-artifact` closes the "pinned object/executable need not
+correspond to the verified IR" gap: after the full
+identity → source → LLVM chain, `program.o` is re-emitted from the pinned
+`program.ll` and relinked into `program`, requiring byte-identical outputs and
+equal toolchain observations (driver/linker versions, triple, data layout) —
+the toolchain-determinism claim, so a different-but-equivalent emitter fails
+closed. Both stages compare against the record's once-read in-memory snapshot
+rather than re-reading bundle files after they were verified.
+
+`link_build.arguments_sha256` is intentionally not re-compared — it pins the
+build-time absolute staging paths, which no recheck reproduces; the
+executable's byte identity is the real binding. Artifacts are never executed:
+OS exit-status, ABI/runtime, optimizer-path and attestation stay out of scope
+(the scope string says so), and inconclusive upstream queries still exit 3.
+
+### Wave 5 per-atom module consumer Evidence
+
+Module bundles emit the sibling envelope
+`mumei.native-module-consumer-evidence/v1` — a separate schema so the two
+families cannot cross-parse, mirroring `native-bundle`/`native-module-bundle`.
+`evidence` carries `1 + 2·N` records in canonical order: one identity record,
+then per atom a source-postcondition record and a
+source-to-LLVM record, all naming the module profiles (never single-atom
+strings) with the configuration fingerprint recording the same pair. Atoms
+with `while` claim `bounded` scope (`while_loop_guard_evaluations <= 4`),
+re-derived from the source text rather than trusted from the report; the
+replay bound widens to 1 MiB for atom-count growth.
+
+This is per-atom output parity for the module family, not acceptance:
+`acceptance: not_evaluated`, aggregate-only emission (no partial-success
+report), and the same assumptions/exclusions. Producer authenticity,
+attestation and dependency/toolchain closure remain open.
+
 ### Wave 5 shared Core Evidence representation gate
 
 The [C02/C13 Core gate](VERIFICATION_NATIVE.md#shared-core-representation-gate)
