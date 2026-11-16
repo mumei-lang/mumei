@@ -5,6 +5,8 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
+    process::Stdio,
+    time::{Duration, Instant},
 };
 
 mod evidence;
@@ -34,6 +36,38 @@ const LLVM_RECHECK_SCOPE: &str =
     "source_postcondition_identity_and_llvm_snapshot_only/no_authenticity_or_binary_semantic_proof";
 const ARTIFACT_RECHECK_SCOPE: &str =
     "source_postcondition_llvm_snapshot_and_toolchain_identity_only/no_execution_or_runtime_semantics";
+const EXIT_STATUS_RECHECK_SCOPE: &str =
+    "artifact_reproduction_and_os_exit_status_observation_only/no_runtime_abi_or_semantic_proof";
+/// The build/recheck single-run cap for observing an executable's exit
+/// status: a bounded pure-i64 `main` is expected to return promptly, but
+/// the observation must never hang a command.
+const EXIT_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run `executable` once with no arguments and closed stdio, returning
+/// its 0..=255 exit code. `None` on spawn failure, timeout or signal
+/// termination — never a claim about program semantics, only an OS
+/// exit-status observation.
+fn observed_exit_status(executable: &Path) -> Option<u32> {
+    let mut child = std::process::Command::new(executable)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + EXIT_STATUS_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.code().map(|code| code as u32),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Err(_) => return None,
+        }
+    }
+}
 
 enum ArtifactRecheck {
     Rechecked,
@@ -95,14 +129,14 @@ pub(crate) fn run(command: NativeBundleCommand) {
             // cannot claim a check a mid-command record swap left unrun.
             let recheck = recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id);
             match recheck
-                .map(|(artifact, family, argv_compared)| (
-                    match artifact {
+                .map(|recheck| (
+                    match recheck.result {
                         ArtifactRecheck::Rechecked => Outcome::EquivalentWithinProfile,
                         ArtifactRecheck::Different => Outcome::Different,
                         ArtifactRecheck::Inconclusive => Outcome::Inconclusive,
                     },
-                    family,
-                    argv_compared,
+                    recheck.family,
+                    recheck.canonical_argv_compared,
                 ))
                 .and_then(|(outcome, family, argv_compared)| write_native_acceptance(outcome, json, match (family, argv_compared) {
                     (RecordFamily::Multifile, true) => &MULTIFILE_ARTIFACT_ACCEPTANCE,
@@ -175,19 +209,86 @@ pub(crate) fn run(command: NativeBundleCommand) {
             println!("Native bundle identity consistent with pinned build ID.\nScope: {scope}");
         }),
         NativeBundleCommand::RecheckArtifact { bundle, source, expected_build_id } => {
-            match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id) {
-                Ok((ArtifactRecheck::Rechecked, ..)) => {
+            match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id)
+                .map(|recheck| recheck.result)
+            {
+                Ok(ArtifactRecheck::Rechecked) => {
                     println!("Pinned toolchain outputs reproduce the pinned object and executable.\nScope: {ARTIFACT_RECHECK_SCOPE}");
                     Ok(())
                 }
-                Ok((ArtifactRecheck::Different, ..)) => Err(BundleError(
+                Ok(ArtifactRecheck::Different) => Err(BundleError(
                     "pinned artifact differs from the toolchain's output for the pinned inputs",
                 )),
-                Ok((ArtifactRecheck::Inconclusive, ..)) => {
+                Ok(ArtifactRecheck::Inconclusive) => {
                     eprintln!("Native source/LLVM recheck inconclusive; no artifact result established.");
                     std::process::exit(3);
                 }
                 Err(error) => Err(error),
+            }
+        }
+        NativeBundleCommand::RecheckExitStatus { bundle, source, expected_build_id } => {
+            match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id) {
+                Err(error) => Err(error),
+                Ok(recheck) => match recheck {
+                ArtifactRecheckResult {
+                    result: ArtifactRecheck::Rechecked,
+                    expected_exit_status: Some(expected),
+                    stage: Some(stage),
+                    ..
+                } => {
+                    // Run the byte-identical reproduced executable the
+                    // recheck just verified, never the bundle's own copy.
+                    match observed_exit_status(
+                        &stage.path().join(BundleFile::Executable.file_name()),
+                    ) {
+                        Some(actual) if actual == expected => {
+                            println!("Pinned toolchain outputs reproduce the pinned object and executable; the reproduced executable exits with the pinned status.\nScope: {EXIT_STATUS_RECHECK_SCOPE}");
+                            Ok(())
+                        }
+                        Some(_) => Err(BundleError(
+                            "reproduced executable's exit status differs from the pinned status",
+                        )),
+                        None => {
+                            eprintln!("Executable exit-status observation inconclusive; spawn failed, timed out or terminated by signal.");
+                            // `exit` skips destructors — clean the staged
+                            // reproduction up explicitly first.
+                            drop(stage);
+                            std::process::exit(3);
+                        }
+                    }
+                }
+                ArtifactRecheckResult {
+                    result: ArtifactRecheck::Rechecked,
+                    expected_exit_status: None,
+                    stage,
+                    ..
+                } => {
+                    eprintln!("Record pins no expected exit status; inconclusive.");
+                    drop(stage);
+                    std::process::exit(3);
+                }
+                ArtifactRecheckResult {
+                    result: ArtifactRecheck::Rechecked,
+                    stage: None,
+                    ..
+                } => {
+                    eprintln!("Reproduced executable is unavailable for execution; inconclusive.");
+                    std::process::exit(3);
+                }
+                ArtifactRecheckResult {
+                    result: ArtifactRecheck::Different,
+                    ..
+                } => Err(BundleError(
+                    "pinned artifact differs from the toolchain's output for the pinned inputs",
+                )),
+                ArtifactRecheckResult {
+                    result: ArtifactRecheck::Inconclusive,
+                    ..
+                } => {
+                    eprintln!("Native source/LLVM recheck inconclusive; no artifact result established.");
+                    std::process::exit(3);
+                }
+                },
             }
         }
     };
@@ -549,11 +650,13 @@ fn build_single(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         .map_err(|_| BundleError("native IR emission failed"))?;
     let object_build = mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir, &object)
         .map_err(|_| BundleError("native object emission failed"))?;
-    let link_build = linker::link_recorded(
+    let mut link_build = linker::link_recorded(
         &[object],
         &stage.path().join(BundleFile::Executable.file_name()),
     )
     .map_err(|_| BundleError("native link or toolchain observation failed"))?;
+    link_build.expected_exit_status =
+        observed_exit_status(&stage.path().join(BundleFile::Executable.file_name()));
     let files = components(stage.path())?;
     let record = NativeBundleRecord {
         schema: SCHEMA.into(),
@@ -648,9 +751,11 @@ fn emit_module(
         .map_err(|_| BundleError("native IR emission failed"))?;
     let object_build = mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir, &object)
         .map_err(|_| BundleError("native object emission failed"))?;
-    let link_build =
+    let mut link_build =
         linker::link_recorded(&[object], &stage.join(BundleFile::Executable.file_name()))
             .map_err(|_| BundleError("native link or toolchain observation failed"))?;
+    link_build.expected_exit_status =
+        observed_exit_status(&stage.join(BundleFile::Executable.file_name()));
     Ok((components(stage)?, object_build, link_build))
 }
 
@@ -1149,11 +1254,45 @@ fn compare_evidence(
 /// replaced by stable placeholders — re-derived here and compared when
 /// the record carries it. Executing either artifact, checking OS exit
 /// status and ABI/runtime semantics stay out of scope.
+/// What the artifact stage established — the outcome, the record
+/// family, whether the canonical argv comparison actually ran, the
+/// record's pinned exit status and the staging directory (kept alive so
+/// `recheck-exit-status` can run the reproduced executable).
+struct ArtifactRecheckResult {
+    result: ArtifactRecheck,
+    family: RecordFamily,
+    canonical_argv_compared: bool,
+    expected_exit_status: Option<u32>,
+    stage: Option<tempfile::TempDir>,
+}
+
+impl ArtifactRecheckResult {
+    fn different(family: RecordFamily) -> Self {
+        Self {
+            result: ArtifactRecheck::Different,
+            family,
+            canonical_argv_compared: false,
+            expected_exit_status: None,
+            stage: None,
+        }
+    }
+
+    fn inconclusive(family: RecordFamily) -> Self {
+        Self {
+            result: ArtifactRecheck::Inconclusive,
+            family,
+            canonical_argv_compared: false,
+            expected_exit_status: None,
+            stage: None,
+        }
+    }
+}
+
 fn recheck_artifact(
     bundle: &Path,
     source: &Path,
     expected_id: &str,
-) -> Result<(ArtifactRecheck, RecordFamily, bool), BundleError> {
+) -> Result<ArtifactRecheckResult, BundleError> {
     // Everything the artifact stage compares comes from the same
     // once-read snapshot `recheck-llvm` verified — re-reading the record
     // or any component here would let a mid-command swap substitute a
@@ -1163,8 +1302,8 @@ fn recheck_artifact(
         LlvmRecheck::Rechecked(_)
         | LlvmRecheck::ModuleRechecked(..)
         | LlvmRecheck::MultifileRechecked(..) => (),
-        LlvmRecheck::Different => return Ok((ArtifactRecheck::Different, family, false)),
-        LlvmRecheck::Inconclusive => return Ok((ArtifactRecheck::Inconclusive, family, false)),
+        LlvmRecheck::Different => return Ok(ArtifactRecheckResult::different(family)),
+        LlvmRecheck::Inconclusive => return Ok(ArtifactRecheckResult::inconclusive(family)),
     }
     let LoadedBundle {
         object_build,
@@ -1188,7 +1327,7 @@ fn recheck_artifact(
     if fresh_object != object_build
         || read_regular(&object_path, MAX_COMPONENT_BYTES)? != files[&BundleFile::Object]
     {
-        return Ok((ArtifactRecheck::Different, family, false));
+        return Ok(ArtifactRecheckResult::different(family));
     }
     let executable_path = stage.path().join(BundleFile::Executable.file_name());
     let fresh_link = linker::link_recorded(&[object_path], &executable_path)
@@ -1200,7 +1339,7 @@ fn recheck_artifact(
         || fresh_link.linker_version != link_build.linker_version
         || read_regular(&executable_path, MAX_COMPONENT_BYTES)? != files[&BundleFile::Executable]
     {
-        return Ok((ArtifactRecheck::Different, family, false));
+        return Ok(ArtifactRecheckResult::different(family));
     }
     // Records pinned before `canonical_arguments_sha256` existed carry
     // no pin to compare — the comparison is honest-absent for them.
@@ -1209,15 +1348,17 @@ fn recheck_artifact(
         .as_deref()
         .is_some_and(|pinned| fresh_link.canonical_arguments_sha256.as_deref() != Some(pinned))
     {
-        return Ok((ArtifactRecheck::Different, family, false));
+        return Ok(ArtifactRecheckResult::different(family));
     }
     // Report whether the canonical argv comparison actually ran so the
     // acceptance descriptor never claims it for a pinless record.
-    Ok((
-        ArtifactRecheck::Rechecked,
+    Ok(ArtifactRecheckResult {
+        result: ArtifactRecheck::Rechecked,
         family,
-        link_build.canonical_arguments_sha256.is_some(),
-    ))
+        canonical_argv_compared: link_build.canonical_arguments_sha256.is_some(),
+        expected_exit_status: link_build.expected_exit_status,
+        stage: Some(stage),
+    })
 }
 
 #[cfg(target_os = "linux")]

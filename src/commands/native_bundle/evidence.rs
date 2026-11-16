@@ -575,6 +575,7 @@ mod tests {
                 linker_version: "1".into(),
                 arguments_sha256: "args".into(),
                 canonical_arguments_sha256: None,
+                expected_exit_status: None,
             },
             settings: BuildSettings::default(),
             files,

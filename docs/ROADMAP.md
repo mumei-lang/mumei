@@ -2993,9 +2993,18 @@ scope is toolchain determinism plus pinned-artifact correspondence — the
 raw link argument vector stays a build-time observation while the optional
 canonical pin (`canonical_arguments_sha256`, path-dependent arguments
 replaced by `{output}`/`{input:i}`/`{toolchain}` placeholders) is
-re-derived and compared when present — and execution, OS exit-status,
-ABI/runtime, optimizer-path and attestation claims remain out of scope. See
+re-derived and compared when present — and execution, ABI/runtime,
+optimizer-path and attestation claims remain out of scope. See
 the [artifact recheck boundary](VERIFICATION_NATIVE.md#pinned-toolchain-artifact-recheck).
+The execution slice follows as `native-bundle recheck-exit-status`: the
+record pins `link_build.expected_exit_status` (one no-argument,
+closed-stdio run of the just-linked executable at build time) and the
+consumer re-runs the byte-identical reproduction it just verified,
+comparing exit statuses — spawn failure, timeout, signal termination and
+pre-field records report inconclusive rather than claiming a comparison.
+An OS-level observation only: no runtime, ABI, process-semantics or
+historical-execution claim. See the [exit-status recheck
+boundary](VERIFICATION_NATIVE.md#pinned-executable-exit-status-recheck).
 General optimizer/ABI/runtime assurance and producer authenticity stay
 open — the records now pin the intra-source call graph as
 `source_dependencies_sha256`, the canonical JSON of the Claim Book
