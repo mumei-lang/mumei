@@ -1152,6 +1152,118 @@ fn replay_command(source: &Path, bundle: &Path, id: &str, saved: &Path) -> Comma
     command
 }
 
+fn accept_command(source: &Path, bundle: &Path, id: &str, saved: &Path, json: bool) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+    command.args([
+        "native-bundle",
+        "accept-evidence",
+        bundle.to_str().unwrap(),
+        source.to_str().unwrap(),
+        saved.to_str().unwrap(),
+        "--expected-build-id",
+        id,
+    ]);
+    if json {
+        command.arg("--json");
+    }
+    command
+}
+
+fn accept_rejected(source: &Path, bundle: &Path, id: &str, saved: &Path) -> Output {
+    let output = accept_command(source, bundle, id, saved, false)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    output
+}
+
+#[test]
+fn accept_evidence_emits_anonymous_acceptance_descriptor_only_on_acceptance() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let saved = save_evidence(root.path(), &source, &bundle, &id);
+    for json in [false, true] {
+        let output = accept_command(&source, &bundle, &id, &saved, json)
+            .output()
+            .unwrap();
+        assert_success(&output);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains("FAKE_PRIVATE"));
+        assert!(!stdout.contains("main"));
+        if json {
+            let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                descriptor["schema_version"],
+                "mumei.native-evidence-acceptance/v1"
+            );
+            assert_eq!(descriptor["acceptance"], "evaluated");
+            assert_eq!(descriptor["accepted"], true);
+            for check in [
+                "bundle_identity_binding",
+                "fresh_same_profile_source_recheck",
+                "llvm_snapshot_translation_recheck",
+                "saved_evidence_consistency",
+            ] {
+                assert!(descriptor["checks_performed"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry == check));
+            }
+            assert!(mumei_core::verification_evidence::decode(&output.stdout).is_err());
+        } else {
+            assert!(stdout.contains("accepted"));
+        }
+    }
+}
+
+#[test]
+fn accept_evidence_rejects_tampered_foreign_and_mispinned_reports() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let saved = save_evidence(root.path(), &source, &bundle, &id);
+    let original = fs::read(&saved).unwrap();
+    // Tampered record.
+    let mut changed: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    changed["evidence"][1]["method"] = serde_json::json!("finite_observation");
+    fs::write(&saved, serde_json::to_vec(&changed).unwrap()).unwrap();
+    accept_rejected(&source, &bundle, &id, &saved);
+    // Foreign-family / foreign-schema envelopes.
+    for foreign in [
+        serde_json::json!({"schema_version": "mumei.native-module-consumer-evidence/v1", "evidence": []}),
+        serde_json::json!({"schema_version": "mumei.verification-evidence/v1"}),
+    ] {
+        fs::write(&saved, serde_json::to_vec(&foreign).unwrap()).unwrap();
+        accept_rejected(&source, &bundle, &id, &saved);
+    }
+    fs::write(&saved, &original).unwrap();
+    // Wrong expected build id and missing source agreement.
+    accept_rejected(&source, &bundle, &"0".repeat(64), &saved);
+    assert_success(
+        &accept_command(&source, &bundle, &id, &saved, true)
+            .output()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn accept_evidence_accepts_module_family_reports() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), MODULE);
+    let saved = save_evidence(root.path(), &source, &bundle, &id);
+    let output = accept_command(&source, &bundle, &id, &saved, true)
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        descriptor["schema_version"],
+        "mumei.native-evidence-acceptance/v1"
+    );
+    assert_eq!(descriptor["accepted"], true);
+}
+
 fn replay_rejected(source: &Path, bundle: &Path, id: &str, saved: &Path) -> Output {
     let output = replay_command(source, bundle, id, saved).output().unwrap();
     assert_eq!(output.status.code(), Some(1));

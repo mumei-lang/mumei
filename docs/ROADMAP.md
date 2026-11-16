@@ -3006,6 +3006,18 @@ module reports grow with atom count. Emission still happens only on aggregate
 equivalence — there is no partial-success module report — and `acceptance`
 stays `not_evaluated`. See the [module evidence envelope](VERIFICATION_NATIVE.md#first-native-consumer-evidence-producer).
 
+The native family gains an acceptance surface through
+`mumei native-bundle accept-evidence <bundle> <source> <evidence> --expected-build-id <id> [--json]`:
+the same evaluation as `recheck-evidence` (saved-report decode, full
+identity/source/LLVM recheck chain, fresh-report equality) reported in the
+acceptance vocabulary for both the single-atom and module families. Acceptance
+emits one anonymous `mumei.native-evidence-acceptance/v1` descriptor naming
+`checks_performed` (bundle identity binding, fresh source and LLVM-snapshot
+rechecks, saved-evidence consistency) and `checks_not_performed` (authenticity,
+historical execution, artifact/linker recheck, optimizer/ABI/runtime/OS
+semantics, grade/Lean). Non-acceptance emits nothing. See the
+[native acceptance contract](VERIFICATION_NATIVE.md#native-evidence-acceptance-evaluation).
+
 The next C02/C13 slice moves the common v1 representation model and runtime
 validation into `mumei_core::verification_evidence`. Native producer/replay use
 the shared shape/combination gate without changing emitted JSON or their fresh

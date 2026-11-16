@@ -490,6 +490,18 @@ pub(crate) enum EvidenceCommand {
 
 #[derive(Subcommand)]
 pub(crate) enum NativeBundleCommand {
+    /// Evaluate a saved native consumer Evidence report against fresh pinned source/LLVM checks into a bounded acceptance descriptor
+    AcceptEvidence {
+        bundle: String,
+        source: String,
+        evidence: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel, not the report
+        #[arg(long)]
+        expected_build_id: String,
+        /// Emit a static acceptance descriptor, not reusable Evidence or a certificate
+        #[arg(long)]
+        json: bool,
+    },
     /// Replay a saved native consumer Evidence report against fresh pinned source/LLVM checks, without proof acceptance
     RecheckEvidence {
         bundle: String,

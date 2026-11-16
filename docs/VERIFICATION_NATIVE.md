@@ -1420,6 +1420,39 @@ Grades, Claim Book and Lean trust/freshness gates remain unchanged. General C02
 acceptance/mapping, broader C09/C10, authenticity and final-artifact assurance
 stay open; no external verifier is adopted.
 
+### Native Evidence acceptance evaluation
+
+```sh
+mumei native-bundle accept-evidence bundle source.mm evidence.json --expected-build-id <trusted-id> [--json]
+```
+
+`accept-evidence` runs **the same evaluation** as `recheck-evidence` — decode
+of the saved report, the full identity/source/LLVM recheck chain and the
+fresh-report equality comparison — but reports the result in the acceptance
+vocabulary. Both the single-atom and module evidence families are dispatched
+on the saved file's own `schema_version`, exactly as the replay consumer.
+
+On acceptance, `--json` emits one static anonymous descriptor
+`mumei.native-evidence-acceptance/v1` with `acceptance: evaluated`,
+`accepted: true`, the scope
+`native_bundle_identity_source_llvm_and_saved_evidence_consistency`, and
+`checks_performed` naming `bundle_identity_binding`,
+`fresh_same_profile_source_recheck`, `llvm_snapshot_translation_recheck` and
+`saved_evidence_consistency`. `checks_not_performed` names what stays
+unassessed: producer authenticity, historical execution, the pinned
+object/linker/artifact recheck (a separate opt-in command), optimizer
+semantics, ABI/runtime semantics, OS exit status, grade promotion and Lean
+kernel checks. Text mode prints the same scope in prose.
+
+The descriptor echoes no subject, digest or provenance — it is a diagnostic,
+not reusable Evidence or a certificate, and the common representation gate
+rejects it as Evidence input. Non-acceptance paths emit no stdout, including
+JSON mode: refutation, difference, malformed/mismatched/foreign-family inputs
+and invalid pins exit 1, an inconclusive fresh query exits 3. Acceptance adds
+no new trust over the replay consumer — it names what was checked, nothing
+more. General acceptance/mapping, authenticity, and final-artifact assurance
+remain open.
+
 ## 9. External verifier candidates, not adoption decisions
 
 Before any adoption check current maintenance, license/distribution/commercial
