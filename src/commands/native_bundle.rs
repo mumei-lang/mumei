@@ -14,10 +14,10 @@ enum LlvmRecheck {
     /// Module bundles carry the per-atom consumer evidence format; the
     /// payload is the translation profile plus that report.
     ModuleRechecked(&'static str, Box<evidence::NativeModuleConsumerEvidence>),
-    /// Multifile bundles pass the same recheck chain over the merged
-    /// source but emit no consumer Evidence yet — the payload is the
-    /// recheck profile only, so a `--json` request fails closed.
-    MultifileRechecked(&'static str),
+    /// Multifile bundles carry the module-shaped envelope plus a merge
+    /// correspondence record; the payload is the recheck profile plus
+    /// that report.
+    MultifileRechecked(&'static str, Box<evidence::NativeMultifileConsumerEvidence>),
     Different,
     Inconclusive,
 }
@@ -53,10 +53,25 @@ struct LoadedBundle {
 pub(crate) fn run(command: NativeBundleCommand) {
     let result = match command {
         NativeBundleCommand::AcceptEvidence { bundle, source, evidence, expected_build_id, json } => {
+            // The descriptor names the checks the chain ran: the
+            // multifile variant adds the pinned-member merge to
+            // `checks_performed`. The saved envelope's own schema picks
+            // the descriptor: on an accepted outcome it is exactly the
+            // family the fresh recheck ran (the compare fails closed
+            // otherwise), so it names the checks the chain actually ran
+            // even if the record file changed mid-command.
             match read_regular(Path::new(&evidence), MAX_EVIDENCE_BYTES)
-                .and_then(|saved| recheck_evidence_bytes(Path::new(&bundle), Path::new(&source), &saved, &expected_build_id)
-                    .map(|outcome| (outcome, saved)))
-                .and_then(|(outcome, saved)| write_native_acceptance(outcome, json, &EVIDENCE_ACCEPTANCE, Some(&saved), &mut std::io::stdout().lock()))
+                .and_then(|saved| {
+                    let acceptance = match evidence::decode(&saved)? {
+                        evidence::ConsumerEvidence::Multifile(_) => {
+                            &MULTIFILE_EVIDENCE_ACCEPTANCE
+                        }
+                        _ => &EVIDENCE_ACCEPTANCE,
+                    };
+                    recheck_evidence_bytes(Path::new(&bundle), Path::new(&source), &saved, &expected_build_id)
+                        .map(|outcome| (acceptance, outcome, saved))
+                })
+                .and_then(|(acceptance, outcome, saved)| write_native_acceptance(outcome, json, acceptance, Some(&saved), &mut std::io::stdout().lock()))
             {
                 Ok(Outcome::EquivalentWithinProfile) => Ok(()),
                 Ok(Outcome::Different) => Err(BundleError("native LLVM body differs from source")),
@@ -71,26 +86,25 @@ pub(crate) fn run(command: NativeBundleCommand) {
             }
         }
         NativeBundleCommand::AcceptArtifact { bundle, source, expected_build_id, json } => {
-            // Multifile bundles run the same artifact chain, but their
-            // consumer Evidence vocabulary is not emitted yet — the
-            // acceptance descriptor stays single/module-only this slice.
-            let family = read_regular(&Path::new(&bundle).join(RECORD_FILE), 1024 * 1024)
-                .and_then(|bytes| record_family(&bytes));
-            let recheck = family.and_then(|family| match family {
-                RecordFamily::Multifile => Err(BundleError(
-                    "multifile consumer Evidence is not emitted yet",
-                )),
-                RecordFamily::Single | RecordFamily::Module => {
-                    recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id)
-                }
-            });
+            // The descriptor names the checks the chain ran: the
+            // multifile variant adds the pinned-member merge to
+            // `checks_performed`. The family comes back from the recheck
+            // itself so the descriptor cannot claim a merge a mid-command
+            // record swap left unrun.
+            let recheck = recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id);
             match recheck
-                .map(|artifact| match artifact {
-                    ArtifactRecheck::Rechecked => Outcome::EquivalentWithinProfile,
-                    ArtifactRecheck::Different => Outcome::Different,
-                    ArtifactRecheck::Inconclusive => Outcome::Inconclusive,
-                })
-                .and_then(|outcome| write_native_acceptance(outcome, json, &ARTIFACT_ACCEPTANCE, None, &mut std::io::stdout().lock()))
+                .map(|(artifact, family)| (
+                    match artifact {
+                        ArtifactRecheck::Rechecked => Outcome::EquivalentWithinProfile,
+                        ArtifactRecheck::Different => Outcome::Different,
+                        ArtifactRecheck::Inconclusive => Outcome::Inconclusive,
+                    },
+                    family,
+                ))
+                .and_then(|(outcome, family)| write_native_acceptance(outcome, json, match family {
+                    RecordFamily::Multifile => &MULTIFILE_ARTIFACT_ACCEPTANCE,
+                    RecordFamily::Single | RecordFamily::Module => &ARTIFACT_ACCEPTANCE,
+                }, None, &mut std::io::stdout().lock()))
             {
                 Ok(Outcome::EquivalentWithinProfile) => Ok(()),
                 Ok(Outcome::Inconclusive) => {
@@ -157,14 +171,14 @@ pub(crate) fn run(command: NativeBundleCommand) {
         }),
         NativeBundleCommand::RecheckArtifact { bundle, source, expected_build_id } => {
             match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id) {
-                Ok(ArtifactRecheck::Rechecked) => {
+                Ok((ArtifactRecheck::Rechecked, _)) => {
                     println!("Pinned toolchain outputs reproduce the pinned object and executable.\nScope: {ARTIFACT_RECHECK_SCOPE}");
                     Ok(())
                 }
-                Ok(ArtifactRecheck::Different) => Err(BundleError(
+                Ok((ArtifactRecheck::Different, _)) => Err(BundleError(
                     "pinned artifact differs from the toolchain's output for the pinned inputs",
                 )),
-                Ok(ArtifactRecheck::Inconclusive) => {
+                Ok((ArtifactRecheck::Inconclusive, _)) => {
                     eprintln!("Native source/LLVM recheck inconclusive; no artifact result established.");
                     std::process::exit(3);
                 }
@@ -212,13 +226,15 @@ fn write_llvm_recheck(
                 .map_err(|_| BundleError("cannot write consumer evidence"))?;
             Ok(Outcome::EquivalentWithinProfile)
         }
-        LlvmRecheck::MultifileRechecked(profile) => {
-            if json {
-                return Err(BundleError(
-                    "multifile consumer Evidence is not emitted yet",
-                ));
-            }
-            let bytes = format!("Pinned snapshot identities consistent; merged module source postconditions and native LLVM bodies freshly rechecked.\nProfile: {profile}\nScope: {LLVM_RECHECK_SCOPE}\nWrapper: checked call/trunc/ret shape, returning low 32 bits of the i64 body.\nConsumer Evidence/object/linker/runtime/OS exit-status/executable semantics: not checked.\n").into_bytes();
+        LlvmRecheck::MultifileRechecked(profile, report) => {
+            let bytes = if json {
+                let mut bytes = serde_json::to_vec_pretty(&report)
+                    .map_err(|_| BundleError("cannot encode consumer evidence"))?;
+                bytes.push(b'\n');
+                bytes
+            } else {
+                format!("Pinned snapshot identities consistent; import closure merged from pinned members, module source postconditions and native LLVM bodies freshly rechecked.\nProfile: {profile}\nScope: {LLVM_RECHECK_SCOPE}\nWrapper: checked call/trunc/ret shape, returning low 32 bits of the i64 body.\nObject/linker/runtime/OS exit-status/executable semantics: not checked.\n").into_bytes()
+            };
             output
                 .write_all(&bytes)
                 .map_err(|_| BundleError("cannot write consumer evidence"))?;
@@ -244,6 +260,20 @@ const EVIDENCE_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "saved_evidence_consistency"],
     not_performed: &["producer_authenticity", "historical_execution", "object_linker_artifact_recheck", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
     text: "Native Evidence accepted within the pinned bundle/source/LLVM profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, saved report consistent.\nAcceptance scope excludes producer authenticity, historical execution, artifact/object/linker recheck, optimizer/ABI/runtime/OS semantics, grade and Lean promotion.\n",
+};
+
+const MULTIFILE_EVIDENCE_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
+    scope: "native_multifile_bundle_identity_merge_source_llvm_and_saved_evidence_consistency",
+    performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "saved_evidence_consistency"],
+    not_performed: &["producer_authenticity", "historical_execution", "object_linker_artifact_recheck", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
+    text: "Native multifile Evidence accepted within the pinned bundle/source/LLVM profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, saved report consistent.\nAcceptance scope excludes producer authenticity, historical execution, artifact/object/linker recheck, optimizer/ABI/runtime/OS semantics, grade and Lean promotion.\n",
+};
+
+const MULTIFILE_ARTIFACT_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
+    scope: "native_multifile_bundle_source_llvm_and_toolchain_artifact_reproduction",
+    performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction"],
+    not_performed: &["producer_authenticity", "historical_execution", "link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
+    text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically.\nAcceptance scope excludes producer authenticity, historical execution, link argument-vector reproduction, optimizer/ABI/runtime/OS exit-status semantics, grade and Lean promotion.\n",
 };
 
 const ARTIFACT_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
@@ -786,7 +816,7 @@ fn recheck_llvm(
     source: &Path,
     expected_id: &str,
 ) -> Result<LlvmRecheck, BundleError> {
-    recheck_llvm_loaded(bundle, source, expected_id).map(|(result, _)| result)
+    recheck_llvm_loaded(bundle, source, expected_id).map(|(result, _, _)| result)
 }
 
 /// `recheck-llvm` plus the pinned bundle snapshot its checks already
@@ -797,7 +827,7 @@ fn recheck_llvm_loaded(
     bundle: &Path,
     source: &Path,
     expected_id: &str,
-) -> Result<(LlvmRecheck, LoadedBundle), BundleError> {
+) -> Result<(LlvmRecheck, LoadedBundle, RecordFamily), BundleError> {
     let bytes = read_regular(&bundle.join(RECORD_FILE), 1024 * 1024)?;
     let files = components(bundle)?;
     if record_family(&bytes)? == RecordFamily::Multifile {
@@ -811,7 +841,7 @@ fn recheck_llvm_loaded(
         match recheck_multifile_source(&bytes, expected_id, &root, &members, &loaded.files)? {
             SourceRecheck::Refuted => return Err(BundleError("source postcondition refuted")),
             SourceRecheck::Inconclusive => {
-                return Ok((LlvmRecheck::Inconclusive, loaded));
+                return Ok((LlvmRecheck::Inconclusive, loaded, RecordFamily::Multifile));
             }
             SourceRecheck::RecheckedWithinProfile => (),
         }
@@ -831,13 +861,20 @@ fn recheck_llvm_loaded(
         }
         return Ok((
             match report.outcome {
-                Outcome::EquivalentWithinProfile => {
-                    LlvmRecheck::MultifileRechecked(MULTIFILE_RECHECK_PROFILE)
-                }
+                Outcome::EquivalentWithinProfile => LlvmRecheck::MultifileRechecked(
+                    MULTIFILE_RECHECK_PROFILE,
+                    Box::new(evidence::from_multifile_recheck(
+                        expected_id,
+                        &record,
+                        &report,
+                        &merged,
+                    )?),
+                ),
                 Outcome::Different | Outcome::UndefinedBehavior => LlvmRecheck::Different,
                 Outcome::Inconclusive => LlvmRecheck::Inconclusive,
             },
             loaded,
+            RecordFamily::Multifile,
         ));
     }
     let source = bounded_source_text(source)?;
@@ -851,7 +888,7 @@ fn recheck_llvm_loaded(
         match recheck_module_source(&bytes, expected_id, &source, &loaded.files)? {
             SourceRecheck::Refuted => return Err(BundleError("source postcondition refuted")),
             SourceRecheck::Inconclusive => {
-                return Ok((LlvmRecheck::Inconclusive, loaded));
+                return Ok((LlvmRecheck::Inconclusive, loaded, RecordFamily::Module));
             }
             SourceRecheck::RecheckedWithinProfile => (),
         }
@@ -881,6 +918,7 @@ fn recheck_llvm_loaded(
                 Outcome::Inconclusive => LlvmRecheck::Inconclusive,
             },
             loaded,
+            RecordFamily::Module,
         ));
     }
     let record = load_pinned_record(&bytes, expected_id)?;
@@ -892,7 +930,7 @@ fn recheck_llvm_loaded(
     match recheck_source(&bytes, expected_id, &source, &loaded.files)? {
         SourceRecheck::Refuted => return Err(BundleError("source postcondition refuted")),
         SourceRecheck::Inconclusive => {
-            return Ok((LlvmRecheck::Inconclusive, loaded));
+            return Ok((LlvmRecheck::Inconclusive, loaded, RecordFamily::Single));
         }
         SourceRecheck::RecheckedWithinProfile => (),
     }
@@ -916,6 +954,7 @@ fn recheck_llvm_loaded(
             Outcome::Inconclusive => LlvmRecheck::Inconclusive,
         },
         loaded,
+        RecordFamily::Single,
     ))
 }
 
@@ -964,17 +1003,22 @@ fn compare_evidence(
         {
             Ok(Outcome::EquivalentWithinProfile)
         }
+        (
+            LlvmRecheck::MultifileRechecked(_, fresh),
+            evidence::ConsumerEvidence::Multifile(saved),
+        ) if *fresh == *saved => Ok(Outcome::EquivalentWithinProfile),
         (LlvmRecheck::Rechecked(_), evidence::ConsumerEvidence::Single(_))
-        | (LlvmRecheck::ModuleRechecked(..), evidence::ConsumerEvidence::Module(_)) => Err(
+        | (LlvmRecheck::ModuleRechecked(..), evidence::ConsumerEvidence::Module(_))
+        | (LlvmRecheck::MultifileRechecked(..), evidence::ConsumerEvidence::Multifile(_)) => Err(
             BundleError("saved native evidence differs from fresh consumer report"),
         ),
-        (LlvmRecheck::Rechecked(_) | LlvmRecheck::ModuleRechecked(..), _) => Err(BundleError(
+        (
+            LlvmRecheck::Rechecked(_)
+            | LlvmRecheck::ModuleRechecked(..)
+            | LlvmRecheck::MultifileRechecked(..),
+            _,
+        ) => Err(BundleError(
             "saved native evidence belongs to the other bundle family",
-        )),
-        // Multifile bundles emit no consumer Evidence yet — nothing saved
-        // can be bound to this family, so the check fails closed.
-        (LlvmRecheck::MultifileRechecked(_), _) => Err(BundleError(
-            "multifile bundles emit no consumer Evidence yet",
         )),
         (LlvmRecheck::Different, _) => Ok(Outcome::Different),
         (LlvmRecheck::Inconclusive, _) => Ok(Outcome::Inconclusive),
@@ -999,18 +1043,18 @@ fn recheck_artifact(
     bundle: &Path,
     source: &Path,
     expected_id: &str,
-) -> Result<ArtifactRecheck, BundleError> {
+) -> Result<(ArtifactRecheck, RecordFamily), BundleError> {
     // Everything the artifact stage compares comes from the same
     // once-read snapshot `recheck-llvm` verified — re-reading the record
     // or any component here would let a mid-command swap substitute a
     // self-consistent foreign IR/object/executable set.
-    let (result, loaded) = recheck_llvm_loaded(bundle, source, expected_id)?;
+    let (result, loaded, family) = recheck_llvm_loaded(bundle, source, expected_id)?;
     match result {
         LlvmRecheck::Rechecked(_)
         | LlvmRecheck::ModuleRechecked(..)
-        | LlvmRecheck::MultifileRechecked(_) => (),
-        LlvmRecheck::Different => return Ok(ArtifactRecheck::Different),
-        LlvmRecheck::Inconclusive => return Ok(ArtifactRecheck::Inconclusive),
+        | LlvmRecheck::MultifileRechecked(..) => (),
+        LlvmRecheck::Different => return Ok((ArtifactRecheck::Different, family)),
+        LlvmRecheck::Inconclusive => return Ok((ArtifactRecheck::Inconclusive, family)),
     }
     let LoadedBundle {
         object_build,
@@ -1034,7 +1078,7 @@ fn recheck_artifact(
     if fresh_object != object_build
         || read_regular(&object_path, MAX_COMPONENT_BYTES)? != files[&BundleFile::Object]
     {
-        return Ok(ArtifactRecheck::Different);
+        return Ok((ArtifactRecheck::Different, family));
     }
     let executable_path = stage.path().join(BundleFile::Executable.file_name());
     let fresh_link = linker::link_recorded(&[object_path], &executable_path)
@@ -1046,9 +1090,9 @@ fn recheck_artifact(
         || fresh_link.linker_version != link_build.linker_version
         || read_regular(&executable_path, MAX_COMPONENT_BYTES)? != files[&BundleFile::Executable]
     {
-        return Ok(ArtifactRecheck::Different);
+        return Ok((ArtifactRecheck::Different, family));
     }
-    Ok(ArtifactRecheck::Rechecked)
+    Ok((ArtifactRecheck::Rechecked, family))
 }
 
 #[cfg(target_os = "linux")]

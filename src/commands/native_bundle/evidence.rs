@@ -1,8 +1,9 @@
 //! Representation of successful local rechecks, not transferable proof acceptance.
 
 use mumei_core::native_bundle::{
-    sha256, BuildSettings, BundleError, BundleFile, ModuleNativeBundleRecord, NativeBundleRecord,
-    MODULE_PROFILE, MODULE_RECHECK_PROFILE, PROFILE, RECHECK_PROFILE, RECHECK_RESOURCE_LIMIT,
+    sha256, BuildSettings, BundleError, BundleFile, ModuleAtomBinding, ModuleNativeBundleRecord,
+    MultifileNativeBundleRecord, NativeBundleRecord, MODULE_PROFILE, MODULE_RECHECK_PROFILE,
+    MULTIFILE_PROFILE, MULTIFILE_RECHECK_PROFILE, PROFILE, RECHECK_PROFILE, RECHECK_RESOURCE_LIMIT,
 };
 use mumei_core::parser::{parse_body_expr_checked, parse_module_checked, Item};
 use mumei_core::semantic_contract::{contains_while_stmt, LOOP_BOUND};
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 const SCHEMA: &str = "mumei.native-consumer-evidence/v1";
 const MODULE_SCHEMA: &str = "mumei.native-module-consumer-evidence/v1";
+const MULTIFILE_SCHEMA: &str = "mumei.native-multifile-consumer-evidence/v1";
 const EXCLUSIONS: &[&str] = &[
     "producer_and_report_authenticity",
     "parser_encoder_and_solver_correctness",
@@ -54,12 +56,18 @@ pub(super) struct NativeModuleConsumerEvidence {
     evidence: Vec<Evidence>,
 }
 
+/// The multifile envelope shares the module layout — an identity record,
+/// the deterministic merge-correspondence record, then a per-atom
+/// postcondition and source-to-LLVM record for each merged atom.
+pub(super) type NativeMultifileConsumerEvidence = NativeModuleConsumerEvidence;
+
 /// Saved evidence decoded by its own `schema_version` — the families
 /// cannot cross-parse, so a single-atom file can never stand in for a
 /// module report or vice versa.
 pub(super) enum ConsumerEvidence {
     Single(Box<NativeConsumerEvidence>),
     Module(NativeModuleConsumerEvidence),
+    Multifile(NativeMultifileConsumerEvidence),
 }
 
 pub(super) fn decode(bytes: &[u8]) -> Result<ConsumerEvidence, BundleError> {
@@ -80,6 +88,12 @@ pub(super) fn decode(bytes: &[u8]) -> Result<ConsumerEvidence, BundleError> {
                 .map_err(|_| BundleError("invalid native evidence representation"))?;
             validate(&report.evidence)?;
             Ok(ConsumerEvidence::Module(report))
+        }
+        Some(MULTIFILE_SCHEMA) => {
+            let report: NativeMultifileConsumerEvidence = serde_json::from_slice(bytes)
+                .map_err(|_| BundleError("invalid native evidence representation"))?;
+            validate(&report.evidence)?;
+            Ok(ConsumerEvidence::Multifile(report))
         }
         _ => Err(BundleError("invalid native evidence representation")),
     }
@@ -282,6 +296,117 @@ pub(super) fn from_module_recheck(
     report: &ModuleValidationReport,
     source: &str,
 ) -> Result<NativeModuleConsumerEvidence, BundleError> {
+    let evidence = emit_module_family(
+        expected_id,
+        MODULE_SCHEMA,
+        MODULE_PROFILE,
+        MODULE_RECHECK_PROFILE,
+        &record.source.atoms,
+        &record.files[&BundleFile::Executable].sha256,
+        report,
+        source,
+    )?;
+    Ok(NativeModuleConsumerEvidence {
+        schema_version: MODULE_SCHEMA.into(),
+        build_id: expected_id.to_owned(),
+        scope: super::LLVM_RECHECK_SCOPE.into(),
+        acceptance: "not_evaluated".into(),
+        evidence,
+    })
+}
+
+/// The multifile family emits the module records plus one
+/// merge-correspondence record: the deterministic import-closure merge
+/// re-derived from the pinned members, bound to the record's
+/// `import_graph_sha256` pin and the merged text the LLVM snapshot was
+/// validated against.
+pub(super) fn from_multifile_recheck(
+    expected_id: &str,
+    record: &MultifileNativeBundleRecord,
+    report: &ModuleValidationReport,
+    merged: &str,
+) -> Result<NativeMultifileConsumerEvidence, BundleError> {
+    let mut evidence = emit_module_family(
+        expected_id,
+        MULTIFILE_SCHEMA,
+        MULTIFILE_PROFILE,
+        MULTIFILE_RECHECK_PROFILE,
+        &record.source.atoms,
+        &record.files[&BundleFile::Executable].sha256,
+        report,
+        merged,
+    )?;
+    let fingerprint = configuration_fingerprint(
+        MULTIFILE_PROFILE,
+        MULTIFILE_RECHECK_PROFILE,
+        report.source_profile,
+        report.profile,
+        report.timeout_ms,
+        report.resource_limit,
+        report.target,
+        report.data_layout,
+    )?;
+    // Inserted right after the identity record so the envelope reads in
+    // the order the chain runs: identity, merge, then per-atom checks.
+    evidence.insert(
+        1,
+        make_evidence(
+            &fingerprint,
+            MULTIFILE_SCHEMA,
+            Subject {
+                id: "native-source.mm".into(),
+                kind: "mumei_source".into(),
+                sha256: report.source_sha256.clone(),
+            },
+            Identity {
+                id: "source_files.import_graph_sha256".into(),
+                sha256: record.source_files.import_graph_sha256.clone(),
+            },
+            "multifile_merge_correspondence",
+            MULTIFILE_RECHECK_PROFILE,
+            "not_applicable",
+            None,
+            "identity_check",
+            "identity",
+            &[],
+            Correspondence {
+                relation: "exact_model".into(),
+                status: "validated".into(),
+                notes: strings(&[
+                    "import_closure_merged_deterministically_from_pinned_member_bytes",
+                    "merged_text_derives_the_pinned_llvm_snapshot_source_hash",
+                ]),
+            },
+            Tool {
+                name: "mumei".into(),
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+            },
+            &["native-bundle.json", "sources/"],
+        ),
+    );
+    validate(&evidence)?;
+    Ok(NativeMultifileConsumerEvidence {
+        schema_version: MULTIFILE_SCHEMA.into(),
+        build_id: expected_id.to_owned(),
+        scope: super::LLVM_RECHECK_SCOPE.into(),
+        acceptance: "not_evaluated".into(),
+        evidence,
+    })
+}
+
+/// The shared emit for the module-shaped families: one identity record
+/// plus a source-postcondition and source-to-LLVM record per atom.
+#[allow(clippy::too_many_arguments)]
+fn emit_module_family(
+    expected_id: &str,
+    protocol: &'static str,
+    identity_profile: &str,
+    recheck_profile: &str,
+    atoms: &std::collections::BTreeMap<String, ModuleAtomBinding>,
+    executable_sha256: &str,
+    report: &ModuleValidationReport,
+    source: &str,
+) -> Result<Vec<Evidence>, BundleError> {
     // Atoms carrying a `while` are verified only where the guard fails
     // within the profile bound, so their records claim a bounded scope
     // rather than the unbounded claim a loop-free atom earns. The
@@ -304,8 +429,8 @@ pub(super) fn from_module_recheck(
         }
     }
     let fingerprint = configuration_fingerprint(
-        MODULE_PROFILE,
-        MODULE_RECHECK_PROFILE,
+        identity_profile,
+        recheck_profile,
         report.source_profile,
         report.profile,
         report.timeout_ms,
@@ -329,7 +454,7 @@ pub(super) fn from_module_recheck(
      -> Evidence {
         make_evidence(
             &fingerprint,
-            MODULE_SCHEMA,
+            protocol,
             subject,
             specification,
             obligation_id,
@@ -344,17 +469,17 @@ pub(super) fn from_module_recheck(
             artifact_paths,
         )
     };
-    let mut evidence = Vec::with_capacity(1 + 2 * record.source.atoms.len());
+    let mut evidence = Vec::with_capacity(1 + 2 * atoms.len());
     evidence.push(make(
-        Subject { id: "program".into(), kind: "native_artifact".into(), sha256: record.files[&BundleFile::Executable].sha256.clone() },
+        Subject { id: "program".into(), kind: "native_artifact".into(), sha256: executable_sha256.to_owned() },
         Identity { id: "native-bundle.json".into(), sha256: expected_id.to_owned() },
-        "native_bundle_identity_consistency", MODULE_PROFILE, "not_applicable", Some(report.target),
+        "native_bundle_identity_consistency", identity_profile, "not_applicable", Some(report.target),
         "identity_check", "identity", &[],
         Correspondence { relation: "unchecked".into(), status: "unverified".into(), notes: strings(&["pinned_source_certificate_and_bundle_member_identities_only_not_semantic_correspondence"]) },
         Tool { name: "mumei".into(), version: env!("CARGO_PKG_VERSION").to_owned() },
         &["native-bundle.json", "program.ll", "program.o", "proof-cert.json", "program"],
     ));
-    for (atom, binding) in &record.source.atoms {
+    for (atom, binding) in atoms {
         let (scope, bounds): (&str, &[&str]) = if bounded_atoms.contains(atom) {
             ("bounded", std::slice::from_ref(&bound_label))
         } else {
@@ -363,7 +488,7 @@ pub(super) fn from_module_recheck(
         evidence.push(make(
             Subject { id: format!("native-source.mm#{atom}"), kind: "mumei_source".into(), sha256: report.source_sha256.clone() },
             Identity { id: format!("{atom}.contract"), sha256: binding.specification_sha256.clone() },
-            &format!("{atom}_source_postcondition"), MODULE_RECHECK_PROFILE, "wrapping_i64", None,
+            &format!("{atom}_source_postcondition"), recheck_profile, "wrapping_i64", None,
             "deductive_proof", scope, bounds,
             Correspondence { relation: "exact_model".into(), status: "assumed".into(), notes: strings(&["restricted_c03_source_encoding_and_parser_normalization_are_trusted_not_independently_proved"]) },
             Tool { name: "Z3".into(), version: z3_version.clone() },
@@ -382,14 +507,7 @@ pub(super) fn from_module_recheck(
             &["program.ll"],
         ));
     }
-    let evidence = NativeModuleConsumerEvidence {
-        schema_version: MODULE_SCHEMA.into(),
-        build_id: expected_id.to_owned(),
-        scope: super::LLVM_RECHECK_SCOPE.into(),
-        acceptance: "not_evaluated".into(),
-        evidence,
-    };
-    validate(&evidence.evidence)?;
+    validate(&evidence)?;
     Ok(evidence)
 }
 

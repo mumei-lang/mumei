@@ -1365,10 +1365,16 @@ every recheck re-derives the merge from them, so the checked text is
 always the one the record binds. `check`, `recheck-source`,
 `recheck-llvm` and `recheck-artifact` run the same module-scope
 verification over the merged text, wrapping-i64 semantics included.
-`recheck-llvm --json`, `recheck-evidence` and the `accept-*` commands
-reject multifile records honestly — the multifile consumer Evidence
-vocabulary is not emitted yet, so nothing reports an envelope it cannot
-produce.
+Consumer Evidence reaches multifile bundles through
+`mumei.native-multifile-consumer-evidence/v1` — the module envelope
+shape plus one merge-correspondence record (`2 + 2·atoms`): an
+`identity_check`/`identity`-scoped record binds the file-level
+`import_graph_sha256` pin to the re-derived merged text the LLVM
+snapshot carries. `recheck-llvm --json` emits it, `recheck-evidence`
+compares a saved envelope against the fresh one, and `accept-evidence`/
+`accept-artifact` report the multifile acceptance scopes, which name
+the pinned-member merge re-derivation among the performed checks and
+keep the same honesty about what stays unchecked.
 
 Nothing is claimed beyond the module scopes: same identity-plus-recheck
 boundaries, no authenticity, no import-alias pinning (the alias is
