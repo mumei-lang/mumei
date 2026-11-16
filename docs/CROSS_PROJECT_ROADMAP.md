@@ -920,6 +920,36 @@ external clock and runtime semantics stay outside the profile). Also
 exposed as the `native_evidence_recheck` MCP tool. C02/C10 stay
 partial.
 
+### Wave 2 declared native-evidence-accept route (C10 consumer)
+
+Agent's `python -m agent native-evidence-accept --core <path>
+--bundle <dir> --source <path> --evidence <path>
+--expected-build-id <sha256>` declares a saved consumer-Evidence
+acceptance evaluation as one attempt: `<core> native-bundle
+accept-evidence --expected-build-id <id> --json <bundle> <source>
+<evidence>` under a `mumei.native-evidence-accept-request/v1`
+fingerprint binding the same four inputs as `native-evidence-recheck`
+— Core bytes, every member the record declares (component members
+plus `sources/<member>` for `mumei.native-multifile-bundle/v1`,
+enumerated and grammar-validated before joining), source bytes, the
+saved envelope's bytes (bounded at Core's 1 MiB evidence limit) and
+the trusted-channel build ID. The post-run drift check re-enumerates
+members from the current record and re-fingerprints, so a mid-run
+swap reports `inputs_changed` rather than claiming an outcome on
+unbound bytes. `acceptance` names only `0 → accepted` and
+`3 → inconclusive`; exit 1 conflates a tampered or mismatched
+envelope with every static failure. Only an `exited` run with
+`exit_code == 0` AND no drift selects — binding Core's emitted
+`mumei.native-evidence-acceptance/v1` descriptor to the lineage via
+`select_result`. No evidence candidate is emitted: the acceptance
+descriptor is anonymous (it names no subject digest), so there is
+nothing to hand off. An `accepted` outcome discharges
+`artifact_semantics` and `claim_truth` at representation level —
+the descriptor asserts the saved envelope matched the bundle's
+user-body LLVM and the source's freshly re-verified semantics — with
+the other four checks in `checks_not_performed`. Also exposed as the
+`native_evidence_accept` MCP tool. C02/C10 stay partial.
+
 ### Wave 2 declared evidence file-identity route (C02)
 
 Agent's `python -m agent evidence-identity-check --evidence <path>
