@@ -3746,11 +3746,13 @@ artifact semantics all need the deeper consumers this route does not
 run. No candidate: the stdout is a fixed diagnostic line. Also
 exposed as the `native_check` MCP tool. C02/C10 stay partial.
 
-With this route every `native-bundle` consumer subcommand has a
+With this route every `native-bundle` consumer subcommand except the
+Stage A `recheck-source` has a
 declared-attempt route: `build` (`native-attempt`), `check`,
 `recheck-llvm` (`native-recheck`), `recheck-artifact`,
 `recheck-evidence`, `accept-evidence` and `accept-artifact`
-(`native-accept`).
+(`native-accept`). `recheck-source` — the source-postcondition gate
+the deeper rechecks already run — remains unrouted.
 
 ## No-`.mm` front door and V1 order
 
