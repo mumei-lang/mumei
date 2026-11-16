@@ -1397,7 +1397,7 @@ fn replay_file_and_pin_boundaries_are_fail_closed_without_following_report_paths
         replay_rejected(&source, &bundle, pin, &saved);
     }
     let mut padded = original.clone();
-    padded.resize(65_536, b' ');
+    padded.resize(1024 * 1024, b' ');
     fs::write(&saved, &padded).unwrap();
     assert_success(
         &replay_command(&source, &bundle, &id, &saved)
@@ -1589,38 +1589,115 @@ fn module_source_recheck_refutes_wrapped_i64_arithmetic() {
 }
 
 #[test]
-fn module_records_stay_off_the_single_atom_consumer_surfaces() {
+fn module_recheck_llvm_json_emits_per_atom_consumer_evidence() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_source(root.path(), MODULE);
-    for args in [
-        vec![
-            "native-bundle",
-            "recheck-llvm",
-            bundle.to_str().unwrap(),
-            source.to_str().unwrap(),
-            "--expected-build-id",
-            &id,
-            "--json",
-        ],
-        vec![
-            "native-bundle",
-            "recheck-evidence",
-            bundle.to_str().unwrap(),
-            source.to_str().unwrap(),
-            "--expected-build-id",
-            &id,
-            root.path().join("evidence.json").to_str().unwrap(),
-        ],
+    let output = recheck_llvm_json(&source, &bundle, &id);
+    assert_success(&output);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["schema_version"],
+        "mumei.native-module-consumer-evidence/v1"
+    );
+    assert_eq!(report["build_id"], id);
+    assert_eq!(report["acceptance"], "not_evaluated");
+    let evidence = report["evidence"].as_array().unwrap();
+    // One identity record plus a postcondition and a translation record
+    // per atom (`helper` and `main` here).
+    assert_eq!(evidence.len(), 1 + 2 * 2);
+    assert_eq!(
+        evidence[0]["obligation_id"],
+        "native_bundle_identity_consistency"
+    );
+    let obligations: Vec<&str> = evidence
+        .iter()
+        .map(|record| record["obligation_id"].as_str().unwrap())
+        .collect();
+    for atom in ["helper", "main"] {
+        assert!(obligations.contains(&format!("{atom}_source_postcondition").as_str()));
+        assert!(obligations.contains(&format!("{atom}_source_to_llvm_user_body").as_str()));
+    }
+    // The identity record names the module bundle profile and every
+    // per-atom postcondition record names the module recheck profile —
+    // never the single-atom family strings.
+    assert_eq!(
+        evidence[0]["semantics"]["profile"],
+        native_bundle::MODULE_PROFILE
+    );
+    for record in evidence.iter().skip(1) {
+        let obligation = record["obligation_id"].as_str().unwrap();
+        if obligation.ends_with("_source_postcondition") {
+            assert_eq!(
+                record["semantics"]["profile"],
+                native_bundle::MODULE_RECHECK_PROFILE
+            );
+        }
+        assert_eq!(record["scope"]["kind"], "unbounded");
+    }
+}
+
+#[test]
+fn module_saved_evidence_roundtrips_and_rejects_tampering() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), MODULE);
+    let saved = save_evidence(root.path(), &source, &bundle, &id);
+    assert_success(
+        &replay_command(&source, &bundle, &id, &saved)
+            .output()
+            .unwrap(),
+    );
+    // A tampered atom specification must never replay.
+    let mut tampered: serde_json::Value =
+        serde_json::from_slice(&fs::read(&saved).unwrap()).unwrap();
+    let obligation = tampered["evidence"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|record| record["obligation_id"] == "helper_source_postcondition")
+        .unwrap();
+    obligation["specification"]["sha256"] = serde_json::Value::String("0".repeat(64));
+    fs::write(&saved, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    let output = replay_rejected(&source, &bundle, &id, &saved);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("differs"));
+}
+
+#[test]
+fn saved_evidence_family_mismatch_and_unknown_schemas_are_rejected() {
+    let single_root = tempfile::tempdir().unwrap();
+    let (single_source, single_bundle, single_id) = build(single_root.path());
+    let module_root = tempfile::tempdir().unwrap();
+    let (module_source, module_bundle, module_id) = build_source(module_root.path(), MODULE);
+    let single_saved = save_evidence(
+        single_root.path(),
+        &single_source,
+        &single_bundle,
+        &single_id,
+    );
+    let module_saved = save_evidence(
+        module_root.path(),
+        &module_source,
+        &module_bundle,
+        &module_id,
+    );
+    // Single-atom evidence must not stand in for a module bundle, nor the
+    // reverse — the families are dispatched on the saved file's schema.
+    for (source, bundle, id, saved) in [
+        (&module_source, &module_bundle, &module_id, &single_saved),
+        (&single_source, &single_bundle, &single_id, &module_saved),
     ] {
-        let output = cli(&args);
-        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        let output = replay_rejected(source, bundle, id, saved);
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("single-atom"),
-            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr).contains("family"),
+            "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(output.stdout.is_empty());
     }
+    // An unrecognized schema_version is rejected before any comparison.
+    let mut unknown: serde_json::Value =
+        serde_json::from_slice(&fs::read(&module_saved).unwrap()).unwrap();
+    unknown["schema_version"] = serde_json::Value::String("mumei.bogus/v9".into());
+    fs::write(&module_saved, serde_json::to_vec(&unknown).unwrap()).unwrap();
+    replay_rejected(&module_source, &module_bundle, &module_id, &module_saved);
 }
 
 #[test]

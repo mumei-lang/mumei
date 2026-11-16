@@ -2977,8 +2977,7 @@ record's own schema. Sibling calls stay inside the widened i64 profile as
 uninterpreted call sites: the source recheck checks one postcondition obligation
 per atom plus one domain obligation per call site — each independently, so a
 vacuous conjunct can never mask a real counterexample — and the LLVM recheck
-reuses `mumei.llvm17-native-module-snapshot/v1`. Consumer Evidence surfaces
-(`--json`, `recheck-evidence`) stay single-atom only. See the
+reuses `mumei.llvm17-native-module-snapshot/v1`. See the
 [module bundle boundary](VERIFICATION_NATIVE.md#multi-atom-native-module-bundles).
 This is partial C10, still identity-plus-recheck scopes only: no
 object/optimizer/linker/runtime/ABI/final-executable semantics, producer
@@ -2996,6 +2995,16 @@ ABI/runtime, optimizer-path and attestation claims remain out of scope. See
 the [artifact recheck boundary](VERIFICATION_NATIVE.md#pinned-toolchain-artifact-recheck).
 General optimizer/ABI/runtime assurance, producer authenticity and the
 source-dependency closure stay open.
+
+Consumer Evidence reaches module bundles through the sibling envelope
+`mumei.native-module-consumer-evidence/v1`: `recheck-llvm --json` emits one
+identity record plus a per-atom postcondition and source-to-LLVM record
+(`1 + 2·atoms`), and `recheck-evidence` dispatches on the saved file's own
+`schema_version`, so a single-atom report can never stand in for a module
+bundle or the reverse. The replay bound widens to the record's 1 MiB because
+module reports grow with atom count. Emission still happens only on aggregate
+equivalence — there is no partial-success module report — and `acceptance`
+stays `not_evaluated`. See the [module evidence envelope](VERIFICATION_NATIVE.md#first-native-consumer-evidence-producer).
 
 The next C02/C13 slice moves the common v1 representation model and runtime
 validation into `mumei_core::verification_evidence`. Native producer/replay use

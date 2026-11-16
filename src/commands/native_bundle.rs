@@ -11,15 +11,17 @@ mod evidence;
 
 enum LlvmRecheck {
     Rechecked(Box<evidence::NativeConsumerEvidence>),
-    /// Module bundles have no single-main consumer evidence format; the
-    /// payload is the translation profile the module report attests.
-    ModuleRechecked(&'static str),
+    /// Module bundles carry the per-atom consumer evidence format; the
+    /// payload is the translation profile plus that report.
+    ModuleRechecked(&'static str, Box<evidence::NativeModuleConsumerEvidence>),
     Different,
     Inconclusive,
 }
 
 const MAX_COMPONENT_BYTES: u64 = 32 * 1024 * 1024;
-const MAX_EVIDENCE_BYTES: u64 = 65_536;
+/// Bounded like the record, not the single-atom evidence size: a module
+/// report carries `1 + 2·atoms` records.
+const MAX_EVIDENCE_BYTES: u64 = 1024 * 1024;
 const LLVM_RECHECK_SCOPE: &str =
     "source_postcondition_identity_and_llvm_snapshot_only/no_authenticity_or_binary_semantic_proof";
 const ARTIFACT_RECHECK_SCOPE: &str =
@@ -137,14 +139,17 @@ fn write_llvm_recheck(
                 .map_err(|_| BundleError("cannot write consumer evidence"))?;
             Ok(Outcome::EquivalentWithinProfile)
         }
-        LlvmRecheck::ModuleRechecked(profile) => {
-            if json {
-                return Err(BundleError(
-                    "consumer evidence is defined for single-atom bundles only",
-                ));
-            }
+        LlvmRecheck::ModuleRechecked(profile, report) => {
+            let bytes = if json {
+                let mut bytes = serde_json::to_vec_pretty(&report)
+                    .map_err(|_| BundleError("cannot encode consumer evidence"))?;
+                bytes.push(b'\n');
+                bytes
+            } else {
+                format!("Pinned snapshot identities consistent; module source postconditions and native LLVM bodies freshly rechecked.\nProfile: {profile}\nScope: {LLVM_RECHECK_SCOPE}\nWrapper: checked call/trunc/ret shape, returning low 32 bits of the i64 body.\nObject/linker/runtime/OS exit-status/executable semantics: not checked.\n").into_bytes()
+            };
             output
-                .write_all(format!("Pinned snapshot identities consistent; module source postconditions and native LLVM bodies freshly rechecked.\nProfile: {profile}\nScope: {LLVM_RECHECK_SCOPE}\nWrapper: checked call/trunc/ret shape, returning low 32 bits of the i64 body.\nObject/linker/runtime/OS exit-status/executable semantics: not checked.\n").as_bytes())
+                .write_all(&bytes)
                 .map_err(|_| BundleError("cannot write consumer evidence"))?;
             Ok(Outcome::EquivalentWithinProfile)
         }
@@ -455,8 +460,8 @@ fn recheck_llvm_loaded(
     if is_module_record(&bytes)? {
         let record = load_pinned_module_record(&bytes, expected_id)?;
         let loaded = LoadedBundle {
-            object_build: record.object_build,
-            link_build: record.link_build,
+            object_build: record.object_build.clone(),
+            link_build: record.link_build.clone(),
             files,
         };
         match recheck_module_source(&bytes, expected_id, &source, &loaded.files)? {
@@ -479,7 +484,15 @@ fn recheck_llvm_loaded(
         }
         return Ok((
             match report.outcome {
-                Outcome::EquivalentWithinProfile => LlvmRecheck::ModuleRechecked(report.profile),
+                Outcome::EquivalentWithinProfile => LlvmRecheck::ModuleRechecked(
+                    report.profile,
+                    Box::new(evidence::from_module_recheck(
+                        expected_id,
+                        &record,
+                        &report,
+                        &source,
+                    )?),
+                ),
                 Outcome::Different | Outcome::UndefinedBehavior => LlvmRecheck::Different,
                 Outcome::Inconclusive => LlvmRecheck::Inconclusive,
             },
@@ -531,29 +544,34 @@ fn recheck_evidence(
     if !is_digest(expected_id) {
         return Err(BundleError("invalid expected build ID"));
     }
-    if is_module_record(&read_regular(&bundle.join(RECORD_FILE), 1024 * 1024)?)? {
-        return Err(BundleError(
-            "native evidence acceptance is defined for single-atom bundles only",
-        ));
-    }
     let saved = evidence::decode(&read_regular(evidence_path, MAX_EVIDENCE_BYTES)?)?;
     compare_evidence(recheck_llvm(bundle, source, expected_id)?, &saved)
 }
 
 fn compare_evidence(
     result: LlvmRecheck,
-    saved: &evidence::NativeConsumerEvidence,
+    saved: &evidence::ConsumerEvidence,
 ) -> Result<Outcome, BundleError> {
-    match result {
-        LlvmRecheck::Rechecked(fresh) if *fresh == *saved => Ok(Outcome::EquivalentWithinProfile),
-        LlvmRecheck::Rechecked(_) => Err(BundleError(
-            "saved native evidence differs from fresh consumer report",
+    match (result, saved) {
+        (LlvmRecheck::Rechecked(fresh), evidence::ConsumerEvidence::Single(saved))
+            if *fresh == **saved =>
+        {
+            Ok(Outcome::EquivalentWithinProfile)
+        }
+        (LlvmRecheck::ModuleRechecked(_, fresh), evidence::ConsumerEvidence::Module(saved))
+            if *fresh == *saved =>
+        {
+            Ok(Outcome::EquivalentWithinProfile)
+        }
+        (LlvmRecheck::Rechecked(_), evidence::ConsumerEvidence::Single(_))
+        | (LlvmRecheck::ModuleRechecked(..), evidence::ConsumerEvidence::Module(_)) => Err(
+            BundleError("saved native evidence differs from fresh consumer report"),
+        ),
+        (LlvmRecheck::Rechecked(_) | LlvmRecheck::ModuleRechecked(..), _) => Err(BundleError(
+            "saved native evidence belongs to the other bundle family",
         )),
-        LlvmRecheck::ModuleRechecked(_) => Err(BundleError(
-            "native evidence acceptance is defined for single-atom bundles only",
-        )),
-        LlvmRecheck::Different => Ok(Outcome::Different),
-        LlvmRecheck::Inconclusive => Ok(Outcome::Inconclusive),
+        (LlvmRecheck::Different, _) => Ok(Outcome::Different),
+        (LlvmRecheck::Inconclusive, _) => Ok(Outcome::Inconclusive),
     }
 }
 
@@ -582,7 +600,7 @@ fn recheck_artifact(
     // self-consistent foreign IR/object/executable set.
     let (result, loaded) = recheck_llvm_loaded(bundle, source, expected_id)?;
     match result {
-        LlvmRecheck::Rechecked(_) | LlvmRecheck::ModuleRechecked(_) => (),
+        LlvmRecheck::Rechecked(_) | LlvmRecheck::ModuleRechecked(..) => (),
         LlvmRecheck::Different => return Ok(ArtifactRecheck::Different),
         LlvmRecheck::Inconclusive => return Ok(ArtifactRecheck::Inconclusive),
     }

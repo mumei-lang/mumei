@@ -1189,9 +1189,10 @@ semantics, which the build inherits.
 `mumei.llvm17-native-module-snapshot/v1` translation validation — per-atom
 LLVM body comparison plus the same `__mumei_user_main`/wrapper admission rules —
 with the module triple/layout still bound to the record's object-build
-observations. The native consumer Evidence surfaces stay single-atom only:
-`recheck-llvm --json` and `recheck-evidence` reject module records, because the
-consumer evidence format is defined for the single-main profile.
+observations. The native consumer Evidence surfaces dispatch on the record's
+own schema family: single-atom bundles emit `mumei.native-consumer-evidence/v1`,
+module bundles emit `mumei.native-module-consumer-evidence/v1` (described in
+the producer section below).
 
 Nothing is claimed beyond the single-atom scopes: the result is still
 `identity_consistency_only` plus the source-postcondition and LLVM-snapshot
@@ -1296,6 +1297,30 @@ ABI/runtime/OS exit-status/final-executable semantics and dependency/toolchain
 closure remain unverified. Broader C02/C09/C10 and final-artifact assurance stay
 open; external verifiers are not adopted.
 
+Module bundles emit the sibling envelope
+`mumei.native-module-consumer-evidence/v1` — a separate schema so the two
+families cannot cross-parse, mirroring `native-bundle`/`native-module-bundle`.
+Same envelope fields and `mumei.verification-evidence/v1` record shape, but
+`evidence` holds exactly `1 + 2·N` records in canonical order: one bundle
+identity record, then per atom in the record's sorted binding map a
+`<atom>_source_postcondition` record (subject: the shared whole-module source
+digest; specification: the atom's contract identity) and a
+`<atom>_source_to_llvm_user_body` record (subject: `program.ll`;
+specification: `native-source.mm#<atom>.body` bound to the module source digest).
+Records name the module profiles —
+`mumei.native-pure-i64-module-linux-x86_64/v1` for identity,
+`mumei.native-module-source-recheck/v1` for source postconditions and
+`mumei.llvm17-native-module-snapshot/v1` for LLVM comparisons — so a module
+report never carries single-atom profile strings, and the configuration
+fingerprint records the same pair. An atom whose body contains a `while` is
+verified only where the guard fails within the profile bound (4 evaluations),
+so its postcondition and translation records claim `bounded` scope with a
+`while_loop_guard_evaluations <= 4` bound rather than `unbounded`; the scope
+is re-derived from the source text, not trusted from the report.
+Module evidence is emitted only on aggregate equivalence, so every atom's
+record reports `established`; there is no partial-success module report.
+Scope, assumptions, exclusions and `acceptance: not_evaluated` are unchanged.
+
 ### First saved native Evidence replay consumer
 
 `mumei native-bundle recheck-evidence <bundle> <source> <evidence> --expected-build-id <trusted-id>`
@@ -1310,10 +1335,17 @@ mumei native-bundle recheck-evidence bundle source.mm evidence.json --expected-b
 The expected build ID must still come from a separately trusted channel, never
 from the report. The report is an additional input, not a bundle member or a
 replacement for source, IR, certificates or pinned identities. It is read once
-as a regular, non-symlink file of at most 65,536 bytes. A closed typed decoder
-rejects malformed/non-UTF-8 JSON, duplicate/unknown fields at every object level,
-missing required fields and record counts other than three. Report strings and
-artifact paths never select tools or files to execute/open.
+as a regular, non-symlink file of at most 1 MiB — bounded like the record,
+not the single-atom report, because a module report carries `1 + 2·atoms`
+records. A closed typed decoder dispatches on the saved file's own
+`schema_version` into the single-atom or module family, and rejects
+malformed/non-UTF-8 JSON, duplicate/unknown fields at every object level,
+missing required fields and unknown schemas; the single-atom family still
+requires exactly three records at decode, while a module report's atom count
+is bound by the fresh-report comparison itself. Report strings and
+artifact paths never select tools or files to execute/open. A saved file of
+the other family — single-atom evidence against a module bundle or vice
+versa — is rejected, never silently reinterpreted.
 
 After decoding, the consumer performs every C08/Stage A/B identity, source-query,
 LLVM-body/wrapper and exact target/layout gate. Only a successful fresh result
