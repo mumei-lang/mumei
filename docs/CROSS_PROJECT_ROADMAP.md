@@ -2027,10 +2027,26 @@ container `var` and `(*GA[i]).V`/`(*GP).V` on a package pointer
 var; container iteration and element inc/dec admit as well —
 `for range *p`/`for range p`/`for range *GP`/`for range GP` (the
 element name carries deps(p) ∪ indirect stores for a bound
-pointer, dep-free for a package var) and `(*p)[i]++`/`--` — while
-nested element fields (`(*p)[i].F.G` reads or stores), anonymous
-`*struct{...}` pointees and a bare `*p` composite-value read stay
-closed. An unnamed-pointee
+pointer, dep-free for a package var) and `(*p)[i]++`/`--` — and a
+computed range operand admits too: `for range *g()`/`for range
+g()` over a locally declared callee whose declared result is a
+pointer to a slice/array/map (or a slice/array/map directly, or a
+pointer-to-array under the `for range p` sugar rule) ranges it
+under the opaque-callee model — the callee's body is outside the
+scalar signature fragment, so the call records an imported
+transfer carrying the argument deps, `effects` stays unknown and
+each element name carries deps(args) ∪ escaped ∪ indirect writes
+while the index/key stays dep-free — while
+nested element fields (`(*p)[i].F.G` reads or stores) and a bare
+`*p` composite-value read stay
+closed. Anonymous `*struct{...}` pointees now admit single-level
+scalar field access — `p.V`/`(*p).V` reads and `p.V = v`/`+=`/`++`
+stores — since the producer emits a `struct` fact for every
+struct underlying and each field resolves through its own
+binding; the synthetic `<binding>/pointee` identity records the
+store, while whole-struct derefs, nested selections (`p.A.N`),
+pointer-typed struct fields and anonymous `struct{...}` values
+(`st := struct{...}{...}`) stay closed. An unnamed-pointee
 binding (`p := &x` on a builtin `int64`) admits through the
 pointer fact's `elem` on both sides, recording the synthetic
 per-binding `<binding_id>/pointee` identity described below. Recording a pointer-typed
