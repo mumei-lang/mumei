@@ -3497,6 +3497,41 @@ mid-command record swap cannot make a descriptor claim a merge that
 never ran. Same assumptions/exclusions otherwise: `acceptance:
 not_evaluated` in emitted envelopes, no authenticity or execution claims.
 
+### Wave 5 declared native-accept route (C10 acceptance)
+
+Agent's `python -m agent native-accept --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` declares a native
+artifact acceptance as one attempt: `<core> native-bundle
+accept-artifact --expected-build-id <id> --json <bundle> <source>`
+under a `mumei.native-accept-request/v1` fingerprint binding the Core
+executable's bytes, every bundle member the record declares, the
+source's bytes and the trusted-channel build ID. Where `native-recheck`
+binds a fixed member set, this route enumerates members from
+`native-bundle.json` — the `files` map plus, for
+`mumei.native-multifile-bundle/v1`, each `sources/<member>` the merge
+is re-derived from — with every member name validated against the
+member grammar before joining, so a hand-crafted record cannot steer
+the fingerprint's reads outside the bundle. The post-run drift check
+re-enumerates members from the current record, so a record swapped
+mid-run that declares new members reports `inputs_changed` rather than
+claiming an outcome on unbound bytes. `acceptance` names only
+`0 → accepted` and `3 → inconclusive`; exit 1 conflates a failed
+reproduction with every static failure. Only an `exited` run with
+`exit_code == 0` selects the produced
+`mumei.native-evidence-acceptance/v1` descriptor; no evidence candidate
+is emitted — the descriptor is anonymous by design (no subject, digest
+or provenance binding), so there is no handoff and the captured bytes
+enter the lineage through the selection itself. An `accepted` outcome
+discharges `artifact_semantics` — the bundle's user-body LLVM AND its
+pinned object/executable bytes correspond to the declared source's
+verified semantics under the recorded toolchain, the deepest layer the
+pipeline covers — and `claim_truth`, both at representation level with
+the other four checks in `checks_not_performed` (producer authenticity,
+historical execution and runtime/OS semantics stay outside the
+profile; the link argument-vector is recorded-but-not-reproduced inside
+Core and adds no claim). Also exposed as the `native_accept` MCP tool.
+C02/C10 stay partial.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
