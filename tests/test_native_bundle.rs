@@ -2066,21 +2066,64 @@ fn multifile_bundle_builds_and_rechecks_with_honest_consumer_rejections() {
     let artifact = consume("recheck-artifact", &source, &bundle, &id);
     assert_success(&artifact);
 
-    // Multifile consumer Evidence is not emitted yet: the JSON surface
-    // and both accept-* commands reject the family honestly.
+    // The multifile family emits the module-shaped consumer envelope
+    // plus a merge-correspondence record.
     let json = consume("recheck-llvm --json", &source, &bundle, &id);
-    assert_eq!(json.status.code(), Some(1));
-    assert!(json.stdout.is_empty());
-    // A valid single-family Evidence report must reach the multifile
-    // rejection — a malformed file would fail decode earlier and prove
-    // nothing about the family branch.
+    assert_success(&json);
+    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        envelope["schema_version"],
+        "mumei.native-multifile-consumer-evidence/v1"
+    );
+    assert!(envelope["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|record| record["obligation_id"] == "multifile_merge_correspondence"));
+    let evidence = root.path().join("evidence.json");
+    fs::write(&evidence, &json.stdout).unwrap();
+    for action in [
+        "recheck-evidence",
+        "accept-evidence",
+        "accept-evidence --json",
+    ] {
+        let mut args = vec!["native-bundle"];
+        args.extend(action.split_whitespace());
+        args.extend([
+            bundle.to_str().unwrap(),
+            source.to_str().unwrap(),
+            evidence.to_str().unwrap(),
+            "--expected-build-id",
+            &id,
+        ]);
+        let output = cli(&args);
+        assert_success(&output);
+    }
+    let descriptor: serde_json::Value = serde_json::from_slice(
+        &cli(&[
+            "native-bundle",
+            "accept-evidence",
+            bundle.to_str().unwrap(),
+            source.to_str().unwrap(),
+            evidence.to_str().unwrap(),
+            "--expected-build-id",
+            &id,
+            "--json",
+        ])
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(
+        descriptor["scope"],
+        "native_multifile_bundle_identity_merge_source_llvm_and_saved_evidence_consistency"
+    );
+    // A single-family report can never stand in for this family.
     let single = tempfile::tempdir().unwrap();
     let (single_source, single_bundle, single_id) = build(single.path());
     let report = recheck_llvm_json(&single_source, &single_bundle, &single_id);
     assert_success(&report);
-    let evidence = root.path().join("evidence.json");
     fs::write(&evidence, &report.stdout).unwrap();
-    let accept_evidence = cli(&[
+    let foreign = cli(&[
         "native-bundle",
         "accept-evidence",
         bundle.to_str().unwrap(),
@@ -2089,12 +2132,10 @@ fn multifile_bundle_builds_and_rechecks_with_honest_consumer_rejections() {
         "--expected-build-id",
         &id,
     ]);
-    assert_eq!(accept_evidence.status.code(), Some(1));
-    assert!(accept_evidence.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&accept_evidence.stderr).contains("multifile"));
+    assert_eq!(foreign.status.code(), Some(1));
+    assert!(foreign.stdout.is_empty());
     let output = consume("accept-artifact", &source, &bundle, &id);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_success(&output);
 
     // A pinned member that is not the root cannot pose as `--source`.
     let wrong = consume("check", &root.path().join("helpers.mm"), &bundle, &id);

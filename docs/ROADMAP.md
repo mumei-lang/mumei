@@ -3009,9 +3009,11 @@ member byte-for-byte under `sources/` plus a file-level
 order, then the root minus its import lines — into the canonical text
 the module pipeline compiles, with `alias::`/`stem::` call qualifiers
 normalized to bare names. `check`, `recheck-source`, `recheck-llvm` and
-`recheck-artifact` re-derive the merge from the pinned members; the
-`--json`/`recheck-evidence`/`accept-*` surfaces reject the family
-honestly until a multifile consumer Evidence vocabulary exists.
+`recheck-artifact` re-derive the merge from the pinned members.
+Consumer Evidence lands as `mumei.native-multifile-consumer-evidence/v1`
+— the module envelope shape plus a merge-correspondence record binding
+the `import_graph_sha256` pin to the re-derived merged text — so
+`--json`/`recheck-evidence`/`accept-*` all serve the family.
 Subdirectory/`std` paths, nested and transitive imports, non-atom
 members and alias pinning stay outside this slice. See the
 [multifile bundle boundary](VERIFICATION_NATIVE.md#multifile-import-closure-bundles).
