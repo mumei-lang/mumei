@@ -1632,12 +1632,13 @@ initializers. Unsummarizable callees keep their declared gaps. See the
 
 ### Wave 3 alias and resource-state coverage in scalar summaries
 
-Agent's C07 acceptance criterion for aliasing and resource state is now
+Agent's C07 acceptance criterion for aliasing and resource state is
 exercised as negative fixtures: pointer parameters, `&x` aliases,
-slice/map/channel resource state, package globals touched by a callee,
+slice/map/channel resource state, composite package globals,
 constructor state, bound function values and closures all fail closed
 as declared gaps rather than producing summaries that silently miss the
-alias or mutation. See the
+alias or mutation (scalar package-level `var`s admit since the
+package-globals slice — see below). See the
 [Agent alias and resource-state fixtures](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-alias-and-resource-state-fixtures).
 
 ### Wave 3 dependent invalidation in scalar summaries
@@ -2056,6 +2057,14 @@ pointer-typed `var` member whose pointee is named — `*lib.PV = v`
 and dot-imported `*PV = v` — storing through the member into
 package state with the same dep-free external-mutation record and
 the pointee's identity pinning via the pointer fact's `type_id`.
+A package-level `var` in the unit itself admits the same way since
+the package-globals slice — `return x + G` on `var G int64` records
+an imported transfer (dep-free value, `effects` unknown) and
+`G = v`/`G += v` mutate it like `lib.V = v` with the stored deps
+dropped — but the target is the var's own binding identity in
+`known`, so `stale_dependents` flags honestly in both directions.
+Composite globals (`var G []int64`, `var G string`), `G++`/`G--`
+inc/dec statements and untracked function-local `var`s stay closed.
 Deeper pointee trees declare their named uses on the member
 record's `pointee_type_ids`: a fully unnamed pointee (`*lib.PU` on
 `*int64`, `(*lib.PA)[i]` on `*[4]int64`) resolves to the empty
