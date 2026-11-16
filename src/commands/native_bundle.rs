@@ -1,5 +1,5 @@
 use crate::{cli::NativeBundleCommand, linker};
-use mumei_core::{hir, native_bundle::*, proof_cert, verification};
+use mumei_core::{hir, native_bundle::*, parser, proof_cert, verification};
 use mumei_emit_llvm::translation_validation::{self as tv, Options, Outcome};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -11,6 +11,9 @@ mod evidence;
 
 enum LlvmRecheck {
     Rechecked(Box<evidence::NativeConsumerEvidence>),
+    /// Module bundles have no single-main consumer evidence format; the
+    /// payload is the translation profile the module report attests.
+    ModuleRechecked(&'static str),
     Different,
     Inconclusive,
 }
@@ -56,23 +59,23 @@ pub(crate) fn run(command: NativeBundleCommand) {
         },
         NativeBundleCommand::RecheckSource { bundle, source, expected_build_id } => {
             match recheck(Path::new(&bundle), Path::new(&source), &expected_build_id) {
-                Ok(SourceRecheck::RecheckedWithinProfile) => {
-                    println!("Pinned snapshot identities consistent; source postcondition freshly rechecked within C03.\nProfile: {RECHECK_PROFILE}\nScope: {RECHECK_SCOPE}\nLLVM/object/linker/runtime/executable semantics: not checked.");
+                Ok((SourceRecheck::RecheckedWithinProfile, profile)) => {
+                    println!("Pinned snapshot identities consistent; source postcondition freshly rechecked within profile.\nProfile: {profile}\nScope: {RECHECK_SCOPE}\nLLVM/object/linker/runtime/executable semantics: not checked.");
                     Ok(())
                 }
-                Ok(SourceRecheck::Refuted) => Err(BundleError("source postcondition refuted")),
-                Ok(SourceRecheck::Inconclusive) => {
+                Ok((SourceRecheck::Refuted, _)) => Err(BundleError("source postcondition refuted")),
+                Ok((SourceRecheck::Inconclusive, _)) => {
                     eprintln!("Native source recheck inconclusive; no source proof established.");
                     std::process::exit(3);
                 }
                 Err(error) => Err(error),
             }
         },
-        NativeBundleCommand::Build { input, output } => build(Path::new(&input), Path::new(&output)).map(|id| {
-            println!("Native bundle built with fixed profile (project config/cache not loaded).\nBuild ID: {id}\nScope: {SCOPE}");
+        NativeBundleCommand::Build { input, output } => build(Path::new(&input), Path::new(&output)).map(|(id, scope)| {
+            println!("Native bundle built with fixed profile (project config/cache not loaded).\nBuild ID: {id}\nScope: {scope}");
         }),
-        NativeBundleCommand::Check { bundle, source, expected_build_id } => check(Path::new(&bundle), Path::new(&source), &expected_build_id).map(|()| {
-            println!("Native bundle identity consistent with pinned build ID.\nScope: {SCOPE}");
+        NativeBundleCommand::Check { bundle, source, expected_build_id } => check(Path::new(&bundle), Path::new(&source), &expected_build_id).map(|scope| {
+            println!("Native bundle identity consistent with pinned build ID.\nScope: {scope}");
         }),
     };
     if let Err(error) = result {
@@ -101,8 +104,34 @@ fn write_llvm_recheck(
                 .map_err(|_| BundleError("cannot write consumer evidence"))?;
             Ok(Outcome::EquivalentWithinProfile)
         }
+        LlvmRecheck::ModuleRechecked(profile) => {
+            if json {
+                return Err(BundleError(
+                    "consumer evidence is defined for single-atom bundles only",
+                ));
+            }
+            output
+                .write_all(format!("Pinned snapshot identities consistent; module source postconditions and native LLVM bodies freshly rechecked.\nProfile: {profile}\nScope: {LLVM_RECHECK_SCOPE}\nWrapper: checked call/trunc/ret shape, returning low 32 bits of the i64 body.\nObject/linker/runtime/OS exit-status/executable semantics: not checked.\n").as_bytes())
+                .map_err(|_| BundleError("cannot write consumer evidence"))?;
+            Ok(Outcome::EquivalentWithinProfile)
+        }
         LlvmRecheck::Different => Ok(Outcome::Different),
         LlvmRecheck::Inconclusive => Ok(Outcome::Inconclusive),
+    }
+}
+
+/// Read only the record's `schema` field — the dispatch key between the
+/// single-atom and module record families. Unknown schemas error here so
+/// the family loaders never see a cross-parsed record.
+fn is_module_record(record: &[u8]) -> Result<bool, BundleError> {
+    match serde_json::from_slice::<serde_json::Value>(record)
+        .map_err(|_| BundleError("invalid record"))?
+        .get("schema")
+        .and_then(|schema| schema.as_str())
+    {
+        Some(MODULE_SCHEMA) => Ok(true),
+        Some(SCHEMA) => Ok(false),
+        _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
 
@@ -131,7 +160,7 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), BundleError> {
     fs::write(path, bytes).map_err(|_| BundleError("cannot stage component"))
 }
 
-fn build(input: &Path, output: &Path) -> Result<String, BundleError> {
+fn build(input: &Path, output: &Path) -> Result<(String, &'static str), BundleError> {
     if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         return Err(BundleError("unsupported host for first native profile"));
     }
@@ -139,7 +168,20 @@ fn build(input: &Path, output: &Path) -> Result<String, BundleError> {
         return Err(BundleError("output already exists"));
     }
     let source = source_text(input)?;
-    let (binding, atom) = prepare_source(&source)?;
+    let atoms = parser::parse_module_checked(&source)
+        .map_err(|_| BundleError("invalid source"))?
+        .into_iter()
+        .filter(|item| matches!(item, parser::Item::Atom(_)))
+        .count();
+    if atoms > 1 {
+        build_module(&source, input, output).map(|id| (id, MODULE_SCOPE))
+    } else {
+        build_single(&source, input, output).map(|id| (id, SCOPE))
+    }
+}
+
+fn build_single(source: &str, input: &Path, output: &Path) -> Result<String, BundleError> {
+    let (binding, atom) = prepare_source(source)?;
     let parent = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -206,7 +248,7 @@ fn build(input: &Path, output: &Path) -> Result<String, BundleError> {
     let bytes =
         serde_json::to_vec_pretty(&record).map_err(|_| BundleError("record encoding failed"))?;
     let id = sha256(&bytes);
-    check_identity(&bytes, &id, &source, &files)?;
+    check_identity(&bytes, &id, source, &files)?;
     if source_text(input)? != source {
         return Err(BundleError("source changed during build"));
     }
@@ -216,23 +258,144 @@ fn build(input: &Path, output: &Path) -> Result<String, BundleError> {
     Ok(id)
 }
 
-fn check(bundle: &Path, source: &Path, expected_id: &str) -> Result<(), BundleError> {
+fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, BundleError> {
+    let (binding, atoms) = prepare_module_source(source)?;
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let stage = tempfile::Builder::new()
+        .prefix(".mumei-native-")
+        .tempdir_in(parent)
+        .map_err(|_| BundleError("cannot stage bundle"))?;
+    let proof_work = tempfile::Builder::new()
+        .prefix(".mumei-proof-")
+        .tempdir_in(parent)
+        .map_err(|_| BundleError("cannot stage proof"))?;
+    let mut env = verification::ModuleEnv::default();
+    for atom in &atoms {
+        env.register_atom(atom);
+    }
+    // Callees are admitted by contract (extract_pure_i64_module_contracts
+    // already ran the profile gates in prepare_module_source), so sibling
+    // calls verify in any declaration order; mark_verified keeps the env
+    // consistent for the certificate.
+    let mut lowered = Vec::with_capacity(atoms.len());
+    for atom in &atoms {
+        let hir_atom = hir::lower_atom_to_hir(atom);
+        verification::verify_with_verification_config(
+            &hir_atom,
+            proof_work.path(),
+            &env,
+            &verification::VerificationConfig::default(),
+        )
+        .map_err(|_| BundleError("source verification failed"))?;
+        env.mark_verified(&atom.name);
+        lowered.push(hir_atom);
+    }
+    let results: HashMap<String, (String, String)> = atoms
+        .iter()
+        .map(|atom| {
+            (
+                atom.name.clone(),
+                (
+                    proof_cert::status::Z3_UNSAT.to_owned(),
+                    proof_cert::status::VERIFIED.to_owned(),
+                ),
+            )
+        })
+        .collect();
+    let atom_refs: Vec<&parser::Atom> = atoms.iter().collect();
+    let cert = proof_cert::generate_certificate(
+        SOURCE_LABEL,
+        &atom_refs,
+        &results,
+        &env,
+        None,
+        None,
+        None,
+    );
+    write(
+        &stage.path().join(BundleFile::Certificate.file_name()),
+        &serde_json::to_vec_pretty(&cert)
+            .map_err(|_| BundleError("certificate encoding failed"))?,
+    )?;
+    let ir = stage.path().join(BundleFile::LlvmIr.file_name());
+    let object = stage.path().join(BundleFile::Object.file_name());
+    mumei_emit_llvm::binary::compile_atoms_to_binary_ll(&lowered, &env, &[], &ir)
+        .map_err(|_| BundleError("native IR emission failed"))?;
+    let object_build = mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir, &object)
+        .map_err(|_| BundleError("native object emission failed"))?;
+    let link_build = linker::link_recorded(
+        &[object],
+        &stage.path().join(BundleFile::Executable.file_name()),
+    )
+    .map_err(|_| BundleError("native link or toolchain observation failed"))?;
+    let files = components(stage.path())?;
+    let record = ModuleNativeBundleRecord {
+        schema: MODULE_SCHEMA.into(),
+        profile: MODULE_PROFILE.into(),
+        scope: MODULE_SCOPE.into(),
+        system_scope: SYSTEM_SCOPE.into(),
+        source: binding,
+        object_build,
+        link_build,
+        settings: BuildSettings::default(),
+        files: files
+            .iter()
+            .map(|(role, bytes)| (*role, ContentIdentity::of(bytes)))
+            .collect(),
+    };
+    let bytes =
+        serde_json::to_vec_pretty(&record).map_err(|_| BundleError("record encoding failed"))?;
+    let id = sha256(&bytes);
+    check_module_identity(&bytes, &id, source, &files)?;
+    if source_text(input)? != source {
+        return Err(BundleError("source changed during build"));
+    }
+    write(&stage.path().join(RECORD_FILE), &bytes)?;
+    publish(stage.path(), output)?;
+    let _ = stage.keep();
+    Ok(id)
+}
+
+fn check(bundle: &Path, source: &Path, expected_id: &str) -> Result<&'static str, BundleError> {
     let record = read_regular(&bundle.join(RECORD_FILE), 1024 * 1024)?;
+    if is_module_record(&record)? {
+        load_pinned_module_record(&record, expected_id)?;
+        check_module_identity(
+            &record,
+            expected_id,
+            &source_text(source)?,
+            &components(bundle)?,
+        )?;
+        return Ok(MODULE_SCOPE);
+    }
     load_pinned_record(&record, expected_id)?;
     check_identity(
         &record,
         expected_id,
         &source_text(source)?,
         &components(bundle)?,
-    )
+    )?;
+    Ok(SCOPE)
 }
 
-fn recheck(bundle: &Path, source: &Path, expected_id: &str) -> Result<SourceRecheck, BundleError> {
+fn recheck(
+    bundle: &Path,
+    source: &Path,
+    expected_id: &str,
+) -> Result<(SourceRecheck, &'static str), BundleError> {
     let record = read_regular(&bundle.join(RECORD_FILE), 1024 * 1024)?;
-    load_pinned_record(&record, expected_id)?;
     let source = String::from_utf8(read_regular(source, 65_536)?)
         .map_err(|_| BundleError("source is not UTF-8"))?;
+    if is_module_record(&record)? {
+        return recheck_module_source(&record, expected_id, &source, &components(bundle)?)
+            .map(|result| (result, MODULE_RECHECK_PROFILE));
+    }
+    load_pinned_record(&record, expected_id)?;
     recheck_source(&record, expected_id, &source, &components(bundle)?)
+        .map(|result| (result, RECHECK_PROFILE))
 }
 
 fn recheck_llvm(
@@ -241,10 +404,35 @@ fn recheck_llvm(
     expected_id: &str,
 ) -> Result<LlvmRecheck, BundleError> {
     let bytes = read_regular(&bundle.join(RECORD_FILE), 1024 * 1024)?;
-    let record = load_pinned_record(&bytes, expected_id)?;
     let source = String::from_utf8(read_regular(source, 65_536)?)
         .map_err(|_| BundleError("source is not UTF-8"))?;
     let files = components(bundle)?;
+    if is_module_record(&bytes)? {
+        let record = load_pinned_module_record(&bytes, expected_id)?;
+        match recheck_module_source(&bytes, expected_id, &source, &files)? {
+            SourceRecheck::Refuted => return Err(BundleError("source postcondition refuted")),
+            SourceRecheck::Inconclusive => return Ok(LlvmRecheck::Inconclusive),
+            SourceRecheck::RecheckedWithinProfile => (),
+        }
+        let llvm_ir = std::str::from_utf8(&files[&BundleFile::LlvmIr])
+            .map_err(|_| BundleError("native LLVM snapshot is not UTF-8"))?;
+        let report = tv::validate_native_module(&source, llvm_ir, Options::default())
+            .map_err(|_| BundleError("native LLVM snapshot outside bounded module profile"))?;
+        if record.object_build.target_triple != report.target
+            || record.object_build.data_layout != report.data_layout
+        {
+            return Err(BundleError(
+                "native LLVM snapshot/toolchain observation mismatch",
+            ));
+        }
+        return Ok(match report.outcome {
+            Outcome::EquivalentWithinProfile => LlvmRecheck::ModuleRechecked(report.profile),
+            Outcome::Different => LlvmRecheck::Different,
+            Outcome::UndefinedBehavior => LlvmRecheck::Different,
+            Outcome::Inconclusive => LlvmRecheck::Inconclusive,
+        });
+    }
+    let record = load_pinned_record(&bytes, expected_id)?;
     match recheck_source(&bytes, expected_id, &source, &files)? {
         SourceRecheck::Refuted => return Err(BundleError("source postcondition refuted")),
         SourceRecheck::Inconclusive => return Ok(LlvmRecheck::Inconclusive),
@@ -280,6 +468,11 @@ fn recheck_evidence(
     if !is_digest(expected_id) {
         return Err(BundleError("invalid expected build ID"));
     }
+    if is_module_record(&read_regular(&bundle.join(RECORD_FILE), 1024 * 1024)?)? {
+        return Err(BundleError(
+            "native evidence acceptance is defined for single-atom bundles only",
+        ));
+    }
     let saved = evidence::decode(&read_regular(evidence_path, MAX_EVIDENCE_BYTES)?)?;
     compare_evidence(recheck_llvm(bundle, source, expected_id)?, &saved)
 }
@@ -292,6 +485,9 @@ fn compare_evidence(
         LlvmRecheck::Rechecked(fresh) if *fresh == *saved => Ok(Outcome::EquivalentWithinProfile),
         LlvmRecheck::Rechecked(_) => Err(BundleError(
             "saved native evidence differs from fresh consumer report",
+        )),
+        LlvmRecheck::ModuleRechecked(_) => Err(BundleError(
+            "native evidence acceptance is defined for single-atom bundles only",
         )),
         LlvmRecheck::Different => Ok(Outcome::Different),
         LlvmRecheck::Inconclusive => Ok(Outcome::Inconclusive),

@@ -1137,6 +1137,71 @@ gates, general build/run and Mumei/Agent ownership remain unchanged.
 Regression gates:
 `LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo test --test test_native_bundle --test test_translation_validation --test test_semantic_contract`.
 
+### Multi-atom native module bundles
+
+When the source declares more than one atom, `mumei native-bundle build` takes
+the module path instead of the single-atom one and records
+`mumei.native-module-bundle/v1` under profile
+`mumei.native-pure-i64-module-linux-x86_64/v1`. The two record families share
+the same member set and shape but carry disjoint schemas, so neither parses as
+the other and `check`, `recheck-source` and `recheck-llvm` dispatch on the
+record's own schema.
+
+```sh
+# module.mm — sibling atoms plus one entry point:
+# atom helper(x: i64) -> i64 requires: x > 0; ensures: result == x + 1; body: { x + 1 };
+# atom main() -> i64 requires: true; ensures: result == 6; body: { helper(5) };
+mumei native-bundle build module.mm -o module-bundle
+mumei native-bundle check module-bundle module.mm --expected-build-id <trusted-id>
+mumei native-bundle recheck-source module-bundle module.mm --expected-build-id <trusted-id>
+mumei native-bundle recheck-llvm module-bundle module.mm --expected-build-id <trusted-id>
+```
+
+The module producer keeps every Stage A/B toolchain gate — the same pinned
+LLVM/cc/linker observations, atomic publish and fresh standard verification —
+and additionally requires every top-level item to be an atom and exactly one
+zero-argument `main` with a literal `true` precondition. The proof certificate
+covers every atom in the module, and the record's source binding carries a
+per-atom hash map (`atom_content_hash`, specification, implementation, HIR, MIR
+and Translator IR identities) instead of the single-atom fields.
+
+Calls between sibling atoms stay inside the widened i64 profile: each `Expr::Call`
+lowers to an uninterpreted `mumei_call_<name>_<arity>` bit-vector function, and
+`recheck-source` checks **each obligation independently** rather than folding
+them into one formula:
+
+- one postcondition obligation per atom — `requires ∧ call assumptions ∧ ¬ensures`,
+  where a call site's result is assumed to satisfy the callee's `ensures`;
+- one domain obligation per call site — `requires ∧ site guard ∧ ¬callee requires`,
+  proven **without** the sibling ensures assumptions, so no circular bootstrap is
+  possible.
+
+Keeping the obligations separate matters: folded into a single conjunction, a
+callee whose `requires` is `true` would contribute a vacuous `∧ false` and mask
+a real counterexample elsewhere — the regression suite demonstrates exactly this
+with a `requires: true` callee whose wrapped-i64 caller postcondition is still
+refuted. `verify` itself works over mathematical integers, so a program that
+verifies (e.g. `id(9223372036854775807) + 1` with `ensures: result > 0`) is
+honestly refuted by the source recheck under the module's wrapping-i64
+semantics, which the build inherits.
+
+`recheck-llvm` on a module record runs the existing
+`mumei.llvm17-native-module-snapshot/v1` translation validation — per-atom
+LLVM body comparison plus the same `__mumei_user_main`/wrapper admission rules —
+with the module triple/layout still bound to the record's object-build
+observations. The native consumer Evidence surfaces stay single-atom only:
+`recheck-llvm --json` and `recheck-evidence` reject module records, because the
+consumer evidence format is defined for the single-main profile.
+
+Nothing is claimed beyond the single-atom scopes: the result is still
+`identity_consistency_only` plus the source-postcondition and LLVM-snapshot
+recheck scopes — no object/optimizer/linker/runtime/ABI/final-executable
+semantics, no producer authenticity or attestation, and the recorded
+source-dependency digest remains pinned to the empty closure.
+
+Regression gate:
+`LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo test --test test_native_bundle --test test_translation_validation -p mumei-core`.
+
 ### First native consumer Evidence producer
 
 `mumei native-bundle recheck-llvm <bundle> <source> --expected-build-id <trusted-id> --json`

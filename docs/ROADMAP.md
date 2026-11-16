@@ -2964,6 +2964,27 @@ schema remain unchanged. See the [replay boundary](VERIFICATION_NATIVE.md#first-
 General acceptance/mapping, broader C09/C10 and final-artifact assurance remain
 open; no external verifier is adopted.
 
+The first wider C10 profile adds multi-atom native module bundles: sources with
+more than one atom take a module producer path recording
+`mumei.native-module-bundle/v1` under
+`mumei.native-pure-i64-module-linux-x86_64/v1`, disjoint from the single-atom
+record family. All Stage A/B toolchain, atomic-publish and fresh-verification
+gates carry over; the module additionally requires every top-level item to be an
+atom and exactly one zero-argument `main` with a literal `true` precondition,
+and the certificate covers every atom while the source binding carries a
+per-atom hash map. `check`, `recheck-source` and `recheck-llvm` dispatch on the
+record's own schema. Sibling calls stay inside the widened i64 profile as
+uninterpreted call sites: the source recheck checks one postcondition obligation
+per atom plus one domain obligation per call site — each independently, so a
+vacuous conjunct can never mask a real counterexample — and the LLVM recheck
+reuses `mumei.llvm17-native-module-snapshot/v1`. Consumer Evidence surfaces
+(`--json`, `recheck-evidence`) stay single-atom only. See the
+[module bundle boundary](VERIFICATION_NATIVE.md#multi-atom-native-module-bundles).
+This is partial C10, still identity-plus-recheck scopes only: no
+object/optimizer/linker/runtime/ABI/final-executable semantics, producer
+authenticity or attestation, and the recorded source-dependency digest remains
+pinned to the empty closure.
+
 The next C02/C13 slice moves the common v1 representation model and runtime
 validation into `mumei_core::verification_evidence`. Native producer/replay use
 the shared shape/combination gate without changing emitted JSON or their fresh
