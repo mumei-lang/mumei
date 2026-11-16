@@ -46,7 +46,7 @@ pub(crate) fn run(command: NativeBundleCommand) {
     let result = match command {
         NativeBundleCommand::AcceptEvidence { bundle, source, evidence, expected_build_id, json } => {
             match read_regular(Path::new(&evidence), MAX_EVIDENCE_BYTES)
-                .and_then(|saved| recheck_evidence(Path::new(&bundle), Path::new(&source), Path::new(&evidence), &expected_build_id)
+                .and_then(|saved| recheck_evidence_bytes(Path::new(&bundle), Path::new(&source), &saved, &expected_build_id)
                     .map(|outcome| (outcome, saved)))
                 .and_then(|(outcome, saved)| write_native_acceptance(outcome, json, &EVIDENCE_ACCEPTANCE, Some(&saved), &mut std::io::stdout().lock()))
             {
@@ -649,10 +649,27 @@ fn recheck_evidence(
     evidence_path: &Path,
     expected_id: &str,
 ) -> Result<Outcome, BundleError> {
+    recheck_evidence_bytes(
+        bundle,
+        source,
+        &read_regular(evidence_path, MAX_EVIDENCE_BYTES)?,
+        expected_id,
+    )
+}
+
+/// Same recheck as `recheck_evidence` but over already-read record bytes:
+/// callers that fingerprint the descriptor to the record must hash exactly
+/// the bytes the recheck decoded, not a second read of the file.
+fn recheck_evidence_bytes(
+    bundle: &Path,
+    source: &Path,
+    evidence_bytes: &[u8],
+    expected_id: &str,
+) -> Result<Outcome, BundleError> {
     if !is_digest(expected_id) {
         return Err(BundleError("invalid expected build ID"));
     }
-    let saved = evidence::decode(&read_regular(evidence_path, MAX_EVIDENCE_BYTES)?)?;
+    let saved = evidence::decode(evidence_bytes)?;
     compare_evidence(recheck_llvm(bundle, source, expected_id)?, &saved)
 }
 
