@@ -628,13 +628,19 @@ fn visit_member(
     // contract: the callee map keys on bare names, so `h::helper(`
     // merges as `helper(` — the same normalization the language's own
     // resolved ModuleEnv performs.
-    let mut body = text
-        .lines()
-        .enumerate()
-        .filter(|(n, _)| !import_lines.contains(&(n + 1)))
-        .map(|(_, line)| line)
-        .collect::<Vec<_>>()
-        .join("\n");
+    // A member with no import lines contributes its text verbatim —
+    // normalizing through `lines().join("\n")` would rewrite CRLF
+    // endings and change the merged bytes slice-1 bundles pinned.
+    let mut body = if import_lines.is_empty() {
+        text.to_owned()
+    } else {
+        text.lines()
+            .enumerate()
+            .filter(|(n, _)| !import_lines.contains(&(n + 1)))
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     for qualifier in &qualifiers {
         body = strip_qualifier(&body, qualifier);
     }
@@ -1248,6 +1254,20 @@ mod multifile_tests {
             ("k.mm".to_owned(), member.to_owned()),
         ]);
         assert!(merge_import_closure("app.mm", &alias_stem_dup).is_err());
+    }
+
+    #[test]
+    fn leaf_member_bytes_are_merged_verbatim() {
+        // A CRLF leaf contributes its bytes untouched: the merge must
+        // not silently normalize them, or a slice-1 bundle's pinned
+        // merged sha could never re-derive.
+        let mut crlf = members();
+        crlf.insert(
+            "helpers.mm".into(),
+            "atom helper(x: i64) -> i64\r\n    requires: true;\r\n    ensures: result == x + 1;\r\n    body: { x + 1 };\r\n".into(),
+        );
+        let (merged, _) = merge_import_closure("app.mm", &crlf).unwrap();
+        assert!(merged.contains("atom helper(x: i64) -> i64\r\n    requires: true;"));
     }
 
     #[test]
