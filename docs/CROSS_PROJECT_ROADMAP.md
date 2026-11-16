@@ -3385,6 +3385,24 @@ acceptance engine or profile mapping; multi-record admission, Agent
 consumption and Claim Book integration remain open. See the
 [acceptance contract](VERIFICATION_NATIVE.md#standalone-source-evidence-acceptance-evaluation).
 
+### Native-bundle Evidence acceptance evaluation (C02/C13)
+
+`mumei native-bundle accept-evidence <bundle> <source> <evidence>
+--expected-build-id <id> [--json]` reports the deepest consumer chain —
+saved-report decode, bundle identity pin, fresh same-profile source recheck,
+LLVM snapshot translation recheck and saved-evidence equality — in the
+acceptance vocabulary for both the single-atom and module families.
+Acceptance emits one anonymous `mumei.native-evidence-acceptance/v1`
+descriptor naming `checks_performed` (bundle identity binding, fresh source
+and LLVM-snapshot rechecks, saved-evidence consistency) and
+`checks_not_performed` (producer authenticity, historical execution,
+object/linker/artifact recheck, optimizer/ABI/runtime/OS semantics, grade,
+Lean). The descriptor echoes no subject, digest or provenance and is not
+reusable Evidence; non-acceptance emits no stdout. General
+acceptance/mapping, authenticity and final-artifact assurance remain open.
+See the
+[native acceptance contract](VERIFICATION_NATIVE.md#native-evidence-acceptance-evaluation).
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
