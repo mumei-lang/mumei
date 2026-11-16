@@ -3003,7 +3003,11 @@ consumer re-runs the byte-identical reproduction it just verified,
 comparing exit statuses — spawn failure, timeout, signal termination and
 pre-field records report inconclusive rather than claiming a comparison.
 An OS-level observation only: no runtime, ABI, process-semantics or
-historical-execution claim. See the [exit-status recheck
+historical-execution claim. The paired `native-bundle
+accept-exit-status` emits the anonymous acceptance descriptor on a
+matching observation — `os_exit_status_observation` moves into
+`checks_performed` while `accept-artifact` keeps it excluded (it runs
+no execution). See the [exit-status recheck
 boundary](VERIFICATION_NATIVE.md#pinned-executable-exit-status-recheck).
 General optimizer/ABI/runtime assurance and producer authenticity stay
 open — the records now pin the intra-source call graph as

@@ -596,6 +596,17 @@ pub(crate) enum NativeBundleCommand {
         #[arg(long)]
         expected_build_id: String,
     },
+    /// Accept the pinned artifact after the exit-status recheck; emits an anonymous acceptance descriptor, not reusable Evidence
+    AcceptExitStatus {
+        bundle: String,
+        source: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel
+        #[arg(long)]
+        expected_build_id: String,
+        /// Emit a static acceptance descriptor, not reusable Evidence or a certificate
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

@@ -1500,6 +1500,17 @@ a runtime, ABI, process-semantics or historical-execution claim. On a
 host whose OS/arch cannot run the pinned target triple, the observation
 is inconclusive by construction.
 
+`mumei native-bundle accept-exit-status` is the acceptance face of the
+same stage: it runs the identical chain and, on a matching observation,
+emits the anonymous acceptance descriptor (`--json` gives the
+`mumei.native-evidence-acceptance/v1` JSON shape) with
+`os_exit_status_observation` moved into `checks_performed`. The name is
+deliberately the observation — `historical_execution`, ABI, runtime and
+process semantics stay in `checks_not_performed`, and `accept-artifact`
+keeps `os_exit_status` excluded since it performs no execution. A
+mismatched status fails closed (exit 1); every unevaluable case exits 3
+with no descriptor.
+
 ### First native consumer Evidence producer
 
 `mumei native-bundle recheck-llvm <bundle> <source> --expected-build-id <trusted-id> --json`

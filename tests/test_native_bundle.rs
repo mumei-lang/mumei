@@ -412,6 +412,67 @@ fn exit_status_is_pinned_and_reproduced() {
 }
 
 #[test]
+fn exit_status_acceptance_emits_the_observation_descriptor() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let accept = cli(&[
+        "native-bundle",
+        "accept-exit-status",
+        bundle.to_str().unwrap(),
+        source.to_str().unwrap(),
+        "--expected-build-id",
+        &id,
+        "--json",
+    ]);
+    assert_success(&accept);
+    let descriptor: serde_json::Value = serde_json::from_slice(&accept.stdout).unwrap();
+    assert_eq!(descriptor["accepted"], true);
+    assert!(
+        descriptor["checks_performed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check == "os_exit_status_observation"),
+        "exit-status acceptance must claim the OS observation"
+    );
+    assert!(
+        descriptor["checks_not_performed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check == "historical_execution"),
+        "one run stays an observation, never a history"
+    );
+    assert!(
+        !descriptor["checks_performed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check == "abi_runtime_semantics"),
+        "no ABI/runtime claim"
+    );
+
+    // A pinless record cannot be accepted this way — inconclusive.
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    record["link_build"]
+        .as_object_mut()
+        .unwrap()
+        .remove("expected_exit_status");
+    let bytes = serde_json::to_vec(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    let pinless = cli(&[
+        "native-bundle",
+        "accept-exit-status",
+        bundle.to_str().unwrap(),
+        source.to_str().unwrap(),
+        "--expected-build-id",
+        &native_bundle::sha256(&bytes),
+    ]);
+    assert_eq!(pinless.status.code(), Some(3));
+}
+
+#[test]
 fn bounded_source_and_symlinks_cannot_bypass_the_consumer() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build(root.path());
