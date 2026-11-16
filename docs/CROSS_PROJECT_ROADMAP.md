@@ -3366,6 +3366,25 @@ Book/Lean promotion or LLVM/final-artifact assurance. Native rechecks, Agent
 orchestration, external-verifier decisions and deferred WASM remain unchanged.
 See the [source consistency contract](VERIFICATION_NATIVE.md#standalone-source-evidence-consistency-recheck).
 
+### Wave 5 standalone source Evidence acceptance evaluation
+
+`evidence accept-source <record> --source <source> [--json]` and
+`mumei_core::source_evidence::accept` report the same bounded pipeline as the
+consistency recheck (representation gate, fresh caller-budgeted query, full
+field equality) in the acceptance vocabulary: `Accepted`, `Rejected`,
+`Inconclusive`. Acceptance emits one anonymous
+`mumei.source-evidence-acceptance/v1` descriptor listing
+`checks_performed`/`checks_not_performed`; it binds no subject or digest and
+is not reusable Evidence. Non-acceptance paths emit nothing.
+
+Acceptance remains bounded to the one restricted profile: producer
+authenticity, historical execution, record freshness, independent model
+correspondence (the same producer re-derives the record), LLVM/artifact
+semantics and grade/Lean promotion stay unassessed. This is not a general
+acceptance engine or profile mapping; multi-record admission, Agent
+consumption and Claim Book integration remain open. See the
+[acceptance contract](VERIFICATION_NATIVE.md#standalone-source-evidence-acceptance-evaluation).
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
