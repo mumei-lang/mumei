@@ -3067,7 +3067,8 @@ artifacts under the recorded toolchain) with an acceptance scope of
 `native_bundle_source_llvm_and_toolchain_artifact_reproduction`.
 `checks_performed` gains `canonical_link_argument_vector_reproduction`
 (the placeholder-normalized argv re-derived and compared when the record
-pins it) while `checks_not_performed` keeps authenticity, historical
+pins it — a pre-field record instead names it among the checks not
+performed) while `checks_not_performed` keeps authenticity, historical
 execution, optimizer/ABI/runtime/OS semantics, grade/Lean and — honestly —
 `raw_link_argument_vector_reproduction`, the raw `arguments_sha256` build
 observation no recheck can reproduce. Acceptance is byte reproduction, not execution or

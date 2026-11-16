@@ -1645,12 +1645,13 @@ descriptor with scope
 `checks_performed` naming `bundle_identity_binding`,
 `fresh_same_profile_source_recheck`, `llvm_snapshot_translation_recheck`,
 `toolchain_object_executable_reproduction` and
-`canonical_link_argument_vector_reproduction` (compared whenever the
-record pins it). `checks_not_performed` keeps producer authenticity,
-historical execution, optimizer/ABI/runtime/OS semantics, grade and
-Lean, and honestly names `raw_link_argument_vector_reproduction` — the
-raw `arguments_sha256` build observation no recheck can reproduce, as
-`recheck-artifact` documents.
+`canonical_link_argument_vector_reproduction` — claimed only when the
+record pins it; for a pre-field record the descriptor names it among
+the checks not performed instead. `checks_not_performed` keeps producer
+authenticity, historical execution, optimizer/ABI/runtime/OS semantics,
+grade and Lean, and honestly names `raw_link_argument_vector_reproduction`
+— the raw `arguments_sha256` build observation no recheck can
+reproduce, as `recheck-artifact` documents.
 Because artifact acceptance evaluates no record input, the descriptor emits
 no `evidence_fingerprint` key; the bundle identity pin is its binding.
 

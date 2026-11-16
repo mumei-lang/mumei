@@ -3603,8 +3603,9 @@ and `program.o`→executable relinking byte-identical to the pinned artifacts
 under the recorded toolchain, so its descriptor scope is
 `native_bundle_source_llvm_and_toolchain_artifact_reproduction` with
 `toolchain_object_executable_reproduction` and
-`canonical_link_argument_vector_reproduction` performed (compared when the
-record pins it) and `raw_link_argument_vector_reproduction` honestly named
+`canonical_link_argument_vector_reproduction` performed (claimed only when
+the record pins it — a pre-field record names it among the checks not
+performed) and `raw_link_argument_vector_reproduction` honestly named
 among the checks not performed. Acceptance is byte reproduction — not execution, exit-status,
 ABI/runtime or optimizer-semantics proof. See the
 [artifact acceptance contract](VERIFICATION_NATIVE.md#native-artifact-acceptance-evaluation).

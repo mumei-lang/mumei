@@ -315,16 +315,41 @@ fn canonical_link_arguments_are_pinned_and_reproduced() {
             .unwrap()
     };
     assert_success(&artifact(&source, &bundle, &id));
+    // …and the acceptance descriptor claims the comparison that ran.
+    let output = consume("accept-artifact --json", &source, &bundle, &id);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(descriptor["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry == "canonical_link_argument_vector_reproduction"));
 
     // A record pinned before the field existed carries no pin — the
-    // recheck skips the comparison honestly rather than failing.
+    // recheck skips the comparison honestly rather than failing, and the
+    // acceptance descriptor names the check among the ones not performed
+    // rather than claiming it.
     record["link_build"]
         .as_object_mut()
         .unwrap()
         .remove("canonical_arguments_sha256");
     let bytes = serde_json::to_vec(&record).unwrap();
     fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
-    assert_success(&artifact(&source, &bundle, &native_bundle::sha256(&bytes)));
+    let unpinned_id = native_bundle::sha256(&bytes);
+    assert_success(&artifact(&source, &bundle, &unpinned_id));
+    let output = consume("accept-artifact --json", &source, &bundle, &unpinned_id);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!descriptor["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry == "canonical_link_argument_vector_reproduction"));
+    assert!(descriptor["checks_not_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry == "canonical_link_argument_vector_reproduction"));
 
     // A wrong pin fails the reproduction check.
     record["link_build"]["canonical_arguments_sha256"] = serde_json::json!("0".repeat(64));
