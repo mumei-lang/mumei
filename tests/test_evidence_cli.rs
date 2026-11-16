@@ -825,7 +825,10 @@ fn check_consistency_reports_identical_and_independent_records_as_consistent() {
 #[test]
 fn check_consistency_names_conflicting_identity_pins() {
     let dir = tempfile::tempdir().unwrap();
-    // Same subject.id with a different content pin is a named conflict.
+    // Two records claiming the same obligation but different subject content
+    // are a named conflict. The shared subject.id is only a producer label
+    // (standalone source records all use "source.mm"), so the obligation
+    // rule — not the subject-id rule — reports the divergence.
     let mut drifted = base();
     drifted["subject"]["sha256"] = json!("a".repeat(64));
     let path = dir.path().join("list.json");
@@ -834,6 +837,7 @@ fn check_consistency_names_conflicting_identity_pins() {
     assert!(output.status.success(), "stderr: {:?}", output.stderr);
     let diagnostic: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(diagnostic["consistent"], false);
+    assert_eq!(diagnostic["conflict_count"], 1);
     let conflicts = diagnostic["conflicts"].as_array().unwrap();
     assert_eq!(conflicts.len(), 1);
     assert_eq!(conflicts[0]["field"], "subject.sha256");
@@ -849,6 +853,7 @@ fn check_consistency_names_conflicting_identity_pins() {
     write(&path, &list_envelope(vec![base(), rebound]));
     let diagnostic: Value = serde_json::from_slice(&check_consistency(&path, true).stdout).unwrap();
     assert_eq!(diagnostic["consistent"], false);
+    assert_eq!(diagnostic["conflict_count"], 3);
     let fields: Vec<&str> = diagnostic["conflicts"]
         .as_array()
         .unwrap()

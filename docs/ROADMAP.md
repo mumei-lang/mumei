@@ -3066,12 +3066,14 @@ Evidence or a receipt. See the
 The declared cross-record gap now has its own structural check:
 `mumei evidence check-consistency <envelope> [--json]` reads the same list
 envelope and reports `mumei.evidence-consistency-check/v1` — `consistent`,
-a bounded `conflicts` list naming each disagreeing pair's indices and field,
-and `record_count`. Records sharing `subject.id` must pin one
-`subject.kind`/`sha256`; records sharing `obligation_id` must pin one
-subject, specification, semantics and method. Outcome fields are claims,
-not identity, and are never compared. Agreement stays syntactic — pin
-correctness, truth, freshness and authenticity remain unperformed. See the
+a bounded `conflicts` list naming each disagreeing pair's indices and field
+(`conflict_count` carries the true total), and `record_count`. Records
+sharing `subject.id` *and* `subject.sha256` must pin one `subject.kind` —
+a `subject.id` alone is a producer label, not an identity. Records sharing
+`obligation_id` must pin one subject, specification, semantics and method.
+Outcome fields are claims, not identity, and are never compared. Agreement
+stays syntactic — pin correctness, truth, freshness and authenticity remain
+unperformed. See the
 [consistency check contract](VERIFICATION_NATIVE.md#cross-record-identity-pin-consistency).
 
 The first standalone C02/C13 source producer now connects the existing bounded

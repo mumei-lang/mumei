@@ -343,16 +343,16 @@ fn check_consistency(
     };
     let records = verification_evidence::decode_list(&bytes)
         .map_err(|_| "invalid evidence representation")?;
-    let conflicts = verification_evidence::consistency_conflicts(&records);
-    let consistent = conflicts.is_empty();
+    let report = verification_evidence::consistency_check(&records);
     let diagnostic = if json {
         let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
             "schema_version": "mumei.evidence-consistency-check/v1",
             "evidence_schema_version": verification_evidence::LIST_SCHEMA_VERSION,
             "representation": "valid",
             "record_count": records.len(),
-            "consistent": consistent,
-            "conflicts": conflicts,
+            "consistent": report.consistent,
+            "conflict_count": report.conflict_count,
+            "conflicts": report.conflicts,
             "acceptance": "not_evaluated",
             "checks_not_performed": ["claim_truth", "file_identity", "freshness",
                 "producer_authenticity", "semantic_correspondence", "artifact_semantics",
@@ -367,10 +367,10 @@ fn check_consistency(
 Scope: syntactic identity-pin agreement only; no claim truth, file identity, freshness, producer authenticity, semantic correspondence, artifact semantics or pin correctness checked.\n\
 Evidence acceptance: not evaluated.\n",
             records.len(),
-            if consistent {
+            if report.consistent {
                 "no conflicts".to_owned()
             } else {
-                format!("{} conflict(s)", conflicts.len())
+                format!("{} conflict(s)", report.conflict_count)
             }
         )
         .into_bytes()

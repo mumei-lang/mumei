@@ -460,7 +460,7 @@ fn list_envelope_admits_zero_or_more_records_each_through_the_single_gate() {
 }
 
 #[test]
-fn consistency_conflicts_compares_identity_pins_never_outcomes() {
+fn consistency_check_compares_identity_pins_never_outcomes() {
     let decode_one = |value: &Value| decode(&serde_json::to_vec(value).unwrap()).unwrap();
     let first = decode_one(&base());
 
@@ -469,40 +469,49 @@ fn consistency_conflicts_compares_identity_pins_never_outcomes() {
     independent["subject"]["id"] = json!("other.mm");
     independent["subject"]["sha256"] = json!("b".repeat(64));
     independent["obligation_id"] = json!("other-obligation");
-    assert!(consistency_conflicts(&[first.clone(), first.clone()]).is_empty());
-    assert!(consistency_conflicts(&[first.clone(), decode_one(&independent)]).is_empty());
+    assert!(consistency_check(&[first.clone(), first.clone()]).consistent);
+    assert!(consistency_check(&[first.clone(), decode_one(&independent)]).consistent);
 
-    // Same subject.id with a different content pin: one named conflict.
-    let mut drifted = base();
-    drifted["subject"]["sha256"] = json!("a".repeat(64));
+    // The subject id is a producer label, not an identity: two records with
+    // the same `subject.id` but different content pins describe different
+    // subjects and stay independent — standalone source records all use
+    // "source.mm", so comparing on the id alone would flag them falsely.
+    let mut other_subject = base();
+    other_subject["subject"]["sha256"] = json!("a".repeat(64));
+    other_subject["obligation_id"] = json!("other-obligation");
+    assert!(consistency_check(&[first.clone(), decode_one(&other_subject)]).consistent);
+
+    // Same claimed subject (id + sha256) with a different kind is a named
+    // conflict.
+    let mut reclassified = base();
+    reclassified["subject"]["kind"] = json!("mumei_source");
+    reclassified["obligation_id"] = json!("other-obligation");
     assert_eq!(
-        consistency_conflicts(&[first.clone(), decode_one(&drifted)]),
+        consistency_check(&[first.clone(), decode_one(&reclassified)]).conflicts,
         vec![ConsistencyConflict {
             index_a: 0,
             index_b: 1,
-            field: "subject.sha256",
+            field: "subject.kind",
         }]
     );
 
-    // Same obligation_id with a rebound specification is a conflict even
-    // when the subjects differ.
+    // Same obligation_id with rebound pins is a conflict even when the
+    // subjects differ — including a different subject content pin.
     let mut rebound = base();
     rebound["subject"]["id"] = json!("other.mm");
     rebound["subject"]["sha256"] = json!("b".repeat(64));
     rebound["specification"]["sha256"] = json!("c".repeat(64));
-    let fields: Vec<&str> = consistency_conflicts(&[first.clone(), decode_one(&rebound)])
+    let fields: Vec<&str> = consistency_check(&[first.clone(), decode_one(&rebound)])
+        .conflicts
         .iter()
         .map(|conflict| conflict.field)
         .collect();
     assert!(fields.contains(&"subject.id"));
+    assert!(fields.contains(&"subject.sha256"));
     assert!(fields.contains(&"specification.sha256"));
 
-    // Outcome fields are claims, not identity: a record disagreeing only on
-    // result/execution/scope/correspondence is consistent — such a pair is
-    // rejected by the v1 gate anyway (inconsistent outcome), so compare on
-    // the admissible axis: same obligation, different result is impossible
-    // under one method's result set, but an unrelated subject's record
-    // differs in every outcome field and still conflicts on nothing.
+    // Outcome fields are claims, not identity: differing only there is
+    // consistent.
     let mut other = base();
     other["subject"]["id"] = json!("other.mm");
     other["subject"]["sha256"] = json!("b".repeat(64));
@@ -511,5 +520,5 @@ fn consistency_conflicts_compares_identity_pins_never_outcomes() {
     other["execution"] = json!("not_run");
     other["correspondence"]["relation"] = json!("unchecked");
     other["correspondence"]["status"] = json!("unverified");
-    assert!(consistency_conflicts(&[first, decode_one(&other)]).is_empty());
+    assert!(consistency_check(&[first, decode_one(&other)]).consistent);
 }

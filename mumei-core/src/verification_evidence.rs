@@ -210,38 +210,53 @@ pub struct ConsistencyConflict {
 }
 
 /// Cap on reported conflicts — the diagnostic stays bounded like every
-/// other surface, even though records admit at most 64·63/2 pairs.
+/// other surface. `ConsistencyReport::conflict_count` keeps the true total
+/// even when this cap truncates the list.
 pub const MAX_CONSISTENCY_CONFLICTS: usize = 64;
 
-/// Syntactic cross-record agreement on declared identity pins: records
-/// naming the same `subject.id` must pin the same `subject.kind`/`sha256`,
-/// and records naming the same `obligation_id` must pin the same subject,
-/// specification, semantics and method. Outcomes (`result`, `execution`,
-/// `scope`, `correspondence`) are claims, not identity — a fresh record may
-/// legitimately disagree with an older one there, so they are never
-/// compared. This is structural agreement only; it does not check that any
-/// pin is correct, current or authentic.
-pub fn consistency_conflicts(records: &[Evidence]) -> Vec<ConsistencyConflict> {
+/// Cross-record agreement on declared identity pins: records claiming the
+/// same subject — `subject.id` **and** `subject.sha256` together, because
+/// the id alone is a producer label (every standalone source record uses
+/// `"source.mm"`) — must agree on `subject.kind`; records naming the same
+/// `obligation_id` must pin the same subject, specification, semantics and
+/// method. Outcomes (`result`, `execution`, `scope`, `correspondence`) are
+/// claims, not identity — a fresh record may legitimately disagree with an
+/// older one there, so they are never compared. Records sharing no pin are
+/// independent, not conflicting.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ConsistencyReport {
+    /// No pair disagreed on a shared identity pin.
+    pub consistent: bool,
+    /// Total disagreements found — may exceed `conflicts.len()`.
+    pub conflict_count: usize,
+    /// The first [`MAX_CONSISTENCY_CONFLICTS`] disagreements.
+    pub conflicts: Vec<ConsistencyConflict>,
+}
+
+/// Syntactic cross-record agreement on declared identity pins. Structural
+/// only: it does not check that any pin is correct, current or authentic.
+pub fn consistency_check(records: &[Evidence]) -> ConsistencyReport {
+    let mut conflict_count = 0usize;
     let mut conflicts = Vec::new();
     for (index_a, a) in records.iter().enumerate() {
         for (index_b, b) in records.iter().enumerate().skip(index_a + 1) {
-            if a.subject.id == b.subject.id {
-                for (field, equal) in [
-                    ("subject.kind", a.subject.kind == b.subject.kind),
-                    ("subject.sha256", a.subject.sha256 == b.subject.sha256),
-                ] {
-                    if !equal && conflicts.len() < MAX_CONSISTENCY_CONFLICTS {
-                        conflicts.push(ConsistencyConflict {
-                            index_a,
-                            index_b,
-                            field,
-                        });
-                    }
+            if a.subject.id == b.subject.id
+                && a.subject.sha256 == b.subject.sha256
+                && a.subject.kind != b.subject.kind
+            {
+                conflict_count += 1;
+                if conflicts.len() < MAX_CONSISTENCY_CONFLICTS {
+                    conflicts.push(ConsistencyConflict {
+                        index_a,
+                        index_b,
+                        field: "subject.kind",
+                    });
                 }
             }
             if a.obligation_id == b.obligation_id {
                 for (field, equal) in [
                     ("subject.id", a.subject.id == b.subject.id),
+                    ("subject.sha256", a.subject.sha256 == b.subject.sha256),
                     ("specification.id", a.specification.id == b.specification.id),
                     (
                         "specification.sha256",
@@ -261,18 +276,25 @@ pub fn consistency_conflicts(records: &[Evidence]) -> Vec<ConsistencyConflict> {
                     ),
                     ("method", a.method == b.method),
                 ] {
-                    if !equal && conflicts.len() < MAX_CONSISTENCY_CONFLICTS {
-                        conflicts.push(ConsistencyConflict {
-                            index_a,
-                            index_b,
-                            field,
-                        });
+                    if !equal {
+                        conflict_count += 1;
+                        if conflicts.len() < MAX_CONSISTENCY_CONFLICTS {
+                            conflicts.push(ConsistencyConflict {
+                                index_a,
+                                index_b,
+                                field,
+                            });
+                        }
                     }
                 }
             }
         }
     }
-    conflicts
+    ConsistencyReport {
+        consistent: conflict_count == 0,
+        conflict_count,
+        conflicts,
+    }
 }
 
 impl Evidence {
