@@ -1230,7 +1230,11 @@ parent:
 Any byte or observation mismatch fails closed as `Different` (exit 1);
 inconclusive source or translation queries still exit 3 with no artifact
 claim. Dispatch follows the record's own schema, so module bundles recheck
-through the same command.
+through the same command. Like the earlier stages, the whole chain works
+on one once-read snapshot: no record or component is re-read between the
+`recheck-llvm` checks and the artifact comparisons, so the bytes being
+rebuilt are exactly the bytes that passed identity and translation
+verification.
 
 `link_build.arguments_sha256` is deliberately not compared: it pins the
 build-time argument vector including absolute staging paths, so it is a
