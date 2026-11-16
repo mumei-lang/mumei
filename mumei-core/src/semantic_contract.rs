@@ -1351,10 +1351,24 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
             _ => None,
         })
         .collect();
+    let callee_bodies: BTreeMap<String, &PureI64Body> = items
+        .iter()
+        .zip(bodies.iter())
+        .filter_map(|(item, body)| match item {
+            Item::Atom(atom) => Some((atom.name.clone(), body)),
+            _ => None,
+        })
+        .collect();
     let mut atoms = Vec::new();
     for (item, body) in items.iter().zip(bodies.iter()) {
         match item {
-            Item::Atom(atom) => atoms.push(module_atom_obligations(atom, body, &callees, context)?),
+            Item::Atom(atom) => atoms.push(module_atom_obligations(
+                atom,
+                body,
+                &callees,
+                &callee_bodies,
+                context,
+            )?),
             _ => return Err(SemanticContractError::Unsupported("non-atom declarations")),
         }
     }
@@ -1379,9 +1393,12 @@ pub struct ModuleAtomObligations<'ctx> {
 /// - entry 0: `requires ∧ call_assumptions ∧ ¬ensures ∧ exits` — the
 ///   caller's own postcondition, assuming each callee honoured its
 ///   `ensures`;
-/// - entries 1..: `requires ∧ site_guard ∧ ¬callee_requires` — the
-///   caller establishes the callee's precondition on every path that
-///   reaches the call, so the ensures assumption above is justified.
+/// - entries 1..: `requires ∧ site_guard ∧ ¬(callee_requires ∧ callee_domain)`
+///   — the caller establishes the callee's precondition *and* stays
+///   inside the domain the callee was verified on (its signature
+///   bounds, guarded-operator definedness and bounded-while exits,
+///   instantiated at the call arguments) on every path that reaches
+///   the call, so the ensures assumption above is justified.
 ///
 /// The domain obligations deliberately exclude the other sites' ensures
 /// assumptions, so no circular justification is possible: a call whose
@@ -1393,6 +1410,7 @@ fn module_atom_obligations<'ctx>(
     atom: &Atom,
     body: &PureI64Body<'ctx>,
     callees: &BTreeMap<String, &crate::parser::ast::Atom>,
+    callee_bodies: &BTreeMap<String, &PureI64Body<'ctx>>,
     context: &'ctx Context,
 ) -> BodyResult<ModuleAtomObligations<'ctx>> {
     // The domain the widened profile binds for this atom: declared
@@ -1483,12 +1501,30 @@ fn module_atom_obligations<'ctx>(
         // bounded-while encodings actually exited — same domain
         // convention the single-atom obligation applies to `requires`.
         // The callee's declared signature bounds its arguments the same
-        // way the caller's `param_domain` binds its inputs: a reached
-        // call whose arguments fall outside the callee's declared
-        // domain is a domain violation — the callee's own obligations
-        // were only ever checked inside it.
+        // way the caller's `param_domain` binds its inputs, and the
+        // callee's own domain — guarded-operator definedness and
+        // bounded-while exits, instantiated at the call arguments —
+        // bounds where its `ensures` was ever proved: a reached call
+        // whose arguments fall outside that domain is a domain
+        // violation, not a verified call.
+        let Some(callee_body) = callee_bodies.get(&site.callee) else {
+            return Err(SemanticContractError::Unsupported(
+                "call target outside module",
+            ));
+        };
+        let substitutions: Vec<(&BV, &BV)> =
+            callee_body.inputs.iter().zip(site.args.iter()).collect();
         let mut callee_precondition = vec![callee_requires];
         callee_precondition.extend(signature_domain(&callee.params, &site.args, context));
+        callee_precondition.extend(
+            callee_body
+                .definedness
+                .iter()
+                .map(|defined| defined.substitute(&substitutions)),
+        );
+        if let Some(exits) = &callee_body.loop_bound_exits {
+            callee_precondition.push(exits.substitute(&substitutions));
+        }
         let callee_precondition =
             Bool::and(context, &callee_precondition.iter().collect::<Vec<_>>());
         let mut domain_terms = vec![
@@ -2875,5 +2911,23 @@ mod tests {
         assert!(outcomes
             .iter()
             .all(|result| *result == z3::SatResult::Unsat));
+    }
+
+    #[test]
+    fn module_obligations_apply_the_callee_loop_domain_at_call_sites() {
+        // `count`'s `while` is proved only where it exits inside
+        // `LOOP_BOUND` unrolled iterations — inputs past the bound sit
+        // outside its verified domain, so its `ensures` was never
+        // checked there. A caller reaching the call with such arguments
+        // may not assume that postcondition: the site is a domain
+        // violation, not a verified call.
+        let source = "atom count(n: i64) -> i64 requires: n >= 0; ensures: result == n; body: { let i = 0; while i < n invariant: i >= 0 decreases: n - i { i = i + 1 }; i };\natom main() -> i64 requires: true; ensures: result == 3; body: { count(3) };";
+        assert!(module_outcomes(source)
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
+        let out_of_bound = source.replace("count(3)", "count(10)");
+        assert!(module_outcomes(&out_of_bound)
+            .iter()
+            .any(|result| *result == z3::SatResult::Sat));
     }
 }
