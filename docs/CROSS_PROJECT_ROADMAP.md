@@ -3708,6 +3708,52 @@ profile; the link argument-vector is recorded-but-not-reproduced inside
 Core and adds no claim). Also exposed as the `native_accept` MCP tool.
 C02/C10 stay partial.
 
+### Wave 5 declared native-artifact-recheck route (C10 consumer)
+
+Agent's `python -m agent native-artifact-recheck --core <path>
+--bundle <dir> --source <path> --expected-build-id <sha256>` declares a
+native artifact reproduction replay as one attempt: `<core>
+native-bundle recheck-artifact --expected-build-id <id> <bundle>
+<source>` under a `mumei.native-artifact-recheck-request/v1`
+fingerprint binding the Core executable's bytes, every member the
+record declares and the declared source's bytes — the same member
+enumeration and post-run drift re-enumeration as the other native
+routes. `artifact_recheck` names only `0 → reproduced` and
+`3 → inconclusive`; exit 1 conflates a failed reproduction with every
+static failure and claims nothing. A `reproduced` run reports
+`discharged_checks` — `artifact_semantics` and `claim_truth` — at
+representation level with the remaining checks in
+`checks_not_performed`. The command's stdout is a fixed diagnostic
+line rather than an evidence record, so no
+`mumei.verifier-evidence-candidate/v1` is emitted and a clean run
+selects the captured output into lineage only. Also exposed as the
+`native_artifact_recheck` MCP tool. C02/C10 stay partial.
+
+### Wave 5 declared native-check route (C10 consumer)
+
+Agent's `python -m agent native-check --core <path> --bundle <dir>
+--source <path> --expected-build-id <sha256>` declares the shallowest
+native consumer — `<core> native-bundle check --expected-build-id
+<id> <bundle> <source>` — as one attempt under a
+`mumei.native-check-request/v1` fingerprint with the same member
+enumeration and drift re-check. `bundle_check` names only
+`0 → consistent`; the command has no inconclusive exit and exit 1
+conflates an identity mismatch with every static failure. A
+`consistent` run reports `file_identity` in `discharged_checks` with
+the other five checks in `checks_not_performed` — claim truth,
+producer authenticity, freshness, semantic correspondence and
+artifact semantics all need the deeper consumers this route does not
+run. No candidate: the stdout is a fixed diagnostic line. Also
+exposed as the `native_check` MCP tool. C02/C10 stay partial.
+
+With this route every `native-bundle` consumer subcommand except the
+Stage A `recheck-source` has a
+declared-attempt route: `build` (`native-attempt`), `check`,
+`recheck-llvm` (`native-recheck`), `recheck-artifact`,
+`recheck-evidence`, `accept-evidence` and `accept-artifact`
+(`native-accept`). `recheck-source` — the source-postcondition gate
+the deeper rechecks already run — remains unrouted.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
