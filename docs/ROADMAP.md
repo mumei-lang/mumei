@@ -2985,6 +2985,18 @@ object/optimizer/linker/runtime/ABI/final-executable semantics, producer
 authenticity or attestation, and the recorded source-dependency digest remains
 pinned to the empty closure.
 
+The next C10 consumer stage adds `native-bundle recheck-artifact` for both
+record families: after the full identity/source/LLVM chain, the pinned
+`program.ll` is re-emitted to an object and the pinned `program.o` is
+re-linked, each under the recorded toolchain, and both produced byte streams
+must equal the pinned artifacts with matching toolchain observations. The
+scope is toolchain determinism plus pinned-artifact correspondence — link
+argument vectors stay build-time observations, and execution, OS exit-status,
+ABI/runtime, optimizer-path and attestation claims remain out of scope. See
+the [artifact recheck boundary](VERIFICATION_NATIVE.md#pinned-toolchain-artifact-recheck).
+General optimizer/ABI/runtime assurance, producer authenticity and the
+source-dependency closure stay open.
+
 The next C02/C13 slice moves the common v1 representation model and runtime
 validation into `mumei_core::verification_evidence`. Native producer/replay use
 the shared shape/combination gate without changing emitted JSON or their fresh

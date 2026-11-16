@@ -22,6 +22,23 @@ const MAX_COMPONENT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_EVIDENCE_BYTES: u64 = 65_536;
 const LLVM_RECHECK_SCOPE: &str =
     "source_postcondition_identity_and_llvm_snapshot_only/no_authenticity_or_binary_semantic_proof";
+const ARTIFACT_RECHECK_SCOPE: &str =
+    "source_postcondition_llvm_snapshot_and_toolchain_identity_only/no_execution_or_runtime_semantics";
+
+enum ArtifactRecheck {
+    Rechecked,
+    Different,
+    Inconclusive,
+}
+
+/// The pinned bundle state the recheck chain verified, kept in memory so
+/// later stages compare against exactly the snapshot that passed — no
+/// component is re-read from the bundle directory afterwards.
+struct LoadedBundle {
+    object_build: ObjectBuild,
+    link_build: LinkBuild,
+    files: BTreeMap<BundleFile, Vec<u8>>,
+}
 
 pub(crate) fn run(command: NativeBundleCommand) {
     let result = match command {
@@ -77,6 +94,22 @@ pub(crate) fn run(command: NativeBundleCommand) {
         NativeBundleCommand::Check { bundle, source, expected_build_id } => check(Path::new(&bundle), Path::new(&source), &expected_build_id).map(|scope| {
             println!("Native bundle identity consistent with pinned build ID.\nScope: {scope}");
         }),
+        NativeBundleCommand::RecheckArtifact { bundle, source, expected_build_id } => {
+            match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id) {
+                Ok(ArtifactRecheck::Rechecked) => {
+                    println!("Pinned toolchain outputs reproduce the pinned object and executable.\nScope: {ARTIFACT_RECHECK_SCOPE}");
+                    Ok(())
+                }
+                Ok(ArtifactRecheck::Different) => Err(BundleError(
+                    "pinned artifact differs from the toolchain's output for the pinned inputs",
+                )),
+                Ok(ArtifactRecheck::Inconclusive) => {
+                    eprintln!("Native source/LLVM recheck inconclusive; no artifact result established.");
+                    std::process::exit(3);
+                }
+                Err(error) => Err(error),
+            }
+        }
     };
     if let Err(error) = result {
         eprintln!("{error}");
@@ -403,60 +436,90 @@ fn recheck_llvm(
     source: &Path,
     expected_id: &str,
 ) -> Result<LlvmRecheck, BundleError> {
+    recheck_llvm_loaded(bundle, source, expected_id).map(|(result, _)| result)
+}
+
+/// `recheck-llvm` plus the pinned bundle snapshot its checks already
+/// verified — the record's toolchain observations and the once-read
+/// component bytes — so downstream stages compare against the same
+/// snapshot instead of re-reading files that could change in between.
+fn recheck_llvm_loaded(
+    bundle: &Path,
+    source: &Path,
+    expected_id: &str,
+) -> Result<(LlvmRecheck, LoadedBundle), BundleError> {
     let bytes = read_regular(&bundle.join(RECORD_FILE), 1024 * 1024)?;
     let source = String::from_utf8(read_regular(source, 65_536)?)
         .map_err(|_| BundleError("source is not UTF-8"))?;
     let files = components(bundle)?;
     if is_module_record(&bytes)? {
         let record = load_pinned_module_record(&bytes, expected_id)?;
-        match recheck_module_source(&bytes, expected_id, &source, &files)? {
+        let loaded = LoadedBundle {
+            object_build: record.object_build,
+            link_build: record.link_build,
+            files,
+        };
+        match recheck_module_source(&bytes, expected_id, &source, &loaded.files)? {
             SourceRecheck::Refuted => return Err(BundleError("source postcondition refuted")),
-            SourceRecheck::Inconclusive => return Ok(LlvmRecheck::Inconclusive),
+            SourceRecheck::Inconclusive => {
+                return Ok((LlvmRecheck::Inconclusive, loaded));
+            }
             SourceRecheck::RecheckedWithinProfile => (),
         }
-        let llvm_ir = std::str::from_utf8(&files[&BundleFile::LlvmIr])
+        let llvm_ir = std::str::from_utf8(&loaded.files[&BundleFile::LlvmIr])
             .map_err(|_| BundleError("native LLVM snapshot is not UTF-8"))?;
         let report = tv::validate_native_module(&source, llvm_ir, Options::default())
             .map_err(|_| BundleError("native LLVM snapshot outside bounded module profile"))?;
-        if record.object_build.target_triple != report.target
-            || record.object_build.data_layout != report.data_layout
+        if loaded.object_build.target_triple != report.target
+            || loaded.object_build.data_layout != report.data_layout
         {
             return Err(BundleError(
                 "native LLVM snapshot/toolchain observation mismatch",
             ));
         }
-        return Ok(match report.outcome {
-            Outcome::EquivalentWithinProfile => LlvmRecheck::ModuleRechecked(report.profile),
-            Outcome::Different => LlvmRecheck::Different,
-            Outcome::UndefinedBehavior => LlvmRecheck::Different,
-            Outcome::Inconclusive => LlvmRecheck::Inconclusive,
-        });
+        return Ok((
+            match report.outcome {
+                Outcome::EquivalentWithinProfile => LlvmRecheck::ModuleRechecked(report.profile),
+                Outcome::Different | Outcome::UndefinedBehavior => LlvmRecheck::Different,
+                Outcome::Inconclusive => LlvmRecheck::Inconclusive,
+            },
+            loaded,
+        ));
     }
     let record = load_pinned_record(&bytes, expected_id)?;
-    match recheck_source(&bytes, expected_id, &source, &files)? {
+    let loaded = LoadedBundle {
+        object_build: record.object_build.clone(),
+        link_build: record.link_build.clone(),
+        files,
+    };
+    match recheck_source(&bytes, expected_id, &source, &loaded.files)? {
         SourceRecheck::Refuted => return Err(BundleError("source postcondition refuted")),
-        SourceRecheck::Inconclusive => return Ok(LlvmRecheck::Inconclusive),
+        SourceRecheck::Inconclusive => {
+            return Ok((LlvmRecheck::Inconclusive, loaded));
+        }
         SourceRecheck::RecheckedWithinProfile => (),
     }
-    let llvm_ir = std::str::from_utf8(&files[&BundleFile::LlvmIr])
+    let llvm_ir = std::str::from_utf8(&loaded.files[&BundleFile::LlvmIr])
         .map_err(|_| BundleError("native LLVM snapshot is not UTF-8"))?;
     let report = tv::validate_native_main(&source, llvm_ir, Options::default())
         .map_err(|_| BundleError("native LLVM snapshot outside bounded translation profile"))?;
-    if record.object_build.target_triple != report.target
-        || record.object_build.data_layout != report.data_layout
+    if loaded.object_build.target_triple != report.target
+        || loaded.object_build.data_layout != report.data_layout
     {
         return Err(BundleError(
             "native LLVM snapshot/toolchain observation mismatch",
         ));
     }
-    Ok(match report.outcome {
-        Outcome::EquivalentWithinProfile => LlvmRecheck::Rechecked(Box::new(
-            evidence::from_recheck(expected_id, &record, &report)?,
-        )),
-        Outcome::Different => LlvmRecheck::Different,
-        Outcome::UndefinedBehavior => LlvmRecheck::Different,
-        Outcome::Inconclusive => LlvmRecheck::Inconclusive,
-    })
+    Ok((
+        match report.outcome {
+            Outcome::EquivalentWithinProfile => LlvmRecheck::Rechecked(Box::new(
+                evidence::from_recheck(expected_id, &record, &report)?,
+            )),
+            Outcome::Different | Outcome::UndefinedBehavior => LlvmRecheck::Different,
+            Outcome::Inconclusive => LlvmRecheck::Inconclusive,
+        },
+        loaded,
+    ))
 }
 
 fn recheck_evidence(
@@ -492,6 +555,74 @@ fn compare_evidence(
         LlvmRecheck::Different => Ok(Outcome::Different),
         LlvmRecheck::Inconclusive => Ok(Outcome::Inconclusive),
     }
+}
+
+/// The full consumer chain plus toolchain determinism: after the same
+/// identity, source and LLVM-snapshot rechecks `recheck-llvm` runs, the
+/// pinned `program.ll` is re-emitted to an object and that object —
+/// proven byte-identical to the pinned `program.o` — is re-linked into
+/// an executable, each under the recorded toolchain. The produced bytes must equal the pinned artifacts and the
+/// observed toolchain fields must match the record — a bundle whose
+/// object or executable is not what this toolchain emits from its pinned
+/// inputs is `Different`.
+///
+/// `link_build.arguments_sha256` is deliberately not compared: it pins
+/// the build-time argument vector including absolute staging paths, so
+/// it is a build observation no recheck can reproduce. The executable's
+/// byte identity is what binds the link. Executing either artifact,
+/// checking OS exit status and ABI/runtime semantics stay out of scope.
+fn recheck_artifact(
+    bundle: &Path,
+    source: &Path,
+    expected_id: &str,
+) -> Result<ArtifactRecheck, BundleError> {
+    // Everything the artifact stage compares comes from the same
+    // once-read snapshot `recheck-llvm` verified — re-reading the record
+    // or any component here would let a mid-command swap substitute a
+    // self-consistent foreign IR/object/executable set.
+    let (result, loaded) = recheck_llvm_loaded(bundle, source, expected_id)?;
+    match result {
+        LlvmRecheck::Rechecked(_) | LlvmRecheck::ModuleRechecked(_) => (),
+        LlvmRecheck::Different => return Ok(ArtifactRecheck::Different),
+        LlvmRecheck::Inconclusive => return Ok(ArtifactRecheck::Inconclusive),
+    }
+    let LoadedBundle {
+        object_build,
+        link_build,
+        files,
+    } = loaded;
+    let parent = bundle
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let stage = tempfile::Builder::new()
+        .prefix(".mumei-artifact-")
+        .tempdir_in(parent)
+        .map_err(|_| BundleError("cannot stage artifact recheck"))?;
+    let ir_path = stage.path().join(BundleFile::LlvmIr.file_name());
+    write(&ir_path, &files[&BundleFile::LlvmIr])?;
+    let object_path = stage.path().join(BundleFile::Object.file_name());
+    let fresh_object =
+        mumei_emit_llvm::codegen::compile_llvm_ir_to_object_recorded(&ir_path, &object_path)
+            .map_err(|_| BundleError("native object re-emission failed"))?;
+    if fresh_object != object_build
+        || read_regular(&object_path, MAX_COMPONENT_BYTES)? != files[&BundleFile::Object]
+    {
+        return Ok(ArtifactRecheck::Different);
+    }
+    let executable_path = stage.path().join(BundleFile::Executable.file_name());
+    let fresh_link = linker::link_recorded(&[object_path], &executable_path)
+        .map_err(|_| BundleError("native link or toolchain observation failed"))?;
+    if fresh_link.driver != link_build.driver
+        || fresh_link.driver_version != link_build.driver_version
+        || fresh_link.driver_target != link_build.driver_target
+        || fresh_link.linker != link_build.linker
+        || fresh_link.linker_version != link_build.linker_version
+        || read_regular(&executable_path, MAX_COMPONENT_BYTES)? != files[&BundleFile::Executable]
+    {
+        return Ok(ArtifactRecheck::Different);
+    }
+    Ok(ArtifactRecheck::Rechecked)
 }
 
 #[cfg(target_os = "linux")]

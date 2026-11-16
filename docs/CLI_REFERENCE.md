@@ -21,6 +21,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei native-bundle recheck-source` | 1 | Check pinned snapshots and freshly recheck the C03 source postcondition, not LLVM or binary semantics |
 | `mumei native-bundle build` | 1 | Freshly verify and build a pure-i64 main on Linux/x86_64 with fixed settings |
 | `mumei native-bundle check` | 1 | Check snapshot identities against an externally supplied build ID; does not execute or prove the artifact |
+| `mumei native-bundle recheck-artifact` | 1 | Recheck that the toolchain reproduces the pinned object and executable; does not execute or check runtime/ABI semantics |
 | `mumei build` | 5 | Verify + compile to LLVM IR (default) |
 | `mumei verify` | 38 | Z3 formal verification only (no codegen) |
 | `mumei config` | 2 | Show effective settings and where each value comes from. The CLI `--profile` is per-invocation; `mumei config` only reports the manifest source. |
@@ -264,6 +265,29 @@ Usage:
 
 ```text
 Usage: mumei native-bundle check --expected-build-id <EXPECTED_BUILD_ID> <BUNDLE> <SOURCE>
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `BUNDLE` | Yes | — |
+| `SOURCE` | Yes | — |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--expected-build-id <EXPECTED_BUILD_ID>` | — | — | SHA-256 of native-bundle.json obtained through a separately trusted channel |
+
+## `mumei native-bundle recheck-artifact`
+
+Recheck that the toolchain reproduces the pinned object and executable; does not execute or check runtime/ABI semantics
+
+Usage:
+
+```text
+Usage: mumei native-bundle recheck-artifact --expected-build-id <EXPECTED_BUILD_ID> <BUNDLE> <SOURCE>
 ```
 
 ### Positional arguments

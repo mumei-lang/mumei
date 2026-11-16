@@ -1202,6 +1202,55 @@ source-dependency digest remains pinned to the empty closure.
 Regression gate:
 `LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo test --test test_native_bundle --test test_translation_validation -p mumei-core`.
 
+### Pinned toolchain artifact recheck
+
+`mumei native-bundle recheck-artifact` is the next C10 consumer stage. It runs
+the whole `recheck-llvm` chain — pinned identity, fresh source postcondition
+and fresh LLVM snapshot — and then asks whether the pinned artifacts are what
+the recorded toolchain actually emits from the pinned inputs:
+
+```sh
+mumei native-bundle recheck-artifact module-bundle module.mm \
+  --expected-build-id <trusted-64-character-lowercase-sha256>
+```
+
+Two staged rebuilds run in a private staging directory inside the bundle's
+parent:
+
+- **object**: the pinned `program.ll` is re-emitted with the same fixed
+  native target machine the build used; the produced bytes must equal the
+  pinned `program.o` and the fresh `ObjectBuild` observation (triple, data
+  layout, LLVM version) must equal the record's;
+- **link**: the object just proven byte-identical to `program.o` is
+  re-linked by the same recorded cc/gcc/clang driver; the produced bytes
+  must equal the pinned `program` and the fresh driver/linker observations
+  (driver name, version, target, linker family and version) must equal the
+  record's.
+
+Any byte or observation mismatch fails closed as `Different` (exit 1);
+inconclusive source or translation queries still exit 3 with no artifact
+claim. Dispatch follows the record's own schema, so module bundles recheck
+through the same command. Like the earlier stages, the whole chain works
+on one once-read snapshot: no record or component is re-read between the
+`recheck-llvm` checks and the artifact comparisons, so the bytes being
+rebuilt are exactly the bytes that passed identity and translation
+verification.
+
+`link_build.arguments_sha256` is deliberately not compared: it pins the
+build-time argument vector including absolute staging paths, so it is a
+build-time observation no recheck can reproduce. The executable's byte
+identity is what binds the link.
+
+The success scope is
+`source_postcondition_llvm_snapshot_and_toolchain_identity_only/no_execution_or_runtime_semantics`.
+The check proves the pinned object and executable are byte-identical to what
+this toolchain emits from the pinned IR and object — **determinism plus
+pinned-artifact correspondence only**. Neither artifact is executed, and
+there is no OS exit-status, ABI, runtime, optimizer-path, system-library or
+attestation claim; a toolchain that emits different but semantically
+equivalent bytes (a different LLVM version, for example) fails closed rather
+than being normalized into agreement.
+
 ### First native consumer Evidence producer
 
 `mumei native-bundle recheck-llvm <bundle> <source> --expected-build-id <trusted-id> --json`
