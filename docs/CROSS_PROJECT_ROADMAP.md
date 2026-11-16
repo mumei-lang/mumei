@@ -1259,6 +1259,23 @@ observations unchanged. C11 stays partial; Evidence acceptance of
 selected attempt outputs remains a Core duty. See the
 [Agent probe-outcome acceptance](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-probe-outcome-acceptance).
 
+### Wave 2 declared probe-history stamp ordering
+
+Agent's `AdapterProbeHistory` emits
+`mumei.adapter-probe-history/v2` — the same record plus a `stamps`
+array parallel to `outcomes` carrying each outcome's observation
+stamp. `record()` fails statically when a request's stamp regresses
+below the last declared stamp (equal stamps order by attempt
+ordinal), and restored records get the same check: `None` entries
+form a prefix only and the declared run must not regress, so a
+reordered or smuggled-undeclared record never restores. Persisted
+v1 records still resume — their stamps restore as `None`
+(undeclared, not fabricated) — so `summaries-plan --histories` and
+the MCP `summaries_plan` keep working. Ordering is declared per
+`command_fingerprint`; cross-adapter ordering stays the registry
+stamp's job. See the
+[Agent probe-history stamp ordering](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-probe-history-stamp-ordering).
+
 ### Wave 2 declared probe cancellation
 
 Agent's `AdapterProbeRequest.cancel_request()` returns the declared
@@ -2588,9 +2605,9 @@ document, the recorded `RuntimeObservation`s and the updated
 `AdapterProbeHistory` records. `--tool-version`, `--rounds` and
 `--max-parallel` pass through to the observe-and-replan loop, and
 `--histories <file>` resumes persisted
-`mumei.adapter-probe-history/v1` records via the new
-`AdapterProbeHistory.to_dict()` / `from_dict()` record schema, so a
-host can persist probe histories between runs. Routing only — a
+`mumei.adapter-probe-history` records (v2 emitted, v1 still
+restored) via the `AdapterProbeHistory.to_dict()` / `from_dict()`
+record schema, so a host can persist probe histories between runs. Routing only — a
 selected adapter grants no verification or acceptance authority. See
 the
 [Agent consumable plan route](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c06-consumable-plan-route-summaries-plan)
@@ -2938,7 +2955,7 @@ adapter probes as `python -m agent <route> --help`, availability is
 deterministic wherever the agent runs — no external toolchain needed.
 Three steps assert `plan_selected` (Go adapter selected under
 `--tool-version 1.23.0` with `selected_priority` reason and one
-`mumei.adapter-probe-history/v1` record), `plan_resumes_history`
+`mumei.adapter-probe-history/v2` record), `plan_resumes_history`
 (`--histories histories.json` continues `attempt_number` 1→2 rather
 than restarting) and `plan_unpinned` (no declared pin selects nothing
 with `tool_version_unknown`). The scenario stays in
