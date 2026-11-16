@@ -308,6 +308,24 @@ acceptance is implied, and the envelope is not reusable Evidence or a
 receipt. See the
 [list check contract](VERIFICATION_NATIVE.md#bounded-multi-record-representation-check).
 
+### Wave 5 cross-record identity-pin consistency check
+
+`mumei evidence check-consistency <envelope> [--json]` closes the
+`cross_record_consistency` gap the list check declared: over the same
+`mumei.verification-evidence-list/v1` envelope it compares the identity
+pins records declare and reports
+`mumei.evidence-consistency-check/v1` — `consistent`, a bounded
+`conflicts` list naming each disagreeing pair's indices and field with
+the true total in `conflict_count`, and `record_count`. Records sharing
+`subject.id` *and* `subject.sha256` must pin one `subject.kind` — a
+`subject.id` alone is a producer label, not an identity, so records
+pinning different subjects stay independent. Records sharing
+`obligation_id` must pin one subject, specification, semantics and
+method; outcome fields are claims, never compared. Agreement stays
+syntactic — `acceptance: not_evaluated`, and pin correctness, truth,
+freshness and authenticity remain unperformed. See the
+[consistency check contract](VERIFICATION_NATIVE.md#cross-record-identity-pin-consistency).
+
 ### Wave 2 explicit Agent-to-Core representation handoff
 
 Agent adds a separately invoked POSIX-only local Core handoff. The host must
