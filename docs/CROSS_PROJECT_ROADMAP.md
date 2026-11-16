@@ -840,9 +840,15 @@ Agent's `python -m agent native-recheck --core <path> --bundle <dir>
 consumer recheck as one attempt: `<core> native-bundle recheck-llvm
 --expected-build-id <id> --json <bundle> <source>` under a
 `mumei.native-recheck-request/v1` fingerprint binding the Core
-executable's bytes, every bundle member the consumer reads
-(`native-bundle.json`, `program.ll`, `program.o`, `proof-cert.json`,
-`program`), the source's bytes and the trusted-channel build ID. Only
+executable's bytes, every bundle member the record declares — the
+`files` map's component members plus, for
+`mumei.native-multifile-bundle/v1`, each `sources/<member>` the merge
+re-derivation consumes, enumerated from `native-bundle.json` and
+validated against the member grammar before joining — the source's
+bytes and the trusted-channel build ID. The post-run drift check
+re-enumerates members from the current record, so a record swapped
+mid-run that declares new members reports `inputs_changed` rather
+than claiming an outcome on unbound bytes. Only
 an `exited` run with `exit_code == 0` (`EquivalentWithinProfile`)
 selects the produced `mumei.native-consumer-evidence/v1` report (the
 three-record envelope: bundle identity, fresh source postcondition,
@@ -870,9 +876,12 @@ Agent's `python -m agent native-attempt --core <path> --source <path>
 executable's bytes, the source's bytes and the declared output path.
 Because the bundle is a side effect rather than a stdout document,
 selection requires three post-conditions: an `exited` run with
-`exit_code == 0`, a parseable `Build ID: <sha256>` line and the full
-declared member set written. The reported `build_id` is the
-Core-computed SHA-256 of `native-bundle.json` — the exact identity
+`exit_code == 0`, a parseable `Build ID: <sha256>` line and every
+member the produced record declares present — the component files
+plus, for a multifile record, each `sources/<member>` (an
+unparseable produced record is incomplete by definition). The
+reported `build_id` is the Core-computed SHA-256 of
+`native-bundle.json` — the exact identity
 `native-recheck` pins via `--expected-build-id`, closing the
 produce/recheck pair. Also exposed as the `native_attempt` MCP tool.
 C02/C10 stay partial.
@@ -3505,8 +3514,8 @@ artifact acceptance as one attempt: `<core> native-bundle
 accept-artifact --expected-build-id <id> --json <bundle> <source>`
 under a `mumei.native-accept-request/v1` fingerprint binding the Core
 executable's bytes, every bundle member the record declares, the
-source's bytes and the trusted-channel build ID. Where `native-recheck`
-binds a fixed member set, this route enumerates members from
+source's bytes and the trusted-channel build ID. Like
+`native-recheck`, this route enumerates members from
 `native-bundle.json` — the `files` map plus, for
 `mumei.native-multifile-bundle/v1`, each `sources/<member>` the merge
 is re-derived from — with every member name validated against the
