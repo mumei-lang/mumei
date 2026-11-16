@@ -2049,6 +2049,69 @@ fn build_multifile(root: &Path) -> (std::path::PathBuf, std::path::PathBuf, Stri
 }
 
 #[test]
+fn multifile_nested_closure_merges_and_cycles_fail_honestly() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        root.path().join("deep.mm"),
+        "atom deep(x: i64) -> i64 requires: true; ensures: result == x + 1; body: { x + 1 };\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("helpers.mm"),
+        "import \"deep\" as d;\n\natom helper(x: i64) -> i64 requires: x > 0; ensures: result == x + 2; body: { d::deep(x) + 1 };\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"helpers\" as h;\n\natom main() -> i64 requires: true; ensures: result == 7; body: { h::helper(5) };",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    // The transitive member is pinned even though the root never names it.
+    assert!(record["sources"]["deep.mm"]["sha256"].is_string());
+    assert!(bundle.join("sources/deep.mm").is_file());
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    let json = consume("recheck-llvm --json", &source, &bundle, &id);
+    assert_success(&json);
+    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        envelope["evidence"].as_array().unwrap().len(),
+        2 + 2 * 3 // identity + merge correspondence + 3 atoms × 2
+    );
+    // Import cycles are rejected honestly at build time.
+    fs::write(
+        root.path().join("cyc1.mm"),
+        "import \"cyc2\";\natom fa() -> i64 requires: true; ensures: result == 1; body: { 1 };",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("cyc2.mm"),
+        "import \"cyc1\";\natom fb() -> i64 requires: true; ensures: result == 1; body: { 1 };",
+    )
+    .unwrap();
+    let output = cli(&[
+        "native-bundle",
+        "build",
+        root.path().join("cyc1.mm").to_str().unwrap(),
+        "-o",
+        root.path().join("cyc.bundle").to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
 fn multifile_bundle_builds_and_rechecks_with_honest_consumer_rejections() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build_multifile(root.path());

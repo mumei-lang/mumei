@@ -668,19 +668,31 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let items = parser::parse_module(source);
+    // Collect the transitive import closure: each member's own imports
+    // are resolved from the same directory, bounded by MAX_SOURCE_FILES.
+    // Visited members are never requeued, so cycles cannot loop here —
+    // merge_import_closure rejects them honestly afterward.
     let mut members = BTreeMap::from([(root.clone(), source.to_owned())]);
-    for item in &items {
-        let parser::Item::Import(decl) = item else {
-            continue;
-        };
-        let member = member_name(&decl.path)?;
-        if members.len() >= MAX_SOURCE_FILES {
-            return Err(BundleError("too many source members"));
+    let mut queue = std::collections::VecDeque::from([root.clone()]);
+    while let Some(current) = queue.pop_front() {
+        let text = members[&current].clone();
+        for item in parser::parse_module(&text) {
+            let parser::Item::Import(decl) = item else {
+                continue;
+            };
+            let member = member_name(&decl.path)?;
+            if members.contains_key(&member) {
+                continue;
+            }
+            if members.len() >= MAX_SOURCE_FILES {
+                return Err(BundleError("too many source members"));
+            }
+            members.insert(
+                member.clone(),
+                bounded_source_text(&directory.join(&member))?,
+            );
+            queue.push_back(member);
         }
-        members
-            .entry(member.clone())
-            .or_insert(bounded_source_text(&directory.join(&member))?);
     }
     let (binding, graph, atoms, _merged) = prepare_multifile_source(&root, &members)?;
     let parent = output
@@ -730,12 +742,12 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
     if bounded_source_text(input)? != *source {
         return Err(BundleError("source changed during build"));
     }
-    for item in &items {
-        if let parser::Item::Import(decl) = item {
-            let member = member_name(&decl.path)?;
-            if bounded_source_text(&directory.join(&member))? != members[&member] {
-                return Err(BundleError("source changed during build"));
-            }
+    for member in members.keys() {
+        if member == &root {
+            continue;
+        }
+        if bounded_source_text(&directory.join(member))? != members[member] {
+            return Err(BundleError("source changed during build"));
         }
     }
     write(&stage.path().join(RECORD_FILE), &bytes)?;

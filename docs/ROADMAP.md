@@ -3000,22 +3000,26 @@ open — the records now pin the intra-source call graph as
 dependency closure is partially closed by the multifile slice below.
 
 The next C10 stage closes the file-level `import` dependency closure for
-same-directory, single-level imports: `native-bundle build` on a source
-declaring `import` items takes the multifile path and records
+same-directory imports, including nested and transitive ones:
+`native-bundle build` on a source declaring `import` items takes the
+multifile path and records
 `mumei.native-multifile-bundle/v1` under
 `mumei.native-pure-i64-multifile-linux-x86_64/v1`, pinning every original
 member byte-for-byte under `sources/` plus a file-level
-`import_graph_sha256`, and merging the closure — imported members in
-order, then the root minus its import lines — into the canonical text
-the module pipeline compiles, with `alias::`/`stem::` call qualifiers
-normalized to bare names. `check`, `recheck-source`, `recheck-llvm` and
-`recheck-artifact` re-derive the merge from the pinned members.
+`import_graph_sha256` (`{member: [sorted direct imports]}` over the
+whole closure), and merging the closure — a post-order walk emits each
+member after its own imports, diamonds once, cycles honestly rejected —
+into the canonical text the module pipeline compiles, with each member's
+`alias::`/`stem::` call qualifiers normalized to bare names file-locally
+and duplicate qualifiers per file rejected. `check`, `recheck-source`,
+`recheck-llvm` and `recheck-artifact` re-derive the merge from the
+pinned members.
 Consumer Evidence lands as `mumei.native-multifile-consumer-evidence/v1`
 — the module envelope shape plus a merge-correspondence record binding
 the `import_graph_sha256` pin to the re-derived merged text — so
 `--json`/`recheck-evidence`/`accept-*` all serve the family.
-Subdirectory/`std` paths, nested and transitive imports, non-atom
-members and alias pinning stay outside this slice. See the
+Subdirectory/`std` paths, non-atom member items and alias pinning stay
+outside this slice. See the
 [multifile bundle boundary](VERIFICATION_NATIVE.md#multifile-import-closure-bundles).
 
 Consumer Evidence reaches module bundles through the sibling envelope
