@@ -1276,8 +1276,17 @@ the producer section below).
 Nothing is claimed beyond the single-atom scopes: the result is still
 `identity_consistency_only` plus the source-postcondition and LLVM-snapshot
 recheck scopes — no object/optimizer/linker/runtime/ABI/final-executable
-semantics, no producer authenticity or attestation, and the recorded
-source-dependency digest remains pinned to the empty closure.
+semantics and no producer authenticity or attestation. The recorded
+`source_dependencies_sha256` now pins the intra-source call graph: the
+Claim Book convention of `{atom: [sorted direct callees]}` encoded as
+canonical JSON — `{"main": ["helper"], "helper": []}` for the module above
+and `{"main": []}` for the single-atom profile, whose `main` cannot call.
+It is a call-graph pin, not a file-level `import` closure, which the
+restricted profiles still do not admit. Records built before this pin
+existed carry `sha256(b"[]")` instead, so a pre-change bundle fails the
+fresh-binding comparison on the same source and must be rebuilt — the
+digest is part of the bound identity, not a stable encoding across
+toolchain versions.
 
 Regression gate:
 `LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo test --test test_native_bundle --test test_translation_validation -p mumei-core`.

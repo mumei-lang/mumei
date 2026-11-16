@@ -2994,7 +2994,9 @@ argument vectors stay build-time observations, and execution, OS exit-status,
 ABI/runtime, optimizer-path and attestation claims remain out of scope. See
 the [artifact recheck boundary](VERIFICATION_NATIVE.md#pinned-toolchain-artifact-recheck).
 General optimizer/ABI/runtime assurance, producer authenticity and the
-source-dependency closure stay open.
+file-level `import` dependency closure stay open — the records now pin the
+intra-source call graph as `source_dependencies_sha256`, the canonical JSON
+of the Claim Book `{atom: [sorted direct callees]}` map.
 
 Consumer Evidence reaches module bundles through the sibling envelope
 `mumei.native-module-consumer-evidence/v1`: `recheck-llvm --json` emits one
