@@ -588,6 +588,14 @@ pub(crate) enum NativeBundleCommand {
         #[arg(long)]
         expected_build_id: String,
     },
+    /// Execute the reproduced executable and compare its OS exit status with the record pin; no runtime/ABI semantics
+    RecheckExitStatus {
+        bundle: String,
+        source: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel
+        #[arg(long)]
+        expected_build_id: String,
+    },
 }
 
 #[derive(Subcommand)]

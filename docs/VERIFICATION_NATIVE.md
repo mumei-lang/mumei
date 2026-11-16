@@ -1457,11 +1457,48 @@ The success scope is
 `source_postcondition_llvm_snapshot_and_toolchain_identity_only/no_execution_or_runtime_semantics`.
 The check proves the pinned object and executable are byte-identical to what
 this toolchain emits from the pinned IR and object — **determinism plus
-pinned-artifact correspondence only**. Neither artifact is executed, and
-there is no OS exit-status, ABI, runtime, optimizer-path, system-library or
+pinned-artifact correspondence only**. Neither artifact is executed by this
+command, and there is no ABI, runtime, optimizer-path, system-library or
 attestation claim; a toolchain that emits different but semantically
 equivalent bytes (a different LLVM version, for example) fails closed rather
-than being normalized into agreement.
+than being normalized into agreement. The OS exit-status check is the
+separate opt-in stage below.
+
+### Pinned executable exit-status recheck
+
+`mumei native-bundle recheck-exit-status` is the execution slice of the
+consumer chain. It runs the whole `recheck-artifact` chain — pinned
+identity, fresh source postcondition, fresh LLVM snapshot and
+byte-identical object/executable reproduction — and then executes the
+reproduced `program` once with no arguments and closed stdio, comparing
+its OS exit status against the record's `link_build.expected_exit_status`
+pin:
+
+```sh
+mumei native-bundle recheck-exit-status module-bundle module.mm \
+  --expected-build-id <trusted-64-character-lowercase-sha256>
+```
+
+The producer pins `expected_exit_status` at build time by running the
+just-linked executable once under the same no-argument/closed-stdio
+conditions with a 30-second cap. Because the consumer runs the executable
+it just proved byte-identical to the pin — never the bundle's own copy —
+a matching exit status is an observation about the *pinned* artifact, not
+about whatever bytes happen to sit in the bundle directory.
+
+The outcome mapping stays honest about what cannot be evaluated: spawn
+failure, timeout, signal termination and a record that pins no
+`expected_exit_status` (pre-field records carry none) all exit 3 as
+inconclusive rather than claiming a comparison that did not run; an
+exit-status mismatch fails closed as `Different` (exit 1) after the
+artifact reproduction itself succeeded.
+
+The success scope is
+`artifact_reproduction_and_os_exit_status_observation_only/no_runtime_abi_or_semantic_proof`.
+A single execution under one environment is an OS-level observation — not
+a runtime, ABI, process-semantics or historical-execution claim. On a
+host whose OS/arch cannot run the pinned target triple, the observation
+is inconclusive by construction.
 
 ### First native consumer Evidence producer
 

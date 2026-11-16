@@ -240,6 +240,14 @@ pub struct LinkBuild {
     /// deserialize; a recheck skips the comparison when it is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_arguments_sha256: Option<String>,
+    /// OS exit status observed by running the produced executable once at
+    /// build time (no arguments, closed stdio). Optional so records pinned
+    /// before the field existed still deserialize; a recheck that executes
+    /// skips the comparison when it is absent — and it is absent whenever
+    /// the build could not observe an exit code (spawn failure, timeout or
+    /// signal termination rather than a 0..=255 code).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_exit_status: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

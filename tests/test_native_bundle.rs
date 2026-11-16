@@ -361,6 +361,57 @@ fn canonical_link_arguments_are_pinned_and_reproduced() {
 }
 
 #[test]
+fn exit_status_is_pinned_and_reproduced() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    // New records pin the executable's observed exit status — `main`
+    // returns 7 here — so a recheck that executes the byte-identical
+    // reproduction compares against the pin.
+    assert_eq!(record["link_build"]["expected_exit_status"], 7);
+    let exit_status = |source: &Path, bundle: &Path, id: &str| {
+        Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .args([
+                "native-bundle",
+                "recheck-exit-status",
+                bundle.to_str().unwrap(),
+                source.to_str().unwrap(),
+                "--expected-build-id",
+                id,
+            ])
+            .output()
+            .unwrap()
+    };
+    assert_success(&exit_status(&source, &bundle, &id));
+
+    // A record pinned before the field existed carries no pin — the
+    // recheck cannot evaluate the comparison and reports inconclusive.
+    record["link_build"]
+        .as_object_mut()
+        .unwrap()
+        .remove("expected_exit_status");
+    let bytes = serde_json::to_vec(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert_eq!(
+        exit_status(&source, &bundle, &native_bundle::sha256(&bytes))
+            .status
+            .code(),
+        Some(3)
+    );
+
+    // A wrong pin fails the reproduction check.
+    record["link_build"]["expected_exit_status"] = serde_json::json!(0);
+    let bytes = serde_json::to_vec(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(
+        !exit_status(&source, &bundle, &native_bundle::sha256(&bytes))
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn bounded_source_and_symlinks_cannot_bypass_the_consumer() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build(root.path());
@@ -2551,6 +2602,7 @@ fn multifile_bundle_builds_and_rechecks_with_honest_consumer_rejections() {
     assert_success(&recheck_llvm(&source, &bundle, &id));
     let artifact = consume("recheck-artifact", &source, &bundle, &id);
     assert_success(&artifact);
+    assert_success(&consume("recheck-exit-status", &source, &bundle, &id));
 
     // The multifile family emits the module-shaped consumer envelope
     // plus a merge-correspondence record.
