@@ -141,9 +141,19 @@ impl fmt::Debug for Evidence {
     }
 }
 
+/// Records are JSON objects only: serde's derived struct shape would also
+/// admit a field-ordered JSON sequence, which the closed-shape contract
+/// does not.
+fn is_json_object(bytes: &[u8]) -> bool {
+    bytes.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{')
+}
+
 pub fn decode(bytes: &[u8]) -> Result<Evidence, RepresentationError> {
     if bytes.len() > MAX_INPUT_BYTES {
         return Err(RepresentationError::InputTooLarge);
+    }
+    if !is_json_object(bytes) {
+        return Err(RepresentationError::InvalidShape);
     }
     let evidence: Evidence =
         serde_json::from_slice(bytes).map_err(|_| RepresentationError::InvalidShape)?;
@@ -171,6 +181,9 @@ struct EvidenceList {
 pub fn decode_list(bytes: &[u8]) -> Result<Vec<Evidence>, RepresentationError> {
     if bytes.len() > MAX_INPUT_BYTES {
         return Err(RepresentationError::InputTooLarge);
+    }
+    if !is_json_object(bytes) {
+        return Err(RepresentationError::InvalidShape);
     }
     let envelope: EvidenceList =
         serde_json::from_slice(bytes).map_err(|_| RepresentationError::InvalidShape)?;

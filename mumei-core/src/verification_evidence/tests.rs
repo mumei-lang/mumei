@@ -411,6 +411,34 @@ fn list_envelope_admits_zero_or_more_records_each_through_the_single_gate() {
     // A single record is not a list envelope, and vice versa.
     assert!(decode_list(&serde_json::to_vec(&base()).unwrap()).is_err());
     assert!(decode(&serde_json::to_vec(&list_envelope(vec![base()])).unwrap()).is_err());
+    // Objects only: a field-ordered JSON sequence is not the closed shape,
+    // for the envelope or for a single record.
+    assert!(decode_list(br#"["mumei.verification-evidence-list/v1", []]"#).is_err());
+    let order = [
+        "schema_version",
+        "subject",
+        "specification",
+        "obligation_id",
+        "semantics",
+        "method",
+        "execution",
+        "result",
+        "scope",
+        "correspondence",
+        "assumptions",
+        "exclusions",
+        "provenance",
+        "artifact_paths",
+    ];
+    let record = base();
+    let sequence: Vec<Value> = order.iter().map(|key| record[key].clone()).collect();
+    let sequence = serde_json::to_vec(&sequence).unwrap();
+    assert!(decode(&sequence).is_err());
+    let seq_envelope = format!(
+        "{{\"schema_version\": \"{LIST_SCHEMA_VERSION}\", \"evidence\": [{}]}}",
+        String::from_utf8(sequence).unwrap()
+    );
+    assert!(decode_list(seq_envelope.as_bytes()).is_err());
     for envelope in [
         json!({"schema_version": SCHEMA_VERSION, "evidence": [base()]}),
         json!({"schema_version": LIST_SCHEMA_VERSION}),
