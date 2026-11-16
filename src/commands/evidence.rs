@@ -165,12 +165,13 @@ fn accept_source(
             }
             _ => "source outside restricted profile or cannot encode evidence",
         })?;
-    write_accept(outcome, json, output)
+    write_accept(outcome, json, &saved, output)
 }
 
 fn write_accept(
     outcome: AcceptOutcome,
     json: bool,
+    saved: &[u8],
     output: &mut impl Write,
 ) -> Result<i32, &'static str> {
     match outcome {
@@ -179,9 +180,12 @@ fn write_accept(
         AcceptOutcome::Accepted => (),
     }
     let bytes = if json {
+        use sha2::{Digest, Sha256};
+        let evidence_fingerprint = format!("{:x}", Sha256::digest(saved));
         let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
             "schema_version": "mumei.source-evidence-acceptance/v1",
             "evidence_schema_version": SCHEMA_VERSION,
+            "evidence_fingerprint": evidence_fingerprint,
             "acceptance": "evaluated",
             "accepted": true,
             "scope": "restricted_c03_source_postcondition_and_same_profile_record_consistency",
@@ -374,16 +378,20 @@ mod tests {
                 (AcceptOutcome::Inconclusive, 3),
             ] {
                 let mut output = Vec::new();
-                assert_eq!(write_accept(outcome, json, &mut output).unwrap(), code);
+                assert_eq!(
+                    write_accept(outcome, json, b"record", &mut output).unwrap(),
+                    code
+                );
                 assert!(output.is_empty());
             }
             assert_eq!(
-                write_accept(AcceptOutcome::Accepted, json, &mut BrokenOutput).unwrap_err(),
+                write_accept(AcceptOutcome::Accepted, json, b"record", &mut BrokenOutput)
+                    .unwrap_err(),
                 "cannot write source acceptance descriptor"
             );
             let mut output = Vec::new();
             assert_eq!(
-                write_accept(AcceptOutcome::Accepted, json, &mut output).unwrap(),
+                write_accept(AcceptOutcome::Accepted, json, b"record", &mut output).unwrap(),
                 0
             );
             let text = String::from_utf8(output).unwrap();
@@ -396,6 +404,10 @@ mod tests {
                 );
                 assert_eq!(diagnostic["acceptance"], "evaluated");
                 assert_eq!(diagnostic["accepted"], true);
+                assert_eq!(
+                    diagnostic["evidence_fingerprint"].as_str().unwrap().len(),
+                    64
+                );
             }
         }
     }

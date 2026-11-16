@@ -421,9 +421,12 @@ historical execution, record freshness, parser/encoder/solver correctness,
 no second verifier runs), LLVM correspondence, artifact semantics, grade
 promotion and Lean kernel checks. Text mode prints the same scope in prose.
 The descriptor echoes no subject, digest or provenance: it is a diagnostic,
-not reusable Evidence, a certificate or a grade. Non-acceptance paths emit no
-stdout, including JSON mode; refutation and rejection exit 1, inconclusive
-exits 3.
+not reusable Evidence, a certificate or a grade. Its only binding is
+`evidence_fingerprint` — the SHA-256 hex of the accepted record's input
+bytes — which lets a holder prove *which* record was evaluated without the
+descriptor replaying any claim or digest as identity. Non-acceptance paths
+emit no stdout, including JSON mode; refutation and rejection exit 1,
+inconclusive exits 3.
 
 This is the first Core-side `acceptance: evaluated` surface, bounded to the
 one profile it names. It is not a general acceptance engine, mapping between
@@ -1482,7 +1485,9 @@ kernel checks. Text mode prints the same scope in prose.
 
 The descriptor echoes no subject, digest or provenance — it is a diagnostic,
 not reusable Evidence or a certificate, and the common representation gate
-rejects it as Evidence input. Non-acceptance paths emit no stdout, including
+rejects it as Evidence input. Its only binding is `evidence_fingerprint`,
+the SHA-256 hex of the accepted report's bytes, binding the descriptor to
+the evaluated record without replaying any claim. Non-acceptance paths emit no stdout, including
 JSON mode: refutation, difference, malformed/mismatched/foreign-family inputs
 and invalid pins exit 1, an inconclusive fresh query exits 3. Acceptance adds
 no new trust over the replay consumer — it names what was checked, nothing
@@ -1512,6 +1517,8 @@ producer authenticity, historical execution, optimizer/ABI/runtime/OS
 semantics, grade and Lean, and honestly names
 `link_argument_vector_reproduction` — the `arguments_sha256` build
 observation no recheck can reproduce, as `recheck-artifact` documents.
+Because artifact acceptance evaluates no record input, the descriptor emits
+no `evidence_fingerprint` key; the bundle identity pin is its binding.
 
 Acceptance is byte reproduction under the recorded toolchain, not execution,
 exit-status, ABI/runtime or optimizer-semantics proof. Non-acceptance paths

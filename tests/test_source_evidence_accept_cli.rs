@@ -65,6 +65,14 @@ fn accepted_descriptor_is_static_anonymous_and_not_reusable_evidence() {
             );
             assert_eq!(value["acceptance"], "evaluated");
             assert_eq!(value["accepted"], true);
+            // The fingerprint binds the descriptor to the accepted
+            // record's bytes — sha256 hex — without echoing the claim.
+            let saved_bytes = std::fs::read(&saved).unwrap();
+            use sha2::{Digest, Sha256};
+            assert_eq!(
+                value["evidence_fingerprint"],
+                format!("{:x}", Sha256::digest(&saved_bytes))
+            );
             assert_eq!(
                 value["checks_performed"],
                 serde_json::json!(["representation_gate", "fresh_same_profile_source_query"])

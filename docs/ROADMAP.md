@@ -3097,6 +3097,15 @@ certificate. Non-acceptance emits nothing; acceptance remains bounded to the
 one restricted profile. See the
 [acceptance contract](VERIFICATION_NATIVE.md#standalone-source-evidence-acceptance-evaluation).
 
+Acceptance descriptors now carry an optional `evidence_fingerprint` binding:
+the SHA-256 hex of the accepted record's input bytes. `accept-source` and
+`native-bundle accept-evidence` always emit it — a holder can prove *which*
+record the descriptor evaluated without the descriptor replaying any claim
+or digest as identity. `native-bundle accept-artifact` evaluates no record,
+so the key stays absent; the bundle identity pin remains its binding. The
+fingerprint is a binding token, not claim identity: descriptors still decode
+as no reusable Evidence, certificate or grade.
+
 The Agent C04/C11 planner also adds optional exact result-contract routing:
 one profile/method pair, scope, bound/assumption identifiers and correspondence
 relation/status must match one complete declared offer. Explicit/automatic
