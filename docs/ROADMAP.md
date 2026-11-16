@@ -3018,6 +3018,19 @@ historical execution, artifact/linker recheck, optimizer/ABI/runtime/OS
 semantics, grade/Lean). Non-acceptance emits nothing. See the
 [native acceptance contract](VERIFICATION_NATIVE.md#native-evidence-acceptance-evaluation).
 
+`mumei native-bundle accept-artifact <bundle> <source> --expected-build-id
+<id> [--json]` reports the deepest verifiable chain in the same vocabulary:
+the `recheck-artifact` evaluation (identity pin, fresh source/LLVM rechecks,
+then object re-emission and executable relinking byte-identical to the pinned
+artifacts under the recorded toolchain) with an acceptance scope of
+`native_bundle_source_llvm_and_toolchain_artifact_reproduction`.
+`checks_not_performed` keeps authenticity, historical execution,
+optimizer/ABI/runtime/OS semantics, grade/Lean and — honestly —
+`link_argument_vector_reproduction`, the `arguments_sha256` build observation
+no recheck can reproduce. Acceptance is byte reproduction, not execution or
+exit-status proof. See the
+[artifact acceptance contract](VERIFICATION_NATIVE.md#native-artifact-acceptance-evaluation).
+
 The next C02/C13 slice moves the common v1 representation model and runtime
 validation into `mumei_core::verification_evidence`. Native producer/replay use
 the shared shape/combination gate without changing emitted JSON or their fresh

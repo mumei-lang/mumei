@@ -1941,3 +1941,65 @@ fn module_artifact_recheck_rejects_a_repinned_foreign_executable() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("differs"));
 }
+
+#[test]
+fn accept_artifact_emits_descriptor_only_when_artifacts_reproduce() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    for action in ["accept-artifact", "accept-artifact --json"] {
+        let output = consume(action, &source, &bundle, &id);
+        assert_success(&output);
+        if action.ends_with("--json") {
+            let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                descriptor["schema_version"],
+                "mumei.native-evidence-acceptance/v1"
+            );
+            assert_eq!(descriptor["acceptance"], "evaluated");
+            assert_eq!(descriptor["accepted"], true);
+            assert_eq!(
+                descriptor["scope"],
+                "native_bundle_source_llvm_and_toolchain_artifact_reproduction"
+            );
+            assert!(descriptor["checks_performed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry == "toolchain_object_executable_reproduction"));
+            assert!(descriptor["checks_not_performed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry == "os_exit_status"));
+            assert!(mumei_core::verification_evidence::decode(&output.stdout).is_err());
+        } else {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("accepted"));
+        }
+    }
+    // A repinned foreign executable is rejected with no descriptor.
+    fs::write(
+        bundle.join(BundleFile::Executable.file_name()),
+        b"repinned non-executable bytes",
+    )
+    .unwrap();
+    let bad_id = repin(&bundle, None);
+    for action in ["accept-artifact", "accept-artifact --json"] {
+        let output = consume(action, &source, &bundle, &bad_id);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn accept_artifact_accepts_module_bundles() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), MODULE);
+    let output = consume("accept-artifact --json", &source, &bundle, &id);
+    assert_success(&output);
+    let descriptor: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        descriptor["schema_version"],
+        "mumei.native-evidence-acceptance/v1"
+    );
+    assert_eq!(descriptor["accepted"], true);
+}
