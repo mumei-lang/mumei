@@ -2030,12 +2030,17 @@ deps even with nothing escaped — and a local callee with unbounded
 effects hands the same conservative rule to `&x` arguments:
 `Set(&x, y); return x` reports every argument's deps like an
 imported call. The operand must be a bound
-identifier whose pointer names a scalar or pointer pointee (`p :=
-&b` on `int64`, `**t = v`, computed pointers stay closed), and
+identifier whose pointer names a scalar or pointer pointee — named
+through its `type_id`, or classified through the pointer fact's
+`elem` since the unnamed scalar pointee slice (`p := &b` on `int64`
+admits through `elem`; `**t = v`, computed pointers and composite
+pointees stay closed) — and
 `(*p)++`/`*t--` admit without a fold — provenance-preserving. `&`
 on non-fragment operands stays outside the fragment; a pointer to
 an unnamed or composite pointee (`*int64`, `**T`) pins nothing but
-still tracks its dep set. Writes to imported `var` members admit
+still tracks its dep set — an unnamed pointee records the mutation
+against a synthetic per-binding `<binding_id>/pointee` identity
+that can never be pinned nor redeclared. Writes to imported `var` members admit
 through the same external-mutation rule — `lib.V = v`,
 `lib.VA[i] = v` and `lib.VS.f = v` (and dot-imported forms) resolve
 the LHS until a `var` member names the target, record the imported
