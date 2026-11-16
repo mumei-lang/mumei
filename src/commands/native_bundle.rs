@@ -291,6 +291,81 @@ pub(crate) fn run(command: NativeBundleCommand) {
                 },
             }
         }
+        NativeBundleCommand::AcceptExitStatus { bundle, source, expected_build_id, json } => {
+            // The acceptance vocabulary for the exit-status slice: the
+            // descriptor claims the OS-level observation only when the
+            // comparison actually ran, and the family/argv split mirrors
+            // accept-artifact so the claim names the checks this record's
+            // recheck performed.
+            match recheck_artifact(Path::new(&bundle), Path::new(&source), &expected_build_id) {
+                Err(error) => Err(error),
+                Ok(recheck) => {
+                    let ArtifactRecheckResult {
+                        result,
+                        family,
+                        canonical_argv_compared,
+                        expected_exit_status,
+                        stage,
+                    } = recheck;
+                    match (result, expected_exit_status, stage) {
+                        (
+                            ArtifactRecheck::Rechecked,
+                            Some(expected),
+                            Some(stage),
+                        ) => {
+                            match observed_exit_status(
+                                &stage.path().join(BundleFile::Executable.file_name()),
+                            ) {
+                                Some(actual) if actual == expected => {
+                                    let acceptance = match (family, canonical_argv_compared) {
+                                        (RecordFamily::Multifile, true) => {
+                                            &MULTIFILE_EXIT_STATUS_ACCEPTANCE
+                                        }
+                                        (RecordFamily::Multifile, false) => {
+                                            &MULTIFILE_EXIT_STATUS_ACCEPTANCE_ARGV_UNPINNED
+                                        }
+                                        (RecordFamily::Single | RecordFamily::Module, true) => {
+                                            &EXIT_STATUS_ACCEPTANCE
+                                        }
+                                        (RecordFamily::Single | RecordFamily::Module, false) => {
+                                            &EXIT_STATUS_ACCEPTANCE_ARGV_UNPINNED
+                                        }
+                                    };
+                                    write_native_acceptance(
+                                        Outcome::EquivalentWithinProfile,
+                                        json,
+                                        acceptance,
+                                        None,
+                                        &mut std::io::stdout().lock(),
+                                    )
+                                    .map(|_| ())
+                                }
+                                Some(_) => Err(BundleError(
+                                    "reproduced executable's exit status differs from the pinned status",
+                                )),
+                                None => {
+                                    eprintln!("Executable exit-status observation inconclusive; spawn failed, timed out or terminated by signal.");
+                                    drop(stage);
+                                    std::process::exit(3);
+                                }
+                            }
+                        }
+                        (ArtifactRecheck::Rechecked, _, stage) => {
+                            eprintln!("Record pins no expected exit status or the reproduced executable is unavailable; inconclusive.");
+                            drop(stage);
+                            std::process::exit(3);
+                        }
+                        (ArtifactRecheck::Different, ..) => Err(BundleError(
+                            "pinned artifact differs from the toolchain's output for the pinned inputs",
+                        )),
+                        (ArtifactRecheck::Inconclusive, ..) => {
+                            eprintln!("Native source/LLVM recheck inconclusive; artifact not accepted.");
+                            std::process::exit(3);
+                        }
+                    }
+                }
+            }
+        }
     };
     if let Err(error) = result {
         eprintln!("{error}");
@@ -401,6 +476,39 @@ const ARTIFACT_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance {
     performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction"],
     not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "os_exit_status", "grade_promotion", "lean_kernel_checks"],
     text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically.\nAcceptance scope excludes producer authenticity, historical execution, canonical link argument-vector reproduction (the record pins no canonical argv), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/OS exit-status semantics, grade and Lean promotion.\n",
+};
+
+// Exit-status acceptance descriptors: the artifact acceptance claim plus
+// the OS exit-status *observation* moved into `checks_performed` — named
+// as an observation, not a semantics proof, since one run under one
+// environment is all it is. `historical_execution` and the semantic
+// exclusions stay not performed.
+const MULTIFILE_EXIT_STATUS_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
+    scope: "native_multifile_bundle_source_llvm_toolchain_reproduction_and_os_exit_status_observation",
+    performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction", "os_exit_status_observation"],
+    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "grade_promotion", "lean_kernel_checks"],
+    text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, canonical link argument vector re-derived, reproduced executable's OS exit status observed matching the record pin.\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
+};
+
+const MULTIFILE_EXIT_STATUS_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance {
+    scope: "native_multifile_bundle_source_llvm_toolchain_reproduction_and_os_exit_status_observation",
+    performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "os_exit_status_observation"],
+    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "grade_promotion", "lean_kernel_checks"],
+    text: "Native multifile artifact accepted within the pinned bundle/toolchain profile: identities bound, import closure re-merged from pinned members, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, reproduced executable's OS exit status observed matching the record pin.\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), canonical link argument-vector reproduction (the record pins no canonical argv), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
+};
+
+const EXIT_STATUS_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
+    scope: "native_bundle_source_llvm_toolchain_reproduction_and_os_exit_status_observation",
+    performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction", "os_exit_status_observation"],
+    not_performed: &["producer_authenticity", "historical_execution", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "grade_promotion", "lean_kernel_checks"],
+    text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, canonical link argument vector re-derived, reproduced executable's OS exit status observed matching the record pin.\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
+};
+
+const EXIT_STATUS_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance {
+    scope: "native_bundle_source_llvm_toolchain_reproduction_and_os_exit_status_observation",
+    performed: &["bundle_identity_binding", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "os_exit_status_observation"],
+    not_performed: &["producer_authenticity", "historical_execution", "canonical_link_argument_vector_reproduction", "raw_link_argument_vector_reproduction", "optimizer_semantics", "abi_runtime_semantics", "grade_promotion", "lean_kernel_checks"],
+    text: "Native artifact accepted within the pinned bundle/toolchain profile: identities bound, source postcondition and LLVM snapshot freshly rechecked, pinned object and executable reproduced byte-identically, reproduced executable's OS exit status observed matching the record pin.\nAcceptance scope excludes producer authenticity, historical execution (one run is an observation, not a history), canonical link argument-vector reproduction (the record pins no canonical argv), raw link argument-vector reproduction (absolute staging paths are unreproducible), optimizer/ABI/runtime/process semantics, grade and Lean promotion.\n",
 };
 
 /// On an accepted outcome emits one anonymous acceptance descriptor — the
