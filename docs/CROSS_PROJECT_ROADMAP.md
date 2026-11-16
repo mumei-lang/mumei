@@ -3278,11 +3278,12 @@ record's own profile, and the LLVM stage runs the module snapshot TV
 
 This is a wider profile boundary, not a new acceptance path: entry-point
 `main` keeps the zero-argument i64 shape, optimizer/ABI/runtime and
-final-artifact semantics remain open, and single-atom bundles are unchanged.
-`source_dependencies_sha256` now pins the intra-source call graph — the
-Claim Book `{atom: [sorted direct callees]}` convention as canonical JSON —
-rather than an honest empty pin; the file-level `import` closure stays
-unadmitted.
+final-artifact semantics remain open, and the single-atom profile is
+unchanged — its records now pin `{"main": []}` under the same convention,
+so earlier bundles must be rebuilt. `source_dependencies_sha256` pins the
+intra-source call graph — the Claim Book `{atom: [sorted direct callees]}`
+convention as canonical JSON — rather than an honest empty pin; the
+file-level `import` closure stays unadmitted.
 
 ### Wave 5 pinned toolchain artifact recheck
 
