@@ -621,11 +621,15 @@ pub fn merge_import_closure(
             .nth(line.saturating_sub(1))
             .map(str::trim)
             .unwrap_or_default();
-        let items = parser::parse_module(text);
+        // A trailing `//` comment is trivia — judge the strict grammar
+        // on the code before it. `//` inside the quoted member name
+        // would already fail the member-name grammar downstream.
+        let code = text.split("//").next().unwrap_or_default().trim_end();
+        let items = parser::parse_module(code);
         // The lenient parser tolerates a missing `;`, but the profile
         // requires the strict statement form so a malformed member
         // cannot ride the merge into a verified bundle.
-        if items.len() != 1 || !matches!(items[0], parser::Item::Import(_)) || !text.ends_with(';')
+        if items.len() != 1 || !matches!(items[0], parser::Item::Import(_)) || !code.ends_with(';')
         {
             return Err(BundleError("multiline or embedded import outside profile"));
         }
@@ -688,6 +692,15 @@ fn strip_qualifier(text: &str, qualifier: &str) -> String {
     let mut j = 0;
     while let Some(rel) = text[j..].find(qualifier) {
         let pos = j + rel;
+        // A match inside a `//` comment is comment text, not a call:
+        // stripping it would splice the line's tail onto the next line
+        // (`// h ::` before `atom f` becomes `// atom f`) and erase the
+        // following declaration.
+        let line_start = text[..pos].rfind('\n').map_or(0, |n| n + 1);
+        if text[line_start..pos].contains("//") {
+            j = pos + qualifier.len();
+            continue;
+        }
         let boundary = pos == 0 || !is_ident_byte(bytes[pos - 1]);
         let after = &text[pos + qualifier.len()..];
         let tail = after.trim_start_matches(ws);
@@ -1131,6 +1144,38 @@ mod multifile_tests {
         assert_eq!(strip_qualifier("x = h ::", "h"), "x = h ::");
         // A bare qualifier with no `::` is never touched.
         assert_eq!(strip_qualifier("let h = 3; h + 1", "h"), "let h = 3; h + 1");
+    }
+
+    #[test]
+    fn qualifier_stripping_leaves_line_comments_alone() {
+        // A qualifier look-alike inside a `//` comment is comment text:
+        // stripping `// h ::` would splice the next line onto the
+        // comment and erase the following declaration.
+        assert_eq!(strip_qualifier("// h ::\natom f", "h"), "// h ::\natom f");
+        assert_eq!(
+            strip_qualifier("x = h::f // note h::g", "h"),
+            "x = f // note h::g"
+        );
+        // A comment line still counts its `//` for later matches.
+        assert_eq!(strip_qualifier("// note\nh::f(0)", "h"), "// note\nf(0)");
+    }
+
+    #[test]
+    fn commented_import_line_and_qualified_comment_merge() {
+        let commented = BTreeMap::from([
+            (
+                "app.mm".to_owned(),
+                "// h :: is not a call\nimport \"helpers\" as h; // trailing note\n\natom main() -> i64\n    requires: true;\n    ensures: result > 0;\n    body: { h::helper(0) };\n".to_owned(),
+            ),
+            ("helpers.mm".to_owned(), HELPERS.to_owned()),
+        ]);
+        let (merged, imports) = merge_import_closure("app.mm", &commented).unwrap();
+        assert_eq!(imports, ["helpers.mm"]);
+        // The comment survives verbatim and `atom main` is not folded
+        // into it.
+        assert!(merged.contains("// h :: is not a call"));
+        assert!(merged.contains("atom main"));
+        assert!(merged.contains("body: { helper(0) };"));
     }
 
     #[test]
