@@ -3812,7 +3812,16 @@ process semantics stay in `checks_not_performed`, and
 execution, so each descriptor names exactly what it ran. Exit
 mapping mirrors the recheck (match → 0, mismatch → 1,
 inconclusive → 3); the descriptor is anonymous and cannot be
-replayed as Evidence. C02/C10 stay partial.
+replayed as Evidence. Agent's declared `native-exit-status-accept`
+route / `native_exit_status_accept` MCP tool rides the same wiring:
+`acceptance` claims only `0 → accepted` and `3 → inconclusive`,
+discharging `artifact_semantics` + `claim_truth` (the OS observation
+discharges no further category), and the anonymous descriptor is
+selected into the lineage with no candidate handoff. mumei-demo's
+`native_exit_status_recheck` and `native_exit_status_accept`
+scenarios exercise both routes end to end — every `native-bundle`
+consumer subcommand now has a declared route and a demo scenario.
+C02/C10 stay partial.
 
 
 ## No-`.mm` front door and V1 order
