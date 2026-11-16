@@ -2061,10 +2061,11 @@ A package-level `var` in the unit itself admits the same way since
 the package-globals slice — `return x + G` on `var G int64` records
 an imported transfer (dep-free value, `effects` unknown) and
 `G = v`/`G += v` mutate it like `lib.V = v` with the stored deps
-dropped — but the target is the var's own binding identity in
+dropped and `G++`/`G--` admit like `lib.V++` — but the target is
+the var's own binding identity in
 `known`, so `stale_dependents` flags honestly in both directions.
-Composite globals (`var G []int64`, `var G string`), `G++`/`G--`
-inc/dec statements and untracked function-local `var`s stay closed.
+Composite globals (`var G []int64`, `var G string`) and untracked
+function-local `var`s stay closed.
 Deeper pointee trees declare their named uses on the member
 record's `pointee_type_ids`: a fully unnamed pointee (`*lib.PU` on
 `*int64`, `(*lib.PA)[i]` on `*[4]int64`) resolves to the empty
