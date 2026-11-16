@@ -1326,16 +1326,22 @@ When the source file declares `import` statements,
 mutually unparseable with the single-atom and module schemas. The
 file-level import closure admits a deliberately small shape:
 
-- every member's imports must be same-directory basenames
-  (`import "helpers" as h;` reads `helpers.mm` next to the root — no
-  `../`, absolute paths, `std/` prefixes or subdirectories);
+- every member's imports resolve file-relative against that member's
+  own directory, exactly like the language resolver: `import "helpers"`
+  in `sub/a.mm` reads `sub/helpers.mm`, and `import "sub/dep"` descends
+  into subdirectories of the root's directory. `..` segments, absolute
+  paths, drive letters, `\`, leading-dot and empty segments are
+  rejected, so the closure is confined to the root's subtree;
 - each import sits alone on its line as `import "<member>" [as <alias>];`;
 - members contain atoms and imports only — no other top-level items —
   and the root needs at least one import; nested and transitive imports
   close over the whole pinned member set, diamonds are merged once, and
   import cycles are rejected honestly;
 - at most 64 members of at most 64 KiB each, named by the member grammar
-  (bare `.mm` basenames — no separators, drive letters or leading dots);
+  (`/`-separated nonempty `.mm` path segments — no `\`, `:` or
+  leading-dot segments); an unaliased import's qualifier is the
+  member's last-segment stem, so `x/dep` plus `y/dep` collide and need
+  an explicit `as` alias;
 - duplicate imports and self-imports are rejected, and no two imports in
   one file may bind the same qualifier — `import "a" as k; import "b" as k;`
   would merge every `k::f` into the same ambiguous bare name.
@@ -1359,8 +1365,9 @@ lines are stripped and its own call qualifiers normalized, so
 `h::helper(0)` merges as `helper(0)` — the same normalization the
 language's resolved `ModuleEnv` performs. Qualified calls are namespace
 syntax, not contract. Every
-original member is written under `sources/<name>.mm` and pinned
-byte-for-byte in the record's `sources` map; `source_files` pins the
+original member is written under `sources/<name>` at its `/`-separated
+member key (real directories on disk) and pinned byte-for-byte in the
+record's `sources` map; `source_files` pins the
 root name plus `import_graph_sha256`, the file-level
 `{member: [sorted imports]}` graph under the same canonical-JSON
 convention as the atom-level `source_dependencies_sha256` pin.
@@ -1385,8 +1392,10 @@ keep the same honesty about what stays unchecked.
 
 Nothing is claimed beyond the module scopes: same identity-plus-recheck
 boundaries, no authenticity, no import-alias pinning (the alias is
-namespace sugar the merge erases), and subdirectory/`std` paths, non-atom
-member items and alias pinning stay outside this slice.
+namespace sugar the merge erases), and non-atom member items and
+alias pinning stay outside this slice. A `std/` member names an
+ordinary local subdirectory, matching the resolver's local-first
+lookup; toolchain `std` fallback remains outside the closure.
 
 ### Pinned toolchain artifact recheck
 
