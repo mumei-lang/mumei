@@ -833,6 +833,34 @@ reported in `discharged_checks` with the other three duties in
 `checks_not_performed`.
 C02/C11 stay partial.
 
+### Wave 2 declared verify-accept route (acceptance layer)
+
+Agent's `python -m agent verify-accept --core <path> --evidence <path>
+--source <path>` is the acceptance companion of verify-recheck: it
+runs `<core> evidence accept-source <evidence> --source <src> --json`
+as one declared attempt under a `mumei.verify-accept-request/v1`
+fingerprint binding the same four inputs — Core executable, saved
+record, declared source, bounded solver budgets. Where verify-recheck
+asks whether the record is still consistent, accept-source folds the
+representation gate in on top — the record must parse AND still match
+a fresh same-profile verification — and emits the
+`mumei.source-evidence-acceptance/v1` descriptor (with
+`evidence_fingerprint` binding the record's bytes) on acceptance
+only. Only an `exited` run with `exit_code == 0` (`Accepted`) selects
+the produced descriptor; `rejected` (1) and `inconclusive` (3) runs
+publish terminal lineage with no selection. The `acceptance` field
+names only `0 → accepted` and `3 → inconclusive`: exit 1 conflates
+`Rejected` with every static failure including
+`Invalid`/`InconsistentSavedEvidence`, so it is claimed only through
+the lineage's `exit_code`; mid-run drift reports `inputs_changed`
+with no claimed outcome. An `accepted` outcome discharges the same
+honest three-check set as a consistent recheck — `claim_truth`,
+`freshness` and `semantic_correspondence` — reported in
+`discharged_checks` with the rest in `checks_not_performed`. Also
+reachable as the `verify_accept` MCP tool. With this route, every
+Core `evidence` subcommand has a declared-attempt route.
+C02/C11 stay partial.
+
 ### Wave 2 declared native-recheck route (C10 consumer)
 
 Agent's `python -m agent native-recheck --core <path> --bundle <dir>
