@@ -1241,6 +1241,24 @@ unchanged. C11 stays partial; Evidence acceptance remains open. See
 the
 [Agent probe retry gate](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-probe-retry-gate).
 
+### Wave 2 declared probe-outcome acceptance
+
+Agent's `adapter_probe.evaluate_probe_acceptance(request, outcome)`
+normalizes a declared `AdapterProbeOutcome` into a
+`mumei.probe-acceptance/v1` descriptor: `request_match` holds only
+when the outcome binds the presented request's execution fingerprint
+and attempt ordinal, and `accepted` holds only when the outcome is
+current AND decisive — an `exited`/`failed` probe answers
+`available`/`missing`; a `timed_out`/`cancelled` one answers
+`unknown` and accepts nothing. The descriptor names the checks left
+unassessed (`checks_not_performed`: stdout interpretation,
+tool-version truth, availability semantics, freshness beyond the
+stamp, producer authenticity) — declaration-level acceptance only,
+not Evidence, a verdict or a routing authority; `plan()` consumes
+observations unchanged. C11 stays partial; Evidence acceptance of
+selected attempt outputs remains a Core duty. See the
+[Agent probe-outcome acceptance](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c11-declared-probe-outcome-acceptance).
+
 ### Wave 2 declared probe cancellation
 
 Agent's `AdapterProbeRequest.cancel_request()` returns the declared
