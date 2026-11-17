@@ -2393,7 +2393,7 @@ fn is_composite_value(
         Expr::StructInit { .. } => true,
         Expr::Variable(name) => env.composite_name(name, scope).is_some(),
         Expr::FieldAccess(target, field) => {
-            env.admit_enum_values && enum_ctor(target, field, env).is_some()
+            env.admit_enum_values && enum_ctor(target, field, scope, env).is_some()
         }
         Expr::Call(name, _) => {
             (env.admit_enum_values && enum_call_ctor(name, env).is_some())
@@ -2412,11 +2412,18 @@ fn is_composite_value(
 fn enum_ctor<'a>(
     target: &Expr,
     field: &str,
+    scope: &BTreeMap<String, ScalarKind>,
     env: &KindEnv<'a>,
 ) -> Option<(&'a str, &'a ResolvedVariant)> {
     let Expr::Variable(enum_name) = target else {
         return None;
     };
+    // A bound name wins over the enum namespace: `Shape.x` where a
+    // parameter or `let` is also named `Shape` reads that binding's
+    // field, never a nullary variant constructor.
+    if scope.contains_key(enum_name.as_str()) || env.composites.contains_key(enum_name.as_str()) {
+        return None;
+    }
     let (resolved_name, variants) = env.enums.get_key_value(enum_name.as_str())?;
     let variant = variants.iter().find(|v| v.name == field)?;
     Some((resolved_name.as_str(), variant))
@@ -2425,6 +2432,12 @@ fn enum_ctor<'a>(
 /// The enum a call-spelled `E::V(args..)` constructor names — `None`
 /// when `name` is not `Enum::Variant` for an admitted enum.
 fn enum_call_ctor<'a>(name: &str, env: &KindEnv<'a>) -> Option<(&'a str, &'a ResolvedVariant)> {
+    // A callee of the same qualified spelling (an impl method on a
+    // struct sharing the enum's name) wins — it is real code the call
+    // machinery dispatches, not a constructor.
+    if env.callees.contains_key(name) {
+        return None;
+    }
     let (enum_name, variant_name) = name.split_once("::")?;
     let (resolved_name, variants) = env.enums.get_key_value(enum_name)?;
     let variant = variants.iter().find(|v| v.name == variant_name)?;
@@ -2620,7 +2633,7 @@ fn composite_kind<'a>(
             // field reads of an enum value never reach here — `match`
             // is the only enum consumer, so no payload projection
             // exists to kind-check.
-            let Some((enum_name, variant)) = enum_ctor(target, field, env) else {
+            let Some((enum_name, variant)) = enum_ctor(target, field, scope, env) else {
                 return Err(SemanticContractError::Unsupported(
                     "enum constructor outside the composite profile",
                 ));
@@ -3330,7 +3343,8 @@ fn encode_atom_body<'ctx>(
     });
     let refined_signature = slots.iter().any(|slot| {
         let name = match slot {
-            SignatureSlot::Scalar(name) | SignatureSlot::EnumField(name) => *name,
+            SignatureSlot::Scalar(name) => *name,
+            SignatureSlot::EnumField { type_name, .. } => *type_name,
             SignatureSlot::EnumTag { .. } => None,
         };
         name.is_some_and(|n| refined.contains_key(n))
@@ -3417,11 +3431,18 @@ fn encode_atom_body<'ctx>(
 /// ordinal, domain `0 <= tag < variants`) followed by one `EnumField`
 /// per payload index up to the widest variant's arity — the tagged
 /// union layout the emitter emits.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum SignatureSlot<'a> {
     Scalar(Option<&'a str>),
-    EnumTag { variants: u64 },
-    EnumField(Option<&'a str>),
+    EnumTag {
+        variants: u64,
+    },
+    /// One shared payload slot of an enum parameter: `carriers` lists
+    /// the ordinals of the variants that declare a field at this index.
+    EnumField {
+        type_name: Option<&'a str>,
+        carriers: Vec<u64>,
+    },
 }
 
 /// The declared scalar type name of every flattened input slot, in
@@ -3446,10 +3467,17 @@ fn signature_slots<'a>(
                     let mut slots = vec![SignatureSlot::EnumTag {
                         variants: variants.len() as u64,
                     }];
-                    slots.extend(
-                        (0..enum_max_arity(variants))
-                            .map(|i| SignatureSlot::EnumField(enum_slot_type(variants, i))),
-                    );
+                    slots.extend((0..enum_max_arity(variants)).map(|i| {
+                        SignatureSlot::EnumField {
+                            type_name: enum_slot_type(variants, i),
+                            carriers: variants
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, v)| v.fields.get(i).is_some())
+                                .map(|(ordinal, _)| ordinal as u64)
+                                .collect(),
+                        }
+                    }));
                     slots
                 }
                 None => vec![SignatureSlot::Scalar(p.type_name.as_deref())],
@@ -3479,51 +3507,93 @@ fn signature_domain<'ctx>(
     if slots.len() != inputs.len() {
         return Err(SemanticContractError::Unsupported("source signature arity"));
     }
+    // The tag slot of the enum parameter currently being walked — an
+    // `EnumField` slot's domain binds only under tags whose variant
+    // declares a field at that index; under every other tag the slot is
+    // padding and unconstrained.
+    let mut enum_tag: Option<&BV> = None;
     for (slot, v) in slots.into_iter().zip(inputs) {
-        let type_name = match slot {
-            SignatureSlot::Scalar(type_name) | SignatureSlot::EnumField(type_name) => type_name,
+        match slot {
             SignatureSlot::EnumTag { variants } => {
+                enum_tag = Some(v);
                 // The tag carries the variant ordinal: bounded above by
                 // the variant count (unsigned, so a negative bit pattern
                 // fails too), matching the tagged union's domain.
                 domain.push(v.bvult(&BV::from_u64(context, variants, 64)));
-                continue;
             }
-        };
-        match type_name {
-            Some("bool") => domain.push(v.bvule(&BV::from_u64(context, 1, 64))),
-            Some("u8") => domain.push(v.bvule(&BV::from_u64(context, u8::MAX as u64, 64))),
-            Some("u16") => domain.push(v.bvule(&BV::from_u64(context, u16::MAX as u64, 64))),
-            Some("u32") => domain.push(v.bvule(&BV::from_u64(context, u32::MAX as u64, 64))),
-            Some("i8") => domain.extend([
-                v.bvsge(&BV::from_i64(context, i8::MIN as i64, 64)),
-                v.bvsle(&BV::from_i64(context, i8::MAX as i64, 64)),
-            ]),
-            Some("i16") => domain.extend([
-                v.bvsge(&BV::from_i64(context, i16::MIN as i64, 64)),
-                v.bvsle(&BV::from_i64(context, i16::MAX as i64, 64)),
-            ]),
-            Some("i32") => domain.extend([
-                v.bvsge(&BV::from_i64(context, i32::MIN as i64, 64)),
-                v.bvsle(&BV::from_i64(context, i32::MAX as i64, 64)),
-            ]),
-            Some(name) => {
-                if let Some(alias) = refined.get(name) {
-                    // The alias's base bound still applies — a `u8`-based
-                    // refinement keeps its range carrier, a `bool`-leaf
-                    // its 0/1 domain — before the declaration's conjuncts
-                    // tighten it.
-                    domain.extend(scalar_domain_bounds(alias.base, v, context));
-                    let operand = if alias.kind == ScalarKind::Bool {
-                        SourceValue::Boolean(v._eq(&BV::from_u64(context, 0, 64)).not())
-                    } else {
-                        SourceValue::Integer(v.clone())
-                    };
-                    domain.extend(alias_predicates(alias, operand, context)?);
+            SignatureSlot::EnumField {
+                type_name,
+                carriers,
+            } => {
+                if carriers.is_empty() {
+                    continue;
+                }
+                let Some(tag) = enum_tag else {
+                    continue;
+                };
+                let carrier_tags = carriers
+                    .iter()
+                    .map(|ordinal| tag._eq(&BV::from_u64(context, *ordinal, 64)))
+                    .collect::<Vec<_>>();
+                let carries = Bool::or(context, &carrier_tags.iter().collect::<Vec<_>>());
+                for conjunct in declared_slot_domain(type_name, v, context, refined)? {
+                    domain.push(carries.implies(&conjunct));
                 }
             }
-            None => (),
+            SignatureSlot::Scalar(type_name) => {
+                enum_tag = None;
+                domain.extend(declared_slot_domain(type_name, v, context, refined)?);
+            }
         }
+    }
+    Ok(domain)
+}
+
+/// The domain conjuncts a declared scalar type name contributes at one
+/// flattened slot: literal range bounds plus a refined alias's base
+/// bounds and declaration conjuncts. Shared by `signature_domain`'s
+/// unconditional scalar slots and its tag-conditional enum payload
+/// slots, and by `result_conjuncts_at`'s enum result arm.
+fn declared_slot_domain<'ctx>(
+    type_name: Option<&str>,
+    v: &BV<'ctx>,
+    context: &'ctx Context,
+    refined: &RefinedEnv,
+) -> BodyResult<Vec<Bool<'ctx>>> {
+    let mut domain = Vec::new();
+    match type_name {
+        Some("bool") => domain.push(v.bvule(&BV::from_u64(context, 1, 64))),
+        Some("u8") => domain.push(v.bvule(&BV::from_u64(context, u8::MAX as u64, 64))),
+        Some("u16") => domain.push(v.bvule(&BV::from_u64(context, u16::MAX as u64, 64))),
+        Some("u32") => domain.push(v.bvule(&BV::from_u64(context, u32::MAX as u64, 64))),
+        Some("i8") => domain.extend([
+            v.bvsge(&BV::from_i64(context, i8::MIN as i64, 64)),
+            v.bvsle(&BV::from_i64(context, i8::MAX as i64, 64)),
+        ]),
+        Some("i16") => domain.extend([
+            v.bvsge(&BV::from_i64(context, i16::MIN as i64, 64)),
+            v.bvsle(&BV::from_i64(context, i16::MAX as i64, 64)),
+        ]),
+        Some("i32") => domain.extend([
+            v.bvsge(&BV::from_i64(context, i32::MIN as i64, 64)),
+            v.bvsle(&BV::from_i64(context, i32::MAX as i64, 64)),
+        ]),
+        Some(name) => {
+            if let Some(alias) = refined.get(name) {
+                // The alias's base bound still applies — a `u8`-based
+                // refinement keeps its range carrier, a `bool`-leaf
+                // its 0/1 domain — before the declaration's conjuncts
+                // tighten it.
+                domain.extend(scalar_domain_bounds(alias.base, v, context));
+                let operand = if alias.kind == ScalarKind::Bool {
+                    SourceValue::Boolean(v._eq(&BV::from_u64(context, 0, 64)).not())
+                } else {
+                    SourceValue::Integer(v.clone())
+                };
+                domain.extend(alias_predicates(alias, operand, context)?);
+            }
+        }
+        None => (),
     }
     Ok(domain)
 }
@@ -3596,14 +3666,45 @@ fn alias_predicates<'ctx>(
 
 /// `refined_conjuncts_at` for a declared result type: a struct result
 /// contributes each refined-alias field's conjuncts at that field's
-/// slot — the same field domains `StructInit` checks at construction.
+/// slot — the same field domains `StructInit` checks at construction —
+/// and an enum result contributes each payload slot's declared domain
+/// conditioned on the tag selecting a carrier, matching the
+/// tag-conditional enum-parameter convention `signature_domain` uses.
 fn result_conjuncts_at<'ctx>(
     type_name: Option<&str>,
     value: SourceValue<'ctx>,
     refined: &RefinedEnv,
     structs: &StructEnv,
+    enums: &EnumEnv,
     context: &'ctx Context,
 ) -> BodyResult<Vec<Bool<'ctx>>> {
+    if let (Some(variants), SourceValue::Enum { tag, slots, .. }) =
+        (type_name.and_then(|n| enums.get(n)), &value)
+    {
+        let mut out = Vec::new();
+        for (i, slot_value) in slots.iter().enumerate() {
+            let carrier_tags = variants
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| v.fields.get(i).is_some())
+                .map(|(ordinal, _)| tag._eq(&BV::from_u64(context, ordinal as u64, 64)))
+                .collect::<Vec<_>>();
+            if carrier_tags.is_empty() {
+                continue;
+            }
+            let carries = Bool::or(context, &carrier_tags.iter().collect::<Vec<_>>());
+            let type_name = enum_slot_type(variants, i);
+            let conjuncts = match slot_value {
+                SourceValue::Integer(v) => declared_slot_domain(type_name, v, context, refined)?,
+                SourceValue::Boolean(_) => {
+                    refined_conjuncts_at(type_name, slot_value.clone(), refined, context)?
+                }
+                _ => continue,
+            };
+            out.extend(conjuncts.iter().map(|c| carries.implies(c)));
+        }
+        return Ok(out);
+    }
     let (Some(fields), SourceValue::Composite(values)) =
         (type_name.and_then(|n| structs.get(n)), &value)
     else {
@@ -3864,6 +3965,7 @@ fn module_atom_obligations<'ctx>(
         result_operand,
         refined,
         structs,
+        enums,
         context,
     )?);
     let post = Bool::and(context, &post.iter().collect::<Vec<_>>());
@@ -3979,6 +4081,7 @@ fn module_atom_obligations<'ctx>(
             ensures_env["result"].clone(),
             refined,
             structs,
+            enums,
             context,
         )?);
         let callee_post = Bool::and(context, &callee_post.iter().collect::<Vec<_>>());
@@ -4878,9 +4981,14 @@ fn source_expr<'ctx>(
         Expr::FieldAccess(target, field) => {
             // A nullary `E::V` — parsed as field access on the enum
             // name — constructs the variant directly; `match` reads
-            // the produced value.
+            // the produced value. A bound variable of the same name
+            // wins: `Shape.x` on a `Shape` parameter or `let` is a
+            // field read, never a constructor.
             if let Expr::Variable(enum_name) = target.as_ref() {
-                if let Some((resolved_name, variants)) = call_returns.enums.get_key_value(enum_name)
+                if let Some((resolved_name, variants)) = call_returns
+                    .enums
+                    .get_key_value(enum_name)
+                    .filter(|_| !env.contains_key(enum_name))
                 {
                     let Some(ordinal) = variants.iter().position(|(v, _)| v == field) else {
                         return Err(SemanticContractError::Unsupported(
@@ -5379,7 +5487,10 @@ fn source_expr<'ctx>(
             // value directly — tag ordinal plus payload slots — not a
             // call site: it carries no obligation domain.
             if let Some((enum_name, variant_name)) = name.split_once("::") {
-                if let Some((resolved_name, variants)) = call_returns.enums.get_key_value(enum_name)
+                if let Some((resolved_name, variants)) = call_returns
+                    .enums
+                    .get_key_value(enum_name)
+                    .filter(|_| !call_returns.returns.contains_key(name))
                 {
                     let Some(ordinal) = variants.iter().position(|(v, _)| v == variant_name) else {
                         return Err(SemanticContractError::Unsupported(
@@ -7160,6 +7271,51 @@ mod tests {
             module_source_profile(&params_only, RefinedAdmission::CompositeV6).unwrap(),
             PURE_I64_COMPOSITE_PROFILE_V4
         );
+    }
+
+    #[test]
+    fn composite_v6_enum_payload_domains_are_tag_conditional() {
+        let outcomes =
+            |source: &str| refined_module_outcomes_admission(source, RefinedAdmission::CompositeV6);
+        // Payload fields carry refined types: `Edge`'s `w` is positive.
+        let decl = "type Pos = i64 where v > 0;\n\
+                    enum Shape { Dot, Edge(w: Pos) }";
+        // A constructor whose payload violates the field's refined
+        // domain is refuted — `Shape::Edge(0)` cannot produce a valid
+        // `Shape`.
+        let bad_ctor = format!(
+            "{decl}\natom mk() -> Shape requires: true; ensures: true; body: {{ Shape::Edge(0) }};\n{MAIN0}"
+        );
+        assert!(outcomes(&bad_ctor).contains(&z3::SatResult::Sat));
+        // Under a different tag the same slot is padding: passing a
+        // nullary `Shape::Dot` to an `Edge`-carrying signature is valid
+        // — the payload domain binds only when the tag selects `Edge`.
+        let dot_call = format!(
+            "{decl}\n\
+             atom read(s: Shape) -> i64 requires: true; ensures: result >= 0; body: {{ match s {{ Shape::Edge(v) => v, _ => 0 }} }};\n\
+             atom use_it() -> i64 requires: true; ensures: result >= 0; body: {{ read(Shape::Dot) }};\n{MAIN0}"
+        );
+        assert!(outcomes(&dot_call)
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
+        // A bound variable of the same name wins over the enum
+        // namespace: `Shape.x` on a `Shape` parameter is a field read,
+        // never a nullary constructor.
+        let shadowed = format!(
+            "{decl}\n\
+             struct Point {{ x: i64, y: i64 }}\n\
+             atom sum(Shape: Point) -> i64 requires: true; ensures: result == Shape.x + Shape.y; body: {{ Shape.x + Shape.y }};\n{MAIN0}"
+        );
+        assert!(extract_pure_i64_module_contracts(
+            &shadowed,
+            "m.mm",
+            None,
+            RefinedAdmission::CompositeV6
+        )
+        .is_ok());
+        assert!(outcomes(&shadowed)
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
     }
 
     #[test]
