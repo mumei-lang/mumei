@@ -2903,7 +2903,10 @@ pub(crate) fn expr_to_z3<'a>(
                             // `ensures` reads post-write fields —
                             // freshen the callee's written composite
                             // params so its clauses don't assert on the
-                            // caller's input-time slots.
+                            // caller's input-time slots. The recursion
+                            // antecedent below must still see the input
+                            // fields — keep a pre-havoc copy.
+                            let mut pre_havoc_env = call_env.clone();
                             havoc_written_callee_fields(vc, &callee, &mut call_env);
                             let ens_ast = parse_expression(&caller_ensures);
 
@@ -2932,7 +2935,7 @@ pub(crate) fn expr_to_z3<'a>(
                                         vc,
                                         &callee,
                                         &caller_requires,
-                                        &mut call_env,
+                                        &mut pre_havoc_env,
                                         scc_internal,
                                     )?;
                                     solver.assert(&ante.implies(&ens_bool));
@@ -5089,7 +5092,10 @@ pub(crate) fn expr_to_z3<'a>(
                         // `ensures` reads post-write fields — freshen
                         // the callee's written composite params so its
                         // clauses don't assert on the caller's
-                        // input-time slots.
+                        // input-time slots. The recursion antecedent
+                        // below must still see the input fields — keep
+                        // a pre-havoc copy.
+                        let mut pre_havoc_env = call_env.clone();
                         havoc_written_callee_fields(vc, &callee_atom, &mut call_env);
                         let ens_ast = parse_expression(&caller_ensures);
                         if use_rec_fn {
@@ -5110,7 +5116,7 @@ pub(crate) fn expr_to_z3<'a>(
                                     vc,
                                     &callee_atom,
                                     &caller_requires,
-                                    &mut call_env,
+                                    &mut pre_havoc_env,
                                     scc_internal,
                                 )?;
                                 solver.assert(&ante.implies(&ens_bool));
