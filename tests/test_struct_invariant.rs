@@ -167,3 +167,23 @@ fn struct_literals_must_establish_refined_alias_field_types() {
             || String::from_utf8_lossy(&out.stdout).contains("type 'Pos' predicate violated")
     );
 }
+
+#[test]
+fn struct_results_bind_result_fields_and_literals_prove_alias_domains() {
+    // `result.x` in `ensures` reads the returned field, and a returned
+    // struct's field reads through a struct `let` see the callee's
+    // postcondition.
+    let out = run_verify(&fixture("test_struct_result.mm"), "result_ok");
+    assert!(
+        out.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // A returned literal still has to establish its alias field domain.
+    let out = run_verify(&fixture("test_struct_result_violation.mm"), "result_bad");
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("type 'Pos' predicate violated")
+            || String::from_utf8_lossy(&out.stdout).contains("type 'Pos' predicate violated")
+    );
+}

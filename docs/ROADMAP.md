@@ -3317,8 +3317,15 @@ verifier now assumes a field's alias predicates for struct parameters,
 and literal-field modules keep `/v4`. `recheck-source`
 covers the composite fragment, and `recheck-llvm` pairs each emitted
 `{ i64, ... }` struct formal with the flattened field slots
-(`extractvalue` reads and pass-through call arguments); built, merged,
-returned or nested aggregates still fail closed. This is a wider admitted fragment, not deeper
+(`extractvalue` reads and pass-through call arguments). Composite
+slice 3 admits struct values under `mumei.pure-i64-composite/v3` and the
+`/v6` profiles, pinned only when an atom uses one: struct results
+(`result.f` in `ensures`), struct literals, struct-valued `let`s and
+field reads on struct-returning calls. `recheck-llvm` pairs `insertvalue`
+chains, folded constant aggregates, aggregate call results and returned
+aggregates with the field slots. Undefined slots, merged or nested
+aggregates, branch-merged struct values and field assignment still fail
+closed. This is a wider admitted fragment, not deeper
 assurance: the same identity-plus-recheck scopes apply. See the
 [composite struct member profile](VERIFICATION_NATIVE.md#composite-struct-member-profile-v4).
 

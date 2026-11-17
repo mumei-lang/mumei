@@ -4,8 +4,8 @@
 use inkwell::{context::Context as LlvmContext, memory_buffer::MemoryBuffer, values::AsValueRef};
 use llvm_sys::{core::*, prelude::*, LLVMIntPredicate, LLVMOpcode, LLVMTypeKind};
 use mumei_core::semantic_contract::{
-    encode_pure_i64_body, encode_pure_i64_module, module_source_profile, PureI64Body,
-    RefinedAdmission, LOOP_BOUND, PURE_I64_WRAPPING_PROFILE,
+    aggregate_value, call_field_decl, encode_pure_i64_body, encode_pure_i64_module,
+    module_source_profile, PureI64Body, RefinedAdmission, LOOP_BOUND, PURE_I64_WRAPPING_PROFILE,
 };
 use std::collections::{BTreeMap, HashMap};
 use z3::{
@@ -566,7 +566,7 @@ unsafe fn compare_function<'ctx>(
     // A struct parameter is one aggregate formal on the IR side and its
     // flattened field slots on the source side, so the IR arity is the
     // declared parameter count, not the slot count.
-    check_function(raw, model.param_shapes.len(), loops)?;
+    check_function(raw, model.param_shapes.len(), model.result_shape, loops)?;
     let mut encoder = IrEncoder::new(context, call_renames, loops);
     let returns = encoder.encode(raw, &model.inputs, &model.param_shapes)?;
     let ir_definedness = encoder.definedness;
@@ -747,6 +747,24 @@ unsafe fn aggregate_fields(ty: LLVMTypeRef) -> Option<u32> {
     .then_some(count)
 }
 
+/// A constant of an admitted aggregate type whose slots the encoder can
+/// read: whole `undef`/`poison` (every slot undefined),
+/// `zeroinitializer`, or a literal struct of integer and `undef`
+/// elements.
+unsafe fn constant_aggregate(value: LLVMValueRef) -> bool {
+    if LLVMIsConstant(value) == 0 || aggregate_fields(LLVMTypeOf(value)).is_none() {
+        return false;
+    }
+    if LLVMIsUndef(value) != 0 || !LLVMIsAConstantAggregateZero(value).is_null() {
+        return true;
+    }
+    !LLVMIsAConstantStruct(value).is_null()
+        && (0..LLVMGetNumOperands(value) as u32).all(|i| {
+            let element = LLVMGetOperand(value, i);
+            LLVMIsUndef(element) != 0 || !LLVMIsAConstantInt(element).is_null()
+        })
+}
+
 unsafe fn check_module_environment(module: LLVMModuleRef) -> Result<()> {
     let mut asm_size = 0;
     LLVMGetModuleInlineAsm(module, &mut asm_size);
@@ -785,7 +803,12 @@ unsafe fn check_module(module: LLVMModuleRef) -> Result<()> {
             member = LLVMGetNextFunction(member);
             continue;
         }
-        check_function(member, LLVMCountParams(member) as usize, true)?;
+        check_function(
+            member,
+            LLVMCountParams(member) as usize,
+            member_result_shape(member),
+            true,
+        )?;
         member = LLVMGetNextFunction(member);
     }
     Ok(())
@@ -859,7 +882,8 @@ unsafe fn check_call(call: LLVMValueRef) -> Result<()> {
         }
     }
     let signature = LLVMGetCalledFunctionType(call);
-    if width(LLVMGetReturnType(signature))? != 64
+    let ret = LLVMGetReturnType(signature);
+    if (aggregate_fields(ret).is_none() && width(ret)? != 64)
         || LLVMCountParamTypes(signature) != LLVMGetNumArgOperands(call)
         || LLVMIsFunctionVarArg(signature) != 0
     {
@@ -904,10 +928,35 @@ unsafe fn check_function_header(function: LLVMValueRef, params: usize) -> Result
     Ok(())
 }
 
-unsafe fn check_function(function: LLVMValueRef, params: usize, allow_cycles: bool) -> Result<()> {
+/// A member's own result shape for the module pre-screen: an admitted
+/// aggregate return is checked as that many slots, anything else as
+/// the scalar i64/i1 return.
+unsafe fn member_result_shape(member: LLVMValueRef) -> Option<usize> {
+    aggregate_fields(LLVMGetReturnType(LLVMGlobalGetValueType(member))).map(|n| n as usize)
+}
+
+/// `result_shape` is the source result layout: `None` for a scalar
+/// result (an i64/i1 return), `Some(n)` for a struct result, whose
+/// return must be an admitted aggregate of exactly `n` slots.
+unsafe fn check_function(
+    function: LLVMValueRef,
+    params: usize,
+    result_shape: Option<usize>,
+    allow_cycles: bool,
+) -> Result<()> {
     check_function_header(function, params)?;
-    if width(LLVMGetReturnType(LLVMGlobalGetValueType(function)))? != 64 {
-        return Err(ValidationError("unsupported LLVM signature"));
+    let ret = LLVMGetReturnType(LLVMGlobalGetValueType(function));
+    match result_shape {
+        None => {
+            if width(ret)? != 64 {
+                return Err(ValidationError("unsupported LLVM signature"));
+            }
+        }
+        Some(slots) => {
+            if aggregate_fields(ret) != Some(slots as u32) {
+                return Err(ValidationError("unsupported LLVM signature"));
+            }
+        }
     }
     if LLVMCountBasicBlocks(function) == 0 || LLVMCountBasicBlocks(function) as usize > MAX_BLOCKS {
         return Err(ValidationError("LLVM block limit"));
@@ -934,20 +983,35 @@ unsafe fn check_function(function: LLVMValueRef, params: usize, allow_cycles: bo
                 // A call's last operand is the callee itself — a
                 // function reference, not an integer value.
                 let is_callee = opcode == LLVMOpcode::LLVMCall && i == LLVMGetNumOperands(inst) - 1;
-                if LLVMIsUndef(value) != 0 || LLVMIsPoison(value) != 0 {
-                    return Err(ValidationError("undef or poison unsupported"));
-                }
-                // An aggregate is only ever an admitted struct formal of
-                // this function, read by `extractvalue` or passed through
-                // to a call — never built (`insertvalue`), merged (`phi`,
-                // `select`), stored, returned or spelled as a constant.
+                // An aggregate is an admitted struct formal, an
+                // `insertvalue` chain or a call's struct result. It is
+                // read by `extractvalue`, extended by `insertvalue`,
+                // passed to a call or returned — never merged (`phi`,
+                // `select`) or stored. A constant aggregate (the
+                // emitter's folded literal) holds integer or `undef`
+                // elements only; an `undef` slot stays undefined and
+                // fails closed wherever it is read.
                 if !is_callee && aggregate_fields(LLVMTypeOf(value)).is_some() {
-                    let use_ok = (opcode == LLVMOpcode::LLVMExtractValue && i == 0)
-                        || opcode == LLVMOpcode::LLVMCall;
-                    if !use_ok || LLVMIsAArgument(value).is_null() {
+                    let use_ok = (matches!(
+                        opcode,
+                        LLVMOpcode::LLVMExtractValue | LLVMOpcode::LLVMInsertValue
+                    ) && i == 0)
+                        || opcode == LLVMOpcode::LLVMCall
+                        || opcode == LLVMOpcode::LLVMRet;
+                    let source_ok = !LLVMIsAArgument(value).is_null()
+                        || (!LLVMIsAInstruction(value).is_null()
+                            && matches!(
+                                LLVMGetInstructionOpcode(value),
+                                LLVMOpcode::LLVMInsertValue | LLVMOpcode::LLVMCall
+                            ))
+                        || constant_aggregate(value);
+                    if !use_ok || !source_ok {
                         return Err(ValidationError("unsupported LLVM aggregate value"));
                     }
                     continue;
+                }
+                if LLVMIsUndef(value) != 0 || LLVMIsPoison(value) != 0 {
+                    return Err(ValidationError("undef or poison unsupported"));
                 }
                 if !is_callee && LLVMValueIsBasicBlock(value) == 0 {
                     width(LLVMTypeOf(value))?;
@@ -979,6 +1043,15 @@ unsafe fn check_function(function: LLVMValueRef, params: usize, allow_cycles: bo
                 }
                 LLVMOpcode::LLVMExtractValue => {
                     if LLVMGetNumIndices(inst) != 1 || width(LLVMTypeOf(inst))? != 64 {
+                        return Err(ValidationError("unsupported LLVM aggregate value"));
+                    }
+                }
+                // One field of an admitted aggregate set from an i64.
+                LLVMOpcode::LLVMInsertValue => {
+                    if LLVMGetNumIndices(inst) != 1
+                        || aggregate_fields(LLVMTypeOf(inst)).is_none()
+                        || width(LLVMTypeOf(LLVMGetOperand(inst, 1)))? != 64
+                    {
                         return Err(ValidationError("unsupported LLVM aggregate value"));
                     }
                 }
@@ -1079,7 +1152,12 @@ unsafe fn check_native_module_multi(module: LLVMModuleRef, user_main: LLVMValueR
             && !(LLVMIsDeclaration(member) != 0
                 && callee_name(member).as_deref() == Some(CANCEL_POLL_INTRINSIC))
         {
-            check_function(member, LLVMCountParams(member) as usize, true)?;
+            check_function(
+                member,
+                LLVMCountParams(member) as usize,
+                member_result_shape(member),
+                true,
+            )?;
         }
         member = LLVMGetNextFunction(member);
     }
@@ -1186,10 +1264,15 @@ struct IrEncoder<'ctx, 'renames> {
     /// recording a return, mirroring the source's bounded unroll.
     loops: bool,
     depths: HashMap<usize, u32>,
-    /// Each admitted aggregate formal's field values: the source slots
-    /// its struct parameter flattens into, in field declaration order.
-    /// Formals never change along a path, so one map serves every path.
-    aggregates: HashMap<usize, Vec<BV<'ctx>>>,
+    /// Each aggregate value's field slots in field declaration order: a
+    /// formal's are the source slots its struct parameter flattens into,
+    /// an `insertvalue` chain's the values written so far (`None` for a
+    /// slot never written), a call result's the per-field uninterpreted
+    /// applications. The walk is depth-first and restores this map at
+    /// every conditional branch, so a value re-bound when a deeper path
+    /// re-enters its block (a later loop iteration) never leaks into a
+    /// sibling path.
+    aggregates: HashMap<usize, Vec<Option<BV<'ctx>>>>,
 }
 impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
     fn new(
@@ -1230,6 +1313,85 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             .ok_or(ValidationError("unresolved LLVM value"))
     }
 
+    /// Every slot of an aggregate value, failing closed on a slot no
+    /// `insertvalue` wrote.
+    unsafe fn aggregate_slots(&self, value: LLVMValueRef) -> Result<Vec<BV<'ctx>>> {
+        self.aggregate(value)?
+            .into_iter()
+            .map(|slot| slot.ok_or(ValidationError("undefined LLVM aggregate slot")))
+            .collect()
+    }
+
+    /// An aggregate value's slots: a constant's elements (`None` for an
+    /// `undef` element) or the slots recorded for a formal,
+    /// `insertvalue` or call result.
+    unsafe fn aggregate(&self, value: LLVMValueRef) -> Result<Vec<Option<BV<'ctx>>>> {
+        if constant_aggregate(value) {
+            let count = aggregate_fields(LLVMTypeOf(value))
+                .ok_or(ValidationError("unsupported LLVM aggregate value"))?
+                as usize;
+            if LLVMIsUndef(value) != 0 {
+                return Ok(vec![None; count]);
+            }
+            if !LLVMIsAConstantAggregateZero(value).is_null() {
+                return Ok(vec![Some(BV::from_u64(self.ctx, 0, 64)); count]);
+            }
+            return Ok((0..count as u32)
+                .map(|i| {
+                    let element = LLVMGetOperand(value, i);
+                    (LLVMIsUndef(element) == 0)
+                        .then(|| BV::from_u64(self.ctx, LLVMConstIntGetZExtValue(element), 64))
+                })
+                .collect());
+        }
+        self.aggregates
+            .get(&(value as usize))
+            .cloned()
+            .ok_or(ValidationError("unsupported LLVM aggregate value"))
+    }
+
+    /// A call's source callee name and flattened arguments: a struct
+    /// argument contributes its field slots, the same arguments in the
+    /// same order the source call site applies. `None` for the
+    /// cancellation-poll intrinsic.
+    unsafe fn call_operands(
+        &self,
+        inst: LLVMValueRef,
+        values: &HashMap<usize, BV<'ctx>>,
+    ) -> Result<Option<(String, Vec<BV<'ctx>>)>> {
+        let callee = LLVMGetCalledValue(inst);
+        let mut name_len = 0;
+        let raw_name = LLVMGetValueName2(callee, &mut name_len);
+        if raw_name.is_null() {
+            return Err(ValidationError("unsupported LLVM call"));
+        }
+        let name =
+            String::from_utf8_lossy(std::slice::from_raw_parts(raw_name as *const u8, name_len))
+                .into_owned();
+        if name == CANCEL_POLL_INTRINSIC && LLVMIsDeclaration(callee) != 0 {
+            return Ok(None);
+        }
+        // An emitted member name maps back to the source atom name its
+        // call sites share with the source encoder (`__mumei_user_main`
+        // back to `main` on native paths).
+        let name = self
+            .call_renames
+            .get(name.as_str())
+            .cloned()
+            .unwrap_or(name);
+        let operands = LLVMGetNumArgOperands(inst) as usize;
+        let mut args = Vec::with_capacity(operands);
+        for index in 0..operands {
+            let arg = LLVMGetOperand(inst, index as u32);
+            if aggregate_fields(LLVMTypeOf(arg)).is_some() {
+                args.extend(self.aggregate_slots(arg)?);
+            } else {
+                args.push(self.value(arg, values)?);
+            }
+        }
+        Ok(Some((name, args)))
+    }
+
     fn condition(&self, value: &BV<'ctx>) -> Result<Bool<'ctx>> {
         if value.get_size() != 1 {
             return Err(ValidationError("LLVM i1 condition expected"));
@@ -1266,7 +1428,8 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     if aggregate_fields(LLVMTypeOf(param)) != Some(*fields as u32) {
                         return Err(ValidationError("LLVM parameter shape mismatch"));
                     }
-                    let fields: Vec<BV<'ctx>> = slots.by_ref().take(*fields).cloned().collect();
+                    let fields: Vec<Option<BV<'ctx>>> =
+                        slots.by_ref().take(*fields).cloned().map(Some).collect();
                     self.aggregates.insert(param as usize, fields);
                 }
             }
@@ -1366,9 +1529,50 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 values.insert(phi as usize, result);
             }
             if op == LLVMOpcode::LLVMRet {
-                let value = self.value(LLVMGetOperand(inst, 0), &values)?;
+                // A returned aggregate compares as its slots laid out
+                // the way the source lays out a struct result.
+                let operand = LLVMGetOperand(inst, 0);
+                let value = if aggregate_fields(LLVMTypeOf(operand)).is_some() {
+                    aggregate_value(&self.aggregate_slots(operand)?)
+                } else {
+                    self.value(operand, &values)?
+                };
                 returns.push((guard, value));
                 return Ok(());
+            }
+            if op == LLVMOpcode::LLVMInsertValue {
+                let mut slots = self.aggregate(LLVMGetOperand(inst, 0))?;
+                let field = self.value(LLVMGetOperand(inst, 1), &values)?;
+                *slots
+                    .get_mut(*LLVMGetIndices(inst) as usize)
+                    .ok_or(ValidationError("unsupported LLVM aggregate value"))? = Some(field);
+                self.aggregates.insert(inst as usize, slots);
+                inst = LLVMGetNextInstruction(inst);
+                continue;
+            }
+            if op == LLVMOpcode::LLVMCall {
+                if let Some(count) = aggregate_fields(LLVMTypeOf(inst)) {
+                    // A struct-returning call: one uninterpreted
+                    // application per field slot, the declarations the
+                    // source encoder applies at the same call site.
+                    let (name, args) = self
+                        .call_operands(inst, &values)?
+                        .ok_or(ValidationError("unsupported LLVM call"))?;
+                    let refs: Vec<&dyn z3::ast::Ast> =
+                        args.iter().map(|v| v as &dyn z3::ast::Ast).collect();
+                    let slots = (0..count as usize)
+                        .map(|i| {
+                            call_field_decl(self.ctx, &name, args.len(), i)
+                                .apply(&refs)
+                                .as_bv()
+                                .map(Some)
+                                .ok_or(ValidationError("unsupported LLVM call result"))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    self.aggregates.insert(inst as usize, slots);
+                    inst = LLVMGetNextInstruction(inst);
+                    continue;
+                }
             }
             if op == LLVMOpcode::LLVMUnreachable {
                 // `unreachable` executes LLVM UB: the path must never run
@@ -1384,6 +1588,12 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     return self.block(LLVMGetSuccessor(inst, 0), block, values, guard, returns);
                 }
                 let cond = self.condition(&self.value(LLVMGetCondition(inst), &values)?)?;
+                // Aggregate slots live in `self.aggregates`, not the
+                // per-path `values`: the second successor must see them
+                // as they were at this branch, not as the first
+                // successor's subtree (a later loop iteration) rebound
+                // them.
+                let aggregates = self.aggregates.clone();
                 self.block(
                     LLVMGetSuccessor(inst, 0),
                     block,
@@ -1391,6 +1601,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     Bool::and(self.ctx, &[&guard, &cond]),
                     returns,
                 )?;
+                self.aggregates = aggregates;
                 return self.block(
                     LLVMGetSuccessor(inst, 1),
                     block,
@@ -1400,74 +1611,36 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 );
             }
             let value = if op == LLVMOpcode::LLVMExtractValue {
-                // `check_function` admitted only a one-index read of a
-                // struct formal; the index selects that field's slot.
-                let fields = self
-                    .aggregates
-                    .get(&(LLVMGetOperand(inst, 0) as usize))
-                    .ok_or(ValidationError("unsupported LLVM aggregate value"))?;
+                // `check_function` admitted only a one-index read of an
+                // admitted aggregate; the index selects that field's slot.
+                let mut fields = self.aggregate(LLVMGetOperand(inst, 0))?;
                 let index = *LLVMGetIndices(inst) as usize;
+                if index >= fields.len() {
+                    return Err(ValidationError("unsupported LLVM aggregate value"));
+                }
                 fields
-                    .get(index)
-                    .cloned()
-                    .ok_or(ValidationError("unsupported LLVM aggregate value"))?
+                    .swap_remove(index)
+                    .ok_or(ValidationError("undefined LLVM aggregate slot"))?
             } else if op == LLVMOpcode::LLVMCall {
                 // Model the call as an uninterpreted function of its
                 // arguments; `call_decl` gives it the same declaration
                 // the source encoder builds for `Expr::Call` on the
                 // same callee name and arity.
-                let callee = LLVMGetCalledValue(inst);
-                let mut name_len = 0;
-                let raw_name = LLVMGetValueName2(callee, &mut name_len);
-                if raw_name.is_null() {
-                    return Err(ValidationError("unsupported LLVM call"));
-                }
-                let name = String::from_utf8_lossy(std::slice::from_raw_parts(
-                    raw_name as *const u8,
-                    name_len,
-                ))
-                .into_owned();
-                if name == CANCEL_POLL_INTRINSIC && LLVMIsDeclaration(callee) != 0 {
+                match self.call_operands(inst, &values)? {
                     // Cooperative cancellation is an effect outside the
                     // pure profile: the claim covers executions where
                     // the poll never fires, so its result binds to 0. A
                     // defined function that merely shares the name stays
                     // a normal call site — its body decides the result.
-                    BV::from_i64(self.ctx, 0, 64)
-                } else {
-                    // An emitted member name maps back to the source atom
-                    // name its call sites share with the source encoder
-                    // (`__mumei_user_main` back to `main` on native paths).
-                    let name = self
-                        .call_renames
-                        .get(name.as_str())
-                        .map(String::as_str)
-                        .unwrap_or(name.as_str());
-                    // A passed-through struct formal flattens into its
-                    // field slots — the same arguments, in the same
-                    // order, the source call site applies.
-                    let operands = LLVMGetNumArgOperands(inst) as usize;
-                    let mut args = Vec::with_capacity(operands);
-                    for index in 0..operands {
-                        let arg = LLVMGetOperand(inst, index as u32);
-                        if aggregate_fields(LLVMTypeOf(arg)).is_some() {
-                            let fields = self
-                                .aggregates
-                                .get(&(arg as usize))
-                                .ok_or(ValidationError("unsupported LLVM aggregate value"))?;
-                            args.extend(fields.iter().cloned());
-                        } else {
-                            args.push(self.value(arg, &values)?);
-                        }
+                    None => BV::from_i64(self.ctx, 0, 64),
+                    Some((name, args)) => {
+                        let refs: Vec<&dyn z3::ast::Ast> =
+                            args.iter().map(|v| v as &dyn z3::ast::Ast).collect();
+                        mumei_core::semantic_contract::call_decl(self.ctx, &name, args.len())
+                            .apply(&refs)
+                            .as_bv()
+                            .ok_or(ValidationError("unsupported LLVM call result"))?
                     }
-                    let refs: Vec<&dyn z3::ast::Ast> =
-                        args.iter().map(|v| v as &dyn z3::ast::Ast).collect();
-                    let applied =
-                        mumei_core::semantic_contract::call_decl(self.ctx, name, args.len())
-                            .apply(&refs);
-                    applied
-                        .as_bv()
-                        .ok_or(ValidationError("unsupported LLVM call result"))?
                 }
             } else {
                 let a = self.value(LLVMGetOperand(inst, 0), &values)?;
