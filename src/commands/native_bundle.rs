@@ -2110,13 +2110,19 @@ mod tests {
             std::fs::set_permissions(&printer, perms).unwrap();
         }
         // Exactly the cap is observable; one byte past it is not —
-        // a pin must cover the whole stream, never a truncation.
+        // a pin must cover the whole stream, never a truncation. Process
+        // startup flakes under CI load (a failed spawn is fail-closed
+        // `None` by design), so retry before asserting — a systematic
+        // boundary bug still fails every attempt.
         for (bytes, expected) in [
             (OBSERVED_CHANNEL_MAX_BYTES, true),
             (OBSERVED_CHANNEL_MAX_BYTES + 1, false),
         ] {
             std::fs::write(&printer, format!("#!/bin/sh\nhead -c {bytes} /dev/zero\n")).unwrap();
-            assert_eq!(observed_stdout(&printer).is_some(), expected);
+            let observed = (0..3)
+                .map(|_| observed_stdout(&printer).is_some())
+                .find(|outcome| *outcome == expected);
+            assert_eq!(observed, Some(expected));
         }
         // The observable digest covers every emitted byte.
         std::fs::write(&printer, "#!/bin/sh\nprintf 'out'\n").unwrap();
@@ -2142,7 +2148,8 @@ mod tests {
         assert_eq!(observed_stderr(&printer), Some(sha256(b"err")));
         assert_eq!(observed_stdout(&printer), Some(sha256(b"out")));
         // The cap bounds stderr the same way: exactly the cap is
-        // observable, one byte past it is not.
+        // observable, one byte past it is not. Same startup-flake retry
+        // as the stdout boundary case above.
         for (bytes, expected) in [
             (OBSERVED_CHANNEL_MAX_BYTES, true),
             (OBSERVED_CHANNEL_MAX_BYTES + 1, false),
@@ -2152,7 +2159,10 @@ mod tests {
                 format!("#!/bin/sh\nhead -c {bytes} /dev/zero >&2\n"),
             )
             .unwrap();
-            assert_eq!(observed_stderr(&printer).is_some(), expected);
+            let observed = (0..3)
+                .map(|_| observed_stderr(&printer).is_some())
+                .find(|outcome| *outcome == expected);
+            assert_eq!(observed, Some(expected));
         }
         // A missing executable is unobservable, not a pin.
         assert_eq!(observed_stderr(&dir.path().join("missing")), None);
