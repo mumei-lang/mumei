@@ -208,6 +208,59 @@ body: { x };
 }
 
 #[test]
+fn caller_gains_callees_refined_return_on_the_call_result() {
+    // `need(-5)` returns a `Neg`: the caller may assume `v < 0` on the call
+    // result, so `result < 0` verifies without an explicit ensures clause.
+    let (dir, output) = verify_source(
+        "caller_gains_return",
+        r#"
+type Neg = i64 where v < 0;
+atom need(x: Neg) -> Neg
+requires: true;
+ensures: true;
+body: { x };
+atom caller() -> i64
+requires: true;
+ensures: result < 0;
+body: { let y = need(-5); y };
+"#,
+    );
+    let text = output_text(&output);
+    assert!(
+        output.status.success(),
+        "the caller must gain the callee's refined return: {text}"
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn atom_ref_call_site_checks_refined_params() {
+    // `call(atom_ref(need), 5)` must fail exactly like `need(5)` — an
+    // indirect call cannot bypass the callee's declared refinement.
+    let (dir, output) = verify_source(
+        "atom_ref_callsite",
+        r#"
+type Neg = i64 where v < 0;
+atom need(x: Neg) -> i64
+requires: true;
+ensures: true;
+body: { x };
+atom caller() -> i64
+requires: true;
+ensures: true;
+body: { call(atom_ref(need), 5) };
+"#,
+    );
+    let text = output_text(&output);
+    assert!(
+        !output.status.success(),
+        "an atom_ref call violating a refined parameter must fail: {text}"
+    );
+    assert!(text.contains("refinement on parameter 'x'"), "{text}");
+    cleanup(dir);
+}
+
+#[test]
 fn cyclic_alias_declarations_are_rejected() {
     // `type A = B; type B = A;` encodes no base and no constraints — a type
     // error, not a constraint-free alias.

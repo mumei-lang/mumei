@@ -460,19 +460,26 @@ fn constant_call_antecedent<'a>(
         let Some(type_name) = param.type_name.as_deref() else {
             continue;
         };
-        let Some(refined) = vc.module_env.get_type(type_name) else {
+        if vc.module_env.get_type(type_name).is_none() {
             continue;
         };
 
-        if refined._base_type == "u64" {
+        // Every conjunct of the declaration chain is part of the
+        // antecedent — a chained alias like `Small = Pos where v < 10`
+        // must carry `Pos`'s `v > 0` into the constant-call guard too.
+        let chain = vc.module_env.refined_chain(type_name).ok()?;
+        let leaf_base = chain.last().map_or("", |decl| decl._base_type.as_str());
+        if leaf_base == "u64" {
             terms.push(nonneg_constraint(vc.ctx, arg)?);
         }
 
-        let mut refinement_env = call_env.clone();
-        refinement_env.insert(refined.operand.clone(), arg.clone());
-        let predicate_ast = parse_expression(&refined.predicate_raw);
-        let predicate_value = expr_to_z3(vc, &predicate_ast, &mut refinement_env, None).ok()?;
-        terms.push(predicate_value.as_bool()?);
+        for decl in chain {
+            let mut refinement_env = call_env.clone();
+            refinement_env.insert(decl.operand.clone(), arg.clone());
+            let predicate_ast = parse_expression(&decl.predicate_raw);
+            let predicate_value = expr_to_z3(vc, &predicate_ast, &mut refinement_env, None).ok()?;
+            terms.push(predicate_value.as_bool()?);
+        }
     }
 
     let term_refs: Vec<&Bool> = terms.iter().collect();
@@ -2830,6 +2837,50 @@ pub(crate) fn expr_to_z3<'a>(
                         //   → call_env に result = call_increment_0 を挿入
                         //   → Z3 に call_increment_0 == n + 1 を assert
                         //   → 後続の `increment(x)` で x >= 1 だけでなく x == n + 1 が使える
+
+                        // A refined return type is part of the callee's
+                        // contract: the caller may assume every conjunct on
+                        // the call's symbolic result. Same gates as the
+                        // ensures assumption — caller/callee encodings must
+                        // agree, and a congruent call assumes it only under
+                        // the induction antecedent.
+                        if !recursive_instance && callee_semantics_match_caller(vc, &callee) {
+                            if let Some(return_type) = callee.return_type.as_deref() {
+                                if vc.module_env.get_type(return_type).is_some() {
+                                    let chain = vc.module_env.refined_chain(return_type).map_err(
+                                        |cycle| {
+                                            MumeiError::type_error_at(cycle, callee.span.clone())
+                                        },
+                                    )?;
+                                    for decl in chain {
+                                        let mut local_env = call_env.clone();
+                                        local_env.insert(decl.operand.clone(), result_z3.clone());
+                                        let pred_ast = parse_expression(&decl.predicate_raw);
+                                        let Some(pred_bool) =
+                                            expr_to_z3(vc, &pred_ast, &mut local_env, None)?
+                                                .as_bool()
+                                        else {
+                                            continue;
+                                        };
+                                        if let Some(solver) = solver_opt {
+                                            if use_rec_fn {
+                                                let ante = congruent_ensures_antecedent(
+                                                    vc,
+                                                    &callee,
+                                                    &caller_requires,
+                                                    &mut call_env,
+                                                    scc_internal,
+                                                )?;
+                                                solver.assert(&ante.implies(&pred_bool));
+                                            } else {
+                                                solver.assert(&pred_bool);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         let caller_ensures = crate::verification::contract_view(
                             &callee,
                             crate::verification::ContractView::CallerEnsures,
@@ -4588,6 +4639,52 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                     }
 
+                    // Refined parameter types are part of the callee's
+                    // contract — the same check the direct-call arm runs:
+                    // `atom_ref(need)(5)` for `need(x: Neg)` must not verify.
+                    if !recursive_instance {
+                        if let Some(solver) = solver_opt {
+                            for param in &callee_atom.params {
+                                let Some(type_name) = param.type_name.as_deref() else {
+                                    continue;
+                                };
+                                if vc.module_env.get_type(type_name).is_none() {
+                                    continue;
+                                }
+                                let chain =
+                                    vc.module_env.refined_chain(type_name).map_err(|cycle| {
+                                        MumeiError::type_error_at(cycle, callee_atom.span.clone())
+                                    })?;
+                                let Some(arg_z3) = call_env.get(&param.name).cloned() else {
+                                    continue;
+                                };
+                                for decl in chain {
+                                    let mut local_env = call_env.clone();
+                                    local_env.insert(decl.operand.clone(), arg_z3.clone());
+                                    let pred_ast = parse_expression(&decl.predicate_raw);
+                                    let Some(pred_bool) =
+                                        expr_to_z3(vc, &pred_ast, &mut local_env, None)?.as_bool()
+                                    else {
+                                        continue;
+                                    };
+                                    solver.push();
+                                    solver.assert(&pred_bool.not());
+                                    if crate::verification::phase_artifacts::check(solver)
+                                        == SatResult::Sat
+                                    {
+                                        solver.pop(1);
+                                        return Err(MumeiError::verification(
+                                            format!("call(atom_ref({})): refinement on parameter '{}' ({}) may not hold at call site", callee_name, param.name, decl.name)
+                                        )
+                                        .with_help("呼び出し元で引数の型制約を満たしていません。引数の値を確認してください")
+                                        .with_verdict(crate::verification::VerdictKind::Rejected));
+                                    }
+                                    solver.pop(1);
+                                }
+                            }
+                        }
+                    }
+
                     // ensures を事実として solver に追加（Equality Ensures Propagation）
                     static CALL_REF_COUNTER: std::sync::atomic::AtomicUsize =
                         std::sync::atomic::AtomicUsize::new(0);
@@ -4738,6 +4835,45 @@ pub(crate) fn expr_to_z3<'a>(
                                     &call_env,
                                     None,
                                 )?;
+                            }
+                        }
+                    }
+
+                    // A refined return type is part of the callee's
+                    // contract: the caller may assume every conjunct on the
+                    // call's symbolic result — the same shape the
+                    // direct-call arm applies.
+                    if !recursive_instance {
+                        if let Some(return_type) = callee_atom.return_type.as_deref() {
+                            if vc.module_env.get_type(return_type).is_some() {
+                                let chain =
+                                    vc.module_env.refined_chain(return_type).map_err(|cycle| {
+                                        MumeiError::type_error_at(cycle, callee_atom.span.clone())
+                                    })?;
+                                for decl in chain {
+                                    let mut local_env = call_env.clone();
+                                    local_env.insert(decl.operand.clone(), result_z3.clone());
+                                    let pred_ast = parse_expression(&decl.predicate_raw);
+                                    let Some(pred_bool) =
+                                        expr_to_z3(vc, &pred_ast, &mut local_env, None)?.as_bool()
+                                    else {
+                                        continue;
+                                    };
+                                    if let Some(solver) = solver_opt {
+                                        if use_rec_fn {
+                                            let ante = congruent_ensures_antecedent(
+                                                vc,
+                                                &callee_atom,
+                                                &caller_requires,
+                                                &mut call_env,
+                                                scc_internal,
+                                            )?;
+                                            solver.assert(&ante.implies(&pred_bool));
+                                        } else {
+                                            solver.assert(&pred_bool);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
