@@ -202,6 +202,40 @@ fn property_based_validation_keeps_negative_values_signed_in_bitvector_mode() {
 }
 
 #[test]
+fn out_of_domain_bool_input_is_skipped_not_a_counterexample() {
+    // `x: Flag` with `v == true` must skip `x = false` — evaluating the
+    // body against an out-of-domain input would report a phantom
+    // counterexample on a correct atom.
+    let mut module_env = ModuleEnv::new();
+    module_env.register_type(&refined("Flag", "bool", "v", "v == true"));
+    let mut atom = base_atom("flagged");
+    atom.params = vec![param("x", "Flag")];
+    atom.ensures = "result == true".to_string();
+    atom.return_type = Some("bool".to_string());
+    atom.body_expr = "x".to_string();
+    let mut assignment = HashMap::new();
+    assignment.insert("x".to_string(), GeneratedValue::Bool(false));
+
+    assert!(check_generated_assignment(&atom, &module_env, &assignment).is_none());
+}
+
+#[test]
+fn out_of_domain_int_input_is_skipped_not_a_counterexample() {
+    // A non-range predicate like `v % 2 == 0` cannot narrow the generator
+    // bounds, so the precondition check itself must filter `x = 3`.
+    let mut module_env = ModuleEnv::new();
+    module_env.register_type(&refined("Even", "i64", "v", "v % 2 == 0"));
+    let mut atom = base_atom("even_id");
+    atom.params = vec![param("x", "Even")];
+    atom.ensures = "result == x".to_string();
+    atom.body_expr = "x".to_string();
+    let mut assignment = HashMap::new();
+    assignment.insert("x".to_string(), GeneratedValue::Int(3));
+
+    assert!(check_generated_assignment(&atom, &module_env, &assignment).is_none());
+}
+
+#[test]
 fn cli_exposes_property_based_validation_flags() {
     let bin = env!("CARGO_BIN_EXE_mumei");
     let output = Command::new(bin)
