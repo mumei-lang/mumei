@@ -37,9 +37,9 @@ pub(crate) fn is_finite_adt(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool 
     }
     enum_def.variants.iter().all(|variant| {
         variant
-            .fields
+            .field_types
             .iter()
-            .all(|field| field_is_scalar(field, module_env))
+            .all(|field| field_is_scalar(field.name.as_str(), module_env))
     })
 }
 
@@ -99,11 +99,11 @@ pub(crate) fn enum_datatype_sort<'a>(
     for variant in &enum_def.variants {
         let mut names = Vec::new();
         let mut sorts = Vec::new();
-        for (i, field_type) in variant.fields.iter().enumerate() {
+        for (i, field_type) in variant.field_types.iter().enumerate() {
             names.push(format!("{}_{}", variant.name, i));
             sorts.push(field_sort(
                 vc.ctx,
-                field_type,
+                field_type.name.as_str(),
                 vc.module_env,
                 vc.ieee754_f64,
             )?);
@@ -317,12 +317,12 @@ fn target_param_enum_name(vc: &VCtx, target: &Dynamic) -> Option<String> {
                         .variants
                         .iter()
                         .find(|v| v.name == variant_name)
-                        .and_then(|v| v.fields.get(i))
+                        .and_then(|v| v.field_types.get(i))
                     {
-                        let resolved = if *ft == enum_name {
+                        let resolved = if ft.name == enum_name {
                             enum_name.to_string()
                         } else {
-                            vc.module_env.resolve_base_type(ft)
+                            vc.module_env.resolve_base_type(ft.name.as_str())
                         };
                         return vc.module_env.get_enum(&resolved).map(|e| e.name.clone());
                     }

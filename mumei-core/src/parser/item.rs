@@ -1025,9 +1025,23 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                                 })
                                 .filter(|f| !f.is_empty())
                                 .collect();
-                            let field_types: Vec<TypeRef> =
-                                fields.iter().map(|f| parse_type_ref(f)).collect();
-                            let is_recursive = fields.iter().any(|f| f == &name);
+                            // `fields` keeps a named field's verbatim
+                            // `name: type` text (it is the arity/display
+                            // surface), but `field_types` must hold only
+                            // the declared type — consumers resolve the
+                            // name as a type, so `b: bool` would
+                            // otherwise be read as an unknown type.
+                            let field_types: Vec<TypeRef> = fields
+                                .iter()
+                                .map(|f| {
+                                    let ty = f
+                                        .split_once(':')
+                                        .map(|(_, t)| t.trim())
+                                        .unwrap_or(f.as_str());
+                                    parse_type_ref(if ty == "Self" { name.as_str() } else { ty })
+                                })
+                                .collect();
+                            let is_recursive = field_types.iter().any(|t| t.name == name);
                             if is_recursive {
                                 any_recursive = true;
                             }
