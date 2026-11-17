@@ -3261,15 +3261,16 @@ The next C10 profile slice admits refined scalar members: modules may
 declare `type <Name> = <scalar> where <operand> <predicate>;` aliases and
 use them in atom signatures, building under
 `mumei.pure-i64-refined-scalar/v1` and the `/v2` module/multifile
-profiles. The alias gate stays fail-closed — `unit` metadata, non-scalar
-or undeclared bases, cycles and atom-name collisions are rejected — and
-each alias's predicates fold into the obligations the module already
-proves: parameters strengthen the signature domain established at every
-call site, and results strengthen the postcondition the callee
-guarantees. Undeclared signature type names are now rejected rather than
-silently modeled as `i64`. Recheckers dispatch on the pinned profile
-name, so v1 records keep the strict admission. Struct/enum member items,
-deeper optimizer/ABI/runtime assurance and producer authenticity remain
+profiles. The alias gate stays fail-closed — `unit` metadata, `bool` or
+non-scalar bases, bases naming another declaration (chains), and
+atom-name collisions are rejected, matching the fragment the verifier's
+own refinement application can encode — and each alias's predicates fold
+into the obligations the module already proves: parameters strengthen
+the signature domain established at every call site, and results
+strengthen the postcondition the callee guarantees. Recheckers dispatch
+on the pinned profile name, so v1 records keep the strict admission.
+Struct/enum member items, `bool`-based and chained aliases, deeper
+optimizer/ABI/runtime assurance and producer authenticity remain
 open. See the
 [refined scalar member profiles](VERIFICATION_NATIVE.md#refined-scalar-member-profiles-v2).
 

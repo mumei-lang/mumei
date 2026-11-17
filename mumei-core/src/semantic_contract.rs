@@ -533,8 +533,7 @@ fn declared_param_kind(
 
 /// The parameter kind inside a contract that already passed
 /// `validate_atom` — unvalidated sources never reach the kind checker.
-/// A refined alias reports its resolved base kind (`Port` → `i64`,
-/// `type Flag = bool where v` → `bool`).
+/// A refined alias reports its resolved base kind (`Port` → `i64`).
 fn param_kind(param: &crate::parser::ast::Param, refined: &RefinedEnv) -> ScalarKind {
     match param.type_name.as_deref() {
         Some("bool") => ScalarKind::Bool,
@@ -699,9 +698,9 @@ fn expect_kind(actual: ScalarKind, expected: ScalarKind) -> Result<(), SemanticC
 }
 
 /// One admitted refined scalar type declaration resolved against the
-/// module's declaration map: the literal scalar name its alias chain ends
-/// at, the kind that literal carries in this profile, and the refinement
-/// conjuncts collected along the chain — each conjunct's declared operand
+/// module's declaration map: the literal scalar name its base resolves
+/// to, the kind that literal carries in this profile, and the
+/// declaration's refinement conjuncts — each conjunct's declared operand
 /// name is substituted with the use-site value at encoding time.
 struct ResolvedAlias {
     base: &'static str,
@@ -715,31 +714,32 @@ struct ResolvedAlias {
 type RefinedEnv = BTreeMap<String, ResolvedAlias>;
 
 /// The literal scalar name and kind a profile scalar type gives, or
-/// `None` outside the vocabulary (`u64`/`usize`/unknown names — an
-/// unsigned full-width domain cannot be expressed as an i64 bound).
-fn scalar_base(name: &str, admit_widened: bool) -> Option<(ScalarKind, &'static str)> {
+/// `None` outside the vocabulary (`bool`/`u64`/`usize`/unknown names —
+/// a `bool` base would bind the refinement operand as `Int` in the
+/// verifier's own encoding, and a full-width unsigned domain cannot be
+/// expressed as an i64 bound).
+fn scalar_base(name: &str) -> Option<(ScalarKind, &'static str)> {
     match name {
         "i64" => Some((ScalarKind::I64, "i64")),
-        "bool" if admit_widened => Some((ScalarKind::Bool, "bool")),
-        "i8" if admit_widened => Some((ScalarKind::I64, "i8")),
-        "i16" if admit_widened => Some((ScalarKind::I64, "i16")),
-        "i32" if admit_widened => Some((ScalarKind::I64, "i32")),
-        "u8" if admit_widened => Some((ScalarKind::I64, "u8")),
-        "u16" if admit_widened => Some((ScalarKind::I64, "u16")),
-        "u32" if admit_widened => Some((ScalarKind::I64, "u32")),
+        "i8" => Some((ScalarKind::I64, "i8")),
+        "i16" => Some((ScalarKind::I64, "i16")),
+        "i32" => Some((ScalarKind::I64, "i32")),
+        "u8" => Some((ScalarKind::I64, "u8")),
+        "u16" => Some((ScalarKind::I64, "u16")),
+        "u32" => Some((ScalarKind::I64, "u32")),
         _ => None,
     }
 }
 
 /// Collect the module's `Item::TypeDef` declarations into the resolved
-/// alias map — two phases like the callee map, so a declaration's base
-/// may name a later sibling. Rejected honestly: `unit` tags (metadata
-/// this profile does not model — dropping it would silently change the
-/// admitted fragment), type names shadowing scalar profile names,
-/// duplicates, cycles, bases outside the scalar vocabulary, and
-/// predicates that are not boolean scalar-vocabulary expressions over
-/// their operand (checked with no call targets, so a refinement cannot
-/// reach a sibling atom).
+/// alias map. Rejected honestly: `unit` tags (metadata this profile does
+/// not model — dropping it would silently change the admitted fragment),
+/// type names shadowing scalar profile names, duplicates, bases outside
+/// the scalar vocabulary (including bases that name another declaration
+/// — the verifier's own refinement application cannot compose chains),
+/// and predicates that are not boolean scalar-vocabulary expressions
+/// over their operand (checked with no call targets, so a refinement
+/// cannot reach a sibling atom).
 fn build_refined_env(items: &[Item]) -> Result<RefinedEnv, SemanticContractError> {
     let mut defs = BTreeMap::new();
     for item in items {
@@ -774,44 +774,32 @@ fn build_refined_env(items: &[Item]) -> Result<RefinedEnv, SemanticContractError
         }
     }
     let mut env = RefinedEnv::new();
-    for name in defs.keys().copied().collect::<Vec<_>>() {
-        resolve_alias(name, &defs, &mut env, &mut BTreeSet::new())?;
+    for (name, def) in &defs {
+        env.insert(name.to_string(), resolve_alias(def, &defs)?);
     }
     Ok(env)
 }
 
 fn resolve_alias(
-    name: &str,
+    def: &crate::parser::ast::RefinedType,
     defs: &BTreeMap<&str, &crate::parser::ast::RefinedType>,
-    env: &mut RefinedEnv,
-    visiting: &mut BTreeSet<String>,
-) -> Result<(), SemanticContractError> {
-    if env.contains_key(name) {
-        return Ok(());
-    }
-    let def = defs[name];
-    if !visiting.insert(name.to_owned()) {
+) -> Result<ResolvedAlias, SemanticContractError> {
+    // The base must be a literal scalar, not another declaration: the
+    // verifier applies only a refinement's own predicate with its
+    // declared base encoding, so a chained alias would silently lose the
+    // ancestor conjuncts at build time even though this env folds them.
+    // This also makes cycles unrepresentable — a self-named or
+    // cross-named base hits this rejection first.
+    if defs.contains_key(def._base_type.as_str()) {
         return Err(SemanticContractError::Unsupported(
-            "cyclic type declaration",
+            "chained type declarations",
         ));
     }
-    let (kind, base, mut conjuncts) = match defs.get(def._base_type.as_str()) {
-        Some(base_def) => {
-            resolve_alias(&base_def.name, defs, env, visiting)?;
-            let resolved = &env[base_def.name.as_str()];
-            (resolved.kind, resolved.base, resolved.conjuncts.clone())
-        }
-        None => {
-            let (kind, base) = scalar_base(&def._base_type, true).ok_or(
-                SemanticContractError::Unsupported("type outside the scalar profile"),
-            )?;
-            (kind, base, Vec::new())
-        }
-    };
-    visiting.remove(name);
+    let (kind, base) = scalar_base(&def._base_type).ok_or(SemanticContractError::Unsupported(
+        "type outside the scalar profile",
+    ))?;
     // The declaration's own predicate must be a scalar-vocabulary boolean
-    // expression over its operand. The operand's kind is the resolved
-    // base kind — every step of an alias chain lowers to the same scalar.
+    // expression over its operand.
     let predicate =
         parse_expression_checked(&def.predicate_raw).map_err(|_| SemanticContractError::Parse)?;
     expect_kind(
@@ -825,16 +813,11 @@ fn resolve_alias(
         )?,
         ScalarKind::Bool,
     )?;
-    conjuncts.push((def.operand.clone(), def.predicate_raw.clone()));
-    env.insert(
-        name.to_owned(),
-        ResolvedAlias {
-            base,
-            kind,
-            conjuncts,
-        },
-    );
-    Ok(())
+    Ok(ResolvedAlias {
+        base,
+        kind,
+        conjuncts: vec![(def.operand.clone(), def.predicate_raw.clone())],
+    })
 }
 
 /// True when the statement subtree holds a `while` at any depth —
@@ -1557,13 +1540,13 @@ fn signature_domain<'ctx>(
             ]),
             Some(name) => {
                 if let Some(alias) = refined.get(name) {
-                    // The alias's base bound still applies — a `bool`-based
-                    // refinement keeps its {0,1} carrier, a `u8`-based one
-                    // its range — before the chain's conjuncts tighten it.
+                    // The alias's base bound still applies — a `u8`-based
+                    // refinement keeps its range carrier — before the
+                    // declaration's conjuncts tighten it.
                     domain.extend(scalar_domain_bounds(alias.base, v, context));
                     domain.extend(alias_predicates(
                         alias,
-                        scalar_operand(alias.kind, v, context),
+                        SourceValue::Integer(v.clone()),
                         context,
                     )?);
                 }
@@ -1580,7 +1563,6 @@ fn signature_domain<'ctx>(
 /// identical range its literal spelling would.
 fn scalar_domain_bounds<'ctx>(base: &str, v: &BV<'ctx>, context: &'ctx Context) -> Vec<Bool<'ctx>> {
     match base {
-        "bool" => vec![v.bvule(&BV::from_u64(context, 1, 64))],
         "u8" => vec![v.bvule(&BV::from_u64(context, u8::MAX as u64, 64))],
         "u16" => vec![v.bvule(&BV::from_u64(context, u16::MAX as u64, 64))],
         "u32" => vec![v.bvule(&BV::from_u64(context, u32::MAX as u64, 64))],
@@ -1597,21 +1579,6 @@ fn scalar_domain_bounds<'ctx>(base: &str, v: &BV<'ctx>, context: &'ctx Context) 
             v.bvsle(&BV::from_i64(context, i32::MAX as i64, 64)),
         ],
         _ => Vec::new(),
-    }
-}
-
-/// The symbolic operand a refined declaration's conjuncts evaluate over:
-/// the same i64-carried materialization `param_env` binds for the
-/// signature — `bool`-based aliases see `input != 0`, integer-based ones
-/// the raw bit-vector.
-fn scalar_operand<'ctx>(
-    kind: ScalarKind,
-    value: &BV<'ctx>,
-    context: &'ctx Context,
-) -> SourceValue<'ctx> {
-    match kind {
-        ScalarKind::Bool => SourceValue::Boolean(value._eq(&BV::from_u64(context, 0, 64)).not()),
-        ScalarKind::I64 => SourceValue::Integer(value.clone()),
     }
 }
 
@@ -1857,10 +1824,9 @@ fn module_atom_obligations<'ctx>(
     .boolean()?;
     // A refined result type adds its declaration conjuncts to the
     // postcondition the atom must satisfy — `-> Port` guarantees
-    // `ensures` AND `v >= 1 && v <= 65535` at the encoded result, with
-    // the operand materialized the same way the alias's base kind is.
+    // `ensures` AND `v >= 1 && v <= 65535` at the encoded result.
     let result_operand = match atom.return_type.as_deref().and_then(|n| refined.get(n)) {
-        Some(alias) => scalar_operand(alias.kind, &body.value, context),
+        Some(_) => SourceValue::Integer(body.value.clone()),
         None => env["result"].clone(),
     };
     let mut post = vec![ensures];
@@ -3382,16 +3348,14 @@ mod tests {
         // The strict fragment keeps refusing the same source — a record
         // pinned v1 could never describe it.
         assert!(extract_pure_i64_module_contracts(port, "m.mm", None, false).is_err());
-        // Alias chains compose: Tiny is Small's `v < 10` plus its own
-        // `v > 0` — admitted as a member signature type too.
+        // Alias chains stay out: the verifier applies only a
+        // refinement's own predicate, so a declared base would silently
+        // lose the ancestor conjuncts at build time.
         let chained = "type Small = i64 where v < 10;\n\
              type Tiny = Small where v > 0;\n\
              atom t(x: Tiny) -> i64 requires: true; ensures: result == x; body: { x };\n\
              atom main() -> i64 requires: true; ensures: result == 4; body: { t(4) };";
-        assert_eq!(
-            extract_pure_i64_module_contracts(chained, "m.mm", None, true).unwrap()[0].profile,
-            PURE_I64_REFINED_PROFILE
-        );
+        assert!(extract_pure_i64_module_contracts(chained, "m.mm", None, true).is_err());
         // A declaration-only module of typedefs plus atoms is fine.
         let unused_alias = "type Unused = i64 where v > 0;\n\
              atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
@@ -3407,8 +3371,10 @@ mod tests {
             "type i64 = bool where v;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
             // duplicate declaration names
             "type P = i64 where v > 0;\ntype P = i64 where v < 10;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
-            // cyclic alias
+            // cyclic alias — a base naming another declaration is a chain
             "type A = B where v > 0;\ntype B = A where v < 10;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+            // bool base — the verifier's refinement operand encodes as Int
+            "type Flag = bool where v;\natom f(x: Flag) -> i64 requires: true; ensures: result == x; body: { x };\natom main() -> i64 requires: true; ensures: result == 1; body: { f(1) };",
             // non-scalar base
             "type T = f64 where v > 0;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
             // undeclared base name
@@ -3494,24 +3460,5 @@ mod tests {
         assert!(refined_module_outcomes(assumed)
             .iter()
             .all(|result| *result == z3::SatResult::Unsat));
-        // A `bool`-based alias keeps its carrier bound: `Flag`'s
-        // refinement (`v`, i.e. always true) holds at `f(1)`, while
-        // `f(0)` fails the predicate and `f(5)` is not even a `bool`
-        // carrier — both must surface as domain violations.
-        let flagged = "type Flag = bool where v;\n\
-             atom f(x: Flag) -> i64 requires: true; ensures: result == 1; body: { 1 };\n\
-             atom main() -> i64 requires: true; ensures: result == 1; body: { f(1) };";
-        assert!(refined_module_outcomes(flagged)
-            .iter()
-            .all(|result| *result == z3::SatResult::Unsat));
-        for call in ["f(0)", "f(5)"] {
-            let bad = flagged.replace("f(1)", call);
-            assert!(
-                refined_module_outcomes(&bad)
-                    .iter()
-                    .any(|result| *result == z3::SatResult::Sat),
-                "{call} should violate the Flag domain"
-            );
-        }
     }
 }
