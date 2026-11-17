@@ -3988,11 +3988,19 @@ pinned only when a module actually declares a struct, so v1–v3 records
 are untouched. A struct parameter flattens to one scalar input per
 field in declaration order; it is never a scalar value itself and only
 passes through by name to a same-struct sibling parameter. Struct
-construction and results, struct `let`s, invariants, methods, field
-constraints, subrange fields (the verifier does not yet assume a
-subrange domain for struct fields) and binders spelled like the
-emitter's synthesized field names all fail
-closed. Refined-alias fields whose chain resolves to an `i64`/`bool`
+constraints, invariants, methods, subrange fields (the verifier does
+not yet assume a subrange domain for struct fields) and binders
+spelled like the emitter's synthesized field names all fail
+closed. Struct construction and results, struct `let`s and
+call-result field reads are admitted under
+`mumei.pure-i64-composite/v3` and the `/v6` bundle profiles: a struct
+result binds `result.f` per declared field, a struct literal must set
+every declared field exactly once and satisfy any alias predicates,
+and a `let`-bound or call-returned struct value reads through the
+same flattened slots; a module pins v6 only when an atom actually
+uses a struct value, and branch-merged struct values, aggregate
+`phi`/`select`, field assignment, nested structs and generic structs
+stay rejected. Refined-alias fields whose chain resolves to an `i64`/`bool`
 leaf are admitted under `mumei.pure-i64-composite/v2` and the `/v5`
 bundle profiles: the verifier assumes a field's alias predicates for
 a struct parameter the same way it does for a scalar parameter, and
@@ -4004,10 +4012,11 @@ profile decomposes aggregate member signatures — `recheck-llvm` cover
 the composite fragment: each struct formal maps to its flattened
 field slots in declaration order, `extractvalue` reads the field at
 its index and a passed-through aggregate call argument expands to the
-same slots the source applies. `insertvalue`, aggregate `phi`/`select`
-merges, constant or returned aggregates, nested/packed/non-i64 shapes
-and scalar/aggregate mismatches stay rejected rather than paired by
-guesswork. Downstream consumers need no route changes:
+same slots the source applies, and under v6 a returned or
+`insertvalue`-built aggregate pairs with the flattened result slots
+(an unwritten slot fails closed). Aggregate `phi`/`select` merges,
+nested/packed/non-i64 shapes and scalar/aggregate mismatches stay
+rejected rather than paired by guesswork. Downstream consumers need no route changes:
 the bundle record pins the profile name it was produced under, so the
 declared recheck/accept routes re-derive under the record's own
 admission. The mumei-demo `native_composite_attempt` declared-route
