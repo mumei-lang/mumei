@@ -3849,6 +3849,15 @@ their own `checks_not_performed` so each document lists exactly what
 it ran. C02/C10 stay partial — ABI/runtime assurance and producer
 authenticity remain open.
 
+mumei-agent replays both subcommands as declared routes
+(`native-stdout-recheck`, `native-stdout-accept`) with the same
+uniquely-mapped outcome contract — exit 0 `reproduced`/`accepted`
+with `artifact_semantics` + `claim_truth` discharged, exit 3
+`inconclusive`, any other code claims nothing — and exposes them as
+the `native_stdout_recheck`/`native_stdout_accept` MCP tools.
+mumei-demo's `native_stdout_recheck` and `native_stdout_accept`
+scenarios exercise both routes end to end.
+
 ### Wave 5 declared producer-identity gate (C02 consumer)
 
 Core's `mumei evidence check|check-list|check-consistency`
