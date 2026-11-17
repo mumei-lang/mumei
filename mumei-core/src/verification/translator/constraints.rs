@@ -27,28 +27,41 @@ pub(crate) fn apply_refinement_constraint<'a>(
     // name decides the encoding (a chained alias's `_base_type` is the next
     // declaration, not a scalar).
     let leaf_base = chain.last().map_or("", |decl| decl._base_type.as_str());
-    let var_z3: Dynamic = match leaf_base {
-        // f64 エンコーディング（デフォルト Real、`--ieee754-f64` で
-        // Float）に合わせ、パラメータ側の `param_z3_value` と同一
-        // ソートにする。
-        "f64" if vc.ieee754_f64 => Float::new_const(ctx, var_name, 11, 53).into(),
-        "f64" => Real::new_const(ctx, var_name).into(),
-        "u64" => {
-            let v = Int::new_const(ctx, var_name);
+    // Reuse the caller's binding when present: a concrete assignment must
+    // stay concrete so the chain predicates actually filter it — rebinding
+    // to a fresh symbolic const would let an out-of-domain input satisfy
+    // the precondition check (and in the symbolic path the binding is the
+    // same name+sort anyway, i.e. the identical z3 const).
+    let var_z3: Dynamic = match global_env.get(var_name) {
+        Some(existing) => existing.clone(),
+        None => match leaf_base {
+            // f64 エンコーディング（デフォルト Real、`--ieee754-f64` で
+            // Float）に合わせ、パラメータ側の `param_z3_value` と同一
+            // ソートにする。
+            "f64" if vc.ieee754_f64 => Float::new_const(ctx, var_name, 11, 53).into(),
+            "f64" => Real::new_const(ctx, var_name).into(),
+            "u64" => Int::new_const(ctx, var_name).into(),
+            // Plan 9-7: Str base type uses Z3 String Sort for refinement constraints
+            "Str" => Z3String::new_const(ctx, var_name).into(),
+            // A refined `i64` keeps the encoding of the run, so a refinement alias
+            // does not silently return an overflow-sensitive parameter to the
+            // unbounded `Int` encoding.
+            "i64" if vc.bitvec_i64 => BV::new_const(ctx, var_name, I64_BITS).into(),
+            "bool" => Bool::new_const(ctx, var_name).into(),
+            _ => Int::new_const(ctx, var_name).into(),
+        },
+    };
+
+    // u64 parameters are non-negative regardless of whether the binding was
+    // reused or freshly minted — a concrete negative input must fail this
+    // assertion just as a symbolic one is constrained by it.
+    if leaf_base == "u64" {
+        if let Some(v) = var_z3.as_int() {
             let track_u64 = Bool::new_const(ctx, format!("track_u64_nonneg_{}", var_name).as_str());
             solver.assert_and_track(&v.ge(&Int::from_i64(ctx, 0)), &track_u64);
             profile_solver_assertion(vc, &format!("u64_nonneg_{}", var_name), None);
-            v.into()
         }
-        // Plan 9-7: Str base type uses Z3 String Sort for refinement constraints
-        "Str" => Z3String::new_const(ctx, var_name).into(),
-        // A refined `i64` keeps the encoding of the run, so a refinement alias
-        // does not silently return an overflow-sensitive parameter to the
-        // unbounded `Int` encoding.
-        "i64" if vc.bitvec_i64 => BV::new_const(ctx, var_name, I64_BITS).into(),
-        "bool" => Bool::new_const(ctx, var_name).into(),
-        _ => Int::new_const(ctx, var_name).into(),
-    };
+    }
 
     global_env.insert(var_name.to_string(), var_z3.clone());
 
