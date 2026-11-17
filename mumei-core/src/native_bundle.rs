@@ -676,28 +676,36 @@ fn member_stem(member: &str) -> &str {
 pub fn merge_import_closure(
     root_name: &str,
     sources: &BTreeMap<String, String>,
+    admit_refined: bool,
 ) -> Result<(String, BTreeMap<String, Vec<String>>), BundleError> {
     if !sources.contains_key(root_name) {
         return Err(BundleError("root source member not pinned"));
     }
-    let mut visiting = std::collections::BTreeSet::new();
-    let mut emitted = std::collections::BTreeSet::new();
-    let mut emitted_hashes = std::collections::BTreeSet::new();
-    let mut graph = BTreeMap::new();
-    let mut parts = Vec::new();
-    visit_member(
-        root_name,
-        sources,
-        &mut visiting,
-        &mut emitted,
-        &mut emitted_hashes,
-        &mut graph,
-        &mut parts,
-    )?;
-    if graph[root_name].is_empty() {
+    let mut state = MergeWalk {
+        admit_refined,
+        visiting: std::collections::BTreeSet::new(),
+        emitted: std::collections::BTreeSet::new(),
+        emitted_hashes: std::collections::BTreeSet::new(),
+        graph: BTreeMap::new(),
+        parts: Vec::new(),
+    };
+    visit_member(root_name, sources, &mut state)?;
+    if state.graph[root_name].is_empty() {
         return Err(BundleError("expected at least one import"));
     }
-    Ok((format!("{}\n", parts.join("\n")), graph))
+    Ok((format!("{}\n", state.parts.join("\n")), state.graph))
+}
+
+/// The walk state shared across the DFS: the refined-members gate plus
+/// the cycle-detection set, the emitted member set and dedup hashes,
+/// and the accumulated graph/parts.
+struct MergeWalk {
+    admit_refined: bool,
+    visiting: std::collections::BTreeSet<String>,
+    emitted: std::collections::BTreeSet<String>,
+    emitted_hashes: std::collections::BTreeSet<String>,
+    graph: BTreeMap<String, Vec<String>>,
+    parts: Vec<String>,
 }
 
 /// One DFS node: gather the member's imports under the same gates as
@@ -708,37 +716,25 @@ pub fn merge_import_closure(
 fn visit_member(
     member: &str,
     sources: &BTreeMap<String, String>,
-    visiting: &mut std::collections::BTreeSet<String>,
-    emitted: &mut std::collections::BTreeSet<String>,
-    emitted_hashes: &mut std::collections::BTreeSet<String>,
-    graph: &mut BTreeMap<String, Vec<String>>,
-    parts: &mut Vec<String>,
+    state: &mut MergeWalk,
 ) -> Result<(), BundleError> {
-    if emitted.contains(member) {
+    if state.emitted.contains(member) {
         return Ok(());
     }
-    if !visiting.insert(member.to_owned()) {
+    if !state.visiting.insert(member.to_owned()) {
         return Err(BundleError("circular import outside profile"));
     }
     let text = sources
         .get(member)
         .ok_or(BundleError("imported source member not pinned"))?;
-    let (imports, qualifiers, import_lines) = member_imports(member, text)?;
+    let (imports, qualifiers, import_lines) = member_imports(member, text, state.admit_refined)?;
     let mut sorted = imports.clone();
     sorted.sort();
-    graph.insert(member.to_owned(), sorted);
+    state.graph.insert(member.to_owned(), sorted);
     for dep in &imports {
-        visit_member(
-            dep,
-            sources,
-            visiting,
-            emitted,
-            emitted_hashes,
-            graph,
-            parts,
-        )?;
+        visit_member(dep, sources, state)?;
     }
-    visiting.remove(member);
+    state.visiting.remove(member);
     // Qualified calls are namespace syntax, not part of the atom
     // contract: the callee map keys on bare names, so `h::helper(`
     // merges as `helper(` — the same normalization the language's own
@@ -768,10 +764,10 @@ fn visit_member(
     // emitting the body twice would only trip the merged module's
     // duplicate-atom gate: emit identical bodies once. Distinct
     // member texts still emit side by side and keep that gate.
-    if emitted_hashes.insert(sha256(body.as_bytes())) {
-        parts.push(body);
+    if state.emitted_hashes.insert(sha256(body.as_bytes())) {
+        state.parts.push(body);
     }
-    emitted.insert(member.to_owned());
+    state.emitted.insert(member.to_owned());
     Ok(())
 }
 
@@ -787,7 +783,11 @@ type MemberImports = (Vec<String>, Vec<String>, std::collections::BTreeSet<usize
 /// ambiguously), atoms the only other allowed item, and every import
 /// alone on its line as one strict `import "..." [as x];` statement
 /// (a trailing `//` comment is trivia).
-fn member_imports(member_key: &str, text: &str) -> Result<MemberImports, BundleError> {
+fn member_imports(
+    member_key: &str,
+    text: &str,
+    admit_refined: bool,
+) -> Result<MemberImports, BundleError> {
     // `parse_module` (not the checked entry point) because the checked
     // pipeline consumes `import` items; whatever the lenient scan cannot
     // see stays in the text and fails the merged admission downstream.
@@ -818,6 +818,10 @@ fn member_imports(member_key: &str, text: &str) -> Result<MemberImports, BundleE
                 import_lines.insert(decl.span.line);
             }
             parser::Item::Atom(_) => (),
+            // Refined scalar declarations ride the merge only when the
+            // pinned profile admits them — the merged admission gate
+            // still validates each one.
+            parser::Item::TypeDef(_) if admit_refined => (),
             _ => return Err(BundleError("declaration outside multifile profile")),
         }
     }
@@ -938,7 +942,7 @@ pub fn prepare_multifile_source(
     sources: &BTreeMap<String, String>,
     admit_refined: bool,
 ) -> Result<PreparedMultifileSource, BundleError> {
-    let (merged, graph) = merge_import_closure(root_name, sources)?;
+    let (merged, graph) = merge_import_closure(root_name, sources, admit_refined)?;
     let (binding, atoms, types) = prepare_module_source(&merged, admit_refined)?;
     Ok(PreparedMultifileSource {
         binding,
@@ -1295,7 +1299,7 @@ mod multifile_tests {
 
     #[test]
     fn merge_strips_imports_and_orders_imported_first() {
-        let (merged, graph) = merge_import_closure("app.mm", &members()).unwrap();
+        let (merged, graph) = merge_import_closure("app.mm", &members(), false).unwrap();
         assert_eq!(graph["app.mm"], ["helpers.mm"]);
         assert!(graph["helpers.mm"].is_empty());
         assert!(merged.starts_with(HELPERS.trim_end()));
@@ -1356,7 +1360,7 @@ mod multifile_tests {
             "helpers.mm".into(),
             format!("import \"deep\" as d;\n{HELPERS}"),
         );
-        let (merged, graph) = merge_import_closure("app.mm", &nested).unwrap();
+        let (merged, graph) = merge_import_closure("app.mm", &nested, false).unwrap();
         assert_eq!(graph["app.mm"], ["helpers.mm"]);
         assert_eq!(graph["helpers.mm"], ["deep.mm"]);
         assert!(graph["deep.mm"].is_empty());
@@ -1378,7 +1382,7 @@ mod multifile_tests {
             "helpers.mm".into(),
             "import \"deep\" as d;\natom helper(x: i64) -> i64\n    requires: true;\n    ensures: result == x + 1;\n    body: { x + d::deep(0) };".into(),
         );
-        let (merged, _) = merge_import_closure("app.mm", &nested).unwrap();
+        let (merged, _) = merge_import_closure("app.mm", &nested, false).unwrap();
         assert!(merged.contains("body: { x + deep(0) };"));
         assert!(!merged.contains("d::") && !merged.contains("h::"));
     }
@@ -1397,7 +1401,7 @@ mod multifile_tests {
             ("c.mm".to_owned(), c.to_owned()),
             ("shared.mm".to_owned(), shared.to_owned()),
         ]);
-        let (merged, graph) = merge_import_closure("app.mm", &sources).unwrap();
+        let (merged, graph) = merge_import_closure("app.mm", &sources, false).unwrap();
         assert_eq!(merged.matches("atom shared").count(), 1);
         assert_eq!(graph["b.mm"], ["shared.mm"]);
         assert_eq!(graph["c.mm"], ["shared.mm"]);
@@ -1412,7 +1416,7 @@ mod multifile_tests {
             ("app.mm".to_owned(), a.to_owned()),
             ("b.mm".to_owned(), b.to_owned()),
         ]);
-        assert!(merge_import_closure("app.mm", &sources).is_err());
+        assert!(merge_import_closure("app.mm", &sources, false).is_err());
     }
 
     #[test]
@@ -1430,7 +1434,7 @@ mod multifile_tests {
             ("a.mm".to_owned(), member.to_owned()),
             ("b.mm".to_owned(), member.to_owned()),
         ]);
-        assert!(merge_import_closure("app.mm", &dup).is_err());
+        assert!(merge_import_closure("app.mm", &dup, false).is_err());
         // The same ambiguity without aliases: `import "a"; import
         // "b";` is fine (qualifiers `a`/`b` differ), but a member named
         // `k.mm` aliased as `k` collides with an unaliased `k`.
@@ -1442,7 +1446,7 @@ mod multifile_tests {
             ("a.mm".to_owned(), member.to_owned()),
             ("k.mm".to_owned(), member.to_owned()),
         ]);
-        assert!(merge_import_closure("app.mm", &alias_stem_dup).is_err());
+        assert!(merge_import_closure("app.mm", &alias_stem_dup, false).is_err());
     }
 
     #[test]
@@ -1455,16 +1459,16 @@ mod multifile_tests {
             "helpers.mm".into(),
             "atom helper(x: i64) -> i64\r\n    requires: true;\r\n    ensures: result == x + 1;\r\n    body: { x + 1 };\r\n".into(),
         );
-        let (merged, _) = merge_import_closure("app.mm", &crlf).unwrap();
+        let (merged, _) = merge_import_closure("app.mm", &crlf, false).unwrap();
         assert!(merged.contains("atom helper(x: i64) -> i64\r\n    requires: true;"));
     }
 
     #[test]
     fn unpinned_and_missing_members_rejected() {
         let only_root = BTreeMap::from([("app.mm".to_owned(), ROOT.to_owned())]);
-        assert!(merge_import_closure("app.mm", &only_root).is_err());
+        assert!(merge_import_closure("app.mm", &only_root, false).is_err());
         let missing_deep = BTreeMap::from([("app.mm".to_owned(), "import \"deep\";\natom main() -> i64\n    requires: true;\n    ensures: result == 1;\n    body: { 1 };".to_owned())]);
-        assert!(merge_import_closure("app.mm", &missing_deep).is_err());
+        assert!(merge_import_closure("app.mm", &missing_deep, false).is_err());
     }
 
     #[test]
@@ -1514,7 +1518,7 @@ mod multifile_tests {
             ),
             ("helpers.mm".to_owned(), HELPERS.to_owned()),
         ]);
-        let (merged, graph) = merge_import_closure("app.mm", &commented).unwrap();
+        let (merged, graph) = merge_import_closure("app.mm", &commented, false).unwrap();
         assert_eq!(graph["app.mm"], ["helpers.mm"]);
         // The comment survives verbatim and `atom main` is not folded
         // into it.
@@ -1532,7 +1536,7 @@ mod multifile_tests {
             ),
             ("helpers.mm".to_owned(), HELPERS.to_owned()),
         ]);
-        assert!(merge_import_closure("app.mm", &missing).is_err());
+        assert!(merge_import_closure("app.mm", &missing, false).is_err());
     }
 
     #[test]
@@ -1540,13 +1544,12 @@ mod multifile_tests {
         let shared = BTreeMap::from([
             (
                 "app.mm".to_owned(),
-                format!(
-                    "import \"helpers\" as h; atom main() -> i64 requires: true; ensures: result > 0; body: {{ h::helper(0) }};"
-                ),
+                "import \"helpers\" as h; atom main() -> i64 requires: true; ensures: result > 0; body: { h::helper(0) };"
+                    .to_owned(),
             ),
             ("helpers.mm".to_owned(), HELPERS.to_owned()),
         ]);
-        assert!(merge_import_closure("app.mm", &shared).is_err());
+        assert!(merge_import_closure("app.mm", &shared, false).is_err());
     }
 
     #[test]

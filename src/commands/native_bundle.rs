@@ -1200,7 +1200,7 @@ fn recheck_llvm_loaded(
             }
             SourceRecheck::RecheckedWithinProfile => (),
         }
-        let merged = merge_import_closure(&root, &members)
+        let merged = merge_import_closure(&root, &members, record.profile == MULTIFILE_PROFILE_V2)
             .map_err(|_| BundleError("import closure merge failed"))?
             .0;
         let llvm_ir = std::str::from_utf8(&loaded.files[&BundleFile::LlvmIr])

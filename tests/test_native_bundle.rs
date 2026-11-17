@@ -1949,6 +1949,57 @@ fn module_bundle_with_typedef_and_single_main_takes_the_module_path() {
 }
 
 #[test]
+fn multifile_bundle_with_refined_member_builds_as_v2() {
+    // A member carrying a `type` declaration merges only under the
+    // refined admission — the member gate must not reject it before the
+    // merged module's profile check ever runs.
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        root.path().join("helpers.mm"),
+        "type Port = i64 where v >= 1 && v <= 65535;\n\
+         atom listen(x: Port) -> Port requires: true; ensures: result == x; body: { x };\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"helpers\" as h;\n\natom main() -> i64 requires: true; ensures: result == 80; body: { h::listen(80) };\n",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V2);
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // The consumer evidence identity record names the pinned v2
+    // multifile profile.
+    let json = consume("recheck-llvm --json", &source, &bundle, &id);
+    assert_success(&json);
+    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        envelope["evidence"][0]["semantics"]["profile"],
+        native_bundle::MULTIFILE_PROFILE_V2
+    );
+    // Under a v1 pin the same members stay refused at the member gate.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MULTIFILE_PROFILE.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn module_bundle_with_match_atom_builds_and_rechecks() {
     // Certificate generation annotates match bodies with a
     // manual-lemma reason in the translator IR; the binding pins the
