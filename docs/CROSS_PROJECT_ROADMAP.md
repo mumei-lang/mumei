@@ -4022,9 +4022,46 @@ declared recheck/accept routes re-derive under the record's own
 admission. The mumei-demo `native_composite_attempt` declared-route
 scenario exercises the v4 fragment end to end (produce → `native-check`
 consistent → a struct field typed by a refined alias refused).
-C10 stays partial — enum members, branch-merged struct values and
-struct-field assignment, deeper
-optimizer/ABI/runtime assurance and producer authenticity remain open.
+Enum members join the composite fragment under
+`mumei.pure-i64-composite/v4` and the `/v7` bundle profiles, pinned
+only when a module declares an enum: a non-generic, non-recursive
+enum whose every payload field resolves to an `i64`/`bool` leaf
+(directly or through a refined-alias chain) is admitted as a module
+member, and an enum-typed atom parameter flattens to a tag slot
+plus one scalar slot per payload index in declaration order —
+the same `{i64, ...}` tagged-union layout the emitter produces.
+The tag carries the variant-count domain (`0 <= tag < variants`)
+and each payload slot keeps its declared type's refined domain,
+which the verifier assumes under the match arm's hit condition
+(a payload exists only when the tag matches). `match` on an enum
+parameter is admitted with `Variant` arms plus a required final
+unguarded wildcard arm; `let`-bound enum values pass through by
+name to a same-enum sibling parameter or scrutinee. Enum
+construction and enum results, literal/variable arms on enum
+targets, mixed-type payload slots across variants, and recursive
+or generic enums stay rejected. Verification of the fragment
+itself needed four repairs shipped in the same slice: enum
+variant `field_types` now stores only the declared type (named
+payloads had kept the verbatim `name: type` text, so every
+type-driven consumer read `b: bool` as an unknown Int type),
+exhaustiveness guards evaluate in the pattern-bound environment,
+an enum constructor proves each payload satisfies its
+declared field type at the construction site — otherwise a
+`Chan::Tcp(0)` under `p: Port` escaped as a valid `Chan` and a
+later match's arm-conditional assumption made the context
+vacuous rather than rejecting the bad value — and match-arm
+bodies evaluate under their real reachability window (the
+negations of the *preceding* arms plus the arm's own condition
+on the path-condition stack), because the previous fold order
+accumulated later arms' conditions and a trailing wildcard's
+`not true` turned every earlier arm's checks vacuous. `check`,
+`recheck-source` and `recheck-llvm` cover the fragment: tag and
+payload slots re-derive under the record's pinned profile name,
+so v1–v6 records are untouched. C10 stays partial — branch-merged
+composite values, field assignment, nested/generic structs and
+enum construction/results inside bundles, `u64`-family leaves and
+the deeper assurance layers remain open.
+
 
 
 ## No-`.mm` front door and V1 order
