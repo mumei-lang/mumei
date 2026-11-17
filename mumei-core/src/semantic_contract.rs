@@ -795,9 +795,15 @@ impl<'a> KindEnv<'a> {
         Ok(())
     }
 
-    /// Reject a binder that collides with a synthesized field name.
+    /// Reject a binder that collides with a synthesized field name. With
+    /// struct values admitted, a struct literal of `T` writes its fields
+    /// under `__struct_T_f` in the verifier and emitter, so a binder
+    /// named like a declared struct (whose `.f` reads resolve through
+    /// that name) is rejected too; `__struct_T_f` itself is reserved.
     fn bind(&self, name: &str) -> Result<(), SemanticContractError> {
-        if self.reserved.contains(name) {
+        if self.reserved.contains(name)
+            || (self.admit_struct_values && self.structs.contains_key(name))
+        {
             return Err(SemanticContractError::Unsupported(
                 "binder collides with a struct field name",
             ));
@@ -1014,7 +1020,7 @@ fn check_atom_contract(
             }
         }
     }
-    let reserved: BTreeSet<String> = composites
+    let mut reserved: BTreeSet<String> = composites
         .iter()
         .flat_map(|(param, struct_name)| {
             structs[*struct_name].iter().flat_map(move |f| {
@@ -1025,6 +1031,13 @@ fn check_atom_contract(
             })
         })
         .collect();
+    if admit_struct_values {
+        reserved.extend(structs.iter().flat_map(|(struct_name, fields)| {
+            fields
+                .iter()
+                .map(move |f| format!("__struct_{struct_name}_{}", f.name))
+        }));
+    }
     let identifiers: BTreeSet<String> = crate::parser::lexer::Lexer::new(&atom.body_expr)
         .tokenize_checked()
         .map_err(|_| SemanticContractError::Parse)?
@@ -5375,6 +5388,13 @@ mod tests {
             "atom h(a: i64) -> i64 requires: true; ensures: true; body: { let q_x = 1; let q = make(a); q.x };",
             "atom h(a: i64) -> i64 requires: true; ensures: true; body: { let q = make(a); let __struct_q_y = 1; q.x };",
             "atom h(q_y: i64) -> i64 requires: true; ensures: true; body: { let q = make(q_y); q.x };",
+            // binders named like a declared struct or spelling a struct
+            // literal's synthesized field names (`__struct_P_x`)
+            "atom h(a: i64) -> i64 requires: true; ensures: true; body: { let P = make(a); let r = P { x: 5, y: 6 }; P.x };",
+            "atom h(P: P) -> i64 requires: true; ensures: true; body: { P.x };",
+            "atom h(a: i64) -> i64 requires: true; ensures: true; body: { let Q = 1; Q };",
+            "atom h(a: i64) -> i64 requires: true; ensures: true; body: { let __struct_P_x = 1; let r = P { x: a, y: 6 }; __struct_P_x };",
+            "atom h(__struct_Q_y: i64) -> i64 requires: true; ensures: true; body: { 0 };",
             // a call result passed where the callee takes another struct
             "atom g(q: Q) -> i64 requires: true; ensures: true; body: { q.x };\natom h(a: i64) -> i64 requires: true; ensures: true; body: { g(make(a)) };",
         ] {
