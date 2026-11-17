@@ -771,6 +771,18 @@ fn struct_field_assign<'a>(
     let handle_name = handle.decl().name();
     bind_struct_fields(env, &handle_name, &merged);
     bind_struct_fields(env, base, &merged);
+    // A struct-typed field (`q.inner = w`) rebinds `q_inner` to the
+    // new handle — its leaf keys (`__struct_q_inner_a`, `q_inner_a`)
+    // would otherwise stay on the pre-write values and a later
+    // `q.inner.a` read would resolve through the direct-path keys to
+    // stale leaves. Projecting the written value's fields into the
+    // `<base>_<field>` binding re-seeds them, including deeper nested
+    // paths (flattened field names compose, e.g. `q_inner_inner_a`).
+    for (name, value) in &merged {
+        if let Some(inner_fields) = project_struct_fields(env, value) {
+            bind_struct_fields(env, &format!("{base}_{name}"), &inner_fields);
+        }
+    }
     env.insert(base.to_string(), handle);
     profile_solver_assertion(vc, &format!("assign_{}", var), None);
     Ok(Some(val))

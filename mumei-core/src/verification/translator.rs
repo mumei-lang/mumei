@@ -33,7 +33,8 @@ pub(crate) use stmt::stmt_to_z3;
 pub(crate) use struct_invariants::{
     alias_struct_fields, assume_struct_contract, assume_struct_invariants, bind_struct_fields,
     check_struct_invariants, field_type_predicates, fresh_struct_handle, lower_struct_contract,
-    seed_struct_fields, struct_field_key, struct_fields_of_value, STRUCT_FIELD_PREFIX,
+    project_struct_fields, seed_struct_fields, struct_field_key, struct_fields_of_value,
+    STRUCT_FIELD_PREFIX,
 };
 pub(crate) use temporal::{
     assert_temporal_effect_transition, is_temporal_witness_predicate, temporal_witness_call_to_z3,

@@ -2777,6 +2777,22 @@ pub(crate) fn expr_to_z3<'a>(
                             }
                             bind_struct_fields(&mut call_env, &result_name, &result_fields);
                             bind_struct_fields(&mut call_env, "result", &result_fields);
+                            // Nested result fields: `call_env` was cloned
+                            // before `seed_struct_fields` wrote the deeper
+                            // `__struct_<result>_<field>_<leaf>` keys to env,
+                            // so rebind them under `result_<field>_*` —
+                            // without this `result.inner.a` in the callee's
+                            // ensures resolves to an unrelated fresh const
+                            // and the caller never learns the guarantee.
+                            for (name, value) in &result_fields {
+                                if let Some(inner_fields) = project_struct_fields(env, value) {
+                                    bind_struct_fields(
+                                        &mut call_env,
+                                        &format!("result_{name}"),
+                                        &inner_fields,
+                                    );
+                                }
+                            }
                             // A direct read `f(1).x` cannot rebuild
                             // `call_<name>_<id>` — key the fields by the
                             // result ast so `FieldAccess` returns the
@@ -5003,6 +5019,19 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                         bind_struct_fields(&mut call_env, &result_name, &result_fields);
                         bind_struct_fields(&mut call_env, "result", &result_fields);
+                        // Same nested-leaf re-home as the other call arms:
+                        // `call_env` predates the `seed_struct_fields` run
+                        // on env, so `result.inner.a` in the callee's
+                        // ensures would otherwise see a fresh const.
+                        for (name, value) in &result_fields {
+                            if let Some(inner_fields) = project_struct_fields(env, value) {
+                                bind_struct_fields(
+                                    &mut call_env,
+                                    &format!("result_{name}"),
+                                    &inner_fields,
+                                );
+                            }
+                        }
                         vc.call_result_fields.borrow_mut().insert(
                             result_z3.get_z3_ast() as usize,
                             (result_fields.clone(), result_z3.clone()),
@@ -5440,7 +5469,19 @@ pub(crate) fn expr_to_z3<'a>(
 
                 // ネスト構造体の再帰解決:
                 // 内側の式を先に Z3 で評価し、結果を env に登録してからフィールドを解決
-                let _base_val = expr_to_z3(vc, inner_expr, env, solver_opt)?;
+                let base_val = expr_to_z3(vc, inner_expr, env, solver_opt)?;
+
+                // 内側が構造体ハンドル（StructInit・パラメータ・let
+                // エイリアスが残す `__mumei_struct_*` 定数、またはその
+                // ite）の場合、そのハンドル名で平坦化された
+                // `__struct_<handle>_<field>` エントリを射影する。
+                // これが無いと `o.inner.a` は未拘束の fresh const に
+                // 退化し、リテラル初期化のフィールド値を読めない。
+                if let Some(fields) = project_struct_fields(env, &base_val) {
+                    if let Some((_, value)) = fields.iter().find(|(name, _)| name == field_name) {
+                        return Ok(value.clone());
+                    }
+                }
 
                 // 内側の式の型を推定し、構造体定義からフィールドの型を取得
                 // フィールドの精緻型制約も再帰的に適用する

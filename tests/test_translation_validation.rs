@@ -2996,3 +2996,46 @@ fn composite_v7_loop_aggregate_phi_reads_sibling_phi_before_commit() {
         Outcome::Different
     );
 }
+
+const NESTED_COMPOSITE_SOURCE: &str = "struct Inner { a: i64, b: i64 }\nstruct Outer { inner: Inner, c: i64 }\natom read_inner(o: Outer) -> i64 requires: true; ensures: true; body: { o.inner.a };\natom set_inner(o: Outer, w: Inner) -> Outer requires: true; ensures: true; body: { o.inner = w; o };\natom main() -> i64 requires: true; ensures: true; body: { let q = read_inner(Outer { inner: Inner { a: 3, b: 4 }, c: 5 }); q };";
+
+#[test]
+fn composite_v8_nested_struct_aggregates_validate_and_refute() {
+    // composite v8 flattens nested struct fields into leaf slots:
+    // `Outer` lowers to `{i64, i64, i64}` and `o.inner = w` emits an
+    // aggregate `insertvalue` at index 0. The validator must compare
+    // leaf ranges, not single slots.
+    let items = parse_module_checked(NESTED_COMPOSITE_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let report = tv::validate_native_module(
+        NESTED_COMPOSITE_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV8,
+    )
+    .unwrap();
+    assert_eq!(
+        report.outcome,
+        Outcome::EquivalentWithinProfile,
+        "nested aggregate module must validate\n{ir}"
+    );
+    // Reading the wrong leaf of the nested aggregate refutes the
+    // comparison: `o.inner.a` is index 0, `o.inner.b` is index 1.
+    let swapped = ir.replacen(
+        "extractvalue { i64, i64 } %o.inner, 0",
+        "extractvalue { i64, i64 } %o.inner, 1",
+        1,
+    );
+    assert_ne!(swapped, ir, "probe did not apply:\n{ir}");
+    assert_eq!(
+        tv::validate_native_module(
+            NESTED_COMPOSITE_SOURCE,
+            &swapped,
+            Options::default(),
+            RefinedAdmission::CompositeV8,
+        )
+        .unwrap()
+        .outcome,
+        Outcome::Different
+    );
+}

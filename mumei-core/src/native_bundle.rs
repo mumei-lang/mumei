@@ -72,6 +72,13 @@ pub const MODULE_PROFILE_V9: &str = "mumei.native-pure-i64-module-linux-x86_64/v
 /// joined under a branch merge (`mumei.pure-i64-composite/v7`).
 /// v1–v9 records keep their own gates.
 pub const MODULE_PROFILE_V10: &str = "mumei.native-pure-i64-module-linux-x86_64/v10";
+/// Module profile v11: the composite gate additionally admits
+/// struct-valued fields — `struct Outer { inner: Inner, c: i64 }`
+/// declarations, nested field reads `o.inner.a`, and composite
+/// writes carried by nested-path binders
+/// (`mumei.pure-i64-composite/v8`). v1–v10 records keep their own
+/// gates.
+pub const MODULE_PROFILE_V11: &str = "mumei.native-pure-i64-module-linux-x86_64/v11";
 pub const MODULE_SCOPE: &str =
     "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1";
@@ -81,7 +88,8 @@ pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1"
 /// single-level refined-scalar gate, v3 under the widened one, v4
 /// under the composite one, v5 under composite v2, v6 under
 /// composite v3, v7 under composite v4, v8 under composite v5, v9
-/// under composite v6 and v10 under composite v7.
+/// under composite v6, v10 under composite v7 and v11 under
+/// composite v8.
 /// Anything else is not this schema's record.
 pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
     match profile {
@@ -95,6 +103,7 @@ pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, Bundl
         MODULE_PROFILE_V8 => Ok(RefinedAdmission::CompositeV5),
         MODULE_PROFILE_V9 => Ok(RefinedAdmission::CompositeV6),
         MODULE_PROFILE_V10 => Ok(RefinedAdmission::CompositeV7),
+        MODULE_PROFILE_V11 => Ok(RefinedAdmission::CompositeV8),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -133,6 +142,9 @@ pub const MULTIFILE_PROFILE_V9: &str = "mumei.native-pure-i64-multifile-linux-x8
 /// Multifile v10: the branch-merged-composite widening of
 /// `MODULE_PROFILE_V10`.
 pub const MULTIFILE_PROFILE_V10: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v10";
+/// Multifile v11: the nested-struct-field widening of
+/// `MODULE_PROFILE_V11`.
+pub const MULTIFILE_PROFILE_V11: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v11";
 pub const MULTIFILE_RECHECK_PROFILE: &str = "mumei.native-multifile-source-recheck/v1";
 
 pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
@@ -147,6 +159,7 @@ pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, Bu
         MULTIFILE_PROFILE_V8 => Ok(RefinedAdmission::CompositeV5),
         MULTIFILE_PROFILE_V9 => Ok(RefinedAdmission::CompositeV6),
         MULTIFILE_PROFILE_V10 => Ok(RefinedAdmission::CompositeV7),
+        MULTIFILE_PROFILE_V11 => Ok(RefinedAdmission::CompositeV8),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -1092,6 +1105,7 @@ pub fn load_pinned_module_record(
             MODULE_PROFILE_V8,
             MODULE_PROFILE_V9,
             MODULE_PROFILE_V10,
+            MODULE_PROFILE_V11,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1156,6 +1170,7 @@ pub fn load_pinned_multifile_record(
             MULTIFILE_PROFILE_V8,
             MULTIFILE_PROFILE_V9,
             MULTIFILE_PROFILE_V10,
+            MULTIFILE_PROFILE_V11,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
