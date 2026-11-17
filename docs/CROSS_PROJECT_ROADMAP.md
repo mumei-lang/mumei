@@ -3989,10 +3989,17 @@ are untouched. A struct parameter flattens to one scalar input per
 field in declaration order; it is never a scalar value itself and only
 passes through by name to a same-struct sibling parameter. Struct
 construction and results, struct `let`s, invariants, methods, field
-constraints, subrange and refined-alias fields (the verifier does not
-yet assume their domains for struct fields), non-scalar fields and
-binders spelled like the emitter's synthesized field names all fail
-closed. `check`, `recheck-source` and — since the translation
+constraints, subrange fields (the verifier does not yet assume a
+subrange domain for struct fields) and binders spelled like the
+emitter's synthesized field names all fail
+closed. Refined-alias fields whose chain resolves to an `i64`/`bool`
+leaf are admitted under `mumei.pure-i64-composite/v2` and the `/v5`
+bundle profiles: the verifier assumes a field's alias predicates for
+a struct parameter the same way it does for a scalar parameter, and
+`StructInit` literals must establish them (a `P { x: 0 }` literal
+with `x: Pos` is a rejected verification error); records keep pinning
+the gate that produced them, so v1–v4 rechecks re-derive under their
+own admission. `check`, `recheck-source` and — since the translation
 profile decomposes aggregate member signatures — `recheck-llvm` cover
 the composite fragment: each struct formal maps to its flattened
 field slots in declaration order, `extractvalue` reads the field at
