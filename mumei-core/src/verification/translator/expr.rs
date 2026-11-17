@@ -2900,6 +2900,11 @@ pub(crate) fn expr_to_z3<'a>(
                                 call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
                                 call_env.insert("len_result".to_string(), len_sym.clone());
                             }
+                            // `ensures` reads post-write fields —
+                            // freshen the callee's written composite
+                            // params so its clauses don't assert on the
+                            // caller's input-time slots.
+                            havoc_written_callee_fields(vc, &callee, &mut call_env);
                             let ens_ast = parse_expression(&caller_ensures);
 
                             if use_rec_fn {
@@ -5081,6 +5086,11 @@ pub(crate) fn expr_to_z3<'a>(
                             call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
                             call_env.insert("len_result".to_string(), len_sym.clone());
                         }
+                        // `ensures` reads post-write fields — freshen
+                        // the callee's written composite params so its
+                        // clauses don't assert on the caller's
+                        // input-time slots.
+                        havoc_written_callee_fields(vc, &callee_atom, &mut call_env);
                         let ens_ast = parse_expression(&caller_ensures);
                         if use_rec_fn {
                             let unfold_key = if solver_opt.is_some()

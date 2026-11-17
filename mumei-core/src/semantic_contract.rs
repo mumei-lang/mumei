@@ -3635,6 +3635,15 @@ fn module_atom_obligations<'ctx>(
         domain_terms.extend(source_domain.iter().cloned());
         domain_obligations.push(Bool::and(context, &domain_terms.iter().collect::<Vec<_>>()));
         let mut ensures_env = site_env;
+        // The callee's `ensures` reads post-write composite fields — the
+        // same post-state its own obligation checks. Binding it to the
+        // caller's input-time argument instead would let `requires
+        // q.f == 0` and `ensures q.f == 1` on a writing callee collapse
+        // the site's assumption into a contradiction, so instantiate
+        // the callee's post-state composites at the call arguments.
+        for (name, value) in &callee_body.post_writes {
+            ensures_env.insert(name.clone(), substitute_source_value(value, &substitutions));
+        }
         ensures_env.insert(
             "result".to_string(),
             result_value(&callee.name, &site.result, context, call_returns),
@@ -3786,6 +3795,33 @@ enum SourceValue<'ctx> {
         tag: BV<'ctx>,
         slots: Vec<SourceValue<'ctx>>,
     },
+}
+
+/// Instantiate a callee-side [`SourceValue`] (expressed over the
+/// callee's input consts) at a call site by substituting each formal
+/// input bitvector with the site's actual argument.
+fn substitute_source_value<'ctx>(
+    value: &SourceValue<'ctx>,
+    substitutions: &[(&BV<'ctx>, &BV<'ctx>)],
+) -> SourceValue<'ctx> {
+    match value {
+        SourceValue::Integer(v) => SourceValue::Integer(v.substitute(substitutions)),
+        SourceValue::Boolean(v) => SourceValue::Boolean(v.substitute(substitutions)),
+        SourceValue::Composite(fields) => SourceValue::Composite(
+            fields
+                .iter()
+                .map(|(name, v)| (name.clone(), substitute_source_value(v, substitutions)))
+                .collect(),
+        ),
+        SourceValue::Enum { name, tag, slots } => SourceValue::Enum {
+            name: name.clone(),
+            tag: tag.substitute(substitutions),
+            slots: slots
+                .iter()
+                .map(|v| substitute_source_value(v, substitutions))
+                .collect(),
+        },
+    }
 }
 
 /// Bind declared parameters to their symbolic inputs: `i64` parameters
