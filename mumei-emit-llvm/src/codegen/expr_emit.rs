@@ -1068,6 +1068,56 @@ pub(crate) fn chan_payload_type_name(
 /// Resolve a declared type name to its base name with generics stripped —
 /// `get_enum`/`get_struct` are keyed on the unparameterized name, so
 /// `Option<i64>` resolves to `Option`.
+/// Resolved integer type of a `HirExpr` operand — `Some("u64")` marks a
+/// `u64` operand, `Some("i64")` a declared signed one, `None` an adaptive
+/// literal or unresolvable expr. Mirrors the verifier's
+/// `fixed_width_int_type` so codegen picks `udiv`/`urem`/`lshr`/`icmp u*`
+/// for the same operands the verifier encoded with unsigned BV ops.
+fn hir_int_type_name(
+    expr: &HirExpr,
+    var_types: &HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    match expr {
+        HirExpr::Variable(name) => var_types
+            .get(name)
+            .map(|t| resolve_named_type(module_env, t)),
+        HirExpr::Call { name, .. } => module_env
+            .get_atom(name)
+            .and_then(|atom| atom.return_type.clone())
+            .map(|t| resolve_named_type(module_env, &t)),
+        HirExpr::BinaryOp(l, _, r) => hir_int_type_name(l, var_types, module_env)
+            .or_else(|| hir_int_type_name(r, var_types, module_env)),
+        HirExpr::FieldAccess(inner, field) => infer_struct_type_name(inner, var_types, module_env)
+            .and_then(|s| {
+                module_env
+                    .get_struct(&s)
+                    .and_then(|sdef| sdef.fields.iter().find(|f| f.name == *field))
+                    .map(|f| resolve_named_type(module_env, &f.type_name))
+            }),
+        _ => None,
+    }
+}
+
+/// `u64` operand semantics for an int binop: `Some(true)` unsigned,
+/// `Some(false)` both signed or adaptive, `Err` on a declared u64/non-u64 mix.
+fn binop_unsigned_operands(
+    left: &HirExpr,
+    right: &HirExpr,
+    var_types: &HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Result<bool, MumeiError> {
+    let lt = hir_int_type_name(left, var_types, module_env);
+    let rt = hir_int_type_name(right, var_types, module_env);
+    let (lu, ru) = (lt.as_deref() == Some("u64"), rt.as_deref() == Some("u64"));
+    if (lu && rt.is_some() && !ru) || (ru && lt.is_some() && !lu) {
+        return Err(MumeiError::codegen(
+            "Cannot mix a u64 operand with a declared non-u64 integer operand".to_string(),
+        ));
+    }
+    Ok(lu || ru)
+}
+
 pub(crate) fn resolve_named_type(module_env: &ModuleEnv, type_name: &str) -> String {
     let base = module_env.resolve_base_type(type_name);
     base.split('<')
@@ -2119,12 +2169,19 @@ pub(crate) fn compile_hir_expr<'a>(
                 }
                 let l = lhs.into_int_value();
                 let r = rhs.into_int_value();
+                let unsigned = binop_unsigned_operands(left, right, var_types, module_env)?;
                 match op {
                     HirBinOp::Add => Ok(llvm!(builder.build_int_add(l, r, "add_tmp")).into()),
                     HirBinOp::Sub => Ok(llvm!(builder.build_int_sub(l, r, "sub_tmp")).into()),
                     HirBinOp::Mul => Ok(llvm!(builder.build_int_mul(l, r, "mul_tmp")).into()),
+                    HirBinOp::Div if unsigned => {
+                        Ok(llvm!(builder.build_int_unsigned_div(l, r, "udiv_tmp")).into())
+                    }
                     HirBinOp::Div => {
                         Ok(llvm!(builder.build_int_signed_div(l, r, "div_tmp")).into())
+                    }
+                    HirBinOp::Rem if unsigned => {
+                        Ok(llvm!(builder.build_int_unsigned_rem(l, r, "urem_tmp")).into())
                     }
                     HirBinOp::Rem => {
                         // `srem i64::MIN, -1` is undefined in LLVM; `x % -1` is
@@ -2155,6 +2212,9 @@ pub(crate) fn compile_hir_expr<'a>(
                     HirBinOp::BitOr => Ok(llvm!(builder.build_or(l, r, "or_tmp")).into()),
                     HirBinOp::BitXor => Ok(llvm!(builder.build_xor(l, r, "xor_tmp")).into()),
                     HirBinOp::Shl => Ok(llvm!(builder.build_left_shift(l, r, "shl_tmp")).into()),
+                    HirBinOp::Shr if unsigned => {
+                        Ok(llvm!(builder.build_right_shift(l, r, false, "lshr_tmp")).into())
+                    }
                     HirBinOp::Shr => {
                         Ok(llvm!(builder.build_right_shift(l, r, true, "ashr_tmp")).into())
                     }
@@ -2164,13 +2224,17 @@ pub(crate) fn compile_hir_expr<'a>(
                     | HirBinOp::Gt
                     | HirBinOp::Ge
                     | HirBinOp::Le => {
-                        let pred = match op {
-                            HirBinOp::Eq => IntPredicate::EQ,
-                            HirBinOp::Neq => IntPredicate::NE,
-                            HirBinOp::Lt => IntPredicate::SLT,
-                            HirBinOp::Gt => IntPredicate::SGT,
-                            HirBinOp::Ge => IntPredicate::SGE,
-                            HirBinOp::Le => IntPredicate::SLE,
+                        let pred = match (op, unsigned) {
+                            (HirBinOp::Eq, _) => IntPredicate::EQ,
+                            (HirBinOp::Neq, _) => IntPredicate::NE,
+                            (HirBinOp::Lt, true) => IntPredicate::ULT,
+                            (HirBinOp::Gt, true) => IntPredicate::UGT,
+                            (HirBinOp::Ge, true) => IntPredicate::UGE,
+                            (HirBinOp::Le, true) => IntPredicate::ULE,
+                            (HirBinOp::Lt, false) => IntPredicate::SLT,
+                            (HirBinOp::Gt, false) => IntPredicate::SGT,
+                            (HirBinOp::Ge, false) => IntPredicate::SGE,
+                            (HirBinOp::Le, false) => IntPredicate::SLE,
                             _ => unreachable!(),
                         };
                         let cmp = llvm!(builder.build_int_compare(pred, l, r, "cmp_tmp"));

@@ -2037,6 +2037,25 @@ fn verify_inner_impl(
         }
     }
 
+    // 2d. `u64` params: under the `Int` encoding the symbol is unbounded —
+    // assert `0 <= v <= u64::MAX` so `a >= 0` and `a < 0` are decided
+    // correctly. The `BV(64)` encoding needs no bound (every value is valid;
+    // the unsigned ops carry the semantics).
+    let u64_max = z3::ast::Int::from_u64(&ctx, u64::MAX);
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        if module_env.resolve_base_type(type_name) != "u64" {
+            continue;
+        }
+        let Some(v) = env.get(&param.name).and_then(|d| d.as_int()) else {
+            continue;
+        };
+        solver.assert(&v.ge(&z3::ast::Int::from_u64(&ctx, 0)));
+        solver.assert(&v.le(&u64_max));
+    }
+
     // 2c. 全パラメータに対して配列長シンボルを事前生成
     #[allow(clippy::map_entry)]
     for param in &atom.params {

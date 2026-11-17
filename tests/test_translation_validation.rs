@@ -915,10 +915,6 @@ fn vacuous_and_out_of_profile_division_and_shifts_fail_closed() {
         "%v = sdiv exact i64 %x, 2\nret i64 %v",
         "%v = shl nsw i64 %x, 1\nret i64 %v",
         "%v = ashr exact i64 %x, 0\nret i64 %v",
-        // Unsigned forms have no source counterpart — still unsupported.
-        "%v = udiv i64 %x, 1\nret i64 %v",
-        "%v = urem i64 %x, 1\nret i64 %v",
-        "%v = lshr i64 %x, 0\nret i64 %v",
         // `i1` division/shifts — legal LLVM, but the profile only encodes
         // i64 semantics; rejecting beats a solver sort mismatch.
         "%c = icmp eq i64 %x, 0\n%v = sdiv i1 %c, %c\n%z = zext i1 %v to i64\nret i64 %z",
@@ -930,6 +926,20 @@ fn vacuous_and_out_of_profile_division_and_shifts_fail_closed() {
     ] {
         assert!(
             tv::validate_pure_i64(&src, &function(body), Options::default()).is_err(),
+            "{body}"
+        );
+    }
+    // Unsigned forms are encoded (composite v10 admits `u64`) — they are
+    // not rejected, but `udiv x,2`, `urem x,1` (0) and `lshr x,1` diverge
+    // from the `x` source and must report `Different`.
+    for body in [
+        "%v = udiv i64 %x, 2\nret i64 %v",
+        "%v = urem i64 %x, 1\nret i64 %v",
+        "%v = lshr i64 %x, 1\nret i64 %v",
+    ] {
+        assert_eq!(
+            validate(&src, &function(body)).outcome,
+            Outcome::Different,
             "{body}"
         );
     }
