@@ -1599,6 +1599,49 @@ keeps `os_exit_status` excluded since it performs no execution. A
 mismatched status fails closed (exit 1); every unevaluable case exits 3
 with no descriptor.
 
+### Pinned executable stdout recheck
+
+`mumei native-bundle recheck-stdout` is the adjacent channel-observation
+slice. It runs the same `recheck-artifact` chain and then executes the
+reproduced `program` once with no arguments and closed stdin/stderr,
+capturing at most 64 KiB of stdout and comparing its SHA-256 against the
+record's `link_build.expected_stdout_sha256` pin:
+
+```sh
+mumei native-bundle recheck-stdout module-bundle module.mm \
+  --expected-build-id <trusted-64-character-lowercase-sha256>
+```
+
+The producer pins `expected_stdout_sha256` at build time under the same
+no-argument/closed-stdin conditions with a 30-second cap; a silent
+program pins the empty-stream digest. Because the consumer executes the
+byte-identical reproduction — never the bundle's own copy — a matching
+digest is an observation about the *pinned* artifact.
+
+The outcome mapping stays honest about what cannot be evaluated: spawn
+failure, timeout, signal termination, output over the capture cap and a
+record that pins no `expected_stdout_sha256` (pre-field records carry
+none) all exit 3 as inconclusive; a digest mismatch fails closed as
+`Different` (exit 1) after the artifact reproduction itself succeeded.
+The field is optional in the record so pre-field records still
+deserialize, and a skipped comparison is exactly what inconclusive
+reports.
+
+The success scope is
+`artifact_reproduction_and_os_stdout_observation_only/no_runtime_abi_or_semantic_proof`.
+A single execution under one environment is an OS-level observation of
+one channel — not a runtime, ABI, process-semantics, stderr or
+historical-execution claim; this command observes stdout only and does
+not compare the exit status.
+
+`mumei native-bundle accept-stdout` is the acceptance face: it runs the
+identical chain and, on a matching observation, emits the anonymous
+acceptance descriptor with `os_stdout_observation` in `checks_performed`
+and `os_exit_status`, `os_stderr_observation`, `historical_execution`,
+optimizer/ABI/runtime semantics, grade and Lean in
+`checks_not_performed`. Every unevaluable case exits 3 with no
+descriptor; a mismatched digest exits 1.
+
 ### First native consumer Evidence producer
 
 `mumei native-bundle recheck-llvm <bundle> <source> --expected-build-id <trusted-id> --json`
@@ -1748,8 +1791,9 @@ On acceptance, `--json` emits one static anonymous descriptor
 `saved_evidence_consistency`. `checks_not_performed` names what stays
 unassessed: producer authenticity, historical execution, the pinned
 object/linker/artifact recheck (a separate opt-in command), optimizer
-semantics, ABI/runtime semantics, OS exit status, grade promotion and Lean
-kernel checks. Text mode prints the same scope in prose.
+semantics, ABI/runtime semantics, OS exit status, OS stdout observation,
+grade promotion and Lean kernel checks. Text mode prints the same scope in
+prose.
 
 The descriptor echoes no subject, digest or provenance — it is a diagnostic,
 not reusable Evidence or a certificate, and the common representation gate
@@ -1785,7 +1829,8 @@ descriptor with scope
 record pins it; for a pre-field record the descriptor names it among
 the checks not performed instead. `checks_not_performed` keeps producer
 authenticity, historical execution, optimizer/ABI/runtime/OS semantics,
-grade and Lean, and honestly names `raw_link_argument_vector_reproduction`
+OS exit status, OS stdout observation, grade and Lean, and honestly names
+`raw_link_argument_vector_reproduction`
 — the raw `arguments_sha256` build observation no recheck can
 reproduce, as `recheck-artifact` documents.
 Because artifact acceptance evaluates no record input, the descriptor emits

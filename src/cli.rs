@@ -616,6 +616,25 @@ pub(crate) enum NativeBundleCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Execute the reproduced executable and compare its captured stdout digest with the record pin; no runtime/ABI semantics
+    RecheckStdout {
+        bundle: String,
+        source: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel
+        #[arg(long)]
+        expected_build_id: String,
+    },
+    /// Accept the pinned artifact after the stdout recheck; emits an anonymous acceptance descriptor, not reusable Evidence
+    AcceptStdout {
+        bundle: String,
+        source: String,
+        /// SHA-256 of native-bundle.json obtained through a separately trusted channel
+        #[arg(long)]
+        expected_build_id: String,
+        /// Emit a static acceptance descriptor, not reusable Evidence or a certificate
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
