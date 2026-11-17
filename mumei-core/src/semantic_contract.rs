@@ -3412,11 +3412,12 @@ fn encode_atom_body<'ctx>(
                     .or_else(|| enum_variants(p, enums).map(|v| 1 + enum_max_arity(v)))
             })
             .collect(),
-        result_shape: atom
-            .return_type
-            .as_deref()
-            .and_then(|name| structs.get(name))
-            .map(Vec::len),
+        result_shape: atom.return_type.as_deref().and_then(|name| {
+            structs
+                .get(name)
+                .map(Vec::len)
+                .or_else(|| enums.get(name).map(|variants| 1 + enum_max_arity(variants)))
+        }),
         loop_bound_exits,
         post_writes: top_writes
             .into_iter()
@@ -3525,6 +3526,15 @@ fn signature_domain<'ctx>(
                 type_name,
                 carriers,
             } => {
+                // A `bool` payload slot stays canonical under EVERY
+                // tag: the source layer reads it as `v != 0` while the
+                // emitter and LLVM pass the raw i64, so leaving the
+                // padding value unconstrained under a non-carrier tag
+                // would let a plain pass-through compare `ite(v != 0,
+                // 1, 0)` against the raw `v`.
+                if enum_slot_is_bool(type_name, refined) {
+                    domain.push(v.bvule(&BV::from_u64(context, 1, 64)));
+                }
                 if carriers.is_empty() {
                     continue;
                 }
@@ -7399,5 +7409,18 @@ mod tests {
             "{decl}\natom bad(s: Shape) -> i64 requires: true; ensures: true; body: {{ if s == Shape::Dot {{ 1 }} else {{ 0 }} }};\n{MAIN0}"
         );
         assert!(v6(&eq).is_err());
+    }
+}
+
+/// Whether a flattened enum payload slot lowers with the profile's
+/// `bool` 0/1 convention: a literal `bool` field type or a bool-leaf
+/// refined alias.
+fn enum_slot_is_bool(type_name: Option<&str>, refined: &RefinedEnv) -> bool {
+    match type_name {
+        Some("bool") => true,
+        Some(name) => refined
+            .get(name)
+            .is_some_and(|alias| alias.kind == ScalarKind::Bool),
+        None => false,
     }
 }
