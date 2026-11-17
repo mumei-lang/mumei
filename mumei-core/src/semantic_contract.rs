@@ -4513,5 +4513,14 @@ mod tests {
         // The same decl/callee pair is admitted on its own, so each
         // rejection above is the probed shape, not the surrounding text.
         composite(&format!("{decl}\n{f}\n{MAIN0}")).unwrap();
+        // The synthesized-name reservation is per struct parameter: a
+        // `p_x` binder is fine where no struct parameter `p` exists, and a
+        // struct parameter named `q` reserves only `q_x`/`q_y`.
+        for atom in [
+            "atom h(p_x: i64) -> i64 requires: true; ensures: result == p_x; body: { p_x };",
+            "atom h(q: P, p_x: i64) -> i64 requires: true; ensures: result == q.x + p_x; body: { let p_y = q.y; q.x + p_x };",
+        ] {
+            composite(&format!("{decl}\n{f}\n{atom}\n{MAIN0}")).unwrap();
+        }
     }
 }
