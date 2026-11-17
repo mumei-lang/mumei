@@ -3977,6 +3977,31 @@ Recheck dispatch is unchanged: the pinned name selects the admission
 level exactly. C10 stays partial — `u64`-family leaves, struct/enum
 members and the deeper assurance layers remain open.
 
+### Wave 5 composite struct member profiles (C10 producer, v4)
+
+Core admits non-generic `struct` declarations whose fields are all
+`i64`/`bool` as module members, struct-typed atom parameters and `p.f`
+field reads on them, under `mumei.pure-i64-composite/v1` and the
+`mumei.native-pure-i64-module-linux-x86_64/v4` /
+`mumei.native-pure-i64-multifile-linux-x86_64/v4` bundle profiles —
+pinned only when a module actually declares a struct, so v1–v3 records
+are untouched. A struct parameter flattens to one scalar input per
+field in declaration order; it is never a scalar value itself and only
+passes through by name to a same-struct sibling parameter. Struct
+construction and results, struct `let`s, invariants, methods, field
+constraints, subrange and refined-alias fields (the verifier does not
+yet assume their domains for struct fields), non-scalar fields and
+binders spelled like the emitter's synthesized field names all fail
+closed. `check` and `recheck-source` cover the composite fragment;
+`recheck-llvm` and every stage built on it reject aggregate member
+signatures until the translation profile decomposes `extractvalue` —
+the next composite slice. Downstream consumers need no route changes:
+the bundle record pins the profile name it was produced under, so the
+declared recheck/accept routes re-derive under the record's own
+admission. mumei-demo coverage of the v4 fragment is a later slice.
+C10 stays partial — enum members, struct construction, deeper
+optimizer/ABI/runtime assurance and producer authenticity remain open.
+
 
 ## No-`.mm` front door and V1 order
 
