@@ -2357,9 +2357,25 @@ fn verify_inner_impl(
     if let (Some(sdef), Some(result_fields)) = (struct_return, &result_struct_fields) {
         match struct_fields_of_value(&env, &body_result, sdef) {
             Some(body_fields) => {
-                for ((_, result_sym), (_, body_val)) in result_fields.iter().zip(&body_fields) {
+                for ((field_name, result_sym), (_, body_val)) in
+                    result_fields.iter().zip(&body_fields)
+                {
                     let (lhs, rhs) = unify_branch_sorts(result_sym.clone(), body_val.clone())?;
                     solver.assert(&lhs._eq(&rhs));
+                    // Nested-struct fields: `seed_struct_fields` pre-created
+                    // `__struct_result_<field>_<leaf>` constants; without
+                    // asserting them equal to the body's leaf values a read
+                    // like `result.inner.a` resolves to a fresh unconstrained
+                    // symbol rather than the returned value's leaf.
+                    if let Some(leaf_fields) = project_struct_fields(&env, body_val) {
+                        for (leaf_name, leaf_val) in leaf_fields {
+                            let key = format!("__struct_result_{}_{}", field_name, leaf_name);
+                            if let Some(result_leaf) = env.get(&key) {
+                                let (lhs, rhs) = unify_branch_sorts(result_leaf.clone(), leaf_val)?;
+                                solver.assert(&lhs._eq(&rhs));
+                            }
+                        }
+                    }
                 }
             }
             None if !sdef.invariants.is_empty() => {

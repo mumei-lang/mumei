@@ -619,10 +619,7 @@ fn unfold_constant_calls<'a>(
                     .collect();
                 bind_struct_fields(&mut call_env, &handle_name, &result_fields);
                 bind_struct_fields(&mut call_env, "result", &result_fields);
-                vc.call_result_fields.borrow_mut().insert(
-                    handle.get_z3_ast() as usize,
-                    (result_fields.clone(), handle.clone()),
-                );
+                register_call_result_fields(vc, &call_env, &handle, &result_fields);
                 handle
             } else {
                 let range = call_result_sort(vc, atom);
@@ -2777,14 +2774,30 @@ pub(crate) fn expr_to_z3<'a>(
                             }
                             bind_struct_fields(&mut call_env, &result_name, &result_fields);
                             bind_struct_fields(&mut call_env, "result", &result_fields);
+                            // Nested result fields: `call_env` was cloned
+                            // before `seed_struct_fields` wrote the deeper
+                            // `__struct_<result>_<field>_<leaf>` keys to env,
+                            // so rebind them under `result_<field>_*` —
+                            // without this `result.inner.a` in the callee's
+                            // ensures resolves to an unrelated fresh const
+                            // and the caller never learns the guarantee.
+                            // Deep leaves rebind too — a shallow bind
+                            // leaves `result.inner.b.c` on stale keys.
+                            for (name, value) in &result_fields {
+                                let fields = nested_field_bindings(env, value);
+                                if !fields.is_empty() {
+                                    bind_struct_fields(
+                                        &mut call_env,
+                                        &format!("result_{name}"),
+                                        &fields,
+                                    );
+                                }
+                            }
                             // A direct read `f(1).x` cannot rebuild
                             // `call_<name>_<id>` — key the fields by the
                             // result ast so `FieldAccess` returns the
                             // projection instead of a shared `field_x`.
-                            vc.call_result_fields.borrow_mut().insert(
-                                result_z3.get_z3_ast() as usize,
-                                (result_fields.clone(), result_z3.clone()),
-                            );
+                            register_call_result_fields(vc, env, &result_z3, &result_fields);
                             if let (Some(solver), true) = (
                                 solver_opt,
                                 !recursive_instance && callee_semantics_match_caller(vc, &callee),
@@ -3960,6 +3973,16 @@ pub(crate) fn expr_to_z3<'a>(
                 }
             }
             bind_struct_fields(env, &handle_name, &field_values);
+            // Deep leaves: a struct-typed field's own fields are only
+            // bound under ITS handle — re-home them under this one too
+            // (`<handle>_mid_m_a`) or `result.mid.m.a`-style reads on a
+            // nested literal resolve to unconstrained fresh symbols.
+            for (name, value) in &field_values {
+                let fields = nested_field_bindings(env, value);
+                if !fields.is_empty() {
+                    bind_struct_fields(env, &format!("{handle_name}_{name}"), &fields);
+                }
+            }
             if let (Some(sdef), Some(solver)) = (sdef, solver_opt) {
                 check_struct_invariants(
                     vc,
@@ -5003,10 +5026,23 @@ pub(crate) fn expr_to_z3<'a>(
                         }
                         bind_struct_fields(&mut call_env, &result_name, &result_fields);
                         bind_struct_fields(&mut call_env, "result", &result_fields);
-                        vc.call_result_fields.borrow_mut().insert(
-                            result_z3.get_z3_ast() as usize,
-                            (result_fields.clone(), result_z3.clone()),
-                        );
+                        // Same nested-leaf re-home as the other call arms:
+                        // `call_env` predates the `seed_struct_fields` run
+                        // on env, so `result.inner.a` in the callee's
+                        // ensures would otherwise see a fresh const.
+                        // Deep leaves rebind too — a shallow bind leaves
+                        // `result.inner.b.c` reading pre-write symbols.
+                        for (name, value) in &result_fields {
+                            let fields = nested_field_bindings(env, value);
+                            if !fields.is_empty() {
+                                bind_struct_fields(
+                                    &mut call_env,
+                                    &format!("result_{name}"),
+                                    &fields,
+                                );
+                            }
+                        }
+                        register_call_result_fields(vc, env, &result_z3, &result_fields);
                         if let (Some(solver), true) = (
                             solver_opt,
                             !recursive_instance && callee_semantics_match_caller(vc, &callee_atom),
@@ -5440,7 +5476,19 @@ pub(crate) fn expr_to_z3<'a>(
 
                 // ネスト構造体の再帰解決:
                 // 内側の式を先に Z3 で評価し、結果を env に登録してからフィールドを解決
-                let _base_val = expr_to_z3(vc, inner_expr, env, solver_opt)?;
+                let base_val = expr_to_z3(vc, inner_expr, env, solver_opt)?;
+
+                // 内側が構造体ハンドル（StructInit・パラメータ・let
+                // エイリアスが残す `__mumei_struct_*` 定数、またはその
+                // ite）の場合、そのハンドル名で平坦化された
+                // `__struct_<handle>_<field>` エントリを射影する。
+                // これが無いと `o.inner.a` は未拘束の fresh const に
+                // 退化し、リテラル初期化のフィールド値を読めない。
+                if let Some(fields) = project_struct_fields(env, &base_val) {
+                    if let Some((_, value)) = fields.iter().find(|(name, _)| name == field_name) {
+                        return Ok(value.clone());
+                    }
+                }
 
                 // 内側の式の型を推定し、構造体定義からフィールドの型を取得
                 // フィールドの精緻型制約も再帰的に適用する
@@ -5476,7 +5524,25 @@ pub(crate) fn expr_to_z3<'a>(
                         return Ok(value.clone());
                     }
                 }
-                let sym = Int::new_const(ctx, format!("field_{}", field_name));
+                // A bound handle's fields are in the env under
+                // `__struct_<handle>_<field>` — project them so a deep
+                // read like `f(1).inner.a` finds `a` instead of
+                // falling to the fallback.
+                if let Some(fields) = project_struct_fields(env, &base) {
+                    if let Some((_, value)) = fields.iter().find(|(name, _)| name == field_name) {
+                        return Ok(value.clone());
+                    }
+                }
+                // Last resort: a constant keyed by the base value's own
+                // ast — NOT a shared `field_<name>`, which would make
+                // `f(1).inner.a` and `f(2).inner.a` resolve to one
+                // symbol and prove them equal. Equal bases (the same
+                // call result, or the same UF application) still share
+                // the symbol.
+                let sym = Int::new_const(
+                    ctx,
+                    format!("field_{}_{}", field_name, base.get_z3_ast() as usize),
+                );
                 Ok(sym.into())
             }
         }
@@ -5545,6 +5611,28 @@ pub(crate) fn expr_to_z3<'a>(
             let recv_id = RECV_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let recv_sym = Int::new_const(ctx, format!("__chan_recv_{}", recv_id).as_str());
             Ok(recv_sym.into())
+        }
+    }
+}
+
+/// Key a call result's fields — and each struct-typed field's own
+/// fields, recursively — by their Z3 asts: a nested read
+/// `f(1).inner.a` evaluates `f(1).inner` to the inner value and looks
+/// it up by that value's ast, so registering only the outer result
+/// leaves deep reads on the `field_*` fallback.
+fn register_call_result_fields<'a>(
+    vc: &VCtx<'a>,
+    env: &Env<'a>,
+    value: &Dynamic<'a>,
+    fields: &[(String, Dynamic<'a>)],
+) {
+    vc.call_result_fields.borrow_mut().insert(
+        value.get_z3_ast() as usize,
+        (fields.to_vec(), value.clone()),
+    );
+    for (_, inner) in fields {
+        if let Some(inner_fields) = project_struct_fields(env, inner) {
+            register_call_result_fields(vc, env, inner, &inner_fields);
         }
     }
 }

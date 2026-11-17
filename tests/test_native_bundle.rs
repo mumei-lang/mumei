@@ -2421,6 +2421,131 @@ fn multifile_bundle_with_struct_results_builds_as_v6() {
 }
 
 #[test]
+fn module_bundle_with_nested_struct_fields_builds_as_v11_and_rechecks() {
+    // `set` writes a whole nested subtree (`o.i = w`) and `main` reads a
+    // nested leaf of its call result: the build, the source recheck and
+    // the LLVM snapshot recheck all pair the nested aggregate's leaf
+    // slots under composite v8.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "struct I { a: i64, b: i64 }\nstruct O { i: I, c: i64 }\n\
+         atom set(o: O, w: I) -> O requires: true; ensures: result.i.a == w.a; body: { o.i = w; o };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { set(O { i: I { a: 1, b: 2 }, c: 0 }, I { a: 8, b: 9 }).i.a };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V11);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V8
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A v11 record re-pinned as v10 is refused: v10 keeps nested
+    // struct fields out of the composite shape.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V10.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
+fn module_bundle_rejects_colliding_flattened_field_names() {
+    // `O { i: I, i_a: i64 }` flattens `i.a` and `i_a` onto the same
+    // verifier symbol `i_a`: two independent fields would alias one
+    // slot and could be proven equal, so admission must refuse it.
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        &source,
+        "struct I { a: i64 }\nstruct O { i: I, i_a: i64 }\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    )
+    .unwrap();
+    assert!(!cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ])
+    .status
+    .success());
+}
+
+#[test]
+fn module_bundle_rejects_exponential_struct_expansion() {
+    // Every level names the same child type twice, so the flattened
+    // leaf count doubles per level: the admission check must bail on
+    // the bound during the count instead of materializing ~2^30 leaves
+    // first (which would exhaust memory before it could reject).
+    let mut decls = String::from("struct L0 { v: i64 }\n");
+    for i in 1..30 {
+        decls.push_str(&format!("struct L{i} {{ x: L{}, y: L{} }}\n", i - 1, i - 1));
+    }
+    decls.push_str("atom main() -> i64 requires: true; ensures: true; body: { 0 };");
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(&source, &decls).unwrap();
+    assert!(!cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ])
+    .status
+    .success());
+}
+
+#[test]
+fn multifile_bundle_with_nested_struct_fields_builds_as_v11() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        root.path().join("shapes.mm"),
+        "struct I { a: i64, b: i64 }\nstruct O { i: I, c: i64 }\n\
+         atom set(o: O, w: I) -> O requires: true; ensures: result.i.a == w.a; body: { o.i = w; o };\n\
+         atom get(o: O) -> i64 requires: true; ensures: result == o.i.a; body: { o.i.a };\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"shapes\" as s;\n\natom main() -> i64 requires: true; ensures: true; body: { 0 };\n",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MULTIFILE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V11);
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // Under a v10 pin the same members stay refused at the member gate.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MULTIFILE_PROFILE_V10.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn module_bundle_with_typedef_and_single_main_takes_the_module_path() {
     // A module holding one `main` plus a refined scalar declaration is
     // still a module — dispatch on atom count alone would send it to

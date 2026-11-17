@@ -725,11 +725,13 @@ unsafe fn width(ty: LLVMTypeRef) -> Result<u32> {
     }
 }
 
-/// The field count of an admitted aggregate formal type: a literal,
-/// non-packed struct of 1..=16 `i64` elements — the emitter's lowering
-/// of a struct parameter whose fields are `i64`/`bool` (a `bool` field is
-/// an i64 carrying 0/1, the same slot the source flattens). Nested,
-/// packed, named, mixed-width and empty aggregates are `None`.
+/// The leaf count of an admitted aggregate formal type: a literal,
+/// non-packed struct whose elements are `i64` or admitted aggregates —
+/// the emitter's lowering of a struct parameter whose fields are
+/// `i64`/`bool` (a `bool` field is an i64 carrying 0/1) or another
+/// admitted struct. Nested struct elements flatten leaf-first; the
+/// total stays within the 16 leaf slots a flattened signature allows.
+/// Packed, named, mixed-width and empty aggregates are `None`.
 unsafe fn aggregate_fields(ty: LLVMTypeRef) -> Option<u32> {
     if LLVMGetTypeKind(ty) != LLVMTypeKind::LLVMStructTypeKind
         || LLVMIsPackedStruct(ty) != 0
@@ -738,13 +740,48 @@ unsafe fn aggregate_fields(ty: LLVMTypeRef) -> Option<u32> {
         return None;
     }
     let count = LLVMCountStructElementTypes(ty);
-    ((1..=16).contains(&count)
-        && (0..count).all(|i| {
-            let element = LLVMStructGetTypeAtIndex(ty, i);
-            LLVMGetTypeKind(element) == LLVMTypeKind::LLVMIntegerTypeKind
-                && LLVMGetIntTypeWidth(element) == 64
-        }))
-    .then_some(count)
+    if count == 0 {
+        return None;
+    }
+    let mut leaves = 0u32;
+    for i in 0..count {
+        let element = LLVMStructGetTypeAtIndex(ty, i);
+        leaves = leaves.checked_add(match aggregate_fields(element) {
+            Some(inner) => inner,
+            None if LLVMGetTypeKind(element) == LLVMTypeKind::LLVMIntegerTypeKind
+                && LLVMGetIntTypeWidth(element) == 64 =>
+            {
+                1
+            }
+            None => return None,
+        })?;
+        // Leaf-first flattening bounds the shape the same way the
+        // fragment's flattened signatures bound a composite param: at
+        // most 16 leaf slots.
+        if leaves > 16 {
+            return None;
+        }
+    }
+    Some(leaves)
+}
+
+/// The leaf range struct element `index` of an admitted aggregate
+/// spans: `aggregate_fields` flattens `{inner: {a, b}, c}` to
+/// `[a, b, c]`, so element 0 covers leaves 0..2. A non-admitted type
+/// or an out-of-range index fails closed.
+unsafe fn aggregate_leaf_range(ty: LLVMTypeRef, index: u32) -> Option<(usize, usize)> {
+    if aggregate_fields(ty).is_none() || index >= LLVMCountStructElementTypes(ty) {
+        return None;
+    }
+    let mut offset = 0usize;
+    for i in 0..=index {
+        let span = aggregate_fields(LLVMStructGetTypeAtIndex(ty, i)).unwrap_or(1) as usize;
+        if i == index {
+            return Some((offset, span));
+        }
+        offset += span;
+    }
+    None
 }
 
 /// A constant of an admitted aggregate type whose slots the encoder can
@@ -761,7 +798,9 @@ unsafe fn constant_aggregate(value: LLVMValueRef) -> bool {
     !LLVMIsAConstantStruct(value).is_null()
         && (0..LLVMGetNumOperands(value) as u32).all(|i| {
             let element = LLVMGetOperand(value, i);
-            LLVMIsUndef(element) != 0 || !LLVMIsAConstantInt(element).is_null()
+            LLVMIsUndef(element) != 0
+                || !LLVMIsAConstantInt(element).is_null()
+                || constant_aggregate(element)
         })
 }
 
@@ -998,6 +1037,10 @@ unsafe fn check_function(
                         opcode,
                         LLVMOpcode::LLVMExtractValue | LLVMOpcode::LLVMInsertValue
                     ) && i == 0)
+                        // A whole nested field write `o.inner = w` inserts an
+                        // aggregate at operand 1 — a leaf `i64` insert is
+                        // handled by the non-aggregate gate.
+                        || (opcode == LLVMOpcode::LLVMInsertValue && i == 1)
                         || opcode == LLVMOpcode::LLVMCall
                         || opcode == LLVMOpcode::LLVMPHI
                         || opcode == LLVMOpcode::LLVMRet;
@@ -1005,7 +1048,8 @@ unsafe fn check_function(
                         || (!LLVMIsAInstruction(value).is_null()
                             && matches!(
                                 LLVMGetInstructionOpcode(value),
-                                LLVMOpcode::LLVMInsertValue
+                                LLVMOpcode::LLVMExtractValue
+                                    | LLVMOpcode::LLVMInsertValue
                                     | LLVMOpcode::LLVMCall
                                     | LLVMOpcode::LLVMPHI
                             ))
@@ -1046,16 +1090,27 @@ unsafe fn check_function(
                 LLVMOpcode::LLVMCall => {
                     check_call(inst)?;
                 }
+                // A one-index read of an admitted aggregate — the
+                // result is an i64 leaf or an admitted aggregate
+                // (extracting a nested struct field).
                 LLVMOpcode::LLVMExtractValue => {
-                    if LLVMGetNumIndices(inst) != 1 || width(LLVMTypeOf(inst))? != 64 {
+                    if LLVMGetNumIndices(inst) != 1 {
+                        return Err(ValidationError("unsupported LLVM aggregate value"));
+                    }
+                    let result = LLVMTypeOf(inst);
+                    if aggregate_fields(result).is_none() && width(result)? != 64 {
                         return Err(ValidationError("unsupported LLVM aggregate value"));
                     }
                 }
-                // One field of an admitted aggregate set from an i64.
+                // One field of an admitted aggregate set from an i64
+                // leaf or an admitted aggregate (writing a nested
+                // struct field whole).
                 LLVMOpcode::LLVMInsertValue => {
+                    let inserted = LLVMTypeOf(LLVMGetOperand(inst, 1));
+                    let leaf = width(inserted).map(|w| w == 64).unwrap_or(false);
                     if LLVMGetNumIndices(inst) != 1
                         || aggregate_fields(LLVMTypeOf(inst)).is_none()
-                        || width(LLVMTypeOf(LLVMGetOperand(inst, 1)))? != 64
+                        || (!leaf && aggregate_fields(inserted).is_none())
                     {
                         return Err(ValidationError("unsupported LLVM aggregate value"));
                     }
@@ -1334,27 +1389,46 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
     /// `insertvalue` or call result.
     unsafe fn aggregate(&self, value: LLVMValueRef) -> Result<Vec<Option<BV<'ctx>>>> {
         if constant_aggregate(value) {
-            let count = aggregate_fields(LLVMTypeOf(value))
-                .ok_or(ValidationError("unsupported LLVM aggregate value"))?
-                as usize;
-            if LLVMIsUndef(value) != 0 {
-                return Ok(vec![None; count]);
-            }
-            if !LLVMIsAConstantAggregateZero(value).is_null() {
-                return Ok(vec![Some(BV::from_u64(self.ctx, 0, 64)); count]);
-            }
-            return Ok((0..count as u32)
-                .map(|i| {
-                    let element = LLVMGetOperand(value, i);
-                    (LLVMIsUndef(element) == 0)
-                        .then(|| BV::from_u64(self.ctx, LLVMConstIntGetZExtValue(element), 64))
-                })
-                .collect());
+            let mut leaves = Vec::new();
+            self.constant_leaves(value, &mut leaves);
+            return Ok(leaves);
         }
         self.aggregates
             .get(&(value as usize))
             .cloned()
             .ok_or(ValidationError("unsupported LLVM aggregate value"))
+    }
+
+    /// The leaf slots of a constant aggregate, flattened element-first:
+    /// `{ {i64 3, i64 4}, i64 5 }` yields `[3, 4, 5]`; an `undef` element
+    /// contributes `None` slots for its whole leaf range.
+    unsafe fn constant_leaves(&self, value: LLVMValueRef, out: &mut Vec<Option<BV<'ctx>>>) {
+        let leaf_count = |v: LLVMValueRef| aggregate_fields(LLVMTypeOf(v)).unwrap_or(1) as usize;
+        if LLVMIsUndef(value) != 0 || LLVMIsPoison(value) != 0 {
+            out.extend(std::iter::repeat_n(None, leaf_count(value)));
+            return;
+        }
+        if !LLVMIsAConstantAggregateZero(value).is_null() {
+            out.extend(std::iter::repeat_n(
+                Some(BV::from_u64(self.ctx, 0, 64)),
+                leaf_count(value),
+            ));
+            return;
+        }
+        for i in 0..LLVMGetNumOperands(value) as u32 {
+            let element = LLVMGetOperand(value, i);
+            if aggregate_fields(LLVMTypeOf(element)).is_some() {
+                self.constant_leaves(element, out);
+            } else if LLVMIsUndef(element) != 0 || LLVMIsPoison(element) != 0 {
+                out.push(None);
+            } else {
+                out.push(Some(BV::from_u64(
+                    self.ctx,
+                    LLVMConstIntGetZExtValue(element),
+                    64,
+                )));
+            }
+        }
     }
 
     /// A call's source callee name and flattened arguments: a struct
@@ -1566,11 +1640,23 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 return Ok(());
             }
             if op == LLVMOpcode::LLVMInsertValue {
-                let mut slots = self.aggregate(LLVMGetOperand(inst, 0))?;
-                let field = self.value(LLVMGetOperand(inst, 1), &values)?;
-                *slots
-                    .get_mut(*LLVMGetIndices(inst) as usize)
-                    .ok_or(ValidationError("unsupported LLVM aggregate value"))? = Some(field);
+                let aggregate = LLVMGetOperand(inst, 0);
+                let mut slots = self.aggregate(aggregate)?;
+                let (offset, span) = aggregate_leaf_range(LLVMTypeOf(inst), *LLVMGetIndices(inst))
+                    .filter(|(offset, span)| offset + span <= slots.len())
+                    .ok_or(ValidationError("unsupported LLVM aggregate value"))?;
+                if span > 1 {
+                    // An aggregate operand (writing a nested struct
+                    // field whole) splices its leaf slots in.
+                    let inserted = self.aggregate(LLVMGetOperand(inst, 1))?;
+                    if inserted.len() != span {
+                        return Err(ValidationError("unsupported LLVM aggregate value"));
+                    }
+                    slots.splice(offset..offset + span, inserted);
+                } else {
+                    let field = self.value(LLVMGetOperand(inst, 1), &values)?;
+                    slots[offset] = Some(field);
+                }
                 self.aggregates.insert(inst as usize, slots);
                 inst = LLVMGetNextInstruction(inst);
                 continue;
@@ -1637,14 +1723,26 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             }
             let value = if op == LLVMOpcode::LLVMExtractValue {
                 // `check_function` admitted only a one-index read of an
-                // admitted aggregate; the index selects that field's slot.
-                let mut fields = self.aggregate(LLVMGetOperand(inst, 0))?;
-                let index = *LLVMGetIndices(inst) as usize;
-                if index >= fields.len() {
-                    return Err(ValidationError("unsupported LLVM aggregate value"));
+                // admitted aggregate; the index selects that element's
+                // leaf range. An aggregate result (extracting a nested
+                // struct) registers its leaf slice and continues; an
+                // i64 result yields its single leaf.
+                let aggregate = LLVMGetOperand(inst, 0);
+                let mut fields = self.aggregate(aggregate)?;
+                let index = *LLVMGetIndices(inst);
+                let (offset, span) = aggregate_leaf_range(LLVMTypeOf(aggregate), index)
+                    .filter(|(offset, span)| offset + span <= fields.len())
+                    .ok_or(ValidationError("unsupported LLVM aggregate value"))?;
+                let slots: Vec<Option<BV>> = fields.drain(offset..offset + span).collect();
+                if span > 1 {
+                    self.aggregates.insert(inst as usize, slots);
+                    inst = LLVMGetNextInstruction(inst);
+                    continue;
                 }
-                fields
-                    .swap_remove(index)
+                slots
+                    .into_iter()
+                    .next()
+                    .flatten()
                     .ok_or(ValidationError("undefined LLVM aggregate slot"))?
             } else if op == LLVMOpcode::LLVMCall {
                 // Model the call as an uninterpreted function of its

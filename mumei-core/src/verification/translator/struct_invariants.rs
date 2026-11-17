@@ -51,6 +51,12 @@ pub(crate) fn bind_struct_fields<'a>(
 
 /// Declare one fresh symbol per field of `sdef` for `binding` (sorts follow
 /// `param_z3_value`, i.e. the encoding of the run) and register them.
+/// A struct-typed field seeds recursively — its leaves land under
+/// `__struct_<binding>_<field>_<leaf>`, so a nested read
+/// `<binding>.<field>.<leaf>` projects through the same keys a literal
+/// init writes and two aliases of one inner value compare equal.
+/// Depth is capped like the fragment's admission bound so a recursive
+/// declaration degenerates to an unseeded const instead of looping.
 pub(crate) fn seed_struct_fields<'a>(
     ctx: &'a Context,
     env: &mut Env<'a>,
@@ -60,6 +66,30 @@ pub(crate) fn seed_struct_fields<'a>(
     ieee754_f64: bool,
     bitvec_i64: bool,
 ) -> Vec<(String, Dynamic<'a>)> {
+    seed_struct_fields_depth(
+        ctx,
+        env,
+        binding,
+        sdef,
+        module_env,
+        ieee754_f64,
+        bitvec_i64,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seed_struct_fields_depth<'a>(
+    ctx: &'a Context,
+    env: &mut Env<'a>,
+    binding: &str,
+    sdef: &StructDef,
+    module_env: &ModuleEnv,
+    ieee754_f64: bool,
+    bitvec_i64: bool,
+    depth: usize,
+) -> Vec<(String, Dynamic<'a>)> {
+    const MAX_NESTED_SEED_DEPTH: usize = 16;
     let values: Vec<(String, Dynamic<'a>)> = sdef
         .fields
         .iter()
@@ -73,6 +103,22 @@ pub(crate) fn seed_struct_fields<'a>(
                 ieee754_f64,
                 bitvec_i64,
             );
+            if depth < MAX_NESTED_SEED_DEPTH {
+                if let Some(inner) = module_env.get_struct(&field.type_name) {
+                    // Seed the inner leaves under this field's own
+                    // binding name: `__struct_<binding>_<field>_<leaf>`.
+                    seed_struct_fields_depth(
+                        ctx,
+                        env,
+                        &name,
+                        inner,
+                        module_env,
+                        ieee754_f64,
+                        bitvec_i64,
+                        depth + 1,
+                    );
+                }
+            }
             (field.name.clone(), value)
         })
         .collect();
@@ -105,8 +151,9 @@ pub(crate) fn struct_fields_of_value<'a>(
 
 /// Field values of a struct-valued term without knowing its struct type:
 /// the `__struct_<handle>_<field>` entries of a handle, or their field-wise
-/// `ite` for a conditional over handles.
-fn project_struct_fields<'a>(
+/// `ite` for a conditional over handles. Nested field reads use it to
+/// resolve `o.inner.a` once `o.inner` evaluates to an inner handle.
+pub(crate) fn project_struct_fields<'a>(
     env: &Env<'a>,
     value: &Dynamic<'a>,
 ) -> Option<Vec<(String, Dynamic<'a>)>> {
@@ -144,6 +191,28 @@ fn project_struct_fields<'a>(
     }
     fields.sort_by(|(a, _), (b, _)| a.cmp(b));
     Some(fields)
+}
+
+/// The full flat field list of `value`: its direct fields plus every
+/// deeper leaf composed under `<field>_<leaf>` (`b` and `b_c` for
+/// `Inner { b: Sub { c } }`), so re-homing the binding covers
+/// `q.inner.b.c`-style paths and a shallow bind never leaves deep keys
+/// on their pre-write symbols.
+pub(crate) fn nested_field_bindings<'a>(
+    env: &Env<'a>,
+    value: &Dynamic<'a>,
+) -> Vec<(String, Dynamic<'a>)> {
+    let Some(fields) = project_struct_fields(env, value) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(fields.len());
+    for (name, inner) in fields {
+        for (deep, v) in nested_field_bindings(env, &inner) {
+            out.push((format!("{name}_{deep}"), v));
+        }
+        out.push((name, inner));
+    }
+    out
 }
 
 /// Register the fields of the struct value `value` under the new binding
