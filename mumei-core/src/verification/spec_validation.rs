@@ -568,8 +568,10 @@ pub(crate) fn validation_ctx<'a>(
 /// and the emitted code reads post-write slots, so input formal values
 /// must not be asserted here either — otherwise `requires q.f == 0` /
 /// `ensures q.f == 1` reads as a contradiction when it is a normal
-/// post-state spec. Written params get fresh unconstrained field slots,
-/// matching the havoc the verifier applies to rebound aggregates.
+/// post-state spec. Only *written* fields lose their input facts —
+/// havocing `q.y` for a `q.x` write would drop `requires q.y == 1` and
+/// falsely refuse `ensures result == 10 / q.y`. A whole-aggregate
+/// `q = …` rebind updates every field.
 fn havoc_written_struct_fields<'a>(
     vc: &VCtx<'a>,
     atom: &Atom,
@@ -588,7 +590,13 @@ fn havoc_written_struct_fields<'a>(
         else {
             continue;
         };
+        let mut written = std::collections::HashSet::new();
+        body.written_fields(&param.name, &mut written);
+        let rebinds = body.rebinds_name(&param.name);
         for field in &sdef.fields {
+            if !rebinds && !written.contains(&field.name) {
+                continue;
+            }
             for key in [
                 format!("{}_{}", param.name, field.name),
                 format!("__struct_{}_{}", param.name, field.name),

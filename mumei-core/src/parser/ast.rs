@@ -300,6 +300,123 @@ impl Expr {
             Expr::ChanRecv { channel } => channel.binds_name(name),
         }
     }
+
+    /// Collect the field names written on `base` by `base.f = …`
+    /// statements embedded in this expression (blocks, branches, loops,
+    /// lambdas). Conservative — meant for fail-closed gates.
+    pub fn written_fields(&self, base: &str, out: &mut std::collections::HashSet<String>) {
+        match self {
+            Expr::Number(_)
+            | Expr::Float(_)
+            | Expr::StringLit(_)
+            | Expr::Variable(_)
+            | Expr::AtomRef { .. } => {}
+            Expr::ArrayLit(elements) => {
+                for e in elements {
+                    e.written_fields(base, out);
+                }
+            }
+            Expr::ArrayAccess(_, index) => index.written_fields(base, out),
+            Expr::BinaryOp(left, _, right) => {
+                left.written_fields(base, out);
+                right.written_fields(base, out);
+            }
+            Expr::Block(stmt) => stmt.written_fields(base, out),
+            Expr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                cond.written_fields(base, out);
+                then_branch.written_fields(base, out);
+                else_branch.written_fields(base, out);
+            }
+            Expr::Call(_, args) => {
+                for a in args {
+                    a.written_fields(base, out);
+                }
+            }
+            Expr::StructInit { fields, .. } => {
+                for (_, e) in fields {
+                    e.written_fields(base, out);
+                }
+            }
+            Expr::FieldAccess(inner, _) => inner.written_fields(base, out),
+            Expr::Match { target, arms } => {
+                target.written_fields(base, out);
+                for arm in arms {
+                    if let Some(g) = &arm.guard {
+                        g.written_fields(base, out);
+                    }
+                    arm.body.written_fields(base, out);
+                }
+            }
+            Expr::Async { body } | Expr::Lambda { body, .. } => body.written_fields(base, out),
+            Expr::Await { expr } => expr.written_fields(base, out),
+            Expr::CallRef { callee, args } => {
+                callee.written_fields(base, out);
+                for a in args {
+                    a.written_fields(base, out);
+                }
+            }
+            Expr::Perform { args, .. } => {
+                for a in args {
+                    a.written_fields(base, out);
+                }
+            }
+            Expr::ChanSend { channel, value } => {
+                channel.written_fields(base, out);
+                value.written_fields(base, out);
+            }
+            Expr::ChanRecv { channel } => channel.written_fields(base, out),
+        }
+    }
+
+    /// True when evaluating this expression can rebind `name` as a whole
+    /// through an embedded `name = …` statement (a `let name` shadows
+    /// locally and does not count). Conservative — for fail-closed gates.
+    pub fn rebinds_name(&self, name: &str) -> bool {
+        match self {
+            Expr::Number(_)
+            | Expr::Float(_)
+            | Expr::StringLit(_)
+            | Expr::Variable(_)
+            | Expr::AtomRef { .. } => false,
+            Expr::ArrayLit(elements) => elements.iter().any(|e| e.rebinds_name(name)),
+            Expr::ArrayAccess(_, index) => index.rebinds_name(name),
+            Expr::BinaryOp(left, _, right) => left.rebinds_name(name) || right.rebinds_name(name),
+            Expr::Block(stmt) => stmt.rebinds_name(name),
+            Expr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                cond.rebinds_name(name)
+                    || then_branch.rebinds_name(name)
+                    || else_branch.rebinds_name(name)
+            }
+            Expr::Call(_, args) => args.iter().any(|a| a.rebinds_name(name)),
+            Expr::StructInit { fields, .. } => fields.iter().any(|(_, e)| e.rebinds_name(name)),
+            Expr::FieldAccess(inner, _) => inner.rebinds_name(name),
+            Expr::Match { target, arms } => {
+                target.rebinds_name(name)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().is_some_and(|g| g.rebinds_name(name))
+                            || arm.body.rebinds_name(name)
+                    })
+            }
+            Expr::Async { body } | Expr::Lambda { body, .. } => body.rebinds_name(name),
+            Expr::Await { expr } => expr.rebinds_name(name),
+            Expr::CallRef { callee, args } => {
+                callee.rebinds_name(name) || args.iter().any(|a| a.rebinds_name(name))
+            }
+            Expr::Perform { args, .. } => args.iter().any(|a| a.rebinds_name(name)),
+            Expr::ChanSend { channel, value } => {
+                channel.rebinds_name(name) || value.rebinds_name(name)
+            }
+            Expr::ChanRecv { channel } => channel.rebinds_name(name),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -389,6 +506,84 @@ impl Stmt {
             Stmt::TaskGroup { children, .. } => children.iter().any(|c| c.binds_name(name)),
             Stmt::Cancel { .. } => false,
             Stmt::Expr(expr, _) => expr.binds_name(name),
+        }
+    }
+
+    /// Collect the field names written on `base` by `base.f = …`
+    /// statements under this statement (nested blocks, branches, loops,
+    /// lambda bodies). Conservative — for fail-closed gates.
+    pub fn written_fields(&self, base: &str, out: &mut std::collections::HashSet<String>) {
+        match self {
+            Stmt::Let { value, .. } => value.written_fields(base, out),
+            Stmt::Assign { var, value, .. } => {
+                if let Some((b, field)) = var.split_once('.') {
+                    if b == base {
+                        out.insert(field.to_string());
+                    }
+                }
+                value.written_fields(base, out);
+            }
+            Stmt::ArrayStore { index, value, .. } => {
+                index.written_fields(base, out);
+                value.written_fields(base, out);
+            }
+            Stmt::Block(stmts, _) => {
+                for s in stmts {
+                    s.written_fields(base, out);
+                }
+            }
+            Stmt::While {
+                cond,
+                invariant,
+                decreases,
+                body,
+                ..
+            } => {
+                cond.written_fields(base, out);
+                invariant.written_fields(base, out);
+                if let Some(d) = decreases {
+                    d.written_fields(base, out);
+                }
+                body.written_fields(base, out);
+            }
+            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => body.written_fields(base, out),
+            Stmt::TaskGroup { children, .. } => {
+                for c in children {
+                    c.written_fields(base, out);
+                }
+            }
+            Stmt::Cancel { .. } => {}
+            Stmt::Expr(expr, _) => expr.written_fields(base, out),
+        }
+    }
+
+    /// True when executing this statement can rebind `name` as a whole
+    /// (`name = …`, including inside nested control flow). A `let name`
+    /// shadows locally and does not count, nor does `name.f = …`.
+    pub fn rebinds_name(&self, name: &str) -> bool {
+        match self {
+            Stmt::Let { value, .. } => value.rebinds_name(name),
+            Stmt::Assign { var, value, .. } => var == name || value.rebinds_name(name),
+            Stmt::ArrayStore { index, value, .. } => {
+                index.rebinds_name(name) || value.rebinds_name(name)
+            }
+            Stmt::Block(stmts, _) => stmts.iter().any(|s| s.rebinds_name(name)),
+            Stmt::While {
+                cond,
+                invariant,
+                decreases,
+                body,
+                ..
+            } => {
+                cond.rebinds_name(name)
+                    || invariant.rebinds_name(name)
+                    || decreases.as_ref().is_some_and(|d| d.rebinds_name(name))
+                    || body.rebinds_name(name)
+            }
+            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => body.rebinds_name(name),
+            Stmt::TaskGroup { children, .. } => children.iter().any(|c| c.rebinds_name(name)),
+            Stmt::Cancel { .. } => false,
+            Stmt::Expr(expr, _) => expr.rebinds_name(name),
         }
     }
 
