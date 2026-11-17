@@ -1357,8 +1357,8 @@ fn emit_module(
 }
 
 /// The record profile a module-family bundle pins for the source profile
-/// its gate derived: `[v1, v2, v3, v4, v5]` for the wrapping, refined
-/// v1, refined v2, composite v1 and composite v2 fragments. Each recheck
+/// its gate derived: `[v1, .., v7]` for the wrapping, refined v1,
+/// refined v2 and the composite v1–v4 fragments. Each recheck
 /// re-derives under exactly that version's admission, never a wider one.
 fn record_profile(source_profile: &str, versions: [&'static str; 7]) -> &'static str {
     let [v1, v2, v3, v4, v5, v6, v7] = versions;
