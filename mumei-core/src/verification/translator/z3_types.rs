@@ -363,6 +363,23 @@ pub(crate) fn merge_arm_env_into<'a>(
             }
         }
     }
+    // Arm-local `__struct_<handle>_<field>` slots (each arm's
+    // StructInit registers its fresh handle's fields) must survive the
+    // merge: `project_struct_fields` reads them back through the folded
+    // `ite` over handles, so dropping them leaves a match-produced
+    // struct with unconstrained fields. They take their arm-local value
+    // verbatim — the `ite` selects the right handle per path.
+    for (key, arm_val) in arm_env.iter() {
+        if !key.starts_with(STRUCT_FIELD_PREFIX)
+            || base_env.contains_key(key)
+            || bound.contains(key)
+        {
+            continue;
+        }
+        if !acc.contains_key(key) {
+            acc.insert(key.clone(), arm_val.clone());
+        }
+    }
 }
 
 /// Put the two branches of an `ite` into a common sort.
@@ -1076,6 +1093,68 @@ pub(crate) fn havoc_array_name<'a>(vc: &VCtx<'a>, name: &str, env: &mut Env<'a>)
     // Ensure the tracked slot exists even when the arg only had a bare
     // `env[name]` const (param arrays before their first access).
     env.insert(arr_key, fresh);
+}
+
+/// `ensures` reads post-write composite fields: at a call site the
+/// callee's written struct params must bind fresh slots, or the caller
+/// evaluates `ensures q.f == 1` against the *input* field it just
+/// constrained to `== 0` through `requires` — the assumption collapses
+/// and every caller postcondition proves vacuously. Only written fields
+/// are freshened; untouched fields keep the argument's projection so
+/// `ensures result == q.g` still relates to the actual argument. A
+/// whole-aggregate `q = …` rebind freshens every declared field.
+pub(crate) fn havoc_written_callee_fields<'a>(
+    vc: &VCtx<'a>,
+    callee: &crate::parser::Atom,
+    env: &mut Env<'a>,
+) {
+    static POSTFIELD_UID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let ctx = vc.ctx;
+    let Ok(body) = crate::parser::parse_body_expr_checked(&callee.body_expr) else {
+        return;
+    };
+    for param in &callee.params {
+        let Some(sdef) = param
+            .type_name
+            .as_deref()
+            .and_then(|name| vc.module_env.get_struct(name))
+        else {
+            continue;
+        };
+        let mut written = std::collections::HashSet::new();
+        body.written_fields(&param.name, &mut written);
+        if body.rebinds_name(&param.name) {
+            written.extend(sdef.fields.iter().map(|f| f.name.clone()));
+        }
+        for field in &sdef.fields {
+            if !written.contains(&field.name) {
+                continue;
+            }
+            for key in [
+                format!("{}_{}", param.name, field.name),
+                struct_field_key(&param.name, &field.name),
+            ] {
+                let Some(old) = env.get(&key) else {
+                    continue;
+                };
+                let uid = POSTFIELD_UID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let fresh: Dynamic = match old.get_sort().kind() {
+                    z3::SortKind::Int => {
+                        Int::fresh_const(ctx, &format!("__postfield_{key}_{uid}")).into()
+                    }
+                    z3::SortKind::Bool => {
+                        Bool::fresh_const(ctx, &format!("__postfield_{key}_{uid}")).into()
+                    }
+                    z3::SortKind::BV => {
+                        let width = old.as_bv().map(|b| b.get_size()).unwrap_or(64);
+                        BV::fresh_const(ctx, &format!("__postfield_{key}_{uid}"), width).into()
+                    }
+                    _ => continue,
+                };
+                env.insert(key, fresh);
+            }
+        }
+    }
 }
 
 /// Element type name carried by a Z3 array's range sort — the inverse of

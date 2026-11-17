@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
+use z3::ast::{Ast, Dynamic, Int};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpecValidationResult {
@@ -277,6 +278,11 @@ pub fn check_spec_satisfiability_with_timeout(
         });
     }
 
+    // `ensures` reads post-write fields for struct params the body
+    // rebinds (`q.f = v`), so contradiction checking must havoc those
+    // slots — an input formal would make a post-state clause like
+    // `q.f == 1` look contradictory to `requires q.f == 0`.
+    let body_stmt = crate::parser::parse_body_expr_checked(&atom.body_expr).ok();
     let ensure_clauses = split_top_level_conjunctions(&atom.ensures);
     let mut checked_ensures = 0usize;
     for (index, clause) in ensure_clauses.iter().enumerate() {
@@ -293,6 +299,9 @@ pub fn check_spec_satisfiability_with_timeout(
         )? {
             had_clause_skips = true;
             push_skip_warning(&mut diagnostics, warning);
+        }
+        if let Some(body) = &body_stmt {
+            havoc_written_struct_fields(&vc, atom, body, &mut local_env);
         }
         match assert_clause(&vc, &local_solver, &mut local_env, atom, clause, "ensures")? {
             ClauseLoweringOutcome::Applied => {
@@ -328,6 +337,9 @@ pub fn check_spec_satisfiability_with_timeout(
         )? {
             had_clause_skips = true;
             push_skip_warning(&mut diagnostics, warning);
+        }
+        if let Some(body) = &body_stmt {
+            havoc_written_struct_fields(&vc, atom, body, &mut combined_env);
         }
         for clause in &ensure_clauses {
             if let ClauseLoweringOutcome::Skipped(warning) = assert_clause(
@@ -533,6 +545,7 @@ pub(crate) fn validation_ctx<'a>(
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_struct_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -547,6 +560,60 @@ pub(crate) fn validation_ctx<'a>(
         check_i64_overflow: std::cell::Cell::new(false),
 
         local_int_types: Default::default(),
+    }
+}
+
+/// `ensures` reads post-write fields for struct params the body rebinds
+/// (`q.f = v`): the verifier evaluates those clauses on the mutated env
+/// and the emitted code reads post-write slots, so input formal values
+/// must not be asserted here either — otherwise `requires q.f == 0` /
+/// `ensures q.f == 1` reads as a contradiction when it is a normal
+/// post-state spec. Only *written* fields lose their input facts —
+/// havocing `q.y` for a `q.x` write would drop `requires q.y == 1` and
+/// falsely refuse `ensures result == 10 / q.y`. A whole-aggregate
+/// `q = …` rebind updates every field.
+fn havoc_written_struct_fields<'a>(
+    vc: &VCtx<'a>,
+    atom: &Atom,
+    body: &crate::parser::ast::Stmt,
+    env: &mut Env<'a>,
+) {
+    let ctx = vc.ctx;
+    for param in &atom.params {
+        if !body.binds_name(&param.name) {
+            continue;
+        }
+        let Some(sdef) = param
+            .type_name
+            .as_deref()
+            .and_then(|type_name| vc.module_env.get_struct(type_name))
+        else {
+            continue;
+        };
+        let mut written = std::collections::HashSet::new();
+        body.written_fields(&param.name, &mut written);
+        let rebinds = body.rebinds_name(&param.name);
+        for field in &sdef.fields {
+            if !rebinds && !written.contains(&field.name) {
+                continue;
+            }
+            for key in [
+                format!("{}_{}", param.name, field.name),
+                format!("__struct_{}_{}", param.name, field.name),
+            ] {
+                let Some(old) = env.get(&key) else {
+                    continue;
+                };
+                let fresh: Dynamic = match old.get_sort().kind() {
+                    z3::SortKind::Int => Int::fresh_const(ctx, &format!("__post_{key}")).into(),
+                    z3::SortKind::Bool => Bool::fresh_const(ctx, &format!("__post_{key}")).into(),
+                    // Non-scalar field slots keep the input view; no
+                    // admitted field-write profile reaches them.
+                    _ => continue,
+                };
+                env.insert(key, fresh);
+            }
+        }
     }
 }
 

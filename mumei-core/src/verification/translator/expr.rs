@@ -2900,6 +2900,14 @@ pub(crate) fn expr_to_z3<'a>(
                                 call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
                                 call_env.insert("len_result".to_string(), len_sym.clone());
                             }
+                            // `ensures` reads post-write fields —
+                            // freshen the callee's written composite
+                            // params so its clauses don't assert on the
+                            // caller's input-time slots. The recursion
+                            // antecedent below must still see the input
+                            // fields — keep a pre-havoc copy.
+                            let mut pre_havoc_env = call_env.clone();
+                            havoc_written_callee_fields(vc, &callee, &mut call_env);
                             let ens_ast = parse_expression(&caller_ensures);
 
                             if use_rec_fn {
@@ -2927,7 +2935,7 @@ pub(crate) fn expr_to_z3<'a>(
                                         vc,
                                         &callee,
                                         &caller_requires,
-                                        &mut call_env,
+                                        &mut pre_havoc_env,
                                         scc_internal,
                                     )?;
                                     solver.assert(&ante.implies(&ens_bool));
@@ -3788,6 +3796,7 @@ pub(crate) fn expr_to_z3<'a>(
             // branches agree on survive (an if-local `let` must not leak its
             // inferred type onto an outer binding).
             let types_before = vc.local_enum_types.borrow().clone();
+            let struct_types_before = vc.local_struct_types.borrow().clone();
             let lambdas_before = vc.local_lambdas.borrow().clone();
             let int_types_before = vc.local_int_types.borrow().clone();
             vc.path_cond_stack.borrow_mut().push(c.clone());
@@ -3796,8 +3805,10 @@ pub(crate) fn expr_to_z3<'a>(
             vc.path_cond_stack.borrow_mut().pop();
             let t = t?;
             let then_types = vc.local_enum_types.borrow().clone();
+            let then_struct_types = vc.local_struct_types.borrow().clone();
             let then_lambdas = vc.local_lambdas.borrow().clone();
             *vc.local_enum_types.borrow_mut() = types_before.clone();
+            *vc.local_struct_types.borrow_mut() = struct_types_before.clone();
             let then_int_types = std::mem::replace(
                 &mut *vc.local_int_types.borrow_mut(),
                 int_types_before.clone(),
@@ -3808,6 +3819,7 @@ pub(crate) fn expr_to_z3<'a>(
             let e = stmt_to_z3(vc, else_branch, &mut else_env, solver_opt);
             vc.path_cond_stack.borrow_mut().pop();
             let else_types = vc.local_enum_types.borrow().clone();
+            let else_struct_types = vc.local_struct_types.borrow().clone();
             let else_lambdas = vc.local_lambdas.borrow().clone();
             let mut merged = types_before;
             merged.retain(|k, v| then_types.get(k) == Some(v) && else_types.get(k) == Some(v));
@@ -3817,6 +3829,19 @@ pub(crate) fn expr_to_z3<'a>(
                 }
             }
             *vc.local_enum_types.borrow_mut() = merged;
+            // Same scope rule for struct bindings: shadowing a struct
+            // param inside the `then` branch must not remove the type
+            // information the `else` branch still needs for `q.f = v`.
+            let mut merged_struct = struct_types_before;
+            merged_struct.retain(|k, v| {
+                then_struct_types.get(k) == Some(v) && else_struct_types.get(k) == Some(v)
+            });
+            for (k, v) in then_struct_types.iter() {
+                if else_struct_types.get(k) == Some(v) {
+                    merged_struct.insert(k.clone(), v.clone());
+                }
+            }
+            *vc.local_struct_types.borrow_mut() = merged_struct;
             // A local keeps its integer type only when both branches agree;
             // otherwise the checker falls back to the declared parameter or i64.
             let else_int_types = vc.local_int_types.borrow().clone();
@@ -5064,6 +5089,14 @@ pub(crate) fn expr_to_z3<'a>(
                             call_env.insert("__z3_arr_result".to_string(), result_z3.clone());
                             call_env.insert("len_result".to_string(), len_sym.clone());
                         }
+                        // `ensures` reads post-write fields — freshen
+                        // the callee's written composite params so its
+                        // clauses don't assert on the caller's
+                        // input-time slots. The recursion antecedent
+                        // below must still see the input fields — keep
+                        // a pre-havoc copy.
+                        let mut pre_havoc_env = call_env.clone();
+                        havoc_written_callee_fields(vc, &callee_atom, &mut call_env);
                         let ens_ast = parse_expression(&caller_ensures);
                         if use_rec_fn {
                             let unfold_key = if solver_opt.is_some()
@@ -5083,7 +5116,7 @@ pub(crate) fn expr_to_z3<'a>(
                                     vc,
                                     &callee_atom,
                                     &caller_requires,
-                                    &mut call_env,
+                                    &mut pre_havoc_env,
                                     scc_internal,
                                 )?;
                                 solver.assert(&ante.implies(&ens_bool));

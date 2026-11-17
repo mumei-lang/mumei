@@ -406,7 +406,7 @@ fn field_type_at_path(module_env: &ModuleEnv, struct_name: &str, path: &str) -> 
 /// Declared type of a bare binding: a parameter's `type_name`, `result`'s
 /// return type, or the inferred enum type recorded for a `let`/`assign`
 /// binding (`let e = Mine::Cons(1)` records `e: Mine`).
-fn binding_declared_type(vc: &VCtx, name: &str) -> Option<String> {
+pub(crate) fn binding_declared_type(vc: &VCtx, name: &str) -> Option<String> {
     let atom = vc.current_atom;
     if name == "result" {
         return atom.and_then(|a| a.return_type.clone());
@@ -418,6 +418,7 @@ fn binding_declared_type(vc: &VCtx, name: &str) -> Option<String> {
             .and_then(|p| p.type_name.clone())
     })
     .or_else(|| vc.local_enum_types.borrow().get(name).cloned())
+    .or_else(|| vc.local_struct_types.borrow().get(name).cloned())
 }
 
 /// Declared type name of an expression, when statically recoverable:
@@ -435,6 +436,7 @@ pub(crate) fn declared_type_of_expr(vc: &VCtx, expr: &Expr) -> Option<String> {
             .module_env
             .get_atom(name)
             .and_then(|a| a.return_type.clone()),
+        Expr::StructInit { type_name, .. } => Some(type_name.clone()),
         Expr::FieldAccess(..) => {
             let mut fields: Vec<&String> = Vec::new();
             let mut cur = expr;
@@ -454,6 +456,34 @@ pub(crate) fn declared_type_of_expr(vc: &VCtx, expr: &Expr) -> Option<String> {
             }
             Some(ty)
         }
+        Expr::Block(stmt) => declared_type_of_stmt(vc, stmt),
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let then_ty = declared_type_of_stmt(vc, then_branch)?;
+            let else_ty = declared_type_of_stmt(vc, else_branch)?;
+            (then_ty == else_ty).then_some(then_ty)
+        }
+        Expr::Match { arms, .. } => {
+            let mut iter = arms.iter();
+            let first = declared_type_of_stmt(vc, iter.next()?.body.as_ref())?;
+            iter.all(|arm| {
+                declared_type_of_stmt(vc, arm.body.as_ref()).as_deref() == Some(first.as_str())
+            })
+            .then_some(first)
+        }
+        _ => None,
+    }
+}
+
+/// Declared type of a statement's tail value: a `Stmt::Expr` yields its
+/// expression's type; a `Stmt::Block` recurses into its last element.
+fn declared_type_of_stmt(vc: &VCtx, stmt: &Stmt) -> Option<String> {
+    match stmt {
+        Stmt::Expr(expr, _) => declared_type_of_expr(vc, expr),
+        Stmt::Block(stmts, _) => stmts.last().and_then(|s| declared_type_of_stmt(vc, s)),
         _ => None,
     }
 }

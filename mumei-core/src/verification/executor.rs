@@ -1736,6 +1736,7 @@ fn verify_inner_impl(
         clause_context: std::cell::RefCell::new(Vec::new()),
         enum_sorts: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_enum_types: std::cell::RefCell::new(std::collections::HashMap::new()),
+        local_struct_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_array_elem_types: std::cell::RefCell::new(std::collections::HashMap::new()),
         local_lambdas: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -1815,6 +1816,15 @@ fn verify_inner_impl(
             bitvec_i64,
         )
     });
+    if let Some(type_name) = atom
+        .return_type
+        .as_deref()
+        .filter(|name| module_env.get_struct(name).is_some())
+    {
+        vc.local_struct_types
+            .borrow_mut()
+            .insert("result".to_string(), type_name.to_string());
+    }
 
     // Phase 1h (continued): ConflictingMerge Z3 infrastructure.
     // With Phase 4c Copy/Move type distinction integrated, move violations for
@@ -2009,6 +2019,9 @@ fn verify_inner_impl(
                     ieee754_f64,
                     bitvec_i64,
                 );
+                vc.local_struct_types
+                    .borrow_mut()
+                    .insert(param.name.clone(), type_name.clone());
                 // フィールド制約 (`where v ...`) と跨フィールド不変量 (`invariant: <expr>`)
                 // を前提として assert
                 assume_struct_contract(
