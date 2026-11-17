@@ -3847,6 +3847,33 @@ lifts `checks_performed` on selection. See
 [VERIFICATION_NATIVE.md](VERIFICATION_NATIVE.md#declared-producer-identity-gate).
 C02 stays partial — real authenticity/attestation remains open.
 
+### Wave 5 refined scalar member profiles (C10 producer, v2)
+
+Core widens the admitted fragment to refined scalar declarations:
+a module or multifile member declaring
+`type Port = i64 where v >= 1 && v <= 65535;` builds under
+`mumei.pure-i64-refined-scalar/v1` and pins
+`mumei.native-pure-i64-module-linux-x86_64/v2` or
+`mumei.native-pure-i64-multifile-linux-x86_64/v2`. The profile name is
+part of the pinned identity — `check`/`recheck-source`/`recheck-llvm`
+dispatch on it, so v1 records keep the strict gate. Admission is
+fail-closed to exactly what the verifier encodes: single-level aliases
+over literal integer-sort bases (`i64`, `i8`–`u32`), no `unit`
+metadata, no `bool` bases (the operand binds as `Int`), no bases
+naming another declaration (ancestor conjuncts would silently drop),
+no duplicate or atom-colliding names. Alias predicates fold into the
+obligations already proven — parameters strengthen the signature
+domain each call site must establish, results strengthen the
+postcondition the callee guarantees.
+
+Agent needs no route change — records carry the pinned profile name
+opaquely. mumei-demo gains the `native_refined_attempt` scenario
+exercising `native-attempt`/`native-check` end to end on a v2 bundle
+plus an unresolvable-base typedef selecting nothing. See
+[VERIFICATION_NATIVE.md](VERIFICATION_NATIVE.md#refined-scalar-member-profiles-v2).
+C10 stays partial — struct/enum members, deeper optimizer/ABI/runtime
+assurance and producer authenticity remain open.
+
 
 ## No-`.mm` front door and V1 order
 
