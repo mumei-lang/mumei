@@ -672,22 +672,26 @@ fn atom_contract(
     }
     // Admitted enum declarations bind the specification the same way
     // struct declarations do — reordering variants changes every tag.
-    specification_identity["enums"] = enums
-        .iter()
-        .map(|(name, variants)| {
-            serde_json::json!({
-                "name": name,
-                "variants": variants.iter().map(|v| {
-                    serde_json::json!({
-                        "name": v.name,
-                        "fields": v.fields.iter().map(|f| {
-                            serde_json::json!({"name": f.name, "type": f.type_name})
-                        }).collect::<Vec<_>>(),
-                    })
-                }).collect::<Vec<_>>(),
+    // The key only appears when a declaration exists so specification
+    // hashes for non-enum sources keep their earlier shape.
+    if !enums.is_empty() {
+        specification_identity["enums"] = enums
+            .iter()
+            .map(|(name, variants)| {
+                serde_json::json!({
+                    "name": name,
+                    "variants": variants.iter().map(|v| {
+                        serde_json::json!({
+                            "name": v.name,
+                            "fields": v.fields.iter().map(|f| {
+                                serde_json::json!({"name": f.name, "type": f.type_name})
+                            }).collect::<Vec<_>>(),
+                        })
+                    }).collect::<Vec<_>>(),
+                })
             })
-        })
-        .collect();
+            .collect();
+    }
     let specification_sha256 = json_digest(&specification_identity)?;
     let composite_params = atom
         .params
