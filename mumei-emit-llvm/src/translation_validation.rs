@@ -1519,8 +1519,11 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
         // phi's incoming value is resolved against the environment the
         // block was entered with, so a phi that references a sibling
         // phi sees the previous iteration's value, not the freshly
-        // bound one. (LLVM requires phi nodes to lead a block.)
+        // bound one. Aggregate phis defer their `self.aggregates`
+        // commit for the same reason. (LLVM requires phi nodes to
+        // lead a block.)
         let mut pending_phis: Vec<(LLVMValueRef, BV<'ctx>)> = Vec::new();
+        let mut pending_aggregates: Vec<(LLVMValueRef, Vec<Option<BV<'ctx>>>)> = Vec::new();
         let mut inst = LLVMGetFirstInstruction(block);
         while !inst.is_null() {
             let op = LLVMGetInstructionOpcode(inst);
@@ -1534,8 +1537,10 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     // `{i64, ...}` phi: its slots are the incoming
                     // aggregate's slots on this predecessor path — the
                     // same per-slot merge the source encoder performs.
-                    self.aggregates
-                        .insert(inst as usize, self.aggregate(incoming)?);
+                    // Slots are resolved eagerly (against the previous
+                    // iteration's aggregates) but committed below,
+                    // with the scalar phis.
+                    pending_aggregates.push((inst, self.aggregate(incoming)?));
                 } else {
                     pending_phis.push((inst, self.value(incoming, &values)?));
                 }
@@ -1544,6 +1549,9 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             }
             for (phi, result) in pending_phis.drain(..) {
                 values.insert(phi as usize, result);
+            }
+            for (phi, slots) in pending_aggregates.drain(..) {
+                self.aggregates.insert(phi as usize, slots);
             }
             if op == LLVMOpcode::LLVMRet {
                 // A returned aggregate compares as its slots laid out
