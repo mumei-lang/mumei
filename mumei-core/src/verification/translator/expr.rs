@@ -4262,7 +4262,28 @@ pub(crate) fn expr_to_z3<'a>(
                     }
                 }
 
-                let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
+                // The arm body only runs on inputs that reach it — prior
+                // arms did not match AND this arm's condition holds. Push
+                // that window onto the path-condition stack while
+                // translating the body so path-cond-aware checks inside it
+                // (refined ctor args, call-site refinements) see only
+                // reachable inputs — `match x { 1 => Chan::Tcp(x), .. }`
+                // must not check the constructor against `x = 0`.
+                {
+                    let mut stack = vc.path_cond_stack.borrow_mut();
+                    for neg in accumulated_negations.iter() {
+                        stack.push(neg.clone());
+                    }
+                    stack.push(full_cond.clone());
+                }
+                let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt);
+                {
+                    let mut stack = vc.path_cond_stack.borrow_mut();
+                    for _ in 0..=accumulated_negations.len() {
+                        stack.pop();
+                    }
+                }
+                let body_val = body_val?;
                 *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
                 merge_arm_env_into(&mut merged_arm_env, &arm_env, env, &full_cond, &arm_bound);
                 result = Some(match result {

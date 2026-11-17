@@ -173,3 +173,17 @@ fn enum_ctor_payload_must_satisfy_declared_field_type() {
         "a payload violating its declared refined field type must be rejected:\n{combined}"
     );
 }
+
+#[test]
+fn enum_ctor_payload_satisfying_field_type_verifies() {
+    let output = mumei_verify("tests/test_enum_ctor_refined.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "payloads satisfying the declared field type — including inside match arms — must verify:\n{combined}"
+    );
+}
