@@ -4003,7 +4003,9 @@ and scalar/aggregate mismatches stay rejected rather than paired by
 guesswork. Downstream consumers need no route changes:
 the bundle record pins the profile name it was produced under, so the
 declared recheck/accept routes re-derive under the record's own
-admission. mumei-demo coverage of the v4 fragment is a later slice.
+admission. The mumei-demo `native_composite_attempt` declared-route
+scenario exercises the v4 fragment end to end (produce → `native-check`
+consistent → a struct field typed by a refined alias refused).
 C10 stays partial — enum members, struct construction, deeper
 optimizer/ABI/runtime assurance and producer authenticity remain open.
 
