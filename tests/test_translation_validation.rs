@@ -2798,3 +2798,62 @@ fn struct_results_pair_returned_aggregates_with_field_slots() {
     // Below composite v3 the struct-valued source itself is refused.
     assert!(composite(STRUCT_RESULT_SOURCE, STRUCT_RESULT_IR).is_err());
 }
+
+const BOOL_ENUM_TRANSFER_SOURCE: &str = "enum Tag { Some(b: bool), None } atom fwd(t: Tag) -> Tag requires: true; ensures: true; body: { t }; atom main() -> i64 requires: true; ensures: true; body: { 0 };";
+
+fn emitted_module(items: &[Item]) -> String {
+    let mut env = ModuleEnv::default();
+    let mut lowered = Vec::new();
+    for item in items {
+        match item {
+            Item::TypeDef(typedef) => env.register_type(typedef),
+            Item::StructDef(struct_def) => env.register_struct(struct_def),
+            Item::EnumDef(enum_def) => env.register_enum(enum_def),
+            Item::Atom(atom) => {
+                env.register_atom(atom);
+                lowered.push(mumei_core::hir::lower_atom_to_hir_with_env(
+                    atom,
+                    Some(&env),
+                ));
+            }
+            _ => {}
+        }
+    }
+    let context = mumei_emit_llvm::LlvmContext::create();
+    let module = context.create_module("enum_transfer");
+    mumei_emit_llvm::codegen::compile_atoms_into_module(&context, &module, &lowered, &env, &[])
+        .unwrap();
+    // `compile_atoms_into_module` keeps the user `main` name; the
+    // bundle emitter renames it to `__mumei_user_main` and adds the
+    // i32 wrapper — do the same here.
+    let ir = module
+        .print_to_string()
+        .to_string()
+        .replace("@main(", "@__mumei_user_main(");
+    let ir = format!(
+        "{ir}\ndefine i32 @main(i32 %0, ptr %1) {{
+entry:
+  %result = call i64 @__mumei_user_main()
+  %exit_code = trunc i64 %result to i32
+  ret i32 %exit_code
+}}\n"
+    );
+    pin(&ir)
+}
+
+#[test]
+fn composite_v6_bool_padding_slots_compare_against_normalized_source_values() {
+    // Under `None` the source reads the padding slot as `v != 0`; the
+    // emitter passes the raw i64 through, so the domain must keep it
+    // ≤1 for a pass-through to compare equal.
+    let items = parse_module_checked(BOOL_ENUM_TRANSFER_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let report = tv::validate_native_module(
+        BOOL_ENUM_TRANSFER_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV6,
+    )
+    .unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+}
