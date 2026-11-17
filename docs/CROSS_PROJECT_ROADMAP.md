@@ -4040,7 +4040,7 @@ name to a same-enum sibling parameter or scrutinee. Enum
 construction and enum results, literal/variable arms on enum
 targets, mixed-type payload slots across variants, and recursive
 or generic enums stay rejected. Verification of the fragment
-itself needed four repairs shipped in the same slice: enum
+itself needed several repairs shipped in the same slice: enum
 variant `field_types` now stores only the declared type (named
 payloads had kept the verbatim `name: type` text, so every
 type-driven consumer read `b: bool` as an unknown Int type),
