@@ -3859,12 +3859,11 @@ part of the pinned identity — `check`/`recheck-source`/`recheck-llvm`
 dispatch on it, so v1 records keep the strict gate. Admission is
 fail-closed to exactly what the verifier encodes: single-level aliases
 over literal integer-sort bases (`i64`, `i8`–`u32`), no `unit`
-metadata, no `bool` bases (the operand binds as `Int`), no bases
-naming another declaration (ancestor conjuncts would silently drop),
-no duplicate or atom-colliding names. Alias predicates fold into the
-obligations already proven — parameters strengthen the signature
-domain each call site must establish, results strengthen the
-postcondition the callee guarantees.
+metadata, no `bool` or chained-declaration bases, no duplicate or
+atom-colliding names. Alias predicates fold into the obligations
+already proven — parameters strengthen the signature domain each call
+site must establish, results strengthen the postcondition the callee
+guarantees.
 
 Agent needs no route change — records carry the pinned profile name
 opaquely. mumei-demo gains the `native_refined_attempt` scenario
@@ -3873,6 +3872,22 @@ plus an unresolvable-base typedef selecting nothing. See
 [VERIFICATION_NATIVE.md](VERIFICATION_NATIVE.md#refined-scalar-member-profiles-v2).
 C10 stays partial — struct/enum members, deeper optimizer/ABI/runtime
 assurance and producer authenticity remain open.
+
+### Wave 5 refined-type boundary enforcement (verifier)
+
+`mumei verify` now enforces refined declarations at every boundary it
+encodes, so the profile's fold-in claims are backed end to end:
+declaration chains compose every ancestor conjunct (cycle-safe, cyclic
+declarations are a type error); `bool`/`f64` leaf bases bind the operand
+at the matching Z3 sort (`Bool`/`Real`); a refined return type acts as
+an implicit postcondition the body must satisfy; call sites — direct
+and `call(atom_ref(...))` — must establish each refined parameter's
+conjuncts under the enclosing path conditions; and callers may assume
+a callee's refined return conjuncts on the call result when the two
+arithmetic modes agree. Solver `Unknown` at a boundary reports
+Inconclusive rather than silently passing. Undecidable or widened
+admission (multi-level chains, `bool` bases) remains outside the v2
+profile — widening needs a new profile name.
 
 
 ## No-`.mm` front door and V1 order
