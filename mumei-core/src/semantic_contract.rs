@@ -2379,8 +2379,6 @@ fn field_write_kind(
     Some(target.kind)
 }
 
-/// `statement_kind` for a struct-valued position (an atom's struct
-/// result): a sequential block whose tail produces a struct value.
 /// Whether a `let` initializer is composite-valued: a struct literal,
 /// an unshadowed composite name, an enum constructor
 /// (`pure-i64-composite/v6`), or a call to a composite-returning
