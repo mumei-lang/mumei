@@ -1,4 +1,5 @@
 use crate::{cli::NativeBundleCommand, linker};
+use mumei_core::semantic_contract::RefinedAdmission;
 use mumei_core::{
     hir, native_bundle::*, parser, proof_cert, resolver, semantic_contract, verification,
 };
@@ -886,7 +887,7 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
     // The producer always runs the refined admission; the record's
     // `profile` names v2 only when the source actually declares or uses
     // refined scalar types, so a plain module keeps pinning v1.
-    let (binding, atoms, types) = prepare_module_source(source, true)?;
+    let (binding, atoms, types) = prepare_module_source(source, RefinedAdmission::V2)?;
     let parent = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -903,7 +904,9 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         emit_module(&atoms, &types, stage.path(), proof_work.path())?;
     let record = ModuleNativeBundleRecord {
         schema: MODULE_SCHEMA.into(),
-        profile: if binding.source_profile == semantic_contract::PURE_I64_REFINED_PROFILE {
+        profile: if binding.source_profile == semantic_contract::PURE_I64_REFINED_PROFILE_V2 {
+            MODULE_PROFILE_V3.into()
+        } else if binding.source_profile == semantic_contract::PURE_I64_REFINED_PROFILE {
             MODULE_PROFILE_V2.into()
         } else {
             MODULE_PROFILE.into()
@@ -1022,7 +1025,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
             queue.push_back(member);
         }
     }
-    let prepared = prepare_multifile_source(&root, &members, true)?;
+    let prepared = prepare_multifile_source(&root, &members, RefinedAdmission::V2)?;
     let (binding, graph, atoms, types) = (
         prepared.binding,
         prepared.import_graph_sha256,
@@ -1054,7 +1057,9 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
     }
     let record = MultifileNativeBundleRecord {
         schema: MULTIFILE_SCHEMA.into(),
-        profile: if binding.source_profile == semantic_contract::PURE_I64_REFINED_PROFILE {
+        profile: if binding.source_profile == semantic_contract::PURE_I64_REFINED_PROFILE_V2 {
+            MULTIFILE_PROFILE_V3.into()
+        } else if binding.source_profile == semantic_contract::PURE_I64_REFINED_PROFILE {
             MULTIFILE_PROFILE_V2.into()
         } else {
             MULTIFILE_PROFILE.into()
@@ -1200,16 +1205,20 @@ fn recheck_llvm_loaded(
             }
             SourceRecheck::RecheckedWithinProfile => (),
         }
-        let merged = merge_import_closure(&root, &members, record.profile == MULTIFILE_PROFILE_V2)
-            .map_err(|_| BundleError("import closure merge failed"))?
-            .0;
+        let merged = merge_import_closure(
+            &root,
+            &members,
+            multifile_refined_admission(&record.profile)?,
+        )
+        .map_err(|_| BundleError("import closure merge failed"))?
+        .0;
         let llvm_ir = std::str::from_utf8(&loaded.files[&BundleFile::LlvmIr])
             .map_err(|_| BundleError("native LLVM snapshot is not UTF-8"))?;
         let report = tv::validate_native_module(
             &merged,
             llvm_ir,
             Options::default(),
-            record.profile == MULTIFILE_PROFILE_V2,
+            multifile_refined_admission(&record.profile)?,
         )
         .map_err(|_| BundleError("native LLVM snapshot outside bounded module profile"))?;
         if loaded.object_build.target_triple != report.target
@@ -1258,7 +1267,7 @@ fn recheck_llvm_loaded(
             &source,
             llvm_ir,
             Options::default(),
-            record.profile == MODULE_PROFILE_V2,
+            module_refined_admission(&record.profile)?,
         )
         .map_err(|_| BundleError("native LLVM snapshot outside bounded module profile"))?;
         if loaded.object_build.target_triple != report.target

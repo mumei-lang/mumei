@@ -1438,23 +1438,33 @@ A member that declares refined scalar aliases —
 fragment under `mumei.pure-i64-refined-scalar/v1`, and a bundle using
 them records `mumei.native-pure-i64-module-linux-x86_64/v2` or
 `mumei.native-pure-i64-multifile-linux-x86_64/v2`. The profile name is
-part of the pinned identity: a module without type declarations still
-pins `/v1`, so the record itself says which admission produced it, and
-`check`/`recheck-source`/`recheck-llvm` dispatch on the pinned name —
-a v1 record is re-admitted under the strict fragment, a v2 record under
-the refined one, and a v2-pinned record cannot be passed off as v1.
+part of the pinned identity — and it names exactly the fragment the
+module needs: a module without type declarations still pins `/v1`, a
+module whose declarations all resolve to integer-sort leaves with a
+single conjunct pins `/v2` (member `mumei.pure-i64-refined-scalar/v1`),
+and only a module needing the widened admission — a `bool` leaf or a
+multi-conjunct chain — pins `/v3` (member
+`mumei.pure-i64-refined-scalar/v2`). The record itself says which
+admission produced it, and `check`/`recheck-source`/`recheck-llvm`
+dispatch on the pinned name — a record is always re-admitted under
+exactly its own admission, never a wider one.
 
 Admission stays deliberately small and fail-closed. A `type` member is
-accepted only under the refined profile (v1 still rejects every non-atom
-item) and only when it carries no `unit` metadata — the profile does
-not model units, so it refuses to discard them silently. The base must
-be a literal scalar in the integer-sort vocabulary (`i64`, `i8`–`u32`):
-a `bool` base or a base naming another declaration (an alias chain) is
-still rejected. The verifier encodes both correctly — `bool` binds the
-operand as `Bool` and a chain composes every ancestor's predicate —
-but admitting them would widen the fragment beyond what the profile
-name declares, so the rejection is a conservative admission choice, not
-a verifier limit. Widening either needs a new profile name. The `where`
+accepted only under a refined profile (the strict profile still rejects
+every non-atom item) and only when it carries no `unit` metadata — the
+profile does not model units, so it refuses to discard them silently.
+Under the v1 refined admission the base must be a literal scalar in the
+integer-sort vocabulary (`i64`, `i8`–`u32`); under the v2 refined
+admission (`mumei.pure-i64-refined-scalar/v2`, bundles pinned
+`mumei.native-pure-i64-module-linux-x86_64/v3` or
+`mumei.native-pure-i64-multifile-linux-x86_64/v3`) the base may also be
+`bool` — the verifier binds the operand as `Bool` — or another declared
+type name, composing every ancestor conjunct exactly the way the
+verifier's chain enforcement does. Cyclic chains stay rejected in both.
+`u64`/`usize`/`isize`/`f64`/`Str` leaves stay rejected in both: a
+full-width unsigned domain cannot be expressed as an i64 bound and the
+obligation vocabulary has no Real/String sorts — widening those needs
+a new profile name again. The `where`
 predicate must check as `Bool` over its declared operand under the
 existing `expression_kind` gate, with no calls admitted inside it.
 Duplicate type names and a type named like an atom are rejected, so
@@ -1471,7 +1481,12 @@ must establish them alongside the callee's `requires` (the same
 the site's argument values); a result's predicates join the
 postcondition, so the callee must guarantee them at its `result`.
 A predicate whose domain can be empty is refused by the existing
-empty-domain gate.
+empty-domain gate. A call keeps the callee's declared signature kinds:
+each argument must carry the callee parameter's kind (a `bool` —
+literal or bool-leaf alias — admits only bool arguments, lowered to
+the profile's i64 0/1 bitvector convention) and the call expression
+itself takes the callee's return kind, so `-> Flag` results stay
+boolean-typed through the call.
 
 Nothing deeper is claimed: the fragment admitted by the profile grew,
 the guarantees did not — the same identity-plus-recheck scopes apply,

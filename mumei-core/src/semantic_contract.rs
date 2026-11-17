@@ -45,6 +45,37 @@ pub const PURE_I64_WRAPPING_PROFILE: &str = "mumei.pure-i64-wrapping-scalar/v1";
 /// producer-declared obligations under the same encoder, not claims
 /// about wider language semantics.
 pub const PURE_I64_REFINED_PROFILE: &str = "mumei.pure-i64-refined-scalar/v1";
+/// v2 widens the admitted declaration fragment the same way the
+/// verifier's boundary enforcement widened its encoding: a `bool` leaf
+/// binds the operand as `bool` (not `Int`), and a base that names
+/// another declaration composes the whole chain's conjuncts instead of
+/// dropping the ancestors. A module that uses either names this
+/// profile; a module inside the v1 fragment keeps the v1 name so a v1
+/// record's pinned profile stays reproducible under its own gate.
+pub const PURE_I64_REFINED_PROFILE_V2: &str = "mumei.pure-i64-refined-scalar/v2";
+
+/// How much of the refined-scalar declaration fragment a gate admits:
+/// `Reject` keeps `Item::TypeDef` out of the item vocabulary entirely,
+/// `V1` admits single-level declarations over the i64-family scalar
+/// vocabulary only (the `pure-i64-refined-scalar/v1` fragment), and `V2`
+/// additionally admits chained declarations and `bool` leaves (the v2
+/// fragment). A pinned record names which level produced it, so a
+/// rechecker re-derives under the record's own admission — never a
+/// wider one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RefinedAdmission {
+    Reject,
+    V1,
+    V2,
+}
+
+impl RefinedAdmission {
+    /// Whether any `Item::TypeDef` declaration is in the item
+    /// vocabulary at all.
+    pub fn admits_typedefs(self) -> bool {
+        self != Self::Reject
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SemanticContractError {
@@ -149,7 +180,8 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined) = admit_pure_i64_atoms(source, allow_wrapping_arithmetic, false)?;
+    let (items, refined) =
+        admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
     if !allow_wrapping_arithmetic && items.len() != 1 {
@@ -181,7 +213,7 @@ pub fn extract_pure_i64_module_contracts(
     source: &str,
     source_name: &str,
     target_triple: Option<&str>,
-    admit_refined: bool,
+    admission: RefinedAdmission,
 ) -> Result<Vec<SemanticContract>, SemanticContractError> {
     if source_name.trim().is_empty() || target_triple.is_some_and(|target| target.trim().is_empty())
     {
@@ -189,7 +221,7 @@ pub fn extract_pure_i64_module_contracts(
             "missing source or target identity",
         ));
     }
-    let (items, refined) = admit_pure_i64_atoms(source, true, admit_refined)?;
+    let (items, refined) = admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
     // refinement annotation only when the alias is registered.
@@ -225,17 +257,29 @@ pub fn extract_pure_i64_module_contracts(
         .collect()
 }
 
+/// The profile name the module gate would pin for `source` under
+/// `admission` — the same `fragment_profile` the contract builder
+/// emits, so a consumer reporting the source profile names exactly
+/// what the obligation pin does.
+pub fn module_source_profile(
+    source: &str,
+    admission: RefinedAdmission,
+) -> Result<&'static str, SemanticContractError> {
+    let (_items, refined) = admit_pure_i64_atoms(source, true, admission)?;
+    Ok(fragment_profile(true, &refined))
+}
+
 /// Shared module admission for the pure-i64 fragment: float reject, parse,
 /// nonempty, callee-map construction and the per-atom
 /// `validate_atom`/`check_atom_contract` gates. Returns the admitted items
 /// in declaration order plus the module's resolved refined-alias map;
-/// `admit_refined` widens the item vocabulary to `Item::TypeDef`
-/// declarations (`PURE_I64_REFINED_PROFILE`) while the scalar fragment
-/// itself is unchanged. The caller decides the arity gate.
+/// `admission` widens the item vocabulary to `Item::TypeDef`
+/// declarations (`PURE_I64_REFINED_PROFILE`/`_V2`) while the scalar
+/// fragment itself is unchanged. The caller decides the arity gate.
 fn admit_pure_i64_atoms(
     source: &str,
     allow_wrapping_arithmetic: bool,
-    admit_refined: bool,
+    admission: RefinedAdmission,
 ) -> Result<(Vec<Item>, RefinedEnv), SemanticContractError> {
     // Item text reconstruction can print 1.0 as 1. Reject float tokens before
     // that normalization erases the category required by this integer profile.
@@ -260,18 +304,15 @@ fn admit_pure_i64_atoms(
     // satisfy the atom profile. A call itself is modeled as an
     // uninterpreted function site — a callee's own contract is a separate
     // per-function obligation.
-    let mut callees = BTreeMap::new();
+    let mut atom_names = BTreeSet::new();
     for item in &items {
         match item {
             Item::Atom(sibling) => {
-                if callees
-                    .insert(sibling.name.clone(), sibling.params.len())
-                    .is_some()
-                {
+                if !atom_names.insert(sibling.name.clone()) {
                     return Err(SemanticContractError::Unsupported("duplicate atom name"));
                 }
             }
-            Item::TypeDef(_) if admit_refined => (),
+            Item::TypeDef(_) if admission.admits_typedefs() => (),
             _ => {
                 return Err(SemanticContractError::Unsupported("non-atom declarations"));
             }
@@ -280,12 +321,31 @@ fn admit_pure_i64_atoms(
     // Refined declarations share the module's name space with atoms: a
     // type named like an atom would make `T(` ambiguous between a type
     // position and a call, so the admission is closed over both maps.
-    let refined = build_refined_env(&items)?;
-    if refined.keys().any(|name| callees.contains_key(name)) {
+    let refined = build_refined_env(&items, admission)?;
+    if refined.keys().any(|name| atom_names.contains(name)) {
         return Err(SemanticContractError::Unsupported(
             "type name collides with an atom name",
         ));
     }
+    let callees: BTreeMap<String, CalleeSig> = items
+        .iter()
+        .filter_map(|item| {
+            let Item::Atom(sibling) = item else {
+                return None;
+            };
+            Some((
+                sibling.name.clone(),
+                CalleeSig {
+                    param_kinds: sibling
+                        .params
+                        .iter()
+                        .map(|p| param_kind(p, &refined))
+                        .collect(),
+                    return_kind: return_kind(sibling, &refined),
+                },
+            ))
+        })
+        .collect();
     // Declaration order is irrelevant to call resolution: the callee map is
     // complete before any atom's own contract is checked, so a forward call
     // to a later sibling resolves the same as a backward one.
@@ -335,6 +395,11 @@ fn fragment_profile(allow_wrapping_arithmetic: bool, refined: &RefinedEnv) -> &'
         PURE_I64_PROFILE
     } else if refined.is_empty() {
         PURE_I64_WRAPPING_PROFILE
+    } else if refined
+        .values()
+        .any(|alias| alias.kind == ScalarKind::Bool || alias.conjuncts.len() > 1)
+    {
+        PURE_I64_REFINED_PROFILE_V2
     } else {
         PURE_I64_REFINED_PROFILE
     }
@@ -492,6 +557,16 @@ fn atom_contract(
     })
 }
 
+/// One sibling atom's call-site signature: the kind each declared
+/// parameter carries and the return kind a call expression takes. The
+/// arity map alone cannot type a call through a widened signature — a
+/// bool parameter admits only bool arguments, and a bool return keeps
+/// the call Bool-typed.
+struct CalleeSig {
+    param_kinds: Vec<ScalarKind>,
+    return_kind: ScalarKind,
+}
+
 /// The scalar kind a declared parameter type gives in this profile, when
 /// the declaration is admissible: `i64` always; `bool` and the narrower
 /// subrange integer types only when `admit_widened` (the widened
@@ -513,7 +588,12 @@ fn declared_param_kind(
         "i64" => ScalarKind::I64,
         "bool" if admit_widened => ScalarKind::Bool,
         "i8" | "i16" | "i32" | "u8" | "u16" | "u32" if admit_widened => ScalarKind::I64,
-        other => refined.get(other)?.kind,
+        // A bool-leaf alias gives the parameter a boolean signature —
+        // the same boundary literal `bool` carries.
+        other => match refined.get(other) {
+            Some(alias) if alias.kind != ScalarKind::Bool || admit_widened => alias.kind,
+            _ => return None,
+        },
     };
     if param.type_ref.as_ref().is_some_and(|ty| {
         ty.name != name
@@ -559,13 +639,29 @@ fn return_kind(atom: &Atom, refined: &RefinedEnv) -> ScalarKind {
     }
 }
 
+/// The kind every module atom's call expression takes, keyed by name:
+/// a bool-returning callee's call lowers to the profile's i64 0/1
+/// bitvector, and `source_expr` needs the callee's declared return kind
+/// to materialize that convention at the call site.
+fn call_return_kinds(items: &[Item], refined: &RefinedEnv) -> BTreeMap<String, ScalarKind> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let Item::Atom(atom) = item else {
+                return None;
+            };
+            Some((atom.name.clone(), return_kind(atom, refined)))
+        })
+        .collect()
+}
+
 /// The tail-atom contract admission shared by every module atom:
 /// requires/ensures must be boolean expressions and the body a statement
 /// of the declared result kind — all under call resolution against the
 /// complete same-module callee map.
 fn check_atom_contract(
     atom: &Atom,
-    callees: &BTreeMap<String, usize>,
+    callees: &BTreeMap<String, CalleeSig>,
     allow_wrapping_arithmetic: bool,
     refined: &RefinedEnv,
 ) -> Result<(), SemanticContractError> {
@@ -634,7 +730,9 @@ fn validate_atom(
     let return_ok = match atom.return_type.as_deref() {
         Some("i64") => true,
         Some("bool") | Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32") => admit_widened,
-        Some(name) => refined.contains_key(name),
+        Some(name) => refined
+            .get(name)
+            .is_some_and(|alias| alias.kind != ScalarKind::Bool || admit_widened),
         None => false,
     };
     if !return_ok
@@ -714,12 +812,14 @@ struct ResolvedAlias {
 type RefinedEnv = BTreeMap<String, ResolvedAlias>;
 
 /// The literal scalar name and kind a profile scalar type gives, or
-/// `None` outside the vocabulary (`bool`/`u64`/`usize`/unknown names —
-/// a `bool` base would bind the refinement operand as `Int` in the
-/// verifier's own encoding, and a full-width unsigned domain cannot be
-/// expressed as an i64 bound).
+/// `None` outside the vocabulary (`u64`/`usize`/`f64`/unknown names —
+/// a full-width unsigned domain cannot be expressed as an i64 bound,
+/// and the obligation vocabulary has no Real/String sorts). `bool` is
+/// a V2 leaf: the verifier binds its operand as `Bool`, so admission
+/// gates it on the V2 fragment rather than this table.
 fn scalar_base(name: &str) -> Option<(ScalarKind, &'static str)> {
     match name {
+        "bool" => Some((ScalarKind::Bool, "bool")),
         "i64" => Some((ScalarKind::I64, "i64")),
         "i8" => Some((ScalarKind::I64, "i8")),
         "i16" => Some((ScalarKind::I64, "i16")),
@@ -735,12 +835,16 @@ fn scalar_base(name: &str) -> Option<(ScalarKind, &'static str)> {
 /// alias map. Rejected honestly: `unit` tags (metadata this profile does
 /// not model — dropping it would silently change the admitted fragment),
 /// type names shadowing scalar profile names, duplicates, bases outside
-/// the scalar vocabulary (including bases that name another declaration
-/// — the verifier's own refinement application cannot compose chains),
-/// and predicates that are not boolean scalar-vocabulary expressions
-/// over their operand (checked with no call targets, so a refinement
-/// cannot reach a sibling atom).
-fn build_refined_env(items: &[Item]) -> Result<RefinedEnv, SemanticContractError> {
+/// the scalar vocabulary, and predicates that are not boolean
+/// scalar-vocabulary expressions over their operand (checked with no
+/// call targets, so a refinement cannot reach a sibling atom). Chained
+/// declarations and `bool` leaves additionally require the V2
+/// admission level — the verifier composes both, but the V1 record
+/// gate keeps its original fragment.
+fn build_refined_env(
+    items: &[Item],
+    admission: RefinedAdmission,
+) -> Result<RefinedEnv, SemanticContractError> {
     let mut defs = BTreeMap::new();
     for item in items {
         let Item::TypeDef(def) = item else {
@@ -775,7 +879,7 @@ fn build_refined_env(items: &[Item]) -> Result<RefinedEnv, SemanticContractError
     }
     let mut env = RefinedEnv::new();
     for (name, def) in &defs {
-        env.insert(name.to_string(), resolve_alias(def, &defs)?);
+        env.insert(name.to_string(), resolve_alias(def, &defs, admission)?);
     }
     Ok(env)
 }
@@ -783,40 +887,66 @@ fn build_refined_env(items: &[Item]) -> Result<RefinedEnv, SemanticContractError
 fn resolve_alias(
     def: &crate::parser::ast::RefinedType,
     defs: &BTreeMap<&str, &crate::parser::ast::RefinedType>,
+    admission: RefinedAdmission,
 ) -> Result<ResolvedAlias, SemanticContractError> {
-    // The base must be a literal scalar, not another declaration: the
-    // verifier applies only a refinement's own predicate with its
-    // declared base encoding, so a chained alias would silently lose the
-    // ancestor conjuncts at build time even though this env folds them.
-    // This also makes cycles unrepresentable — a self-named or
-    // cross-named base hits this rejection first.
-    if defs.contains_key(def._base_type.as_str()) {
-        return Err(SemanticContractError::Unsupported(
-            "chained type declarations",
-        ));
-    }
-    let (kind, base) = scalar_base(&def._base_type).ok_or(SemanticContractError::Unsupported(
+    // Walk the declaration chain to the literal base, accumulating each
+    // declaration's own (operand, predicate) conjunct — the same
+    // fold the verifier applies per link, so no ancestor is silently
+    // dropped. A base naming another declaration needs V2 admission
+    // (the V1 record gate keeps its single-level fragment); a cycle
+    // is rejected fail-closed either way, matching the verifier's own
+    // type error.
+    let mut conjuncts: Vec<(String, String)> = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut current = def;
+    let leaf = loop {
+        if !seen.insert(current.name.as_str()) {
+            return Err(SemanticContractError::Unsupported(
+                "cyclic type declarations",
+            ));
+        }
+        conjuncts.push((current.operand.clone(), current.predicate_raw.clone()));
+        match defs.get(current._base_type.as_str()) {
+            Some(next) => {
+                if admission < RefinedAdmission::V2 {
+                    return Err(SemanticContractError::Unsupported(
+                        "chained type declarations",
+                    ));
+                }
+                current = next;
+            }
+            None => break current._base_type.clone(),
+        }
+    };
+    let (kind, base) = scalar_base(&leaf).ok_or(SemanticContractError::Unsupported(
         "type outside the scalar profile",
     ))?;
-    // The declaration's own predicate must be a scalar-vocabulary boolean
-    // expression over its operand.
-    let predicate =
-        parse_expression_checked(&def.predicate_raw).map_err(|_| SemanticContractError::Parse)?;
-    expect_kind(
-        expression_kind(
-            &predicate,
-            &BTreeMap::from([(def.operand.clone(), kind)]),
-            false,
-            true,
-            &BTreeSet::new(),
-            &BTreeMap::new(),
-        )?,
-        ScalarKind::Bool,
-    )?;
+    if kind == ScalarKind::Bool && admission < RefinedAdmission::V2 {
+        return Err(SemanticContractError::Unsupported(
+            "bool-leaf type declarations",
+        ));
+    }
+    // Every declaration's predicate must be a scalar-vocabulary boolean
+    // expression over its own operand, which binds the leaf-typed value.
+    for (operand, predicate_raw) in &conjuncts {
+        let predicate =
+            parse_expression_checked(predicate_raw).map_err(|_| SemanticContractError::Parse)?;
+        expect_kind(
+            expression_kind(
+                &predicate,
+                &BTreeMap::from([(operand.clone(), kind)]),
+                false,
+                true,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            )?,
+            ScalarKind::Bool,
+        )?;
+    }
     Ok(ResolvedAlias {
         base,
         kind,
-        conjuncts: vec![(def.operand.clone(), def.predicate_raw.clone())],
+        conjuncts,
     })
 }
 
@@ -897,7 +1027,7 @@ fn statement_kind(
     result_in_scope: bool,
     allow_wrapping_arithmetic: bool,
     assignable: &BTreeSet<String>,
-    callees: &BTreeMap<String, usize>,
+    callees: &BTreeMap<String, CalleeSig>,
 ) -> Result<ScalarKind, SemanticContractError> {
     match stmt {
         Stmt::Expr(expr, _) => expression_kind(
@@ -1049,7 +1179,7 @@ fn expression_kind(
     result_in_scope: bool,
     allow_wrapping_arithmetic: bool,
     assignable: &BTreeSet<String>,
-    callees: &BTreeMap<String, usize>,
+    callees: &BTreeMap<String, CalleeSig>,
 ) -> Result<ScalarKind, SemanticContractError> {
     match expr {
         Expr::Number(_) => Ok(ScalarKind::I64),
@@ -1248,17 +1378,20 @@ fn expression_kind(
             // A call must name an atom of this module with a matching
             // arity: an undeclared or mismatched callee has no
             // counterpart to compare a call site against.
-            match callees.get(name.as_str()) {
-                Some(arity) if *arity == args.len() => {}
-                _ => {
-                    return Err(SemanticContractError::Unsupported(
-                        "call target outside module",
-                    ));
-                }
+            let Some(sig) = callees.get(name.as_str()) else {
+                return Err(SemanticContractError::Unsupported(
+                    "call target outside module",
+                ));
+            };
+            if sig.param_kinds.len() != args.len() {
+                return Err(SemanticContractError::Unsupported(
+                    "call target outside module",
+                ));
             }
-            // A call is i64-valued with i64 arguments: each argument
-            // must kind-check as I64.
-            for arg in args {
+            // Each argument carries the callee parameter's declared
+            // kind — a widened bool parameter admits only bool
+            // arguments — and the call takes the callee's return kind.
+            for (arg, kind) in args.iter().zip(&sig.param_kinds) {
                 expect_kind(
                     expression_kind(
                         arg,
@@ -1268,10 +1401,10 @@ fn expression_kind(
                         &BTreeSet::new(),
                         callees,
                     )?,
-                    ScalarKind::I64,
+                    *kind,
                 )?;
             }
-            Ok(ScalarKind::I64)
+            Ok(sig.return_kind)
         }
         _ => Err(SemanticContractError::Unsupported(
             "expression or unbound name",
@@ -1314,6 +1447,16 @@ pub struct PureI64Body<'ctx> {
     /// compares as an uninterpreted site on both sides); the source
     /// recheck binds each site to the callee's contract.
     pub call_sites: Vec<CallSite<'ctx>>,
+    /// The bool-carrier convention applied to call results: a callee
+    /// whose declared return kind is `bool` produces an i64 in {0,1} at
+    /// the call boundary, so each such application's result carries
+    /// `result <=u 1`. Asserting the bound on the shared application
+    /// term makes a forwarded call result (`-> Flag { f(x) }`, where
+    /// the source materializes `ite(v != 0, 1, 0)` and the IR returns
+    /// the raw `v`) compare equal under the convention — while a
+    /// member that returns a literal `5` for a bool result still
+    /// differs from the normalized source.
+    pub call_result_bounds: Vec<Bool<'ctx>>,
     /// Definedness obligations for division, remainder and shifts, each an
     /// implication `guard -> operands defined` mirroring the safety rules
     /// `--bitvec-i64` verification requires. Empty unless the caller admitted
@@ -1353,11 +1496,12 @@ pub fn encode_pure_i64_body<'ctx>(
     allow_wrapping_arithmetic: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
     let (source_sha256, mut items, refined) =
-        bounded_pure_i64_module(source, allow_wrapping_arithmetic, false)?;
+        bounded_pure_i64_module(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
+    let call_returns = call_return_kinds(&items, &refined);
     let Some(Item::Atom(atom)) = items.pop() else {
         return Err(SemanticContractError::Unsupported("source atom"));
     };
-    encode_atom_body(&atom, context, source_sha256, &refined)
+    encode_atom_body(&atom, context, source_sha256, &refined, &call_returns)
 }
 
 /// Encode every atom of the module under the same profile, in declaration
@@ -1368,10 +1512,11 @@ pub fn encode_pure_i64_module<'ctx>(
     source: &str,
     context: &'ctx Context,
     allow_wrapping_arithmetic: bool,
-    admit_refined: bool,
+    admission: RefinedAdmission,
 ) -> BodyResult<Vec<PureI64Body<'ctx>>> {
     let (source_sha256, items, refined) =
-        bounded_pure_i64_module(source, allow_wrapping_arithmetic, admit_refined)?;
+        bounded_pure_i64_module(source, allow_wrapping_arithmetic, admission)?;
+    let call_returns = call_return_kinds(&items, &refined);
     items
         .iter()
         .filter_map(|item| match item {
@@ -1380,6 +1525,7 @@ pub fn encode_pure_i64_module<'ctx>(
                 context,
                 source_sha256.clone(),
                 &refined,
+                &call_returns,
             )),
             _ => None,
         })
@@ -1390,11 +1536,11 @@ pub fn encode_pure_i64_module<'ctx>(
 /// admission (which itself gates every declared item of the profile)
 /// and the module item list. Returns the module digest, the items and
 /// the resolved refined-alias map — empty for callers that keep the
-/// plain fragment (`admit_refined = false`).
+/// plain fragment (`admission = Reject`).
 fn bounded_pure_i64_module(
     source: &str,
     allow_wrapping_arithmetic: bool,
-    admit_refined: bool,
+    admission: RefinedAdmission,
 ) -> BodyResult<(String, Vec<Item>, RefinedEnv)> {
     if source.len() > 65_536 {
         return Err(SemanticContractError::Unsupported("source size limit"));
@@ -1419,7 +1565,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined) = admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admit_refined)?;
+    let (items, refined) = admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
     if !allow_wrapping_arithmetic && items.len() != 1 {
@@ -1435,6 +1581,7 @@ fn encode_atom_body<'ctx>(
     context: &'ctx Context,
     source_sha256: String,
     refined: &RefinedEnv,
+    call_returns: &BTreeMap<String, ScalarKind>,
 ) -> BodyResult<PureI64Body<'ctx>> {
     if atom.params.len() > 16 {
         return Err(SemanticContractError::Unsupported("parameter limit"));
@@ -1466,6 +1613,7 @@ fn encode_atom_body<'ctx>(
         &mut top_writes,
         &mut loop_exits,
         &mut call_sites,
+        call_returns,
     )? {
         SourceValue::Integer(value) => value,
         SourceValue::Boolean(value) => {
@@ -1493,12 +1641,18 @@ fn encode_atom_body<'ctx>(
         let refs: Vec<&Bool> = loop_exits.iter().collect();
         Some(Bool::and(context, &refs))
     };
+    let call_result_bounds: Vec<Bool> = call_sites
+        .iter()
+        .filter(|site| call_returns.get(site.callee.as_str()) == Some(&ScalarKind::Bool))
+        .map(|site| site.result.bvule(&BV::from_u64(context, 1, 64)))
+        .collect();
     Ok(PureI64Body {
         function_name: atom.name.clone(),
         source_sha256,
         inputs,
         value,
         call_sites,
+        call_result_bounds,
         definedness,
         param_domain,
         subrange_params,
@@ -1541,14 +1695,16 @@ fn signature_domain<'ctx>(
             Some(name) => {
                 if let Some(alias) = refined.get(name) {
                     // The alias's base bound still applies — a `u8`-based
-                    // refinement keeps its range carrier — before the
-                    // declaration's conjuncts tighten it.
+                    // refinement keeps its range carrier, a `bool`-leaf
+                    // its 0/1 domain — before the declaration's conjuncts
+                    // tighten it.
                     domain.extend(scalar_domain_bounds(alias.base, v, context));
-                    domain.extend(alias_predicates(
-                        alias,
-                        SourceValue::Integer(v.clone()),
-                        context,
-                    )?);
+                    let operand = if alias.kind == ScalarKind::Bool {
+                        SourceValue::Boolean(v._eq(&BV::from_u64(context, 0, 64)).not())
+                    } else {
+                        SourceValue::Integer(v.clone())
+                    };
+                    domain.extend(alias_predicates(alias, operand, context)?);
                 }
             }
             None => (),
@@ -1563,6 +1719,7 @@ fn signature_domain<'ctx>(
 /// identical range its literal spelling would.
 fn scalar_domain_bounds<'ctx>(base: &str, v: &BV<'ctx>, context: &'ctx Context) -> Vec<Bool<'ctx>> {
     match base {
+        "bool" => vec![v.bvule(&BV::from_u64(context, 1, 64))],
         "u8" => vec![v.bvule(&BV::from_u64(context, u8::MAX as u64, 64))],
         "u16" => vec![v.bvule(&BV::from_u64(context, u16::MAX as u64, 64))],
         "u32" => vec![v.bvule(&BV::from_u64(context, u32::MAX as u64, 64))],
@@ -1612,6 +1769,7 @@ fn alias_predicates<'ctx>(
             &mut HashMap::new(),
             &mut exits,
             &mut Vec::new(),
+            &BTreeMap::new(),
         )?
         .boolean()?;
         out.extend(definedness);
@@ -1660,7 +1818,7 @@ pub fn encode_pure_i64_obligation<'ctx>(
     let Some(Item::Atom(atom)) = items.pop() else {
         return Err(SemanticContractError::Unsupported("source atom"));
     };
-    atom_obligation(&atom, &body, context, &RefinedEnv::new())
+    atom_obligation(&atom, &body, &BTreeMap::new(), context, &RefinedEnv::new())
 }
 
 /// Counterexample obligations for a multi-atom module under the widened
@@ -1678,9 +1836,9 @@ pub fn encode_pure_i64_obligation<'ctx>(
 pub fn encode_pure_i64_module_obligations<'ctx>(
     source: &str,
     context: &'ctx Context,
-    admit_refined: bool,
+    admission: RefinedAdmission,
 ) -> BodyResult<Vec<ModuleAtomObligations<'ctx>>> {
-    let (source_sha256, items, refined) = bounded_pure_i64_module(source, true, admit_refined)?;
+    let (source_sha256, items, refined) = bounded_pure_i64_module(source, true, admission)?;
     let atom_items: Vec<&crate::parser::ast::Atom> = items
         .iter()
         .filter_map(|item| match item {
@@ -1696,9 +1854,18 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
             "expected at least one atom",
         ));
     }
+    let call_returns = call_return_kinds(&items, &refined);
     let bodies: Vec<PureI64Body> = atom_items
         .iter()
-        .map(|atom| encode_atom_body(atom, context, source_sha256.clone(), &refined))
+        .map(|atom| {
+            encode_atom_body(
+                atom,
+                context,
+                source_sha256.clone(),
+                &refined,
+                &call_returns,
+            )
+        })
         .collect::<BodyResult<_>>()?;
     let callees: BTreeMap<String, &crate::parser::ast::Atom> = atom_items
         .iter()
@@ -1716,6 +1883,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
             body,
             &callees,
             &callee_bodies,
+            &call_returns,
             context,
             &refined,
         )?);
@@ -1759,6 +1927,7 @@ fn module_atom_obligations<'ctx>(
     body: &PureI64Body<'ctx>,
     callees: &BTreeMap<String, &crate::parser::ast::Atom>,
     callee_bodies: &BTreeMap<String, &PureI64Body<'ctx>>,
+    call_returns: &BTreeMap<String, ScalarKind>,
     context: &'ctx Context,
     refined: &RefinedEnv,
 ) -> BodyResult<ModuleAtomObligations<'ctx>> {
@@ -1795,6 +1964,7 @@ fn module_atom_obligations<'ctx>(
         &mut HashMap::new(),
         &mut requires_exits,
         &mut Vec::new(),
+        call_returns,
     )?
     .boolean()?;
     env.insert(
@@ -1820,15 +1990,17 @@ fn module_atom_obligations<'ctx>(
         &mut HashMap::new(),
         &mut ensures_exits,
         &mut Vec::new(),
+        call_returns,
     )?
     .boolean()?;
     // A refined result type adds its declaration conjuncts to the
     // postcondition the atom must satisfy — `-> Port` guarantees
     // `ensures` AND `v >= 1 && v <= 65535` at the encoded result.
-    let result_operand = match atom.return_type.as_deref().and_then(|n| refined.get(n)) {
-        Some(_) => SourceValue::Integer(body.value.clone()),
-        None => env["result"].clone(),
-    };
+    // `env["result"]` already carries the kind-typed operand — an
+    // `Integer` for an i64 leaf and a `Boolean` for a bool leaf — so a
+    // refined result's conjuncts evaluate on the same value the
+    // ensures clause does.
+    let result_operand = env["result"].clone();
     let mut post = vec![ensures];
     post.extend(refined_conjuncts_at(
         atom.return_type.as_deref(),
@@ -1860,6 +2032,7 @@ fn module_atom_obligations<'ctx>(
             &mut HashMap::new(),
             &mut site_exits,
             &mut Vec::new(),
+            call_returns,
         )?
         .boolean()?;
         // A domain counterexample counts only where the callee's own
@@ -1929,6 +2102,7 @@ fn module_atom_obligations<'ctx>(
             &mut HashMap::new(),
             &mut ensures_site_exits,
             &mut Vec::new(),
+            call_returns,
         )?
         .boolean()?;
         // A refined callee result type strengthens the assumption the
@@ -1975,6 +2149,7 @@ fn module_atom_obligations<'ctx>(
 fn atom_obligation<'ctx>(
     atom: &Atom,
     body: &PureI64Body<'ctx>,
+    call_returns: &BTreeMap<String, ScalarKind>,
     context: &'ctx Context,
     refined: &RefinedEnv,
 ) -> BodyResult<Bool<'ctx>> {
@@ -1999,6 +2174,7 @@ fn atom_obligation<'ctx>(
         &mut HashMap::new(),
         &mut requires_exits,
         &mut Vec::new(),
+        call_returns,
     )?
     .boolean()?;
     env.insert(
@@ -2019,6 +2195,7 @@ fn atom_obligation<'ctx>(
         &mut HashMap::new(),
         &mut ensures_exits,
         &mut Vec::new(),
+        call_returns,
     )?
     .boolean()?;
     let mut terms = vec![requires, ensures.not()];
@@ -2097,6 +2274,7 @@ fn source_stmt<'ctx>(
     // to inputs satisfying all of them.
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
+    call_returns: &BTreeMap<String, ScalarKind>,
 ) -> BodyResult<SourceValue<'ctx>> {
     if depth > MAX_DEPTH {
         return Err(SemanticContractError::Unsupported("source depth limit"));
@@ -2113,6 +2291,7 @@ fn source_stmt<'ctx>(
             written,
             loop_exits,
             call_sites,
+            call_returns,
         ),
         Stmt::Assign { var, value, .. } => {
             if !assignable.contains(var) {
@@ -2131,6 +2310,7 @@ fn source_stmt<'ctx>(
                 written,
                 loop_exits,
                 call_sites,
+                call_returns,
             )?;
             written.insert(var.clone(), bound.clone());
             Ok(bound)
@@ -2146,6 +2326,7 @@ fn source_stmt<'ctx>(
             written,
             loop_exits,
             call_sites,
+            call_returns,
         ),
         Stmt::Block(stmts, _) if !stmts.is_empty() => {
             // Sequential blocks bind names lexically: each `let`
@@ -2175,6 +2356,7 @@ fn source_stmt<'ctx>(
                             written,
                             loop_exits,
                             call_sites,
+                            call_returns,
                         )?;
                         inner.insert(var.clone(), bound);
                         inner_assignable.insert(var.clone());
@@ -2197,6 +2379,7 @@ fn source_stmt<'ctx>(
                             written,
                             loop_exits,
                             call_sites,
+                            call_returns,
                         )?;
                         inner.insert(var.clone(), bound.clone());
                         if escapable.contains(var) {
@@ -2216,6 +2399,7 @@ fn source_stmt<'ctx>(
                             &mut local,
                             loop_exits,
                             call_sites,
+                            call_returns,
                         )?;
                         for (name, bound) in local {
                             inner.insert(name.clone(), bound.clone());
@@ -2238,6 +2422,7 @@ fn source_stmt<'ctx>(
                             &mut local,
                             loop_exits,
                             call_sites,
+                            call_returns,
                         )?;
                         for (name, bound) in local {
                             inner.insert(name.clone(), bound.clone());
@@ -2265,6 +2450,7 @@ fn source_stmt<'ctx>(
                 &mut tail_writes,
                 loop_exits,
                 call_sites,
+                call_returns,
             )?;
             for (name, bound) in tail_writes {
                 if escapable.contains(&name) {
@@ -2300,6 +2486,7 @@ fn source_while<'ctx>(
     written: &mut HashMap<String, SourceValue<'ctx>>,
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
+    call_returns: &BTreeMap<String, ScalarKind>,
 ) -> BodyResult<()> {
     use SourceValue::{Boolean as B, Integer as I};
     let mut cur = env.clone();
@@ -2320,6 +2507,7 @@ fn source_while<'ctx>(
             &mut HashMap::new(),
             loop_exits,
             call_sites,
+            call_returns,
         )? {
             B(b) => b,
             _ => {
@@ -2341,6 +2529,7 @@ fn source_while<'ctx>(
             &mut body_writes,
             loop_exits,
             call_sites,
+            call_returns,
         )?;
         for (name, bound) in body_writes {
             // Writes escape only where the body actually ran: an
@@ -2420,6 +2609,7 @@ fn source_expr<'ctx>(
     written: &mut HashMap<String, SourceValue<'ctx>>,
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
+    call_returns: &BTreeMap<String, ScalarKind>,
 ) -> BodyResult<SourceValue<'ctx>> {
     use SourceValue::{Boolean as B, Integer as I};
     if depth > MAX_DEPTH {
@@ -2443,6 +2633,7 @@ fn source_expr<'ctx>(
             written,
             loop_exits,
             call_sites,
+            call_returns,
         )?,
         Expr::BinaryOp(a, op, b) => {
             let a = source_expr(
@@ -2456,6 +2647,7 @@ fn source_expr<'ctx>(
                 written,
                 loop_exits,
                 call_sites,
+                call_returns,
             )?;
             // `&&`/`||`/`=>` short-circuit like the emitter and
             // `--bitvec-i64` verification: the right operand's partial
@@ -2476,6 +2668,7 @@ fn source_expr<'ctx>(
                 written,
                 loop_exits,
                 call_sites,
+                call_returns,
             )?;
             match (a, op, b) {
                 (I(a), Op::Eq, I(b)) => B(a._eq(&b)),
@@ -2541,6 +2734,7 @@ fn source_expr<'ctx>(
                 written,
                 loop_exits,
                 call_sites,
+                call_returns,
             )?
             .boolean()?;
             // Branches may rebind linear-path names: each write merges
@@ -2562,6 +2756,7 @@ fn source_expr<'ctx>(
                     &mut then_writes,
                     loop_exits,
                     call_sites,
+                    call_returns,
                 )?,
                 source_stmt(
                     else_branch,
@@ -2574,6 +2769,7 @@ fn source_expr<'ctx>(
                     &mut else_writes,
                     loop_exits,
                     call_sites,
+                    call_returns,
                 )?,
             );
             let names: BTreeSet<&String> = then_writes.keys().chain(else_writes.keys()).collect();
@@ -2623,6 +2819,7 @@ fn source_expr<'ctx>(
                 written,
                 loop_exits,
                 call_sites,
+                call_returns,
             )?
             .integer()?;
             let mut missed: Vec<Bool> = Vec::new();
@@ -2684,6 +2881,7 @@ fn source_expr<'ctx>(
                                 written,
                                 loop_exits,
                                 call_sites,
+                                call_returns,
                             )?
                             .boolean()?;
                             Some(match pattern {
@@ -2718,6 +2916,7 @@ fn source_expr<'ctx>(
                     &mut arm_writes,
                     loop_exits,
                     call_sites,
+                    call_returns,
                 )?;
                 // Arm writes escape like `if` branch writes: each merges
                 // under the arm-local hit (earlier arms' misses and this
@@ -2766,9 +2965,11 @@ fn source_expr<'ctx>(
             result
         }
         Expr::Call(name, args) => {
-            // The declared profile admits i64 call arguments only (the
-            // extraction gate enforces it); a `bool` here is unreachable
-            // and stays rejected so encoder and gate never drift apart.
+            // Call arguments carry the profile's lowered representation:
+            // the extraction gate checked each argument's kind against
+            // the callee parameter, and a `bool` argument lowers to the
+            // same i64 0/1 bitvector a bool parameter does — so the call
+            // site and `signature_domain`/`param_env` see one encoding.
             let mut applied = Vec::with_capacity(args.len());
             for arg in args {
                 match source_expr(
@@ -2782,12 +2983,11 @@ fn source_expr<'ctx>(
                     written,
                     loop_exits,
                     call_sites,
+                    call_returns,
                 )? {
                     I(v) => applied.push(v),
-                    B(_) => {
-                        return Err(SemanticContractError::Unsupported(
-                            "source call argument kind",
-                        ));
+                    B(b) => {
+                        applied.push(b.ite(&BV::from_u64(ctx, 1, 64), &BV::from_u64(ctx, 0, 64)))
                     }
                 }
             }
@@ -2803,7 +3003,13 @@ fn source_expr<'ctx>(
                 result: value.clone(),
                 guard: guard.clone(),
             });
-            I(value)
+            // The uninterpreted result is a bitvector; a callee whose
+            // return kind is bool reads it under the profile's 0/1
+            // convention, matching `param_env` and `env["result"]`.
+            match call_returns.get(name.as_str()) {
+                Some(ScalarKind::Bool) => B(value._eq(&BV::from_u64(ctx, 0, 64)).not()),
+                _ => I(value),
+            }
         }
         _ => {
             return Err(SemanticContractError::Unsupported(
@@ -3194,7 +3400,8 @@ mod tests {
         config.set_timeout_msec(crate::verification::VerificationConfig::default().timeout_ms);
         let context = z3::Context::new(&config);
         let solver = z3::Solver::new(&context);
-        let atoms = encode_pure_i64_module_obligations(source, &context, false).unwrap();
+        let atoms =
+            encode_pure_i64_module_obligations(source, &context, RefinedAdmission::Reject).unwrap();
         let mut outcomes = Vec::new();
         for atom in &atoms {
             solver.reset();
@@ -3316,12 +3523,15 @@ mod tests {
             .any(|result| *result == z3::SatResult::Sat));
     }
 
-    fn refined_module_outcomes(source: &str) -> Vec<z3::SatResult> {
+    fn refined_module_outcomes_admission(
+        source: &str,
+        admission: RefinedAdmission,
+    ) -> Vec<z3::SatResult> {
         let mut config = z3::Config::new();
         config.set_timeout_msec(crate::verification::VerificationConfig::default().timeout_ms);
         let context = z3::Context::new(&config);
         let solver = z3::Solver::new(&context);
-        let atoms = encode_pure_i64_module_obligations(source, &context, true).unwrap();
+        let atoms = encode_pure_i64_module_obligations(source, &context, admission).unwrap();
         let mut outcomes = Vec::new();
         for atom in &atoms {
             solver.reset();
@@ -3336,18 +3546,26 @@ mod tests {
         outcomes
     }
 
+    fn refined_module_outcomes(source: &str) -> Vec<z3::SatResult> {
+        refined_module_outcomes_admission(source, RefinedAdmission::V1)
+    }
+
     #[test]
     fn refined_typedef_admission_gates_the_fragment() {
         let port = "type Port = i64 where v >= 1 && v <= 65535;\n\
              atom listen(x: Port) -> Port requires: true; ensures: result == x; body: { x };\n\
              atom main() -> i64 requires: true; ensures: result == 80; body: { listen(80) };";
         // The refined profile admits the declaration and signature use.
-        let contracts = extract_pure_i64_module_contracts(port, "m.mm", None, true).unwrap();
+        let contracts =
+            extract_pure_i64_module_contracts(port, "m.mm", None, RefinedAdmission::V1).unwrap();
         assert_eq!(contracts.len(), 2);
         assert_eq!(contracts[0].profile, PURE_I64_REFINED_PROFILE);
         // The strict fragment keeps refusing the same source — a record
         // pinned v1 could never describe it.
-        assert!(extract_pure_i64_module_contracts(port, "m.mm", None, false).is_err());
+        assert!(
+            extract_pure_i64_module_contracts(port, "m.mm", None, RefinedAdmission::Reject)
+                .is_err()
+        );
         // Alias chains stay out: the verifier applies only a
         // refinement's own predicate, so a declared base would silently
         // lose the ancestor conjuncts at build time.
@@ -3355,12 +3573,16 @@ mod tests {
              type Tiny = Small where v > 0;\n\
              atom t(x: Tiny) -> i64 requires: true; ensures: result == x; body: { x };\n\
              atom main() -> i64 requires: true; ensures: result == 4; body: { t(4) };";
-        assert!(extract_pure_i64_module_contracts(chained, "m.mm", None, true).is_err());
+        assert!(
+            extract_pure_i64_module_contracts(chained, "m.mm", None, RefinedAdmission::V1).is_err()
+        );
         // A declaration-only module of typedefs plus atoms is fine.
         let unused_alias = "type Unused = i64 where v > 0;\n\
              atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
         assert_eq!(
-            extract_pure_i64_module_contracts(unused_alias, "m.mm", None, true).unwrap()[0].profile,
+            extract_pure_i64_module_contracts(unused_alias, "m.mm", None, RefinedAdmission::V1)
+                .unwrap()[0]
+                .profile,
             PURE_I64_REFINED_PROFILE
         );
         // Fail-closed gates: every malformed declaration stays out.
@@ -3389,7 +3611,7 @@ mod tests {
             "type P = i64 where v > w;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
         ] {
             assert!(
-                extract_pure_i64_module_contracts(source, "m.mm", None, true).is_err(),
+                extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::V1).is_err(),
                 "unexpected acceptance: {source}"
             );
         }
@@ -3397,11 +3619,16 @@ mod tests {
         // gate nonempty implied an atom, so the widened admission must
         // refuse it rather than return vacuous contracts/obligations.
         let decls_only = "type Port = i64 where v >= 1 && v <= 65535;";
-        assert!(extract_pure_i64_module_contracts(decls_only, "m.mm", None, true).is_err());
+        assert!(
+            extract_pure_i64_module_contracts(decls_only, "m.mm", None, RefinedAdmission::V1)
+                .is_err()
+        );
         let mut config = z3::Config::new();
         config.set_timeout_msec(30_000);
         let context = z3::Context::new(&config);
-        assert!(encode_pure_i64_module_obligations(decls_only, &context, true).is_err());
+        assert!(
+            encode_pure_i64_module_obligations(decls_only, &context, RefinedAdmission::V1).is_err()
+        );
     }
 
     #[test]
@@ -3460,5 +3687,103 @@ mod tests {
         assert!(refined_module_outcomes(assumed)
             .iter()
             .all(|result| *result == z3::SatResult::Unsat));
+    }
+
+    #[test]
+    fn refined_typedef_v2_admits_chains_and_bool_leafs() {
+        // Under V2 a chained declaration resolves its leaf and folds
+        // every declared conjunct — matching the verifier's chain
+        // composition — and the module names the v2 member profile.
+        let chained = "type Small = i64 where v < 10;\n\
+             type Tiny = Small where v > 0;\n\
+             atom t(x: Tiny) -> i64 requires: true; ensures: result == x; body: { x };\n\
+             atom main() -> i64 requires: true; ensures: result == 4; body: { t(4) };";
+        let contracts =
+            extract_pure_i64_module_contracts(chained, "m.mm", None, RefinedAdmission::V2).unwrap();
+        assert_eq!(contracts[0].profile, PURE_I64_REFINED_PROFILE_V2);
+        // The folded conjuncts are checked, not just admitted:
+        // `t(15)` leaves `Small`'s `v < 10`, so a call obligation is
+        // refutable; the conforming call closes every obligation.
+        assert!(
+            refined_module_outcomes_admission(chained, RefinedAdmission::V2)
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat)
+        );
+        let bad_call = chained.replace("t(4)", "t(15)");
+        assert!(
+            refined_module_outcomes_admission(&bad_call, RefinedAdmission::V2)
+                .iter()
+                .any(|result| *result == z3::SatResult::Sat)
+        );
+        // The ancestor conjunct binds too — `t(0)` satisfies `v < 10`
+        // but not `Tiny`'s `v > 0`.
+        let zero_call = chained.replace("t(4)", "t(0)");
+        assert!(
+            refined_module_outcomes_admission(&zero_call, RefinedAdmission::V2)
+                .iter()
+                .any(|result| *result == z3::SatResult::Sat)
+        );
+        // A bool leaf joins the same fragment at V2 and names v2;
+        // its predicate sees the Bool operand, so `f(0)` — false —
+        // leaves `Flag` while `f(1)` closes the call.
+        let flag = "type Flag = bool where v == true;\n\
+             atom f(x: Flag) -> Flag requires: true; ensures: result == x; body: { x };\n\
+             atom main() -> Flag requires: true; ensures: result == f(true); body: { f(true) };";
+        let contracts =
+            extract_pure_i64_module_contracts(flag, "m.mm", None, RefinedAdmission::V2).unwrap();
+        assert_eq!(contracts[0].profile, PURE_I64_REFINED_PROFILE_V2);
+        assert!(
+            refined_module_outcomes_admission(flag, RefinedAdmission::V2)
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat)
+        );
+        let false_call = flag.replace("f(true)", "f(false)");
+        assert!(
+            refined_module_outcomes_admission(&false_call, RefinedAdmission::V2)
+                .iter()
+                .any(|result| *result == z3::SatResult::Sat)
+        );
+        // A bool-leaf chain folds through to Bool as well.
+        let bool_chain = "type B = bool where v == true;\n\
+             type C = B where v == true;\n\
+             atom f(x: C) -> C requires: true; ensures: result == x; body: { x };\n\
+             atom main() -> C requires: true; ensures: result == f(true); body: { f(true) };";
+        let contracts =
+            extract_pure_i64_module_contracts(bool_chain, "m.mm", None, RefinedAdmission::V2)
+                .unwrap();
+        assert_eq!(contracts[0].profile, PURE_I64_REFINED_PROFILE_V2);
+        assert!(
+            refined_module_outcomes_admission(bool_chain, RefinedAdmission::V2)
+                .iter()
+                .all(|result| *result == z3::SatResult::Unsat)
+        );
+        // The narrow levels keep refusing both shapes — a v1 record
+        // could never describe them.
+        for source in [chained, flag, bool_chain] {
+            assert!(
+                extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::V1)
+                    .is_err()
+            );
+            assert!(extract_pure_i64_module_contracts(
+                source,
+                "m.mm",
+                None,
+                RefinedAdmission::Reject
+            )
+            .is_err());
+        }
+        // Fail-closed gates that v2 does not lift: cycles, unresolvable
+        // or non-scalar leaves, and predicates over undeclared names.
+        for source in [
+            "type A = B where v > 0;\ntype B = A where v < 10;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+            "type T = Missing where v > 0;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+            "type T = f64 where v > 0;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+            "type T = u64 where v > 0;\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::V2).is_err(),
+                "unexpected acceptance: {source}"
+            );
+        }
     }
 }

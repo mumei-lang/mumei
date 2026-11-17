@@ -25,7 +25,12 @@ pub(crate) fn run_translation_validation_check(
     let Ok(llvm_ir) = fs::read_to_string(ll_path) else {
         return;
     };
-    let report = match tv::validate_native_module(source, &llvm_ir, Options::default(), true) {
+    let report = match tv::validate_native_module(
+        source,
+        &llvm_ir,
+        Options::default(),
+        mumei_core::semantic_contract::RefinedAdmission::V2,
+    ) {
         Ok(report) => report,
         Err(_) => return,
     };

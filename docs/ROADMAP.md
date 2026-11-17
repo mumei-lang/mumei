@@ -3257,20 +3257,26 @@ overflow byte, and adds no Agent runner, acceptance or grade promotion. Host
 deadlines and input closure remain required. See the
 [canonical stdin milestone](CROSS_PROJECT_ROADMAP.md#wave-2-original-byte-core-stdin-representation-checks).
 
-The next C10 profile slice admits refined scalar members: modules may
-declare `type <Name> = <scalar> where <operand> <predicate>;` aliases and
-use them in atom signatures, building under
+The refined scalar member slice landed in two profile levels: modules
+may declare `type <Name> = <scalar> where <operand> <predicate>;`
+aliases and use them in atom signatures. The first level builds under
 `mumei.pure-i64-refined-scalar/v1` and the `/v2` module/multifile
-profiles. The alias gate stays fail-closed — `unit` metadata, `bool` or
-non-scalar bases, bases naming another declaration (chains), and
-atom-name collisions are rejected. `bool` bases and chains stay out as
-a conservative admission choice — the verifier encodes both correctly,
-so widening either needs a new profile name — and each alias's predicates fold
-into the obligations the module already proves: parameters strengthen
-the signature domain established at every call site, and results
-strengthen the postcondition the callee guarantees. Recheckers dispatch
-on the pinned profile name, so v1 records keep the strict admission.
-Struct/enum member items, `bool`-based and chained aliases, deeper
+profiles — single-level aliases onto the integer-sort vocabulary. The
+widened level — `mumei.pure-i64-refined-scalar/v2` plus the `/v3`
+module/multifile profiles — additionally admits `bool` leaves and
+alias chains, since the verifier now composes every ancestor conjunct
+and binds a bool leaf as `Bool`; the member profile a module pins is
+derived from what its declarations actually need, and calls carry the
+callee's declared signature kinds (a `bool` argument/result lowers to
+the profile's i64 0/1 convention). The alias gate stays fail-closed in
+both: `unit` metadata, cyclic or unresolvable bases, non-scalar leaves
+(`u64`/`usize`/`isize`/`f64`/`Str`), and atom-name collisions are
+rejected. Each alias's predicates fold into the obligations the module
+already proves: parameters strengthen the signature domain established
+at every call site, and results strengthen the postcondition the callee
+guarantees. Recheckers dispatch on the pinned profile name, so every
+record is re-admitted under exactly its own admission level.
+Struct/enum member items, `u64`-family leaves, deeper
 optimizer/ABI/runtime assurance and producer authenticity remain
 open. See the
 [refined scalar member profiles](VERIFICATION_NATIVE.md#refined-scalar-member-profiles-v2).

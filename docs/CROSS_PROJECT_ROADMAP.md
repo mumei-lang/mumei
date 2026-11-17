@@ -3885,9 +3885,27 @@ and `call(atom_ref(...))` — must establish each refined parameter's
 conjuncts under the enclosing path conditions; and callers may assume
 a callee's refined return conjuncts on the call result when the two
 arithmetic modes agree. Solver `Unknown` at a boundary reports
-Inconclusive rather than silently passing. Undecidable or widened
-admission (multi-level chains, `bool` bases) remains outside the v2
-profile — widening needs a new profile name.
+Inconclusive rather than silently passing.
+
+### Wave 5 widened refined scalar profiles (C10 producer, v3)
+
+With the verifier enforcing chains and `bool` leaf sorts, the two
+remaining v1-admission exclusions lose their justification, so Core
+adds a second refined level: `mumei.pure-i64-refined-scalar/v2` admits
+`bool` leaf bases and alias chains whose every conjunct folds into the
+same obligation vocabulary the verifier composes, and bundles using
+them pin `mumei.native-pure-i64-module-linux-x86_64/v3` or
+`mumei.native-pure-i64-multifile-linux-x86_64/v3`. The member profile
+a module names is derived from what its declarations need — a single-
+conjunct integer-leaf module still pins the v1 member profile — and a
+call keeps the callee's declared signature kinds: a `bool` argument or
+result lowers to the profile's i64 0/1 bitvector convention, with each
+argument checked against the callee parameter's kind. Fail-closed gates
+carry over: `unit` metadata, cyclic or unresolvable bases, `u64`-family
+and `f64`/`Str` leaves, and atom-name collisions stay rejected.
+Recheck dispatch is unchanged: the pinned name selects the admission
+level exactly. C10 stays partial — `u64`-family leaves, struct/enum
+members and the deeper assurance layers remain open.
 
 
 ## No-`.mm` front door and V1 order
