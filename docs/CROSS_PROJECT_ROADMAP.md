@@ -4057,9 +4057,32 @@ accumulated later arms' conditions and a trailing wildcard's
 `not true` turned every earlier arm's checks vacuous. `check`,
 `recheck-source` and `recheck-llvm` cover the fragment: tag and
 payload slots re-derive under the record's pinned profile name,
-so v1–v6 records are untouched. C10 stays partial — branch-merged
-composite values, field assignment, nested/generic structs and
-enum construction/results inside bundles, `u64`-family leaves and
+so v1–v6 records are untouched. Struct field assignment
+`q.f = v` joins the composite fragment under
+`mumei.pure-i64-composite/v5` and the `/v8` bundle profiles,
+pinned only when a module actually writes a field: the kind
+layer admits the write when the base resolves to a declared
+struct and the field is declared — enum bindings, undeclared
+fields and deeper `a.b.c` paths stay rejected — and the source
+layer encodes the written value, re-checks its slot kind, and
+rebinds the composite under the base name. The verifier
+re-checks the written field's refined-type predicates,
+`where v` clause and the struct's cross-field invariants — the
+same obligations `StructInit` runs — then re-homes the binding
+on a fresh handle so a sibling alias keeps projecting its own
+unwritten fields; the emitter emits `insertvalue` into the
+aggregate. `ensures` reads post-write fields, so a callee's
+`ensures result == 1 && q.x == 1` propagates to call sites
+while unwritten fields keep the input-time projection. A field
+write inside an `if`/`match` arm or `while` body reaches the
+branch/loop merge as a composite and fails closed there rather
+than being silently dropped — branch-merged composites are the
+next slice. A `let` may re-bind a composite name only to the
+same struct type; scalar or different-struct shadows are
+rejected because name-keyed field slots would merge stale
+values. C10 stays partial — branch-merged
+composite values, enum construction/results inside bundles,
+nested/generic structs, `u64`-family leaves and
 the deeper assurance layers remain open.
 
 
