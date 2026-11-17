@@ -640,8 +640,35 @@ fn field_clause_angle_open(fragment: &str) -> bool {
     if !trimmed[ident_len..].trim_start().starts_with(':') {
         return false;
     }
+    // Only the type text admits `<`/`>` as type-argument brackets; in a
+    // `where` constraint they are comparisons (`x: i64 where v < 10`).
+    // The type ends at the first `where` word outside string literals.
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut type_end = trimmed.len();
+    for i in 0..bytes.len() {
+        let b = bytes[i];
+        if in_string && escaped {
+            escaped = false;
+            continue;
+        }
+        match b {
+            b'"' => in_string = !in_string,
+            b'\\' if in_string => escaped = true,
+            b'w' if !in_string
+                && trimmed[i..].starts_with("where")
+                && (i == 0 || !is_ident(bytes[i - 1]))
+                && bytes.get(i + 5).is_none_or(|&b| !is_ident(b)) =>
+            {
+                type_end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
     let mut depth = 0i32;
-    for c in trimmed.chars() {
+    for c in trimmed[..type_end].chars() {
         match c {
             '<' => depth += 1,
             '>' => depth -= 1,

@@ -8798,6 +8798,7 @@ mod tests {
         let items = crate::parser::parse_module(
             "struct Duo<T, U> { first: T, second: U }\n\
              struct R { lo: i64, hi: i64, invariant: self.lo < self.hi, n: i64, pair: Duo<i64, bool> }\n\
+             struct W { x: i64 where v < 10, y: i64 where v <= 20, z: Duo<i64, bool> where v.first >= 0 }\n\
              atom g(p: Duo<i64, bool>, q: i64) -> i64 requires: true; ensures: true; body: { 0 };",
         );
         let r = items
@@ -8816,6 +8817,17 @@ mod tests {
             .find(|f| f.name == "pair")
             .expect("pair field");
         assert_eq!(pair.type_name, "Duo<i64, bool>");
+        // A `<`/`<=` inside a `where` constraint is a comparison, not a
+        // type-argument bracket: the following fields must still split.
+        let w = items
+            .iter()
+            .find_map(|item| match item {
+                Item::StructDef(def) if def.name == "W" => Some(def),
+                _ => None,
+            })
+            .expect("struct W parsed");
+        let w_names: Vec<&str> = w.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(w_names, ["x", "y", "z"], "{w:?}");
         let g = items
             .iter()
             .find_map(|item| match item {
