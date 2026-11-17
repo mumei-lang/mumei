@@ -1408,7 +1408,10 @@ fn emit_enum_variant_init<'a>(
         .position(|v| v.name == variant_name)
         .unwrap_or(0);
     let enum_type = enum_llvm_type(context, enum_def, Some(module_env));
-    let mut val = enum_type.get_undef();
+    // Payload slots this variant does not fill must read as zero, not
+    // undef: the verification-side model pads the flattened slot union
+    // with zeroed slots, and translation validation compares them.
+    let mut val = enum_type.const_zero();
     // Set tag
     val = llvm!(builder.build_insert_value(
         val,
