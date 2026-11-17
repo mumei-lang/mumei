@@ -85,6 +85,15 @@ pub const PURE_I64_COMPOSITE_PROFILE_V3: &str = "mumei.pure-i64-composite/v3";
 /// carries. Enum construction, enum results and enum `let`s beyond
 /// pass-through stay outside (`pure-i64-composite/v4`).
 pub const PURE_I64_COMPOSITE_PROFILE_V4: &str = "mumei.pure-i64-composite/v4";
+/// v5 admits field assignment on struct values: `q.f = v` where `q` is
+/// a bound admitted struct binding (parameter or struct `let`) and `f`
+/// a declared leaf field. The write re-establishes the field's
+/// refined-type predicates and `where` constraint plus every struct
+/// invariant, so a write that would break them is rejected rather than
+/// assumed. Nested field paths, writes on enum bindings and writes
+/// through branch-merged values stay outside
+/// (`pure-i64-composite/v5`).
+pub const PURE_I64_COMPOSITE_PROFILE_V5: &str = "mumei.pure-i64-composite/v5";
 
 /// How much of the refined-scalar declaration fragment a gate admits:
 /// `Reject` keeps `Item::TypeDef` out of the item vocabulary entirely,
@@ -98,7 +107,9 @@ pub const PURE_I64_COMPOSITE_PROFILE_V4: &str = "mumei.pure-i64-composite/v4";
 /// additionally admits struct values — results, `StructInit`, struct
 /// `let`s and call-result field reads (`pure-i64-composite/v3`);
 /// `CompositeV4` additionally admits `enum` declarations, enum-typed
-/// parameters and `match` arms on them (`pure-i64-composite/v4`). A
+/// parameters and `match` arms on them (`pure-i64-composite/v4`);
+/// `CompositeV5` additionally admits field assignment `q.f = v` on
+/// admitted struct bindings (`pure-i64-composite/v5`). A
 /// pinned record names which level produced it, so a
 /// rechecker re-derives under the record's own admission — never a
 /// wider one.
@@ -111,6 +122,7 @@ pub enum RefinedAdmission {
     CompositeV2,
     CompositeV3,
     CompositeV4,
+    CompositeV5,
 }
 
 impl RefinedAdmission {
@@ -136,6 +148,12 @@ impl RefinedAdmission {
     /// are in the vocabulary.
     pub fn admits_enums(self) -> bool {
         self >= Self::CompositeV4
+    }
+
+    /// Whether field assignment `q.f = v` on an admitted struct binding
+    /// is in the statement vocabulary.
+    pub fn admits_field_writes(self) -> bool {
+        self >= Self::CompositeV5
     }
 }
 
@@ -242,7 +260,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _) =
+    let (items, refined, structs, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -263,6 +281,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         &ModuleEnv::default(),
     )
@@ -286,7 +305,7 @@ pub fn extract_pure_i64_module_contracts(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, enums, struct_values) =
+    let (items, refined, structs, enums, struct_values, field_writes) =
         admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
@@ -321,6 +340,7 @@ pub fn extract_pure_i64_module_contracts(
                 &structs,
                 &enums,
                 struct_values,
+                field_writes,
                 &cert_env,
             )),
             // Type and struct declarations carry no per-atom contract;
@@ -338,7 +358,7 @@ pub fn module_source_profile(
     source: &str,
     admission: RefinedAdmission,
 ) -> Result<&'static str, SemanticContractError> {
-    let (_items, refined, structs, enums, struct_values) =
+    let (_items, refined, structs, enums, struct_values, field_writes) =
         admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
         true,
@@ -346,6 +366,7 @@ pub fn module_source_profile(
         &structs,
         &enums,
         struct_values,
+        field_writes,
     ))
 }
 
@@ -358,11 +379,17 @@ pub fn module_source_profile(
 /// `Item::StructDef` declarations (`PURE_I64_COMPOSITE_PROFILE`) while
 /// the scalar fragment itself is unchanged. The caller decides the
 /// arity gate.
+/// What `admit_pure_i64_atoms` returns: the admitted items, the refined
+/// type environment, the struct and enum declaration environments, and
+/// the two usage flags (`struct_values`, `field_writes`) the module's
+/// profile name derives from.
+type AdmittedModule = (Vec<Item>, RefinedEnv, StructEnv, EnumEnv, bool, bool);
+
 fn admit_pure_i64_atoms(
     source: &str,
     allow_wrapping_arithmetic: bool,
     admission: RefinedAdmission,
-) -> Result<(Vec<Item>, RefinedEnv, StructEnv, EnumEnv, bool), SemanticContractError> {
+) -> Result<AdmittedModule, SemanticContractError> {
     // Item text reconstruction can print 1.0 as 1. Reject float tokens before
     // that normalization erases the category required by this integer profile.
     let tokens = crate::parser::lexer::Lexer::new(source)
@@ -441,6 +468,7 @@ fn admit_pure_i64_atoms(
     // complete before any atom's own contract is checked, so a forward call
     // to a later sibling resolves the same as a backward one.
     let struct_values_used = std::cell::Cell::new(false);
+    let field_writes_used = std::cell::Cell::new(false);
     for item in &items {
         let Item::Atom(sibling) = item else {
             continue;
@@ -466,10 +494,19 @@ fn admit_pure_i64_atoms(
             &structs,
             &enums,
             admission.admits_struct_values(),
+            admission.admits_field_writes(),
             &struct_values_used,
+            &field_writes_used,
         )?;
     }
-    Ok((items, refined, structs, enums, struct_values_used.get()))
+    Ok((
+        items,
+        refined,
+        structs,
+        enums,
+        struct_values_used.get(),
+        field_writes_used.get(),
+    ))
 }
 
 /// Build the `SemanticContract` for one already-admitted atom — binders,
@@ -507,9 +544,12 @@ fn fragment_profile(
     structs: &StructEnv,
     enums: &EnumEnv,
     struct_values: bool,
+    field_writes: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if field_writes {
+        PURE_I64_COMPOSITE_PROFILE_V5
     } else if !enums.is_empty() {
         PURE_I64_COMPOSITE_PROFILE_V4
     } else if struct_values {
@@ -545,6 +585,7 @@ fn atom_contract(
     structs: &StructEnv,
     enums: &EnumEnv,
     struct_values: bool,
+    field_writes: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
@@ -554,6 +595,7 @@ fn atom_contract(
         structs,
         enums,
         struct_values,
+        field_writes,
     );
     let result_fields = atom
         .return_type
@@ -851,9 +893,15 @@ struct KindEnv<'a> {
     identifiers: BTreeSet<String>,
     /// Whether struct values (`pure-i64-composite/v3`) are admitted.
     admit_struct_values: bool,
+    /// Whether field assignment `q.f = v` on a struct binding is
+    /// admitted (`pure-i64-composite/v5`).
+    admit_field_writes: bool,
     /// Set when the atom actually uses a struct-value shape, so the
     /// module names the v3 profile only when it needs it.
     struct_values_used: &'a std::cell::Cell<bool>,
+    /// Set when the atom writes a struct field, so the module names
+    /// the v5 profile only when it needs it.
+    field_writes_used: &'a std::cell::Cell<bool>,
 }
 
 impl<'a> KindEnv<'a> {
@@ -1148,7 +1196,9 @@ fn check_atom_contract(
     structs: &StructEnv,
     enums: &EnumEnv,
     admit_struct_values: bool,
+    admit_field_writes: bool,
     struct_values_used: &std::cell::Cell<bool>,
+    field_writes_used: &std::cell::Cell<bool>,
 ) -> Result<(), SemanticContractError> {
     // Struct parameters stay out of the scalar scope — so they are
     // neither scalar operands nor rebindable — and live in the
@@ -1204,7 +1254,9 @@ fn check_atom_contract(
         reserved,
         identifiers,
         admit_struct_values,
+        admit_field_writes,
         struct_values_used,
+        field_writes_used,
     };
     for p in &atom.params {
         env.bind(&p.name)?;
@@ -1821,7 +1873,9 @@ fn resolve_alias(
                     reserved: BTreeSet::new(),
                     identifiers: BTreeSet::new(),
                     admit_struct_values: false,
+                    admit_field_writes: false,
                     struct_values_used: &std::cell::Cell::new(false),
+                    field_writes_used: &std::cell::Cell::new(false),
                 },
             )?,
             ScalarKind::Bool,
@@ -1923,6 +1977,22 @@ fn statement_kind(
             env,
         ),
         Stmt::Assign { var, value, .. } if allow_wrapping_arithmetic => {
+            // A field write in tail position yields the assigned
+            // field's scalar value, same as a scalar rebind yields its
+            // name's kind.
+            if let Some(field_kind) = field_write_kind(env, scope, var) {
+                let kind = expression_kind(
+                    value,
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                    env,
+                )?;
+                expect_kind(kind, field_kind)?;
+                env.field_writes_used.set(true);
+                return Ok(field_kind);
+            }
             if !assignable.contains(var) {
                 return Err(SemanticContractError::Unsupported(
                     "assignment to a name not bound on the linear path",
@@ -2028,6 +2098,23 @@ fn block_prefix_kinds<'a>(
                 inner_assignable.insert(var.clone());
             }
             Stmt::Assign { var, value, .. } => {
+                // A struct field write (`pure-i64-composite/v5`) is a
+                // rebind of the composite binding: the base stays
+                // bound, only the declared leaf field's kind must
+                // match the value.
+                if let Some(field_kind) = field_write_kind(&inner_env, &inner, var) {
+                    let kind = expression_kind(
+                        value,
+                        &inner,
+                        result_in_scope,
+                        allow_wrapping_arithmetic,
+                        &BTreeSet::new(),
+                        &inner_env,
+                    )?;
+                    expect_kind(kind, field_kind)?;
+                    inner_env.field_writes_used.set(true);
+                    continue;
+                }
                 if !inner_assignable.contains(var) {
                     return Err(SemanticContractError::Unsupported(
                         "assignment to a name not bound on the linear path",
@@ -2096,6 +2183,29 @@ fn block_prefix_kinds<'a>(
         }
     }
     Ok((inner, inner_assignable, inner_env))
+}
+
+/// The scalar kind a dotted `q.f` assignment writes: `q` an unshadowed
+/// struct binding and `f` one of its declared fields — under
+/// `pure-i64-composite/v5` admission only. `None` keeps the ordinary
+/// assignable check: a non-dotted target, a deeper `a.b.c` path (`f`
+/// containing a `.` matches no declared field), a scalar or enum
+/// binding, or an undeclared field all fall through and fail there.
+/// An enum binding resolves through `composites` but never through
+/// `structs`, so enum field writes stay closed.
+fn field_write_kind(
+    env: &KindEnv<'_>,
+    scope: &BTreeMap<String, ScalarKind>,
+    var: &str,
+) -> Option<ScalarKind> {
+    if !env.admit_field_writes {
+        return None;
+    }
+    let (base, field) = var.split_once('.')?;
+    let struct_name = env.composite_name(base, scope)?;
+    let declared = env.structs.get(struct_name)?;
+    let target = declared.iter().find(|f| f.name == field)?;
+    Some(target.kind)
 }
 
 /// Whether a `let` initializer is struct-valued: a struct literal, an
@@ -2830,7 +2940,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _) =
+    let (items, refined, structs, enums, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -3752,6 +3862,85 @@ impl<'ctx> SourceValue<'ctx> {
     }
 }
 
+/// The `q.f = v` half of an assignment, when `var` names a field of a
+/// composite binding on the linear path (`pure-i64-composite/v5` —
+/// `field_write_kind` at the kind layer already gated admission, so
+/// reaching here with a composite target means the write is in the
+/// fragment). The base needs no `assignable` entry: `assignable` names
+/// scalar rebind targets, while a composite base's mutability is
+/// inherent — `env.get(base)` holding a `Composite` already proves the
+/// binding is live on the linear path. Returns the base name and the
+/// encoded field value so the caller can rebind the composite under
+/// it; `None` falls through to the ordinary assignable check.
+#[allow(clippy::too_many_arguments)]
+fn source_field_write<'ctx>(
+    var: &str,
+    value: &Expr,
+    ctx: &'ctx Context,
+    env: &HashMap<String, SourceValue<'ctx>>,
+    guard: &Bool<'ctx>,
+    definedness: &mut Vec<Bool<'ctx>>,
+    depth: usize,
+    written: &mut HashMap<String, SourceValue<'ctx>>,
+    loop_exits: &mut Vec<Bool<'ctx>>,
+    call_sites: &mut Vec<CallSite<'ctx>>,
+    call_returns: &CallShapes,
+) -> BodyResult<Option<(String, SourceValue<'ctx>)>> {
+    let Some((base, field)) = var.split_once('.') else {
+        return Ok(None);
+    };
+    let Some(SourceValue::Composite(fields)) = env.get(base) else {
+        return Ok(None);
+    };
+    let Some((_, slot)) = fields.iter().find(|(name, _)| name == field) else {
+        return Ok(None);
+    };
+    let bound = source_expr(
+        value,
+        ctx,
+        env,
+        guard,
+        definedness,
+        depth + 1,
+        &BTreeSet::new(),
+        written,
+        loop_exits,
+        call_sites,
+        call_returns,
+    )?;
+    // The encoded slot kind cannot change: an integer field takes only
+    // an integer value, a boolean field only a boolean.
+    match (slot, &bound) {
+        (SourceValue::Integer(_), SourceValue::Integer(_))
+        | (SourceValue::Boolean(_), SourceValue::Boolean(_)) => {}
+        _ => {
+            return Err(SemanticContractError::Unsupported(
+                "struct field write kind",
+            ));
+        }
+    }
+    Ok(Some((base.to_owned(), bound)))
+}
+
+/// Whether a name rebound inside a block escapes into `written`: an
+/// ordinary assignable does (`escapable` already excludes shadowed
+/// names), and so does a composite bound outside the block — composite
+/// parameters never enter `assignable`, so without this second clause
+/// a field write inside an `if`/`match` arm or a `while` body would be
+/// dropped silently instead of reaching the branch/loop merge, which
+/// fails closed on composites. A `let` bound in the block stays out:
+/// it is in `inner_assignable` and absent from the outer `env`.
+fn write_escapes<'ctx>(
+    env: &HashMap<String, SourceValue<'ctx>>,
+    inner_assignable: &BTreeSet<String>,
+    escapable: &BTreeSet<String>,
+    name: &str,
+) -> bool {
+    escapable.contains(name)
+        || (matches!(env.get(name), Some(SourceValue::Composite(_)))
+            && !inner_assignable.contains(name))
+}
+
 /// `assignable` mirrors `statement_kind`: only names bound on the
 /// current linear path may be rebound. `written` collects the final
 /// symbolic value of every assignable name a statement rewrites, so an
@@ -3793,6 +3982,41 @@ fn source_stmt<'ctx>(
             call_returns,
         ),
         Stmt::Assign { var, value, .. } => {
+            if let Some((base, bound)) = source_field_write(
+                var,
+                value,
+                ctx,
+                env,
+                guard,
+                definedness,
+                depth,
+                written,
+                loop_exits,
+                call_sites,
+                call_returns,
+            )? {
+                // A field write rebinds the whole composite under the
+                // base name: the escape record sees the updated fields
+                // exactly like a scalar rebind of `base`.
+                let Some(SourceValue::Composite(fields)) = env.get(&base) else {
+                    return Err(SemanticContractError::Unsupported("source binding"));
+                };
+                let field = &var[base.len() + 1..];
+                let updated = SourceValue::Composite(
+                    fields
+                        .iter()
+                        .map(|(name, slot)| {
+                            if name == field {
+                                (name.clone(), bound.clone())
+                            } else {
+                                (name.clone(), slot.clone())
+                            }
+                        })
+                        .collect(),
+                );
+                written.insert(base, updated);
+                return Ok(bound);
+            }
             if !assignable.contains(var) {
                 return Err(SemanticContractError::Unsupported(
                     "assignment to a name not bound on the linear path",
@@ -3862,6 +4086,43 @@ fn source_stmt<'ctx>(
                         escapable.remove(var);
                     }
                     Stmt::Assign { var, value, .. } => {
+                        if let Some((base, bound)) = source_field_write(
+                            var,
+                            value,
+                            ctx,
+                            &inner,
+                            guard,
+                            definedness,
+                            depth,
+                            written,
+                            loop_exits,
+                            call_sites,
+                            call_returns,
+                        )? {
+                            // Same rebind as the tail-position arm,
+                            // escaping per `write_escapes`.
+                            let Some(SourceValue::Composite(fields)) = inner.get(&base) else {
+                                return Err(SemanticContractError::Unsupported("source binding"));
+                            };
+                            let field = &var[base.len() + 1..];
+                            let updated = SourceValue::Composite(
+                                fields
+                                    .iter()
+                                    .map(|(name, slot)| {
+                                        if name == field {
+                                            (name.clone(), bound.clone())
+                                        } else {
+                                            (name.clone(), slot.clone())
+                                        }
+                                    })
+                                    .collect(),
+                            );
+                            inner.insert(base.clone(), updated.clone());
+                            if write_escapes(env, &inner_assignable, &escapable, &base) {
+                                written.insert(base, updated);
+                            }
+                            continue;
+                        }
                         if !inner_assignable.contains(var) {
                             return Err(SemanticContractError::Unsupported(
                                 "assignment to a name not bound on the linear path",
@@ -3902,7 +4163,7 @@ fn source_stmt<'ctx>(
                         )?;
                         for (name, bound) in local {
                             inner.insert(name.clone(), bound.clone());
-                            if escapable.contains(&name) {
+                            if write_escapes(env, &inner_assignable, &escapable, &name) {
                                 written.insert(name, bound);
                             }
                         }
@@ -3925,7 +4186,7 @@ fn source_stmt<'ctx>(
                         )?;
                         for (name, bound) in local {
                             inner.insert(name.clone(), bound.clone());
-                            if escapable.contains(&name) {
+                            if write_escapes(env, &inner_assignable, &escapable, &name) {
                                 written.insert(name, bound);
                             }
                         }
@@ -3952,7 +4213,7 @@ fn source_stmt<'ctx>(
                 call_returns,
             )?;
             for (name, bound) in tail_writes {
-                if escapable.contains(&name) {
+                if write_escapes(env, &inner_assignable, &escapable, &name) {
                     written.insert(name, bound);
                 }
             }
@@ -6183,5 +6444,152 @@ mod tests {
                 .iter()
                 .all(|r| *r == z3::SatResult::Unsat)
         );
+    }
+
+    #[test]
+    fn composite_v5_admits_struct_field_writes() {
+        let v5 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV5)
+        };
+        let outcomes =
+            |source: &str| refined_module_outcomes_admission(source, RefinedAdmission::CompositeV5);
+        let decl = "struct P { x: i64, y: i64 }";
+        // `q.f = v` on a parameter, on a `let`-bound literal and on a
+        // moved owner, in tail and mid-block positions.
+        let source = format!(
+            "{decl}\n\
+             atom bump(q: P) -> i64 requires: q.x >= 0; ensures: result == q.x + 1; body: {{ q.x = q.x + 1; q.x }};\n\
+             atom lit(a: i64) -> i64 requires: true; ensures: result == a + 1; body: {{ let s = P {{ x: a, y: 0 }}; s.x = s.x + 1; s.x }};\n\
+             atom mid(q: P) -> i64 requires: true; ensures: result == 2; body: {{ q.y = q.x + 1; q.y + 1 - q.x }};\n{MAIN0}"
+        );
+        let contracts = v5(&source).unwrap();
+        assert!(contracts
+            .iter()
+            .all(|c| c.profile == PURE_I64_COMPOSITE_PROFILE_V5));
+        assert_eq!(
+            module_source_profile(&source, RefinedAdmission::CompositeV5).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V5
+        );
+        assert!(outcomes(&source).iter().all(|r| *r == z3::SatResult::Unsat));
+        // The written field's value feeds the obligation: off-by-one
+        // postconditions on the written field and the untouched sibling
+        // refute, so the equivalence recheck is the real one.
+        let pieces = [
+            "atom bump(q: P) -> i64 requires: q.x >= 0; ensures: result == q.x + 1; body: { q.x = q.x + 1; q.x };",
+            "atom lit(a: i64) -> i64 requires: true; ensures: result == a + 1; body: { let s = P { x: a, y: 0 }; s.x = s.x + 1; s.x };",
+            "atom mid(q: P) -> i64 requires: true; ensures: result == 2; body: { q.y = q.x + 1; q.y + 1 - q.x };",
+            "atom keep(q: P) -> i64 requires: true; ensures: result == q.y; body: { q.x = q.x + 1; q.y };",
+        ];
+        let module = |piece: &str| format!("{decl}\n{piece}\n{MAIN0}");
+        for piece in pieces {
+            assert!(
+                outcomes(&module(piece))
+                    .iter()
+                    .all(|r| *r == z3::SatResult::Unsat),
+                "not rechecked: {piece}"
+            );
+        }
+        for (piece, from, to) in [
+            (pieces[0], "result == q.x + 1", "result == q.x"),
+            (pieces[1], "result == a + 1", "result == a"),
+            (pieces[2], "result == 2", "result == 1"),
+            (pieces[3], "result == q.y", "result == q.x"),
+        ] {
+            let source = module(piece);
+            let broken = source.replace(from, to);
+            assert_ne!(broken, source, "probe did not apply: {to}");
+            assert!(
+                outcomes(&broken).contains(&z3::SatResult::Sat),
+                "probe not refuted: {to}"
+            );
+        }
+        // A module using no field write keeps its older profile name.
+        let read_only = format!(
+            "{decl}\natom gx(q: P) -> i64 requires: true; ensures: result >= 0; body: {{ q.x }};\n{MAIN0}"
+        );
+        assert_eq!(
+            v5(&read_only).unwrap()[0].profile,
+            PURE_I64_COMPOSITE_PROFILE
+        );
+        // v4 keeps field writes out.
+        assert!(extract_pure_i64_module_contracts(
+            &source,
+            "m.mm",
+            None,
+            RefinedAdmission::CompositeV4
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn composite_v5_rejects_field_writes_outside_the_fragment() {
+        let v5 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV5)
+        };
+        let context = z3::Context::new(&z3::Config::new());
+        let decl = "enum E { A(i64), B }\nstruct P { x: i64, y: i64 }";
+        for (piece, why) in [
+            // Undeclared field: falls through to the assignable check.
+            (
+                "atom bad(q: P) -> i64 requires: true; ensures: true; body: { q.z = 1; q.x };",
+                "undeclared field write",
+            ),
+            // Enum binding: `composites` resolves `e` but `structs` does
+            // not, so the write stays closed.
+            (
+                "atom bad(e: E, q: P) -> i64 requires: true; ensures: true; body: { e.x = 1; q.x };",
+                "enum field write",
+            ),
+            // Write inside an `if` branch: the branch-write merge keeps
+            // only scalar rebinding, so the composite write fails closed.
+            (
+                "atom bad(q: P, c: i64) -> i64 requires: true; ensures: true; body: { if c == 1 { q.x = q.x + 1; q.x } else { q.x } };",
+                "branch-merged field write",
+            ),
+            // Write inside a `while`: the loop body's assignable set
+            // excludes the escaping base.
+            (
+                "atom bad(q: P) -> i64 requires: true; ensures: true; body: { let i = 0; while i < 2 invariant: i >= 0 decreases: 2 - i { q.x = q.x + 1; i = i + 1 }; q.x };",
+                "loop-carried field write",
+            ),
+        ] {
+            let source = format!("{decl}\n{piece}\n{MAIN0}");
+            // The source-layer encoder rejects each shape — a field
+            // write inside an `if`/`while` reaches the merge as a
+            // composite and fails closed instead of being dropped.
+            assert!(
+                encode_pure_i64_module_obligations(&source, &context, RefinedAdmission::CompositeV5)
+                    .is_err(),
+                "encoded: {why}"
+            );
+        }
+        // The first two also fail at contract extraction; a branch or
+        // loop write passes the kind layer (its profile name is `v5`)
+        // and only the source layer closes it, so extraction stays `Ok`.
+        for (piece, kind_closed) in [
+            (
+                "atom bad(q: P) -> i64 requires: true; ensures: true; body: { q.z = 1; q.x };",
+                true,
+            ),
+            (
+                "atom bad(e: E, q: P) -> i64 requires: true; ensures: true; body: { e.x = 1; q.x };",
+                true,
+            ),
+            (
+                "atom bad(q: P, c: i64) -> i64 requires: true; ensures: true; body: { if c == 1 { q.x = q.x + 1; q.x } else { q.x } };",
+                false,
+            ),
+            (
+                "atom bad(q: P) -> i64 requires: true; ensures: true; body: { let i = 0; while i < 2 invariant: i >= 0 decreases: 2 - i { q.x = q.x + 1; i = i + 1 }; q.x };",
+                false,
+            ),
+        ] {
+            let source = format!("{decl}\n{piece}\n{MAIN0}");
+            assert_eq!(
+                v5(&source).is_err(),
+                kind_closed,
+                "extraction mismatch"
+            );
+        }
     }
 }

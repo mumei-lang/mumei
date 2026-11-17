@@ -418,6 +418,7 @@ fn binding_declared_type(vc: &VCtx, name: &str) -> Option<String> {
             .and_then(|p| p.type_name.clone())
     })
     .or_else(|| vc.local_enum_types.borrow().get(name).cloned())
+    .or_else(|| vc.local_struct_types.borrow().get(name).cloned())
 }
 
 /// Declared type name of an expression, when statically recoverable:

@@ -3,6 +3,7 @@ use crate::codegen::expr_emit::{
     infer_struct_type_name, resolve_named_type, LAMBDA_MARK,
 };
 use crate::codegen::lowering::ArrayPtr;
+use crate::codegen::pattern_emit::find_field_index;
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -323,6 +324,38 @@ pub(crate) fn compile_hir_stmt<'a>(
             Ok(val)
         }
         HirStmt::Assign { var, value } => {
+            if let Some((base, field)) = var.split_once('.') {
+                if let Some(struct_ty) = var_types.get(base) {
+                    if let Some(idx) = find_field_index(struct_ty, field, module_env) {
+                        let val = compile_hir_expr(
+                            context, builder, module, function, value, variables, var_types,
+                            array_ptrs, module_env,
+                        )?;
+                        let old = variables.get(base).copied().ok_or_else(|| {
+                            MumeiError::codegen(format!(
+                                "struct binding '{base}' has no aggregate value"
+                            ))
+                        })?;
+                        let agg: BasicValueEnum = llvm!(builder.build_insert_value(
+                            old.into_struct_value(),
+                            val,
+                            idx,
+                            var
+                        ))
+                        .into_struct_value()
+                        .into();
+                        variables.insert(base.to_string(), agg);
+                        for key in [
+                            format!("__struct_{base}_{field}"),
+                            format!("{base}_{field}"),
+                        ] {
+                            variables.insert(key, val);
+                        }
+                        rebind_chan_payload(base, value, var_types);
+                        return Ok(val);
+                    }
+                }
+            }
             if let Some((resource, field)) = module_env.is_resource_state_var(var) {
                 let val = compile_hir_expr(
                     context, builder, module, function, value, variables, var_types, array_ptrs,

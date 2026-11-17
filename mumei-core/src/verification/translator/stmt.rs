@@ -385,6 +385,30 @@ fn record_binding_enum_type(vc: &VCtx, var: &str, value: &Expr) {
     }
 }
 
+/// Record (or clear, when the value has no inferable struct type) the
+/// declared struct type of a let/assign binding in
+/// `vc.local_struct_types`, so a later `var.f = v` write resolves the
+/// binding's `StructDef` — its field declarations, refined-type
+/// predicates and invariants — like a declared struct parameter does.
+fn record_binding_struct_type(vc: &VCtx, var: &str, value: &Expr) {
+    let ty = match value {
+        Expr::StructInit { type_name, .. } => Some(type_name.clone()),
+        _ => crate::verification::support::datatype::declared_type_of_expr(vc, value)
+            .map(|t| crate::verification::support::datatype::type_name_base(&t).to_string())
+            .filter(|t| vc.module_env.get_struct(t).is_some()),
+    };
+    match ty {
+        Some(name) => {
+            vc.local_struct_types
+                .borrow_mut()
+                .insert(var.to_string(), name);
+        }
+        None => {
+            vc.local_struct_types.borrow_mut().remove(var);
+        }
+    }
+}
+
 /// Parameter count of a `LocalLambda`, following `Ite` branches — a call
 /// through a conditional lambda can only pick one arity, so `Ite` reports
 /// a count only when both sides agree.
@@ -571,6 +595,122 @@ fn record_binding_lambda<'a>(
     };
 }
 
+/// `q.f = v` on a declared struct binding: re-check the written field's
+/// refined-type predicates and `where` constraint and the struct's
+/// invariants against the merged field set, then re-home `q` on a fresh
+/// handle so a sibling alias of `q` keeps projecting its own (unwritten)
+/// field state. `None` falls through to the resource-state path.
+fn struct_field_assign<'a>(
+    vc: &VCtx<'a>,
+    var: &str,
+    value: &Expr,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> Result<Option<Dynamic<'a>>, MumeiError> {
+    let ctx = vc.ctx;
+    let Some((base, field)) = var.split_once('.') else {
+        return Ok(None);
+    };
+    let Some(type_name) = vc.local_struct_types.borrow().get(base).cloned() else {
+        return Ok(None);
+    };
+    let Some(sdef) = vc.module_env.get_struct(&type_name) else {
+        return Ok(None);
+    };
+    let Some(sfield) = sdef.fields.iter().find(|f| f.name == field) else {
+        return Ok(None);
+    };
+    let Some(fields) = env
+        .get(base)
+        .and_then(|bound| struct_fields_of_value(env, bound, sdef))
+    else {
+        // A moved or otherwise unbound base falls through to the
+        // resource-state error — the executor's move pre-pass rejects
+        // genuine use-after-move before translation reaches here.
+        return Ok(None);
+    };
+    let val = expr_to_z3(vc, value, env, solver_opt)?;
+    let slot_key = format!("{base}_{field}");
+    if let Some(slot) = env.get(&slot_key) {
+        if val.get_sort() != slot.get_sort() {
+            return Err(MumeiError::type_error(format!(
+                "field '{var}' has type {} but value has type {}",
+                slot.get_sort(),
+                val.get_sort()
+            )));
+        }
+    }
+    // The write establishes the declared field contract: the refined-alias
+    // predicates must hold unconditionally (only `Unsat` proves them) and
+    // the `where v` clause must hold under the current path condition —
+    // the same obligations `StructInit` runs per field.
+    if let Some(solver) = solver_opt {
+        for (decl, predicate) in field_type_predicates(vc, sfield, &val, env)? {
+            solver.push();
+            solver.assert(&vc.path_cond_conj());
+            solver.assert(&predicate.not());
+            let verdict = crate::verification::phase_artifacts::check(solver);
+            solver.pop(1);
+            if verdict != SatResult::Unsat {
+                return Err(MumeiError::verification(format!(
+                    "Struct '{type_name}' field '{field}' type '{decl}' predicate violated",
+                ))
+                .with_verdict(crate::verification::VerdictKind::Rejected));
+            }
+        }
+        if let Some(constraint_raw) = &sfield.constraint {
+            let mut local_env = env.clone();
+            local_env.insert("v".to_string(), val.clone());
+            let constraint_z3 =
+                expr_to_z3(vc, &parse_expression(constraint_raw), &mut local_env, None)?;
+            if let Some(constraint_bool) = constraint_z3.as_bool() {
+                solver.push();
+                solver.assert(&vc.path_cond_conj());
+                solver.assert(&constraint_bool.not());
+                let verdict = crate::verification::phase_artifacts::check(solver);
+                solver.pop(1);
+                if verdict == SatResult::Sat {
+                    return Err(MumeiError::verification(format!(
+                        "Struct '{type_name}' field '{field}' constraint violated: {constraint_raw}",
+                    ))
+                    .with_verdict(crate::verification::VerdictKind::Rejected));
+                }
+            }
+        }
+    }
+    let merged: Vec<(String, Dynamic)> = fields
+        .into_iter()
+        .map(|(name, old)| {
+            if name == field {
+                (name, val.clone())
+            } else {
+                (name, old)
+            }
+        })
+        .collect();
+    if let Some(solver) = solver_opt {
+        check_struct_invariants(
+            vc,
+            solver,
+            sdef,
+            &format!("field write to '{var}'"),
+            &merged,
+            env,
+        )?;
+    }
+    // Re-home the binding on a fresh handle carrying the merged fields:
+    // `env[base]` must not keep the old handle, because a sibling alias
+    // (`let r = q`) binds `__struct_<old-handle>_<field>` projections —
+    // updating those in place would rewrite the alias's view of `q`.
+    let handle = fresh_struct_handle(ctx, &type_name);
+    let handle_name = handle.decl().name();
+    bind_struct_fields(env, &handle_name, &merged);
+    bind_struct_fields(env, base, &merged);
+    env.insert(base.to_string(), handle);
+    profile_solver_assertion(vc, &format!("assign_{}", var), None);
+    Ok(Some(val))
+}
+
 /// `let a = arr` / `a = arr` where `arr` is an array name: alias the backing
 /// Z3 array const and `len_<name>` symbol so `a[i]` accesses and stores share
 /// `arr`'s constraint state instead of starting over with an unconstrained
@@ -588,6 +728,7 @@ pub(crate) fn stmt_to_z3<'a>(
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             record_binding_enum_type(vc, var, value);
             record_binding_int_type(vc, var, value);
+            record_binding_struct_type(vc, var, value);
             record_binding_lambda(vc, var, value, env, solver_opt);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
@@ -598,6 +739,9 @@ pub(crate) fn stmt_to_z3<'a>(
         Stmt::Assign { var, value, .. } => {
             if var.contains('.') {
                 let Some((resource, _field)) = vc.module_env.is_resource_state_var(var) else {
+                    if let Some(val) = struct_field_assign(vc, var, value, env, solver_opt)? {
+                        return Ok(val);
+                    }
                     return Err(MumeiError::verification(format!(
                         "unknown resource state '{var}'"
                     )));
@@ -636,6 +780,7 @@ pub(crate) fn stmt_to_z3<'a>(
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             record_binding_enum_type(vc, var, value);
             record_binding_int_type(vc, var, value);
+            record_binding_struct_type(vc, var, value);
             record_binding_lambda(vc, var, value, env, solver_opt);
             env.insert(var.clone(), val.clone());
             alias_struct_fields(env, var, &val);
