@@ -227,7 +227,9 @@ fn out_of_domain_int_input_is_skipped_not_a_counterexample() {
     module_env.register_type(&refined("Even", "i64", "v", "v % 2 == 0"));
     let mut atom = base_atom("even_id");
     atom.params = vec![param("x", "Even")];
-    atom.ensures = "result == x".to_string();
+    // `result % 2 == 0` fails on the unfiltered input, so `None` only
+    // comes back when the precondition check actually skipped it.
+    atom.ensures = "result % 2 == 0".to_string();
     atom.body_expr = "x".to_string();
     let mut assignment = HashMap::new();
     assignment.insert("x".to_string(), GeneratedValue::Int(3));
