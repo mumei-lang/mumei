@@ -790,6 +790,34 @@ pub(crate) fn stmt_to_z3<'a>(
     let ctx = vc.ctx;
     match stmt {
         Stmt::Let { var, value, .. } => {
+            // A `let` may re-bind a composite name only to a value of
+            // the SAME struct type (a full re-init overwrites every
+            // `q_f`/`__struct_q_f` slot, so no stale value survives).
+            // Shadowing with a scalar or a different struct leaves the
+            // name-keyed field slots bound to the old struct's values —
+            // reads through the new binding would see the stale slots.
+            if let Some(existing) =
+                crate::verification::support::datatype::binding_declared_type(vc, var)
+            {
+                if vc.module_env.get_struct(&existing).is_some() {
+                    let new_ty = match value.as_ref() {
+                        Expr::StructInit { type_name, .. } => Some(type_name.clone()),
+                        _ => {
+                            crate::verification::support::datatype::declared_type_of_expr(vc, value)
+                                .map(|t| {
+                                    crate::verification::support::datatype::type_name_base(&t)
+                                        .to_string()
+                                })
+                                .filter(|t| vc.module_env.get_struct(t).is_some())
+                        }
+                    };
+                    if new_ty.as_deref() != Some(existing.as_str()) {
+                        return Err(MumeiError::type_error(format!(
+                            "let '{var}' shadows a struct binding with a different type — rename the local"
+                        )));
+                    }
+                }
+            }
             let val = expr_to_z3(vc, value, env, solver_opt)?;
             record_binding_enum_type(vc, var, value);
             record_binding_int_type(vc, var, value);

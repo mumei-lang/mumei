@@ -2080,11 +2080,36 @@ fn block_prefix_kinds<'a>(
                     allow_wrapping_arithmetic,
                     &inner_env,
                 )?;
+                // A `let` may re-bind a composite name only to a
+                // value of the SAME struct type — a full re-init
+                // overwrites every `q_f`/`__struct_q_f` slot, while a
+                // different-typed shadow would leave stale slots the
+                // branch merge then leaks into the outer binding.
+                if inner_env
+                    .composite_name(var, &inner)
+                    .is_some_and(|tn| tn != struct_name)
+                {
+                    return Err(SemanticContractError::Unsupported(
+                        "let shadows a struct binding with a different type",
+                    ));
+                }
                 inner_env.bind_composite(var, struct_name)?;
                 inner.remove(var);
                 inner_assignable.remove(var);
             }
             Stmt::Let { var, value, .. } => {
+                // A scalar `let` must not shadow a live struct
+                // binding either: the composite's name-keyed slots
+                // stay bound to the old values and reads through the
+                // scalar would merge stale data.
+                if inner_env
+                    .composite_name(var, &inner)
+                    .is_some_and(|tn| inner_env.structs.contains_key(tn))
+                {
+                    return Err(SemanticContractError::Unsupported(
+                        "let shadows a struct binding with a different type",
+                    ));
+                }
                 let kind = expression_kind(
                     value,
                     &inner,
@@ -4147,6 +4172,17 @@ fn source_stmt<'ctx>(
                             call_sites,
                             call_returns,
                         )?;
+                        // Same shadow rule as the kind layer and the
+                        // verifier: a composite's slots are name-keyed,
+                        // so only a same-shape composite may re-bind the
+                        // name — a scalar shadow would merge stale slots.
+                        if matches!(inner.get(var), Some(SourceValue::Composite(_)))
+                            && !matches!(bound, SourceValue::Composite(_))
+                        {
+                            return Err(SemanticContractError::Unsupported(
+                                "let shadows a struct binding with a different type",
+                            ));
+                        }
                         inner.insert(var.clone(), bound);
                         inner_assignable.insert(var.clone());
                         escapable.remove(var);
