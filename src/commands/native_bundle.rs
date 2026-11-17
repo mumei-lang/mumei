@@ -109,14 +109,14 @@ fn observed_stdout(executable: &Path) -> Option<String> {
                     break;
                 }
                 Ok(n) => {
-                    let remaining = OBSERVED_STDOUT_MAX_BYTES + 1
-                        - captured.len().min(OBSERVED_STDOUT_MAX_BYTES + 1);
-                    if n > remaining {
+                    let room = OBSERVED_STDOUT_MAX_BYTES.saturating_sub(captured.len());
+                    if n > room {
+                        // Any byte past the cap makes the channel
+                        // unobservable — the pin must cover the whole
+                        // stream, never a truncation.
                         overflow = true;
                     }
-                    if remaining > 0 {
-                        captured.extend_from_slice(&chunk[..n.min(remaining)]);
-                    }
+                    captured.extend_from_slice(&chunk[..n.min(room)]);
                 }
             }
         }
@@ -1831,6 +1831,33 @@ mod tests {
                 assert!(output.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn stdout_observation_fails_closed_one_byte_past_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let printer = dir.path().join("printer.sh");
+        std::fs::write(&printer, "#!/bin/sh\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&printer).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&printer, perms).unwrap();
+        }
+        // Exactly the cap is observable; one byte past it is not —
+        // a pin must cover the whole stream, never a truncation.
+        for (bytes, expected) in [
+            (OBSERVED_STDOUT_MAX_BYTES, true),
+            (OBSERVED_STDOUT_MAX_BYTES + 1, false),
+        ] {
+            std::fs::write(&printer, format!("#!/bin/sh\nhead -c {bytes} /dev/zero\n")).unwrap();
+            assert_eq!(observed_stdout(&printer).is_some(), expected);
+        }
+        // The observable digest covers every emitted byte.
+        std::fs::write(&printer, "#!/bin/sh\nprintf 'out'\n").unwrap();
+        assert_eq!(observed_stdout(&printer), Some(sha256(b"out")));
+        // A missing executable is unobservable, not a pin.
+        assert_eq!(observed_stdout(&dir.path().join("missing")), None);
     }
 
     #[test]
