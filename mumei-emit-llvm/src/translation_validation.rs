@@ -1268,9 +1268,10 @@ struct IrEncoder<'ctx, 'renames> {
     /// formal's are the source slots its struct parameter flattens into,
     /// an `insertvalue` chain's the values written so far (`None` for a
     /// slot never written), a call result's the per-field uninterpreted
-    /// applications. SSA values dominate their uses and the walk is
-    /// depth-first, so a value re-bound when a later path re-enters its
-    /// block never leaks into an earlier path.
+    /// applications. The walk is depth-first and restores this map at
+    /// every conditional branch, so a value re-bound when a deeper path
+    /// re-enters its block (a later loop iteration) never leaks into a
+    /// sibling path.
     aggregates: HashMap<usize, Vec<Option<BV<'ctx>>>>,
 }
 impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
@@ -1587,6 +1588,12 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     return self.block(LLVMGetSuccessor(inst, 0), block, values, guard, returns);
                 }
                 let cond = self.condition(&self.value(LLVMGetCondition(inst), &values)?)?;
+                // Aggregate slots live in `self.aggregates`, not the
+                // per-path `values`: the second successor must see them
+                // as they were at this branch, not as the first
+                // successor's subtree (a later loop iteration) rebound
+                // them.
+                let aggregates = self.aggregates.clone();
                 self.block(
                     LLVMGetSuccessor(inst, 0),
                     block,
@@ -1594,6 +1601,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     Bool::and(self.ctx, &[&guard, &cond]),
                     returns,
                 )?;
+                self.aggregates = aggregates;
                 return self.block(
                     LLVMGetSuccessor(inst, 1),
                     block,
