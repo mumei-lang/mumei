@@ -2,8 +2,8 @@
 
 use mumei_core::native_bundle::{
     sha256, BuildSettings, BundleError, BundleFile, ModuleAtomBinding, ModuleNativeBundleRecord,
-    MultifileNativeBundleRecord, NativeBundleRecord, MODULE_PROFILE, MODULE_RECHECK_PROFILE,
-    MULTIFILE_PROFILE, MULTIFILE_RECHECK_PROFILE, PROFILE, RECHECK_PROFILE, RECHECK_RESOURCE_LIMIT,
+    MultifileNativeBundleRecord, NativeBundleRecord, MODULE_RECHECK_PROFILE,
+    MULTIFILE_RECHECK_PROFILE, PROFILE, RECHECK_PROFILE, RECHECK_RESOURCE_LIMIT,
 };
 use mumei_core::parser::{parse_body_expr_checked, parse_module_checked, Item};
 use mumei_core::semantic_contract::{contains_while_stmt, LOOP_BOUND};
@@ -296,10 +296,12 @@ pub(super) fn from_module_recheck(
     report: &ModuleValidationReport,
     source: &str,
 ) -> Result<NativeModuleConsumerEvidence, BundleError> {
+    // The identity record and fingerprint name the record's pinned
+    // profile — a v2 bundle's admission is v2, not the v1 constant.
     let evidence = emit_module_family(
         expected_id,
         MODULE_SCHEMA,
-        MODULE_PROFILE,
+        &record.profile,
         MODULE_RECHECK_PROFILE,
         &record.source.atoms,
         &record.files[&BundleFile::Executable].sha256,
@@ -329,7 +331,7 @@ pub(super) fn from_multifile_recheck(
     let mut evidence = emit_module_family(
         expected_id,
         MULTIFILE_SCHEMA,
-        MULTIFILE_PROFILE,
+        &record.profile,
         MULTIFILE_RECHECK_PROFILE,
         &record.source.atoms,
         &record.files[&BundleFile::Executable].sha256,
@@ -337,7 +339,7 @@ pub(super) fn from_multifile_recheck(
         merged,
     )?;
     let fingerprint = configuration_fingerprint(
-        MULTIFILE_PROFILE,
+        &record.profile,
         MULTIFILE_RECHECK_PROFILE,
         report.source_profile,
         report.profile,
@@ -516,6 +518,7 @@ mod tests {
     use super::*;
     use mumei_core::native_bundle::{
         ContentIdentity, LinkBuild, ModuleAtomBinding, ModuleSourceBinding, ObjectBuild,
+        MODULE_PROFILE,
     };
     use mumei_emit_llvm::translation_validation::{FunctionOutcome, Outcome};
     use std::collections::BTreeMap;

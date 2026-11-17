@@ -1908,6 +1908,16 @@ fn module_bundle_with_refined_scalar_members_builds_as_v2() {
     assert_success(&check(&source, &bundle, &id));
     assert_success(&recheck(&source, &bundle, &id));
     assert_success(&recheck_llvm(&source, &bundle, &id));
+    // The emitted consumer evidence names the pinned v2 profile, not
+    // the v1 constant — the identity record must say which admission
+    // actually produced the bundle.
+    let json = consume("recheck-llvm --json", &source, &bundle, &id);
+    assert_success(&json);
+    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        envelope["evidence"][0]["semantics"]["profile"],
+        native_bundle::MODULE_PROFILE_V2
+    );
     // A v2 record re-pinned under the v1 name is not a v1 record —
     // the identity check refuses it rather than silently re-admitting
     // under the narrower gate.
