@@ -4126,9 +4126,30 @@ as the zero padding the source model asserts, and
 aggregate-typed `phi`/`select` results skip the integer
 width check that only applies to scalar slots. `check`,
 `recheck-source` and `recheck-llvm` cover the fragment.
-C10 stays partial — nested/generic structs,
-`u64`-family leaves and the deeper assurance layers remain
-open.
+Struct-valued fields join the fragment under
+`mumei.pure-i64-composite/v8` and the `/v11` bundle
+profiles, pinned only when a module declares a field whose
+type is another declared struct: `Outer { inner: Inner, c:
+i64 }` admits nested literals, nested leaf reads
+(`o.inner.a`) and whole-subtree writes (`o.inner = w`),
+while nested-path leaf writes (`o.inner.a = v`),
+generic/recursive/mismatched-type declarations, depth > 8
+and > 16 leaf slots fail closed. Resolved fields carry
+`shape: ValueKind` rather than `kind: ScalarKind`; field
+paths expand to leaf paths (`inner.a`) plus prefix paths
+(`inner`) for signature binders, reserved names and arity,
+and `composite_target_name` resolves `o.inner` to the
+child struct name so a whole-subtree write checks the
+written value's composite type equals the declared field
+type. The verifier seeds nested field constants
+recursively so `__struct_<b>_<field>_<leaf>` exists at
+every depth, and `q.inner = w` rebinds the projected
+`<base>_<field>_*` leaves; emitted IR lowers nested fields
+to nested LLVM aggregates with leaf-slice
+`insertvalue`/`extractvalue` splices. `check`,
+`recheck-source` and `recheck-llvm` cover the fragment.
+C10 stays partial — generic structs, `u64`-family leaves
+and the deeper assurance layers remain open.
 
 
 
