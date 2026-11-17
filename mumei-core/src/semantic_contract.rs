@@ -4,8 +4,8 @@
 use crate::hir::lower_atom_to_hir;
 use crate::mir::lower_hir_to_mir;
 use crate::parser::{
-    parse_body_expr_checked, parse_expression_checked, parse_module_checked, Atom, Expr, Item, Op,
-    Pattern, Span, Stmt, TrustLevel,
+    parse_body_expr_checked, parse_expression_checked, parse_module_checked, Atom, Expr, Item,
+    MatchArm, Op, Pattern, Span, Stmt, TrustLevel,
 };
 use crate::proof_cert::compute_atom_content_hash_v2;
 use crate::verification::{
@@ -101,6 +101,13 @@ pub const PURE_I64_COMPOSITE_PROFILE_V5: &str = "mumei.pure-i64-composite/v5";
 /// never merges across `if`/`match` branches and never takes a field
 /// write (`pure-i64-composite/v6`).
 pub const PURE_I64_COMPOSITE_PROFILE_V6: &str = "mumei.pure-i64-composite/v6";
+/// v7 admits branch-merged composite values: `if`/`match` expressions
+/// whose arms all produce the same struct or enum type merge the
+/// flattened slots under `ite` — the aggregate `phi` the emitter
+/// writes — and composite bindings written inside a branch merge the
+/// same way. Merged arms must produce one type; mixed-type merges stay
+/// outside (`pure-i64-composite/v7`).
+pub const PURE_I64_COMPOSITE_PROFILE_V7: &str = "mumei.pure-i64-composite/v7";
 
 /// How much of the refined-scalar declaration fragment a gate admits:
 /// `Reject` keeps `Item::TypeDef` out of the item vocabulary entirely,
@@ -118,7 +125,10 @@ pub const PURE_I64_COMPOSITE_PROFILE_V6: &str = "mumei.pure-i64-composite/v6";
 /// `CompositeV5` additionally admits field assignment `q.f = v` on
 /// admitted struct bindings (`pure-i64-composite/v5`);
 /// `CompositeV6` additionally admits enum construction, enum results
-/// and enum-returning calls (`pure-i64-composite/v6`). A
+/// and enum-returning calls (`pure-i64-composite/v6`);
+/// `CompositeV7` additionally admits branch-merged composite values —
+/// `if`/`match` expressions producing struct or enum values
+/// (`pure-i64-composite/v7`). A
 /// pinned record names which level produced it, so a
 /// rechecker re-derives under the record's own admission — never a
 /// wider one.
@@ -133,6 +143,7 @@ pub enum RefinedAdmission {
     CompositeV4,
     CompositeV5,
     CompositeV6,
+    CompositeV7,
 }
 
 impl RefinedAdmission {
@@ -171,6 +182,12 @@ impl RefinedAdmission {
     /// (`pure-i64-composite/v6`).
     pub fn admits_enum_values(self) -> bool {
         self >= Self::CompositeV6
+    }
+
+    /// Whether composite values may merge across `if`/`match` branches
+    /// (`pure-i64-composite/v7`).
+    pub fn admits_merged_composites(self) -> bool {
+        self >= Self::CompositeV7
     }
 }
 
@@ -277,7 +294,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _, _, _) =
+    let (items, refined, structs, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -298,6 +315,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         false,
         false,
@@ -323,7 +341,7 @@ pub fn extract_pure_i64_module_contracts(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, enums, struct_values, field_writes, enum_values) =
+    let (items, refined, structs, enums, struct_values, field_writes, enum_values, merged) =
         admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
@@ -360,6 +378,7 @@ pub fn extract_pure_i64_module_contracts(
                 struct_values,
                 field_writes,
                 enum_values,
+                merged,
                 &cert_env,
             )),
             // Type and struct declarations carry no per-atom contract;
@@ -377,7 +396,7 @@ pub fn module_source_profile(
     source: &str,
     admission: RefinedAdmission,
 ) -> Result<&'static str, SemanticContractError> {
-    let (_items, refined, structs, enums, struct_values, field_writes, enum_values) =
+    let (_items, refined, structs, enums, struct_values, field_writes, enum_values, merged) =
         admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
         true,
@@ -387,6 +406,7 @@ pub fn module_source_profile(
         struct_values,
         field_writes,
         enum_values,
+        merged,
     ))
 }
 
@@ -401,9 +421,19 @@ pub fn module_source_profile(
 /// arity gate.
 /// What `admit_pure_i64_atoms` returns: the admitted items, the refined
 /// type environment, the struct and enum declaration environments, and
-/// the three usage flags (`struct_values`, `field_writes`,
-/// `enum_values`) the module's profile name derives from.
-type AdmittedModule = (Vec<Item>, RefinedEnv, StructEnv, EnumEnv, bool, bool, bool);
+/// the four usage flags (`struct_values`, `field_writes`,
+/// `enum_values`, `merged_composites`) the module's profile name
+/// derives from.
+type AdmittedModule = (
+    Vec<Item>,
+    RefinedEnv,
+    StructEnv,
+    EnumEnv,
+    bool,
+    bool,
+    bool,
+    bool,
+);
 
 fn admit_pure_i64_atoms(
     source: &str,
@@ -490,6 +520,7 @@ fn admit_pure_i64_atoms(
     let struct_values_used = std::cell::Cell::new(false);
     let field_writes_used = std::cell::Cell::new(false);
     let enum_values_used = std::cell::Cell::new(false);
+    let merged_composites_used = std::cell::Cell::new(false);
     for item in &items {
         let Item::Atom(sibling) = item else {
             continue;
@@ -518,9 +549,11 @@ fn admit_pure_i64_atoms(
             admission.admits_struct_values(),
             admission.admits_field_writes(),
             admission.admits_enum_values(),
+            admission.admits_merged_composites(),
             &struct_values_used,
             &field_writes_used,
             &enum_values_used,
+            &merged_composites_used,
         )?;
     }
     Ok((
@@ -531,6 +564,7 @@ fn admit_pure_i64_atoms(
         struct_values_used.get(),
         field_writes_used.get(),
         enum_values_used.get(),
+        merged_composites_used.get(),
     ))
 }
 
@@ -563,6 +597,7 @@ fn binder_scalar_type(type_name: Option<&str>, refined: &RefinedEnv) -> &'static
 /// composite extension when it admitted any `struct` declarations —
 /// its v3 name only when some atom uses a struct value (a struct
 /// result, literal, `let` or call-result read).
+#[allow(clippy::too_many_arguments)]
 fn fragment_profile(
     allow_wrapping_arithmetic: bool,
     refined: &RefinedEnv,
@@ -571,9 +606,12 @@ fn fragment_profile(
     struct_values: bool,
     field_writes: bool,
     enum_values: bool,
+    merged_composites: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if merged_composites {
+        PURE_I64_COMPOSITE_PROFILE_V7
     } else if enum_values {
         PURE_I64_COMPOSITE_PROFILE_V6
     } else if field_writes {
@@ -615,6 +653,7 @@ fn atom_contract(
     struct_values: bool,
     field_writes: bool,
     enum_values: bool,
+    merged_composites: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
@@ -626,6 +665,7 @@ fn atom_contract(
         struct_values,
         field_writes,
         enum_values,
+        merged_composites,
     );
     let result_fields = atom
         .return_type
@@ -941,6 +981,9 @@ struct KindEnv<'a> {
     /// Whether enum values (`E::V(..)` construction, `-> E` results,
     /// enum-returning calls) are admitted (`pure-i64-composite/v6`).
     admit_enum_values: bool,
+    /// Whether `if`/`match` expressions producing composite values are
+    /// admitted (`pure-i64-composite/v7`).
+    admit_merged_composites: bool,
     /// Set when the atom actually uses a struct-value shape, so the
     /// module names the v3 profile only when it needs it.
     struct_values_used: &'a std::cell::Cell<bool>,
@@ -950,6 +993,9 @@ struct KindEnv<'a> {
     /// Set when the atom produces an enum value, so the module names
     /// the v6 profile only when it needs it.
     enum_values_used: &'a std::cell::Cell<bool>,
+    /// Set when the atom merges a composite value across branches, so
+    /// the module names the v7 profile only when it needs it.
+    merged_composites_used: &'a std::cell::Cell<bool>,
 }
 
 impl<'a> KindEnv<'a> {
@@ -1161,6 +1207,7 @@ fn call_return_kinds(
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
+    admission: RefinedAdmission,
 ) -> CallShapes {
     CallShapes {
         returns: items
@@ -1201,6 +1248,7 @@ fn call_return_kinds(
                 )
             })
             .collect(),
+        merged_composites: admission.admits_merged_composites(),
     }
 }
 
@@ -1223,6 +1271,10 @@ struct CallShapes {
     /// through this map.
     /// Variant name plus its payload slot kinds, in declaration order.
     enums: BTreeMap<String, EnumVariantLayout>,
+    /// Whether branch-merged composites (`pure-i64-composite/v7`) are
+    /// admitted: the source layer fails closed on a `Composite`/`Enum`
+    /// reaching a branch merge below that admission.
+    merged_composites: bool,
 }
 
 impl CallShapes {
@@ -1301,9 +1353,11 @@ fn check_atom_contract(
     admit_struct_values: bool,
     admit_field_writes: bool,
     admit_enum_values: bool,
+    admit_merged_composites: bool,
     struct_values_used: &std::cell::Cell<bool>,
     field_writes_used: &std::cell::Cell<bool>,
     enum_values_used: &std::cell::Cell<bool>,
+    merged_composites_used: &std::cell::Cell<bool>,
 ) -> Result<(), SemanticContractError> {
     // Struct parameters stay out of the scalar scope — so they are
     // neither scalar operands nor rebindable — and live in the
@@ -1361,9 +1415,11 @@ fn check_atom_contract(
         admit_struct_values,
         admit_field_writes,
         admit_enum_values,
+        admit_merged_composites,
         struct_values_used,
         field_writes_used,
         enum_values_used,
+        merged_composites_used,
     };
     for p in &atom.params {
         env.bind(&p.name)?;
@@ -2018,9 +2074,11 @@ fn resolve_alias(
                     admit_struct_values: false,
                     admit_field_writes: false,
                     admit_enum_values: false,
+                    admit_merged_composites: false,
                     struct_values_used: &std::cell::Cell::new(false),
                     field_writes_used: &std::cell::Cell::new(false),
                     enum_values_used: &std::cell::Cell::new(false),
+                    merged_composites_used: &std::cell::Cell::new(false),
                 },
             )?,
             ScalarKind::Bool,
@@ -2224,6 +2282,7 @@ fn block_prefix_kinds<'a>(
                     &inner,
                     result_in_scope,
                     allow_wrapping_arithmetic,
+                    &inner_assignable,
                     &inner_env,
                 )?;
                 // A `let` may re-bind a composite name only to a
@@ -2402,6 +2461,109 @@ fn is_composite_value(
                         || (env.admit_enum_values && matches!(sig.return_kind, ValueKind::Enum(_)))
                 })
         }
+        // A branch-merged composite is structural only: both branch
+        // tails read as composite positions. Checking the type
+        // agreement or setting usage flags here would leak a failed
+        // probe into the profile name — `composite_kind` does both
+        // when the position is actually bound.
+        Expr::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            env.admit_merged_composites
+                && is_composite_stmt(then_branch, scope, env)
+                && is_composite_stmt(else_branch, scope, env)
+        }
+        Expr::Match { arms, .. } => {
+            env.admit_merged_composites
+                && !arms.is_empty()
+                && arms
+                    .iter()
+                    .all(|arm| is_composite_stmt(&arm.body, scope, env))
+        }
+        _ => false,
+    }
+}
+
+/// Whether a statement writes a composite-typed binding (`q.f = v` on
+/// a struct binding, or a `q = ..` rebind of one) — the write a
+/// branch merge must join (`pure-i64-composite/v7`), so an `if`/`match`
+/// whose VALUE stays scalar still names the merged profile. A
+/// branch-local `let` never reaches the merge: `let`s are scoped and
+/// skipped here.
+fn stmt_writes_composite(
+    stmt: &Stmt,
+    scope: &BTreeMap<String, ScalarKind>,
+    env: &KindEnv<'_>,
+) -> bool {
+    match stmt {
+        Stmt::Expr(expr, _) => expr_writes_composite(expr, scope, env),
+        Stmt::Assign { var, .. } => {
+            let base = var.split('.').next().unwrap_or(var.as_str());
+            env.composite_name(base, scope).is_some()
+        }
+        // The bound name is branch-local, but the right-hand side can
+        // still nest a branch that writes an OUTER composite binding.
+        Stmt::Let { value, .. } => expr_writes_composite(value, scope, env),
+        Stmt::Block(stmts, _) => stmts
+            .iter()
+            .any(|inner| stmt_writes_composite(inner, scope, env)),
+        _ => false,
+    }
+}
+
+/// `stmt_writes_composite` through the expression forms that hold
+/// statements (`if` branches, `match` arms, a `Block` expr) and the
+/// subexpressions that can nest them.
+fn expr_writes_composite(
+    expr: &Expr,
+    scope: &BTreeMap<String, ScalarKind>,
+    env: &KindEnv<'_>,
+) -> bool {
+    match expr {
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_writes_composite(cond, scope, env)
+                || stmt_writes_composite(then_branch, scope, env)
+                || stmt_writes_composite(else_branch, scope, env)
+        }
+        Expr::Match { target, arms } => {
+            expr_writes_composite(target, scope, env)
+                || arms
+                    .iter()
+                    .any(|arm| stmt_writes_composite(&arm.body, scope, env))
+        }
+        Expr::Block(stmt) => stmt_writes_composite(stmt, scope, env),
+        Expr::BinaryOp(a, _, b) => {
+            expr_writes_composite(a, scope, env) || expr_writes_composite(b, scope, env)
+        }
+        Expr::Call(_, args) => args
+            .iter()
+            .any(|arg| expr_writes_composite(arg, scope, env)),
+        Expr::StructInit { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| expr_writes_composite(value, scope, env)),
+        Expr::FieldAccess(target, _) => expr_writes_composite(target, scope, env),
+        Expr::ArrayLit(items) => items
+            .iter()
+            .any(|item| expr_writes_composite(item, scope, env)),
+        Expr::ArrayAccess(_, index) => expr_writes_composite(index, scope, env),
+        _ => false,
+    }
+}
+
+/// Whether a statement's tail produces a composite value: an
+/// expression statement or a block's last statement, recursively.
+fn is_composite_stmt(stmt: &Stmt, scope: &BTreeMap<String, ScalarKind>, env: &KindEnv<'_>) -> bool {
+    match stmt {
+        Stmt::Expr(expr, _) => is_composite_value(expr, scope, env),
+        Stmt::Block(stmts, _) => stmts
+            .last()
+            .is_some_and(|last| is_composite_stmt(last, scope, env)),
         _ => false,
     }
 }
@@ -2486,9 +2648,14 @@ fn statement_composite_kind<'a>(
     env: &KindEnv<'a>,
 ) -> Result<&'a str, SemanticContractError> {
     match stmt {
-        Stmt::Expr(expr, _) => {
-            composite_kind(expr, scope, result_in_scope, allow_wrapping_arithmetic, env)
-        }
+        Stmt::Expr(expr, _) => composite_kind(
+            expr,
+            scope,
+            result_in_scope,
+            allow_wrapping_arithmetic,
+            assignable,
+            env,
+        ),
         Stmt::Block(stmts, _) if stmts.len() == 1 => statement_composite_kind(
             &stmts[0],
             scope,
@@ -2526,14 +2693,17 @@ fn statement_composite_kind<'a>(
 /// `pure-i64-composite/v3` only an unshadowed struct name qualifies (a
 /// parameter passed through). v3 adds a struct literal initializing
 /// every declared field exactly once from a scalar expression of the
-/// field's kind, and a call to a struct-returning sibling. Struct values
-/// merged across `if`/`match` branches, nested struct literals and
+/// field's kind, and a call to a struct-returning sibling; v6 adds enum
+/// construction and enum-returning calls, and v7 adds `if`/`match`
+/// expressions whose branches all produce the same composite type —
+/// the aggregate `phi` the emitter writes. Nested struct literals and
 /// anything else stay outside.
 fn composite_kind<'a>(
     expr: &Expr,
     scope: &BTreeMap<String, ScalarKind>,
     result_in_scope: bool,
     allow_wrapping_arithmetic: bool,
+    assignable: &BTreeSet<String>,
     env: &KindEnv<'a>,
 ) -> Result<&'a str, SemanticContractError> {
     match expr {
@@ -2602,6 +2772,7 @@ fn composite_kind<'a>(
                 scope,
                 result_in_scope,
                 allow_wrapping_arithmetic,
+                assignable,
                 env,
             )?;
             match &sig.return_kind {
@@ -2648,6 +2819,87 @@ fn composite_kind<'a>(
             )?;
             Ok(enum_name)
         }
+        // A branch-merged composite (`pure-i64-composite/v7`): both
+        // tails produce the same composite type and the encoder merges
+        // the flattened slots under `ite` — the aggregate `phi` the
+        // emitter writes. Branch bodies may still rebind names; the
+        // write merge runs in the source layer.
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } if env.admit_merged_composites && allow_wrapping_arithmetic => {
+            expect_kind(
+                expression_kind(
+                    cond,
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                    env,
+                )?,
+                ScalarKind::Bool,
+            )?;
+            let then_name = statement_composite_kind(
+                then_branch,
+                scope,
+                result_in_scope,
+                allow_wrapping_arithmetic,
+                assignable,
+                env,
+            )?;
+            let else_name = statement_composite_kind(
+                else_branch,
+                scope,
+                result_in_scope,
+                allow_wrapping_arithmetic,
+                assignable,
+                env,
+            )?;
+            if then_name != else_name {
+                return Err(SemanticContractError::Unsupported(
+                    "branch-merged composite types",
+                ));
+            }
+            env.merged_composites_used.set(true);
+            Ok(then_name)
+        }
+        Expr::Match { target, arms }
+            if env.admit_merged_composites && allow_wrapping_arithmetic =>
+        {
+            let arm_envs = match_arm_envs(
+                target,
+                arms,
+                scope,
+                result_in_scope,
+                allow_wrapping_arithmetic,
+                assignable,
+                env,
+            )?;
+            let mut name = None;
+            for (arm, (arm_scope, arm_assignable)) in arms.iter().zip(arm_envs) {
+                let arm_name = statement_composite_kind(
+                    &arm.body,
+                    &arm_scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &arm_assignable,
+                    env,
+                )?;
+                match name {
+                    None => name = Some(arm_name),
+                    Some(first) if first == arm_name => (),
+                    Some(_) => {
+                        return Err(SemanticContractError::Unsupported(
+                            "match-merged composite types",
+                        ));
+                    }
+                }
+            }
+            let name = name.ok_or(SemanticContractError::Unsupported("empty match"))?;
+            env.merged_composites_used.set(true);
+            Ok(name)
+        }
         _ => Err(SemanticContractError::Unsupported(
             "struct value outside the composite profile",
         )),
@@ -2664,6 +2916,7 @@ fn check_call<'a>(
     scope: &BTreeMap<String, ScalarKind>,
     result_in_scope: bool,
     allow_wrapping_arithmetic: bool,
+    assignable: &BTreeSet<String>,
     env: &KindEnv<'a>,
 ) -> Result<&'a CalleeSig, SemanticContractError> {
     // A call must name an atom of this module with a matching
@@ -2693,7 +2946,15 @@ fn check_call<'a>(
                 *kind,
             )?,
             ValueKind::Struct(expected) | ValueKind::Enum(expected) => {
-                if composite_kind(arg, scope, result_in_scope, allow_wrapping_arithmetic, env).ok()
+                if composite_kind(
+                    arg,
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    assignable,
+                    env,
+                )
+                .ok()
                     != Some(expected.as_str())
                 {
                     return Err(SemanticContractError::Unsupported(
@@ -2704,6 +2965,159 @@ fn check_call<'a>(
         }
     }
     Ok(sig)
+}
+
+/// The scrutinee, pattern-vocabulary, catch-all and arm-guard checks a
+/// `match` runs under the composite profile — returning each arm's
+/// (`arm_scope`, `arm_assignable`) so the scalar and composite paths
+/// admit the same match shapes and only differ in what the arm bodies
+/// produce.
+///
+/// An enum scrutinee flips the arm vocabulary: `Variant` patterns bind
+/// the payload slots of the variant they name, `Wildcard` is the
+/// trailing catch-all, and literals or a variable-binding arm stay
+/// out — the flattened enum value has no scalar to bind and
+/// construction is never observed. An `i64` scrutinee takes `Literal`
+/// patterns plus a trailing `Wildcard`/`Variable` catch-all.
+#[allow(clippy::type_complexity)]
+fn match_arm_envs<'a>(
+    target: &Expr,
+    arms: &[MatchArm],
+    scope: &BTreeMap<String, ScalarKind>,
+    result_in_scope: bool,
+    allow_wrapping_arithmetic: bool,
+    assignable: &BTreeSet<String>,
+    env: &KindEnv<'a>,
+) -> Result<Vec<(BTreeMap<String, ScalarKind>, BTreeSet<String>)>, SemanticContractError> {
+    let enum_scrutinee = match target {
+        Expr::Variable(name) => env
+            .composite_name(name, scope)
+            .and_then(|type_name| env.enums.get(type_name)),
+        _ => None,
+    };
+    let mut out = Vec::with_capacity(arms.len());
+    if let Some(variants) = enum_scrutinee {
+        let Some(last) = arms.last() else {
+            return Err(SemanticContractError::Unsupported("empty match"));
+        };
+        if !matches!(last.pattern, Pattern::Wildcard) || last.guard.is_some() {
+            return Err(SemanticContractError::Unsupported(
+                "match without a catch-all arm",
+            ));
+        }
+        for arm in arms {
+            let mut arm_scope = scope.clone();
+            let mut arm_assignable = assignable.clone();
+            match &arm.pattern {
+                Pattern::Wildcard => {}
+                Pattern::Variant {
+                    variant_name,
+                    fields,
+                } => {
+                    let short = variant_name.rsplit("::").next().unwrap_or(variant_name);
+                    let Some(variant) = variants.iter().find(|v| v.name == short) else {
+                        return Err(SemanticContractError::Unsupported(
+                            "match variant outside enum",
+                        ));
+                    };
+                    if variant.fields.len() != fields.len() {
+                        return Err(SemanticContractError::Unsupported("match variant arity"));
+                    }
+                    for (field_pattern, field) in fields.iter().zip(&variant.fields) {
+                        match field_pattern {
+                            Pattern::Variable(name) => {
+                                env.bind(name)?;
+                                arm_scope.insert(name.clone(), field.kind);
+                                arm_assignable.remove(name);
+                            }
+                            Pattern::Wildcard => (),
+                            _ => {
+                                return Err(SemanticContractError::Unsupported(
+                                    "match variant field pattern",
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SemanticContractError::Unsupported(
+                        "match pattern outside variants and catch-all",
+                    ));
+                }
+            }
+            if let Some(guard) = &arm.guard {
+                expect_kind(
+                    expression_kind(
+                        guard,
+                        &arm_scope,
+                        result_in_scope,
+                        allow_wrapping_arithmetic,
+                        &BTreeSet::new(),
+                        env,
+                    )?,
+                    ScalarKind::Bool,
+                )?;
+            }
+            out.push((arm_scope, arm_assignable));
+        }
+        return Ok(out);
+    }
+    expect_kind(
+        expression_kind(
+            target,
+            scope,
+            result_in_scope,
+            allow_wrapping_arithmetic,
+            &BTreeSet::new(),
+            env,
+        )?,
+        ScalarKind::I64,
+    )?;
+    let Some(last) = arms.last() else {
+        return Err(SemanticContractError::Unsupported("empty match"));
+    };
+    if !matches!(last.pattern, Pattern::Wildcard | Pattern::Variable(_)) {
+        return Err(SemanticContractError::Unsupported(
+            "match without a catch-all arm",
+        ));
+    }
+    if last.guard.is_some() {
+        return Err(SemanticContractError::Unsupported(
+            "guarded match catch-all arm",
+        ));
+    }
+    for arm in arms {
+        let mut arm_scope = scope.clone();
+        let mut arm_assignable = assignable.clone();
+        match &arm.pattern {
+            Pattern::Literal(_) | Pattern::Wildcard => {}
+            Pattern::Variable(name) => {
+                env.bind(name)?;
+                arm_scope.insert(name.clone(), ScalarKind::I64);
+                arm_assignable.remove(name);
+            }
+            _ => {
+                return Err(SemanticContractError::Unsupported(
+                    "match pattern outside literals and catch-all",
+                ));
+            }
+        }
+        if let Some(guard) = &arm.guard {
+            expect_kind(
+                expression_kind(
+                    guard,
+                    &arm_scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                    env,
+                )?,
+                ScalarKind::Bool,
+            )?;
+        }
+        out.push((arm_scope, arm_assignable));
+    }
+    Ok(out)
 }
 
 /// `assignable` lists the linear-path names an `if` branch may rebind:
@@ -2806,7 +3220,9 @@ fn expression_kind(
             )?;
             // Branch bodies may rebind names bound on the current
             // linear path; the encoder merges them under the branch
-            // condition like the emitter's per-variable phi.
+            // condition like the emitter's per-variable phi. A write
+            // to a composite binding joins aggregate slots — the v7
+            // merge — even when the `if` value itself stays scalar.
             let then_kind = statement_kind(
                 then_branch,
                 scope,
@@ -2826,6 +3242,11 @@ fn expression_kind(
                 )?,
                 then_kind,
             )?;
+            if stmt_writes_composite(then_branch, scope, env)
+                || stmt_writes_composite(else_branch, scope, env)
+            {
+                env.merged_composites_used.set(true);
+            }
             Ok(then_kind)
         }
         // First-match-order `match` on an i64 scrutinee: literal patterns
@@ -2838,162 +3259,20 @@ fn expression_kind(
         // Arm bodies may rebind linear-path names like `if` branches —
         // each write merges under the arm's own hit-condition.
         Expr::Match { target, arms } if allow_wrapping_arithmetic => {
-            // An enum scrutinee flips the arm vocabulary: `Variant`
-            // patterns bind the payload slots of the variant they name,
-            // `Wildcard` is the trailing catch-all, and literals or a
-            // variable-binding arm stay out — the flattened enum value
-            // has no scalar to bind and construction is never observed.
-            let enum_scrutinee = match &**target {
-                Expr::Variable(name) => env
-                    .composite_name(name, scope)
-                    .and_then(|type_name| env.enums.get(type_name)),
-                _ => None,
-            };
-            if let Some(variants) = enum_scrutinee {
-                let Some(last) = arms.last() else {
-                    return Err(SemanticContractError::Unsupported("empty match"));
-                };
-                if !matches!(last.pattern, Pattern::Wildcard) || last.guard.is_some() {
-                    return Err(SemanticContractError::Unsupported(
-                        "match without a catch-all arm",
-                    ));
-                }
-                let mut kind = None;
-                for arm in arms {
-                    let mut arm_scope = scope.clone();
-                    match &arm.pattern {
-                        Pattern::Wildcard => {}
-                        Pattern::Variant {
-                            variant_name,
-                            fields,
-                        } => {
-                            let short = variant_name.rsplit("::").next().unwrap_or(variant_name);
-                            let Some(variant) = variants.iter().find(|v| v.name == short) else {
-                                return Err(SemanticContractError::Unsupported(
-                                    "match variant outside enum",
-                                ));
-                            };
-                            if variant.fields.len() != fields.len() {
-                                return Err(SemanticContractError::Unsupported(
-                                    "match variant arity",
-                                ));
-                            }
-                            for (field_pattern, field) in fields.iter().zip(&variant.fields) {
-                                match field_pattern {
-                                    Pattern::Variable(name) => {
-                                        env.bind(name)?;
-                                        arm_scope.insert(name.clone(), field.kind);
-                                    }
-                                    Pattern::Wildcard => (),
-                                    _ => {
-                                        return Err(SemanticContractError::Unsupported(
-                                            "match variant field pattern",
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            return Err(SemanticContractError::Unsupported(
-                                "match pattern outside variants and catch-all",
-                            ));
-                        }
-                    }
-                    if let Some(guard) = &arm.guard {
-                        expect_kind(
-                            expression_kind(
-                                guard,
-                                &arm_scope,
-                                result_in_scope,
-                                allow_wrapping_arithmetic,
-                                &BTreeSet::new(),
-                                env,
-                            )?,
-                            ScalarKind::Bool,
-                        )?;
-                    }
-                    let mut arm_assignable = assignable.clone();
-                    if let Pattern::Variant { fields, .. } = &arm.pattern {
-                        for field_pattern in fields {
-                            if let Pattern::Variable(name) = field_pattern {
-                                arm_assignable.remove(name);
-                            }
-                        }
-                    }
-                    let arm_kind = statement_kind(
-                        &arm.body,
-                        &arm_scope,
-                        result_in_scope,
-                        allow_wrapping_arithmetic,
-                        &arm_assignable,
-                        env,
-                    )?;
-                    match kind {
-                        None => kind = Some(arm_kind),
-                        Some(first) => expect_kind(arm_kind, first)?,
-                    }
-                }
-                return kind.ok_or(SemanticContractError::Unsupported("empty match"));
-            }
-            expect_kind(
-                expression_kind(
-                    target,
-                    scope,
-                    result_in_scope,
-                    allow_wrapping_arithmetic,
-                    &BTreeSet::new(),
-                    env,
-                )?,
-                ScalarKind::I64,
+            // The scrutinee/pattern/catch-all/guard checks live in
+            // `match_arm_envs`; each arm body must agree on one scalar
+            // kind, like the emitter's match.merge.
+            let arm_envs = match_arm_envs(
+                target,
+                arms,
+                scope,
+                result_in_scope,
+                allow_wrapping_arithmetic,
+                assignable,
+                env,
             )?;
-            let Some(last) = arms.last() else {
-                return Err(SemanticContractError::Unsupported("empty match"));
-            };
-            if !matches!(last.pattern, Pattern::Wildcard | Pattern::Variable(_)) {
-                return Err(SemanticContractError::Unsupported(
-                    "match without a catch-all arm",
-                ));
-            }
-            if last.guard.is_some() {
-                return Err(SemanticContractError::Unsupported(
-                    "guarded match catch-all arm",
-                ));
-            }
             let mut kind = None;
-            for arm in arms {
-                let mut arm_scope = scope.clone();
-                match &arm.pattern {
-                    Pattern::Literal(_) | Pattern::Wildcard => {}
-                    Pattern::Variable(name) => {
-                        env.bind(name)?;
-                        arm_scope.insert(name.clone(), ScalarKind::I64);
-                    }
-                    _ => {
-                        return Err(SemanticContractError::Unsupported(
-                            "match pattern outside literals and catch-all",
-                        ));
-                    }
-                }
-                if let Some(guard) = &arm.guard {
-                    expect_kind(
-                        expression_kind(
-                            guard,
-                            &arm_scope,
-                            result_in_scope,
-                            allow_wrapping_arithmetic,
-                            &BTreeSet::new(),
-                            env,
-                        )?,
-                        ScalarKind::Bool,
-                    )?;
-                }
-                // Arm bodies may rebind linear-path names like `if`
-                // branches; a `Variable` pattern shadows an outer name
-                // for this arm, so it leaves the assignable set.
-                let mut arm_assignable = assignable.clone();
-                if let Pattern::Variable(name) = &arm.pattern {
-                    arm_assignable.remove(name);
-                }
+            for (arm, (arm_scope, arm_assignable)) in arms.iter().zip(arm_envs) {
                 let arm_kind = statement_kind(
                     &arm.body,
                     &arm_scope,
@@ -3005,6 +3284,14 @@ fn expression_kind(
                 match kind {
                     None => kind = Some(arm_kind),
                     Some(first) => expect_kind(arm_kind, first)?,
+                }
+            }
+            // As in the `if` merge: an arm writing a composite binding
+            // joins aggregate slots under the arm's hit.
+            for arm in arms {
+                if stmt_writes_composite(&arm.body, scope, env) {
+                    env.merged_composites_used.set(true);
+                    break;
                 }
             }
             kind.ok_or(SemanticContractError::Unsupported("empty match"))
@@ -3021,6 +3308,7 @@ fn expression_kind(
                 scope,
                 result_in_scope,
                 allow_wrapping_arithmetic,
+                assignable,
                 env,
             )?
             .return_kind
@@ -3044,6 +3332,7 @@ fn expression_kind(
                     scope,
                     result_in_scope,
                     allow_wrapping_arithmetic,
+                    assignable,
                     env,
                 )?),
                 _ => None,
@@ -3167,7 +3456,8 @@ pub fn encode_pure_i64_body<'ctx>(
 ) -> BodyResult<PureI64Body<'ctx>> {
     let (source_sha256, mut items, refined, structs, enums) =
         bounded_pure_i64_module(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
-    let call_returns = call_return_kinds(&items, &refined, &structs, &enums);
+    let call_returns =
+        call_return_kinds(&items, &refined, &structs, &enums, RefinedAdmission::Reject);
     let Some(Item::Atom(atom)) = items.pop() else {
         return Err(SemanticContractError::Unsupported("source atom"));
     };
@@ -3194,7 +3484,7 @@ pub fn encode_pure_i64_module<'ctx>(
 ) -> BodyResult<Vec<PureI64Body<'ctx>>> {
     let (source_sha256, items, refined, structs, enums) =
         bounded_pure_i64_module(source, allow_wrapping_arithmetic, admission)?;
-    let call_returns = call_return_kinds(&items, &refined, &structs, &enums);
+    let call_returns = call_return_kinds(&items, &refined, &structs, &enums, admission);
     items
         .iter()
         .filter_map(|item| match item {
@@ -3245,7 +3535,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _, _) =
+    let (items, refined, structs, enums, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -3814,7 +4104,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
             "expected at least one atom",
         ));
     }
-    let call_returns = call_return_kinds(&items, &refined, &structs, &enums);
+    let call_returns = call_return_kinds(&items, &refined, &structs, &enums, admission);
     let bodies: Vec<PureI64Body> = atom_items
         .iter()
         .map(|atom| {
@@ -4429,6 +4719,58 @@ fn write_escapes<'ctx>(
 /// symbolic value of every assignable name a statement rewrites, so an
 /// enclosing `if` can merge branch writes under its condition and an
 /// enclosing block can re-export the writes that escape it.
+#[allow(clippy::too_many_arguments)]
+/// The value `cond` selects between: a scalar `ite`, or per-slot `ite`s
+/// over the flattened fields of a `Composite`/`Enum` — the merge the
+/// emitter's aggregate `phi` performs on branch-joined composites
+/// (`pure-i64-composite/v7`). Both sides must flatten to the same
+/// shape: equal struct field lists, equal enum name and slot count.
+fn merge_source_values<'ctx>(
+    cond: &Bool<'ctx>,
+    a: SourceValue<'ctx>,
+    b: SourceValue<'ctx>,
+    merged_composites: bool,
+) -> BodyResult<SourceValue<'ctx>> {
+    use SourceValue::{Boolean as B, Integer as I};
+    match (a, b) {
+        (I(a), I(b)) => Ok(I(cond.ite(&a, &b))),
+        (B(a), B(b)) => Ok(B(cond.ite(&a, &b))),
+        (SourceValue::Composite(a), SourceValue::Composite(b)) if merged_composites => {
+            if a.len() != b.len() || a.iter().zip(b.iter()).any(|((an, _), (bn, _))| an != bn) {
+                return Err(SemanticContractError::Unsupported("branch composite kinds"));
+            }
+            let mut fields = Vec::with_capacity(a.len());
+            for ((name, av), (_, bv)) in a.into_iter().zip(b) {
+                fields.push((name, merge_source_values(cond, av, bv, merged_composites)?));
+            }
+            Ok(SourceValue::Composite(fields))
+        }
+        (
+            SourceValue::Enum {
+                name: an,
+                tag: at,
+                slots: a_slots,
+            },
+            SourceValue::Enum {
+                name: bn,
+                tag: bt,
+                slots: b_slots,
+            },
+        ) if merged_composites && an == bn && a_slots.len() == b_slots.len() => {
+            let mut slots = Vec::with_capacity(a_slots.len());
+            for (av, bv) in a_slots.into_iter().zip(b_slots) {
+                slots.push(merge_source_values(cond, av, bv, merged_composites)?);
+            }
+            Ok(SourceValue::Enum {
+                name: an,
+                tag: cond.ite(&at, &bt),
+                slots,
+            })
+        }
+        _ => Err(SemanticContractError::Unsupported("branch composite kinds")),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn source_stmt<'ctx>(
     stmt: &Stmt,
@@ -5250,18 +5592,20 @@ fn source_expr<'ctx>(
                         .cloned()
                         .ok_or(SemanticContractError::Unsupported("source binding"))?,
                 };
-                let merged = match (then_bound, else_bound) {
-                    (I(a), I(b)) => I(cond.ite(&a, &b)),
-                    (B(a), B(b)) => B(cond.ite(&a, &b)),
-                    _ => return Err(SemanticContractError::Unsupported("branch write kinds")),
-                };
+                let merged = merge_source_values(
+                    &cond,
+                    then_bound,
+                    else_bound,
+                    call_returns.merged_composites,
+                )?;
                 written.insert(name.clone(), merged);
             }
-            match (then_value, else_value) {
-                (I(a), I(b)) => I(cond.ite(&a, &b)),
-                (B(a), B(b)) => B(cond.ite(&a, &b)),
-                _ => return Err(SemanticContractError::Unsupported("source branch types")),
-            }
+            merge_source_values(
+                &cond,
+                then_value,
+                else_value,
+                call_returns.merged_composites,
+            )?
         }
         // First-match order, like the emitter's try-chain and
         // `--bitvec-i64` verification: an arm runs under the negation of
@@ -5461,15 +5805,12 @@ fn source_expr<'ctx>(
                         .cloned()
                         .or_else(|| env.get(&name).cloned())
                         .ok_or(SemanticContractError::Unsupported("source binding"))?;
-                    let merged = match (prior, bound) {
-                        (I(a), I(b)) => I(arm_hit.ite(&b, &a)),
-                        (B(a), B(b)) => B(arm_hit.ite(&b, &a)),
-                        _ => {
-                            return Err(SemanticContractError::Unsupported(
-                                "match arm write kinds",
-                            ));
-                        }
-                    };
+                    let merged = merge_source_values(
+                        &arm_hit,
+                        bound,
+                        prior,
+                        call_returns.merged_composites,
+                    )?;
                     written.insert(name, merged);
                 }
                 if let Some(cond) = hit {
@@ -5484,11 +5825,7 @@ fn source_expr<'ctx>(
                 ));
             };
             for (cond, value) in selected.into_iter().rev() {
-                result = match (result, value) {
-                    (I(rest), I(v)) => I(cond.ite(&v, &rest)),
-                    (B(rest), B(v)) => B(cond.ite(&v, &rest)),
-                    _ => return Err(SemanticContractError::Unsupported("source match arm kinds")),
-                };
+                result = merge_source_values(&cond, value, result, call_returns.merged_composites)?;
             }
             result
         }
@@ -7326,6 +7663,130 @@ mod tests {
         assert!(outcomes(&shadowed)
             .iter()
             .all(|result| *result == z3::SatResult::Unsat));
+    }
+
+    #[test]
+    fn composite_v7_admits_branch_merged_composites() {
+        let v7 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV7)
+        };
+        let outcomes =
+            |source: &str| refined_module_outcomes_admission(source, RefinedAdmission::CompositeV7);
+        let decl = "struct P { x: i64, y: i64 }\nenum Shape { Dot, Edge(w: i64) }";
+        // `if`/`match` tails producing struct literals, parameters and
+        // enum values — the slice's whole merge vocabulary in one
+        // module.
+        let module = |piece: &str| format!("{decl}\n{piece}\n{MAIN0}");
+        for piece in [
+            // `if` tails producing a parameter and a struct literal.
+            "atom pick(p: P, c: i64) -> P requires: c >= 0 && p.x >= 0; ensures: result.x >= 0; body: { if c == 0 { p } else { P { x: c, y: c } } };",
+            // `if` tails producing enum values — tag and payload merge.
+            "atom pick_enum(s: Shape, c: i64) -> Shape requires: c >= 0; ensures: true; body: { if c == 0 { s } else { Shape::Edge(c) } };",
+            // `match` arms producing struct literals.
+            "atom pick_match(a: i64, b: i64, c: i64) -> P requires: a >= 0 && b >= 0; ensures: result.y >= 0; body: { match c { 0 => P { x: a, y: b }, _ => P { x: b, y: a } } };",
+            // A field write inside a branch merges the composite.
+            "atom merge_field(q: P, c: i64) -> i64 requires: q.x >= 0 && q.x < 100; ensures: result >= 0; body: { if c == 0 { q.x = q.x + 1; q.x } else { q.x } };",
+        ] {
+            let source = module(piece);
+            assert!(
+                v7(&source)
+                    .unwrap()
+                    .iter()
+                    .all(|c| c.profile == PURE_I64_COMPOSITE_PROFILE_V7),
+                "{piece}"
+            );
+            assert!(
+                outcomes(&source)
+                    .iter()
+                    .all(|result| *result == z3::SatResult::Unsat),
+                "{piece}"
+            );
+        }
+        let source = module(
+            "atom pick(p: P, c: i64) -> P requires: c >= 0 && p.x >= 0; ensures: result.x >= 0; body: { if c == 0 { p } else { P { x: c, y: c } } };",
+        );
+        assert_eq!(
+            module_source_profile(&source, RefinedAdmission::CompositeV7).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V7
+        );
+        // A merged struct's field conjunct must hold on BOTH tails:
+        // the else tail breaks `result.x >= 0`, so the obligation is
+        // refuted, not vacuous.
+        let wrong = source.replace("else { P { x: c, y: c } }", "else { P { x: 0 - 1, y: c } }");
+        assert!(outcomes(&wrong).contains(&z3::SatResult::Sat));
+        // Narrower admissions keep merged composites out of the
+        // vocabulary.
+        for admission in [
+            RefinedAdmission::Reject,
+            RefinedAdmission::V1,
+            RefinedAdmission::V2,
+            RefinedAdmission::Composite,
+            RefinedAdmission::CompositeV2,
+            RefinedAdmission::CompositeV3,
+            RefinedAdmission::CompositeV4,
+            RefinedAdmission::CompositeV5,
+            RefinedAdmission::CompositeV6,
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(&source, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+        }
+        // A module whose `if` only merges scalars keeps the earlier
+        // profile — branch-merged composites are opt-in.
+        let scalars_only = format!(
+            "struct P {{ x: i64, y: i64 }}\natom read(p: P, c: i64) -> i64 requires: c >= 0; ensures: result >= 0; body: {{ if c == 0 {{ p.x }} else {{ p.y }} }};\n{MAIN0}"
+        );
+        assert_eq!(
+            module_source_profile(&scalars_only, RefinedAdmission::CompositeV7).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE
+        );
+    }
+
+    #[test]
+    fn composite_v7_rejects_merged_composites_outside_the_fragment() {
+        let context = z3::Context::new(&z3::Config::new());
+        let decl = "struct P { x: i64, y: i64 }\nstruct Q { z: i64 }\nenum Shape { Dot, Edge(w: i64) }\nenum M { A(x: i64) }";
+        for (piece, why) in [
+            // Branches producing different struct types.
+            (
+                "atom bad(p: P, r: Q, c: i64) -> i64 requires: true; ensures: true; body: { let s = if c == 0 { p } else { r }; s.x };",
+                "mismatched struct tails",
+            ),
+            // A struct tail against a scalar tail.
+            (
+                "atom bad(p: P, c: i64) -> i64 requires: true; ensures: true; body: { let s = if c == 0 { p } else { 1 }; s.x };",
+                "mixed composite/scalar tails",
+            ),
+            // Enum values merging against a different enum's values.
+            (
+                "atom bad(s: Shape, m: M, c: i64) -> i64 requires: true; ensures: true; body: { let e = if c == 0 { s } else { m }; match e { Shape::Edge(v) => v, _ => 0 } };",
+                "mismatched enum tails",
+            ),
+            // A `while` body still keeps merged composites out — the
+            // loop's merge stays scalar.
+            (
+                "atom bad(p: P) -> i64 requires: true; ensures: true; body: { let i = 0; while i < 2 invariant: i >= 0 decreases: 2 - i { i = i + 1 }; if i == 2 { p } else { p }.x };",
+                "composite result off a loop tail",
+            ),
+        ] {
+            let source = format!("{decl}\n{piece}\n{MAIN0}");
+            assert!(
+                extract_pure_i64_module_contracts(
+                    &source,
+                    "m.mm",
+                    None,
+                    RefinedAdmission::CompositeV7
+                )
+                .is_err(),
+                "admitted: {why}"
+            );
+            assert!(
+                encode_pure_i64_module_obligations(&source, &context, RefinedAdmission::CompositeV7)
+                    .is_err(),
+                "encoded: {why}"
+            );
+        }
     }
 
     #[test]

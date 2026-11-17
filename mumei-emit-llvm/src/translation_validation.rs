@@ -986,8 +986,10 @@ unsafe fn check_function(
                 // An aggregate is an admitted struct formal, an
                 // `insertvalue` chain or a call's struct result. It is
                 // read by `extractvalue`, extended by `insertvalue`,
-                // passed to a call or returned — never merged (`phi`,
-                // `select`) or stored. A constant aggregate (the
+                // passed to a call, returned or merged by
+                // `phi` (the emitter lowers a branch-merged composite to
+                // a `{i64, ...}` phi under composite v7) — never `select`
+                // or stored. A constant aggregate (the
                 // emitter's folded literal) holds integer or `undef`
                 // elements only; an `undef` slot stays undefined and
                 // fails closed wherever it is read.
@@ -997,12 +999,15 @@ unsafe fn check_function(
                         LLVMOpcode::LLVMExtractValue | LLVMOpcode::LLVMInsertValue
                     ) && i == 0)
                         || opcode == LLVMOpcode::LLVMCall
+                        || opcode == LLVMOpcode::LLVMPHI
                         || opcode == LLVMOpcode::LLVMRet;
                     let source_ok = !LLVMIsAArgument(value).is_null()
                         || (!LLVMIsAInstruction(value).is_null()
                             && matches!(
                                 LLVMGetInstructionOpcode(value),
-                                LLVMOpcode::LLVMInsertValue | LLVMOpcode::LLVMCall
+                                LLVMOpcode::LLVMInsertValue
+                                    | LLVMOpcode::LLVMCall
+                                    | LLVMOpcode::LLVMPHI
                             ))
                         || constant_aggregate(value);
                     if !use_ok || !source_ok {
@@ -1063,7 +1068,9 @@ unsafe fn check_function(
                 | LLVMOpcode::LLVMTrunc
                 | LLVMOpcode::LLVMSelect
                 | LLVMOpcode::LLVMPHI => {
-                    width(LLVMTypeOf(inst))?;
+                    if aggregate_fields(LLVMTypeOf(inst)).is_none() {
+                        width(LLVMTypeOf(inst))?;
+                    }
                 }
                 _ => return Err(ValidationError("unsupported LLVM instruction")),
             }
@@ -1512,8 +1519,11 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
         // phi's incoming value is resolved against the environment the
         // block was entered with, so a phi that references a sibling
         // phi sees the previous iteration's value, not the freshly
-        // bound one. (LLVM requires phi nodes to lead a block.)
+        // bound one. Aggregate phis defer their `self.aggregates`
+        // commit for the same reason. (LLVM requires phi nodes to
+        // lead a block.)
         let mut pending_phis: Vec<(LLVMValueRef, BV<'ctx>)> = Vec::new();
+        let mut pending_aggregates: Vec<(LLVMValueRef, Vec<Option<BV<'ctx>>>)> = Vec::new();
         let mut inst = LLVMGetFirstInstruction(block);
         while !inst.is_null() {
             let op = LLVMGetInstructionOpcode(inst);
@@ -1521,12 +1531,27 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 let i = (0..LLVMCountIncoming(inst))
                     .find(|&i| LLVMGetIncomingBlock(inst, i) == previous)
                     .ok_or(ValidationError("missing LLVM phi edge"))?;
-                pending_phis.push((inst, self.value(LLVMGetIncomingValue(inst, i), &values)?));
+                let incoming = LLVMGetIncomingValue(inst, i);
+                if aggregate_fields(LLVMTypeOf(inst)).is_some() {
+                    // A composite merged across a branch boundary is a
+                    // `{i64, ...}` phi: its slots are the incoming
+                    // aggregate's slots on this predecessor path — the
+                    // same per-slot merge the source encoder performs.
+                    // Slots are resolved eagerly (against the previous
+                    // iteration's aggregates) but committed below,
+                    // with the scalar phis.
+                    pending_aggregates.push((inst, self.aggregate(incoming)?));
+                } else {
+                    pending_phis.push((inst, self.value(incoming, &values)?));
+                }
                 inst = LLVMGetNextInstruction(inst);
                 continue;
             }
             for (phi, result) in pending_phis.drain(..) {
                 values.insert(phi as usize, result);
+            }
+            for (phi, slots) in pending_aggregates.drain(..) {
+                self.aggregates.insert(phi as usize, slots);
             }
             if op == LLVMOpcode::LLVMRet {
                 // A returned aggregate compares as its slots laid out

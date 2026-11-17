@@ -2857,3 +2857,142 @@ fn composite_v6_bool_padding_slots_compare_against_normalized_source_values() {
     .unwrap();
     assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
 }
+
+const BRANCH_MERGED_COMPOSITE_SOURCE: &str = "struct P { x: i64, y: i64 }\nenum Shape { Dot, Edge(w: i64) }\natom pick(p: P, c: i64) -> P requires: c >= 0 && p.x >= 0; ensures: result.x >= 0; body: { if c == 0 { p } else { P { x: c, y: c } } };\natom pick_enum(s: Shape, c: i64) -> Shape requires: c >= 0; ensures: true; body: { if c == 0 { s } else { Shape::Edge(c) } };\natom main() -> i64 requires: true; ensures: true; body: { let q = pick(P { x: 1, y: 2 }, 3); q.x };";
+
+#[test]
+fn composite_v7_branch_merged_aggregates_validate_against_phi_ir() {
+    // composite v7 lowers a branch-merged struct/enum to a `{i64, ...}`
+    // phi: the validator must follow the merge per slot, so the real
+    // emitter output compares EquivalentWithinProfile.
+    let items = parse_module_checked(BRANCH_MERGED_COMPOSITE_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    assert!(
+        ir.contains("phi { i64, i64 }"),
+        "emitter did not phi a composite:\n{ir}"
+    );
+    let report = tv::validate_native_module(
+        BRANCH_MERGED_COMPOSITE_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV7,
+    )
+    .unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    // Reading the wrong slot of the merged aggregate refutes the
+    // comparison: `main` must take `q.x`, not `q.y`.
+    let swapped = ir.replace(
+        "%q.x = extractvalue { i64, i64 } %call_pick, 0",
+        "%q.x = extractvalue { i64, i64 } %call_pick, 1",
+    );
+    assert_ne!(swapped, ir, "probe did not apply");
+    assert_eq!(
+        tv::validate_native_module(
+            BRANCH_MERGED_COMPOSITE_SOURCE,
+            &swapped,
+            Options::default(),
+            RefinedAdmission::CompositeV7,
+        )
+        .unwrap()
+        .outcome,
+        Outcome::Different
+    );
+}
+
+const SHORT_VARIANT_SOURCE: &str = "enum Shape { Dot, Edge(w: i64) }\natom mk() -> Shape requires: true; ensures: true; body: { Shape::Dot };\natom main() -> i64 requires: true; ensures: true; body: { 0 };";
+
+#[test]
+fn composite_v6_short_variant_zero_fills_unwritten_payload_slots() {
+    // `Dot` carries no payload, so slot 1 of the `{i64, i64}` union is
+    // left unwritten by the variant init. The source model pads it with
+    // zero; an `undef` starting value would fail the slot comparison.
+    let items = parse_module_checked(SHORT_VARIANT_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let report = tv::validate_native_module(
+        SHORT_VARIANT_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV6,
+    )
+    .unwrap();
+    assert_eq!(
+        report.outcome,
+        Outcome::EquivalentWithinProfile,
+        "short-variant enum padding did not recheck:\n{ir}"
+    );
+}
+
+// The source keeps its own bounded scalar loop — it is what lets the
+// IR side walk a cycle at all — while the composite `p`/`q` carriers
+// exist only in the IR: `q` tracks the previous iteration's `p`, i.e.
+// `max(0, s - 1)` where `s` counts iterations.
+const LOOP_SIBLING_PHI_SOURCE: &str = "atom f(n: i64) -> i64 requires: n >= 0 && n <= 4; ensures: true; body: { let i = 0; let s = 0; while i < n invariant: i >= 0 && i <= n decreases: n - i { s = s + 1; i = i + 1 }; if s == 0 { 0 } else { s - 1 } };\natom main() -> i64 requires: true; ensures: true; body: { 0 };";
+
+const LOOP_SIBLING_PHI_IR: &str = r#"define i64 @f(i64 %0) {
+entry:
+  br label %header
+header:
+  %p = phi { i64, i64 } [ { i64 0, i64 0 }, %entry ], [ %pn, %latch ]
+  %q = phi { i64, i64 } [ { i64 0, i64 0 }, %entry ], [ %p, %latch ]
+  %i = phi i64 [ 0, %entry ], [ %in, %latch ]
+  %cond = icmp slt i64 %i, %0
+  br i1 %cond, label %latch, label %exit
+latch:
+  %px = extractvalue { i64, i64 } %p, 0
+  %px1 = add i64 %px, 1
+  %pn = insertvalue { i64, i64 } %p, i64 %px1, 0
+  %in = add i64 %i, 1
+  br label %header
+exit:
+  %qx = extractvalue { i64, i64 } %q, 0
+  ret i64 %qx
+}
+define i64 @__mumei_user_main() {
+entry:
+  ret i64 0
+}
+define i32 @main(i32 %0, ptr %1) {
+entry:
+  %result = call i64 @__mumei_user_main()
+  %exit_code = trunc i64 %result to i32
+  ret i32 %exit_code
+}
+"#;
+
+#[test]
+fn composite_v7_loop_aggregate_phi_reads_sibling_phi_before_commit() {
+    // `%q`'s latch-edge incoming is the sibling header phi `%p` itself.
+    // LLVM phis commit together, so `%q` must see `%p`'s value for the
+    // current iteration — not the freshly resolved `%pn` slots.
+    let ir = pin(LOOP_SIBLING_PHI_IR);
+    let report = tv::validate_native_module(
+        LOOP_SIBLING_PHI_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV7,
+    )
+    .unwrap();
+    assert_eq!(
+        report.outcome,
+        Outcome::EquivalentWithinProfile,
+        "loop sibling-phi comparison did not recheck"
+    );
+    // If `%q` instead read `%p`'s next-iteration value the comparison
+    // must fail — that is exactly the eager-commit mistake this guards.
+    let shifted = ir.replace(
+        "  %q = phi { i64, i64 } [ { i64 0, i64 0 }, %entry ], [ %p, %latch ]\n",
+        "  %q = phi { i64, i64 } [ { i64 0, i64 0 }, %entry ], [ %pn, %latch ]\n",
+    );
+    assert_ne!(shifted, ir, "probe did not apply");
+    assert_eq!(
+        tv::validate_native_module(
+            LOOP_SIBLING_PHI_SOURCE,
+            &shifted,
+            Options::default(),
+            RefinedAdmission::CompositeV7,
+        )
+        .unwrap()
+        .outcome,
+        Outcome::Different
+    );
+}
