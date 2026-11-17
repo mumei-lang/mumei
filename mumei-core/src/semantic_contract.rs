@@ -3569,7 +3569,9 @@ pub fn call_field_decl<'ctx>(
     let refs: Vec<&Sort> = domain.iter().collect();
     FuncDecl::new(
         ctx,
-        format!("mumei_call_{name}_{arity}_field_{index}"),
+        // `:` never appears in an identifier, so no `call_decl` name
+        // (`mumei_call_<atom>_<arity>`) can spell a field slot's name.
+        format!("mumei_call_field:{name}:{arity}:{index}"),
         &refs,
         &Sort::bitvector(ctx, 64),
     )
@@ -5317,6 +5319,19 @@ mod tests {
             RefinedAdmission::CompositeV2
         )
         .is_err());
+    }
+
+    #[test]
+    fn struct_call_slot_declarations_never_alias_scalar_call_declarations() {
+        let context = z3::Context::new(&z3::Config::new());
+        assert_ne!(
+            call_field_decl(&context, "f", 1, 1).name(),
+            call_decl(&context, "f_1_field", 1).name()
+        );
+        assert_ne!(
+            call_field_decl(&context, "f", 1, 1).name(),
+            call_field_decl(&context, "f", 1, 0).name()
+        );
     }
 
     #[test]
