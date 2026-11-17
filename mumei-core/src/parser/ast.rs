@@ -562,7 +562,11 @@ impl Stmt {
     /// shadows locally and does not count, nor does `name.f = …`.
     pub fn rebinds_name(&self, name: &str) -> bool {
         match self {
-            Stmt::Let { value, .. } => value.rebinds_name(name),
+            // A `let` re-binding `name` replaces the binding wholesale —
+            // the admission gate only allows it for a same-type struct
+            // re-init, which is a whole-aggregate rebind for
+            // spec-validation purposes.
+            Stmt::Let { var, value, .. } => var == name || value.rebinds_name(name),
             Stmt::Assign { var, value, .. } => var == name || value.rebinds_name(name),
             Stmt::ArrayStore { index, value, .. } => {
                 index.rebinds_name(name) || value.rebinds_name(name)
