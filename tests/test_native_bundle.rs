@@ -1931,6 +1931,24 @@ fn module_bundle_with_refined_scalar_members_builds_as_v2() {
 }
 
 #[test]
+fn module_bundle_with_typedef_and_single_main_takes_the_module_path() {
+    // A module holding one `main` plus a refined scalar declaration is
+    // still a module — dispatch on atom count alone would send it to
+    // the single-atom path, which rejects `type` items outright.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "type Port = i64 where v >= 1 && v <= 65535;\n\
+         atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MODULE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V2);
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+}
+
+#[test]
 fn module_bundle_with_match_atom_builds_and_rechecks() {
     // Certificate generation annotates match bodies with a
     // manual-lemma reason in the translator IR; the binding pins the
