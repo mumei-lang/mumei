@@ -664,6 +664,11 @@ pub fn monomorphize_generic_structs(items: Vec<Item>) -> Result<Vec<Item>, Seman
         }
     }
     const MAX_GENERIC_STRUCT_INSTANCES: usize = 64;
+    // An instance's display name encodes its whole type-argument tree, so
+    // `L<T> { n: L<(T,T)> }`-style recursion doubles the name each round:
+    // bound its length as well as the instance count, or the fixpoint
+    // exhausts memory before reaching the count bound.
+    const MAX_GENERIC_INSTANCE_NAME_LEN: usize = 512;
     let mut mono = crate::ast::Monomorphizer::new();
     let mut items = items;
     let mut produced = std::collections::HashSet::new();
@@ -672,6 +677,15 @@ pub fn monomorphize_generic_structs(items: Vec<Item>) -> Result<Vec<Item>, Seman
         if mono.instances().len() > MAX_GENERIC_STRUCT_INSTANCES {
             return Err(SemanticContractError::Unsupported(
                 "generic struct instantiation bound exceeded",
+            ));
+        }
+        if mono
+            .instances()
+            .iter()
+            .any(|name| name.len() > MAX_GENERIC_INSTANCE_NAME_LEN)
+        {
+            return Err(SemanticContractError::Unsupported(
+                "generic struct instantiation type too large",
             ));
         }
         // `monomorphize` re-appends every collected instance each
@@ -8701,6 +8715,116 @@ mod tests {
             module_source_profile(&flat, RefinedAdmission::CompositeV9).unwrap(),
             PURE_I64_COMPOSITE_PROFILE
         );
+    }
+
+    #[test]
+    fn composite_v9_bounds_type_argument_explosion() {
+        // `L<T> { n: L<(T,T)> }` doubles the type-argument tree every
+        // instantiation round — well before the 64-instance count bound
+        // the name-length bound must reject it, not run out of memory.
+        let items = crate::parser::parse_module(
+            "struct L<T> { n: L<(T,T)> }\n             atom f(p: L<i64>) -> i64 requires: true; ensures: true; body: { 0 };",
+        );
+        let err = monomorphize_generic_structs(items).unwrap_err();
+        assert!(
+            matches!(err, SemanticContractError::Unsupported(msg) if msg.contains("too large")),
+            "{err:?}"
+        );
+        // Same through the module gate.
+        assert!(extract_pure_i64_module_contracts(
+            "struct L<T> { n: L<(T,T)> }\n             atom f(p: L<i64>) -> i64 requires: true; ensures: true; body: { 0 };\n             atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+            "m.mm",
+            None,
+            RefinedAdmission::CompositeV9,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn composite_v9_instantiates_only_concrete_nested_arguments() {
+        // `Outer<T> { inner: Box<Pair<T>> }`: the `T` inside the generic
+        // declaration is unresolved, so no phantom `Box<Pair<T>>`
+        // declaration is generated — only the concrete chain.
+        let items = crate::parser::parse_module(
+            "struct Pair<T> { a: T, b: T }\n             struct Box<T> { inner: T }\n             struct Outer<T> { inner: Box<Pair<T>> }\n             atom f(o: Outer<i64>) -> i64 requires: true; ensures: true; body: { o.inner.inner.a };\n             atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+        );
+        let mono = monomorphize_generic_structs(items).unwrap();
+        let names: Vec<&str> = mono
+            .iter()
+            .filter_map(|item| match item {
+                Item::StructDef(def) => Some(def.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.contains(&"Outer<i64>"), "{names:?}");
+        assert!(names.contains(&"Box<Pair<i64>>"), "{names:?}");
+        assert!(names.contains(&"Pair<i64>"), "{names:?}");
+        assert!(
+            !names.iter().any(|name| name.contains('T')),
+            "no unresolved declaration: {names:?}"
+        );
+        // A one-letter concrete struct used as a type argument is not a
+        // type parameter: `Box<I>` instantiates like `Box<i64>`.
+        let items = crate::parser::parse_module(
+            "struct I { v: i64 }\n             struct Box<T> { inner: T }\n             atom f(b: Box<I>) -> i64 requires: true; ensures: true; body: { b.inner.v };\n             atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+        );
+        let mono = monomorphize_generic_structs(items).unwrap();
+        let names: Vec<&str> = mono
+            .iter()
+            .filter_map(|item| match item {
+                Item::StructDef(def) => Some(def.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.contains(&"Box<I>"), "{names:?}");
+    }
+
+    #[test]
+    fn composite_v9_multi_param_structs_and_invariant_commas() {
+        let v9 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV9)
+        };
+        // Commas inside type arguments — `Duo<i64, bool>` — must not
+        // split a parameter or a struct-field declaration in two.
+        let source = format!(
+            "struct Duo<T, U> {{ first: T, second: U }}\n             struct Wrap {{ pair: Duo<i64, bool>, n: i64 }}\n             atom get(p: Duo<i64, bool>) -> i64 requires: p.first >= 0; ensures: result == p.first; body: {{ p.first }};\n             atom flag(w: Wrap) -> bool requires: true; ensures: result == w.pair.second; body: {{ w.pair.second }};\n             {{MAIN0}}"
+        );
+        let source = source.replace("{MAIN0}", MAIN0);
+        assert!(v9(&source).is_ok(), "{}", source);
+        // Splitting itself: the comma inside `Duo<i64, bool>` stays in
+        // the field, while a comparison inside an `invariant` clause
+        // still ends at the following comma — `<` there is an operator,
+        // never a bracket.
+        let items = crate::parser::parse_module(
+            "struct Duo<T, U> { first: T, second: U }\n\
+             struct R { lo: i64, hi: i64, invariant: self.lo < self.hi, n: i64, pair: Duo<i64, bool> }\n\
+             atom g(p: Duo<i64, bool>, q: i64) -> i64 requires: true; ensures: true; body: { 0 };",
+        );
+        let r = items
+            .iter()
+            .find_map(|item| match item {
+                Item::StructDef(def) if def.name == "R" => Some(def),
+                _ => None,
+            })
+            .expect("struct R parsed");
+        assert_eq!(r.invariants.len(), 1, "{r:?}");
+        let field_names: Vec<&str> = r.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(field_names, ["lo", "hi", "n", "pair"], "{r:?}");
+        let pair = r
+            .fields
+            .iter()
+            .find(|f| f.name == "pair")
+            .expect("pair field");
+        assert_eq!(pair.type_name, "Duo<i64, bool>");
+        let g = items
+            .iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "g" => Some(atom),
+                _ => None,
+            })
+            .expect("atom g parsed");
+        assert_eq!(g.params.len(), 2, "{g:?}");
+        assert_eq!(g.params[0].type_name.as_deref(), Some("Duo<i64, bool>"));
     }
 
     #[test]
