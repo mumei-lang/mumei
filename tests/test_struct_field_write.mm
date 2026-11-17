@@ -91,6 +91,18 @@ body: {
     q.x
 };
 
+// A `match` right side works too: each arm's StructInit registers its
+// fresh handle's `__struct_<h>_f` slots in the arm env, and the merge
+// must carry them so `project_struct_fields` can fold the field-wise
+// ite — otherwise the rebound q.x is unconstrained.
+atom rebind_match_rhs(b: i64, q: Pt) -> i64
+requires: b == 0 || b == 1;
+ensures: result >= 1 && q.x >= 1;
+body: {
+    let q = match b { 0 => Pt { x: 3, y: 0 }, _ => Pt { x: 4, y: 0 } };
+    q.x
+};
+
 // A recursive callee that writes a composite field still propagates
 // its ensures to a caller whose requires constrains the input
 // field — the recursion antecedent evaluates on the input-time
