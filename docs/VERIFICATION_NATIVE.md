@@ -1449,11 +1449,12 @@ accepted only under the refined profile (v1 still rejects every non-atom
 item) and only when it carries no `unit` metadata — the profile does
 not model units, so it refuses to discard them silently. The base must
 be a literal scalar in the integer-sort vocabulary (`i64`, `i8`–`u32`):
-a `bool` base cannot be admitted because the verifier encodes the
-refinement operand as `Int` (a `Bool` predicate would not check), and a
-base naming another declaration is rejected as a chain for the same
-reason — the verifier applies only a refinement's own predicate, so an
-ancestor's conjuncts would silently drop at build time. The `where`
+a `bool` base or a base naming another declaration (an alias chain) is
+still rejected. The verifier encodes both correctly — `bool` binds the
+operand as `Bool` and a chain composes every ancestor's predicate —
+but admitting them would widen the fragment beyond what the profile
+name declares, so the rejection is a conservative admission choice, not
+a verifier limit. Widening either needs a new profile name. The `where`
 predicate must check as `Bool` over its declared operand under the
 existing `expression_kind` gate, with no calls admitted inside it.
 Duplicate type names and a type named like an atom are rejected, so

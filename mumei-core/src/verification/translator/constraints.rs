@@ -10,11 +10,24 @@ pub(crate) fn apply_refinement_constraint<'a>(
     solver: &Solver<'a>,
     var_name: &str,
     refined: &RefinedType,
+    module_env: &crate::verification::module_env::ModuleEnv,
     global_env: &mut Env<'a>,
 ) -> MumeiResult<()> {
     let ctx = vc.ctx;
-    // Type System 2.0: ベース型に基づいて変数を生成
-    let var_z3: Dynamic = match refined._base_type.as_str() {
+    // A refined type may name another declaration as its base
+    // (`type Small = Pos where v < 10;`): every ancestor's predicate is a
+    // conjunct of the alias, so the operand must satisfy the whole chain —
+    // applying only the immediate declaration would silently drop the
+    // ancestor's constraints. A cyclic base is a type error, not an alias
+    // carrying no constraints.
+    let chain = module_env
+        .refined_chain(&refined.name)
+        .map_err(|cycle| MumeiError::type_error_at(cycle, refined.span.clone()))?;
+    // Type System 2.0: ベース型に基づいて変数を生成 — the chain's leaf base
+    // name decides the encoding (a chained alias's `_base_type` is the next
+    // declaration, not a scalar).
+    let leaf_base = chain.last().map_or("", |decl| decl._base_type.as_str());
+    let var_z3: Dynamic = match leaf_base {
         // f64 エンコーディング（デフォルト Real、`--ieee754-f64` で
         // Float）に合わせ、パラメータ側の `param_z3_value` と同一
         // ソートにする。
@@ -33,36 +46,41 @@ pub(crate) fn apply_refinement_constraint<'a>(
         // does not silently return an overflow-sensitive parameter to the
         // unbounded `Int` encoding.
         "i64" if vc.bitvec_i64 => BV::new_const(ctx, var_name, I64_BITS).into(),
+        "bool" => Bool::new_const(ctx, var_name).into(),
         _ => Int::new_const(ctx, var_name).into(),
     };
 
     global_env.insert(var_name.to_string(), var_z3.clone());
 
-    let mut local_env = global_env.clone();
-    local_env.insert(refined.operand.clone(), var_z3);
+    // Assert every conjunct in the chain — each declaration names its own
+    // operand, and each binds to the same z3 variable.
+    for decl in chain {
+        let mut local_env = global_env.clone();
+        local_env.insert(decl.operand.clone(), var_z3.clone());
 
-    let predicate_ast = parse_expression(&refined.predicate_raw);
-    let predicate_z3 = expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
-        .as_bool()
-        .ok_or(
-            MumeiError::type_error_at(
-                format!("Predicate for {} must be boolean", refined.name),
-                refined.span.clone(),
-            )
-            .with_help(format!(
-                "型 '{}' の制約が boolean 式である必要があります",
-                refined.name
-            )),
-        )?;
+        let predicate_ast = parse_expression(&decl.predicate_raw);
+        let predicate_z3 = expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
+            .as_bool()
+            .ok_or(
+                MumeiError::type_error_at(
+                    format!("Predicate for {} must be boolean", decl.name),
+                    decl.span.clone(),
+                )
+                .with_help(format!(
+                    "型 '{}' の制約が boolean 式である必要があります",
+                    decl.name
+                )),
+            )?;
 
-    let track_label = format!("track_refined_type_{}::{}", var_name, refined.name);
-    let track_bool = Bool::new_const(ctx, track_label.as_str());
-    solver.assert_and_track(&predicate_z3, &track_bool);
-    profile_solver_assertion(
-        vc,
-        &format!("refined_type_{}::{}", var_name, refined.name),
-        Some(refined.span.to_string()),
-    );
+        let track_label = format!("track_refined_type_{}::{}", var_name, decl.name);
+        let track_bool = Bool::new_const(ctx, track_label.as_str());
+        solver.assert_and_track(&predicate_z3, &track_bool);
+        profile_solver_assertion(
+            vc,
+            &format!("refined_type_{}::{}", var_name, decl.name),
+            Some(decl.span.to_string()),
+        );
+    }
     Ok(())
 }
 

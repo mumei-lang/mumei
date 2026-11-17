@@ -2465,6 +2465,60 @@ pub(crate) fn expr_to_z3<'a>(
                             }
                         }
 
+                        // Refined parameter types are part of the callee's
+                        // contract: `need(x: Neg)` must reject `need(5)`. Each
+                        // conjunct of the param's declaration chain is checked
+                        // at the call site, the same shape as `requires`.
+                        if !recursive_instance {
+                            if let Some(solver) = solver_opt {
+                                for param in &callee.params {
+                                    let Some(type_name) = param.type_name.as_deref() else {
+                                        continue;
+                                    };
+                                    if vc.module_env.get_type(type_name).is_none() {
+                                        continue;
+                                    }
+                                    let chain = vc.module_env.refined_chain(type_name).map_err(
+                                        |cycle| {
+                                            MumeiError::type_error_at(cycle, callee.span.clone())
+                                        },
+                                    )?;
+                                    let Some(arg_z3) = call_env.get(&param.name).cloned() else {
+                                        continue;
+                                    };
+                                    for decl in chain {
+                                        let mut local_env = call_env.clone();
+                                        local_env.insert(decl.operand.clone(), arg_z3.clone());
+                                        let pred_ast = parse_expression(&decl.predicate_raw);
+                                        let Some(pred_bool) =
+                                            expr_to_z3(vc, &pred_ast, &mut local_env, None)?
+                                                .as_bool()
+                                        else {
+                                            continue;
+                                        };
+                                        if vc.cover_obligations.is_some() {
+                                            record_cover_obligation(vc, pred_bool);
+                                            continue;
+                                        }
+                                        solver.push();
+                                        for cond in vc.path_cond_stack.borrow().iter() {
+                                            solver.assert(cond);
+                                        }
+                                        solver.assert(&pred_bool.not());
+                                        let refined_check =
+                                            crate::verification::phase_artifacts::check(solver);
+                                        solver.pop(1);
+                                        if refined_check == SatResult::Sat {
+                                            return Err(MumeiError::verification(
+                                                format!("Call to '{}': refinement on parameter '{}' ({}) not satisfied at call site", name, param.name, decl.name)
+                                            ).with_help("呼び出し元で引数の型制約を満たしていません。引数の値を確認してください")
+                                            .with_verdict(crate::verification::VerdictKind::Rejected));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Trait method param_constraints の検証:
                         // 呼び出し先がトレイトメソッドの実装である場合、param_constraints を
                         // 呼び出し元のコンテキストで検証する。

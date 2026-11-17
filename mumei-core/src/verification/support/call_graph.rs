@@ -98,7 +98,14 @@ pub(crate) fn verify_atom_invariant(
         // 精緻型制約も適用
         if let Some(type_name) = &param.type_name {
             if let Some(refined) = module_env.get_type(type_name) {
-                apply_refinement_constraint(&vc, &solver, &param.name, refined, &mut env)?;
+                apply_refinement_constraint(
+                    &vc,
+                    &solver,
+                    &param.name,
+                    refined,
+                    module_env,
+                    &mut env,
+                )?;
             }
         }
     }

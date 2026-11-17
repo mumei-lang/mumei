@@ -1243,7 +1243,7 @@ fn assert_parameter_refinements<'a>(
         let Some(refined) = module_env.get_type(type_name) else {
             continue;
         };
-        apply_refinement_constraint(vc, solver, &param.name, refined, env)
+        apply_refinement_constraint(vc, solver, &param.name, refined, module_env, env)
             .map_err(|err| err.to_string())?;
     }
     Ok(())

@@ -233,6 +233,25 @@ impl ModuleEnv {
         self.types.get(name)
     }
 
+    /// The declaration chain behind `name`: `name` itself first, then each
+    /// ancestor whose `_base_type` names another declaration, ending at a
+    /// literal base or an undeclared name. A base that revisits an earlier
+    /// name is a cycle and returns `Err` — the declaration is a type error,
+    /// not a silently constraint-free alias.
+    pub fn refined_chain<'a>(&'a self, name: &str) -> Result<Vec<&'a RefinedType>, String> {
+        let mut chain = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut current = name;
+        while let Some(refined) = self.types.get(current) {
+            if !seen.insert(current) {
+                return Err(format!("cyclic refined type declaration at '{current}'"));
+            }
+            chain.push(refined);
+            current = refined._base_type.as_str();
+        }
+        Ok(chain)
+    }
+
     /// Unit tag of `name`, inherited through alias chains: `type Money = Usd;`
     /// carries `Usd`'s unit unless it declares its own. `None` for unitless or
     /// unknown types.
