@@ -3992,10 +3992,15 @@ construction and results, struct `let`s, invariants, methods, field
 constraints, subrange and refined-alias fields (the verifier does not
 yet assume their domains for struct fields), non-scalar fields and
 binders spelled like the emitter's synthesized field names all fail
-closed. `check` and `recheck-source` cover the composite fragment;
-`recheck-llvm` and every stage built on it reject aggregate member
-signatures until the translation profile decomposes `extractvalue` —
-the next composite slice. Downstream consumers need no route changes:
+closed. `check`, `recheck-source` and — since the translation
+profile decomposes aggregate member signatures — `recheck-llvm` cover
+the composite fragment: each struct formal maps to its flattened
+field slots in declaration order, `extractvalue` reads the field at
+its index and a passed-through aggregate call argument expands to the
+same slots the source applies. `insertvalue`, aggregate `phi`/`select`
+merges, constant or returned aggregates, nested/packed/non-i64 shapes
+and scalar/aggregate mismatches stay rejected rather than paired by
+guesswork. Downstream consumers need no route changes:
 the bundle record pins the profile name it was produced under, so the
 declared recheck/accept routes re-derive under the record's own
 admission. mumei-demo coverage of the v4 fragment is a later slice.
