@@ -2639,15 +2639,162 @@ fn composite_aggregates_outside_struct_formal_reads_and_pass_through_fail_closed
             "aggregate probe accepted: {to}"
         );
     }
-    // Aggregate results stay outside: a member returning its formal.
-    let returning = COMPOSITE_IR.replace(
-        "define i64 @__mumei_user_main() {\nentry:\n  ret i64 0\n}",
-        "define i64 @__mumei_user_main() {\nentry:\n  ret i64 0\n}\ndefine { i64, i64 } @echo({ i64, i64 } %0) {\nentry:\n  ret { i64, i64 } %0\n}",
-    );
+    // A scalar source result never pairs with an aggregate return.
+    let returning = COMPOSITE_IR
+        .replace(
+            "define i64 @fwd({ i64, i64 } %0, i64 %1) {",
+            "define { i64, i64 } @fwd({ i64, i64 } %0, i64 %1) {",
+        )
+        .replace(
+            "  %add_tmp = add i64 %call_pick, %1\n  ret i64 %add_tmp",
+            "  %add_tmp = add i64 %call_pick, %1\n  ret { i64, i64 } %0",
+        );
+    assert_ne!(returning, COMPOSITE_IR);
     assert!(composite(COMPOSITE_SOURCE, &returning).is_err());
     // A scalar source parameter never pairs with an aggregate formal.
     let scalar = COMPOSITE_SOURCE
         .replace("atom fwd(t: S, k: i64)", "atom fwd(t: i64, k: i64)")
         .replace("pick(t) + k", "t + k");
     assert!(composite(&scalar, COMPOSITE_IR).is_err());
+}
+
+const STRUCT_RESULT_SOURCE: &str = "struct P { x: i64, y: i64 }\n\
+    atom make(a: i64) -> P requires: true; ensures: result.x == a; body: { P { x: a, y: a + 1 } };\n\
+    atom usep(a: i64) -> i64 requires: true; ensures: true; body: { make(a).y };\n\
+    atom initlet(a: i64) -> i64 requires: true; ensures: result == a; body: { let q = P { x: 5, y: a }; q.y };\n\
+    atom fwd(a: i64) -> P requires: true; ensures: result.x == a; body: { make(a) };\n\
+    atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
+
+/// The emitter's own native snapshot of `STRUCT_RESULT_SOURCE`: a struct
+/// result is an `insertvalue` chain returned as `{ i64, i64 }` (folded
+/// into a constant base where a field is a literal), and a call's struct
+/// result is read by `extractvalue` or returned unchanged.
+const STRUCT_RESULT_IR: &str = r#"source_filename = "mumei_merged"
+target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
+target triple = "x86_64-pc-linux-gnu"
+define { i64, i64 } @make(i64 %0) {
+entry:
+  %add_tmp = add i64 %0, 1
+  %struct_x = insertvalue { i64, i64 } undef, i64 %0, 0
+  %struct_y = insertvalue { i64, i64 } %struct_x, i64 %add_tmp, 1
+  ret { i64, i64 } %struct_y
+}
+define i64 @usep(i64 %0) {
+entry:
+  %call_make = call { i64, i64 } @make(i64 %0)
+  %nested.y = extractvalue { i64, i64 } %call_make, 1
+  ret i64 %nested.y
+}
+define i64 @initlet(i64 %0) {
+entry:
+  %struct_y = insertvalue { i64, i64 } { i64 5, i64 undef }, i64 %0, 1
+  %q.y = extractvalue { i64, i64 } %struct_y, 1
+  ret i64 %q.y
+}
+define { i64, i64 } @fwd(i64 %0) {
+entry:
+  %call_make = call { i64, i64 } @make(i64 %0)
+  ret { i64, i64 } %call_make
+}
+define i64 @__mumei_user_main() {
+entry:
+  ret i64 0
+}
+define i32 @main(i32 %0, ptr %1) {
+entry:
+  %result = call i64 @__mumei_user_main()
+  %exit_code = trunc i64 %result to i32
+  ret i32 %exit_code
+}
+"#;
+
+fn struct_results(
+    source: &str,
+    ir: &str,
+) -> Result<tv::ModuleValidationReport, tv::ValidationError> {
+    tv::validate_native_module(
+        source,
+        ir,
+        Options::default(),
+        mumei_core::semantic_contract::RefinedAdmission::CompositeV3,
+    )
+}
+
+#[test]
+fn struct_results_pair_returned_aggregates_with_field_slots() {
+    let report = struct_results(STRUCT_RESULT_SOURCE, STRUCT_RESULT_IR).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(
+        report.source_profile,
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V3
+    );
+    for (from, to) in [
+        // returned fields written to each other's slots
+        (
+            "%struct_x = insertvalue { i64, i64 } undef, i64 %0, 0\n  %struct_y = insertvalue { i64, i64 } %struct_x, i64 %add_tmp, 1",
+            "%struct_x = insertvalue { i64, i64 } undef, i64 %0, 1\n  %struct_y = insertvalue { i64, i64 } %struct_x, i64 %add_tmp, 0",
+        ),
+        // a call result's slot read at the wrong index
+        (
+            "%nested.y = extractvalue { i64, i64 } %call_make, 1",
+            "%nested.y = extractvalue { i64, i64 } %call_make, 0",
+        ),
+        // the folded literal's constant slot read instead of the written one
+        (
+            "%q.y = extractvalue { i64, i64 } %struct_y, 1",
+            "%q.y = extractvalue { i64, i64 } %struct_y, 0",
+        ),
+        // a forwarded call result replaced by a fresh literal
+        (
+            "  %call_make = call { i64, i64 } @make(i64 %0)\n  ret { i64, i64 } %call_make",
+            "  %call_make = call { i64, i64 } @make(i64 %0)\n  ret { i64, i64 } { i64 0, i64 0 }",
+        ),
+    ] {
+        let ir = STRUCT_RESULT_IR.replace(from, to);
+        assert_ne!(ir, STRUCT_RESULT_IR, "probe did not apply: {to}");
+        assert_eq!(
+            struct_results(STRUCT_RESULT_SOURCE, &ir).unwrap().outcome,
+            Outcome::Different,
+            "probe not different: {to}"
+        );
+    }
+    for (from, to) in [
+        // a returned slot no `insertvalue` wrote is never guessed
+        (
+            "  %struct_y = insertvalue { i64, i64 } %struct_x, i64 %add_tmp, 1\n  ret { i64, i64 } %struct_y",
+            "  %struct_y = insertvalue { i64, i64 } %struct_x, i64 %add_tmp, 1\n  ret { i64, i64 } %struct_x",
+        ),
+        // reading the undefined slot of a folded literal
+        (
+            "%struct_y = insertvalue { i64, i64 } { i64 5, i64 undef }, i64 %0, 1\n  %q.y = extractvalue { i64, i64 } %struct_y, 1",
+            "%struct_y = insertvalue { i64, i64 } { i64 5, i64 undef }, i64 %0, 0\n  %q.y = extractvalue { i64, i64 } %struct_y, 1",
+        ),
+        // aggregates merged by select stay outside
+        (
+            "  %call_make = call { i64, i64 } @make(i64 %0)\n  ret { i64, i64 } %call_make",
+            "  %call_make = call { i64, i64 } @make(i64 %0)\n  %m = select i1 true, { i64, i64 } %call_make, { i64, i64 } %call_make\n  ret { i64, i64 } %m",
+        ),
+        // a nested or wider returned aggregate
+        (
+            "define { i64, i64 } @make(i64 %0) {",
+            "define { i64, i64, i64 } @make(i64 %0) {",
+        ),
+        // a struct result returned as a scalar
+        (
+            "  %call_make = call { i64, i64 } @make(i64 %0)\n  ret { i64, i64 } %call_make",
+            "  %call_make = call { i64, i64 } @make(i64 %0)\n  %f = extractvalue { i64, i64 } %call_make, 0\n  ret i64 %f",
+        ),
+    ] {
+        let ir = STRUCT_RESULT_IR.replace(from, to);
+        assert_ne!(ir, STRUCT_RESULT_IR, "probe did not apply: {to}");
+        assert!(
+            !matches!(
+                struct_results(STRUCT_RESULT_SOURCE, &ir).map(|report| report.outcome),
+                Ok(Outcome::EquivalentWithinProfile)
+            ),
+            "struct result probe accepted: {to}"
+        );
+    }
+    // Below composite v3 the struct-valued source itself is refused.
+    assert!(composite(STRUCT_RESULT_SOURCE, STRUCT_RESULT_IR).is_err());
 }

@@ -1548,12 +1548,35 @@ binds a struct field by its base sort, without the subrange bound a
 scalar parameter of that type carries. A binder spelled like a
 synthesized field name (`p_x`, `__struct_p_x` for a struct parameter
 `p` with field `x`) is rejected — the verifier and emitter resolve
-`p.x` through those names before the struct value itself. Struct
-construction (`P { .. }`), struct results, struct-valued `let`s, struct
-values in scalar positions, nested or computed field targets, a field
-read through a name a scalar binding shadows, rebinding a struct
-parameter, and pass-through arguments of another struct or shape all
-stay outside.
+`p.x` through those names before the struct value itself. Under
+`/v4` and `/v5`, struct construction (`P { .. }`), struct results,
+struct-valued `let`s, struct values in scalar positions, nested or
+computed field targets, a field read through a name a scalar binding
+shadows, rebinding a struct parameter, and pass-through arguments of
+another struct or shape all stay outside.
+
+`mumei.pure-i64-composite/v3` widens the fragment from struct parameters
+to struct values. An atom may return an admitted struct
+(`atom make(a: i64) -> P ... ensures: result.x == a`), with `result.f`
+binding the returned field slot in `ensures`. A body may build a struct
+literal that sets every declared field exactly once from a scalar
+expression of the field's kind, bind a struct-valued `let`
+(`let q = make(a); q.x`), read a field of a struct-returning call
+(`make(a).x`) and pass any of these struct values to a same-struct
+parameter. A struct literal still checks each refined-alias field's
+predicates when it is built, and a struct result's postcondition
+includes those field predicates at the returned slots. A struct-valued
+call becomes one uninterpreted application per field slot. Such a
+module pins `mumei.native-pure-i64-module-linux-x86_64/v6` or
+`mumei.native-pure-i64-multifile-linux-x86_64/v6` only when some atom
+uses a struct value. Modules that use only struct parameters keep
+pinning `/v4` or `/v5`, and `/v4`/`/v5` records are re-admitted under
+their own gates. Still rejected: a struct value in a scalar position,
+struct values merged by `if`/`match`, field reads on a struct literal or
+on a branch, nested struct literals, rebinding a struct `let`,
+assigning to a field (`q.x = ...`), and binders spelled like a struct
+`let`'s synthesized field names (`q_x`, `__struct_q_x`) anywhere in the
+atom.
 
 The LLVM snapshot recheck pairs the aggregate formal the emitter
 produces for a struct parameter with the source's flattened slots: a
@@ -1563,12 +1586,19 @@ field count, element `i` is the struct's `i`-th declared field, a
 one-index `extractvalue` reads that slot, and a formal passed through
 to a call flattens into the same field arguments the source call site
 applies. Field order is compared positionally, so a snapshot reading
-the fields in a different order is `Different`. An aggregate anywhere
-else stays outside the translation profile and fails closed: built by
-`insertvalue`, merged by `phi`/`select`, spelled as a constant,
-returned, nested, packed, mixed-width, or paired with a scalar source
-parameter. `check`, `recheck-source`, `recheck-llvm` and the stages
-built on it all reach `/v4` bundles.
+the fields in a different order is `Different`. For `/v6` struct
+values, an aggregate may also be an `insertvalue` chain (one index, an
+i64 value), a constant aggregate whose elements are integers or `undef`
+(the emitter folds literal fields into one), or a struct-returning
+call's result. A call result is one uninterpreted application per slot,
+the same applications the source call site makes. A returned aggregate
+of exactly the struct's field count compares slot by slot with the
+source's struct result. A slot that no `insertvalue` or constant
+element defines is never guessed: reading, passing or returning it fails
+closed. Aggregates merged by `phi`/`select`, stored, nested, packed,
+mixed-width, or paired with a scalar source parameter or result still
+fail closed. `check`, `recheck-source`, `recheck-llvm` and the stages
+built on it all reach `/v4`–`/v6` bundles.
 As with the refined profiles, the admitted fragment grew and the
 assurance did not: no translation, optimizer/object/linker/runtime/ABI
 or final-executable semantics and no producer authenticity or

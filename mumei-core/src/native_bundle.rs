@@ -46,6 +46,11 @@ pub const MODULE_PROFILE_V4: &str = "mumei.native-pure-i64-module-linux-x86_64/v
 /// struct field types (`mumei.pure-i64-composite/v2`). v4 records keep
 /// the literal `i64`/`bool` field gate.
 pub const MODULE_PROFILE_V5: &str = "mumei.native-pure-i64-module-linux-x86_64/v5";
+/// v6 profile: the composite gate additionally admits struct values —
+/// struct results, `StructInit`, struct `let`s and call-result field
+/// reads (`mumei.pure-i64-composite/v3`). v4/v5 records keep their own
+/// gates.
+pub const MODULE_PROFILE_V6: &str = "mumei.native-pure-i64-module-linux-x86_64/v6";
 pub const MODULE_SCOPE: &str =
     "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1";
@@ -53,7 +58,8 @@ pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1"
 /// The admission mode a pinned module/multifile record demands: v1
 /// records re-derive under the literal-scalar gate, v2 under the
 /// single-level refined-scalar gate, v3 under the widened one, v4
-/// under the composite one.
+/// under the composite one, v5 under composite v2 and v6 under
+/// composite v3.
 /// Anything else is not this schema's record.
 pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
     match profile {
@@ -62,6 +68,7 @@ pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, Bundl
         MODULE_PROFILE_V3 => Ok(RefinedAdmission::V2),
         MODULE_PROFILE_V4 => Ok(RefinedAdmission::Composite),
         MODULE_PROFILE_V5 => Ok(RefinedAdmission::CompositeV2),
+        MODULE_PROFILE_V6 => Ok(RefinedAdmission::CompositeV3),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -89,6 +96,8 @@ pub const MULTIFILE_PROFILE_V3: &str = "mumei.native-pure-i64-multifile-linux-x8
 pub const MULTIFILE_PROFILE_V4: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v4";
 /// Multifile v5: the refined-alias field widening of `MODULE_PROFILE_V5`.
 pub const MULTIFILE_PROFILE_V5: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v5";
+/// Multifile v6: the struct-value widening of `MODULE_PROFILE_V6`.
+pub const MULTIFILE_PROFILE_V6: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v6";
 pub const MULTIFILE_RECHECK_PROFILE: &str = "mumei.native-multifile-source-recheck/v1";
 
 pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
@@ -98,6 +107,7 @@ pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, Bu
         MULTIFILE_PROFILE_V3 => Ok(RefinedAdmission::V2),
         MULTIFILE_PROFILE_V4 => Ok(RefinedAdmission::Composite),
         MULTIFILE_PROFILE_V5 => Ok(RefinedAdmission::CompositeV2),
+        MULTIFILE_PROFILE_V6 => Ok(RefinedAdmission::CompositeV3),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -1031,6 +1041,7 @@ pub fn load_pinned_module_record(
             MODULE_PROFILE_V3,
             MODULE_PROFILE_V4,
             MODULE_PROFILE_V5,
+            MODULE_PROFILE_V6,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1090,6 +1101,7 @@ pub fn load_pinned_multifile_record(
             MULTIFILE_PROFILE_V3,
             MULTIFILE_PROFILE_V4,
             MULTIFILE_PROFILE_V5,
+            MULTIFILE_PROFILE_V6,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1792,6 +1804,15 @@ mod source_recheck_tests {
             RefinedAdmission::CompositeV2
         );
         assert!(multifile_refined_admission(MODULE_PROFILE_V4).is_err());
+        assert_eq!(
+            module_refined_admission(MODULE_PROFILE_V6).unwrap(),
+            RefinedAdmission::CompositeV3
+        );
+        assert_eq!(
+            multifile_refined_admission(MULTIFILE_PROFILE_V6).unwrap(),
+            RefinedAdmission::CompositeV3
+        );
+        assert!(module_refined_admission(MULTIFILE_PROFILE_V6).is_err());
     }
 
     const COMPOSITE: &str = "struct Point { x: i64, y: i64 }\n\
