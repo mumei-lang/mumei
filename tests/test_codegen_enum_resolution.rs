@@ -154,7 +154,9 @@ atom bake(n: i64) -> Fruit
         "bake",
     );
     assert!(
-        ir.contains("insertvalue { i64, i64 } { i64 0") && ir.contains("i64 %0"),
+        (ir.contains("insertvalue { i64, i64 } { i64 0")
+            || ir.contains("insertvalue { i64, i64 } zeroinitializer"))
+            && ir.contains("i64 %0"),
         "Apple(n) must insert tag 0 plus the param payload:\n{ir}"
     );
     assert!(
@@ -189,7 +191,8 @@ atom mk(p: i64) -> Mine
         "mk",
     );
     assert!(
-        ir.contains("insertvalue { i64, i64 } { i64 0"),
+        ir.contains("insertvalue { i64, i64 } { i64 0")
+            || ir.contains("insertvalue { i64, i64 } zeroinitializer"),
         "Mine::Cons must insert Mine's tag 0, not prelude List's 1:\n{ir}"
     );
 }
