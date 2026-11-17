@@ -68,6 +68,54 @@ body: {
     cur.x
 };
 
+// Re-binding the struct PARAM itself via `let` counts as a whole-
+// aggregate rebind — the input-time requires fact on q.x must be
+// dropped so the post-reinit ensures is consistent, not a spec
+// contradiction.
+atom rebind_param(q: Pt) -> i64
+requires: q.x == 0 && q.y == 0;
+ensures: result == 9 && q.x == 9;
+body: {
+    let q = Pt { x: 9, y: 9 };
+    q.x
+};
+
+// A `let` re-init whose right side is a branch expression still
+// resolves to the same struct type — `if`/`match` tails keep their
+// declared type.
+atom rebind_branch_rhs(b: i64, q: Pt) -> i64
+requires: b == 0 || b == 1;
+ensures: result >= 1 && q.x >= 1;
+body: {
+    let q = if b == 0 { Pt { x: 1, y: 0 } } else { Pt { x: 2, y: 0 } };
+    q.x
+};
+
+// A recursive callee that writes a composite field still propagates
+// its ensures to a caller whose requires constrains the input
+// field — the recursion antecedent evaluates on the input-time
+// slots, not the post-write fresh constants. (Composite-field
+// post-state inside the recursive call in its own body is tracked
+// through rec_fn's result only — a deeper limitation.)
+atom rec_bump(n: i64, q: Pt) -> i64
+requires: n >= 0 && q.x == 0;
+ensures: result >= 1;
+body: {
+    if n == 0 {
+        q.x = q.x + 1;
+        q.x
+    } else {
+        rec_bump(n - 1, q)
+    }
+};
+
+atom caller_rec(p: Pt) -> i64
+requires: p.x == 0;
+ensures: result >= 1;
+body: {
+    rec_bump(1, p)
+};
+
 // Field writes inside a loop havoc the composite base on entry —
 // post-loop field facts are lost, but unrelated locals still verify.
 atom write_in_loop(q: Pt) -> i64
