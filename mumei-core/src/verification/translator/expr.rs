@@ -3959,9 +3959,21 @@ pub(crate) fn expr_to_z3<'a>(
                     )?;
                     // ガード条件がある場合は AND で結合
                     let full_cond = if let Some(guard) = &arm.guard {
+                        // The guard may name the arm's payload binders —
+                        // evaluate it in an env where the pattern's
+                        // bindings exist, like the arm pass below does.
+                        let mut check_env = env.clone();
+                        pattern_bind_variables(
+                            ctx,
+                            &arm.pattern,
+                            &target_z3,
+                            &mut check_env,
+                            vc,
+                            decl_hint.as_deref(),
+                        );
                         // The arm pass below checks the guard's arithmetic.
                         let check_i64 = vc.check_i64_overflow.replace(false);
-                        let guard_z3 = expr_to_z3(vc, guard, env, None);
+                        let guard_z3 = expr_to_z3(vc, guard, &mut check_env, None);
                         vc.check_i64_overflow.set(check_i64);
                         let guard_z3 = guard_z3?
                             .as_bool()
@@ -4083,6 +4095,61 @@ pub(crate) fn expr_to_z3<'a>(
                     solver_opt,
                     decl_hint.as_deref(),
                 )?;
+                // A payload field declared with a refined type carries the
+                // declaration's conjuncts — asserted under the arm's hit
+                // condition since the payload only exists when the tag
+                // matches. Without this, `On(p: Port)` would bind `p` to an
+                // unconstrained payload and reject valid atoms.
+                if let (
+                    Some(solver),
+                    Pattern::Variant {
+                        variant_name,
+                        fields,
+                    },
+                ) = (solver_opt, &arm.pattern)
+                {
+                    if let Ok(Some(enum_def)) = datatype::resolve_variant_owner(
+                        vc,
+                        &target_z3,
+                        variant_name,
+                        decl_hint.as_deref(),
+                    ) {
+                        let variant_leaf = datatype::variant_leaf(variant_name);
+                        if let Some(variant_def) =
+                            enum_def.variants.iter().find(|v| v.name == variant_leaf)
+                        {
+                            for (i, field_pattern) in fields.iter().enumerate() {
+                                let (Pattern::Variable(bound_name), Some(field_ty)) =
+                                    (field_pattern, variant_def.field_types.get(i))
+                                else {
+                                    continue;
+                                };
+                                let Some(refined) = vc.module_env.get_type(field_ty.name.as_str())
+                                else {
+                                    continue;
+                                };
+                                let Some(bound) = arm_env.get(bound_name).cloned() else {
+                                    continue;
+                                };
+                                let chain = vc.module_env.refined_chain(&refined.name).map_err(
+                                    |cycle| MumeiError::type_error_at(cycle, refined.span.clone()),
+                                )?;
+                                for decl in chain {
+                                    let mut local_env = arm_env.clone();
+                                    local_env.insert(decl.operand.clone(), bound.clone());
+                                    let predicate_ast = parse_expression(&decl.predicate_raw);
+                                    let Some(predicate_z3) =
+                                        expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
+                                            .as_bool()
+                                    else {
+                                        continue;
+                                    };
+                                    solver.assert(&arm_cond.implies(&predicate_z3));
+                                }
+                            }
+                        }
+                    }
+                }
                 let full_cond = if let Some(guard) = &arm.guard {
                     // The guard only runs when the arm's pattern matches.
                     vc.path_cond_stack.borrow_mut().push(arm_cond.clone());
