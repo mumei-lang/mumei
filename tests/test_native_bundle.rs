@@ -2218,6 +2218,26 @@ fn module_bundle_without_structs_keeps_its_narrow_profile_under_the_composite_pr
 }
 
 #[test]
+fn module_bundle_with_struct_and_single_main_takes_the_module_path() {
+    // A lone `main` beside a struct declaration is still a composite
+    // module — the single-atom path rejects every non-atom item.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "struct Point { x: i64 }\n\
+         atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MODULE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V4);
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    // No member takes a struct parameter, so no aggregate formal exists
+    // and the LLVM snapshot recheck still reaches its scalar profile.
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+}
+
+#[test]
 fn composite_source_recheck_refutes_wrapped_field_arithmetic() {
     // `verify` reasons over mathematical integers; the source recheck
     // encodes each flattened field as a wrapping i64, so the sum of two

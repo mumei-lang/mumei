@@ -827,7 +827,8 @@ type MemberImports = (Vec<String>, Vec<String>, std::collections::BTreeSet<usize
 /// self-import (post-resolution, so `sub/a.mm` importing `"a"` counts),
 /// distinct qualifiers (alias or stem — two members bound to the same
 /// namespace sugar would strip to the same bare-name space
-/// ambiguously), atoms the only other allowed item, and every import
+/// ambiguously), atoms plus the `type`/`struct` declarations the pinned
+/// admission permits the only other allowed items, and every import
 /// alone on its line as one strict `import "..." [as x];` statement
 /// (a trailing `//` comment is trivia).
 fn member_imports(

@@ -1162,11 +1162,12 @@ fn build(input: &Path, output: &Path) -> Result<(String, &'static str), BundleEr
         .filter(|item| matches!(item, parser::Item::Atom(_)))
         .count();
     // A single-atom module still takes the module path when it declares
-    // refined scalar types — `build_single` admits only a lone atom.
+    // refined scalar types or structs — `build_single` admits only a
+    // lone atom.
     if atoms > 1
         || items
             .iter()
-            .any(|item| matches!(item, parser::Item::TypeDef(_)))
+            .any(|item| matches!(item, parser::Item::TypeDef(_) | parser::Item::StructDef(_)))
     {
         build_module(&source, input, output).map(|id| (id, MODULE_SCOPE))
     } else {

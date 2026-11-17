@@ -4385,6 +4385,18 @@ mod tests {
         assert!(composite_outcomes(&refined)
             .iter()
             .all(|result| *result == z3::SatResult::Unsat));
+        // A `bool` field flattens to the i64 0/1 carrier on both sides of
+        // the call, so a forwarded flag keeps its truth value.
+        let flag = format!(
+            "struct S {{ on: bool, x: i64 }}\n\
+             atom f(s: S) -> bool requires: true; ensures: result == s.on; body: {{ s.on }};\n\
+             atom g(t: S) -> bool requires: true; ensures: result == t.on; body: {{ f(t) }};\n{MAIN0}"
+        );
+        assert!(composite_outcomes(&flag)
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
+        let negated = flag.replace("ensures: result == t.on", "ensures: result != t.on");
+        assert!(composite_outcomes(&negated).contains(&z3::SatResult::Sat));
     }
 
     #[test]
