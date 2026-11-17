@@ -198,6 +198,40 @@ pub(crate) fn lower_struct_invariant<'a>(
     })
 }
 
+/// The predicates a field's declared refined-alias type imposes on its
+/// value, named by declaration: the alias's whole chain, each declaration
+/// binding its own operand to the field value — exactly what
+/// `apply_refinement_constraint` asserts for a scalar parameter of that
+/// type. Empty for a field of any other type; a cyclic chain is a type
+/// error.
+pub(crate) fn field_type_predicates<'a>(
+    vc: &VCtx<'a>,
+    field: &crate::parser::ast::StructField,
+    field_z3: &Dynamic<'a>,
+    env: &Env<'a>,
+) -> MumeiResult<Vec<(String, Bool<'a>)>> {
+    if !vc.module_env.types.contains_key(&field.type_name) {
+        return Ok(Vec::new());
+    }
+    let chain = vc
+        .module_env
+        .refined_chain(&field.type_name)
+        .map_err(MumeiError::type_error)?;
+    let mut predicates = Vec::with_capacity(chain.len());
+    for decl in chain {
+        let mut local_env = env.clone();
+        local_env.insert(decl.operand.clone(), field_z3.clone());
+        let ast = normalize_comparison_chains(parse_expression(&decl.predicate_raw));
+        let predicate = expr_to_z3(vc, &ast, &mut local_env, None)?
+            .as_bool()
+            .ok_or_else(|| {
+                MumeiError::type_error(format!("Predicate for {} must be boolean", decl.name))
+            })?;
+        predicates.push((decl.name.clone(), predicate));
+    }
+    Ok(predicates)
+}
+
 /// Lower the complete struct contract against `fields`.
 ///
 /// Field constraints use `v` as their field value and invariants use the same
@@ -216,6 +250,9 @@ where
     F: FnMut(String, Bool<'a>) -> MumeiResult<()>,
 {
     for (field, (_, field_z3)) in sdef.fields.iter().zip(fields) {
+        for (decl, predicate) in field_type_predicates(vc, field, field_z3, env)? {
+            on_fact(format!("field::{}::type::{}", field.name, decl), predicate)?;
+        }
         let Some(constraint_raw) = &field.constraint else {
             continue;
         };

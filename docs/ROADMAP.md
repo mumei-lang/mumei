@@ -3310,9 +3310,11 @@ take them as atom parameters and read their fields, under
 one scalar input per field; it is never a scalar value itself and only
 passes through by name to a same-struct sibling parameter. Struct
 construction and results, struct invariants, methods, field
-constraints, subrange/refined-alias fields (the verifier does not yet
-assume their domains for struct fields) and non-scalar fields stay
-rejected. `recheck-source`
+constraints, subrange fields and non-scalar fields stay rejected.
+Composite slice 2 admits refined-alias fields with `i64`/`bool` leaves
+under `mumei.pure-i64-composite/v2` and the `/v5` profiles. The
+verifier now assumes a field's alias predicates for struct parameters,
+and literal-field modules keep `/v4`. `recheck-source`
 covers the composite fragment, and `recheck-llvm` pairs each emitted
 `{ i64, ... }` struct formal with the flattened field slots
 (`extractvalue` reads and pass-through call arguments); built, merged,

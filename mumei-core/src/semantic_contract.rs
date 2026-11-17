@@ -62,6 +62,13 @@ pub const PURE_I64_REFINED_PROFILE_V2: &str = "mumei.pure-i64-refined-scalar/v2"
 /// construction, struct results and struct-valued `let`s stay outside.
 /// A module that declares no struct keeps its refined or wrapping name.
 pub const PURE_I64_COMPOSITE_PROFILE: &str = "mumei.pure-i64-composite/v1";
+/// v2 widens the composite fragment's field vocabulary to refined-alias
+/// field types whose chain resolves to an `i64` or `bool` leaf: the
+/// verifier now assumes a field's alias predicates for a struct
+/// parameter the same way it does for a scalar parameter of that type,
+/// so the flattened field slot's alias domain is one both sides bind. A
+/// module whose fields are all literal `i64`/`bool` keeps the v1 name.
+pub const PURE_I64_COMPOSITE_PROFILE_V2: &str = "mumei.pure-i64-composite/v2";
 
 /// How much of the refined-scalar declaration fragment a gate admits:
 /// `Reject` keeps `Item::TypeDef` out of the item vocabulary entirely,
@@ -70,7 +77,8 @@ pub const PURE_I64_COMPOSITE_PROFILE: &str = "mumei.pure-i64-composite/v1";
 /// additionally admits chained declarations and `bool` leaves (the v2
 /// fragment). `Composite` keeps the V2 declaration fragment and adds
 /// all-scalar `struct` declarations as module members
-/// (`pure-i64-composite/v1`). A pinned record names which level produced it, so a
+/// (`pure-i64-composite/v1`); `CompositeV2` additionally admits
+/// refined-alias field types (`pure-i64-composite/v2`). A pinned record names which level produced it, so a
 /// rechecker re-derives under the record's own admission — never a
 /// wider one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -79,6 +87,7 @@ pub enum RefinedAdmission {
     V1,
     V2,
     Composite,
+    CompositeV2,
 }
 
 impl RefinedAdmission {
@@ -90,7 +99,7 @@ impl RefinedAdmission {
 
     /// Whether `Item::StructDef` declarations are in the item vocabulary.
     pub fn admits_structs(self) -> bool {
-        self == Self::Composite
+        matches!(self, Self::Composite | Self::CompositeV2)
     }
 }
 
@@ -347,7 +356,7 @@ fn admit_pure_i64_atoms(
     // type named like an atom would make `T(` ambiguous between a type
     // position and a call, so the admission is closed over both maps.
     let refined = build_refined_env(&items, admission)?;
-    let structs = build_struct_env(&items, &refined)?;
+    let structs = build_struct_env(&items, &refined, admission)?;
     if refined
         .keys()
         .chain(structs.keys())
@@ -434,6 +443,12 @@ fn fragment_profile(
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if structs
+        .values()
+        .flatten()
+        .any(|field| refined.contains_key(&field.type_name))
+    {
+        PURE_I64_COMPOSITE_PROFILE_V2
     } else if !structs.is_empty() {
         PURE_I64_COMPOSITE_PROFILE
     } else if refined.is_empty() {
@@ -1041,6 +1056,7 @@ type StructEnv = BTreeMap<String, Vec<ResolvedField>>;
 fn build_struct_env(
     items: &[Item],
     refined: &RefinedEnv,
+    admission: RefinedAdmission,
 ) -> Result<StructEnv, SemanticContractError> {
     let mut env = StructEnv::new();
     for item in items {
@@ -1087,9 +1103,19 @@ fn build_struct_env(
                 ));
             }
             let ty = &field.type_ref;
+            // `CompositeV2` admits a refined alias whose chain (already
+            // resolved by `build_refined_env`: no units, no cycles, scalar
+            // leaves only) ends in `i64` or `bool` — the verifier assumes
+            // its predicates for struct fields. Subrange leaves stay out:
+            // the verifier binds a field by its base sort without the
+            // subrange bound a scalar parameter of that type carries.
             let kind = match field.type_name.as_str() {
                 "i64" => Some(ScalarKind::I64),
                 "bool" => Some(ScalarKind::Bool),
+                name if admission == RefinedAdmission::CompositeV2 => refined
+                    .get(name)
+                    .filter(|alias| matches!(alias.base, "i64" | "bool"))
+                    .map(|alias| alias.kind),
                 _ => None,
             };
             let Some(kind) = kind.filter(|_| {
@@ -4531,6 +4557,65 @@ mod tests {
             "atom h(q: P, p_x: i64) -> i64 requires: true; ensures: result == q.x + p_x; body: { let p_y = q.y; q.x + p_x };",
         ] {
             composite(&format!("{decl}\n{f}\n{atom}\n{MAIN0}")).unwrap();
+        }
+    }
+
+    #[test]
+    fn composite_v2_admits_alias_fields_with_i64_or_bool_leaves() {
+        let v2 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV2)
+        };
+        let source = format!(
+            "type Pos = i64 where v > 0;\nstruct P {{ x: Pos, y: i64 }}\n\
+             atom gx(p: P) -> i64 requires: true; ensures: result >= 1; body: {{ p.x }};\n\
+             atom fwd(q: P) -> i64 requires: true; ensures: result >= 1; body: {{ gx(q) }};\n{MAIN0}"
+        );
+        assert!(v2(&source)
+            .unwrap()
+            .iter()
+            .all(|c| c.profile == PURE_I64_COMPOSITE_PROFILE_V2));
+        // The v1 composite gate keeps alias fields out.
+        assert!(composite(&source).is_err());
+        assert!(
+            refined_module_outcomes_admission(&source, RefinedAdmission::CompositeV2)
+                .iter()
+                .all(|r| *r == z3::SatResult::Unsat)
+        );
+        let tight = source.replace("result >= 1; body: { p.x }", "result >= 2; body: { p.x }");
+        assert!(
+            refined_module_outcomes_admission(&tight, RefinedAdmission::CompositeV2)
+                .contains(&z3::SatResult::Sat)
+        );
+        // Chains and bool leaves compose; literal-field modules keep v1.
+        let chained = format!(
+            "type A = i64 where v >= 0;\ntype B = A where v <= 9;\ntype F = bool where v == true;\n\
+             struct P {{ x: B, on: F }}\n\
+             atom gx(p: P) -> i64 requires: true; ensures: result >= 0 && result <= 9; body: {{ if p.on {{ p.x }} else {{ 0 }} }};\n{MAIN0}"
+        );
+        assert_eq!(
+            v2(&chained).unwrap()[0].profile,
+            PURE_I64_COMPOSITE_PROFILE_V2
+        );
+        assert!(
+            refined_module_outcomes_admission(&chained, RefinedAdmission::CompositeV2)
+                .iter()
+                .all(|r| *r == z3::SatResult::Unsat)
+        );
+        let plain = format!("struct P {{ x: i64 }}\n{MAIN0}");
+        assert_eq!(v2(&plain).unwrap()[0].profile, PURE_I64_COMPOSITE_PROFILE);
+        // Subrange leaves, subrange literals and undeclared names stay out.
+        for decl in [
+            "type U = u8 where v > 0;\nstruct P { x: U }",
+            "type S = i32 where v > 0;\nstruct P { x: S }",
+            "struct P { x: u8 }",
+            "struct P { x: Missing }",
+            "type A = B where v > 0;\ntype B = A where v > 0;\nstruct P { x: A }",
+            "type U = i64 unit USD;\nstruct P { x: U }",
+        ] {
+            assert!(
+                v2(&format!("{decl}\n{MAIN0}")).is_err(),
+                "unexpected acceptance: {decl}"
+            );
         }
     }
 }
