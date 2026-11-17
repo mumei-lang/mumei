@@ -456,6 +456,18 @@ pub fn validate_native_module(
     let mut any_loops = false;
     let mut any_refined = false;
     let mut outcome = Outcome::EquivalentWithinProfile;
+    // The report names the same source profile the record pins: refined
+    // whenever the module carries an admitted `type` declaration —
+    // including one no signature uses — so this gate follows the
+    // declared-members rule, not `any_refined`, which is per-signature.
+    let declares_refined = admit_refined
+        && mumei_core::parser::parse_module_checked(source)
+            .map(|items| {
+                items
+                    .iter()
+                    .any(|item| matches!(item, mumei_core::parser::Item::TypeDef(_)))
+            })
+            .unwrap_or(false);
     for model in &models {
         let member_name = if model.function_name == "main" {
             "__mumei_user_main"
@@ -491,7 +503,7 @@ pub fn validate_native_module(
         } else {
             NATIVE_MODULE_PROFILE
         },
-        source_profile: if any_refined {
+        source_profile: if declares_refined {
             PURE_I64_REFINED_PROFILE
         } else {
             PURE_I64_WRAPPING_PROFILE

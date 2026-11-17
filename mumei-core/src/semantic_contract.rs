@@ -199,6 +199,13 @@ pub fn extract_pure_i64_module_contracts(
             cert_env.register_type(typedef);
         }
     }
+    // A declaration-only module under the refined profile carries no
+    // contract — the nonempty-items gate no longer implies an atom.
+    if !items.iter().any(|item| matches!(item, Item::Atom(_))) {
+        return Err(SemanticContractError::Unsupported(
+            "expected at least one atom",
+        ));
+    }
     items
         .into_iter()
         .filter_map(|item| match item {
@@ -1550,6 +1557,10 @@ fn signature_domain<'ctx>(
             ]),
             Some(name) => {
                 if let Some(alias) = refined.get(name) {
+                    // The alias's base bound still applies — a `bool`-based
+                    // refinement keeps its {0,1} carrier, a `u8`-based one
+                    // its range — before the chain's conjuncts tighten it.
+                    domain.extend(scalar_domain_bounds(alias.base, v, context));
                     domain.extend(alias_predicates(
                         alias,
                         scalar_operand(alias.kind, v, context),
@@ -1561,6 +1572,32 @@ fn signature_domain<'ctx>(
         }
     }
     Ok(domain)
+}
+
+/// The input bounds one literal profile scalar name contributes — the
+/// same bounds `signature_domain` applies to a parameter declared with
+/// that name. Shared so a refined alias's resolved base carries the
+/// identical range its literal spelling would.
+fn scalar_domain_bounds<'ctx>(base: &str, v: &BV<'ctx>, context: &'ctx Context) -> Vec<Bool<'ctx>> {
+    match base {
+        "bool" => vec![v.bvule(&BV::from_u64(context, 1, 64))],
+        "u8" => vec![v.bvule(&BV::from_u64(context, u8::MAX as u64, 64))],
+        "u16" => vec![v.bvule(&BV::from_u64(context, u16::MAX as u64, 64))],
+        "u32" => vec![v.bvule(&BV::from_u64(context, u32::MAX as u64, 64))],
+        "i8" => vec![
+            v.bvsge(&BV::from_i64(context, i8::MIN as i64, 64)),
+            v.bvsle(&BV::from_i64(context, i8::MAX as i64, 64)),
+        ],
+        "i16" => vec![
+            v.bvsge(&BV::from_i64(context, i16::MIN as i64, 64)),
+            v.bvsle(&BV::from_i64(context, i16::MAX as i64, 64)),
+        ],
+        "i32" => vec![
+            v.bvsge(&BV::from_i64(context, i32::MIN as i64, 64)),
+            v.bvsle(&BV::from_i64(context, i32::MAX as i64, 64)),
+        ],
+        _ => Vec::new(),
+    }
 }
 
 /// The symbolic operand a refined declaration's conjuncts evaluate over:
@@ -1684,6 +1721,14 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
             _ => None,
         })
         .collect();
+    // The v1 nonempty gate guaranteed ≥1 atom because only atoms were
+    // admitted; a declaration-only module under the refined profile has
+    // items but nothing to check — vacuous obligations prove nothing.
+    if atom_items.is_empty() {
+        return Err(SemanticContractError::Unsupported(
+            "expected at least one atom",
+        ));
+    }
     let bodies: Vec<PureI64Body> = atom_items
         .iter()
         .map(|atom| encode_atom_body(atom, context, source_sha256.clone(), &refined))
@@ -1812,11 +1857,16 @@ fn module_atom_obligations<'ctx>(
     .boolean()?;
     // A refined result type adds its declaration conjuncts to the
     // postcondition the atom must satisfy — `-> Port` guarantees
-    // `ensures` AND `v >= 1 && v <= 65535` at the encoded result.
+    // `ensures` AND `v >= 1 && v <= 65535` at the encoded result, with
+    // the operand materialized the same way the alias's base kind is.
+    let result_operand = match atom.return_type.as_deref().and_then(|n| refined.get(n)) {
+        Some(alias) => scalar_operand(alias.kind, &body.value, context),
+        None => env["result"].clone(),
+    };
     let mut post = vec![ensures];
     post.extend(refined_conjuncts_at(
         atom.return_type.as_deref(),
-        env["result"].clone(),
+        result_operand,
         refined,
         context,
     )?);
@@ -3377,6 +3427,15 @@ mod tests {
                 "unexpected acceptance: {source}"
             );
         }
+        // A declaration-only module has items but no atom: under the v1
+        // gate nonempty implied an atom, so the widened admission must
+        // refuse it rather than return vacuous contracts/obligations.
+        let decls_only = "type Port = i64 where v >= 1 && v <= 65535;";
+        assert!(extract_pure_i64_module_contracts(decls_only, "m.mm", None, true).is_err());
+        let mut config = z3::Config::new();
+        config.set_timeout_msec(30_000);
+        let context = z3::Context::new(&config);
+        assert!(encode_pure_i64_module_obligations(decls_only, &context, true).is_err());
     }
 
     #[test]
@@ -3435,5 +3494,24 @@ mod tests {
         assert!(refined_module_outcomes(assumed)
             .iter()
             .all(|result| *result == z3::SatResult::Unsat));
+        // A `bool`-based alias keeps its carrier bound: `Flag`'s
+        // refinement (`v`, i.e. always true) holds at `f(1)`, while
+        // `f(0)` fails the predicate and `f(5)` is not even a `bool`
+        // carrier — both must surface as domain violations.
+        let flagged = "type Flag = bool where v;\n\
+             atom f(x: Flag) -> i64 requires: true; ensures: result == 1; body: { 1 };\n\
+             atom main() -> i64 requires: true; ensures: result == 1; body: { f(1) };";
+        assert!(refined_module_outcomes(flagged)
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
+        for call in ["f(0)", "f(5)"] {
+            let bad = flagged.replace("f(1)", call);
+            assert!(
+                refined_module_outcomes(&bad)
+                    .iter()
+                    .any(|result| *result == z3::SatResult::Sat),
+                "{call} should violate the Flag domain"
+            );
+        }
     }
 }

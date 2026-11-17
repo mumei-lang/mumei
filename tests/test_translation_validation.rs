@@ -1,5 +1,6 @@
 use mumei_core::hir::lower_atom_to_hir;
 use mumei_core::parser::{parse_module_checked, Item};
+use mumei_core::semantic_contract::{PURE_I64_REFINED_PROFILE, PURE_I64_WRAPPING_PROFILE};
 use mumei_core::verification::ModuleEnv;
 use mumei_emit_llvm::translation_validation::{self as tv, Options, Outcome};
 
@@ -2012,6 +2013,62 @@ fn native_module_validation_compares_each_atom_against_its_member() {
         report.functions[1].outcome,
         Outcome::EquivalentWithinProfile
     );
+}
+
+#[test]
+fn native_module_report_names_the_declared_source_profile() {
+    // A `type` declaration — even one no signature uses — makes the
+    // module the refined source profile, matching the name the record
+    // pins; a signature that resolves through the alias likewise names
+    // it, and a plain module keeps the wrapping name.
+    let const_ir = |user_main: &str| {
+        pin(&format!(
+            "define i64 @__mumei_user_main() {{ {user_main} }}\n\
+             define i32 @main(i32 %argc, ptr %argv) {{\n\
+             %result = call i64 @__mumei_user_main()\n\
+             %exit_code = trunc i64 %result to i32\n\
+             ret i32 %exit_code\n}}"
+        ))
+    };
+    let declared_unused = "type Port = i64 where v >= 1 && v <= 65535;\n\
+         atom main() -> i64 requires: true; ensures: result == 7; body: { 7 };";
+    let report = tv::validate_native_module(
+        declared_unused,
+        &const_ir("ret i64 7"),
+        Options::default(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(report.source_profile, PURE_I64_REFINED_PROFILE);
+
+    let used = "type Port = i64 where v >= 1 && v <= 65535;\n\
+         atom id(p: Port) -> i64 requires: true; ensures: result == p; body: { p };\n\
+         atom main() -> i64 requires: true; ensures: result == 80; body: { id(80) };";
+    let used_ir = pin(
+        "define i64 @id(i64 %p) { ret i64 %p }\n\
+         define i64 @__mumei_user_main() { %a = call i64 @id(i64 80) ret i64 %a }\n\
+         define i32 @main(i32 %argc, ptr %argv) { %result = call i64 @__mumei_user_main() %exit_code = trunc i64 %result to i32 ret i32 %exit_code }",
+    );
+    let report = tv::validate_native_module(used, &used_ir, Options::default(), true).unwrap();
+    assert_eq!(report.source_profile, PURE_I64_REFINED_PROFILE);
+
+    let plain = tv::validate_native_module(
+        NATIVE_CALLING,
+        &native_module_ir("ret i64 %x"),
+        Options::default(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(plain.source_profile, PURE_I64_WRAPPING_PROFILE);
+    // The strict admission refuses the declared module outright — a v1
+    // record could never describe it.
+    assert!(tv::validate_native_module(
+        declared_unused,
+        &const_ir("ret i64 7"),
+        Options::default(),
+        false,
+    )
+    .is_err());
 }
 
 #[test]
