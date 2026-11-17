@@ -4113,9 +4113,12 @@ pub(crate) fn expr_to_z3<'a>(
             // are then folded into an ite chain from the last arm outward.
             let mut accumulated_negations: Vec<Bool> = Vec::new();
             let mut arm_results: Vec<(Bool, Dynamic)> = Vec::with_capacity(arms.len());
-            // Assignments to pre-existing vars inside arm bodies must fold
-            // back under each arm's condition — previously they were dropped
-            // with the per-arm env clone, so post-match code saw stale values.
+            // Per-arm writes to pre-existing vars fold back under first-match
+            // precedence: collected forward, then merged last-to-first so an
+            // earlier arm's state overrides a later arm's (the accumulated
+            // `ite(cond, arm, acc)` otherwise lets a trailing `_` win).
+            let mut arm_states: Vec<(Bool, Env, std::collections::HashSet<String>)> =
+                Vec::with_capacity(arms.len());
             let mut merged_arm_env: Option<Env> = None;
             // Lambda `let`s inside an arm body stay arm-local — restore the
             // map before each arm and after the match, mirroring the
@@ -4260,13 +4263,15 @@ pub(crate) fn expr_to_z3<'a>(
                 }
                 let body_val = body_val?;
                 *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
-                merge_arm_env_into(&mut merged_arm_env, &arm_env, env, &full_cond, &arm_bound);
+                arm_states.push((full_cond.clone(), arm_env, arm_bound));
                 arm_results.push((full_cond.clone(), body_val));
                 accumulated_negations.push(full_cond.not());
             }
 
             // Fold the arm values into an ite chain from the last arm
-            // outward: `ite(c_1, b_1, ite(c_2, b_2, ... b_n))`.
+            // outward: `ite(c_1, b_1, ite(c_2, b_2, ... b_n))`, and fold the
+            // per-arm writes in the same order so the first matching arm
+            // takes precedence for post-match state.
             let mut result: Option<Dynamic> = None;
             for (cond, val) in arm_results.into_iter().rev() {
                 result = Some(match result {
@@ -4276,6 +4281,9 @@ pub(crate) fn expr_to_z3<'a>(
                     }
                     None => val,
                 });
+            }
+            for (cond, arm_env, arm_bound) in arm_states.into_iter().rev() {
+                merge_arm_env_into(&mut merged_arm_env, &arm_env, env, &cond, &arm_bound);
             }
 
             if let Some(merged_env) = merged_arm_env {
