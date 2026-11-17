@@ -4103,11 +4103,16 @@ pub(crate) fn expr_to_z3<'a>(
             // ========================================================
             // Match 式の値の構築（if-then-else チェーンとして Z3 式を構築）
             // ========================================================
-            // A. デフォルトアーム最適化:
-            //    _ アームの body 評価時に、先行アームの否定を事前条件として
-            //    env/solver に追加し、デフォルトアーム内の検証精度を向上させる。
+            // Arms are evaluated in source order so `accumulated_negations`
+            // holds the negations of the *preceding* arms — the window an
+            // arm body actually runs under (all earlier arms failed to match
+            // AND this arm's condition holds). The window is pushed onto the
+            // path-condition stack during body evaluation so path-cond-aware
+            // checks inside the body (refined ctor args, call-site
+            // refinements, divisions) see only reachable inputs; the results
+            // are then folded into an ite chain from the last arm outward.
             let mut accumulated_negations: Vec<Bool> = Vec::new();
-            let mut result: Option<Dynamic> = None;
+            let mut arm_results: Vec<(Bool, Dynamic)> = Vec::with_capacity(arms.len());
             // Assignments to pre-existing vars inside arm bodies must fold
             // back under each arm's condition — previously they were dropped
             // with the per-arm env clone, so post-match code saw stale values.
@@ -4117,7 +4122,7 @@ pub(crate) fn expr_to_z3<'a>(
             // per-arm `env.clone()` scoping below.
             let lambdas_before = vc.local_lambdas.borrow().clone();
 
-            for arm in arms.iter().rev() {
+            for arm in arms.iter() {
                 *vc.local_lambdas.borrow_mut() = lambdas_before.clone();
                 let mut arm_env = env.clone();
                 let int_types_before_arm = vc.local_int_types.borrow().clone();
@@ -4230,45 +4235,15 @@ pub(crate) fn expr_to_z3<'a>(
                     arm_cond
                 };
 
-                // A. デフォルトアーム最適化: Wildcard/Variable パターンの場合、
-                //    先行アームの否定条件を solver に追加して body を検証
-                if let Some(solver) = solver_opt {
-                    if matches!(arm.pattern, Pattern::Wildcard | Pattern::Variable(_))
-                        && !accumulated_negations.is_empty()
-                    {
-                        let neg_refs: Vec<&Bool> = accumulated_negations.iter().collect();
-                        let prior_negation = Bool::and(ctx, &neg_refs);
-                        solver.push();
-                        solver.assert(&prior_negation);
-                        let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
-                        *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
-                        solver.pop(1);
-                        merge_arm_env_into(
-                            &mut merged_arm_env,
-                            &arm_env,
-                            env,
-                            &full_cond,
-                            &arm_bound,
-                        );
-                        result = Some(match result {
-                            Some(else_val) => {
-                                let (body_val, else_val) = unify_branch_sorts(body_val, else_val)?;
-                                full_cond.ite(&body_val, &else_val)
-                            }
-                            None => body_val,
-                        });
-                        accumulated_negations.push(full_cond.not());
-                        continue;
-                    }
-                }
-
                 // The arm body only runs on inputs that reach it — prior
                 // arms did not match AND this arm's condition holds. Push
                 // that window onto the path-condition stack while
                 // translating the body so path-cond-aware checks inside it
-                // (refined ctor args, call-site refinements) see only
-                // reachable inputs — `match x { 1 => Chan::Tcp(x), .. }`
-                // must not check the constructor against `x = 0`.
+                // (refined ctor args, call-site refinements, divisions) see
+                // only reachable inputs — `match x { 1 => Chan::Tcp(x), .. }`
+                // must not check the constructor against `x = 0`. The window
+                // goes on the stack rather than the solver so checks that do
+                // not consult path conditions are not perturbed.
                 {
                     let mut stack = vc.path_cond_stack.borrow_mut();
                     for neg in accumulated_negations.iter() {
@@ -4286,14 +4261,21 @@ pub(crate) fn expr_to_z3<'a>(
                 let body_val = body_val?;
                 *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
                 merge_arm_env_into(&mut merged_arm_env, &arm_env, env, &full_cond, &arm_bound);
+                arm_results.push((full_cond.clone(), body_val));
+                accumulated_negations.push(full_cond.not());
+            }
+
+            // Fold the arm values into an ite chain from the last arm
+            // outward: `ite(c_1, b_1, ite(c_2, b_2, ... b_n))`.
+            let mut result: Option<Dynamic> = None;
+            for (cond, val) in arm_results.into_iter().rev() {
                 result = Some(match result {
                     Some(else_val) => {
-                        let (body_val, else_val) = unify_branch_sorts(body_val, else_val)?;
-                        full_cond.ite(&body_val, &else_val)
+                        let (val, else_val) = unify_branch_sorts(val, else_val)?;
+                        cond.ite(&val, &else_val)
                     }
-                    None => body_val,
+                    None => val,
                 });
-                accumulated_negations.push(full_cond.not());
             }
 
             if let Some(merged_env) = merged_arm_env {
