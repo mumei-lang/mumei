@@ -1974,6 +1974,40 @@ fn native_module_ir(g_body: &str) -> String {
 }
 
 #[test]
+fn native_module_bool_result_calls_carry_the_zero_one_convention() {
+    // A `-> Flag` member forwarding a bool call result materializes
+    // `ite(v != 0, 1, 0)` on the source side while the IR `ret`s the
+    // raw uninterpreted value: without the convention bound the UF
+    // result `v = 2` is a spurious difference. The bound lives on the
+    // shared application term, so the same call compares equal on both
+    // sides.
+    let module = "type Flag = bool where v == true;\n\
+         atom f(x: Flag) -> Flag requires: true; ensures: true; body: { x };\n\
+         atom g(x: Flag) -> Flag requires: true; ensures: true; body: { f(x) };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };";
+    let ir = pin("define i64 @f(i64 %x) { ret i64 %x }\n\
+         define i64 @g(i64 %x) { %r = call i64 @f(i64 %x) ret i64 %r }\n\
+         define i64 @__mumei_user_main() { ret i64 0 }\n\
+         define i32 @main(i32 %argc, ptr %argv) {\n\
+         %result = call i64 @__mumei_user_main()\n\
+         %exit_code = trunc i64 %result to i32\n\
+         ret i32 %exit_code\n}");
+    let report =
+        tv::validate_native_module(module, &ir, Options::default(), RefinedAdmission::V2).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    // The bound is the convention, not an unconditional pass: a member
+    // returning a literal outside {0,1} for a bool result still
+    // differs from the normalized source.
+    let bad = ir.replace(
+        "%r = call i64 @f(i64 %x) ret i64 %r",
+        "%r = call i64 @f(i64 %x) ret i64 5",
+    );
+    let report =
+        tv::validate_native_module(module, &bad, Options::default(), RefinedAdmission::V2).unwrap();
+    assert_eq!(report.outcome, Outcome::Different);
+}
+
+#[test]
 fn native_module_validation_compares_each_atom_against_its_member() {
     // `g` compares against its same-named member; the `main` atom
     // compares against `__mumei_user_main` — the emitter's rename.

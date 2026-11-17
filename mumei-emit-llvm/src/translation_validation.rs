@@ -586,6 +586,7 @@ unsafe fn compare_function<'ctx>(
         .param_domain
         .iter()
         .chain(model.definedness.iter())
+        .chain(model.call_result_bounds.iter())
         .cloned()
         .collect();
     let src_dom = Bool::and(context, &src_terms.iter().collect::<Vec<_>>());

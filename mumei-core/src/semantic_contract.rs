@@ -1447,6 +1447,16 @@ pub struct PureI64Body<'ctx> {
     /// compares as an uninterpreted site on both sides); the source
     /// recheck binds each site to the callee's contract.
     pub call_sites: Vec<CallSite<'ctx>>,
+    /// The bool-carrier convention applied to call results: a callee
+    /// whose declared return kind is `bool` produces an i64 in {0,1} at
+    /// the call boundary, so each such application's result carries
+    /// `result <=u 1`. Asserting the bound on the shared application
+    /// term makes a forwarded call result (`-> Flag { f(x) }`, where
+    /// the source materializes `ite(v != 0, 1, 0)` and the IR returns
+    /// the raw `v`) compare equal under the convention — while a
+    /// member that returns a literal `5` for a bool result still
+    /// differs from the normalized source.
+    pub call_result_bounds: Vec<Bool<'ctx>>,
     /// Definedness obligations for division, remainder and shifts, each an
     /// implication `guard -> operands defined` mirroring the safety rules
     /// `--bitvec-i64` verification requires. Empty unless the caller admitted
@@ -1631,12 +1641,18 @@ fn encode_atom_body<'ctx>(
         let refs: Vec<&Bool> = loop_exits.iter().collect();
         Some(Bool::and(context, &refs))
     };
+    let call_result_bounds: Vec<Bool> = call_sites
+        .iter()
+        .filter(|site| call_returns.get(site.callee.as_str()) == Some(&ScalarKind::Bool))
+        .map(|site| site.result.bvule(&BV::from_u64(context, 1, 64)))
+        .collect();
     Ok(PureI64Body {
         function_name: atom.name.clone(),
         source_sha256,
         inputs,
         value,
         call_sites,
+        call_result_bounds,
         definedness,
         param_domain,
         subrange_params,
