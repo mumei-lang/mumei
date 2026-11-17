@@ -4080,10 +4080,33 @@ than being silently dropped — branch-merged composites are the
 next slice. A `let` may re-bind a composite name only to the
 same struct type; scalar or different-struct shadows are
 rejected because name-keyed field slots would merge stale
-values. C10 stays partial — branch-merged
-composite values, enum construction/results inside bundles,
-nested/generic structs, `u64`-family leaves and
-the deeper assurance layers remain open.
+values. Enum construction and enum results join the fragment
+under `mumei.pure-i64-composite/v6` and the `/v9` bundle
+profiles, pinned only when a module actually *produces* an
+enum: `E::V(..)` constructors resolve through the declared
+enum map to each variant's payload kinds, a nullary `E::V`
+reads as a tagged value with no payload, and an atom result
+`-> E` is admitted when the body produces exactly that enum.
+A constructor lowers to `SourceValue::Enum { tag, slots }`
+with slots padded to the widest variant's arity and `Bool`
+payloads carried as `v != 0`; an enum-returning call site
+flattens to `result.tag` + `result.{i}` slots, uninterpreted
+unless the callee's `ensures` pins it. The signature domain
+bounds bool payload slots under every tag — an unconstrained
+slot would let the slot slice differ from the payload's own
+`v != 0` bound — and `result_shape` models enum results so
+the returned-aggregate validator no longer rejects them as
+non-integer. Enum *production* alone lifts the profile: a
+module that only consumes an enum (parameter + `match`)
+keeps its existing profile name, and `let`/call-arg
+pass-through stays V4 vocabulary. Branch-merged enum values,
+enum-producing `match`/`if` arms, enum equality
+`e == E::V`, `result.tag` reads as scalars and enum field
+writes all fail closed. `check`, `recheck-source` and
+`recheck-llvm` cover the fragment. C10 stays partial —
+branch-merged composite values, nested/generic structs,
+`u64`-family leaves and the deeper assurance layers remain
+open.
 
 
 
