@@ -1527,11 +1527,25 @@ Admission is fail-closed. Rejected: generic structs, struct invariants,
 `impl` methods, `where` constraints on fields, empty structs, duplicate
 fields or structs, struct names shadowing a scalar name or colliding
 with a `type` or atom name, and fields other than `i64`/`bool`
-(`u64`/`usize`/`f64`/arrays/other structs, so no recursion). Subrange
-(`i8`–`u32`) and refined-alias fields stay out too: the verifier binds a
-struct field by its base sort only, without the range or predicate a
-scalar parameter of that type carries, so the recheck would assume a
-domain the build never verified against. A binder spelled like a
+(`u64`/`usize`/`f64`/arrays/other structs, so no recursion). Under
+`/v4`, refined-alias fields stay out as well.
+
+`mumei.pure-i64-composite/v2` widens the field vocabulary to
+refined-alias types whose chain ends in an `i64` or `bool` leaf
+(`type Pos = i64 where v > 0; struct P { x: Pos }`), under the same
+chain rules as refined scalar parameters: chained declarations compose,
+and units, cycles and `u64`/`f64`/`Str` leaves stay rejected. The
+verifier now assumes a field's whole alias chain for a struct parameter,
+the same as for a scalar parameter of that type, and checks it at every
+struct literal. The flattened field slot therefore has the same domain in
+the build and in every recheck. Such a module pins
+`mumei.native-pure-i64-module-linux-x86_64/v5` or
+`mumei.native-pure-i64-multifile-linux-x86_64/v5`. A module whose fields
+are all literal `i64`/`bool` keeps pinning `/v4`, and a `/v4` record is
+re-admitted under the literal-field gate only. Subrange fields
+(`i8`–`u32`, literal or as an alias leaf) stay out: the verifier still
+binds a struct field by its base sort, without the subrange bound a
+scalar parameter of that type carries. A binder spelled like a
 synthesized field name (`p_x`, `__struct_p_x` for a struct parameter
 `p` with field `x`) is rejected — the verifier and emitter resolve
 `p.x` through those names before the struct value itself. Struct

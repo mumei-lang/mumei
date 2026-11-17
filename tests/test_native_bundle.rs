@@ -2222,6 +2222,48 @@ fn module_bundle_with_struct_members_builds_as_v4_and_rechecks_its_source() {
 }
 
 #[test]
+fn module_bundle_with_alias_struct_fields_builds_as_v5_and_rechecks() {
+    // `gx`'s postcondition holds only under `Pos`'s predicate on `p.x`:
+    // the verifier now assumes it for struct fields, so the build and
+    // every recheck bind the same field domain.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "type Pos = i64 where v > 0;\nstruct P { x: Pos, y: i64 }\n\
+         atom gx(p: P) -> i64 requires: true; ensures: result >= 1; body: { p.x };\n\
+         atom fwd(q: P) -> i64 requires: true; ensures: result >= 1; body: { gx(q) };\n\
+         atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V5);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V2
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A v5 record re-pinned as v4 is refused: v4 keeps literal fields.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V4.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
+fn literal_field_composite_modules_keep_pinning_v4() {
+    let root = tempfile::tempdir().unwrap();
+    let (_source, bundle, _id) = build_source(root.path(), COMPOSITE_MODULE);
+    assert_eq!(
+        module_record(&bundle)["profile"],
+        native_bundle::MODULE_PROFILE_V4
+    );
+}
+
+#[test]
 fn module_bundle_without_structs_keeps_its_narrow_profile_under_the_composite_producer() {
     let root = tempfile::tempdir().unwrap();
     let (_source, bundle, _id) = build_source(root.path(), MODULE);

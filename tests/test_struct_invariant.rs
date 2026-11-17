@@ -125,3 +125,45 @@ fn existing_struct_fixtures_are_unaffected() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn refined_alias_field_predicates_are_assumed_for_struct_parameters() {
+    // `type Pos = i64 where v > 0` on `x` lets `gx` prove `result >= 1`
+    // from `p.x` alone — the same domain a scalar `Pos` parameter gets.
+    let out = run_verify(&fixture("test_struct_alias_field.mm"), "alias_ok");
+    assert!(
+        out.status.success(),
+        "alias field predicate must be assumed\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The assumption is the predicate, not more: `result >= 2` fails.
+    let out = run_verify(
+        &fixture("test_struct_alias_field_violation.mm"),
+        "alias_bad",
+    );
+    assert!(!out.status.success());
+}
+
+#[test]
+fn struct_literals_must_establish_refined_alias_field_types() {
+    // Struct parameters assume their alias field predicates, so a literal
+    // is the point that has to prove them.
+    let out = run_verify(
+        &fixture("test_struct_alias_field_literal.mm"),
+        "alias_lit_ok",
+    );
+    assert!(
+        out.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = run_verify(
+        &fixture("test_struct_alias_field_literal_violation.mm"),
+        "alias_lit_bad",
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("type 'Pos' predicate violated")
+            || String::from_utf8_lossy(&out.stdout).contains("type 'Pos' predicate violated")
+    );
+}

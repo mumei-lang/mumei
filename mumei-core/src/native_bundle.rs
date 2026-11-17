@@ -42,6 +42,10 @@ pub const MODULE_PROFILE_V3: &str = "mumei.native-pure-i64-module-linux-x86_64/v
 /// the LLVM snapshot recheck keeps aggregate member signatures outside
 /// its translation profile and fails closed on them.
 pub const MODULE_PROFILE_V4: &str = "mumei.native-pure-i64-module-linux-x86_64/v4";
+/// v5 profile: the composite gate additionally admits refined-alias
+/// struct field types (`mumei.pure-i64-composite/v2`). v4 records keep
+/// the literal `i64`/`bool` field gate.
+pub const MODULE_PROFILE_V5: &str = "mumei.native-pure-i64-module-linux-x86_64/v5";
 pub const MODULE_SCOPE: &str =
     "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1";
@@ -57,6 +61,7 @@ pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, Bundl
         MODULE_PROFILE_V2 => Ok(RefinedAdmission::V1),
         MODULE_PROFILE_V3 => Ok(RefinedAdmission::V2),
         MODULE_PROFILE_V4 => Ok(RefinedAdmission::Composite),
+        MODULE_PROFILE_V5 => Ok(RefinedAdmission::CompositeV2),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -82,6 +87,8 @@ pub const MULTIFILE_PROFILE_V3: &str = "mumei.native-pure-i64-multifile-linux-x8
 /// import-closure merge — struct declarations ride the merge like
 /// refined `type` declarations do.
 pub const MULTIFILE_PROFILE_V4: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v4";
+/// Multifile v5: the refined-alias field widening of `MODULE_PROFILE_V5`.
+pub const MULTIFILE_PROFILE_V5: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v5";
 pub const MULTIFILE_RECHECK_PROFILE: &str = "mumei.native-multifile-source-recheck/v1";
 
 pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
@@ -90,6 +97,7 @@ pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, Bu
         MULTIFILE_PROFILE_V2 => Ok(RefinedAdmission::V1),
         MULTIFILE_PROFILE_V3 => Ok(RefinedAdmission::V2),
         MULTIFILE_PROFILE_V4 => Ok(RefinedAdmission::Composite),
+        MULTIFILE_PROFILE_V5 => Ok(RefinedAdmission::CompositeV2),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -1022,6 +1030,7 @@ pub fn load_pinned_module_record(
             MODULE_PROFILE_V2,
             MODULE_PROFILE_V3,
             MODULE_PROFILE_V4,
+            MODULE_PROFILE_V5,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1080,6 +1089,7 @@ pub fn load_pinned_multifile_record(
             MULTIFILE_PROFILE_V2,
             MULTIFILE_PROFILE_V3,
             MULTIFILE_PROFILE_V4,
+            MULTIFILE_PROFILE_V5,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1773,6 +1783,14 @@ mod source_recheck_tests {
         // The module and multifile families never decode each other's
         // composite profile.
         assert!(module_refined_admission(MULTIFILE_PROFILE_V4).is_err());
+        assert_eq!(
+            module_refined_admission(MODULE_PROFILE_V5).unwrap(),
+            RefinedAdmission::CompositeV2
+        );
+        assert_eq!(
+            multifile_refined_admission(MULTIFILE_PROFILE_V5).unwrap(),
+            RefinedAdmission::CompositeV2
+        );
         assert!(multifile_refined_admission(MODULE_PROFILE_V4).is_err());
     }
 

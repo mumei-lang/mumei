@@ -3824,6 +3824,23 @@ pub(crate) fn expr_to_z3<'a>(
                 // フィールド制約の検証: 構造体定義から constraint を取得
                 if let Some(sdef) = vc.module_env.get_struct(type_name) {
                     if let Some(sfield) = sdef.fields.iter().find(|f| f.name == *field_name) {
+                        // A refined-alias field type is assumed for struct
+                        // parameters, so every literal must establish it.
+                        if let Some(solver) = solver_opt {
+                            for (decl, predicate) in field_type_predicates(vc, sfield, &val, env)? {
+                                solver.push();
+                                solver.assert(&predicate.not());
+                                let verdict = crate::verification::phase_artifacts::check(solver);
+                                solver.pop(1);
+                                if verdict == SatResult::Sat {
+                                    return Err(MumeiError::verification(format!(
+                                        "Struct '{}' field '{}' type '{}' predicate violated",
+                                        type_name, field_name, decl
+                                    ))
+                                    .with_verdict(crate::verification::VerdictKind::Rejected));
+                                }
+                            }
+                        }
                         if let Some(constraint_raw) = &sfield.constraint {
                             // constraint 内の "v" をフィールド値に置き換えて検証
                             let mut local_env = env.clone();
