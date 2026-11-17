@@ -363,6 +363,23 @@ pub(crate) fn merge_arm_env_into<'a>(
             }
         }
     }
+    // Arm-local `__struct_<handle>_<field>` slots (each arm's
+    // StructInit registers its fresh handle's fields) must survive the
+    // merge: `project_struct_fields` reads them back through the folded
+    // `ite` over handles, so dropping them leaves a match-produced
+    // struct with unconstrained fields. They take their arm-local value
+    // verbatim — the `ite` selects the right handle per path.
+    for (key, arm_val) in arm_env.iter() {
+        if !key.starts_with(STRUCT_FIELD_PREFIX)
+            || base_env.contains_key(key)
+            || bound.contains(key)
+        {
+            continue;
+        }
+        if !acc.contains_key(key) {
+            acc.insert(key.clone(), arm_val.clone());
+        }
+    }
 }
 
 /// Put the two branches of an `ite` into a common sort.
