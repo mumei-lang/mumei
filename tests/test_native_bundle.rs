@@ -2546,6 +2546,79 @@ fn multifile_bundle_with_nested_struct_fields_builds_as_v11() {
 }
 
 #[test]
+fn module_bundle_with_generic_structs_builds_as_v12_and_rechecks() {
+    // Generic `struct` declarations monomorphize to ordinary v8-shaped
+    // declarations before verification: the build, the source recheck
+    // and the LLVM snapshot recheck all run on the instantiated module.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "struct Pair<T> { a: T, b: T }\nstruct Box<T> { inner: T }\n\
+         atom mk(a: i64) -> Pair<i64> requires: a >= 0; ensures: result.a == a && result.b == a; body: { Pair<i64>{a: a, b: a} };\n\
+         atom boxed(b: Box<Pair<i64>>) -> i64 requires: true; ensures: result == b.inner.a; body: { b.inner.a };\n\
+         atom main() -> i64 requires: true; ensures: result == 2; body: { let p = Pair<i64>{a: 2, b: 2}; p.a };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V12);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V9
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A v12 record re-pinned as v11 is refused: v11 keeps generic
+    // struct declarations out of the vocabulary.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V11.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
+fn multifile_bundle_with_generic_structs_builds_as_v12() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        root.path().join("shapes.mm"),
+        "struct Pair<T> { a: T, b: T }\n\
+         atom sum(p: Pair<i64>) -> i64 requires: p.a >= 0 && p.b >= 0; ensures: result == p.a + p.b; body: { p.a + p.b };\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"shapes\" as s;\n\natom main() -> i64 requires: true; ensures: true; body: { 0 };\n",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MULTIFILE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V12);
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // Under a v11 pin the member's generic declarations stay refused.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MULTIFILE_PROFILE_V11.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn module_bundle_with_typedef_and_single_main_takes_the_module_path() {
     // A module holding one `main` plus a refined scalar declaration is
     // still a module — dispatch on atom count alone would send it to

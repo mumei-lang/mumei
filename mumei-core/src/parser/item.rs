@@ -979,9 +979,12 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                             .map(|t| t.trim().to_string())
                             .unwrap_or_else(|| "i64".to_string());
                         let type_ref = parse_type_ref(&type_name_str);
+                        // `type_name` is the normalized display name
+                        // (`Pair < i64 >` → `Pair<i64>`) so declared-name
+                        // lookups match the `type_ref`'s canonical form.
                         StructField {
                             name: parts[0].trim().to_string(),
-                            type_name: type_name_str,
+                            type_name: type_ref.display_name(),
                             type_ref,
                             constraint,
                         }
@@ -1814,7 +1817,10 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                 let type_ref = parse_type_ref(&type_name_str);
                 Param {
                     name: param_name.trim().to_string(),
-                    type_name: Some(type_name_str),
+                    // Normalized display name (`Pair < i64 >` →
+                    // `Pair<i64>`) so declared-name lookups match the
+                    // `type_ref`'s canonical form.
+                    type_name: Some(type_ref.display_name()),
                     type_ref: Some(type_ref),
                     consume,
                     is_ref,
