@@ -986,8 +986,10 @@ unsafe fn check_function(
                 // An aggregate is an admitted struct formal, an
                 // `insertvalue` chain or a call's struct result. It is
                 // read by `extractvalue`, extended by `insertvalue`,
-                // passed to a call or returned — never merged (`phi`,
-                // `select`) or stored. A constant aggregate (the
+                // passed to a call, returned or merged by
+                // `phi` (the emitter lowers a branch-merged composite to
+                // a `{i64, ...}` phi under composite v7) — never `select`
+                // or stored. A constant aggregate (the
                 // emitter's folded literal) holds integer or `undef`
                 // elements only; an `undef` slot stays undefined and
                 // fails closed wherever it is read.
@@ -997,12 +999,15 @@ unsafe fn check_function(
                         LLVMOpcode::LLVMExtractValue | LLVMOpcode::LLVMInsertValue
                     ) && i == 0)
                         || opcode == LLVMOpcode::LLVMCall
+                        || opcode == LLVMOpcode::LLVMPHI
                         || opcode == LLVMOpcode::LLVMRet;
                     let source_ok = !LLVMIsAArgument(value).is_null()
                         || (!LLVMIsAInstruction(value).is_null()
                             && matches!(
                                 LLVMGetInstructionOpcode(value),
-                                LLVMOpcode::LLVMInsertValue | LLVMOpcode::LLVMCall
+                                LLVMOpcode::LLVMInsertValue
+                                    | LLVMOpcode::LLVMCall
+                                    | LLVMOpcode::LLVMPHI
                             ))
                         || constant_aggregate(value);
                     if !use_ok || !source_ok {
@@ -1063,7 +1068,9 @@ unsafe fn check_function(
                 | LLVMOpcode::LLVMTrunc
                 | LLVMOpcode::LLVMSelect
                 | LLVMOpcode::LLVMPHI => {
-                    width(LLVMTypeOf(inst))?;
+                    if aggregate_fields(LLVMTypeOf(inst)).is_none() {
+                        width(LLVMTypeOf(inst))?;
+                    }
                 }
                 _ => return Err(ValidationError("unsupported LLVM instruction")),
             }
@@ -1521,7 +1528,17 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 let i = (0..LLVMCountIncoming(inst))
                     .find(|&i| LLVMGetIncomingBlock(inst, i) == previous)
                     .ok_or(ValidationError("missing LLVM phi edge"))?;
-                pending_phis.push((inst, self.value(LLVMGetIncomingValue(inst, i), &values)?));
+                let incoming = LLVMGetIncomingValue(inst, i);
+                if aggregate_fields(LLVMTypeOf(inst)).is_some() {
+                    // A composite merged across a branch boundary is a
+                    // `{i64, ...}` phi: its slots are the incoming
+                    // aggregate's slots on this predecessor path — the
+                    // same per-slot merge the source encoder performs.
+                    self.aggregates
+                        .insert(inst as usize, self.aggregate(incoming)?);
+                } else {
+                    pending_phis.push((inst, self.value(incoming, &values)?));
+                }
                 inst = LLVMGetNextInstruction(inst);
                 continue;
             }

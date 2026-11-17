@@ -2857,3 +2857,44 @@ fn composite_v6_bool_padding_slots_compare_against_normalized_source_values() {
     .unwrap();
     assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
 }
+
+const BRANCH_MERGED_COMPOSITE_SOURCE: &str = "struct P { x: i64, y: i64 }\nenum Shape { Dot, Edge(w: i64) }\natom pick(p: P, c: i64) -> P requires: c >= 0 && p.x >= 0; ensures: result.x >= 0; body: { if c == 0 { p } else { P { x: c, y: c } } };\natom pick_enum(s: Shape, c: i64) -> Shape requires: c >= 0; ensures: true; body: { if c == 0 { s } else { Shape::Edge(c) } };\natom main() -> i64 requires: true; ensures: true; body: { let q = pick(P { x: 1, y: 2 }, 3); q.x };";
+
+#[test]
+fn composite_v7_branch_merged_aggregates_validate_against_phi_ir() {
+    // composite v7 lowers a branch-merged struct/enum to a `{i64, ...}`
+    // phi: the validator must follow the merge per slot, so the real
+    // emitter output compares EquivalentWithinProfile.
+    let items = parse_module_checked(BRANCH_MERGED_COMPOSITE_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    assert!(
+        ir.contains("phi { i64, i64 }"),
+        "emitter did not phi a composite:\n{ir}"
+    );
+    let report = tv::validate_native_module(
+        BRANCH_MERGED_COMPOSITE_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV7,
+    )
+    .unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    // Reading the wrong slot of the merged aggregate refutes the
+    // comparison: `main` must take `q.x`, not `q.y`.
+    let swapped = ir.replace(
+        "%q.x = extractvalue { i64, i64 } %call_pick, 0",
+        "%q.x = extractvalue { i64, i64 } %call_pick, 1",
+    );
+    assert_ne!(swapped, ir, "probe did not apply");
+    assert_eq!(
+        tv::validate_native_module(
+            BRANCH_MERGED_COMPOSITE_SOURCE,
+            &swapped,
+            Options::default(),
+            RefinedAdmission::CompositeV7,
+        )
+        .unwrap()
+        .outcome,
+        Outcome::Different
+    );
+}
