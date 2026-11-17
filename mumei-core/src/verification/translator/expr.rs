@@ -3087,6 +3087,67 @@ pub(crate) fn expr_to_z3<'a>(
                             for arg in args {
                                 ctor_args.push(expr_to_z3(vc, arg, env, solver_opt)?);
                             }
+                            // A payload argument must satisfy the declared
+                            // field type — `Chan::Tcp(0)` with `p: Port`
+                            // (`v in 1..=65535`) is a rejected construction,
+                            // not a value a later match may assume the
+                            // refined bounds on (the same contract a caller
+                            // satisfies for a refined callee parameter).
+                            if let (Some(solver), Some((enum_def, vidx))) =
+                                (solver_opt, datatype::resolve_enum_ctor(vc, name)?)
+                            {
+                                let variant_def = &enum_def.variants[vidx];
+                                for (i, arg_z3) in ctor_args.iter().enumerate() {
+                                    let Some(field_ty) = variant_def.field_types.get(i) else {
+                                        continue;
+                                    };
+                                    let Some(refined) =
+                                        vc.module_env.get_type(field_ty.name.as_str())
+                                    else {
+                                        continue;
+                                    };
+                                    let chain = vc
+                                        .module_env
+                                        .refined_chain(&refined.name)
+                                        .map_err(|cycle| {
+                                            MumeiError::type_error_at(cycle, refined.span.clone())
+                                        })?;
+                                    for decl in chain {
+                                        let mut local_env = env.clone();
+                                        local_env.insert(decl.operand.clone(), arg_z3.clone());
+                                        let predicate_ast = parse_expression(&decl.predicate_raw);
+                                        let Some(pred_bool) =
+                                            expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
+                                                .as_bool()
+                                        else {
+                                            continue;
+                                        };
+                                        if vc.cover_obligations.is_some() {
+                                            record_cover_obligation(vc, pred_bool);
+                                            continue;
+                                        }
+                                        solver.push();
+                                        for cond in vc.path_cond_stack.borrow().iter() {
+                                            solver.assert(cond);
+                                        }
+                                        solver.assert(&pred_bool.not());
+                                        let refined_check =
+                                            crate::verification::phase_artifacts::check(solver);
+                                        solver.pop(1);
+                                        if refined_check == SatResult::Sat {
+                                            return Err(MumeiError::verification(
+                                                format!("Construction of '{name}': refinement on field '{}' ({}) not satisfied", variant_def.fields.get(i).cloned().unwrap_or_else(|| i.to_string()), decl.name)
+                                            ).with_help("enum を構築する引数が宣言されたフィールド型の制約を満たしていません。引数の値を確認してください")
+                                            .with_verdict(crate::verification::VerdictKind::Rejected));
+                                        }
+                                        if refined_check == SatResult::Unknown {
+                                            return Err(MumeiError::verification(
+                                                format!("Construction of '{name}': refinement on field '{}' ({}) could not be decided", variant_def.fields.get(i).cloned().unwrap_or_else(|| i.to_string()), decl.name)
+                                            ).with_verdict(crate::verification::VerdictKind::Inconclusive));
+                                        }
+                                    }
+                                }
+                            }
                             if let Some(value) = datatype::enum_ctor_apply(vc, name, &ctor_args)? {
                                 return Ok(value);
                             }
@@ -3959,9 +4020,21 @@ pub(crate) fn expr_to_z3<'a>(
                     )?;
                     // ガード条件がある場合は AND で結合
                     let full_cond = if let Some(guard) = &arm.guard {
+                        // The guard may name the arm's payload binders —
+                        // evaluate it in an env where the pattern's
+                        // bindings exist, like the arm pass below does.
+                        let mut check_env = env.clone();
+                        pattern_bind_variables(
+                            ctx,
+                            &arm.pattern,
+                            &target_z3,
+                            &mut check_env,
+                            vc,
+                            decl_hint.as_deref(),
+                        );
                         // The arm pass below checks the guard's arithmetic.
                         let check_i64 = vc.check_i64_overflow.replace(false);
-                        let guard_z3 = expr_to_z3(vc, guard, env, None);
+                        let guard_z3 = expr_to_z3(vc, guard, &mut check_env, None);
                         vc.check_i64_overflow.set(check_i64);
                         let guard_z3 = guard_z3?
                             .as_bool()
@@ -4030,21 +4103,29 @@ pub(crate) fn expr_to_z3<'a>(
             // ========================================================
             // Match 式の値の構築（if-then-else チェーンとして Z3 式を構築）
             // ========================================================
-            // A. デフォルトアーム最適化:
-            //    _ アームの body 評価時に、先行アームの否定を事前条件として
-            //    env/solver に追加し、デフォルトアーム内の検証精度を向上させる。
+            // Arms are evaluated in source order so `accumulated_negations`
+            // holds the negations of the *preceding* arms — the window an
+            // arm body actually runs under (all earlier arms failed to match
+            // AND this arm's condition holds). The window is pushed onto the
+            // path-condition stack during body evaluation so path-cond-aware
+            // checks inside the body (refined ctor args, call-site
+            // refinements, divisions) see only reachable inputs; the results
+            // are then folded into an ite chain from the last arm outward.
             let mut accumulated_negations: Vec<Bool> = Vec::new();
-            let mut result: Option<Dynamic> = None;
-            // Assignments to pre-existing vars inside arm bodies must fold
-            // back under each arm's condition — previously they were dropped
-            // with the per-arm env clone, so post-match code saw stale values.
+            let mut arm_results: Vec<(Bool, Dynamic)> = Vec::with_capacity(arms.len());
+            // Per-arm writes to pre-existing vars fold back under first-match
+            // precedence: collected forward, then merged last-to-first so an
+            // earlier arm's state overrides a later arm's (the accumulated
+            // `ite(cond, arm, acc)` otherwise lets a trailing `_` win).
+            let mut arm_states: Vec<(Bool, Env, std::collections::HashSet<String>)> =
+                Vec::with_capacity(arms.len());
             let mut merged_arm_env: Option<Env> = None;
             // Lambda `let`s inside an arm body stay arm-local — restore the
             // map before each arm and after the match, mirroring the
             // per-arm `env.clone()` scoping below.
             let lambdas_before = vc.local_lambdas.borrow().clone();
 
-            for arm in arms.iter().rev() {
+            for arm in arms.iter() {
                 *vc.local_lambdas.borrow_mut() = lambdas_before.clone();
                 let mut arm_env = env.clone();
                 let int_types_before_arm = vc.local_int_types.borrow().clone();
@@ -4083,6 +4164,61 @@ pub(crate) fn expr_to_z3<'a>(
                     solver_opt,
                     decl_hint.as_deref(),
                 )?;
+                // A payload field declared with a refined type carries the
+                // declaration's conjuncts — asserted under the arm's hit
+                // condition since the payload only exists when the tag
+                // matches. Without this, `On(p: Port)` would bind `p` to an
+                // unconstrained payload and reject valid atoms.
+                if let (
+                    Some(solver),
+                    Pattern::Variant {
+                        variant_name,
+                        fields,
+                    },
+                ) = (solver_opt, &arm.pattern)
+                {
+                    if let Ok(Some(enum_def)) = datatype::resolve_variant_owner(
+                        vc,
+                        &target_z3,
+                        variant_name,
+                        decl_hint.as_deref(),
+                    ) {
+                        let variant_leaf = datatype::variant_leaf(variant_name);
+                        if let Some(variant_def) =
+                            enum_def.variants.iter().find(|v| v.name == variant_leaf)
+                        {
+                            for (i, field_pattern) in fields.iter().enumerate() {
+                                let (Pattern::Variable(bound_name), Some(field_ty)) =
+                                    (field_pattern, variant_def.field_types.get(i))
+                                else {
+                                    continue;
+                                };
+                                let Some(refined) = vc.module_env.get_type(field_ty.name.as_str())
+                                else {
+                                    continue;
+                                };
+                                let Some(bound) = arm_env.get(bound_name).cloned() else {
+                                    continue;
+                                };
+                                let chain = vc.module_env.refined_chain(&refined.name).map_err(
+                                    |cycle| MumeiError::type_error_at(cycle, refined.span.clone()),
+                                )?;
+                                for decl in chain {
+                                    let mut local_env = arm_env.clone();
+                                    local_env.insert(decl.operand.clone(), bound.clone());
+                                    let predicate_ast = parse_expression(&decl.predicate_raw);
+                                    let Some(predicate_z3) =
+                                        expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
+                                            .as_bool()
+                                    else {
+                                        continue;
+                                    };
+                                    solver.assert(&arm_cond.implies(&predicate_z3));
+                                }
+                            }
+                        }
+                    }
+                }
                 let full_cond = if let Some(guard) = &arm.guard {
                     // The guard only runs when the arm's pattern matches.
                     vc.path_cond_stack.borrow_mut().push(arm_cond.clone());
@@ -4102,49 +4238,52 @@ pub(crate) fn expr_to_z3<'a>(
                     arm_cond
                 };
 
-                // A. デフォルトアーム最適化: Wildcard/Variable パターンの場合、
-                //    先行アームの否定条件を solver に追加して body を検証
-                if let Some(solver) = solver_opt {
-                    if matches!(arm.pattern, Pattern::Wildcard | Pattern::Variable(_))
-                        && !accumulated_negations.is_empty()
-                    {
-                        let neg_refs: Vec<&Bool> = accumulated_negations.iter().collect();
-                        let prior_negation = Bool::and(ctx, &neg_refs);
-                        solver.push();
-                        solver.assert(&prior_negation);
-                        let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
-                        *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
-                        solver.pop(1);
-                        merge_arm_env_into(
-                            &mut merged_arm_env,
-                            &arm_env,
-                            env,
-                            &full_cond,
-                            &arm_bound,
-                        );
-                        result = Some(match result {
-                            Some(else_val) => {
-                                let (body_val, else_val) = unify_branch_sorts(body_val, else_val)?;
-                                full_cond.ite(&body_val, &else_val)
-                            }
-                            None => body_val,
-                        });
-                        accumulated_negations.push(full_cond.not());
-                        continue;
+                // The arm body only runs on inputs that reach it — prior
+                // arms did not match AND this arm's condition holds. Push
+                // that window onto the path-condition stack while
+                // translating the body so path-cond-aware checks inside it
+                // (refined ctor args, call-site refinements, divisions) see
+                // only reachable inputs — `match x { 1 => Chan::Tcp(x), .. }`
+                // must not check the constructor against `x = 0`. The window
+                // goes on the stack rather than the solver so checks that do
+                // not consult path conditions are not perturbed.
+                {
+                    let mut stack = vc.path_cond_stack.borrow_mut();
+                    for neg in accumulated_negations.iter() {
+                        stack.push(neg.clone());
+                    }
+                    stack.push(full_cond.clone());
+                }
+                let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt);
+                {
+                    let mut stack = vc.path_cond_stack.borrow_mut();
+                    for _ in 0..=accumulated_negations.len() {
+                        stack.pop();
                     }
                 }
-
-                let body_val = stmt_to_z3(vc, &arm.body, &mut arm_env, solver_opt)?;
+                let body_val = body_val?;
                 *vc.local_int_types.borrow_mut() = int_types_before_arm.clone();
-                merge_arm_env_into(&mut merged_arm_env, &arm_env, env, &full_cond, &arm_bound);
+                arm_states.push((full_cond.clone(), arm_env, arm_bound));
+                arm_results.push((full_cond.clone(), body_val));
+                accumulated_negations.push(full_cond.not());
+            }
+
+            // Fold the arm values into an ite chain from the last arm
+            // outward: `ite(c_1, b_1, ite(c_2, b_2, ... b_n))`, and fold the
+            // per-arm writes in the same order so the first matching arm
+            // takes precedence for post-match state.
+            let mut result: Option<Dynamic> = None;
+            for (cond, val) in arm_results.into_iter().rev() {
                 result = Some(match result {
                     Some(else_val) => {
-                        let (body_val, else_val) = unify_branch_sorts(body_val, else_val)?;
-                        full_cond.ite(&body_val, &else_val)
+                        let (val, else_val) = unify_branch_sorts(val, else_val)?;
+                        cond.ite(&val, &else_val)
                     }
-                    None => body_val,
+                    None => val,
                 });
-                accumulated_negations.push(full_cond.not());
+            }
+            for (cond, arm_env, arm_bound) in arm_states.into_iter().rev() {
+                merge_arm_env_into(&mut merged_arm_env, &arm_env, env, &cond, &arm_bound);
             }
 
             if let Some(merged_env) = merged_arm_env {

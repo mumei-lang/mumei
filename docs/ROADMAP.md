@@ -3325,9 +3325,19 @@ field reads on struct-returning calls. `recheck-llvm` pairs `insertvalue`
 chains, folded constant aggregates, aggregate call results and returned
 aggregates with the field slots. Undefined slots, merged or nested
 aggregates, branch-merged struct values and field assignment still fail
-closed. This is a wider admitted fragment, not deeper
+closed. Composite slice 4 admits enum members under
+`mumei.pure-i64-composite/v4` and the `/v7` profiles: non-generic,
+non-recursive enums with scalar or refined-alias payloads uniform at
+each index ride the merge, and an enum parameter flattens to a tag
+slot bounded by the variant count plus one slot per payload index —
+the emitter's tagged-union layout. `match` on an enum parameter
+admits `Variant` arms plus a final unguarded `_` arm, enum parameters
+pass through by name to same-enum callees, and enum `let`s bind
+pass-through. Enum construction/results, `Literal`/bare-`Variable`
+arms, mixed-type payload slots and recursive or generic enums stay
+out. This is a wider admitted fragment, not deeper
 assurance: the same identity-plus-recheck scopes apply. See the
-[composite struct member profile](VERIFICATION_NATIVE.md#composite-struct-member-profile-v4).
+[composite member profile](VERIFICATION_NATIVE.md#composite-struct-member-profile-v4).
 
 ## Related Documents
 

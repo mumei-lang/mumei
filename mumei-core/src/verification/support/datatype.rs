@@ -37,9 +37,9 @@ pub(crate) fn is_finite_adt(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool 
     }
     enum_def.variants.iter().all(|variant| {
         variant
-            .fields
+            .field_types
             .iter()
-            .all(|field| field_is_scalar(field, module_env))
+            .all(|field| field_is_scalar(field.name.as_str(), module_env))
     })
 }
 
@@ -99,11 +99,11 @@ pub(crate) fn enum_datatype_sort<'a>(
     for variant in &enum_def.variants {
         let mut names = Vec::new();
         let mut sorts = Vec::new();
-        for (i, field_type) in variant.fields.iter().enumerate() {
+        for (i, field_type) in variant.field_types.iter().enumerate() {
             names.push(format!("{}_{}", variant.name, i));
             sorts.push(field_sort(
                 vc.ctx,
-                field_type,
+                field_type.name.as_str(),
                 vc.module_env,
                 vc.ieee754_f64,
             )?);
@@ -135,15 +135,13 @@ pub(crate) fn datatype_sort_for_type<'a>(
     Some((sort, enum_def))
 }
 
-/// `Enum::Variant(args)` / `Variant(args)` construction — applies the
-/// variant's Z3 constructor to `args` (already lowered). Returns `None` when
-/// the name does not resolve to a finite-ADT variant or the arity is wrong —
-/// callers then keep the previous behaviour (unknown/atom call).
-pub(crate) fn enum_ctor_apply<'a>(
+/// Resolve `ctor_path` (`E::V` or bare `V`) to its declaring enum and the
+/// variant's index — the resolution `enum_ctor_apply` performs, shared with
+/// callers that need the declaration (e.g. to check payload field types).
+pub(crate) fn resolve_enum_ctor<'a>(
     vc: &VCtx<'a>,
     ctor_path: &str,
-    args: &[Dynamic<'a>],
-) -> MumeiResult<Option<Dynamic<'a>>> {
+) -> MumeiResult<Option<(&'a EnumDef, usize)>> {
     let variant_name = ctor_path.rsplit("::").next().unwrap_or(ctor_path);
     let enum_def = if let Some((qual, _)) = ctor_path.split_once("::") {
         // Qualified `E::V` resolves `E` directly — `find_enum_by_variant`
@@ -176,6 +174,21 @@ pub(crate) fn enum_ctor_apply<'a>(
         .iter()
         .position(|v| v.name == variant_name)
     else {
+        return Ok(None);
+    };
+    Ok(Some((enum_def, idx)))
+}
+
+/// `Enum::Variant(args)` / `Variant(args)` construction — applies the
+/// variant's Z3 constructor to `args` (already lowered). Returns `None` when
+/// the name does not resolve to a finite-ADT variant or the arity is wrong —
+/// callers then keep the previous behaviour (unknown/atom call).
+pub(crate) fn enum_ctor_apply<'a>(
+    vc: &VCtx<'a>,
+    ctor_path: &str,
+    args: &[Dynamic<'a>],
+) -> MumeiResult<Option<Dynamic<'a>>> {
+    let Some((enum_def, idx)) = resolve_enum_ctor(vc, ctor_path)? else {
         return Ok(None);
     };
     let Some(sort) = enum_datatype_sort(vc, enum_def) else {
@@ -317,12 +330,12 @@ fn target_param_enum_name(vc: &VCtx, target: &Dynamic) -> Option<String> {
                         .variants
                         .iter()
                         .find(|v| v.name == variant_name)
-                        .and_then(|v| v.fields.get(i))
+                        .and_then(|v| v.field_types.get(i))
                     {
-                        let resolved = if *ft == enum_name {
+                        let resolved = if ft.name == enum_name {
                             enum_name.to_string()
                         } else {
-                            vc.module_env.resolve_base_type(ft)
+                            vc.module_env.resolve_base_type(ft.name.as_str())
                         };
                         return vc.module_env.get_enum(&resolved).map(|e| e.name.clone());
                     }

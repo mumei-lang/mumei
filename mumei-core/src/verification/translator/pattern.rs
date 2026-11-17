@@ -245,8 +245,8 @@ pub(crate) fn pattern_bind_variables<'a>(
                 {
                     for (i, field_pattern) in fields.iter().enumerate() {
                         let proj_name = format!("__proj_{}_{}_{}", enum_def.name, variant_leaf, i);
-                        let field_sym: Dynamic = if i < variant_def.fields.len() {
-                            let field_type = &variant_def.fields[i];
+                        let field_sym: Dynamic = if i < variant_def.field_types.len() {
+                            let field_type = &variant_def.field_types[i].name;
                             let base = if *field_type == enum_def.name {
                                 "i64".to_string()
                             } else {
@@ -254,6 +254,7 @@ pub(crate) fn pattern_bind_variables<'a>(
                             };
                             match base.as_str() {
                                 "f64" => Float::new_const(ctx, proj_name.as_str(), 11, 53).into(),
+                                "bool" => Bool::new_const(ctx, proj_name.as_str()).into(),
                                 _ => Int::new_const(ctx, proj_name.as_str()).into(),
                             }
                         } else {
@@ -270,11 +271,11 @@ pub(crate) fn pattern_bind_variables<'a>(
                                 // ネストした Variant: フィールドの宣言型
                                 // （再帰 `Self` → 自身の enum 名）を hint に
                                 let field_hint: Option<String> =
-                                    variant_def.fields.get(i).and_then(|ft| {
-                                        let resolved = if *ft == enum_def.name {
+                                    variant_def.field_types.get(i).and_then(|ft| {
+                                        let resolved = if ft.name == enum_def.name {
                                             enum_def.name.clone()
                                         } else {
-                                            module_env.resolve_base_type(ft)
+                                            module_env.resolve_base_type(ft.name.as_str())
                                         };
                                         module_env.get_enum(&resolved).map(|_| resolved)
                                     });

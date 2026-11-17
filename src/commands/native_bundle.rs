@@ -94,7 +94,26 @@ fn observed_exit_status(executable: &Path) -> Option<u32> {
 /// of the captured bytes. `None` on spawn failure, timeout, signal
 /// termination or output over the cap — never a claim about program
 /// semantics, only an OS-level channel observation.
+/// Why a channel observation produced no digest — every failure is
+/// fail-closed `None` to callers, but the reason is kept internally for
+/// test diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObservedStreamFailure {
+    SpawnFailed,
+    PipeTaken,
+    TimedOutOrKilled,
+    ReaderFailed,
+    OutputOverCap,
+}
+
 fn observed_stream(executable: &Path, channel: ObservedChannel) -> Option<String> {
+    observed_stream_inner(executable, channel).ok()
+}
+
+fn observed_stream_inner(
+    executable: &Path,
+    channel: ObservedChannel,
+) -> Result<String, ObservedStreamFailure> {
     use std::io::Read;
     let mut command = std::process::Command::new(executable);
     command.stdin(Stdio::null());
@@ -106,12 +125,24 @@ fn observed_stream(executable: &Path, channel: ObservedChannel) -> Option<String
             command.stdout(Stdio::null()).stderr(Stdio::piped());
         }
     }
-    let mut child = command.spawn().ok()?;
+    let mut child = command
+        .spawn()
+        .map_err(|_| ObservedStreamFailure::SpawnFailed)?;
     // ChildStdout/ChildStderr are distinct types; erase to the shared
     // Read interface for the draining reader thread.
     let mut piped: Box<dyn std::io::Read + Send> = match channel {
-        ObservedChannel::Stdout => Box::new(child.stdout.take()?),
-        ObservedChannel::Stderr => Box::new(child.stderr.take()?),
+        ObservedChannel::Stdout => Box::new(
+            child
+                .stdout
+                .take()
+                .ok_or(ObservedStreamFailure::PipeTaken)?,
+        ),
+        ObservedChannel::Stderr => Box::new(
+            child
+                .stderr
+                .take()
+                .ok_or(ObservedStreamFailure::PipeTaken)?,
+        ),
     };
     let reader = std::thread::spawn(move || {
         let mut captured = Vec::new();
@@ -160,11 +191,16 @@ fn observed_stream(executable: &Path, channel: ObservedChannel) -> Option<String
             }
         }
     };
-    let (captured, overflow) = reader.join().ok()?;
-    if !finished || overflow {
-        return None;
+    let (captured, overflow) = reader
+        .join()
+        .map_err(|_| ObservedStreamFailure::ReaderFailed)?;
+    if !finished {
+        return Err(ObservedStreamFailure::TimedOutOrKilled);
     }
-    Some(sha256(&captured))
+    if overflow {
+        return Err(ObservedStreamFailure::OutputOverCap);
+    }
+    Ok(sha256(&captured))
 }
 
 /// The stdout channel observation — see `observed_stream`.
@@ -1162,12 +1198,15 @@ fn build(input: &Path, output: &Path) -> Result<(String, &'static str), BundleEr
         .filter(|item| matches!(item, parser::Item::Atom(_)))
         .count();
     // A single-atom module still takes the module path when it declares
-    // refined scalar types or structs — `build_single` admits only a
-    // lone atom.
+    // refined scalar types, structs or enums — `build_single` admits
+    // only a lone atom.
     if atoms > 1
-        || items
-            .iter()
-            .any(|item| matches!(item, parser::Item::TypeDef(_) | parser::Item::StructDef(_)))
+        || items.iter().any(|item| {
+            matches!(
+                item,
+                parser::Item::TypeDef(_) | parser::Item::StructDef(_) | parser::Item::EnumDef(_)
+            )
+        })
     {
         build_module(&source, input, output).map(|id| (id, MODULE_SCOPE))
     } else {
@@ -1270,19 +1309,23 @@ fn emit_module(
     atoms: &[parser::Atom],
     types: &[parser::RefinedType],
     structs: &[parser::StructDef],
+    enums: &[parser::EnumDef],
     stage: &Path,
     proof_work: &Path,
 ) -> Result<EmittedModule, BundleError> {
     let mut env = verification::ModuleEnv::default();
-    // Register the module's refined scalar and struct declarations
-    // before the atoms — signature members typed by an alias or a struct
-    // resolve through the env the same way `mumei verify`'s module
-    // environment does.
+    // Register the module's refined scalar, struct and enum
+    // declarations before the atoms — signature members typed by an
+    // alias, a struct or an enum resolve through the env the same way
+    // `mumei verify`'s module environment does.
     for typedef in types {
         env.register_type(typedef);
     }
     for struct_def in structs {
         env.register_struct(struct_def);
+    }
+    for enum_def in enums {
+        env.register_enum(enum_def);
     }
     for atom in atoms {
         env.register_atom(atom);
@@ -1350,12 +1393,13 @@ fn emit_module(
 }
 
 /// The record profile a module-family bundle pins for the source profile
-/// its gate derived: `[v1, v2, v3, v4, v5]` for the wrapping, refined
-/// v1, refined v2, composite v1 and composite v2 fragments. Each recheck
+/// its gate derived: `[v1, .., v7]` for the wrapping, refined v1,
+/// refined v2 and the composite v1–v4 fragments. Each recheck
 /// re-derives under exactly that version's admission, never a wider one.
-fn record_profile(source_profile: &str, versions: [&'static str; 6]) -> &'static str {
-    let [v1, v2, v3, v4, v5, v6] = versions;
+fn record_profile(source_profile: &str, versions: [&'static str; 7]) -> &'static str {
+    let [v1, v2, v3, v4, v5, v6, v7] = versions;
     match source_profile {
+        semantic_contract::PURE_I64_COMPOSITE_PROFILE_V4 => v7,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE_V3 => v6,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE_V2 => v5,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE => v4,
@@ -1369,8 +1413,8 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
     // The producer always runs the widest (composite) admission; the
     // record's `profile` names a wider version only when the source
     // actually declares what needs it, so a plain module keeps pinning v1.
-    let (binding, atoms, types, structs) =
-        prepare_module_source(source, RefinedAdmission::CompositeV3)?;
+    let (binding, atoms, types, structs, enums) =
+        prepare_module_source(source, RefinedAdmission::CompositeV4)?;
     let parent = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -1383,8 +1427,14 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         .prefix(".mumei-proof-")
         .tempdir_in(parent)
         .map_err(|_| BundleError("cannot stage proof"))?;
-    let (files, object_build, link_build) =
-        emit_module(&atoms, &types, &structs, stage.path(), proof_work.path())?;
+    let (files, object_build, link_build) = emit_module(
+        &atoms,
+        &types,
+        &structs,
+        &enums,
+        stage.path(),
+        proof_work.path(),
+    )?;
     let record = ModuleNativeBundleRecord {
         schema: MODULE_SCHEMA.into(),
         profile: record_profile(
@@ -1396,6 +1446,7 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
                 MODULE_PROFILE_V4,
                 MODULE_PROFILE_V5,
                 MODULE_PROFILE_V6,
+                MODULE_PROFILE_V7,
             ],
         )
         .into(),
@@ -1513,13 +1564,14 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
             queue.push_back(member);
         }
     }
-    let prepared = prepare_multifile_source(&root, &members, RefinedAdmission::CompositeV3)?;
-    let (binding, graph, atoms, types, structs) = (
+    let prepared = prepare_multifile_source(&root, &members, RefinedAdmission::CompositeV4)?;
+    let (binding, graph, atoms, types, structs, enums) = (
         prepared.binding,
         prepared.import_graph_sha256,
         prepared.atoms,
         prepared.types,
         prepared.structs,
+        prepared.enums,
     );
     let parent = output
         .parent()
@@ -1533,8 +1585,14 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
         .prefix(".mumei-proof-")
         .tempdir_in(parent)
         .map_err(|_| BundleError("cannot stage proof"))?;
-    let (files, object_build, link_build) =
-        emit_module(&atoms, &types, &structs, stage.path(), proof_work.path())?;
+    let (files, object_build, link_build) = emit_module(
+        &atoms,
+        &types,
+        &structs,
+        &enums,
+        stage.path(),
+        proof_work.path(),
+    )?;
     let sources_dir = stage.path().join(SOURCES_DIR);
     fs::create_dir(&sources_dir).map_err(|_| BundleError("cannot stage source members"))?;
     for (name, text) in &members {
@@ -1555,6 +1613,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
                 MULTIFILE_PROFILE_V4,
                 MULTIFILE_PROFILE_V5,
                 MULTIFILE_PROFILE_V6,
+                MULTIFILE_PROFILE_V7,
             ],
         )
         .into(),
@@ -2087,13 +2146,15 @@ mod tests {
             std::fs::set_permissions(&printer, perms).unwrap();
         }
         // Exactly the cap is observable; one byte past it is not —
-        // a pin must cover the whole stream, never a truncation.
+        // a pin must cover the whole stream, never a truncation. Assert
+        // on the inner result so a failure names its reason.
         for (bytes, expected) in [
             (OBSERVED_CHANNEL_MAX_BYTES, true),
             (OBSERVED_CHANNEL_MAX_BYTES + 1, false),
         ] {
             std::fs::write(&printer, format!("#!/bin/sh\nhead -c {bytes} /dev/zero\n")).unwrap();
-            assert_eq!(observed_stdout(&printer).is_some(), expected);
+            let observed = observed_stream_inner(&printer, ObservedChannel::Stdout);
+            assert_eq!(observed.is_ok(), expected, "{bytes} bytes: {observed:?}");
         }
         // The observable digest covers every emitted byte.
         std::fs::write(&printer, "#!/bin/sh\nprintf 'out'\n").unwrap();
@@ -2129,7 +2190,8 @@ mod tests {
                 format!("#!/bin/sh\nhead -c {bytes} /dev/zero >&2\n"),
             )
             .unwrap();
-            assert_eq!(observed_stderr(&printer).is_some(), expected);
+            let observed = observed_stream_inner(&printer, ObservedChannel::Stderr);
+            assert_eq!(observed.is_ok(), expected, "{bytes} bytes: {observed:?}");
         }
         // A missing executable is unobservable, not a pin.
         assert_eq!(observed_stderr(&dir.path().join("missing")), None);

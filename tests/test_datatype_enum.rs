@@ -142,3 +142,62 @@ fn qualified_arm_mismatching_target_type_fails_closed() {
         "a `Qual::V` arm on a differently-typed target must fail closed:\n{combined}"
     );
 }
+
+#[test]
+fn enum_named_payload_type_drives_binding_and_refinement() {
+    // `On(b: bool)` must bind `b` as Bool (an unnormalized "b: bool" fell
+    // back to Int) and `On(p: Port)` must assume the alias's conjuncts
+    // under the arm's hit condition.
+    let output = mumei_verify("tests/test_enum_named_payload.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "named bool/refined payloads should verify:\n{combined}"
+    );
+}
+
+#[test]
+fn enum_ctor_payload_must_satisfy_declared_field_type() {
+    let output = mumei_verify("tests/test_enum_ctor_refined_negative.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("not satisfied"),
+        "a payload violating its declared refined field type must be rejected:\n{combined}"
+    );
+}
+
+#[test]
+fn enum_ctor_violation_inside_reachable_match_arm_is_rejected() {
+    let output = mumei_verify("tests/test_enum_ctor_refined_arm_negative.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("not satisfied"),
+        "a violating payload in a reachable match arm must not verify vacuously:\n{combined}"
+    );
+}
+
+#[test]
+fn enum_ctor_payload_satisfying_field_type_verifies() {
+    let output = mumei_verify("tests/test_enum_ctor_refined.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "payloads satisfying the declared field type — including inside match arms — must verify:\n{combined}"
+    );
+}

@@ -4729,7 +4729,10 @@ fn test_enum_def(
             .map(|(vname, fields)| EnumVariant {
                 name: vname.to_string(),
                 fields: fields.iter().map(|s| s.to_string()).collect(),
-                field_types: vec![],
+                field_types: fields
+                    .iter()
+                    .map(|s| crate::parser::item::parse_type_ref(s))
+                    .collect(),
                 is_recursive: false,
             })
             .collect(),
