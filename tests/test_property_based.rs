@@ -4,7 +4,7 @@ use std::process::Command;
 use mumei_core::parser::{Atom, Param, RefinedType, Span, TrustLevel};
 use mumei_core::verification::{
     check_generated_assignment, generator_from_refinement, run_property_based_test,
-    shrink_counterexample, synthesize_input_generators, GeneratedValue, InputGenerator, ModuleEnv,
+    shrink_counterexample, synthesize_input_generators, GeneratedValue, ModuleEnv,
     PropertyBasedTestConfig,
 };
 
@@ -64,24 +64,29 @@ fn refined(name: &str, base_type: &str, operand: &str, predicate: &str) -> Refin
 
 #[test]
 fn synthesizes_nat_generator_from_refinement_type() {
-    let generator = generator_from_refinement(&refined("Nat", "i64", "v", "v >= 0"));
+    let mut module_env = ModuleEnv::new();
+    module_env.register_type(&refined("Nat", "i64", "v", "v >= 0"));
+    let generator = generator_from_refinement("Nat", &module_env);
 
-    assert_eq!(generator.min, 0);
-    assert_eq!(generator.max, 100);
-    assert!(generator
-        .boundary_values()
-        .contains(&GeneratedValue::Int(0)));
+    let values = generator.boundary_values();
+    assert!(values.contains(&GeneratedValue::Int(0)));
+    assert!(values
+        .iter()
+        .all(|v| matches!(v, GeneratedValue::Int(i) if *i >= 0)));
 }
 
 #[test]
 fn synthesizes_bounded_generator_from_refinement_type() {
-    let generator = generator_from_refinement(&refined("Small", "i64", "v", "v >= -3 && v <= 7"));
+    let mut module_env = ModuleEnv::new();
+    module_env.register_type(&refined("Small", "i64", "v", "v >= -3 && v <= 7"));
+    let generator = generator_from_refinement("Small", &module_env);
 
-    assert_eq!(generator.min, -3);
-    assert_eq!(generator.max, 7);
-    assert!(generator
-        .boundary_values()
-        .contains(&GeneratedValue::Int(7)));
+    let values = generator.boundary_values();
+    assert!(values.contains(&GeneratedValue::Int(-3)));
+    assert!(values.contains(&GeneratedValue::Int(7)));
+    assert!(values
+        .iter()
+        .all(|v| matches!(v, GeneratedValue::Int(i) if (-3..=7).contains(i))));
 }
 
 #[test]
