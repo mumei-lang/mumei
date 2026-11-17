@@ -1799,6 +1799,41 @@ fn flattened_struct_fields<'a>(
     out
 }
 
+/// `flattened_struct_fields(..).len() > limit` without materializing the
+/// leaves: each occurrence of a struct-typed field contributes its own
+/// leaf slots, so a chain where every level names the same child type
+/// twice doubles the count per level — a bounded walk must bail as soon
+/// as the limit is passed rather than expanding first.
+fn leaf_count_exceeds(structs: &StructEnv, fields: &[ResolvedField], limit: usize) -> bool {
+    fn visit(
+        structs: &StructEnv,
+        fields: &[ResolvedField],
+        count: &mut usize,
+        limit: usize,
+    ) -> bool {
+        for field in fields {
+            match &field.shape {
+                ValueKind::Struct(child) => {
+                    if let Some(inner) = structs.get(child) {
+                        if visit(structs, inner, count, limit) {
+                            return true;
+                        }
+                    }
+                }
+                _ => {
+                    *count += 1;
+                    if *count > limit {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+    let mut count = 0usize;
+    visit(structs, fields, &mut count, limit)
+}
+
 /// A struct parameter's value from its lowered leaf slots: a scalar
 /// field consumes one slot, a struct-typed field consumes its own
 /// flattened leaves and becomes a nested `Composite`
@@ -2193,11 +2228,29 @@ fn build_struct_env(
         // leaf slots; a struct that flattens past that (or nests
         // deeper than the walk bound below) stays outside the
         // fragment rather than risking a signature arity mismatch
-        // the admission checker could not express.
-        if flattened_struct_fields(&env, fields).len() > 16 || struct_depth(&env, fields, 0) > 8 {
+        // the admission checker could not express. The count is a
+        // capped walk rather than a materialized list — a chain of
+        // declarations each carrying two fields of the same child
+        // type doubles its leaf count per level, so expanding first
+        // and counting later would exhaust memory before the limit
+        // check could reject.
+        if leaf_count_exceeds(&env, fields, 16) || struct_depth(&env, fields, 0) > 8 {
             return Err(SemanticContractError::Unsupported(
                 "struct declaration nests beyond the aggregate limit",
             ));
+        }
+        // Two different field paths can synthesize the same flattened
+        // name (`Inner { a }` inside `Outer { inner: Inner, inner_a }`
+        // both land on `inner_a`): the verifier binds leaves under
+        // underscore-joined paths, so such a declaration would alias
+        // two independent slots to one symbol and prove them equal.
+        let mut flattened_names = BTreeSet::new();
+        for path in all_field_paths(&env, fields) {
+            if !flattened_names.insert(path.replace('.', "_")) {
+                return Err(SemanticContractError::Unsupported(
+                    "struct field paths collide when flattened",
+                ));
+            }
         }
     }
     Ok(env)

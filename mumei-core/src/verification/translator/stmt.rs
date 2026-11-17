@@ -779,8 +779,15 @@ fn struct_field_assign<'a>(
     // `<base>_<field>` binding re-seeds them, including deeper nested
     // paths (flattened field names compose, e.g. `q_inner_inner_a`).
     for (name, value) in &merged {
-        if let Some(inner_fields) = project_struct_fields(env, value) {
-            bind_struct_fields(env, &format!("{base}_{name}"), &inner_fields);
+        // Deep leaves re-seed too — a shallow bind leaves
+        // `q.inner.b.c` reading the pre-write symbols for 3+ levels.
+        // Seed under both the direct-path binding (`q_inner_b_c`) and
+        // the new handle (`__struct_<handle>_inner_b_c`) so post-write
+        // `result`-style projections pick up the deep leaves as well.
+        let fields = nested_field_bindings(env, value);
+        if !fields.is_empty() {
+            bind_struct_fields(env, &format!("{base}_{name}"), &fields);
+            bind_struct_fields(env, &format!("{handle_name}_{name}"), &fields);
         }
     }
     env.insert(base.to_string(), handle);

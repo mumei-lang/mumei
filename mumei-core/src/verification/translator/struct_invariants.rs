@@ -193,6 +193,28 @@ pub(crate) fn project_struct_fields<'a>(
     Some(fields)
 }
 
+/// The full flat field list of `value`: its direct fields plus every
+/// deeper leaf composed under `<field>_<leaf>` (`b` and `b_c` for
+/// `Inner { b: Sub { c } }`), so re-homing the binding covers
+/// `q.inner.b.c`-style paths and a shallow bind never leaves deep keys
+/// on their pre-write symbols.
+pub(crate) fn nested_field_bindings<'a>(
+    env: &Env<'a>,
+    value: &Dynamic<'a>,
+) -> Vec<(String, Dynamic<'a>)> {
+    let Some(fields) = project_struct_fields(env, value) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(fields.len());
+    for (name, inner) in fields {
+        for (deep, v) in nested_field_bindings(env, &inner) {
+            out.push((format!("{name}_{deep}"), v));
+        }
+        out.push((name, inner));
+    }
+    out
+}
+
 /// Register the fields of the struct value `value` under the new binding
 /// `alias` (`let alias = value;` / `alias = value;`), so `alias.f` resolves.
 pub(crate) fn alias_struct_fields<'a>(env: &mut Env<'a>, alias: &str, value: &Dynamic<'a>) {

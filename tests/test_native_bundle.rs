@@ -2454,6 +2454,57 @@ fn module_bundle_with_nested_struct_fields_builds_as_v11_and_rechecks() {
 }
 
 #[test]
+fn module_bundle_rejects_colliding_flattened_field_names() {
+    // `O { i: I, i_a: i64 }` flattens `i.a` and `i_a` onto the same
+    // verifier symbol `i_a`: two independent fields would alias one
+    // slot and could be proven equal, so admission must refuse it.
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        &source,
+        "struct I { a: i64 }\nstruct O { i: I, i_a: i64 }\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    )
+    .unwrap();
+    assert!(!cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ])
+    .status
+    .success());
+}
+
+#[test]
+fn module_bundle_rejects_exponential_struct_expansion() {
+    // Every level names the same child type twice, so the flattened
+    // leaf count doubles per level: the admission check must bail on
+    // the bound during the count instead of materializing ~2^30 leaves
+    // first (which would exhaust memory before it could reject).
+    let mut decls = String::from("struct L0 { v: i64 }\n");
+    for i in 1..30 {
+        decls.push_str(&format!("struct L{i} {{ x: L{}, y: L{} }}\n", i - 1, i - 1));
+    }
+    decls.push_str("atom main() -> i64 requires: true; ensures: true; body: { 0 };");
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(&source, &decls).unwrap();
+    assert!(!cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ])
+    .status
+    .success());
+}
+
+#[test]
 fn multifile_bundle_with_nested_struct_fields_builds_as_v11() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("app.mm");

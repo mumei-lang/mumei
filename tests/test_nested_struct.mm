@@ -46,3 +46,42 @@ body: {
     let s = set_inner(o, Inner { a: 7, b: 8 });
     s.inner.a + s.inner.b - o.inner.a - o.inner.b
 };
+
+struct Deep3 {
+    m: Inner,
+    x: i64
+}
+
+struct Top {
+    mid: Deep3,
+    t: i64
+}
+
+atom swap_mid(tp: Top, w: Deep3) -> Top
+requires: w.m.a >= 0;
+ensures: result.mid.m.a == w.m.a && result.mid.x == w.x;
+body: {
+    tp.mid = w;
+    tp
+};
+
+atom mk_outer(x: i64) -> Top
+requires: x >= 0;
+ensures: result.mid.m.a == x;
+body: {
+    Top { mid: Deep3 { m: Inner { a: x, b: x }, x: x }, t: x }
+};
+
+atom call_nested_leaf() -> i64
+requires: true;
+ensures: result == 3;
+body: {
+    mk_outer(3).mid.m.a
+};
+
+atom diff_call_leaves() -> i64
+requires: true;
+ensures: result == -1;
+body: {
+    mk_outer(1).mid.m.a - mk_outer(2).mid.m.a
+};
