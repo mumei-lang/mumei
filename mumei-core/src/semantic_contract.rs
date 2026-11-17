@@ -94,6 +94,13 @@ pub const PURE_I64_COMPOSITE_PROFILE_V4: &str = "mumei.pure-i64-composite/v4";
 /// through branch-merged values stay outside
 /// (`pure-i64-composite/v5`).
 pub const PURE_I64_COMPOSITE_PROFILE_V5: &str = "mumei.pure-i64-composite/v5";
+/// v6 admits producing enum values: construction `E::V(..)` and the
+/// nullary `E::V`, enum results `-> E` (a tag plus the widest
+/// variant's payload slots, the layout the emitter's tagged union
+/// returns) and calls to enum-returning atoms. An enum value still
+/// never merges across `if`/`match` branches and never takes a field
+/// write (`pure-i64-composite/v6`).
+pub const PURE_I64_COMPOSITE_PROFILE_V6: &str = "mumei.pure-i64-composite/v6";
 
 /// How much of the refined-scalar declaration fragment a gate admits:
 /// `Reject` keeps `Item::TypeDef` out of the item vocabulary entirely,
@@ -109,7 +116,9 @@ pub const PURE_I64_COMPOSITE_PROFILE_V5: &str = "mumei.pure-i64-composite/v5";
 /// `CompositeV4` additionally admits `enum` declarations, enum-typed
 /// parameters and `match` arms on them (`pure-i64-composite/v4`);
 /// `CompositeV5` additionally admits field assignment `q.f = v` on
-/// admitted struct bindings (`pure-i64-composite/v5`). A
+/// admitted struct bindings (`pure-i64-composite/v5`);
+/// `CompositeV6` additionally admits enum construction, enum results
+/// and enum-returning calls (`pure-i64-composite/v6`). A
 /// pinned record names which level produced it, so a
 /// rechecker re-derives under the record's own admission — never a
 /// wider one.
@@ -123,6 +132,7 @@ pub enum RefinedAdmission {
     CompositeV3,
     CompositeV4,
     CompositeV5,
+    CompositeV6,
 }
 
 impl RefinedAdmission {
@@ -154,6 +164,13 @@ impl RefinedAdmission {
     /// is in the statement vocabulary.
     pub fn admits_field_writes(self) -> bool {
         self >= Self::CompositeV5
+    }
+
+    /// Whether enum values can be produced — construction `E::V(..)`,
+    /// enum results and enum-returning calls
+    /// (`pure-i64-composite/v6`).
+    pub fn admits_enum_values(self) -> bool {
+        self >= Self::CompositeV6
     }
 }
 
@@ -260,7 +277,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _, _) =
+    let (items, refined, structs, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -281,6 +298,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         false,
         &ModuleEnv::default(),
@@ -305,7 +323,7 @@ pub fn extract_pure_i64_module_contracts(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, enums, struct_values, field_writes) =
+    let (items, refined, structs, enums, struct_values, field_writes, enum_values) =
         admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
@@ -341,6 +359,7 @@ pub fn extract_pure_i64_module_contracts(
                 &enums,
                 struct_values,
                 field_writes,
+                enum_values,
                 &cert_env,
             )),
             // Type and struct declarations carry no per-atom contract;
@@ -358,7 +377,7 @@ pub fn module_source_profile(
     source: &str,
     admission: RefinedAdmission,
 ) -> Result<&'static str, SemanticContractError> {
-    let (_items, refined, structs, enums, struct_values, field_writes) =
+    let (_items, refined, structs, enums, struct_values, field_writes, enum_values) =
         admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
         true,
@@ -367,6 +386,7 @@ pub fn module_source_profile(
         &enums,
         struct_values,
         field_writes,
+        enum_values,
     ))
 }
 
@@ -381,9 +401,9 @@ pub fn module_source_profile(
 /// arity gate.
 /// What `admit_pure_i64_atoms` returns: the admitted items, the refined
 /// type environment, the struct and enum declaration environments, and
-/// the two usage flags (`struct_values`, `field_writes`) the module's
-/// profile name derives from.
-type AdmittedModule = (Vec<Item>, RefinedEnv, StructEnv, EnumEnv, bool, bool);
+/// the three usage flags (`struct_values`, `field_writes`,
+/// `enum_values`) the module's profile name derives from.
+type AdmittedModule = (Vec<Item>, RefinedEnv, StructEnv, EnumEnv, bool, bool, bool);
 
 fn admit_pure_i64_atoms(
     source: &str,
@@ -469,6 +489,7 @@ fn admit_pure_i64_atoms(
     // to a later sibling resolves the same as a backward one.
     let struct_values_used = std::cell::Cell::new(false);
     let field_writes_used = std::cell::Cell::new(false);
+    let enum_values_used = std::cell::Cell::new(false);
     for item in &items {
         let Item::Atom(sibling) = item else {
             continue;
@@ -480,6 +501,7 @@ fn admit_pure_i64_atoms(
             &structs,
             &enums,
             admission.admits_struct_values(),
+            admission.admits_enum_values(),
         )?;
         // Every atom's contract is checked against the complete callee map,
         // not only the tail's: module validation compares each atom
@@ -495,8 +517,10 @@ fn admit_pure_i64_atoms(
             &enums,
             admission.admits_struct_values(),
             admission.admits_field_writes(),
+            admission.admits_enum_values(),
             &struct_values_used,
             &field_writes_used,
+            &enum_values_used,
         )?;
     }
     Ok((
@@ -506,6 +530,7 @@ fn admit_pure_i64_atoms(
         enums,
         struct_values_used.get(),
         field_writes_used.get(),
+        enum_values_used.get(),
     ))
 }
 
@@ -545,9 +570,12 @@ fn fragment_profile(
     enums: &EnumEnv,
     struct_values: bool,
     field_writes: bool,
+    enum_values: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if enum_values {
+        PURE_I64_COMPOSITE_PROFILE_V6
     } else if field_writes {
         PURE_I64_COMPOSITE_PROFILE_V5
     } else if !enums.is_empty() {
@@ -586,6 +614,7 @@ fn atom_contract(
     enums: &EnumEnv,
     struct_values: bool,
     field_writes: bool,
+    enum_values: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
@@ -596,6 +625,7 @@ fn atom_contract(
         enums,
         struct_values,
         field_writes,
+        enum_values,
     );
     let result_fields = atom
         .return_type
@@ -634,13 +664,25 @@ fn atom_contract(
             span_precision: "atom",
         })
         .collect();
-    // A struct result reports one result binder per field (`result.x`).
+    // A struct result reports one result binder per field (`result.x`),
+    // an enum result a tag binder (`result.tag`) plus one per payload
+    // slot (`result.{i}`) — the flat expansion the obligation encodes.
     let result_binders = match result_fields {
         Some(fields) => fields
             .iter()
             .map(|f| (format!("result.{}", f.name), Some(f.type_name.as_str())))
             .collect(),
-        None => vec![("result".to_owned(), atom.return_type.as_deref())],
+        None => match atom.return_type.as_deref().and_then(|name| enums.get(name)) {
+            Some(variants) => {
+                let mut names = vec![("result.tag".to_owned(), None)];
+                names.extend(
+                    (0..enum_max_arity(variants))
+                        .map(|i| (format!("result.{i}"), enum_slot_type(variants, i))),
+                );
+                names
+            }
+            None => vec![("result".to_owned(), atom.return_type.as_deref())],
+        },
     };
     binders.extend(
         result_binders
@@ -896,12 +938,18 @@ struct KindEnv<'a> {
     /// Whether field assignment `q.f = v` on a struct binding is
     /// admitted (`pure-i64-composite/v5`).
     admit_field_writes: bool,
+    /// Whether enum values (`E::V(..)` construction, `-> E` results,
+    /// enum-returning calls) are admitted (`pure-i64-composite/v6`).
+    admit_enum_values: bool,
     /// Set when the atom actually uses a struct-value shape, so the
     /// module names the v3 profile only when it needs it.
     struct_values_used: &'a std::cell::Cell<bool>,
     /// Set when the atom writes a struct field, so the module names
     /// the v5 profile only when it needs it.
     field_writes_used: &'a std::cell::Cell<bool>,
+    /// Set when the atom produces an enum value, so the module names
+    /// the v6 profile only when it needs it.
+    enum_values_used: &'a std::cell::Cell<bool>,
 }
 
 impl<'a> KindEnv<'a> {
@@ -943,6 +991,10 @@ impl<'a> KindEnv<'a> {
             }
             self.struct_values_used.set(true);
         }
+        // Enum-typed bindings do not mark `enum_values_used`: passing an
+        // enum through `let`s and call args is already V4 vocabulary —
+        // the flag is set only where a value is *produced* (constructor,
+        // call result, atom result).
         self.composites.insert(name.to_owned(), type_name);
         Ok(())
     }
@@ -1152,6 +1204,12 @@ fn call_return_kinds(
     }
 }
 
+/// One enum variant: its name plus the kinds of its payload slots.
+type EnumVariant = (String, Vec<ScalarKind>);
+
+/// One enum's variants in declaration order.
+type EnumVariantLayout = Vec<EnumVariant>;
+
 /// What each module atom's call produces — a scalar kind or an admitted
 /// struct — plus the module's struct field layouts in declaration
 /// order, so the source encoder can build struct literals and split a
@@ -1163,7 +1221,8 @@ struct CallShapes {
     /// Every admitted enum's variants in declaration order — a match
     /// arm's `Pattern::Variant` resolves its ordinal and payload kinds
     /// through this map.
-    enums: BTreeMap<String, Vec<(String, Vec<ScalarKind>)>>,
+    /// Variant name plus its payload slot kinds, in declaration order.
+    enums: BTreeMap<String, EnumVariantLayout>,
 }
 
 impl CallShapes {
@@ -1181,6 +1240,50 @@ impl CallShapes {
             _ => None,
         }
     }
+
+    /// The enum name and variant layout of an enum-returning callee's
+    /// result (`pure-i64-composite/v6`) — variants in declaration
+    /// order, each with its payload slot kinds.
+    fn result_enum<'s>(&'s self, name: &str) -> Option<(&'s str, &'s [EnumVariant])> {
+        match self.returns.get(name)? {
+            ValueKind::Enum(enum_name) => self
+                .enums
+                .get_key_value(enum_name)
+                .map(|(n, variants)| (n.as_str(), variants.as_slice())),
+            _ => None,
+        }
+    }
+}
+
+/// The payload-slot kinds of a variant layout — the shared slot at
+/// index `i` takes the kind every variant carrying it agrees on
+/// (`build_enum_env` already rejected a disagreeing index), `I64`
+/// when no variant carries it.
+fn enum_shape_slot_kinds(variants: &[(String, Vec<ScalarKind>)]) -> Vec<ScalarKind> {
+    let arity = variants
+        .iter()
+        .map(|(_, kinds)| kinds.len())
+        .max()
+        .unwrap_or(0);
+    (0..arity)
+        .map(|i| {
+            variants
+                .iter()
+                .find_map(|(_, kinds)| kinds.get(i).copied())
+                .unwrap_or(ScalarKind::I64)
+        })
+        .collect()
+}
+
+/// A scalar `SourceValue` of `kind` reading the lowered i64 `v` under
+/// the profile's 0/1 `bool` convention — the same wrap a struct
+/// field slot gets.
+fn enum_slot_value<'ctx>(kind: ScalarKind, v: &BV<'ctx>, ctx: &'ctx Context) -> SourceValue<'ctx> {
+    if kind == ScalarKind::Bool {
+        SourceValue::Boolean(v._eq(&BV::from_u64(ctx, 0, 64)).not())
+    } else {
+        SourceValue::Integer(v.clone())
+    }
 }
 
 /// The tail-atom contract admission shared by every module atom:
@@ -1197,8 +1300,10 @@ fn check_atom_contract(
     enums: &EnumEnv,
     admit_struct_values: bool,
     admit_field_writes: bool,
+    admit_enum_values: bool,
     struct_values_used: &std::cell::Cell<bool>,
     field_writes_used: &std::cell::Cell<bool>,
+    enum_values_used: &std::cell::Cell<bool>,
 ) -> Result<(), SemanticContractError> {
     // Struct parameters stay out of the scalar scope — so they are
     // neither scalar operands nor rebindable — and live in the
@@ -1255,8 +1360,10 @@ fn check_atom_contract(
         identifiers,
         admit_struct_values,
         admit_field_writes,
+        admit_enum_values,
         struct_values_used,
         field_writes_used,
+        enum_values_used,
     };
     for p in &atom.params {
         env.bind(&p.name)?;
@@ -1280,10 +1387,45 @@ fn check_atom_contract(
     )?;
     let result_kind = match return_shape(atom, refined, structs, enums) {
         ValueKind::Scalar(kind) => kind,
-        // An enum result stays outside: `validate_atom` already
-        // rejected it; keep the gate closed if reached anyway.
-        ValueKind::Enum(_) => {
-            return Err(SemanticContractError::Unsupported("enum result"));
+        // An enum result is never a scalar either: `ensures` sees
+        // `result` as the enum-typed composite (read via `match`), and
+        // the body must produce a value of exactly that enum.
+        ValueKind::Enum(name) => {
+            enum_values_used.set(true);
+            let Some((enum_name, _)) = enums.get_key_value(name.as_str()) else {
+                return Err(SemanticContractError::Unsupported(
+                    "enum result outside the composite profile",
+                ));
+            };
+            let mut ensures_env = env.clone();
+            ensures_env
+                .composites
+                .insert("result".to_owned(), enum_name.as_str());
+            expect_kind(
+                expression_kind(
+                    &ensures,
+                    &scope,
+                    false,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                    &ensures_env,
+                )?,
+                ScalarKind::Bool,
+            )?;
+            let produced = statement_composite_kind(
+                &body,
+                &scope,
+                false,
+                allow_wrapping_arithmetic,
+                &scope.keys().cloned().collect(),
+                &env,
+            )?;
+            if produced != enum_name {
+                return Err(SemanticContractError::Unsupported(
+                    "enum result of a different enum",
+                ));
+            }
+            return Ok(());
         }
         // A struct result is never a scalar: `ensures` sees `result`
         // only through field reads of the returned struct, and the
@@ -1360,6 +1502,7 @@ fn validate_atom(
     structs: &StructEnv,
     enums: &EnumEnv,
     admit_struct_values: bool,
+    admit_enum_values: bool,
 ) -> Result<(), SemanticContractError> {
     // A declared subrange integer result lowers to an i64 return like
     // the parameters — the emitter emits no truncation, so the checked
@@ -1372,10 +1515,10 @@ fn validate_atom(
         Some("i64") => true,
         Some("bool") | Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32") => admit_widened,
         // An admitted struct result (`pure-i64-composite/v3`) returns
-        // the struct's field slots. An enum result stays out: an enum
-        // parameter is read through `match`, never produced here.
+        // the struct's field slots. An admitted enum result
+        // (`pure-i64-composite/v6`) returns its tag plus payload slots.
         Some(name) if structs.contains_key(name) => admit_struct_values,
-        Some(name) if enums.contains_key(name) => false,
+        Some(name) if enums.contains_key(name) => admit_enum_values,
         Some(name) => refined
             .get(name)
             .is_some_and(|alias| alias.kind != ScalarKind::Bool || admit_widened),
@@ -1874,8 +2017,10 @@ fn resolve_alias(
                     identifiers: BTreeSet::new(),
                     admit_struct_values: false,
                     admit_field_writes: false,
+                    admit_enum_values: false,
                     struct_values_used: &std::cell::Cell::new(false),
                     field_writes_used: &std::cell::Cell::new(false),
+                    enum_values_used: &std::cell::Cell::new(false),
                 },
             )?,
             ScalarKind::Bool,
@@ -2071,7 +2216,8 @@ fn block_prefix_kinds<'a>(
             // only — it leaves the scalar scope, so it is
             // neither a scalar operand nor rebindable.
             Stmt::Let { var, value, .. }
-                if inner_env.admit_struct_values && is_struct_value(value, &inner, &inner_env) =>
+                if (inner_env.admit_struct_values || inner_env.admit_enum_values)
+                    && is_composite_value(value, &inner, &inner_env) =>
             {
                 let struct_name = composite_kind(
                     value,
@@ -2233,18 +2379,89 @@ fn field_write_kind(
     Some(target.kind)
 }
 
-/// Whether a `let` initializer is struct-valued: a struct literal, an
-/// unshadowed struct name, or a call to a struct-returning sibling.
-fn is_struct_value(expr: &Expr, scope: &BTreeMap<String, ScalarKind>, env: &KindEnv<'_>) -> bool {
+/// `statement_kind` for a struct-valued position (an atom's struct
+/// result): a sequential block whose tail produces a struct value.
+/// Whether a `let` initializer is composite-valued: a struct literal,
+/// an unshadowed composite name, an enum constructor
+/// (`pure-i64-composite/v6`), or a call to a composite-returning
+/// sibling. `composite_kind` re-checks every case, so this only
+/// decides which `let` arm examines the initializer.
+fn is_composite_value(
+    expr: &Expr,
+    scope: &BTreeMap<String, ScalarKind>,
+    env: &KindEnv<'_>,
+) -> bool {
     match expr {
         Expr::StructInit { .. } => true,
         Expr::Variable(name) => env.composite_name(name, scope).is_some(),
-        Expr::Call(name, _) => env
-            .callees
-            .get(name.as_str())
-            .is_some_and(|sig| matches!(sig.return_kind, ValueKind::Struct(_))),
+        Expr::FieldAccess(target, field) => {
+            env.admit_enum_values && enum_ctor(target, field, env).is_some()
+        }
+        Expr::Call(name, _) => {
+            (env.admit_enum_values && enum_call_ctor(name, env).is_some())
+                || env.callees.get(name.as_str()).is_some_and(|sig| {
+                    matches!(sig.return_kind, ValueKind::Struct(_))
+                        || (env.admit_enum_values && matches!(sig.return_kind, ValueKind::Enum(_)))
+                })
+        }
         _ => false,
     }
+}
+
+/// The enum a qualified `E::V` constructor names, spelled as a nullary
+/// `FieldAccess` on the enum name — `None` when `target`/`field` does
+/// not name a variant of an admitted enum.
+fn enum_ctor<'a>(
+    target: &Expr,
+    field: &str,
+    env: &KindEnv<'a>,
+) -> Option<(&'a str, &'a ResolvedVariant)> {
+    let Expr::Variable(enum_name) = target else {
+        return None;
+    };
+    let (resolved_name, variants) = env.enums.get_key_value(enum_name.as_str())?;
+    let variant = variants.iter().find(|v| v.name == field)?;
+    Some((resolved_name.as_str(), variant))
+}
+
+/// The enum a call-spelled `E::V(args..)` constructor names — `None`
+/// when `name` is not `Enum::Variant` for an admitted enum.
+fn enum_call_ctor<'a>(name: &str, env: &KindEnv<'a>) -> Option<(&'a str, &'a ResolvedVariant)> {
+    let (enum_name, variant_name) = name.split_once("::")?;
+    let (resolved_name, variants) = env.enums.get_key_value(enum_name)?;
+    let variant = variants.iter().find(|v| v.name == variant_name)?;
+    Some((resolved_name.as_str(), variant))
+}
+
+/// `composite_kind` for a resolved enum constructor: arity and each
+/// payload argument's scalar kind must match the variant's declared
+/// fields exactly.
+fn enum_ctor_kind<'a>(
+    args: &[Expr],
+    variant: &ResolvedVariant,
+    scope: &BTreeMap<String, ScalarKind>,
+    result_in_scope: bool,
+    allow_wrapping_arithmetic: bool,
+    env: &KindEnv<'a>,
+) -> Result<(), SemanticContractError> {
+    if args.len() != variant.fields.len() {
+        return Err(SemanticContractError::Unsupported("enum constructor arity"));
+    }
+    for (arg, field) in args.iter().zip(variant.fields.iter()) {
+        expect_kind(
+            expression_kind(
+                arg,
+                scope,
+                result_in_scope,
+                allow_wrapping_arithmetic,
+                &BTreeSet::new(),
+                env,
+            )?,
+            field.kind,
+        )?;
+    }
+    env.enum_values_used.set(true);
+    Ok(())
 }
 
 /// `statement_kind` for a struct-valued position (an atom's struct
@@ -2352,7 +2569,22 @@ fn composite_kind<'a>(
             env.struct_values_used.set(true);
             Ok(struct_name.as_str())
         }
-        Expr::Call(name, args) if allow_wrapping_arithmetic && env.admit_struct_values => {
+        Expr::Call(name, args)
+            if allow_wrapping_arithmetic && (env.admit_struct_values || env.admit_enum_values) =>
+        {
+            if env.admit_enum_values {
+                if let Some((enum_name, variant)) = enum_call_ctor(name, env) {
+                    enum_ctor_kind(
+                        args,
+                        variant,
+                        scope,
+                        result_in_scope,
+                        allow_wrapping_arithmetic,
+                        env,
+                    )?;
+                    return Ok(enum_name);
+                }
+            }
             let sig = check_call(
                 name,
                 args,
@@ -2361,18 +2593,49 @@ fn composite_kind<'a>(
                 allow_wrapping_arithmetic,
                 env,
             )?;
-            let ValueKind::Struct(result) = &sig.return_kind else {
+            match &sig.return_kind {
+                ValueKind::Enum(result) if env.admit_enum_values => {
+                    let Some((enum_name, _)) = env.enums.get_key_value(result.as_str()) else {
+                        return Err(SemanticContractError::Unsupported(
+                            "enum value outside the composite profile",
+                        ));
+                    };
+                    env.enum_values_used.set(true);
+                    Ok(enum_name.as_str())
+                }
+                ValueKind::Struct(result) if env.admit_struct_values => {
+                    let Some((struct_name, _)) = env.structs.get_key_value(result.as_str()) else {
+                        return Err(SemanticContractError::Unsupported(
+                            "struct value outside the composite profile",
+                        ));
+                    };
+                    env.struct_values_used.set(true);
+                    Ok(struct_name.as_str())
+                }
+                _ => Err(SemanticContractError::Unsupported(
+                    "scalar call in a composite position",
+                )),
+            }
+        }
+        Expr::FieldAccess(target, field) if env.admit_enum_values => {
+            // A nullary `E::V` parses as field access on the enum name;
+            // field reads of an enum value never reach here — `match`
+            // is the only enum consumer, so no payload projection
+            // exists to kind-check.
+            let Some((enum_name, variant)) = enum_ctor(target, field, env) else {
                 return Err(SemanticContractError::Unsupported(
-                    "scalar call in a struct position",
+                    "enum constructor outside the composite profile",
                 ));
             };
-            let Some((struct_name, _)) = env.structs.get_key_value(result.as_str()) else {
-                return Err(SemanticContractError::Unsupported(
-                    "struct value outside the composite profile",
-                ));
-            };
-            env.struct_values_used.set(true);
-            Ok(struct_name.as_str())
+            enum_ctor_kind(
+                &[],
+                variant,
+                scope,
+                result_in_scope,
+                allow_wrapping_arithmetic,
+                env,
+            )?;
+            Ok(enum_name)
         }
         _ => Err(SemanticContractError::Unsupported(
             "struct value outside the composite profile",
@@ -2971,7 +3234,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _) =
+    let (items, refined, structs, enums, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -3051,9 +3314,14 @@ fn encode_atom_body<'ctx>(
                 .map(|(_, field)| lower_scalar(field, context))
                 .collect::<BodyResult<Vec<_>>>()?,
         ),
-        SourceValue::Enum { .. } => {
-            return Err(SemanticContractError::Unsupported("enum result"));
-        }
+        // An enum result's value is its tag slot followed by the shared
+        // payload slots — the tagged-union layout the emitter's
+        // returned aggregate decomposes into.
+        SourceValue::Enum { tag, slots, .. } => aggregate_value(
+            &std::iter::once(Ok(tag))
+                .chain(slots.into_iter().map(|slot| lower_scalar(slot, context)))
+                .collect::<BodyResult<Vec<_>>>()?,
+        ),
     };
     let param_domain = signature_domain(&atom.params, &inputs, context, refined, structs, enums)?;
     let subrange_params = slots.iter().any(|slot| {
@@ -3089,7 +3357,20 @@ fn encode_atom_body<'ctx>(
                     .zip(fields)
                     .map(|(slot, (_, kind))| (slot, *kind == ScalarKind::Bool))
                     .collect(),
-                None => vec![(site.result.clone(), call_returns.returns_bool(&site.callee))],
+                None => match call_returns.result_enum(&site.callee) {
+                    // An enum-valued call result carries the 0/1
+                    // convention on each `bool` payload slot — the tag
+                    // is always an i64 ordinal.
+                    Some((_, variants)) => {
+                        let kinds = enum_shape_slot_kinds(variants);
+                        split_slots(&site.result, 1 + kinds.len())
+                            .into_iter()
+                            .zip(std::iter::once(&ScalarKind::I64).chain(kinds.iter()))
+                            .map(|(slot, kind)| (slot, *kind == ScalarKind::Bool))
+                            .collect()
+                    }
+                    None => vec![(site.result.clone(), call_returns.returns_bool(&site.callee))],
+                },
             };
             slots
                 .into_iter()
@@ -4550,6 +4831,20 @@ fn result_value<'ctx>(
 ) -> SourceValue<'ctx> {
     if let Some(fields) = call_returns.result_fields(atom) {
         composite_from_slots(fields, &split_slots(value, fields.len()), ctx)
+    } else if let Some((enum_name, variants)) = call_returns.result_enum(atom) {
+        // An enum result splits into its tag slot then the shared
+        // payload slots — the layout `match` decomposes.
+        let slot_kinds = enum_shape_slot_kinds(variants);
+        let flat = split_slots(value, 1 + slot_kinds.len());
+        SourceValue::Enum {
+            name: enum_name.to_owned(),
+            tag: flat[0].clone(),
+            slots: slot_kinds
+                .iter()
+                .zip(&flat[1..])
+                .map(|(kind, slot)| enum_slot_value(*kind, slot, ctx))
+                .collect(),
+        }
     } else if call_returns.returns_bool(atom) {
         SourceValue::Boolean(value._eq(&BV::from_u64(ctx, 0, 64)).not())
     } else {
@@ -4583,6 +4878,31 @@ fn source_expr<'ctx>(
             .cloned()
             .ok_or(SemanticContractError::Unsupported("source binding"))?,
         Expr::FieldAccess(target, field) => {
+            // A nullary `E::V` — parsed as field access on the enum
+            // name — constructs the variant directly; `match` reads
+            // the produced value.
+            if let Expr::Variable(enum_name) = target.as_ref() {
+                if let Some((resolved_name, variants)) = call_returns.enums.get_key_value(enum_name)
+                {
+                    let Some(ordinal) = variants.iter().position(|(v, _)| v == field) else {
+                        return Err(SemanticContractError::Unsupported(
+                            "undeclared enum variant",
+                        ));
+                    };
+                    if !variants[ordinal].1.is_empty() {
+                        return Err(SemanticContractError::Unsupported("enum constructor arity"));
+                    }
+                    let slot_kinds = enum_shape_slot_kinds(variants);
+                    return Ok(SourceValue::Enum {
+                        name: resolved_name.clone(),
+                        tag: BV::from_u64(ctx, ordinal as u64, 64),
+                        slots: slot_kinds
+                            .iter()
+                            .map(|kind| enum_slot_value(*kind, &BV::from_u64(ctx, 0, 64), ctx))
+                            .collect(),
+                    });
+                }
+            }
             if !matches!(target.as_ref(), Expr::Variable(_) | Expr::Call(..)) {
                 return Err(SemanticContractError::Unsupported("source field read"));
             }
@@ -5057,6 +5377,49 @@ fn source_expr<'ctx>(
             result
         }
         Expr::Call(name, args) => {
+            // An `E::V(args..)` enum constructor produces the variant's
+            // value directly — tag ordinal plus payload slots — not a
+            // call site: it carries no obligation domain.
+            if let Some((enum_name, variant_name)) = name.split_once("::") {
+                if let Some((resolved_name, variants)) = call_returns.enums.get_key_value(enum_name)
+                {
+                    let Some(ordinal) = variants.iter().position(|(v, _)| v == variant_name) else {
+                        return Err(SemanticContractError::Unsupported(
+                            "undeclared enum variant",
+                        ));
+                    };
+                    let payload_kinds = &variants[ordinal].1;
+                    if args.len() != payload_kinds.len() {
+                        return Err(SemanticContractError::Unsupported("enum constructor arity"));
+                    }
+                    let slot_kinds = enum_shape_slot_kinds(variants);
+                    let mut slots = Vec::with_capacity(slot_kinds.len());
+                    for (arg, kind) in args.iter().zip(payload_kinds.iter()) {
+                        let value = source_expr(
+                            arg,
+                            ctx,
+                            env,
+                            guard,
+                            definedness,
+                            depth + 1,
+                            &BTreeSet::new(),
+                            written,
+                            loop_exits,
+                            call_sites,
+                            call_returns,
+                        )?;
+                        slots.push(enum_slot_value(*kind, &lower_scalar(value, ctx)?, ctx));
+                    }
+                    for kind in slot_kinds.iter().skip(slots.len()) {
+                        slots.push(enum_slot_value(*kind, &BV::from_u64(ctx, 0, 64), ctx));
+                    }
+                    return Ok(SourceValue::Enum {
+                        name: resolved_name.clone(),
+                        tag: BV::from_u64(ctx, ordinal as u64, 64),
+                        slots,
+                    });
+                }
+            }
             // Call arguments carry the profile's lowered representation:
             // the extraction gate checked each argument's kind against
             // the callee parameter, and a `bool` argument lowers to the
@@ -5119,6 +5482,37 @@ fn source_expr<'ctx>(
                     guard: guard.clone(),
                 });
                 return Ok(composite_from_slots(fields, &slots, ctx));
+            }
+            // An enum-returning call applies one uninterpreted function
+            // per flattened slot — the tag, then each shared payload
+            // slot — and the site records their `aggregate_value`.
+            if let Some((enum_name, variants)) = call_returns.result_enum(name) {
+                let slot_kinds = enum_shape_slot_kinds(variants);
+                let slots = (0..=slot_kinds.len())
+                    .map(|i| {
+                        call_field_decl(ctx, name, applied.len(), i)
+                            .apply(&refs)
+                            .as_bv()
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or(SemanticContractError::Unsupported(
+                        "source call result kind",
+                    ))?;
+                call_sites.push(CallSite {
+                    callee: name.clone(),
+                    args: applied.clone(),
+                    result: aggregate_value(&slots),
+                    guard: guard.clone(),
+                });
+                return Ok(SourceValue::Enum {
+                    name: enum_name.to_owned(),
+                    tag: slots[0].clone(),
+                    slots: slot_kinds
+                        .iter()
+                        .zip(&slots[1..])
+                        .map(|(kind, slot)| enum_slot_value(*kind, slot, ctx))
+                        .collect(),
+                });
             }
             let Some(value) = call_decl(ctx, name, applied.len()).apply(&refs).as_bv() else {
                 return Err(SemanticContractError::Unsupported(
@@ -6695,5 +7089,161 @@ mod tests {
                 "extraction mismatch"
             );
         }
+    }
+
+    #[test]
+    fn composite_v6_admits_enum_construction_and_results() {
+        let v6 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV6)
+        };
+        let outcomes =
+            |source: &str| refined_module_outcomes_admission(source, RefinedAdmission::CompositeV6);
+        let decl = "enum Shape { Dot, Edge(w: i64), Rect(w: i64, h: i64) }";
+        // Enum construction in the tail, a nullary constructor behind a
+        // `let`, an enum-returning sibling call, and a `match` on the
+        // result value — the whole slice in one module.
+        let source = format!(
+            "{decl}\n\
+             atom make_edge(w: i64) -> Shape requires: true; ensures: match result {{ Shape::Edge(v) => v == w, _ => false }}; body: {{ Shape::Edge(w) }};\n\
+             atom make_dot() -> Shape requires: true; ensures: true; body: {{ let s = Shape::Dot; s }};\n\
+             atom use_it(w: i64) -> i64 requires: w >= 0; ensures: result >= 0; body: {{ let s = make_edge(w); match s {{ Shape::Edge(v) => v, _ => 0 }} }};\n\
+             atom pair(w: i64) -> i64 requires: true; ensures: result == w + 1; body: {{ let s = Shape::Rect(w, 1); match s {{ Shape::Rect(a, b) => a + b, _ => 0 }} }};\n{MAIN0}"
+        );
+        let contracts = v6(&source).unwrap();
+        assert!(contracts
+            .iter()
+            .all(|c| c.profile == PURE_I64_COMPOSITE_PROFILE_V6));
+        assert_eq!(
+            module_source_profile(&source, RefinedAdmission::CompositeV6).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V6
+        );
+        // An enum result flattens to a tag binder plus one binder per
+        // payload slot of the widest variant.
+        let binders: Vec<_> = contracts[0]
+            .specification
+            .binders
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect();
+        assert_eq!(binders, ["w", "result.tag", "result.0", "result.1"]);
+        assert!(outcomes(&source)
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
+        // A postcondition over the constructed tag that cannot hold is
+        // refuted, not vacuous — the ctor pins `result.tag`, the
+        // uninterpreted call result is pinned by the callee `ensures`.
+        let wrong = source.replace(
+            "ensures: match result { Shape::Edge(v) => v == w, _ => false };",
+            "ensures: match result { Shape::Dot => true, _ => false };",
+        );
+        assert!(outcomes(&wrong).contains(&z3::SatResult::Sat));
+        // Narrower admissions keep enum values out of the vocabulary.
+        for admission in [
+            RefinedAdmission::Reject,
+            RefinedAdmission::V1,
+            RefinedAdmission::V2,
+            RefinedAdmission::Composite,
+            RefinedAdmission::CompositeV2,
+            RefinedAdmission::CompositeV3,
+            RefinedAdmission::CompositeV4,
+            RefinedAdmission::CompositeV5,
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(&source, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+        }
+        // A module that declares enums but never constructs or returns
+        // them keeps the V4 profile — enum values are opt-in.
+        let params_only = format!(
+            "{decl}\natom read(s: Shape) -> i64 requires: true; ensures: result >= 0; body: {{ match s {{ Shape::Edge(v) => v, Shape::Rect(a, b) => a + b, _ => 0 }} }};\n{MAIN0}"
+        );
+        assert_eq!(
+            module_source_profile(&params_only, RefinedAdmission::CompositeV6).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V4
+        );
+    }
+
+    #[test]
+    fn composite_v6_rejects_enum_values_outside_the_fragment() {
+        let v6 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV6)
+        };
+        let context = z3::Context::new(&z3::Config::new());
+        let decl = "enum Shape { Dot, Edge(w: i64), Rect(w: i64, h: i64) }\nenum M { A(x: i64) }";
+        for (piece, why) in [
+            // Payload arity: `Edge` takes one field.
+            (
+                "atom bad() -> Shape requires: true; ensures: true; body: { Shape::Edge(1, 2) };",
+                "enum constructor arity",
+            ),
+            // Payload kind: `w` is `i64`, `true` is `Bool`.
+            (
+                "atom bad() -> Shape requires: true; ensures: true; body: { Shape::Edge(true) };",
+                "payload kind mismatch",
+            ),
+            // Undeclared variant.
+            (
+                "atom bad() -> Shape requires: true; ensures: true; body: { Shape::Hexagon };",
+                "undeclared variant",
+            ),
+            // Nullary constructor given payload.
+            (
+                "atom bad() -> Shape requires: true; ensures: true; body: { Shape::Dot(1) };",
+                "nullary constructor with payload",
+            ),
+            // Result of a different enum: `M::A` is not a `Shape`.
+            (
+                "atom bad() -> Shape requires: true; ensures: true; body: { M::A(1) };",
+                "enum result of a different enum",
+            ),
+            // Call returning a different enum for a `Shape` result.
+            (
+                "atom mk() -> M requires: true; ensures: true; body: { M::A(1) };\natom bad() -> Shape requires: true; ensures: true; body: { mk() };",
+                "call result of a different enum",
+            ),
+            // Branch-merged enum values are a later slice.
+            (
+                "atom bad(c: i64) -> Shape requires: true; ensures: true; body: { if c == 1 { Shape::Dot } else { Shape::Edge(c) } };",
+                "branch-merged enum value",
+            ),
+            // Match arms producing enums merge to a composite result.
+            (
+                "atom bad(c: i64) -> Shape requires: true; ensures: true; body: { match c { 1 => Shape::Dot, _ => Shape::Edge(c) } };",
+                "enum-producing match arms",
+            ),
+            // Field write on an enum binding stays closed.
+            (
+                "atom bad(s: Shape) -> i64 requires: true; ensures: true; body: { s.w = 1; 0 };",
+                "enum field write",
+            ),
+        ] {
+            let source = format!("{decl}\n{piece}\n{MAIN0}");
+            assert!(
+                encode_pure_i64_module_obligations(&source, &context, RefinedAdmission::CompositeV6)
+                    .is_err(),
+                "encoded: {why}"
+            );
+        }
+        // Every shape above except the branch/loop-merge family also
+        // fails at contract extraction.
+        for piece in [
+            "atom bad() -> Shape requires: true; ensures: true; body: { Shape::Edge(1, 2) };",
+            "atom bad() -> Shape requires: true; ensures: true; body: { Shape::Edge(true) };",
+            "atom bad() -> Shape requires: true; ensures: true; body: { Shape::Hexagon };",
+            "atom bad() -> Shape requires: true; ensures: true; body: { Shape::Dot(1) };",
+            "atom bad() -> Shape requires: true; ensures: true; body: { M::A(1) };",
+            "atom mk() -> M requires: true; ensures: true; body: { M::A(1) };\natom bad() -> Shape requires: true; ensures: true; body: { mk() };",
+            "atom bad(s: Shape) -> i64 requires: true; ensures: true; body: { s.w = 1; 0 };",
+        ] {
+            let source = format!("{decl}\n{piece}\n{MAIN0}");
+            assert!(v6(&source).is_err(), "extraction accepted: {piece}");
+        }
+        // Enum equality (`e == Shape::Dot`, `e.tag`) stays outside the
+        // fragment — `match` is the only enum consumer.
+        let eq = format!(
+            "{decl}\natom bad(s: Shape) -> i64 requires: true; ensures: true; body: {{ if s == Shape::Dot {{ 1 }} else {{ 0 }} }};\n{MAIN0}"
+        );
+        assert!(v6(&eq).is_err());
     }
 }
