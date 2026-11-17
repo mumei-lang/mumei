@@ -22,9 +22,26 @@ pub const RECHECK_RESOURCE_LIMIT: u32 = 1_000_000;
 /// beyond strict C03, pinned in the record's `profile`.
 pub const MODULE_SCHEMA: &str = "mumei.native-module-bundle/v1";
 pub const MODULE_PROFILE: &str = "mumei.native-pure-i64-module-linux-x86_64/v1";
+/// v2 profile: the module gate additionally admits refined scalar type
+/// declarations (`type Port = i64 where ...`) and signature members
+/// typed by them. The fragment's atoms and their verification model
+/// are unchanged — the record's `profile` names which admission ran so
+/// a consumer re-derives the binding under exactly the producer's gate.
+pub const MODULE_PROFILE_V2: &str = "mumei.native-pure-i64-module-linux-x86_64/v2";
 pub const MODULE_SCOPE: &str =
     "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1";
+
+/// The admission mode a pinned module/multifile record demands: v1
+/// records re-derive under the literal-scalar gate, v2 records under
+/// the refined-scalar gate. Anything else is not this schema's record.
+fn module_admit_refined(profile: &str) -> Result<bool, BundleError> {
+    match profile {
+        MODULE_PROFILE => Ok(false),
+        MODULE_PROFILE_V2 => Ok(true),
+        _ => Err(BundleError("unsupported schema, scope or settings")),
+    }
+}
 
 /// Multi-file module bundle profile: the module profile's import-closure
 /// extension. The producer merges a root `.mm` member and the files its
@@ -37,7 +54,18 @@ pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1"
 /// the file-level import graph in `source_files`.
 pub const MULTIFILE_SCHEMA: &str = "mumei.native-multifile-bundle/v1";
 pub const MULTIFILE_PROFILE: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v1";
+/// Multifile v2: the same refined-scalar widening as `MODULE_PROFILE_V2`
+/// over the import-closure merge.
+pub const MULTIFILE_PROFILE_V2: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v2";
 pub const MULTIFILE_RECHECK_PROFILE: &str = "mumei.native-multifile-source-recheck/v1";
+
+fn multifile_admit_refined(profile: &str) -> Result<bool, BundleError> {
+    match profile {
+        MULTIFILE_PROFILE => Ok(false),
+        MULTIFILE_PROFILE_V2 => Ok(true),
+        _ => Err(BundleError("unsupported schema, scope or settings")),
+    }
+}
 /// Bundle subdirectory holding the pinned original member texts.
 pub const SOURCES_DIR: &str = "sources";
 pub const MAX_SOURCE_FILES: usize = 64;
@@ -491,39 +519,58 @@ pub fn check_identity(
 }
 
 /// Parse and admit a multi-atom module under the widened wrapping profile:
-/// every item is an atom satisfying the per-atom gates, and exactly one is
-/// `main` — zero-argument with a literal `true` precondition, matching the
-/// profile the C `main` wrapper attests.
+/// every item is an atom satisfying the per-atom gates — plus, when
+/// `admit_refined`, refined scalar type declarations — and exactly one
+/// atom is `main` — zero-argument with a literal `true` precondition,
+/// matching the profile the C `main` wrapper attests. Returns the
+/// declared refined types so the build path can register them with the
+/// verifier's environment the same way `mumei verify` does.
 pub fn prepare_module_source(
     source: &str,
-) -> Result<(ModuleSourceBinding, Vec<parser::Atom>), BundleError> {
-    let contracts =
-        semantic_contract::extract_pure_i64_module_contracts(source, SOURCE_LABEL, None)
-            .map_err(|_| BundleError("unsupported or invalid module source"))?;
+    admit_refined: bool,
+) -> Result<
+    (
+        ModuleSourceBinding,
+        Vec<parser::Atom>,
+        Vec<parser::RefinedType>,
+    ),
+    BundleError,
+> {
+    let contracts = semantic_contract::extract_pure_i64_module_contracts(
+        source,
+        SOURCE_LABEL,
+        None,
+        admit_refined,
+    )
+    .map_err(|_| BundleError("unsupported or invalid module source"))?;
     let mut items =
         parser::parse_module_checked(source).map_err(|_| BundleError("invalid source"))?;
     let mut atoms = Vec::with_capacity(items.len());
+    let mut types = Vec::new();
     let mut mains = 0usize;
     for item in items.drain(..) {
-        let parser::Item::Atom(mut atom) = item else {
-            return Err(BundleError("non-atom declarations"));
-        };
-        if atom.name == "main" {
-            mains += 1;
-            // The C `main` wrapper attests an i64 user body — the widened
-            // profile admits other scalar returns for siblings, but the
-            // entry point keeps the single-atom `-> i64` signature.
-            if !atom.params.is_empty()
-                || atom.requires.trim() != "true"
-                || atom.return_type.as_deref() != Some("i64")
-            {
-                return Err(BundleError(
-                    "profile requires zero-argument i64 main with literal true precondition",
-                ));
+        match item {
+            parser::Item::Atom(mut atom) => {
+                if atom.name == "main" {
+                    mains += 1;
+                    // The C `main` wrapper attests an i64 user body — the widened
+                    // profile admits other scalar returns for siblings, but the
+                    // entry point keeps the single-atom `-> i64` signature.
+                    if !atom.params.is_empty()
+                        || atom.requires.trim() != "true"
+                        || atom.return_type.as_deref() != Some("i64")
+                    {
+                        return Err(BundleError(
+                            "profile requires zero-argument i64 main with literal true precondition",
+                        ));
+                    }
+                }
+                atom.span.file = SOURCE_LABEL.to_owned();
+                atoms.push(atom);
             }
+            parser::Item::TypeDef(typedef) => types.push(typedef),
+            _ => return Err(BundleError("non-atom declarations")),
         }
-        atom.span.file = SOURCE_LABEL.to_owned();
-        atoms.push(atom);
     }
     if mains != 1 {
         return Err(BundleError("profile requires exactly one main atom"));
@@ -561,6 +608,7 @@ pub fn prepare_module_source(
             source_dependencies_sha256: source_dependencies_sha256(&atoms)?,
         },
         atoms,
+        types,
     ))
 }
 
@@ -628,28 +676,36 @@ fn member_stem(member: &str) -> &str {
 pub fn merge_import_closure(
     root_name: &str,
     sources: &BTreeMap<String, String>,
+    admit_refined: bool,
 ) -> Result<(String, BTreeMap<String, Vec<String>>), BundleError> {
     if !sources.contains_key(root_name) {
         return Err(BundleError("root source member not pinned"));
     }
-    let mut visiting = std::collections::BTreeSet::new();
-    let mut emitted = std::collections::BTreeSet::new();
-    let mut emitted_hashes = std::collections::BTreeSet::new();
-    let mut graph = BTreeMap::new();
-    let mut parts = Vec::new();
-    visit_member(
-        root_name,
-        sources,
-        &mut visiting,
-        &mut emitted,
-        &mut emitted_hashes,
-        &mut graph,
-        &mut parts,
-    )?;
-    if graph[root_name].is_empty() {
+    let mut state = MergeWalk {
+        admit_refined,
+        visiting: std::collections::BTreeSet::new(),
+        emitted: std::collections::BTreeSet::new(),
+        emitted_hashes: std::collections::BTreeSet::new(),
+        graph: BTreeMap::new(),
+        parts: Vec::new(),
+    };
+    visit_member(root_name, sources, &mut state)?;
+    if state.graph[root_name].is_empty() {
         return Err(BundleError("expected at least one import"));
     }
-    Ok((format!("{}\n", parts.join("\n")), graph))
+    Ok((format!("{}\n", state.parts.join("\n")), state.graph))
+}
+
+/// The walk state shared across the DFS: the refined-members gate plus
+/// the cycle-detection set, the emitted member set and dedup hashes,
+/// and the accumulated graph/parts.
+struct MergeWalk {
+    admit_refined: bool,
+    visiting: std::collections::BTreeSet<String>,
+    emitted: std::collections::BTreeSet<String>,
+    emitted_hashes: std::collections::BTreeSet<String>,
+    graph: BTreeMap<String, Vec<String>>,
+    parts: Vec<String>,
 }
 
 /// One DFS node: gather the member's imports under the same gates as
@@ -660,37 +716,25 @@ pub fn merge_import_closure(
 fn visit_member(
     member: &str,
     sources: &BTreeMap<String, String>,
-    visiting: &mut std::collections::BTreeSet<String>,
-    emitted: &mut std::collections::BTreeSet<String>,
-    emitted_hashes: &mut std::collections::BTreeSet<String>,
-    graph: &mut BTreeMap<String, Vec<String>>,
-    parts: &mut Vec<String>,
+    state: &mut MergeWalk,
 ) -> Result<(), BundleError> {
-    if emitted.contains(member) {
+    if state.emitted.contains(member) {
         return Ok(());
     }
-    if !visiting.insert(member.to_owned()) {
+    if !state.visiting.insert(member.to_owned()) {
         return Err(BundleError("circular import outside profile"));
     }
     let text = sources
         .get(member)
         .ok_or(BundleError("imported source member not pinned"))?;
-    let (imports, qualifiers, import_lines) = member_imports(member, text)?;
+    let (imports, qualifiers, import_lines) = member_imports(member, text, state.admit_refined)?;
     let mut sorted = imports.clone();
     sorted.sort();
-    graph.insert(member.to_owned(), sorted);
+    state.graph.insert(member.to_owned(), sorted);
     for dep in &imports {
-        visit_member(
-            dep,
-            sources,
-            visiting,
-            emitted,
-            emitted_hashes,
-            graph,
-            parts,
-        )?;
+        visit_member(dep, sources, state)?;
     }
-    visiting.remove(member);
+    state.visiting.remove(member);
     // Qualified calls are namespace syntax, not part of the atom
     // contract: the callee map keys on bare names, so `h::helper(`
     // merges as `helper(` — the same normalization the language's own
@@ -720,10 +764,10 @@ fn visit_member(
     // emitting the body twice would only trip the merged module's
     // duplicate-atom gate: emit identical bodies once. Distinct
     // member texts still emit side by side and keep that gate.
-    if emitted_hashes.insert(sha256(body.as_bytes())) {
-        parts.push(body);
+    if state.emitted_hashes.insert(sha256(body.as_bytes())) {
+        state.parts.push(body);
     }
-    emitted.insert(member.to_owned());
+    state.emitted.insert(member.to_owned());
     Ok(())
 }
 
@@ -739,7 +783,11 @@ type MemberImports = (Vec<String>, Vec<String>, std::collections::BTreeSet<usize
 /// ambiguously), atoms the only other allowed item, and every import
 /// alone on its line as one strict `import "..." [as x];` statement
 /// (a trailing `//` comment is trivia).
-fn member_imports(member_key: &str, text: &str) -> Result<MemberImports, BundleError> {
+fn member_imports(
+    member_key: &str,
+    text: &str,
+    admit_refined: bool,
+) -> Result<MemberImports, BundleError> {
     // `parse_module` (not the checked entry point) because the checked
     // pipeline consumes `import` items; whatever the lenient scan cannot
     // see stays in the text and fails the merged admission downstream.
@@ -770,6 +818,10 @@ fn member_imports(member_key: &str, text: &str) -> Result<MemberImports, BundleE
                 import_lines.insert(decl.span.line);
             }
             parser::Item::Atom(_) => (),
+            // Refined scalar declarations ride the merge only when the
+            // pinned profile admits them — the merged admission gate
+            // still validates each one.
+            parser::Item::TypeDef(_) if admit_refined => (),
             _ => return Err(BundleError("declaration outside multifile profile")),
         }
     }
@@ -870,17 +922,35 @@ pub fn import_graph_sha256(graph: &BTreeMap<String, Vec<String>>) -> String {
     sha256(&serde_json::to_vec(graph).expect("member names serialize"))
 }
 
-/// The full multifile derivation: merge the import closure, admit the
-/// merged text under the module gate (now atom-only), and return its
-/// per-atom binding, the file-graph pin, the atoms and the merged text
-/// so emit/recheck feed the same bytes the binding describes.
+/// The full multifile derivation's products: the merged text's per-atom
+/// binding, the file-graph pin, the admitted atoms and type
+/// declarations, and the canonical merged source itself, so
+/// emit/recheck feed the same bytes the binding describes.
+pub struct PreparedMultifileSource {
+    pub binding: ModuleSourceBinding,
+    pub import_graph_sha256: String,
+    pub atoms: Vec<parser::Atom>,
+    pub types: Vec<parser::RefinedType>,
+    pub merged: String,
+}
+
+/// Merge the import closure and admit the merged text under the module
+/// gate (atom items plus, under `admit_refined`, refined `type`
+/// declarations).
 pub fn prepare_multifile_source(
     root_name: &str,
     sources: &BTreeMap<String, String>,
-) -> Result<(ModuleSourceBinding, String, Vec<parser::Atom>, String), BundleError> {
-    let (merged, graph) = merge_import_closure(root_name, sources)?;
-    let (binding, atoms) = prepare_module_source(&merged)?;
-    Ok((binding, import_graph_sha256(&graph), atoms, merged))
+    admit_refined: bool,
+) -> Result<PreparedMultifileSource, BundleError> {
+    let (merged, graph) = merge_import_closure(root_name, sources, admit_refined)?;
+    let (binding, atoms, types) = prepare_module_source(&merged, admit_refined)?;
+    Ok(PreparedMultifileSource {
+        binding,
+        import_graph_sha256: import_graph_sha256(&graph),
+        atoms,
+        types,
+        merged,
+    })
 }
 
 /// Pin a module record the same way `load_pinned_record` pins a
@@ -896,7 +966,7 @@ pub fn load_pinned_module_record(
     let record: ModuleNativeBundleRecord =
         serde_json::from_slice(bytes).map_err(|_| BundleError("invalid record"))?;
     if record.schema != MODULE_SCHEMA
-        || record.profile != MODULE_PROFILE
+        || ![MODULE_PROFILE, MODULE_PROFILE_V2].contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
         || record.system_scope != SYSTEM_SCOPE
         || record.settings != BuildSettings::default()
@@ -948,7 +1018,7 @@ pub fn load_pinned_multifile_record(
     let record: MultifileNativeBundleRecord =
         serde_json::from_slice(bytes).map_err(|_| BundleError("invalid record"))?;
     if record.schema != MULTIFILE_SCHEMA
-        || record.profile != MULTIFILE_PROFILE
+        || ![MULTIFILE_PROFILE, MULTIFILE_PROFILE_V2].contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
         || record.system_scope != SYSTEM_SCOPE
         || record.settings != BuildSettings::default()
@@ -1007,7 +1077,8 @@ pub fn check_module_identity(
     files: &BTreeMap<BundleFile, Vec<u8>>,
 ) -> Result<(), BundleError> {
     let record = load_pinned_module_record(record_bytes, expected_id)?;
-    let (binding, atoms) = prepare_module_source(source)?;
+    let (binding, atoms, _types) =
+        prepare_module_source(source, module_admit_refined(&record.profile)?)?;
     if record.source != binding {
         return Err(BundleError("source or compiler identity mismatch"));
     }
@@ -1036,11 +1107,17 @@ pub fn check_multifile_identity(
     {
         return Err(BundleError("missing or replaced source member"));
     }
-    let (binding, graph, atoms, _merged) = prepare_multifile_source(root_name, sources)?;
-    if record.source != binding || record.source_files.import_graph_sha256 != graph {
+    let prepared = prepare_multifile_source(
+        root_name,
+        sources,
+        multifile_admit_refined(&record.profile)?,
+    )?;
+    if record.source != prepared.binding
+        || record.source_files.import_graph_sha256 != prepared.import_graph_sha256
+    {
         return Err(BundleError("source or compiler identity mismatch"));
     }
-    check_module_members(&record.files, &binding, &atoms, files)
+    check_module_members(&record.files, &prepared.binding, &prepared.atoms, files)
 }
 
 /// The member/certificate half of module-family identity — shared by the
@@ -1123,13 +1200,15 @@ pub fn recheck_module_source(
     files: &BTreeMap<BundleFile, Vec<u8>>,
 ) -> Result<SourceRecheck, BundleError> {
     use z3::{Config, Context, Solver};
-    load_pinned_module_record(record_bytes, expected_id)?;
+    let record = load_pinned_module_record(record_bytes, expected_id)?;
+    let admit_refined = module_admit_refined(&record.profile)?;
     let mut config = Config::new();
     config.set_timeout_msec(BuildSettings::default().solver_timeout_ms);
     config.set_param_value("rlimit", &RECHECK_RESOURCE_LIMIT.to_string());
     let context = Context::new(&config);
-    let atoms = semantic_contract::encode_pure_i64_module_obligations(source, &context)
-        .map_err(|_| BundleError("source outside bounded module recheck profile"))?;
+    let atoms =
+        semantic_contract::encode_pure_i64_module_obligations(source, &context, admit_refined)
+            .map_err(|_| BundleError("source outside bounded module recheck profile"))?;
     check_module_identity(record_bytes, expected_id, source, files)?;
     let solver = Solver::new(&context);
     solve_module_obligations(&atoms, &solver)
@@ -1147,20 +1226,22 @@ pub fn recheck_multifile_source(
     files: &BTreeMap<BundleFile, Vec<u8>>,
 ) -> Result<SourceRecheck, BundleError> {
     use z3::{Config, Context, Solver};
-    if load_pinned_multifile_record(record_bytes, expected_id)?
-        .source_files
-        .root
-        != root_name
-    {
+    let record = load_pinned_multifile_record(record_bytes, expected_id)?;
+    if record.source_files.root != root_name {
         return Err(BundleError("root source member mismatch"));
     }
+    let admit_refined = multifile_admit_refined(&record.profile)?;
     let mut config = Config::new();
     config.set_timeout_msec(BuildSettings::default().solver_timeout_ms);
     config.set_param_value("rlimit", &RECHECK_RESOURCE_LIMIT.to_string());
     let context = Context::new(&config);
-    let (_binding, _graph, _atoms, merged) = prepare_multifile_source(root_name, sources)?;
-    let atoms = semantic_contract::encode_pure_i64_module_obligations(&merged, &context)
-        .map_err(|_| BundleError("source outside bounded module recheck profile"))?;
+    let prepared = prepare_multifile_source(root_name, sources, admit_refined)?;
+    let atoms = semantic_contract::encode_pure_i64_module_obligations(
+        &prepared.merged,
+        &context,
+        admit_refined,
+    )
+    .map_err(|_| BundleError("source outside bounded module recheck profile"))?;
     check_multifile_identity(record_bytes, expected_id, root_name, sources, files)?;
     let solver = Solver::new(&context);
     solve_module_obligations(&atoms, &solver)
@@ -1218,7 +1299,7 @@ mod multifile_tests {
 
     #[test]
     fn merge_strips_imports_and_orders_imported_first() {
-        let (merged, graph) = merge_import_closure("app.mm", &members()).unwrap();
+        let (merged, graph) = merge_import_closure("app.mm", &members(), false).unwrap();
         assert_eq!(graph["app.mm"], ["helpers.mm"]);
         assert!(graph["helpers.mm"].is_empty());
         assert!(merged.starts_with(HELPERS.trim_end()));
@@ -1279,7 +1360,7 @@ mod multifile_tests {
             "helpers.mm".into(),
             format!("import \"deep\" as d;\n{HELPERS}"),
         );
-        let (merged, graph) = merge_import_closure("app.mm", &nested).unwrap();
+        let (merged, graph) = merge_import_closure("app.mm", &nested, false).unwrap();
         assert_eq!(graph["app.mm"], ["helpers.mm"]);
         assert_eq!(graph["helpers.mm"], ["deep.mm"]);
         assert!(graph["deep.mm"].is_empty());
@@ -1301,7 +1382,7 @@ mod multifile_tests {
             "helpers.mm".into(),
             "import \"deep\" as d;\natom helper(x: i64) -> i64\n    requires: true;\n    ensures: result == x + 1;\n    body: { x + d::deep(0) };".into(),
         );
-        let (merged, _) = merge_import_closure("app.mm", &nested).unwrap();
+        let (merged, _) = merge_import_closure("app.mm", &nested, false).unwrap();
         assert!(merged.contains("body: { x + deep(0) };"));
         assert!(!merged.contains("d::") && !merged.contains("h::"));
     }
@@ -1320,7 +1401,7 @@ mod multifile_tests {
             ("c.mm".to_owned(), c.to_owned()),
             ("shared.mm".to_owned(), shared.to_owned()),
         ]);
-        let (merged, graph) = merge_import_closure("app.mm", &sources).unwrap();
+        let (merged, graph) = merge_import_closure("app.mm", &sources, false).unwrap();
         assert_eq!(merged.matches("atom shared").count(), 1);
         assert_eq!(graph["b.mm"], ["shared.mm"]);
         assert_eq!(graph["c.mm"], ["shared.mm"]);
@@ -1335,7 +1416,7 @@ mod multifile_tests {
             ("app.mm".to_owned(), a.to_owned()),
             ("b.mm".to_owned(), b.to_owned()),
         ]);
-        assert!(merge_import_closure("app.mm", &sources).is_err());
+        assert!(merge_import_closure("app.mm", &sources, false).is_err());
     }
 
     #[test]
@@ -1353,7 +1434,7 @@ mod multifile_tests {
             ("a.mm".to_owned(), member.to_owned()),
             ("b.mm".to_owned(), member.to_owned()),
         ]);
-        assert!(merge_import_closure("app.mm", &dup).is_err());
+        assert!(merge_import_closure("app.mm", &dup, false).is_err());
         // The same ambiguity without aliases: `import "a"; import
         // "b";` is fine (qualifiers `a`/`b` differ), but a member named
         // `k.mm` aliased as `k` collides with an unaliased `k`.
@@ -1365,7 +1446,7 @@ mod multifile_tests {
             ("a.mm".to_owned(), member.to_owned()),
             ("k.mm".to_owned(), member.to_owned()),
         ]);
-        assert!(merge_import_closure("app.mm", &alias_stem_dup).is_err());
+        assert!(merge_import_closure("app.mm", &alias_stem_dup, false).is_err());
     }
 
     #[test]
@@ -1378,16 +1459,16 @@ mod multifile_tests {
             "helpers.mm".into(),
             "atom helper(x: i64) -> i64\r\n    requires: true;\r\n    ensures: result == x + 1;\r\n    body: { x + 1 };\r\n".into(),
         );
-        let (merged, _) = merge_import_closure("app.mm", &crlf).unwrap();
+        let (merged, _) = merge_import_closure("app.mm", &crlf, false).unwrap();
         assert!(merged.contains("atom helper(x: i64) -> i64\r\n    requires: true;"));
     }
 
     #[test]
     fn unpinned_and_missing_members_rejected() {
         let only_root = BTreeMap::from([("app.mm".to_owned(), ROOT.to_owned())]);
-        assert!(merge_import_closure("app.mm", &only_root).is_err());
+        assert!(merge_import_closure("app.mm", &only_root, false).is_err());
         let missing_deep = BTreeMap::from([("app.mm".to_owned(), "import \"deep\";\natom main() -> i64\n    requires: true;\n    ensures: result == 1;\n    body: { 1 };".to_owned())]);
-        assert!(merge_import_closure("app.mm", &missing_deep).is_err());
+        assert!(merge_import_closure("app.mm", &missing_deep, false).is_err());
     }
 
     #[test]
@@ -1437,7 +1518,7 @@ mod multifile_tests {
             ),
             ("helpers.mm".to_owned(), HELPERS.to_owned()),
         ]);
-        let (merged, graph) = merge_import_closure("app.mm", &commented).unwrap();
+        let (merged, graph) = merge_import_closure("app.mm", &commented, false).unwrap();
         assert_eq!(graph["app.mm"], ["helpers.mm"]);
         // The comment survives verbatim and `atom main` is not folded
         // into it.
@@ -1455,7 +1536,7 @@ mod multifile_tests {
             ),
             ("helpers.mm".to_owned(), HELPERS.to_owned()),
         ]);
-        assert!(merge_import_closure("app.mm", &missing).is_err());
+        assert!(merge_import_closure("app.mm", &missing, false).is_err());
     }
 
     #[test]
@@ -1463,24 +1544,28 @@ mod multifile_tests {
         let shared = BTreeMap::from([
             (
                 "app.mm".to_owned(),
-                format!(
-                    "import \"helpers\" as h; atom main() -> i64 requires: true; ensures: result > 0; body: {{ h::helper(0) }};"
-                ),
+                "import \"helpers\" as h; atom main() -> i64 requires: true; ensures: result > 0; body: { h::helper(0) };"
+                    .to_owned(),
             ),
             ("helpers.mm".to_owned(), HELPERS.to_owned()),
         ]);
-        assert!(merge_import_closure("app.mm", &shared).is_err());
+        assert!(merge_import_closure("app.mm", &shared, false).is_err());
     }
 
     #[test]
     fn prepare_multifile_binds_merged_module() {
-        let (binding, graph, atoms, merged) =
-            prepare_multifile_source("app.mm", &members()).unwrap();
-        assert_eq!(binding.source_sha256, sha256(merged.as_bytes()));
-        assert_eq!(binding.atoms.len(), 2);
-        assert!(binding.atoms.contains_key("helper") && binding.atoms.contains_key("main"));
-        assert!(is_digest(&graph));
-        assert_eq!(atoms.len(), 2);
+        let prepared = prepare_multifile_source("app.mm", &members(), false).unwrap();
+        assert_eq!(
+            prepared.binding.source_sha256,
+            sha256(prepared.merged.as_bytes())
+        );
+        assert_eq!(prepared.binding.atoms.len(), 2);
+        assert!(
+            prepared.binding.atoms.contains_key("helper")
+                && prepared.binding.atoms.contains_key("main")
+        );
+        assert!(is_digest(&prepared.import_graph_sha256));
+        assert_eq!(prepared.atoms.len(), 2);
     }
 }
 
@@ -1554,5 +1639,38 @@ mod source_recheck_tests {
             source_recheck_result(solver.check()),
             SourceRecheck::Inconclusive
         );
+    }
+
+    #[test]
+    fn prepare_module_source_names_the_refined_profile_only_when_used() {
+        // A module declaring or using refined scalar types binds the v2
+        // source profile — and refuses the v1 admission outright, so a
+        // v1 record could never have been built from it.
+        let refined = "type Port = i64 where v >= 1 && v <= 65535;\n\
+             atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
+        assert!(prepare_module_source(refined, false).is_err());
+        let (binding, atoms, types) = prepare_module_source(refined, true).unwrap();
+        assert_eq!(
+            binding.source_profile,
+            semantic_contract::PURE_I64_REFINED_PROFILE
+        );
+        assert_eq!(types.len(), 1);
+        assert_eq!(atoms.len(), 1);
+        // A plain module keeps the wrapping profile under the same gate.
+        let plain = "atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
+        let (binding, _atoms, types) = prepare_module_source(plain, true).unwrap();
+        assert_eq!(
+            binding.source_profile,
+            semantic_contract::PURE_I64_WRAPPING_PROFILE
+        );
+        assert!(types.is_empty());
+        // The record profile mirrors the bound source profile, and both
+        // admission modes decode — anything else is not this schema.
+        assert!(!module_admit_refined(MODULE_PROFILE).unwrap());
+        assert!(module_admit_refined(MODULE_PROFILE_V2).unwrap());
+        assert!(!multifile_admit_refined(MULTIFILE_PROFILE).unwrap());
+        assert!(multifile_admit_refined(MULTIFILE_PROFILE_V2).unwrap());
+        assert!(module_admit_refined("mumei.other/v1").is_err());
+        assert!(multifile_admit_refined("mumei.other/v1").is_err());
     }
 }
