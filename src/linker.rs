@@ -321,6 +321,7 @@ pub fn link_recorded(
         canonical_arguments_sha256,
         expected_exit_status: None,
         expected_stdout_sha256: None,
+        expected_stderr_sha256: None,
     })
 }
 

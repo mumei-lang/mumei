@@ -3858,6 +3858,32 @@ the `native_stdout_recheck`/`native_stdout_accept` MCP tools.
 mumei-demo's `native_stdout_recheck` and `native_stdout_accept`
 scenarios exercise both routes end to end.
 
+### Wave 5 pinned executable stderr recheck and acceptance (C10 consumer)
+
+Core's `mumei native-bundle recheck-stderr <bundle> <source>
+--expected-build-id <id>` completes the channel-observation trio: it
+runs the whole `recheck-artifact` chain, then executes the reproduced
+`program` once with no arguments, closed stdin and stdout, capturing at
+most 64 KiB of stderr and comparing its SHA-256 against the record's
+`link_build.expected_stderr_sha256` pin the producer wrote at build
+time under the same conditions (a program silent on stderr pins the
+empty-stream digest). A digest mismatch fails closed as `Different`
+after reproduction succeeds; spawn failure, timeout, signal
+termination, capture overflow and pre-field records carrying no pin
+exit 3 as inconclusive rather than claiming an unevaluated comparison.
+The scope is
+`artifact_reproduction_and_os_stderr_observation_only` — an OS-level
+observation of one channel with no exit-status, stdout, runtime, ABI
+or historical-execution claim. The paired `native-bundle
+accept-stderr` emits the anonymous acceptance descriptor on a matching
+observation with `os_stderr_observation` in `checks_performed` and
+`os_exit_status`, `os_stdout_observation`, `historical_execution`,
+optimizer/ABI/runtime, grade and Lean honestly named in
+`checks_not_performed`; the sibling descriptors name the new check in
+their own `checks_not_performed` so each document lists exactly what
+it ran. C02/C10 stay partial — ABI/runtime assurance and producer
+authenticity remain open.
+
 ### Wave 5 declared producer-identity gate (C02 consumer)
 
 Core's `mumei evidence check|check-list|check-consistency`

@@ -3020,6 +3020,16 @@ OS-level observation of one channel only: no exit-status comparison,
 stderr, runtime, ABI or historical-execution claim. See the [stdout
 recheck
 boundary](VERIFICATION_NATIVE.md#pinned-executable-stdout-recheck).
+The closing channel-observation slice is `native-bundle recheck-stderr`
+and `accept-stderr`: the record pins
+`link_build.expected_stderr_sha256` (SHA-256 of ≤64 KiB stderr from the
+same single no-argument, closed-stdin build-time run), and the consumer
+compares the reproduced executable's observed stderr digest with the
+same inconclusive mapping. This completes the OS channel-observation
+trio — exit status, stdout and stderr are each pinned and reproduced —
+while runtime, ABI and historical-execution claims stay out of scope.
+See the [stderr recheck
+boundary](VERIFICATION_NATIVE.md#pinned-executable-stderr-recheck).
 General optimizer/ABI/runtime assurance and producer authenticity stay
 open — the records now pin the intra-source call graph as
 `source_dependencies_sha256`, the canonical JSON of the Claim Book
