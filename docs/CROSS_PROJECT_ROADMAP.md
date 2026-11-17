@@ -4103,8 +4103,30 @@ pass-through stays V4 vocabulary. Branch-merged enum values,
 enum-producing `match`/`if` arms, enum equality
 `e == E::V`, `result.tag` reads as scalars and enum field
 writes all fail closed. `check`, `recheck-source` and
-`recheck-llvm` cover the fragment. C10 stays partial —
-branch-merged composite values, nested/generic structs,
+`recheck-llvm` cover the fragment.
+Branch-merged composite values join the fragment under
+`mumei.pure-i64-composite/v7` and the `/v10` bundle
+profiles, pinned only when a module actually merges a
+composite across a branch: an `if`/`match` whose tail (or
+whose body writes a composite binding) produces a struct or
+enum encodes a per-slot conditional merge — scalars and tags
+merge through `ite(cond, then, else)`, struct fields and
+enum payload slots merge recursively — and fails closed on
+shape mismatches, mixed composite kinds and loop-tail
+composites. The emitted IR merges aggregates with
+`{i64, ...}` `phi` nodes; the translation validator admits
+aggregate phis under the same value-source gate as scalars
+(formals, `insertvalue` chains, calls, constants) and
+commits them after the block's phi run so a sibling phi read
+resolves to its pre-block incoming value, matching LLVM's
+simultaneous-commit semantics. Two repairs shipped in the
+same slice: enum variant construction starts from the zeroed
+union type so a short variant's unwritten payload slots read
+as the zero padding the source model asserts, and
+aggregate-typed `phi`/`select` results skip the integer
+width check that only applies to scalar slots. `check`,
+`recheck-source` and `recheck-llvm` cover the fragment.
+C10 stays partial — nested/generic structs,
 `u64`-family leaves and the deeper assurance layers remain
 open.
 
