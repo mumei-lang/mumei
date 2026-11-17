@@ -2838,9 +2838,6 @@ entry:
   ret i32 %exit_code
 }}\n"
     );
-    if std::env::var("DUMP_IR").is_ok() {
-        eprintln!("{ir}");
-    }
     pin(&ir)
 }
 
