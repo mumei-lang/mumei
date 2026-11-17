@@ -3009,6 +3009,17 @@ matching observation — `os_exit_status_observation` moves into
 `checks_performed` while `accept-artifact` keeps it excluded (it runs
 no execution). See the [exit-status recheck
 boundary](VERIFICATION_NATIVE.md#pinned-executable-exit-status-recheck).
+The channel-observation slice follows as `native-bundle recheck-stdout`
+and `accept-stdout`: the record pins
+`link_build.expected_stdout_sha256` (SHA-256 of ≤64 KiB stdout from the
+same single no-argument, closed-stdin build-time run), and the consumer
+compares the reproduced executable's observed stdout digest — spawn
+failure, timeout, signal termination, capture overflow and pre-field
+records report inconclusive rather than claiming a comparison. An
+OS-level observation of one channel only: no exit-status comparison,
+stderr, runtime, ABI or historical-execution claim. See the [stdout
+recheck
+boundary](VERIFICATION_NATIVE.md#pinned-executable-stdout-recheck).
 General optimizer/ABI/runtime assurance and producer authenticity stay
 open — the records now pin the intra-source call graph as
 `source_dependencies_sha256`, the canonical JSON of the Claim Book

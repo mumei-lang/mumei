@@ -473,6 +473,120 @@ fn exit_status_acceptance_emits_the_observation_descriptor() {
 }
 
 #[test]
+fn stdout_is_pinned_and_reproduced() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    // New records pin the executable's observed stdout digest — the
+    // profile's `main` is silent, so the pin is the empty-stream digest.
+    assert_eq!(
+        record["link_build"]["expected_stdout_sha256"],
+        native_bundle::sha256(b"")
+    );
+    let stdout_recheck = |source: &Path, bundle: &Path, id: &str| {
+        Command::new(env!("CARGO_BIN_EXE_mumei"))
+            .args([
+                "native-bundle",
+                "recheck-stdout",
+                bundle.to_str().unwrap(),
+                source.to_str().unwrap(),
+                "--expected-build-id",
+                id,
+            ])
+            .output()
+            .unwrap()
+    };
+    assert_success(&stdout_recheck(&source, &bundle, &id));
+
+    // A record pinned before the field existed carries no pin — the
+    // recheck cannot evaluate the comparison and reports inconclusive.
+    record["link_build"]
+        .as_object_mut()
+        .unwrap()
+        .remove("expected_stdout_sha256");
+    let bytes = serde_json::to_vec(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert_eq!(
+        stdout_recheck(&source, &bundle, &native_bundle::sha256(&bytes))
+            .status
+            .code(),
+        Some(3)
+    );
+
+    // A wrong pin fails the reproduction check.
+    record["link_build"]["expected_stdout_sha256"] = serde_json::json!("0".repeat(64));
+    let bytes = serde_json::to_vec(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(
+        !stdout_recheck(&source, &bundle, &native_bundle::sha256(&bytes))
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn stdout_acceptance_emits_the_observation_descriptor() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build(root.path());
+    let accept = cli(&[
+        "native-bundle",
+        "accept-stdout",
+        bundle.to_str().unwrap(),
+        source.to_str().unwrap(),
+        "--expected-build-id",
+        &id,
+        "--json",
+    ]);
+    assert_success(&accept);
+    let descriptor: serde_json::Value = serde_json::from_slice(&accept.stdout).unwrap();
+    assert_eq!(descriptor["accepted"], true);
+    assert!(
+        descriptor["checks_performed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check == "os_stdout_observation"),
+        "stdout acceptance must claim the OS observation"
+    );
+    assert!(
+        descriptor["checks_not_performed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check == "os_exit_status"),
+        "a stdout run does not compare the exit status"
+    );
+    assert!(
+        !descriptor["checks_performed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check == "abi_runtime_semantics"),
+        "no ABI/runtime claim"
+    );
+
+    // A pinless record cannot be accepted this way — inconclusive.
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle.join(RECORD_FILE)).unwrap()).unwrap();
+    record["link_build"]
+        .as_object_mut()
+        .unwrap()
+        .remove("expected_stdout_sha256");
+    let bytes = serde_json::to_vec(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    let pinless = cli(&[
+        "native-bundle",
+        "accept-stdout",
+        bundle.to_str().unwrap(),
+        source.to_str().unwrap(),
+        "--expected-build-id",
+        &native_bundle::sha256(&bytes),
+    ]);
+    assert_eq!(pinless.status.code(), Some(3));
+}
+
+#[test]
 fn bounded_source_and_symlinks_cannot_bypass_the_consumer() {
     let root = tempfile::tempdir().unwrap();
     let (source, bundle, id) = build(root.path());

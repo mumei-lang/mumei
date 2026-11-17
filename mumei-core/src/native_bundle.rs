@@ -288,6 +288,15 @@ pub struct LinkBuild {
     /// signal termination rather than a 0..=255 code).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_exit_status: Option<u32>,
+    /// SHA-256 hex of the stdout bytes observed by running the produced
+    /// executable once at build time (no arguments, closed stdin, drained
+    /// stdout capped at 64 KiB). Optional so records pinned before the field
+    /// existed still deserialize; a recheck that executes skips the
+    /// comparison when it is absent — and it is absent whenever the build
+    /// could not observe the channel (spawn failure, timeout, signal
+    /// termination or output over the capture cap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_stdout_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
