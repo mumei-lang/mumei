@@ -563,6 +563,15 @@ unsafe fn compare_function<'ctx>(
     // A source `while` relaxes the CFG gate only for that atom's member:
     // cycles elsewhere still reject as unsupported.
     let loops = model.loop_bound_exits.is_some();
+    // A struct parameter's source inputs are its flattened fields; the
+    // emitted member takes one aggregate formal instead, which this
+    // scalar-formal profile does not decompose — fail closed rather
+    // than pair slots with formals.
+    if model.composite_signature {
+        return Err(ValidationError(
+            "aggregate member signature outside translation profile",
+        ));
+    }
     check_function(raw, model.inputs.len(), loops)?;
     let mut encoder = IrEncoder::new(context, call_renames, loops);
     let returns = encoder.encode(raw, &model.inputs)?;

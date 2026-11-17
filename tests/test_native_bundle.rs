@@ -2161,6 +2161,145 @@ fn module_bundle_with_refined_scalar_members_builds_as_v2() {
         .success());
 }
 
+const COMPOSITE_MODULE: &str = "struct Point { x: i64, y: i64 }\n\
+     atom gx(p: Point) -> i64 requires: p.x >= 0; ensures: result == p.x; body: { p.x };\n\
+     atom fwd(p: Point) -> i64 requires: p.x >= 1; ensures: result >= 1; body: { gx(p) };\n\
+     atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
+
+#[test]
+fn module_bundle_with_struct_members_builds_as_v4_and_rechecks_its_source() {
+    // Struct declarations, struct-typed parameters, field reads and a
+    // same-struct pass-through call build under the composite profile;
+    // check and the source recheck re-derive under that same gate.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(root.path(), COMPOSITE_MODULE);
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MODULE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V4);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE
+    );
+    assert_eq!(record["source"]["atoms"].as_object().unwrap().len(), 3);
+    assert_success(&check(&source, &bundle, &id));
+    let output = recheck(&source, &bundle, &id);
+    assert_success(&output);
+    assert!(String::from_utf8_lossy(&output.stdout).contains(native_bundle::MODULE_RECHECK_PROFILE));
+    // The LLVM snapshot recheck does not decompose aggregate member
+    // signatures: it fails closed instead of claiming equivalence.
+    let llvm = recheck_llvm(&source, &bundle, &id);
+    assert!(!llvm.status.success());
+    assert!(String::from_utf8_lossy(&llvm.stderr).contains("outside bounded module profile"));
+    // A v4 record re-pinned under any narrower name is refused: those
+    // gates keep `struct` out of the item vocabulary.
+    for narrower in [
+        native_bundle::MODULE_PROFILE,
+        native_bundle::MODULE_PROFILE_V2,
+        native_bundle::MODULE_PROFILE_V3,
+    ] {
+        let mut record = module_record(&bundle);
+        record["profile"] = serde_json::Value::String(narrower.into());
+        let bytes = serde_json::to_vec_pretty(&record).unwrap();
+        fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+        let id = native_bundle::sha256(&bytes);
+        assert!(!check(&source, &bundle, &id).status.success());
+        assert!(!recheck(&source, &bundle, &id).status.success());
+    }
+}
+
+#[test]
+fn module_bundle_without_structs_keeps_its_narrow_profile_under_the_composite_producer() {
+    let root = tempfile::tempdir().unwrap();
+    let (_source, bundle, _id) = build_source(root.path(), MODULE);
+    assert_eq!(
+        module_record(&bundle)["profile"],
+        native_bundle::MODULE_PROFILE
+    );
+}
+
+#[test]
+fn module_bundle_with_struct_and_single_main_takes_the_module_path() {
+    // A lone `main` beside a struct declaration is still a composite
+    // module — the single-atom path rejects every non-atom item.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "struct Point { x: i64 }\n\
+         atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MODULE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V4);
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    // No member takes a struct parameter, so no aggregate formal exists
+    // and the LLVM snapshot recheck still reaches its scalar profile.
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+}
+
+#[test]
+fn composite_source_recheck_refutes_wrapped_field_arithmetic() {
+    // `verify` reasons over mathematical integers; the source recheck
+    // encodes each flattened field as a wrapping i64, so the sum of two
+    // nonnegative fields can wrap below the first one.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "struct Point { x: i64, y: i64 }\n\
+         atom sum(p: Point) -> i64 requires: p.x >= 0 && p.y >= 0; ensures: result >= p.x; body: { p.x + p.y };\n\
+         atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+    );
+    assert_eq!(
+        module_record(&bundle)["profile"],
+        native_bundle::MODULE_PROFILE_V4
+    );
+    assert_success(&check(&source, &bundle, &id));
+    let output = recheck(&source, &bundle, &id);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refuted"));
+}
+
+#[test]
+fn multifile_bundle_with_struct_member_builds_as_v4() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        root.path().join("shapes.mm"),
+        "struct Point { x: i64, y: i64 }\n\
+         atom gx(p: Point) -> i64 requires: true; ensures: result == p.x; body: { p.x };\n\
+         atom one(k: i64) -> i64 requires: true; ensures: result == k; body: { k };\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"shapes\" as s;\n\natom main() -> i64 requires: true; ensures: result == 3; body: { s::one(3) };\n",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MULTIFILE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V4);
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert!(!recheck_llvm(&source, &bundle, &id).status.success());
+    // Under a v3 pin the struct member is refused at the member gate.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MULTIFILE_PROFILE_V3.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
 #[test]
 fn module_bundle_with_typedef_and_single_main_takes_the_module_path() {
     // A module holding one `main` plus a refined scalar declaration is
