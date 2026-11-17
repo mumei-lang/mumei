@@ -4,8 +4,8 @@
 use inkwell::{context::Context as LlvmContext, memory_buffer::MemoryBuffer, values::AsValueRef};
 use llvm_sys::{core::*, prelude::*, LLVMIntPredicate, LLVMOpcode, LLVMTypeKind};
 use mumei_core::semantic_contract::{
-    encode_pure_i64_body, encode_pure_i64_module, PureI64Body, LOOP_BOUND,
-    PURE_I64_REFINED_PROFILE, PURE_I64_WRAPPING_PROFILE,
+    encode_pure_i64_body, encode_pure_i64_module, module_source_profile, PureI64Body,
+    RefinedAdmission, LOOP_BOUND, PURE_I64_WRAPPING_PROFILE,
 };
 use std::collections::{BTreeMap, HashMap};
 use z3::{
@@ -284,7 +284,7 @@ pub fn validate_pure_i64_module(
     config.set_timeout_msec(options.timeout_ms as u64);
     config.set_param_value("rlimit", &options.resource_limit.to_string());
     let context = Context::new(&config);
-    let models = encode_pure_i64_module(source, &context, true, false)
+    let models = encode_pure_i64_module(source, &context, true, RefinedAdmission::Reject)
         .map_err(|_| ValidationError("unsupported C03 source"))?;
     let llvm_context = LlvmContext::create();
     let module = llvm_context
@@ -384,15 +384,15 @@ pub fn validate_pure_i64_module(
 /// screened by the fixed call/trunc/ret shape (not compared — its i32
 /// exit-status truncation is the attested artifact edge), and every
 /// member keeps external linkage under the shared function profile.
-/// `admit_refined` runs the refined-scalar admission the pinned v2
-/// record names: refined type declarations and signature members typed
-/// by them join the encoded domain/postcondition. The solver budget
-/// applies per function.
+/// `admission` runs the refined-scalar admission the pinned record
+/// names: refined type declarations and signature members typed by
+/// them join the encoded domain/postcondition, at exactly the record's
+/// admission level. The solver budget applies per function.
 pub fn validate_native_module(
     source: &str,
     llvm_ir: &str,
     options: Options,
-    admit_refined: bool,
+    admission: RefinedAdmission,
 ) -> Result<ModuleValidationReport> {
     bounded(llvm_ir)?;
     if options.timeout_ms == 0 || options.timeout_ms > 30_000 || options.resource_limit == 0 {
@@ -402,7 +402,7 @@ pub fn validate_native_module(
     config.set_timeout_msec(options.timeout_ms as u64);
     config.set_param_value("rlimit", &options.resource_limit.to_string());
     let context = Context::new(&config);
-    let models = encode_pure_i64_module(source, &context, true, admit_refined)
+    let models = encode_pure_i64_module(source, &context, true, admission)
         .map_err(|_| ValidationError("unsupported C03 source"))?;
     let mut mains = 0usize;
     for model in &models {
@@ -456,18 +456,12 @@ pub fn validate_native_module(
     let mut any_loops = false;
     let mut any_refined = false;
     let mut outcome = Outcome::EquivalentWithinProfile;
-    // The report names the same source profile the record pins: refined
-    // whenever the module carries an admitted `type` declaration —
-    // including one no signature uses — so this gate follows the
+    // The report names the same source profile the record pins: the
+    // profile the module gate itself resolves — refined v1 or v2 when
+    // the admitted declarations need them — so this follows the
     // declared-members rule, not `any_refined`, which is per-signature.
-    let declares_refined = admit_refined
-        && mumei_core::parser::parse_module_checked(source)
-            .map(|items| {
-                items
-                    .iter()
-                    .any(|item| matches!(item, mumei_core::parser::Item::TypeDef(_)))
-            })
-            .unwrap_or(false);
+    let source_profile = module_source_profile(source, admission)
+        .map_err(|_| ValidationError("unsupported C03 source"))?;
     for model in &models {
         let member_name = if model.function_name == "main" {
             "__mumei_user_main"
@@ -503,11 +497,7 @@ pub fn validate_native_module(
         } else {
             NATIVE_MODULE_PROFILE
         },
-        source_profile: if declares_refined {
-            PURE_I64_REFINED_PROFILE
-        } else {
-            PURE_I64_WRAPPING_PROFILE
-        },
+        source_profile,
         target,
         data_layout: DATA_LAYOUT,
         checked_stage:
