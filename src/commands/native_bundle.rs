@@ -94,7 +94,26 @@ fn observed_exit_status(executable: &Path) -> Option<u32> {
 /// of the captured bytes. `None` on spawn failure, timeout, signal
 /// termination or output over the cap — never a claim about program
 /// semantics, only an OS-level channel observation.
+/// Why a channel observation produced no digest — every failure is
+/// fail-closed `None` to callers, but the reason is kept internally for
+/// test diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObservedStreamFailure {
+    SpawnFailed,
+    PipeTaken,
+    TimedOutOrKilled,
+    ReaderFailed,
+    OutputOverCap,
+}
+
 fn observed_stream(executable: &Path, channel: ObservedChannel) -> Option<String> {
+    observed_stream_inner(executable, channel).ok()
+}
+
+fn observed_stream_inner(
+    executable: &Path,
+    channel: ObservedChannel,
+) -> Result<String, ObservedStreamFailure> {
     use std::io::Read;
     let mut command = std::process::Command::new(executable);
     command.stdin(Stdio::null());
@@ -106,12 +125,24 @@ fn observed_stream(executable: &Path, channel: ObservedChannel) -> Option<String
             command.stdout(Stdio::null()).stderr(Stdio::piped());
         }
     }
-    let mut child = command.spawn().ok()?;
+    let mut child = command
+        .spawn()
+        .map_err(|_| ObservedStreamFailure::SpawnFailed)?;
     // ChildStdout/ChildStderr are distinct types; erase to the shared
     // Read interface for the draining reader thread.
     let mut piped: Box<dyn std::io::Read + Send> = match channel {
-        ObservedChannel::Stdout => Box::new(child.stdout.take()?),
-        ObservedChannel::Stderr => Box::new(child.stderr.take()?),
+        ObservedChannel::Stdout => Box::new(
+            child
+                .stdout
+                .take()
+                .ok_or(ObservedStreamFailure::PipeTaken)?,
+        ),
+        ObservedChannel::Stderr => Box::new(
+            child
+                .stderr
+                .take()
+                .ok_or(ObservedStreamFailure::PipeTaken)?,
+        ),
     };
     let reader = std::thread::spawn(move || {
         let mut captured = Vec::new();
@@ -160,11 +191,16 @@ fn observed_stream(executable: &Path, channel: ObservedChannel) -> Option<String
             }
         }
     };
-    let (captured, overflow) = reader.join().ok()?;
-    if !finished || overflow {
-        return None;
+    let (captured, overflow) = reader
+        .join()
+        .map_err(|_| ObservedStreamFailure::ReaderFailed)?;
+    if !finished {
+        return Err(ObservedStreamFailure::TimedOutOrKilled);
     }
-    Some(sha256(&captured))
+    if overflow {
+        return Err(ObservedStreamFailure::OutputOverCap);
+    }
+    Ok(sha256(&captured))
 }
 
 /// The stdout channel observation — see `observed_stream`.
@@ -2110,19 +2146,15 @@ mod tests {
             std::fs::set_permissions(&printer, perms).unwrap();
         }
         // Exactly the cap is observable; one byte past it is not —
-        // a pin must cover the whole stream, never a truncation. Process
-        // startup flakes under CI load (a failed spawn is fail-closed
-        // `None` by design), so retry before asserting — a systematic
-        // boundary bug still fails every attempt.
+        // a pin must cover the whole stream, never a truncation. Assert
+        // on the inner result so a failure names its reason.
         for (bytes, expected) in [
             (OBSERVED_CHANNEL_MAX_BYTES, true),
             (OBSERVED_CHANNEL_MAX_BYTES + 1, false),
         ] {
             std::fs::write(&printer, format!("#!/bin/sh\nhead -c {bytes} /dev/zero\n")).unwrap();
-            let observed = (0..3)
-                .map(|_| observed_stdout(&printer).is_some())
-                .find(|outcome| *outcome == expected);
-            assert_eq!(observed, Some(expected));
+            let observed = observed_stream_inner(&printer, ObservedChannel::Stdout);
+            assert_eq!(observed.is_ok(), expected, "{bytes} bytes: {observed:?}");
         }
         // The observable digest covers every emitted byte.
         std::fs::write(&printer, "#!/bin/sh\nprintf 'out'\n").unwrap();
@@ -2148,8 +2180,7 @@ mod tests {
         assert_eq!(observed_stderr(&printer), Some(sha256(b"err")));
         assert_eq!(observed_stdout(&printer), Some(sha256(b"out")));
         // The cap bounds stderr the same way: exactly the cap is
-        // observable, one byte past it is not. Same startup-flake retry
-        // as the stdout boundary case above.
+        // observable, one byte past it is not.
         for (bytes, expected) in [
             (OBSERVED_CHANNEL_MAX_BYTES, true),
             (OBSERVED_CHANNEL_MAX_BYTES + 1, false),
@@ -2159,10 +2190,8 @@ mod tests {
                 format!("#!/bin/sh\nhead -c {bytes} /dev/zero >&2\n"),
             )
             .unwrap();
-            let observed = (0..3)
-                .map(|_| observed_stderr(&printer).is_some())
-                .find(|outcome| *outcome == expected);
-            assert_eq!(observed, Some(expected));
+            let observed = observed_stream_inner(&printer, ObservedChannel::Stderr);
+            assert_eq!(observed.is_ok(), expected, "{bytes} bytes: {observed:?}");
         }
         // A missing executable is unobservable, not a pin.
         assert_eq!(observed_stderr(&dir.path().join("missing")), None);
