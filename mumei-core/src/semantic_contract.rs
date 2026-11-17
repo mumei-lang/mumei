@@ -658,9 +658,24 @@ struct KindEnv<'a> {
     callees: &'a BTreeMap<String, CalleeSig>,
     composites: BTreeMap<String, &'a str>,
     structs: &'a StructEnv,
+    /// The names the verifier and emitter synthesize for a struct
+    /// parameter's fields (`p_x`, `__struct_p_x`). Both resolve `p.x`
+    /// by looking those names up before the struct value itself, so a
+    /// binder spelled like one would silently stand in for the field.
+    reserved: BTreeSet<String>,
 }
 
 impl KindEnv<'_> {
+    /// Reject a binder that collides with a synthesized field name.
+    fn bind(&self, name: &str) -> Result<(), SemanticContractError> {
+        if self.reserved.contains(name) {
+            return Err(SemanticContractError::Unsupported(
+                "binder collides with a struct field name",
+            ));
+        }
+        Ok(())
+    }
+
     /// The fields a struct-typed parameter exposes, unless a scalar
     /// binding of the same name (a `let` or a match-arm binder) shadows
     /// it on the current path.
@@ -835,11 +850,26 @@ fn check_atom_contract(
             }
         }
     }
+    let reserved: BTreeSet<String> = composites
+        .iter()
+        .flat_map(|(param, struct_name)| {
+            structs[*struct_name].iter().flat_map(move |f| {
+                [
+                    format!("{param}_{}", f.name),
+                    format!("__struct_{param}_{}", f.name),
+                ]
+            })
+        })
+        .collect();
     let env = KindEnv {
         callees,
         composites,
         structs,
+        reserved,
     };
+    for p in &atom.params {
+        env.bind(&p.name)?;
+    }
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
     let ensures =
@@ -1000,9 +1030,12 @@ type StructEnv = BTreeMap<String, Vec<ResolvedField>>;
 /// past the item-vocabulary gate under `Composite` admission). Nothing
 /// a declaration carries may be dropped silently, so generic
 /// parameters, invariants, methods, field constraints and empty field
-/// lists are rejected; every field must be a profile scalar — a
-/// literal scalar name or an admitted refined alias (no struct-valued
-/// fields, so no recursion). Names shadowing scalar profile names,
+/// lists are rejected; every field must be `i64` or `bool` (no
+/// struct-valued fields, so no recursion). Subrange and refined-alias
+/// fields stay out: the verifier binds a struct field by its base sort
+/// only, without the range or alias predicates a scalar parameter of
+/// that type carries, so the recheck model would assume a domain the
+/// build never verified against. Names shadowing scalar profile names,
 /// colliding with a refined type, duplicate structs and duplicate
 /// fields fail closed.
 fn build_struct_env(
@@ -1054,9 +1087,10 @@ fn build_struct_env(
                 ));
             }
             let ty = &field.type_ref;
-            let kind = match scalar_base(&field.type_name) {
-                Some((kind, _)) => Some(kind),
-                None => refined.get(&field.type_name).map(|alias| alias.kind),
+            let kind = match field.type_name.as_str() {
+                "i64" => Some(ScalarKind::I64),
+                "bool" => Some(ScalarKind::Bool),
+                _ => None,
             };
             let Some(kind) = kind.filter(|_| {
                 ty.name == field.type_name
@@ -1212,6 +1246,7 @@ fn resolve_alias(
                     callees: &BTreeMap::new(),
                     composites: BTreeMap::new(),
                     structs: &StructEnv::new(),
+                    reserved: BTreeSet::new(),
                 },
             )?,
             ScalarKind::Bool,
@@ -1357,6 +1392,7 @@ fn statement_kind(
                             &BTreeSet::new(),
                             env,
                         )?;
+                        env.bind(var)?;
                         inner.insert(var.clone(), kind);
                         inner_assignable.insert(var.clone());
                     }
@@ -1605,6 +1641,7 @@ fn expression_kind(
                 match &arm.pattern {
                     Pattern::Literal(_) | Pattern::Wildcard => {}
                     Pattern::Variable(name) => {
+                        env.bind(name)?;
                         arm_scope.insert(name.clone(), ScalarKind::I64);
                     }
                     _ => {
@@ -4301,9 +4338,9 @@ mod tests {
 
     #[test]
     fn composite_specification_identity_binds_the_field_layout() {
-        let atom = "atom gx(p: P) -> i64 requires: true; ensures: result == p.x; body: { p.x };";
+        let atom = "atom gy(p: P) -> i64 requires: true; ensures: result == p.y; body: { p.y };";
         let wide = format!("struct P {{ x: i64, y: i64 }}\n{atom}\n{MAIN0}");
-        let narrow = format!("struct P {{ x: i32, y: i64 }}\n{atom}\n{MAIN0}");
+        let narrow = format!("struct P {{ x: bool, y: i64 }}\n{atom}\n{MAIN0}");
         let swapped = format!("struct P {{ y: i64, x: i64 }}\n{atom}\n{MAIN0}");
         let wide = composite(&wide).unwrap();
         let narrow = composite(&narrow).unwrap();
@@ -4313,17 +4350,16 @@ mod tests {
             wide[0].specification_sha256,
             swapped[0].specification_sha256
         );
-        assert_eq!(narrow[0].specification.binders[0].scalar_type, "i32");
+        assert_eq!(narrow[0].specification.binders[0].scalar_type, "bool");
     }
 
     #[test]
-    fn composite_fields_carry_their_declared_scalar_domains() {
-        // `bool`, subrange and refined-alias fields bound their flattened
-        // slot exactly like a scalar parameter of that type.
+    fn composite_bool_fields_carry_the_zero_one_domain() {
+        // A `bool` field binds its flattened slot as the i64 0/1 carrier,
+        // exactly like a `bool` parameter.
         let source = format!(
-            "type Port = i64 where v >= 1 && v <= 65535;\n\
-             struct S {{ on: bool, b: u8, port: Port }}\n\
-             atom pick(s: S) -> i64 requires: true; ensures: result >= 0 && result <= 65535; body: {{ if s.on {{ s.port }} else {{ s.b }} }};\n{MAIN0}"
+            "struct S {{ on: bool, x: i64 }}\n\
+             atom pick(s: S) -> i64 requires: true; ensures: result == 0 || result == s.x; body: {{ if s.on {{ s.x }} else {{ 0 }} }};\n{MAIN0}"
         );
         let contracts = composite(&source).unwrap();
         let binders: Vec<_> = contracts[0]
@@ -4334,27 +4370,21 @@ mod tests {
             .collect();
         assert_eq!(
             binders,
-            [
-                ("s.on", "bool"),
-                ("s.b", "u8"),
-                ("s.port", "i64"),
-                ("result", "i64")
-            ]
+            [("s.on", "bool"), ("s.x", "i64"), ("result", "i64")]
         );
         assert!(composite_outcomes(&source)
             .iter()
             .all(|result| *result == z3::SatResult::Unsat));
-        // Outside the alias predicate the bound fails: the domain is
-        // what makes the postcondition hold, not a vacuous encoding.
-        let tight = source.replace("result <= 65535", "result <= 255");
-        assert!(composite_outcomes(&tight).contains(&z3::SatResult::Sat));
+        let wrong = source.replace("result == 0 || result == s.x", "result == s.x");
+        assert!(composite_outcomes(&wrong).contains(&z3::SatResult::Sat));
         let context = z3::Context::new(&z3::Config::new());
         let bodies =
             encode_pure_i64_module(&source, &context, true, RefinedAdmission::Composite).unwrap();
-        assert_eq!(bodies[0].inputs.len(), 3);
+        assert_eq!(bodies[0].inputs.len(), 2);
+        assert_eq!(bodies[0].param_domain.len(), 1);
         assert!(bodies[0].composite_signature);
-        assert!(bodies[0].refined_signature);
-        assert!(bodies[0].subrange_params);
+        assert!(!bodies[0].refined_signature);
+        assert!(!bodies[0].subrange_params);
         assert!(!bodies[1].composite_signature);
     }
 
@@ -4374,17 +4404,6 @@ mod tests {
         // violation the call-site obligation refutes.
         let weak = source.replace("requires: q.x > 0", "requires: q.x >= 0");
         assert!(composite_outcomes(&weak).contains(&z3::SatResult::Sat));
-        // The callee's refined field domain is part of what the call
-        // site must establish too — the shared struct keeps it.
-        let refined = format!(
-            "type Pos = i64 where v > 0;\n\
-             struct P {{ x: Pos }}\n\
-             atom f(p: P) -> i64 requires: true; ensures: result > 0; body: {{ p.x }};\n\
-             atom g(q: P) -> i64 requires: true; ensures: result > 0; body: {{ f(q) }};\n{MAIN0}"
-        );
-        assert!(composite_outcomes(&refined)
-            .iter()
-            .all(|result| *result == z3::SatResult::Unsat));
         // A `bool` field flattens to the i64 0/1 carrier on both sides of
         // the call, so a forwarded flag keeps its truth value.
         let flag = format!(
@@ -4410,6 +4429,11 @@ mod tests {
             // field constraints, non-scalar and struct-valued fields
             "struct P { x: i64 where v >= 0 }",
             "struct P { x: f64 }",
+            // subrange and refined-alias fields: the verifier binds a
+            // field by its base sort only, without their domains
+            "struct P { x: u8 }",
+            "struct P { x: i32 }",
+            "type Pos = i64 where v > 0;\nstruct P { x: Pos }",
             "struct P { x: u64 }",
             "struct P { x: usize }",
             "struct P { x: Missing }",
@@ -4471,6 +4495,14 @@ mod tests {
             "atom h(p: P) -> i64 requires: true; ensures: true; body: { f(p, p) };",
             // a struct parameter passed where a scalar is expected
             "atom k(x: i64) -> i64 requires: true; ensures: true; body: { x };\natom h(p: P) -> i64 requires: true; ensures: true; body: { k(p) };",
+            // binders spelled like the synthesized field names the
+            // verifier and emitter resolve `p.x` through
+            "atom h(p: P, p_x: i64) -> i64 requires: true; ensures: result == p.x; body: { p.x };",
+            "atom h(p_x: i64, p: P) -> i64 requires: true; ensures: true; body: { p.y };",
+            "atom h(p: P, __struct_p_y: i64) -> i64 requires: true; ensures: true; body: { p.y };",
+            "atom h(p: P, p_x: P) -> i64 requires: true; ensures: true; body: { p.y };",
+            "atom h(p: P) -> i64 requires: true; ensures: true; body: { let p_x = 1; p.x };",
+            "atom h(p: P) -> i64 requires: true; ensures: true; body: { match 0 { p_y => p.y } };",
             // borrowed or consumed struct parameters
             "atom h(ref p: P) -> i64 requires: true; ensures: true; body: { p.x };",
             "atom h(consume p: P) -> i64 requires: true; ensures: true; body: { p.x };",

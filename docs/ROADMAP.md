@@ -3303,14 +3303,16 @@ open. See the
 [refined scalar member profiles](VERIFICATION_NATIVE.md#refined-scalar-member-profiles-v2).
 
 The composite member slice 1 widens the admitted fragment to
-non-generic structs with all-scalar fields: modules may declare them,
+non-generic structs with `i64`/`bool` fields: modules may declare them,
 take them as atom parameters and read their fields, under
 `mumei.pure-i64-composite/v1` and the `/v4` module/multifile profiles
 (pinned only when a struct is declared). A struct parameter flattens to
 one scalar input per field; it is never a scalar value itself and only
 passes through by name to a same-struct sibling parameter. Struct
 construction and results, struct invariants, methods, field
-constraints and non-scalar fields stay rejected. `recheck-source`
+constraints, subrange/refined-alias fields (the verifier does not yet
+assume their domains for struct fields) and non-scalar fields stay
+rejected. `recheck-source`
 covers the composite fragment; `recheck-llvm` and the stages built on
 it fail closed on aggregate member signatures until the translation
 profile decomposes `extractvalue`/aggregate call arguments — the next

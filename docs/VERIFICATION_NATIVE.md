@@ -1501,7 +1501,7 @@ Regression gate:
 ### Composite struct member profile (v4)
 
 A module may also declare non-generic structs whose fields are all
-profile scalars — `struct Point { x: i64, y: i64 }` — use them as atom
+`i64` or `bool` — `struct Point { x: i64, y: i64 }` — use them as atom
 parameter types and read their fields (`p.x`) in `requires`, `ensures`
 and bodies. Such a module builds under the member profile
 `mumei.pure-i64-composite/v1` and pins
@@ -1515,7 +1515,7 @@ pinning `/v1`–`/v3` exactly as before, and `check`/`recheck-source`/
 The encoding is a flat scalar expansion with no new sorts. A struct
 parameter becomes one scalar input per field in declaration order, each
 bound by its field's declared type exactly like a scalar parameter of
-that type (`bool` 0/1, subrange bounds, refined-alias predicates). The
+that type (a `bool` field carries the i64 0/1 convention). The
 struct value itself is never a scalar: it may only be read through a
 field or passed by name to a sibling parameter of the same struct,
 which flattens to the same field slots — so the call-site obligation
@@ -1526,8 +1526,15 @@ the specification identity includes the struct's field layout.
 Admission is fail-closed. Rejected: generic structs, struct invariants,
 `impl` methods, `where` constraints on fields, empty structs, duplicate
 fields or structs, struct names shadowing a scalar name or colliding
-with a `type` or atom name, and fields outside the scalar vocabulary
-(`u64`/`usize`/`f64`/arrays/other structs, so no recursion). Struct
+with a `type` or atom name, and fields other than `i64`/`bool`
+(`u64`/`usize`/`f64`/arrays/other structs, so no recursion). Subrange
+(`i8`–`u32`) and refined-alias fields stay out too: the verifier binds a
+struct field by its base sort only, without the range or predicate a
+scalar parameter of that type carries, so the recheck would assume a
+domain the build never verified against. A binder spelled like a
+synthesized field name (`p_x`, `__struct_p_x` for a struct parameter
+`p` with field `x`) is rejected — the verifier and emitter resolve
+`p.x` through those names before the struct value itself. Struct
 construction (`P { .. }`), struct results, struct-valued `let`s, struct
 values in scalar positions, nested or computed field targets, a field
 read through a name a scalar binding shadows, rebinding a struct
