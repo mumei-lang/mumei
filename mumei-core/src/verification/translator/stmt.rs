@@ -40,11 +40,15 @@ fn collect_assigned_vars(
     match stmt {
         Stmt::Assign { var, value, .. } => {
             // A field write `q.f = v` rebinds the whole `q` aggregate —
-            // havoc must reset `q` itself, since no env key is named
-            // `q.f`.
+            // havoc must reset `q` itself, since a struct's env keys are
+            // named `q_f`/`__struct_q_f`, not `q.f`. The dotted name is
+            // kept too: resource states live in env under the verbatim
+            // `res.field` key, and the `env.contains_key` retain simply
+            // drops it when no such binding exists.
             match var.split_once('.') {
                 Some((base, _)) => {
                     out.insert(base.to_string());
+                    out.insert(var.clone());
                 }
                 None => {
                     out.insert(var.clone());
