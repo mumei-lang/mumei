@@ -51,6 +51,11 @@ pub const MODULE_PROFILE_V5: &str = "mumei.native-pure-i64-module-linux-x86_64/v
 /// reads (`mumei.pure-i64-composite/v3`). v4/v5 records keep their own
 /// gates.
 pub const MODULE_PROFILE_V6: &str = "mumei.native-pure-i64-module-linux-x86_64/v6";
+/// Module profile v7: the enum-member widening of
+/// `mumei.pure-i64-composite/v4` — admitted `enum` declarations and
+/// enum parameters flattened to a tag slot plus payload slots. v1–v6
+/// records keep their own gates.
+pub const MODULE_PROFILE_V7: &str = "mumei.native-pure-i64-module-linux-x86_64/v7";
 pub const MODULE_SCOPE: &str =
     "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1";
@@ -58,8 +63,8 @@ pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1"
 /// The admission mode a pinned module/multifile record demands: v1
 /// records re-derive under the literal-scalar gate, v2 under the
 /// single-level refined-scalar gate, v3 under the widened one, v4
-/// under the composite one, v5 under composite v2 and v6 under
-/// composite v3.
+/// under the composite one, v5 under composite v2, v6 under
+/// composite v3 and v7 under composite v4.
 /// Anything else is not this schema's record.
 pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
     match profile {
@@ -69,6 +74,7 @@ pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, Bundl
         MODULE_PROFILE_V4 => Ok(RefinedAdmission::Composite),
         MODULE_PROFILE_V5 => Ok(RefinedAdmission::CompositeV2),
         MODULE_PROFILE_V6 => Ok(RefinedAdmission::CompositeV3),
+        MODULE_PROFILE_V7 => Ok(RefinedAdmission::CompositeV4),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -98,6 +104,8 @@ pub const MULTIFILE_PROFILE_V4: &str = "mumei.native-pure-i64-multifile-linux-x8
 pub const MULTIFILE_PROFILE_V5: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v5";
 /// Multifile v6: the struct-value widening of `MODULE_PROFILE_V6`.
 pub const MULTIFILE_PROFILE_V6: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v6";
+/// Multifile v7: the enum-member widening of `MODULE_PROFILE_V7`.
+pub const MULTIFILE_PROFILE_V7: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v7";
 pub const MULTIFILE_RECHECK_PROFILE: &str = "mumei.native-multifile-source-recheck/v1";
 
 pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
@@ -108,6 +116,7 @@ pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, Bu
         MULTIFILE_PROFILE_V4 => Ok(RefinedAdmission::Composite),
         MULTIFILE_PROFILE_V5 => Ok(RefinedAdmission::CompositeV2),
         MULTIFILE_PROFILE_V6 => Ok(RefinedAdmission::CompositeV3),
+        MULTIFILE_PROFILE_V7 => Ok(RefinedAdmission::CompositeV4),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -601,6 +610,7 @@ pub fn prepare_module_source(
     let mut atoms = Vec::with_capacity(items.len());
     let mut types = Vec::new();
     let mut structs = Vec::new();
+    let mut enums = Vec::new();
     let mut mains = 0usize;
     for item in items.drain(..) {
         match item {
@@ -624,6 +634,7 @@ pub fn prepare_module_source(
             }
             parser::Item::TypeDef(typedef) => types.push(typedef),
             parser::Item::StructDef(struct_def) => structs.push(struct_def),
+            parser::Item::EnumDef(enum_def) => enums.push(enum_def),
             _ => return Err(BundleError("non-atom declarations")),
         }
     }
@@ -665,16 +676,18 @@ pub fn prepare_module_source(
         atoms,
         types,
         structs,
+        enums,
     ))
 }
 
 /// The module derivation's products: the source binding, the admitted
-/// atoms and the declared refined types and structs.
+/// atoms and the declared refined types, structs and enums.
 pub type ModuleSourceParts = (
     ModuleSourceBinding,
     Vec<parser::Atom>,
     Vec<parser::RefinedType>,
     Vec<parser::StructDef>,
+    Vec<parser::EnumDef>,
 );
 
 /// Normalize an import path or member key to its `<dir>/<stem>.mm`
@@ -889,6 +902,7 @@ fn member_imports(
             // gate still validates each one.
             parser::Item::TypeDef(_) if admission.admits_typedefs() => (),
             parser::Item::StructDef(_) if admission.admits_structs() => (),
+            parser::Item::EnumDef(_) if admission.admits_enums() => (),
             _ => return Err(BundleError("declaration outside multifile profile")),
         }
     }
@@ -999,6 +1013,7 @@ pub struct PreparedMultifileSource {
     pub atoms: Vec<parser::Atom>,
     pub types: Vec<parser::RefinedType>,
     pub structs: Vec<parser::StructDef>,
+    pub enums: Vec<parser::EnumDef>,
     pub merged: String,
 }
 
@@ -1011,13 +1026,14 @@ pub fn prepare_multifile_source(
     admission: RefinedAdmission,
 ) -> Result<PreparedMultifileSource, BundleError> {
     let (merged, graph) = merge_import_closure(root_name, sources, admission)?;
-    let (binding, atoms, types, structs) = prepare_module_source(&merged, admission)?;
+    let (binding, atoms, types, structs, enums) = prepare_module_source(&merged, admission)?;
     Ok(PreparedMultifileSource {
         binding,
         import_graph_sha256: import_graph_sha256(&graph),
         atoms,
         types,
         structs,
+        enums,
         merged,
     })
 }
@@ -1042,6 +1058,7 @@ pub fn load_pinned_module_record(
             MODULE_PROFILE_V4,
             MODULE_PROFILE_V5,
             MODULE_PROFILE_V6,
+            MODULE_PROFILE_V7,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1102,6 +1119,7 @@ pub fn load_pinned_multifile_record(
             MULTIFILE_PROFILE_V4,
             MULTIFILE_PROFILE_V5,
             MULTIFILE_PROFILE_V6,
+            MULTIFILE_PROFILE_V7,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1162,7 +1180,7 @@ pub fn check_module_identity(
     files: &BTreeMap<BundleFile, Vec<u8>>,
 ) -> Result<(), BundleError> {
     let record = load_pinned_module_record(record_bytes, expected_id)?;
-    let (binding, atoms, _types, _structs) =
+    let (binding, atoms, _types, _structs, _enums) =
         prepare_module_source(source, module_refined_admission(&record.profile)?)?;
     if record.source != binding {
         return Err(BundleError("source or compiler identity mismatch"));
@@ -1739,7 +1757,7 @@ mod source_recheck_tests {
         let refined = "type Port = i64 where v >= 1 && v <= 65535;\n\
              atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
         assert!(prepare_module_source(refined, RefinedAdmission::Reject).is_err());
-        let (binding, atoms, types, _) =
+        let (binding, atoms, types, _, _) =
             prepare_module_source(refined, RefinedAdmission::V1).unwrap();
         assert_eq!(
             binding.source_profile,
@@ -1749,7 +1767,7 @@ mod source_recheck_tests {
         assert_eq!(atoms.len(), 1);
         // A plain module keeps the wrapping profile under the same gate.
         let plain = "atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
-        let (binding, _atoms, types, _) =
+        let (binding, _atoms, types, _, _) =
             prepare_module_source(plain, RefinedAdmission::V1).unwrap();
         assert_eq!(
             binding.source_profile,
@@ -1828,7 +1846,7 @@ mod source_recheck_tests {
         ] {
             assert!(prepare_module_source(COMPOSITE, admission).is_err());
         }
-        let (binding, atoms, types, structs) =
+        let (binding, atoms, types, structs, enums) =
             prepare_module_source(COMPOSITE, RefinedAdmission::Composite).unwrap();
         assert_eq!(
             binding.source_profile,
@@ -1838,6 +1856,7 @@ mod source_recheck_tests {
         assert!(types.is_empty());
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].name, "Point");
+        assert!(enums.is_empty());
         // The composite gate leaves plain and refined modules on their
         // own narrower names, with byte-identical bindings.
         let plain = "atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
@@ -1847,7 +1866,7 @@ mod source_recheck_tests {
             (plain, RefinedAdmission::Reject),
             (refined, RefinedAdmission::V1),
         ] {
-            let (wide, _, _, structs) =
+            let (wide, _, _, structs, _) =
                 prepare_module_source(source, RefinedAdmission::Composite).unwrap();
             assert!(structs.is_empty());
             assert_eq!(wide, prepare_module_source(source, narrow).unwrap().0);
@@ -1880,6 +1899,49 @@ mod source_recheck_tests {
         assert_eq!(
             prepared.binding.source_profile,
             semantic_contract::PURE_I64_COMPOSITE_PROFILE
+        );
+    }
+
+    #[test]
+    fn enum_members_ride_the_module_and_merge_only_under_composite_v4() {
+        let enum_source = "enum Shape {\n    Point,\n    Circle(r: i64),\n    Rect(w: i64, h: i64)\n}\n\
+             atom tag_of(s: Shape) -> i64 requires: true; ensures: result >= 0 && result <= 2; body: { match s { Shape::Circle(r) => 1, Shape::Rect(w, h) => 2, _ => 0 } };\n\
+             atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
+        for admission in [
+            RefinedAdmission::Reject,
+            RefinedAdmission::V1,
+            RefinedAdmission::V2,
+            RefinedAdmission::Composite,
+            RefinedAdmission::CompositeV2,
+            RefinedAdmission::CompositeV3,
+        ] {
+            assert!(prepare_module_source(enum_source, admission).is_err());
+        }
+        let (binding, atoms, _types, _structs, enums) =
+            prepare_module_source(enum_source, RefinedAdmission::CompositeV4).unwrap();
+        assert_eq!(enums.len(), 1);
+        assert_eq!(enums[0].name, "Shape");
+        assert_eq!(atoms.len(), 2);
+        assert_eq!(
+            binding.source_profile,
+            semantic_contract::PURE_I64_COMPOSITE_PROFILE_V4
+        );
+        // The merge carries enum declarations under composite v4 only.
+        let sources = BTreeMap::from([
+            ("shapes.mm".to_owned(), enum_source.rsplit_once("\natom main()").unwrap().0.to_owned() + "\n"),
+            (
+                "app.mm".to_owned(),
+                "import \"shapes\" as s;\n\natom main() -> i64 requires: true; ensures: result == 0; body: { 0 };\n"
+                    .to_owned(),
+            ),
+        ]);
+        assert!(merge_import_closure("app.mm", &sources, RefinedAdmission::CompositeV3).is_err());
+        let prepared =
+            prepare_multifile_source("app.mm", &sources, RefinedAdmission::CompositeV4).unwrap();
+        assert_eq!(prepared.enums.len(), 1);
+        assert_eq!(
+            prepared.binding.source_profile,
+            semantic_contract::PURE_I64_COMPOSITE_PROFILE_V4
         );
     }
 }

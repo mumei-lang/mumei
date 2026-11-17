@@ -77,6 +77,14 @@ pub const PURE_I64_COMPOSITE_PROFILE_V2: &str = "mumei.pure-i64-composite/v2";
 /// across `if`/`match` branches and never rebound. A module that uses
 /// none of those shapes keeps its v1/v2 name.
 pub const PURE_I64_COMPOSITE_PROFILE_V3: &str = "mumei.pure-i64-composite/v3";
+/// v4 adds `enum` declarations to the composite fragment: a
+/// non-generic, non-recursive enum lowers to the tagged-union layout
+/// the emitter emits — an i64 variant ordinal plus one i64 payload
+/// slot per index up to the widest variant — so an enum parameter is
+/// read by a `match` whose arms bind the payload slots the variant
+/// carries. Enum construction, enum results and enum `let`s beyond
+/// pass-through stay outside (`pure-i64-composite/v4`).
+pub const PURE_I64_COMPOSITE_PROFILE_V4: &str = "mumei.pure-i64-composite/v4";
 
 /// How much of the refined-scalar declaration fragment a gate admits:
 /// `Reject` keeps `Item::TypeDef` out of the item vocabulary entirely,
@@ -88,7 +96,9 @@ pub const PURE_I64_COMPOSITE_PROFILE_V3: &str = "mumei.pure-i64-composite/v3";
 /// (`pure-i64-composite/v1`); `CompositeV2` additionally admits
 /// refined-alias field types (`pure-i64-composite/v2`); `CompositeV3`
 /// additionally admits struct values — results, `StructInit`, struct
-/// `let`s and call-result field reads (`pure-i64-composite/v3`). A
+/// `let`s and call-result field reads (`pure-i64-composite/v3`);
+/// `CompositeV4` additionally admits `enum` declarations, enum-typed
+/// parameters and `match` arms on them (`pure-i64-composite/v4`). A
 /// pinned record names which level produced it, so a
 /// rechecker re-derives under the record's own admission — never a
 /// wider one.
@@ -100,6 +110,7 @@ pub enum RefinedAdmission {
     Composite,
     CompositeV2,
     CompositeV3,
+    CompositeV4,
 }
 
 impl RefinedAdmission {
@@ -118,6 +129,13 @@ impl RefinedAdmission {
     /// call-result field reads) are in the expression vocabulary.
     pub fn admits_struct_values(self) -> bool {
         self >= Self::CompositeV3
+    }
+
+    /// Whether `Item::EnumDef` declarations and enum values
+    /// (parameters, `match` scrutinees, pass-through calls and `let`s)
+    /// are in the vocabulary.
+    pub fn admits_enums(self) -> bool {
+        self >= Self::CompositeV4
     }
 }
 
@@ -224,7 +242,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _) =
+    let (items, refined, structs, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -244,6 +262,7 @@ pub fn extract_pure_i64_contract(
         allow_wrapping_arithmetic,
         &refined,
         &structs,
+        &EnumEnv::new(),
         false,
         &ModuleEnv::default(),
     )
@@ -267,7 +286,8 @@ pub fn extract_pure_i64_module_contracts(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, struct_values) = admit_pure_i64_atoms(source, true, admission)?;
+    let (items, refined, structs, enums, struct_values) =
+        admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
     // refinement annotation only when the alias is registered, and a
@@ -277,6 +297,7 @@ pub fn extract_pure_i64_module_contracts(
         match item {
             Item::TypeDef(typedef) => cert_env.register_type(typedef),
             Item::StructDef(struct_def) => cert_env.register_struct(struct_def),
+            Item::EnumDef(enum_def) => cert_env.register_enum(enum_def),
             _ => (),
         }
     }
@@ -298,6 +319,7 @@ pub fn extract_pure_i64_module_contracts(
                 true,
                 &refined,
                 &structs,
+                &enums,
                 struct_values,
                 &cert_env,
             )),
@@ -316,8 +338,15 @@ pub fn module_source_profile(
     source: &str,
     admission: RefinedAdmission,
 ) -> Result<&'static str, SemanticContractError> {
-    let (_items, refined, structs, struct_values) = admit_pure_i64_atoms(source, true, admission)?;
-    Ok(fragment_profile(true, &refined, &structs, struct_values))
+    let (_items, refined, structs, enums, struct_values) =
+        admit_pure_i64_atoms(source, true, admission)?;
+    Ok(fragment_profile(
+        true,
+        &refined,
+        &structs,
+        &enums,
+        struct_values,
+    ))
 }
 
 /// Shared module admission for the pure-i64 fragment: float reject, parse,
@@ -333,7 +362,7 @@ fn admit_pure_i64_atoms(
     source: &str,
     allow_wrapping_arithmetic: bool,
     admission: RefinedAdmission,
-) -> Result<(Vec<Item>, RefinedEnv, StructEnv, bool), SemanticContractError> {
+) -> Result<(Vec<Item>, RefinedEnv, StructEnv, EnumEnv, bool), SemanticContractError> {
     // Item text reconstruction can print 1.0 as 1. Reject float tokens before
     // that normalization erases the category required by this integer profile.
     let tokens = crate::parser::lexer::Lexer::new(source)
@@ -367,6 +396,7 @@ fn admit_pure_i64_atoms(
             }
             Item::TypeDef(_) if admission.admits_typedefs() => (),
             Item::StructDef(_) if admission.admits_structs() => (),
+            Item::EnumDef(_) if admission.admits_enums() => (),
             _ => {
                 return Err(SemanticContractError::Unsupported("non-atom declarations"));
             }
@@ -377,9 +407,11 @@ fn admit_pure_i64_atoms(
     // position and a call, so the admission is closed over both maps.
     let refined = build_refined_env(&items, admission)?;
     let structs = build_struct_env(&items, &refined, admission)?;
+    let enums = build_enum_env(&items, &refined, &structs)?;
     if refined
         .keys()
         .chain(structs.keys())
+        .chain(enums.keys())
         .any(|name| atom_names.contains(name))
     {
         return Err(SemanticContractError::Unsupported(
@@ -398,9 +430,9 @@ fn admit_pure_i64_atoms(
                     param_kinds: sibling
                         .params
                         .iter()
-                        .map(|p| param_shape(p, &refined, &structs))
+                        .map(|p| param_shape(p, &refined, &structs, &enums))
                         .collect(),
-                    return_kind: return_shape(sibling, &refined, &structs),
+                    return_kind: return_shape(sibling, &refined, &structs, &enums),
                 },
             ))
         })
@@ -418,6 +450,7 @@ fn admit_pure_i64_atoms(
             allow_wrapping_arithmetic,
             &refined,
             &structs,
+            &enums,
             admission.admits_struct_values(),
         )?;
         // Every atom's contract is checked against the complete callee map,
@@ -431,11 +464,12 @@ fn admit_pure_i64_atoms(
             allow_wrapping_arithmetic,
             &refined,
             &structs,
+            &enums,
             admission.admits_struct_values(),
             &struct_values_used,
         )?;
     }
-    Ok((items, refined, structs, struct_values_used.get()))
+    Ok((items, refined, structs, enums, struct_values_used.get()))
 }
 
 /// Build the `SemanticContract` for one already-admitted atom — binders,
@@ -471,10 +505,13 @@ fn fragment_profile(
     allow_wrapping_arithmetic: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
+    enums: &EnumEnv,
     struct_values: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if !enums.is_empty() {
+        PURE_I64_COMPOSITE_PROFILE_V4
     } else if struct_values {
         PURE_I64_COMPOSITE_PROFILE_V3
     } else if structs
@@ -506,19 +543,27 @@ fn atom_contract(
     allow_wrapping_arithmetic: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
+    enums: &EnumEnv,
     struct_values: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
-    let profile = fragment_profile(allow_wrapping_arithmetic, refined, structs, struct_values);
+    let profile = fragment_profile(
+        allow_wrapping_arithmetic,
+        refined,
+        structs,
+        enums,
+        struct_values,
+    );
     let result_fields = atom
         .return_type
         .as_deref()
         .and_then(|name| structs.get(name));
 
-    // A struct parameter reports one scalar binder per field (`p.x`) —
-    // the flat expansion the obligation encodes — never a scalar binder
-    // for the struct value itself.
+    // A struct parameter reports one scalar binder per field (`p.x`),
+    // an enum parameter a tag binder (`p.tag`) plus one per payload
+    // slot (`p.{i}`) — the flat expansion the obligation encodes —
+    // never a scalar binder for the composite value itself.
     let mut binders: Vec<_> = atom
         .params
         .iter()
@@ -527,7 +572,17 @@ fn atom_contract(
                 .iter()
                 .map(|f| (format!("{}.{}", p.name, f.name), Some(f.type_name.as_str())))
                 .collect::<Vec<_>>(),
-            None => vec![(p.name.clone(), p.type_name.as_deref())],
+            None => match enum_variants(p, enums) {
+                Some(variants) => {
+                    let mut names = vec![(format!("{}.tag", p.name), None)];
+                    names.extend(
+                        (0..enum_max_arity(variants))
+                            .map(|i| (format!("{}.{}", p.name, i), enum_slot_type(variants, i))),
+                    );
+                    names
+                }
+                None => vec![(p.name.clone(), p.type_name.as_deref())],
+            },
         })
         .map(|(name, type_name)| TypedBinder {
             name,
@@ -584,7 +639,23 @@ fn atom_contract(
                         .map(|f| serde_json::json!({"name": f.name, "type": f.type_name}))
                         .collect::<Vec<_>>(),
                 }),
-                None => serde_json::json!({"name": p.name, "type": p.type_name}),
+                None => match enum_variants(p, enums) {
+                    Some(variants) => serde_json::json!({
+                        "name": p.name,
+                        "type": p.type_name,
+                        "variants": variants
+                            .iter()
+                            .map(|v| serde_json::json!({
+                                "name": v.name,
+                                "fields": v.fields
+                                    .iter()
+                                    .map(|f| serde_json::json!({"name": f.name, "type": f.type_name}))
+                                    .collect::<Vec<_>>(),
+                            }))
+                            .collect::<Vec<_>>(),
+                    }),
+                    None => serde_json::json!({"name": p.name, "type": p.type_name}),
+                },
             })
             .collect::<Vec<_>>(),
         "return_type": atom.return_type,
@@ -599,11 +670,29 @@ fn atom_contract(
             .map(|f| serde_json::json!({"name": f.name, "type": f.type_name}))
             .collect();
     }
+    // Admitted enum declarations bind the specification the same way
+    // struct declarations do — reordering variants changes every tag.
+    specification_identity["enums"] = enums
+        .iter()
+        .map(|(name, variants)| {
+            serde_json::json!({
+                "name": name,
+                "variants": variants.iter().map(|v| {
+                    serde_json::json!({
+                        "name": v.name,
+                        "fields": v.fields.iter().map(|f| {
+                            serde_json::json!({"name": f.name, "type": f.type_name})
+                        }).collect::<Vec<_>>(),
+                    })
+                }).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
     let specification_sha256 = json_digest(&specification_identity)?;
     let composite_params = atom
         .params
         .iter()
-        .any(|p| struct_fields(p, structs).is_some());
+        .any(|p| struct_fields(p, structs).is_some() || enum_variants(p, enums).is_some());
     let hir = lower_atom_to_hir(&atom);
     let mir = lower_hir_to_mir(&hir);
     Ok(SemanticContract {
@@ -730,6 +819,9 @@ struct CalleeSig {
 enum ValueKind {
     Scalar(ScalarKind),
     Struct(String),
+    /// An admitted enum: a tag ordinal plus shared payload slots —
+    /// never a scalar value, read by `match` arms only.
+    Enum(String),
 }
 
 /// The kind-checking environment shared by every expression position of
@@ -740,6 +832,10 @@ struct KindEnv<'a> {
     callees: &'a BTreeMap<String, CalleeSig>,
     composites: BTreeMap<String, &'a str>,
     structs: &'a StructEnv,
+    /// The module's admitted enums: a composite name resolving to an
+    /// enum name is a tag+payload value a `match` scrutinee or
+    /// pass-through call consumes.
+    enums: &'a EnumEnv,
     /// The names the verifier and emitter synthesize for a struct
     /// parameter's fields (`p_x`, `__struct_p_x`). Both resolve `p.x`
     /// by looking those names up before the struct value itself, so a
@@ -770,28 +866,32 @@ impl<'a> KindEnv<'a> {
     /// Bind a struct-valued `let`: its synthesized field names
     /// (`q_x`, `__struct_q_x`) must not be spelled anywhere in the atom —
     /// the emitter resolves `q.x` through them first — and become
-    /// reserved for every later binder.
+    /// reserved for every later binder. An enum-valued `let` has no
+    /// synthesized names (only `match` reads it), so it binds and
+    /// records the composite directly.
     fn bind_composite(
         &mut self,
         name: &str,
-        struct_name: &'a str,
+        type_name: &'a str,
     ) -> Result<(), SemanticContractError> {
         self.bind(name)?;
-        for field in &self.structs[struct_name] {
-            for synthesized in [
-                format!("{name}_{}", field.name),
-                format!("__struct_{name}_{}", field.name),
-            ] {
-                if self.identifiers.contains(&synthesized) {
-                    return Err(SemanticContractError::Unsupported(
-                        "binder collides with a struct field name",
-                    ));
+        if let Some(fields) = self.structs.get(type_name) {
+            for field in fields {
+                for synthesized in [
+                    format!("{name}_{}", field.name),
+                    format!("__struct_{name}_{}", field.name),
+                ] {
+                    if self.identifiers.contains(&synthesized) {
+                        return Err(SemanticContractError::Unsupported(
+                            "binder collides with a struct field name",
+                        ));
+                    }
+                    self.reserved.insert(synthesized);
                 }
-                self.reserved.insert(synthesized);
             }
+            self.struct_values_used.set(true);
         }
-        self.composites.insert(name.to_owned(), struct_name);
-        self.struct_values_used.set(true);
+        self.composites.insert(name.to_owned(), type_name);
         Ok(())
     }
 
@@ -867,10 +967,14 @@ fn declared_param_shape(
     admit_widened: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
+    enums: &EnumEnv,
 ) -> Option<ValueKind> {
     match param.type_name.as_deref() {
         Some(name) if structs.contains_key(name) => {
             plain_param(param, name).then(|| ValueKind::Struct(name.to_owned()))
+        }
+        Some(name) if enums.contains_key(name) => {
+            plain_param(param, name).then(|| ValueKind::Enum(name.to_owned()))
         }
         _ => declared_param_kind(param, admit_widened, refined).map(ValueKind::Scalar),
     }
@@ -891,9 +995,11 @@ fn param_shape(
     param: &crate::parser::ast::Param,
     refined: &RefinedEnv,
     structs: &StructEnv,
+    enums: &EnumEnv,
 ) -> ValueKind {
     match param.type_name.as_deref() {
         Some(name) if structs.contains_key(name) => ValueKind::Struct(name.to_owned()),
+        Some(name) if enums.contains_key(name) => ValueKind::Enum(name.to_owned()),
         _ => ValueKind::Scalar(param_kind(param, refined)),
     }
 }
@@ -928,9 +1034,15 @@ fn return_kind(atom: &Atom, refined: &RefinedEnv) -> ScalarKind {
 
 /// `return_kind` widened by the module's struct map: an atom returning
 /// an admitted struct produces that struct's shape.
-fn return_shape(atom: &Atom, refined: &RefinedEnv, structs: &StructEnv) -> ValueKind {
+fn return_shape(
+    atom: &Atom,
+    refined: &RefinedEnv,
+    structs: &StructEnv,
+    enums: &EnumEnv,
+) -> ValueKind {
     match atom.return_type.as_deref() {
         Some(name) if structs.contains_key(name) => ValueKind::Struct(name.to_owned()),
+        Some(name) if enums.contains_key(name) => ValueKind::Enum(name.to_owned()),
         _ => ValueKind::Scalar(return_kind(atom, refined)),
     }
 }
@@ -940,7 +1052,12 @@ fn return_shape(atom: &Atom, refined: &RefinedEnv, structs: &StructEnv) -> Value
 /// bitvector and a struct-returning callee's call to one slot per
 /// field, so `source_expr` needs the callee's declared return shape to
 /// materialize that convention at the call site.
-fn call_return_kinds(items: &[Item], refined: &RefinedEnv, structs: &StructEnv) -> CallShapes {
+fn call_return_kinds(
+    items: &[Item],
+    refined: &RefinedEnv,
+    structs: &StructEnv,
+    enums: &EnumEnv,
+) -> CallShapes {
     CallShapes {
         returns: items
             .iter()
@@ -948,7 +1065,10 @@ fn call_return_kinds(items: &[Item], refined: &RefinedEnv, structs: &StructEnv) 
                 let Item::Atom(atom) = item else {
                     return None;
                 };
-                Some((atom.name.clone(), return_shape(atom, refined, structs)))
+                Some((
+                    atom.name.clone(),
+                    return_shape(atom, refined, structs, enums),
+                ))
             })
             .collect(),
         structs: structs
@@ -957,6 +1077,23 @@ fn call_return_kinds(items: &[Item], refined: &RefinedEnv, structs: &StructEnv) 
                 (
                     name.clone(),
                     fields.iter().map(|f| (f.name.clone(), f.kind)).collect(),
+                )
+            })
+            .collect(),
+        enums: enums
+            .iter()
+            .map(|(name, variants)| {
+                (
+                    name.clone(),
+                    variants
+                        .iter()
+                        .map(|v| {
+                            (
+                                v.name.clone(),
+                                v.fields.iter().map(|f| f.kind).collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect(),
                 )
             })
             .collect(),
@@ -971,6 +1108,10 @@ fn call_return_kinds(items: &[Item], refined: &RefinedEnv, structs: &StructEnv) 
 struct CallShapes {
     returns: BTreeMap<String, ValueKind>,
     structs: BTreeMap<String, Vec<(String, ScalarKind)>>,
+    /// Every admitted enum's variants in declaration order — a match
+    /// arm's `Pattern::Variant` resolves its ordinal and payload kinds
+    /// through this map.
+    enums: BTreeMap<String, Vec<(String, Vec<ScalarKind>)>>,
 }
 
 impl CallShapes {
@@ -985,7 +1126,7 @@ impl CallShapes {
     fn result_fields(&self, name: &str) -> Option<&[(String, ScalarKind)]> {
         match self.returns.get(name)? {
             ValueKind::Struct(struct_name) => self.structs.get(struct_name).map(Vec::as_slice),
-            ValueKind::Scalar(_) => None,
+            _ => None,
         }
     }
 }
@@ -994,12 +1135,14 @@ impl CallShapes {
 /// requires/ensures must be boolean expressions and the body a statement
 /// of the declared result kind — all under call resolution against the
 /// complete same-module callee map.
+#[allow(clippy::too_many_arguments)]
 fn check_atom_contract(
     atom: &Atom,
     callees: &BTreeMap<String, CalleeSig>,
     allow_wrapping_arithmetic: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
+    enums: &EnumEnv,
     admit_struct_values: bool,
     struct_values_used: &std::cell::Cell<bool>,
 ) -> Result<(), SemanticContractError> {
@@ -1010,11 +1153,11 @@ fn check_atom_contract(
     let mut scope: BTreeMap<String, ScalarKind> = BTreeMap::new();
     let mut composites: BTreeMap<String, &str> = BTreeMap::new();
     for p in &atom.params {
-        match param_shape(p, refined, structs) {
+        match param_shape(p, refined, structs, enums) {
             ValueKind::Scalar(kind) => {
                 scope.insert(p.name.clone(), kind);
             }
-            ValueKind::Struct(_) => {
+            ValueKind::Struct(_) | ValueKind::Enum(_) => {
                 let name = p.type_name.as_deref().unwrap_or_default();
                 composites.insert(p.name.clone(), name);
             }
@@ -1022,6 +1165,7 @@ fn check_atom_contract(
     }
     let mut reserved: BTreeSet<String> = composites
         .iter()
+        .filter(|(_, type_name)| structs.contains_key(**type_name))
         .flat_map(|(param, struct_name)| {
             structs[*struct_name].iter().flat_map(move |f| {
                 [
@@ -1052,6 +1196,7 @@ fn check_atom_contract(
         callees,
         composites,
         structs,
+        enums,
         reserved,
         identifiers,
         admit_struct_values,
@@ -1077,8 +1222,13 @@ fn check_atom_contract(
         )?,
         ScalarKind::Bool,
     )?;
-    let result_kind = match return_shape(atom, refined, structs) {
+    let result_kind = match return_shape(atom, refined, structs, enums) {
         ValueKind::Scalar(kind) => kind,
+        // An enum result stays outside: `validate_atom` already
+        // rejected it; keep the gate closed if reached anyway.
+        ValueKind::Enum(_) => {
+            return Err(SemanticContractError::Unsupported("enum result"));
+        }
         // A struct result is never a scalar: `ensures` sees `result`
         // only through field reads of the returned struct, and the
         // body must produce a value of exactly that struct.
@@ -1152,6 +1302,7 @@ fn validate_atom(
     admit_widened: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
+    enums: &EnumEnv,
     admit_struct_values: bool,
 ) -> Result<(), SemanticContractError> {
     // A declared subrange integer result lowers to an i64 return like
@@ -1165,8 +1316,10 @@ fn validate_atom(
         Some("i64") => true,
         Some("bool") | Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32") => admit_widened,
         // An admitted struct result (`pure-i64-composite/v3`) returns
-        // the struct's field slots.
+        // the struct's field slots. An enum result stays out: an enum
+        // parameter is read through `match`, never produced here.
         Some(name) if structs.contains_key(name) => admit_struct_values,
+        Some(name) if enums.contains_key(name) => false,
         Some(name) => refined
             .get(name)
             .is_some_and(|alias| alias.kind != ScalarKind::Bool || admit_widened),
@@ -1176,7 +1329,7 @@ fn validate_atom(
         || atom
             .params
             .iter()
-            .any(|p| declared_param_shape(p, admit_widened, refined, structs).is_none())
+            .any(|p| declared_param_shape(p, admit_widened, refined, structs, enums).is_none())
     {
         return Err(SemanticContractError::Unsupported(
             "explicit owned scalar i64 signature required",
@@ -1261,6 +1414,173 @@ struct ResolvedField {
 /// declaration order — the order a struct parameter flattens in. An
 /// empty map is every non-composite fragment.
 type StructEnv = BTreeMap<String, Vec<ResolvedField>>;
+
+/// One admitted enum variant: its name and the payload fields it
+/// carries (each resolved like a struct field's scalar type).
+struct ResolvedVariant {
+    name: String,
+    fields: Vec<ResolvedField>,
+}
+
+/// The module's admitted enum declarations by name, variants in
+/// declaration order — a variant's ordinal is its index, so the tag
+/// slot an enum parameter flattens to carries the same ordinals the
+/// emitter's tagged union writes. An empty map is every non-composite
+/// fragment.
+type EnumEnv = BTreeMap<String, Vec<ResolvedVariant>>;
+
+/// The payload-slot count an enum flattens to: the widest variant's
+/// arity, matching the tagged-union layout the emitter emits.
+fn enum_max_arity(variants: &[ResolvedVariant]) -> usize {
+    variants.iter().map(|v| v.fields.len()).max().unwrap_or(0)
+}
+
+/// The type name every variant that carries index `i` agrees on, or
+/// `None` when the variants disagree — a mixed-type union slot would
+/// need tag-conditional slot domains, which the flattened signature
+/// does not express, so such an enum stays out.
+fn enum_slot_type<'a>(variants: &'a [ResolvedVariant], i: usize) -> Option<&'a str> {
+    let mut found: Option<&'a str> = None;
+    for variant in variants {
+        let Some(field) = variant.fields.get(i) else {
+            continue;
+        };
+        match found {
+            None => found = Some(field.type_name.as_str()),
+            Some(name) if name == field.type_name => (),
+            Some(_) => return None,
+        }
+    }
+    found
+}
+
+/// Collect the module's `Item::EnumDef` declarations under
+/// `CompositeV4` admission. Like structs, nothing a declaration
+/// carries may be dropped silently: recursive or generic enums, empty
+/// enums, duplicate variant names and duplicate fields in a variant
+/// fail closed, and every payload field resolves the same way a
+/// struct field does (literal `i64`/`bool` or a refined alias ending
+/// in one — the chain's leaf must be uniform across a payload index's
+/// variants by `enum_slot_type` at signature flattening). Names
+/// shadowing scalar profile names, colliding with a refined or struct
+/// type, or declared twice fail closed.
+fn build_enum_env(
+    items: &[Item],
+    refined: &RefinedEnv,
+    structs: &StructEnv,
+) -> Result<EnumEnv, SemanticContractError> {
+    let mut env = EnumEnv::new();
+    for item in items {
+        let Item::EnumDef(def) = item else {
+            continue;
+        };
+        if def.is_recursive || !def.type_params.is_empty() {
+            return Err(SemanticContractError::Unsupported(
+                "recursive or generic enum declarations",
+            ));
+        }
+        if def.variants.is_empty() {
+            return Err(SemanticContractError::Unsupported(
+                "empty enum declarations",
+            ));
+        }
+        if scalar_base(&def.name).is_some()
+            || matches!(def.name.as_str(), "u64" | "usize" | "isize")
+        {
+            return Err(SemanticContractError::Unsupported(
+                "type name shadows a scalar profile name",
+            ));
+        }
+        if refined.contains_key(&def.name) || structs.contains_key(&def.name) {
+            return Err(SemanticContractError::Unsupported(
+                "enum name collides with a type name",
+            ));
+        }
+        if env.contains_key(&def.name) {
+            return Err(SemanticContractError::Unsupported(
+                "duplicate enum declaration",
+            ));
+        }
+        let mut variant_names = BTreeSet::new();
+        let mut variants = Vec::with_capacity(def.variants.len());
+        for variant in &def.variants {
+            if variant.is_recursive {
+                return Err(SemanticContractError::Unsupported(
+                    "recursive enum declarations",
+                ));
+            }
+            if !variant_names.insert(variant.name.as_str()) {
+                return Err(SemanticContractError::Unsupported("duplicate enum variant"));
+            }
+            if variant.fields.len() != variant.field_types.len() {
+                return Err(SemanticContractError::Unsupported("enum variant shape"));
+            }
+            let mut names = BTreeSet::new();
+            let mut fields = Vec::with_capacity(variant.fields.len());
+            for (index, field) in variant.fields.iter().enumerate() {
+                // The parser keeps a declared `name: type` field verbatim
+                // (and `field_types` rides the same string); a bare entry
+                // is a positional field whose text IS the type.
+                let (name, type_name) = match field.split_once(':') {
+                    Some((name, ty)) => (name.trim().to_owned(), ty.trim()),
+                    // Positional fields carry no name to collide.
+                    None => (format!("#{index}"), field.as_str()),
+                };
+                if name.is_empty() || type_name.is_empty() {
+                    return Err(SemanticContractError::Unsupported("enum variant shape"));
+                }
+                if !names.insert(name.clone()) {
+                    return Err(SemanticContractError::Unsupported("duplicate enum field"));
+                }
+                let ty = &variant.field_types[index];
+                let kind = match type_name {
+                    "i64" => Some(ScalarKind::I64),
+                    "bool" => Some(ScalarKind::Bool),
+                    name => refined
+                        .get(name)
+                        .filter(|alias| matches!(alias.base, "i64" | "bool"))
+                        .map(|alias| alias.kind),
+                };
+                let Some(kind) = kind.filter(|_| {
+                    ty.type_args.is_empty() && ty.effect_set.is_none() && ty.capability.is_none()
+                }) else {
+                    return Err(SemanticContractError::Unsupported(
+                        "enum field type outside the scalar profile",
+                    ));
+                };
+                fields.push(ResolvedField {
+                    name: name.to_owned(),
+                    type_name: type_name.to_owned(),
+                    kind,
+                });
+            }
+            variants.push(ResolvedVariant {
+                name: variant.name.clone(),
+                fields,
+            });
+        }
+        // A payload index the variants type differently has no uniform
+        // carrier: reject the whole enum now rather than guess per-tag.
+        for i in 0..enum_max_arity(&variants) {
+            if enum_slot_type(&variants, i).is_none() {
+                return Err(SemanticContractError::Unsupported(
+                    "enum payload slot typed differently across variants",
+                ));
+            }
+        }
+        env.insert(def.name.clone(), variants);
+    }
+    Ok(env)
+}
+
+/// The enum type name an enum-typed parameter carries, and its
+/// admitted variants — `None` for a scalar or struct parameter.
+fn enum_variants<'a>(
+    param: &crate::parser::ast::Param,
+    enums: &'a EnumEnv,
+) -> Option<&'a [ResolvedVariant]> {
+    enums.get(param.type_name.as_deref()?).map(Vec::as_slice)
+}
 
 /// Collect the module's `Item::StructDef` declarations (only present
 /// past the item-vocabulary gate under `Composite` admission). Nothing
@@ -1493,6 +1813,7 @@ fn resolve_alias(
                     callees: &BTreeMap::new(),
                     composites: BTreeMap::new(),
                     structs: &StructEnv::new(),
+                    enums: &EnumEnv::new(),
                     reserved: BTreeSet::new(),
                     identifiers: BTreeSet::new(),
                     admit_struct_values: false,
@@ -1958,7 +2279,7 @@ fn check_call<'a>(
                 )?,
                 *kind,
             )?,
-            ValueKind::Struct(expected) => {
+            ValueKind::Struct(expected) | ValueKind::Enum(expected) => {
                 if composite_kind(arg, scope, result_in_scope, allow_wrapping_arithmetic, env).ok()
                     != Some(expected.as_str())
                 {
@@ -2104,6 +2425,103 @@ fn expression_kind(
         // Arm bodies may rebind linear-path names like `if` branches —
         // each write merges under the arm's own hit-condition.
         Expr::Match { target, arms } if allow_wrapping_arithmetic => {
+            // An enum scrutinee flips the arm vocabulary: `Variant`
+            // patterns bind the payload slots of the variant they name,
+            // `Wildcard` is the trailing catch-all, and literals or a
+            // variable-binding arm stay out — the flattened enum value
+            // has no scalar to bind and construction is never observed.
+            let enum_scrutinee = match &**target {
+                Expr::Variable(name) => env
+                    .composite_name(name, scope)
+                    .and_then(|type_name| env.enums.get(type_name)),
+                _ => None,
+            };
+            if let Some(variants) = enum_scrutinee {
+                let Some(last) = arms.last() else {
+                    return Err(SemanticContractError::Unsupported("empty match"));
+                };
+                if !matches!(last.pattern, Pattern::Wildcard) || last.guard.is_some() {
+                    return Err(SemanticContractError::Unsupported(
+                        "match without a catch-all arm",
+                    ));
+                }
+                let mut kind = None;
+                for arm in arms {
+                    let mut arm_scope = scope.clone();
+                    match &arm.pattern {
+                        Pattern::Wildcard => {}
+                        Pattern::Variant {
+                            variant_name,
+                            fields,
+                        } => {
+                            let short = variant_name.rsplit("::").next().unwrap_or(variant_name);
+                            let Some(variant) = variants.iter().find(|v| v.name == short) else {
+                                return Err(SemanticContractError::Unsupported(
+                                    "match variant outside enum",
+                                ));
+                            };
+                            if variant.fields.len() != fields.len() {
+                                return Err(SemanticContractError::Unsupported(
+                                    "match variant arity",
+                                ));
+                            }
+                            for (field_pattern, field) in fields.iter().zip(&variant.fields) {
+                                match field_pattern {
+                                    Pattern::Variable(name) => {
+                                        env.bind(name)?;
+                                        arm_scope.insert(name.clone(), field.kind);
+                                    }
+                                    Pattern::Wildcard => (),
+                                    _ => {
+                                        return Err(SemanticContractError::Unsupported(
+                                            "match variant field pattern",
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(SemanticContractError::Unsupported(
+                                "match pattern outside variants and catch-all",
+                            ));
+                        }
+                    }
+                    if let Some(guard) = &arm.guard {
+                        expect_kind(
+                            expression_kind(
+                                guard,
+                                &arm_scope,
+                                result_in_scope,
+                                allow_wrapping_arithmetic,
+                                &BTreeSet::new(),
+                                env,
+                            )?,
+                            ScalarKind::Bool,
+                        )?;
+                    }
+                    let mut arm_assignable = assignable.clone();
+                    if let Pattern::Variant { fields, .. } = &arm.pattern {
+                        for field_pattern in fields {
+                            if let Pattern::Variable(name) = field_pattern {
+                                arm_assignable.remove(name);
+                            }
+                        }
+                    }
+                    let arm_kind = statement_kind(
+                        &arm.body,
+                        &arm_scope,
+                        result_in_scope,
+                        allow_wrapping_arithmetic,
+                        &arm_assignable,
+                        env,
+                    )?;
+                    match kind {
+                        None => kind = Some(arm_kind),
+                        Some(first) => expect_kind(arm_kind, first)?,
+                    }
+                }
+                return kind.ok_or(SemanticContractError::Unsupported("empty match"));
+            }
             expect_kind(
                 expression_kind(
                     target,
@@ -2195,9 +2613,9 @@ fn expression_kind(
             .return_kind
             {
                 ValueKind::Scalar(kind) => Ok(*kind),
-                ValueKind::Struct(_) => Err(SemanticContractError::Unsupported(
-                    "struct value in a scalar position",
-                )),
+                ValueKind::Struct(_) | ValueKind::Enum(_) => Err(
+                    SemanticContractError::Unsupported("struct value in a scalar position"),
+                ),
             }
         }
         // A field read names an unshadowed struct parameter directly and
@@ -2328,9 +2746,9 @@ pub fn encode_pure_i64_body<'ctx>(
     context: &'ctx Context,
     allow_wrapping_arithmetic: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
-    let (source_sha256, mut items, refined, structs) =
+    let (source_sha256, mut items, refined, structs, enums) =
         bounded_pure_i64_module(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
-    let call_returns = call_return_kinds(&items, &refined, &structs);
+    let call_returns = call_return_kinds(&items, &refined, &structs, &enums);
     let Some(Item::Atom(atom)) = items.pop() else {
         return Err(SemanticContractError::Unsupported("source atom"));
     };
@@ -2340,6 +2758,7 @@ pub fn encode_pure_i64_body<'ctx>(
         source_sha256,
         &refined,
         &structs,
+        &enums,
         &call_returns,
     )
 }
@@ -2354,9 +2773,9 @@ pub fn encode_pure_i64_module<'ctx>(
     allow_wrapping_arithmetic: bool,
     admission: RefinedAdmission,
 ) -> BodyResult<Vec<PureI64Body<'ctx>>> {
-    let (source_sha256, items, refined, structs) =
+    let (source_sha256, items, refined, structs, enums) =
         bounded_pure_i64_module(source, allow_wrapping_arithmetic, admission)?;
-    let call_returns = call_return_kinds(&items, &refined, &structs);
+    let call_returns = call_return_kinds(&items, &refined, &structs, &enums);
     items
         .iter()
         .filter_map(|item| match item {
@@ -2366,6 +2785,7 @@ pub fn encode_pure_i64_module<'ctx>(
                 source_sha256.clone(),
                 &refined,
                 &structs,
+                &enums,
                 &call_returns,
             )),
             _ => None,
@@ -2382,7 +2802,7 @@ fn bounded_pure_i64_module(
     source: &str,
     allow_wrapping_arithmetic: bool,
     admission: RefinedAdmission,
-) -> BodyResult<(String, Vec<Item>, RefinedEnv, StructEnv)> {
+) -> BodyResult<(String, Vec<Item>, RefinedEnv, StructEnv, EnumEnv)> {
     if source.len() > 65_536 {
         return Err(SemanticContractError::Unsupported("source size limit"));
     }
@@ -2406,7 +2826,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, _) =
+    let (items, refined, structs, enums, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -2415,7 +2835,7 @@ fn bounded_pure_i64_module(
             "expected exactly one atom",
         ));
     }
-    Ok((digest(source.as_bytes()), items, refined, structs))
+    Ok((digest(source.as_bytes()), items, refined, structs, enums))
 }
 
 fn encode_atom_body<'ctx>(
@@ -2424,11 +2844,12 @@ fn encode_atom_body<'ctx>(
     source_sha256: String,
     refined: &RefinedEnv,
     structs: &StructEnv,
+    enums: &EnumEnv,
     call_returns: &CallShapes,
 ) -> BodyResult<PureI64Body<'ctx>> {
     // A struct parameter contributes one input per field, so the limit
     // bounds the flattened signature.
-    let slots = signature_slots(&atom.params, structs);
+    let slots = signature_slots(&atom.params, structs, enums);
     if slots.len() > 16 {
         return Err(SemanticContractError::Unsupported("parameter limit"));
     }
@@ -2438,17 +2859,17 @@ fn encode_atom_body<'ctx>(
         .map(|i| BV::new_const(context, format!("input_{i}"), 64))
         .collect();
     let env: HashMap<String, SourceValue> =
-        param_env(&atom.params, &inputs, context, refined, structs)?;
+        param_env(&atom.params, &inputs, context, refined, structs, enums)?;
     let top = Bool::from_bool(context, true);
     let mut definedness = Vec::new();
     let composite_signature = atom
         .params
         .iter()
-        .any(|p| struct_fields(p, structs).is_some());
+        .any(|p| struct_fields(p, structs).is_some() || enum_variants(p, enums).is_some());
     let assignable: BTreeSet<String> = atom
         .params
         .iter()
-        .filter(|p| struct_fields(p, structs).is_none())
+        .filter(|p| struct_fields(p, structs).is_none() && enum_variants(p, enums).is_none())
         .map(|p| p.name.clone())
         .collect();
     // A `-> bool` body lowers to i64 carrying 0/1 — the emitter zexts
@@ -2484,18 +2905,27 @@ fn encode_atom_body<'ctx>(
                 .map(|(_, field)| lower_scalar(field, context))
                 .collect::<BodyResult<Vec<_>>>()?,
         ),
+        SourceValue::Enum { .. } => {
+            return Err(SemanticContractError::Unsupported("enum result"));
+        }
     };
-    let param_domain = signature_domain(&atom.params, &inputs, context, refined, structs)?;
-    let subrange_params = slots
-        .iter()
-        .any(|slot| matches!(slot, Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32")));
-    let refined_signature = slots
-        .iter()
-        .any(|slot| slot.is_some_and(|n| refined.contains_key(n)))
-        || atom
-            .return_type
-            .as_deref()
-            .is_some_and(|n| refined.contains_key(n));
+    let param_domain = signature_domain(&atom.params, &inputs, context, refined, structs, enums)?;
+    let subrange_params = slots.iter().any(|slot| {
+        matches!(
+            slot,
+            SignatureSlot::Scalar(Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32"))
+        )
+    });
+    let refined_signature = slots.iter().any(|slot| {
+        let name = match slot {
+            SignatureSlot::Scalar(name) | SignatureSlot::EnumField(name) => *name,
+            SignatureSlot::EnumTag { .. } => None,
+        };
+        name.is_some_and(|n| refined.contains_key(n))
+    }) || atom
+        .return_type
+        .as_deref()
+        .is_some_and(|n| refined.contains_key(n));
     let loop_bound_exits = if loop_exits.is_empty() {
         None
     } else {
@@ -2537,7 +2967,11 @@ fn encode_atom_body<'ctx>(
         param_shapes: atom
             .params
             .iter()
-            .map(|p| struct_fields(p, structs).map(<[ResolvedField]>::len))
+            .map(|p| {
+                struct_fields(p, structs)
+                    .map(<[ResolvedField]>::len)
+                    .or_else(|| enum_variants(p, enums).map(|v| 1 + enum_max_arity(v)))
+            })
             .collect(),
         result_shape: atom
             .return_type
@@ -2548,18 +2982,49 @@ fn encode_atom_body<'ctx>(
     })
 }
 
+/// One flattened input slot of a parameter's lowered signature: a
+/// scalar parameter contributes a `Scalar` slot carrying its declared
+/// type name, an enum parameter contributes an `EnumTag` (the variant
+/// ordinal, domain `0 <= tag < variants`) followed by one `EnumField`
+/// per payload index up to the widest variant's arity — the tagged
+/// union layout the emitter emits.
+#[derive(Clone, Copy)]
+enum SignatureSlot<'a> {
+    Scalar(Option<&'a str>),
+    EnumTag { variants: u64 },
+    EnumField(Option<&'a str>),
+}
+
 /// The declared scalar type name of every flattened input slot, in
 /// order: a scalar parameter is one slot, a struct parameter one slot
-/// per field in declaration order.
+/// per field in declaration order, an enum parameter a tag slot plus
+/// one slot per payload index (uniformly typed across variants —
+/// `build_enum_env` rejects mixed-type slots).
 fn signature_slots<'a>(
     params: &'a [crate::parser::ast::Param],
     structs: &'a StructEnv,
-) -> Vec<Option<&'a str>> {
+    enums: &'a EnumEnv,
+) -> Vec<SignatureSlot<'a>> {
     params
         .iter()
         .flat_map(|p| match struct_fields(p, structs) {
-            Some(fields) => fields.iter().map(|f| Some(f.type_name.as_str())).collect(),
-            None => vec![p.type_name.as_deref()],
+            Some(fields) => fields
+                .iter()
+                .map(|f| SignatureSlot::Scalar(Some(f.type_name.as_str())))
+                .collect(),
+            None => match enum_variants(p, enums) {
+                Some(variants) => {
+                    let mut slots = vec![SignatureSlot::EnumTag {
+                        variants: variants.len() as u64,
+                    }];
+                    slots.extend(
+                        (0..enum_max_arity(variants))
+                            .map(|i| SignatureSlot::EnumField(enum_slot_type(variants, i))),
+                    );
+                    slots
+                }
+                None => vec![SignatureSlot::Scalar(p.type_name.as_deref())],
+            },
         })
         .collect()
 }
@@ -2576,15 +3041,26 @@ fn signature_domain<'ctx>(
     context: &'ctx Context,
     refined: &RefinedEnv,
     structs: &StructEnv,
+    enums: &EnumEnv,
 ) -> BodyResult<Vec<Bool<'ctx>>> {
     let mut domain = Vec::new();
     // A struct field's declared scalar type bounds its flattened slot
     // the same way it would bound a scalar parameter of that type.
-    let slots = signature_slots(params, structs);
+    let slots = signature_slots(params, structs, enums);
     if slots.len() != inputs.len() {
         return Err(SemanticContractError::Unsupported("source signature arity"));
     }
-    for (type_name, v) in slots.into_iter().zip(inputs) {
+    for (slot, v) in slots.into_iter().zip(inputs) {
+        let type_name = match slot {
+            SignatureSlot::Scalar(type_name) | SignatureSlot::EnumField(type_name) => type_name,
+            SignatureSlot::EnumTag { variants } => {
+                // The tag carries the variant ordinal: bounded above by
+                // the variant count (unsigned, so a negative bit pattern
+                // fails too), matching the tagged union's domain.
+                domain.push(v.bvult(&BV::from_u64(context, variants, 64)));
+                continue;
+            }
+        };
         match type_name {
             Some("bool") => domain.push(v.bvule(&BV::from_u64(context, 1, 64))),
             Some("u8") => domain.push(v.bvule(&BV::from_u64(context, u8::MAX as u64, 64))),
@@ -2781,7 +3257,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
     context: &'ctx Context,
     admission: RefinedAdmission,
 ) -> BodyResult<Vec<ModuleAtomObligations<'ctx>>> {
-    let (source_sha256, items, refined, structs) =
+    let (source_sha256, items, refined, structs, enums) =
         bounded_pure_i64_module(source, true, admission)?;
     let atom_items: Vec<&crate::parser::ast::Atom> = items
         .iter()
@@ -2798,7 +3274,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
             "expected at least one atom",
         ));
     }
-    let call_returns = call_return_kinds(&items, &refined, &structs);
+    let call_returns = call_return_kinds(&items, &refined, &structs, &enums);
     let bodies: Vec<PureI64Body> = atom_items
         .iter()
         .map(|atom| {
@@ -2808,6 +3284,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
                 source_sha256.clone(),
                 &refined,
                 &structs,
+                &enums,
                 &call_returns,
             )
         })
@@ -2832,6 +3309,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
             context,
             &refined,
             &structs,
+            &enums,
         )?);
     }
     Ok(atoms)
@@ -2878,6 +3356,7 @@ fn module_atom_obligations<'ctx>(
     context: &'ctx Context,
     refined: &RefinedEnv,
     structs: &StructEnv,
+    enums: &EnumEnv,
 ) -> BodyResult<ModuleAtomObligations<'ctx>> {
     // The domain the widened profile binds for this atom: declared
     // signature bounds (bool/subrange parameters), guarded-operator
@@ -2895,7 +3374,7 @@ fn module_atom_obligations<'ctx>(
         source_domain.push(exits.clone());
     }
     let mut env: HashMap<String, SourceValue> =
-        param_env(&atom.params, &body.inputs, context, refined, structs)?;
+        param_env(&atom.params, &body.inputs, context, refined, structs, enums)?;
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
     let top = Bool::from_bool(context, true);
@@ -2961,7 +3440,7 @@ fn module_atom_obligations<'ctx>(
                 "call target outside module",
             ));
         };
-        let site_env = param_env(&callee.params, &site.args, context, refined, structs)?;
+        let site_env = param_env(&callee.params, &site.args, context, refined, structs, enums)?;
         let callee_requires =
             parse_expression_checked(&callee.requires).map_err(|_| SemanticContractError::Parse)?;
         let mut site_exits = Vec::new();
@@ -3003,6 +3482,7 @@ fn module_atom_obligations<'ctx>(
             context,
             refined,
             structs,
+            enums,
         )?);
         callee_precondition.extend(
             callee_body
@@ -3100,6 +3580,7 @@ fn atom_obligation<'ctx>(
         context,
         refined,
         &StructEnv::new(),
+        &EnumEnv::new(),
     )?;
     let requires =
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
@@ -3159,6 +3640,17 @@ enum SourceValue<'ctx> {
     /// a field read or a pass-through call argument consumes it; every
     /// scalar position rejects it.
     Composite(Vec<(String, SourceValue<'ctx>)>),
+    /// An enum parameter's flattened value: the declared enum's name,
+    /// the tag slot carrying the variant ordinal, and one payload slot
+    /// per index up to the widest variant's arity — the tagged-union
+    /// layout the emitter emits. Only a `match` scrutinee or a
+    /// pass-through call argument consumes it; every scalar position
+    /// and every result position rejects it.
+    Enum {
+        name: String,
+        tag: BV<'ctx>,
+        slots: Vec<SourceValue<'ctx>>,
+    },
 }
 
 /// Bind declared parameters to their symbolic inputs: `i64` parameters
@@ -3172,8 +3664,9 @@ fn param_env<'ctx>(
     ctx: &'ctx Context,
     refined: &RefinedEnv,
     structs: &StructEnv,
+    enums: &EnumEnv,
 ) -> BodyResult<HashMap<String, SourceValue<'ctx>>> {
-    if signature_slots(params, structs).len() != inputs.len() {
+    if signature_slots(params, structs, enums).len() != inputs.len() {
         return Err(SemanticContractError::Unsupported("source signature arity"));
     }
     let scalar = |kind: ScalarKind, v: &BV<'ctx>| {
@@ -3194,12 +3687,43 @@ fn param_env<'ctx>(
                     .map(|(f, v)| (f.name.clone(), scalar(f.kind, v)))
                     .collect(),
             ),
-            None => {
-                let Some(v) = slots.next() else {
-                    return Err(SemanticContractError::Unsupported("source signature arity"));
-                };
-                scalar(param_kind(p, refined), v)
-            }
+            None => match enum_variants(p, enums) {
+                Some(variants) => {
+                    let arity = enum_max_arity(variants);
+                    let Some(tag) = slots.next() else {
+                        return Err(SemanticContractError::Unsupported("source signature arity"));
+                    };
+                    let mut slot_values = Vec::with_capacity(arity);
+                    for i in 0..arity {
+                        let Some(v) = slots.next() else {
+                            return Err(SemanticContractError::Unsupported(
+                                "source signature arity",
+                            ));
+                        };
+                        let kind = enum_slot_type(variants, i)
+                            .map(|name| {
+                                if name == "bool" {
+                                    ScalarKind::Bool
+                                } else {
+                                    refined.get(name).map_or(ScalarKind::I64, |a| a.kind)
+                                }
+                            })
+                            .unwrap_or(ScalarKind::I64);
+                        slot_values.push(scalar(kind, v));
+                    }
+                    SourceValue::Enum {
+                        name: p.type_name.clone().unwrap_or_default(),
+                        tag: tag.clone(),
+                        slots: slot_values,
+                    }
+                }
+                None => {
+                    let Some(v) = slots.next() else {
+                        return Err(SemanticContractError::Unsupported("source signature arity"));
+                    };
+                    scalar(param_kind(p, refined), v)
+                }
+            },
         };
         env.insert(p.name.clone(), value);
     }
@@ -3642,6 +4166,9 @@ fn lower_scalar<'ctx>(value: SourceValue<'ctx>, ctx: &'ctx Context) -> BodyResul
         SourceValue::Composite(_) => Err(SemanticContractError::Unsupported(
             "source nested struct value",
         )),
+        SourceValue::Enum { .. } => Err(SemanticContractError::Unsupported(
+            "source enum value in a scalar position",
+        )),
     }
 }
 
@@ -3940,7 +4467,7 @@ fn source_expr<'ctx>(
         // remains, so any later arm is dead — it gets the literal
         // `false` miss term, which encodes it while binding nothing.
         Expr::Match { target, arms } => {
-            let target = source_expr(
+            let target_value = source_expr(
                 target,
                 ctx,
                 env,
@@ -3952,8 +4479,19 @@ fn source_expr<'ctx>(
                 loop_exits,
                 call_sites,
                 call_returns,
-            )?
-            .integer()?;
+            )?;
+            // An enum scrutinee carries a tag plus the shared payload
+            // slots of its tagged-union layout: a `Variant` arm's hit is
+            // `tag == ordinal` and its binders take the slot values the
+            // emitter's `extractvalue` reads produce.
+            let enum_target = match &target_value {
+                SourceValue::Enum { .. } => Some(&target_value),
+                _ => None,
+            };
+            let target = match enum_target {
+                Some(_) => None,
+                None => Some(target_value.clone().integer()?),
+            };
             let mut missed: Vec<Bool> = Vec::new();
             let mut selected: Vec<(Bool, SourceValue)> = Vec::new();
             let mut fallback = None;
@@ -3976,26 +4514,81 @@ fn source_expr<'ctx>(
                 // hits, without the enclosing guard (the caller merges
                 // `written` under its own condition).
                 let arm_reach = Bool::and(ctx, &terms[1..]);
-                let (pat_cond, binding) = match &arm.pattern {
-                    Pattern::Literal(n) => (Some(target._eq(&BV::from_i64(ctx, *n, 64))), None),
-                    Pattern::Variable(name) => (None, Some(name.clone())),
-                    Pattern::Wildcard => (None, None),
-                    _ => {
-                        return Err(SemanticContractError::Unsupported(
-                            "match pattern outside literals and catch-all",
-                        ));
-                    }
-                };
-                // A `Variable` pattern shadows an outer name for this
-                // arm, so it leaves the assignable set and its writes
-                // stay arm-local.
+                let (pat_cond, bindings): (Option<Bool>, Vec<(String, SourceValue)>) =
+                    match (&arm.pattern, enum_target) {
+                        (Pattern::Literal(n), None) => (
+                            Some(target.as_ref().unwrap()._eq(&BV::from_i64(ctx, *n, 64))),
+                            Vec::new(),
+                        ),
+                        (Pattern::Variable(name), None) => {
+                            (None, vec![(name.clone(), I(target.clone().unwrap()))])
+                        }
+                        (Pattern::Wildcard, _) => (None, Vec::new()),
+                        (
+                            Pattern::Variant {
+                                variant_name,
+                                fields,
+                            },
+                            Some(SourceValue::Enum { name, tag, slots }),
+                        ) => {
+                            let variants = call_returns.enums.get(name.as_str()).ok_or(
+                                SemanticContractError::Unsupported("match scrutinee enum"),
+                            )?;
+                            let short = variant_name.rsplit("::").next().unwrap_or(variant_name);
+                            let Some((ordinal, (_, payload_kinds))) = variants
+                                .iter()
+                                .enumerate()
+                                .find(|(_, (variant, _))| variant == short)
+                            else {
+                                return Err(SemanticContractError::Unsupported(
+                                    "match variant outside enum",
+                                ));
+                            };
+                            if payload_kinds.len() != fields.len() {
+                                return Err(SemanticContractError::Unsupported(
+                                    "match variant arity",
+                                ));
+                            }
+                            let mut bindings = Vec::with_capacity(fields.len());
+                            for (field_pattern, slot) in fields.iter().zip(slots.iter()) {
+                                match field_pattern {
+                                    Pattern::Variable(name) => {
+                                        bindings.push((name.clone(), slot.clone()));
+                                    }
+                                    Pattern::Wildcard => (),
+                                    _ => {
+                                        return Err(SemanticContractError::Unsupported(
+                                            "match variant field pattern",
+                                        ));
+                                    }
+                                }
+                            }
+                            (
+                                Some(tag._eq(&BV::from_u64(ctx, ordinal as u64, 64))),
+                                bindings,
+                            )
+                        }
+                        (Pattern::Variant { .. }, _) | (Pattern::Variable(_), Some(_)) => {
+                            return Err(SemanticContractError::Unsupported(
+                                "match pattern outside variants and catch-all",
+                            ));
+                        }
+                        (Pattern::Literal(_), Some(_)) => {
+                            return Err(SemanticContractError::Unsupported(
+                                "literal match arm on an enum",
+                            ));
+                        }
+                    };
+                // A binding shadows an outer name for this arm, so it
+                // leaves the assignable set and its writes stay
+                // arm-local.
                 let mut arm_assignable = assignable.clone();
-                if let Some(name) = &binding {
+                for (name, _) in &bindings {
                     arm_assignable.remove(name);
                 }
                 let mut arm_env = env.clone();
-                if let Some(name) = binding {
-                    arm_env.insert(name, I(target.clone()));
+                for (name, value) in bindings {
+                    arm_env.insert(name, value);
                 }
                 let hit = if dead {
                     None
@@ -4124,6 +4717,15 @@ fn source_expr<'ctx>(
                     SourceValue::Composite(fields) => {
                         for (_, field) in fields {
                             applied.push(lower(field)?);
+                        }
+                    }
+                    // A passed-through enum parameter flattens into its
+                    // tag slot then the shared payload slots — the same
+                    // order `signature_domain` and `param_env` consume.
+                    SourceValue::Enum { tag, slots, .. } => {
+                        applied.push(tag);
+                        for slot in slots {
+                            applied.push(lower(slot)?);
                         }
                     }
                     scalar => applied.push(lower(scalar)?),
@@ -5466,5 +6068,116 @@ mod tests {
                 "unexpected acceptance: {decl}"
             );
         }
+    }
+
+    #[test]
+    fn composite_v4_admits_enum_params_and_variant_match_arms() {
+        let v4 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV4)
+        };
+        let outcomes =
+            |source: &str| refined_module_outcomes_admission(source, RefinedAdmission::CompositeV4);
+        let decl = "enum Shape { Point, Circle(r: i64), Rect(w: i64, h: i64) }";
+        let source = format!(
+            "{decl}\n\
+             atom tag_of(s: Shape) -> i64 requires: true; ensures: result >= 0 && result <= 2; body: {{ match s {{ Shape::Circle(r) => 1, Shape::Rect(w, h) => 2, _ => 0 }} }};\n\
+             atom read(s: Shape) -> i64 requires: true; ensures: true; body: {{ match s {{ Shape::Circle(r) => r, Shape::Rect(w, h) => w + h, _ => 0 }} }};\n\
+             atom pass(s: Shape) -> i64 requires: true; ensures: result == tag_of(s); body: {{ let t = s; tag_of(t) }};\n{MAIN0}"
+        );
+        let contracts = v4(&source).unwrap();
+        assert!(contracts
+            .iter()
+            .all(|c| c.profile == PURE_I64_COMPOSITE_PROFILE_V4));
+        assert_eq!(
+            module_source_profile(&source, RefinedAdmission::CompositeV4).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V4
+        );
+        // An enum parameter flattens to a tag binder plus one binder per
+        // payload slot — never a scalar binder for the value itself.
+        let binders: Vec<_> = contracts[0]
+            .specification
+            .binders
+            .iter()
+            .map(|b| (b.name.as_str(), b.scalar_type))
+            .collect();
+        assert_eq!(
+            binders,
+            [
+                ("s.tag", "i64"),
+                ("s.0", "i64"),
+                ("s.1", "i64"),
+                ("result", "i64")
+            ]
+        );
+        assert!(outcomes(&source)
+            .iter()
+            .all(|result| *result == z3::SatResult::Unsat));
+        // A false postcondition over the tag is refuted, not vacuous.
+        let wrong = source.replace("result >= 0 && result <= 2", "result >= 0 && result <= 1");
+        assert!(outcomes(&wrong).contains(&z3::SatResult::Sat));
+        // Narrower admissions keep `enum` out of the vocabulary.
+        for admission in [
+            RefinedAdmission::Reject,
+            RefinedAdmission::V1,
+            RefinedAdmission::V2,
+            RefinedAdmission::Composite,
+            RefinedAdmission::CompositeV2,
+            RefinedAdmission::CompositeV3,
+        ] {
+            assert!(extract_pure_i64_module_contracts(&source, "m.mm", None, admission).is_err());
+            assert!(module_source_profile(&source, admission).is_err());
+        }
+        // Modules declaring no enums keep the narrower profile names.
+        let plain = format!("struct P {{ x: i64 }}\n{MAIN0}");
+        assert_eq!(v4(&plain).unwrap()[0].profile, PURE_I64_COMPOSITE_PROFILE);
+    }
+
+    #[test]
+    fn composite_v4_rejects_enum_shapes_outside_the_fragment() {
+        let v4 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV4)
+        };
+        let decl = "enum Shape { Point, Circle(r: i64), Rect(w: i64, h: i64) }";
+        // Literal and catch-all Variable arms on an enum scrutinee are
+        // outside the fragment — the tag domain is not a sparse i64 one.
+        for bad in [
+            format!("{decl}\natom t(s: Shape) -> i64 requires: true; ensures: true; body: {{ match s {{ Shape::Circle(r) => r, 7 => 9, _ => 0 }} }};\n{MAIN0}"),
+            format!("{decl}\natom t(s: Shape) -> i64 requires: true; ensures: true; body: {{ match s {{ Shape::Circle(r) => r, other => 0 }} }};\n{MAIN0}"),
+            format!("{decl}\natom t(s: Shape) -> i64 requires: true; ensures: true; body: {{ match s {{ Shape::Circle(r) => r, Shape::Rect(w, h) => 0 }} }};\n{MAIN0}"),
+            format!("{decl}\natom t(s: Shape) -> i64 requires: true; ensures: true; body: {{ match s {{ Shape::Circle(r, x) => r, _ => 0 }} }};\n{MAIN0}"),
+            format!("{decl}\natom t(s: Shape) -> i64 requires: true; ensures: true; body: {{ match s {{ Shape::Square => 1, _ => 0 }} }};\n{MAIN0}"),
+            // Enum results, enum construction and aggregate field types
+            // stay outside this slice.
+            format!("{decl}\natom mk() -> Shape requires: true; ensures: true; body: {{ Shape::Point }};\n{MAIN0}"),
+            format!("{decl}\natom mk() -> i64 requires: true; ensures: true; body: {{ let s = Shape::Point; 0 }};\n{MAIN0}"),
+            format!("{decl}\natom t(s: Shape) -> i64 requires: true; ensures: true; body: {{ s.r }};\n{MAIN0}"),
+            format!("{decl}\natom t(s: Shape) -> Shape requires: true; ensures: true; body: {{ s }};\n{MAIN0}"),
+            format!("enum M {{ A(x: i64), B(b: bool, n: i64) }}\natom t(m: M) -> i64 requires: true; ensures: true; body: {{ match m {{ M::A(x) => x, _ => 0 }} }};\n{MAIN0}"),
+            format!("enum M {{ A(p: Point) }}\nstruct Point {{ x: i64 }}\natom t(m: M) -> i64 requires: true; ensures: true; body: {{ match m {{ _ => 0 }} }};\n{MAIN0}"),
+            format!("enum M {{ A(x: u8) }}\natom t(m: M) -> i64 requires: true; ensures: true; body: {{ match m {{ _ => 0 }} }};\n{MAIN0}"),
+        ] {
+            assert!(v4(&bad).is_err(), "unexpected acceptance: {bad}");
+        }
+        // Refined-alias fields ride the same env as struct fields.
+        let source = format!(
+            "type Port = i64 where v > 0;\nenum P {{ Tcp(p: Port), Idle }}\n\
+             atom use(s: P) -> i64 requires: true; ensures: result >= 0; body: {{ match s {{ P::Tcp(p) => p - p + 1, _ => 0 }} }};\n{MAIN0}"
+        );
+        let contracts = v4(&source).unwrap();
+        let binders: Vec<_> = contracts[0]
+            .specification
+            .binders
+            .iter()
+            .map(|b| (b.name.as_str(), b.scalar_type))
+            .collect();
+        assert_eq!(
+            binders,
+            [("s.tag", "i64"), ("s.0", "i64"), ("result", "i64")]
+        );
+        assert!(
+            refined_module_outcomes_admission(&source, RefinedAdmission::CompositeV4)
+                .iter()
+                .all(|r| *r == z3::SatResult::Unsat)
+        );
     }
 }

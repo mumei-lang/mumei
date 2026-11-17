@@ -1162,12 +1162,15 @@ fn build(input: &Path, output: &Path) -> Result<(String, &'static str), BundleEr
         .filter(|item| matches!(item, parser::Item::Atom(_)))
         .count();
     // A single-atom module still takes the module path when it declares
-    // refined scalar types or structs — `build_single` admits only a
-    // lone atom.
+    // refined scalar types, structs or enums — `build_single` admits
+    // only a lone atom.
     if atoms > 1
-        || items
-            .iter()
-            .any(|item| matches!(item, parser::Item::TypeDef(_) | parser::Item::StructDef(_)))
+        || items.iter().any(|item| {
+            matches!(
+                item,
+                parser::Item::TypeDef(_) | parser::Item::StructDef(_) | parser::Item::EnumDef(_)
+            )
+        })
     {
         build_module(&source, input, output).map(|id| (id, MODULE_SCOPE))
     } else {
@@ -1270,19 +1273,23 @@ fn emit_module(
     atoms: &[parser::Atom],
     types: &[parser::RefinedType],
     structs: &[parser::StructDef],
+    enums: &[parser::EnumDef],
     stage: &Path,
     proof_work: &Path,
 ) -> Result<EmittedModule, BundleError> {
     let mut env = verification::ModuleEnv::default();
-    // Register the module's refined scalar and struct declarations
-    // before the atoms — signature members typed by an alias or a struct
-    // resolve through the env the same way `mumei verify`'s module
-    // environment does.
+    // Register the module's refined scalar, struct and enum
+    // declarations before the atoms — signature members typed by an
+    // alias, a struct or an enum resolve through the env the same way
+    // `mumei verify`'s module environment does.
     for typedef in types {
         env.register_type(typedef);
     }
     for struct_def in structs {
         env.register_struct(struct_def);
+    }
+    for enum_def in enums {
+        env.register_enum(enum_def);
     }
     for atom in atoms {
         env.register_atom(atom);
@@ -1353,9 +1360,10 @@ fn emit_module(
 /// its gate derived: `[v1, v2, v3, v4, v5]` for the wrapping, refined
 /// v1, refined v2, composite v1 and composite v2 fragments. Each recheck
 /// re-derives under exactly that version's admission, never a wider one.
-fn record_profile(source_profile: &str, versions: [&'static str; 6]) -> &'static str {
-    let [v1, v2, v3, v4, v5, v6] = versions;
+fn record_profile(source_profile: &str, versions: [&'static str; 7]) -> &'static str {
+    let [v1, v2, v3, v4, v5, v6, v7] = versions;
     match source_profile {
+        semantic_contract::PURE_I64_COMPOSITE_PROFILE_V4 => v7,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE_V3 => v6,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE_V2 => v5,
         semantic_contract::PURE_I64_COMPOSITE_PROFILE => v4,
@@ -1369,8 +1377,8 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
     // The producer always runs the widest (composite) admission; the
     // record's `profile` names a wider version only when the source
     // actually declares what needs it, so a plain module keeps pinning v1.
-    let (binding, atoms, types, structs) =
-        prepare_module_source(source, RefinedAdmission::CompositeV3)?;
+    let (binding, atoms, types, structs, enums) =
+        prepare_module_source(source, RefinedAdmission::CompositeV4)?;
     let parent = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -1383,8 +1391,14 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         .prefix(".mumei-proof-")
         .tempdir_in(parent)
         .map_err(|_| BundleError("cannot stage proof"))?;
-    let (files, object_build, link_build) =
-        emit_module(&atoms, &types, &structs, stage.path(), proof_work.path())?;
+    let (files, object_build, link_build) = emit_module(
+        &atoms,
+        &types,
+        &structs,
+        &enums,
+        stage.path(),
+        proof_work.path(),
+    )?;
     let record = ModuleNativeBundleRecord {
         schema: MODULE_SCHEMA.into(),
         profile: record_profile(
@@ -1396,6 +1410,7 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
                 MODULE_PROFILE_V4,
                 MODULE_PROFILE_V5,
                 MODULE_PROFILE_V6,
+                MODULE_PROFILE_V7,
             ],
         )
         .into(),
@@ -1513,13 +1528,14 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
             queue.push_back(member);
         }
     }
-    let prepared = prepare_multifile_source(&root, &members, RefinedAdmission::CompositeV3)?;
-    let (binding, graph, atoms, types, structs) = (
+    let prepared = prepare_multifile_source(&root, &members, RefinedAdmission::CompositeV4)?;
+    let (binding, graph, atoms, types, structs, enums) = (
         prepared.binding,
         prepared.import_graph_sha256,
         prepared.atoms,
         prepared.types,
         prepared.structs,
+        prepared.enums,
     );
     let parent = output
         .parent()
@@ -1533,8 +1549,14 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
         .prefix(".mumei-proof-")
         .tempdir_in(parent)
         .map_err(|_| BundleError("cannot stage proof"))?;
-    let (files, object_build, link_build) =
-        emit_module(&atoms, &types, &structs, stage.path(), proof_work.path())?;
+    let (files, object_build, link_build) = emit_module(
+        &atoms,
+        &types,
+        &structs,
+        &enums,
+        stage.path(),
+        proof_work.path(),
+    )?;
     let sources_dir = stage.path().join(SOURCES_DIR);
     fs::create_dir(&sources_dir).map_err(|_| BundleError("cannot stage source members"))?;
     for (name, text) in &members {
@@ -1555,6 +1577,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
                 MULTIFILE_PROFILE_V4,
                 MULTIFILE_PROFILE_V5,
                 MULTIFILE_PROFILE_V6,
+                MULTIFILE_PROFILE_V7,
             ],
         )
         .into(),

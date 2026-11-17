@@ -1598,7 +1598,32 @@ element defines is never guessed: reading, passing or returning it fails
 closed. Aggregates merged by `phi`/`select`, stored, nested, packed,
 mixed-width, or paired with a scalar source parameter or result still
 fail closed. `check`, `recheck-source`, `recheck-llvm` and the stages
-built on it all reach `/v4`–`/v6` bundles.
+built on it all reach `/v4`–`/v7` bundles.
+
+`mumei.pure-i64-composite/v4` widens the fragment to enum members. A
+module may declare a non-generic, non-recursive `enum` whose variant
+payloads are `i64`/`bool` scalars or refined aliases on those leaves
+— uniform across the variants at each payload index — and take the
+enum as an atom parameter. An enum parameter flattens to a tag slot
+plus one slot per payload index up to the widest variant's arity: the
+tag is the variant ordinal bounded `0 <= tag < variants` and slot `i`
+is the `i`-th declared payload, matching the `{ i64, ... }` aggregate
+the emitter builds (tag `insertvalue` first, payloads bit-preserved).
+A `match` on an enum parameter admits `Variant` arms (binding the
+declared payload positionally) and requires a final unguarded `_`
+arm; the arm's hit condition is `tag == ordinal`. Enum parameters
+pass through by name to a same-enum sibling parameter, flattening to
+tag plus payload slots at the call site, and `let` binds the value
+pass-through. Such a module pins
+`mumei.native-pure-i64-module-linux-x86_64/v7` or
+`mumei.native-pure-i64-multifile-linux-x86_64/v7` only when it
+declares an enum; enum-free modules keep their narrower names and
+older records re-admit under their own gates. Still rejected: enum
+construction and results, `Literal` and catch-all `Variable` arms on
+an enum scrutinee, variant arms with the wrong arity or an undeclared
+variant, mixed-type payload indices, recursive or generic enums, enum
+values in scalar positions, field reads on an enum, and rebinding an
+enum `let`.
 As with the refined profiles, the admitted fragment grew and the
 assurance did not: no translation, optimizer/object/linker/runtime/ABI
 or final-executable semantics and no producer authenticity or
