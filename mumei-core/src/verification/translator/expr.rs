@@ -2521,6 +2521,11 @@ pub(crate) fn expr_to_z3<'a>(
                                             ).with_help("呼び出し元で引数の型制約を満たしていません。引数の値を確認してください")
                                             .with_verdict(crate::verification::VerdictKind::Rejected));
                                         }
+                                        if refined_check == SatResult::Unknown {
+                                            return Err(MumeiError::verification(
+                                                format!("Call to '{}': refinement on parameter '{}' ({}) could not be decided", name, param.name, decl.name)
+                                            ).with_verdict(crate::verification::VerdictKind::Inconclusive));
+                                        }
                                     }
                                 }
                             }
@@ -4668,18 +4673,26 @@ pub(crate) fn expr_to_z3<'a>(
                                         continue;
                                     };
                                     solver.push();
+                                    for cond in vc.path_cond_stack.borrow().iter() {
+                                        solver.assert(cond);
+                                    }
                                     solver.assert(&pred_bool.not());
-                                    if crate::verification::phase_artifacts::check(solver)
-                                        == SatResult::Sat
-                                    {
-                                        solver.pop(1);
+                                    let refined_check =
+                                        crate::verification::phase_artifacts::check(solver);
+                                    solver.pop(1);
+                                    if refined_check == SatResult::Sat {
                                         return Err(MumeiError::verification(
                                             format!("call(atom_ref({})): refinement on parameter '{}' ({}) may not hold at call site", callee_name, param.name, decl.name)
                                         )
                                         .with_help("呼び出し元で引数の型制約を満たしていません。引数の値を確認してください")
                                         .with_verdict(crate::verification::VerdictKind::Rejected));
                                     }
-                                    solver.pop(1);
+                                    if refined_check == SatResult::Unknown {
+                                        return Err(MumeiError::verification(
+                                            format!("call(atom_ref({})): refinement on parameter '{}' ({}) could not be decided", callee_name, param.name, decl.name)
+                                        )
+                                        .with_verdict(crate::verification::VerdictKind::Inconclusive));
+                                    }
                                 }
                             }
                         }
@@ -4842,8 +4855,10 @@ pub(crate) fn expr_to_z3<'a>(
                     // A refined return type is part of the callee's
                     // contract: the caller may assume every conjunct on the
                     // call's symbolic result — the same shape the
-                    // direct-call arm applies.
-                    if !recursive_instance {
+                    // direct-call arm applies. The encodings must agree:
+                    // a predicate proved under the callee's Int arithmetic
+                    // cannot be imported under caller bit-vector semantics.
+                    if !recursive_instance && callee_semantics_match_caller(vc, &callee_atom) {
                         if let Some(return_type) = callee_atom.return_type.as_deref() {
                             if vc.module_env.get_type(return_type).is_some() {
                                 let chain =

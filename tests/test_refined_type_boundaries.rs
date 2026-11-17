@@ -261,6 +261,80 @@ body: { call(atom_ref(need), 5) };
 }
 
 #[test]
+fn atom_ref_call_site_respects_branch_conditions() {
+    // `call(atom_ref(need), x)` under `x < 0` satisfies `Neg`: the check must
+    // evaluate the argument under the enclosing branch's path condition, not
+    // unconditionally.
+    let (dir, output) = verify_source(
+        "atom_ref_guarded",
+        r#"
+type Neg = i64 where v < 0;
+atom need(x: Neg) -> i64
+requires: true;
+ensures: true;
+body: { x };
+atom caller(x: i64) -> i64
+requires: true;
+ensures: true;
+body: { if x < 0 { call(atom_ref(need), x) } else { 0 } };
+"#,
+    );
+    let text = output_text(&output);
+    assert!(
+        output.status.success(),
+        "a branch-guarded atom_ref call satisfying the refinement must verify: {text}"
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn chained_bool_alias_binds_the_parameter_as_bool() {
+    // `F2 = Flag = bool` must mint the parameter as a Bool — not an Int that
+    // the refinement conjuncts cannot constrain. `x == true` input with
+    // `result == false` must be refuted.
+    let (dir, output) = verify_source(
+        "bool_chain",
+        r#"
+type Flag = bool where v == true;
+type F2 = Flag;
+atom f(x: F2) -> bool
+requires: true;
+ensures: result == false;
+body: { x };
+"#,
+    );
+    let text = output_text(&output);
+    assert!(
+        !output.status.success(),
+        "a chained bool-refined operand must be refutable: {text}"
+    );
+    cleanup(dir);
+}
+
+#[test]
+fn chained_f64_alias_verifies_against_the_leaf_sort() {
+    // `P2 = Pos = f64` must mint the parameter as Real so the leaf predicate
+    // establishes `result > 0`.
+    let (dir, output) = verify_source(
+        "f64_chain",
+        r#"
+type Pos = f64 where v > 0.0;
+type P2 = Pos;
+atom keep(x: P2) -> f64
+requires: true;
+ensures: result > 0.0;
+body: { x };
+"#,
+    );
+    let text = output_text(&output);
+    assert!(
+        output.status.success(),
+        "a chained f64 alias must verify against the leaf sort: {text}"
+    );
+    cleanup(dir);
+}
+
+#[test]
 fn cyclic_alias_declarations_are_rejected() {
     // `type A = B; type B = A;` encodes no base and no constraints — a type
     // error, not a constraint-free alias.

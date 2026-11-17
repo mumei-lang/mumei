@@ -394,10 +394,18 @@ impl ModuleEnv {
         if type_name == "Str" {
             return "Str".to_string();
         }
-        if let Some(refined) = self.types.get(type_name) {
-            return refined._base_type.clone();
+        // Follow the declaration chain to the leaf base: `type F2 = Flag`
+        // resolves to `bool`, not `Flag` — a one-level answer would mint the
+        // parameter/result at a different sort than the refinement operand.
+        let mut current = type_name;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(refined) = self.types.get(current) {
+            if !seen.insert(current) {
+                break;
+            }
+            current = refined._base_type.as_str();
         }
-        type_name.to_string()
+        current.to_string()
     }
 
     pub fn register_trait(&mut self, trait_def: &TraitDef) {
