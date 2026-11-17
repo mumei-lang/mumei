@@ -900,10 +900,10 @@ const EXIT_STATUS_ACCEPTANCE_ARGV_UNPINNED: NativeAcceptance = NativeAcceptance 
 // Stdout acceptance descriptors: the artifact acceptance claim plus the
 // OS stdout-digest *observation* moved into `checks_performed` — named
 // as an observation, not an output-semantics proof, since one run under
-// one environment is all it is. This command never captures stderr
-// (timing and panic text are nondeterministic by convention), so
-// `os_stderr_observation` joins the not-performed list explicitly; the
-// paired `accept-stderr` command owns that channel.
+// one environment is all it is. Each channel is observed by its own
+// command, so this one never captures stderr and names
+// `os_stderr_observation` in the not-performed list; the paired
+// `accept-stderr` command owns that channel.
 const MULTIFILE_STDOUT_ACCEPTANCE: NativeAcceptance = NativeAcceptance {
     scope: "native_multifile_bundle_source_llvm_toolchain_reproduction_and_os_stdout_observation",
     performed: &["bundle_identity_binding", "pinned_member_merge_rederivation", "fresh_same_profile_source_recheck", "llvm_snapshot_translation_recheck", "toolchain_object_executable_reproduction", "canonical_link_argument_vector_reproduction", "os_stdout_observation"],
