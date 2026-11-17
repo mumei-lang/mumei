@@ -3297,10 +3297,26 @@ already proves: parameters strengthen the signature domain established
 at every call site, and results strengthen the postcondition the callee
 guarantees. Recheckers dispatch on the pinned profile name, so every
 record is re-admitted under exactly its own admission level.
-Struct/enum member items, `u64`-family leaves, deeper
+Enum member items, `u64`-family leaves, deeper
 optimizer/ABI/runtime assurance and producer authenticity remain
 open. See the
 [refined scalar member profiles](VERIFICATION_NATIVE.md#refined-scalar-member-profiles-v2).
+
+The composite member slice 1 widens the admitted fragment to
+non-generic structs with all-scalar fields: modules may declare them,
+take them as atom parameters and read their fields, under
+`mumei.pure-i64-composite/v1` and the `/v4` module/multifile profiles
+(pinned only when a struct is declared). A struct parameter flattens to
+one scalar input per field; it is never a scalar value itself and only
+passes through by name to a same-struct sibling parameter. Struct
+construction and results, struct invariants, methods, field
+constraints and non-scalar fields stay rejected. `recheck-source`
+covers the composite fragment; `recheck-llvm` and the stages built on
+it fail closed on aggregate member signatures until the translation
+profile decomposes `extractvalue`/aggregate call arguments — the next
+composite slice. This is a wider admitted fragment, not deeper
+assurance: the same identity-plus-recheck scopes apply. See the
+[composite struct member profile](VERIFICATION_NATIVE.md#composite-struct-member-profile-v4).
 
 ## Related Documents
 

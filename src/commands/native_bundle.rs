@@ -1268,15 +1268,20 @@ type EmittedModule = (BTreeMap<BundleFile, Vec<u8>>, ObjectBuild, LinkBuild);
 fn emit_module(
     atoms: &[parser::Atom],
     types: &[parser::RefinedType],
+    structs: &[parser::StructDef],
     stage: &Path,
     proof_work: &Path,
 ) -> Result<EmittedModule, BundleError> {
     let mut env = verification::ModuleEnv::default();
-    // Register the module's refined scalar declarations before the
-    // atoms — signature members typed by an alias resolve through the
-    // env the same way `mumei verify`'s module environment does.
+    // Register the module's refined scalar and struct declarations
+    // before the atoms — signature members typed by an alias or a struct
+    // resolve through the env the same way `mumei verify`'s module
+    // environment does.
     for typedef in types {
         env.register_type(typedef);
+    }
+    for struct_def in structs {
+        env.register_struct(struct_def);
     }
     for atom in atoms {
         env.register_atom(atom);
@@ -1343,11 +1348,26 @@ fn emit_module(
     Ok((components(stage)?, object_build, link_build))
 }
 
+/// The record profile a module-family bundle pins for the source profile
+/// its gate derived: `[v1, v2, v3, v4]` for the wrapping, refined v1,
+/// refined v2 and composite fragments. Each recheck re-derives under
+/// exactly that version's admission, never a wider one.
+fn record_profile(source_profile: &str, versions: [&'static str; 4]) -> &'static str {
+    let [v1, v2, v3, v4] = versions;
+    match source_profile {
+        semantic_contract::PURE_I64_COMPOSITE_PROFILE => v4,
+        semantic_contract::PURE_I64_REFINED_PROFILE_V2 => v3,
+        semantic_contract::PURE_I64_REFINED_PROFILE => v2,
+        _ => v1,
+    }
+}
+
 fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, BundleError> {
-    // The producer always runs the refined admission; the record's
-    // `profile` names v2 only when the source actually declares or uses
-    // refined scalar types, so a plain module keeps pinning v1.
-    let (binding, atoms, types) = prepare_module_source(source, RefinedAdmission::V2)?;
+    // The producer always runs the widest (composite) admission; the
+    // record's `profile` names a wider version only when the source
+    // actually declares what needs it, so a plain module keeps pinning v1.
+    let (binding, atoms, types, structs) =
+        prepare_module_source(source, RefinedAdmission::Composite)?;
     let parent = output
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -1361,16 +1381,19 @@ fn build_module(source: &str, input: &Path, output: &Path) -> Result<String, Bun
         .tempdir_in(parent)
         .map_err(|_| BundleError("cannot stage proof"))?;
     let (files, object_build, link_build) =
-        emit_module(&atoms, &types, stage.path(), proof_work.path())?;
+        emit_module(&atoms, &types, &structs, stage.path(), proof_work.path())?;
     let record = ModuleNativeBundleRecord {
         schema: MODULE_SCHEMA.into(),
-        profile: if binding.source_profile == semantic_contract::PURE_I64_REFINED_PROFILE_V2 {
-            MODULE_PROFILE_V3.into()
-        } else if binding.source_profile == semantic_contract::PURE_I64_REFINED_PROFILE {
-            MODULE_PROFILE_V2.into()
-        } else {
-            MODULE_PROFILE.into()
-        },
+        profile: record_profile(
+            &binding.source_profile,
+            [
+                MODULE_PROFILE,
+                MODULE_PROFILE_V2,
+                MODULE_PROFILE_V3,
+                MODULE_PROFILE_V4,
+            ],
+        )
+        .into(),
         scope: MODULE_SCOPE.into(),
         system_scope: SYSTEM_SCOPE.into(),
         source: binding,
@@ -1485,12 +1508,13 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
             queue.push_back(member);
         }
     }
-    let prepared = prepare_multifile_source(&root, &members, RefinedAdmission::V2)?;
-    let (binding, graph, atoms, types) = (
+    let prepared = prepare_multifile_source(&root, &members, RefinedAdmission::Composite)?;
+    let (binding, graph, atoms, types, structs) = (
         prepared.binding,
         prepared.import_graph_sha256,
         prepared.atoms,
         prepared.types,
+        prepared.structs,
     );
     let parent = output
         .parent()
@@ -1505,7 +1529,7 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
         .tempdir_in(parent)
         .map_err(|_| BundleError("cannot stage proof"))?;
     let (files, object_build, link_build) =
-        emit_module(&atoms, &types, stage.path(), proof_work.path())?;
+        emit_module(&atoms, &types, &structs, stage.path(), proof_work.path())?;
     let sources_dir = stage.path().join(SOURCES_DIR);
     fs::create_dir(&sources_dir).map_err(|_| BundleError("cannot stage source members"))?;
     for (name, text) in &members {
@@ -1517,13 +1541,16 @@ fn build_multifile(source: &str, input: &Path, output: &Path) -> Result<String, 
     }
     let record = MultifileNativeBundleRecord {
         schema: MULTIFILE_SCHEMA.into(),
-        profile: if binding.source_profile == semantic_contract::PURE_I64_REFINED_PROFILE_V2 {
-            MULTIFILE_PROFILE_V3.into()
-        } else if binding.source_profile == semantic_contract::PURE_I64_REFINED_PROFILE {
-            MULTIFILE_PROFILE_V2.into()
-        } else {
-            MULTIFILE_PROFILE.into()
-        },
+        profile: record_profile(
+            &binding.source_profile,
+            [
+                MULTIFILE_PROFILE,
+                MULTIFILE_PROFILE_V2,
+                MULTIFILE_PROFILE_V3,
+                MULTIFILE_PROFILE_V4,
+            ],
+        )
+        .into(),
         scope: MODULE_SCOPE.into(),
         system_scope: SYSTEM_SCOPE.into(),
         source: binding,

@@ -1491,11 +1491,62 @@ boolean-typed through the call.
 Nothing deeper is claimed: the fragment admitted by the profile grew,
 the guarantees did not — the same identity-plus-recheck scopes apply,
 with no optimizer/object/linker/runtime/ABI/final-executable semantics
-and no producer authenticity or attestation. Struct/enum declarations
-and `unit`-carrying aliases stay outside the profile.
+and no producer authenticity or attestation. Enum declarations and
+`unit`-carrying aliases stay outside the profile; struct declarations
+are admitted only by the composite profile below.
 
 Regression gate:
 `LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo test --test test_native_bundle --test test_translation_validation -p mumei-core`.
+
+### Composite struct member profile (v4)
+
+A module may also declare non-generic structs whose fields are all
+profile scalars — `struct Point { x: i64, y: i64 }` — use them as atom
+parameter types and read their fields (`p.x`) in `requires`, `ensures`
+and bodies. Such a module builds under the member profile
+`mumei.pure-i64-composite/v1` and pins
+`mumei.native-pure-i64-module-linux-x86_64/v4` or
+`mumei.native-pure-i64-multifile-linux-x86_64/v4`. The producer always
+runs this widest admission, but the record names it only when the
+module actually declares a struct: a module without structs keeps
+pinning `/v1`–`/v3` exactly as before, and `check`/`recheck-source`/
+`recheck-llvm` re-admit a `/v4` record under the composite gate only.
+
+The encoding is a flat scalar expansion with no new sorts. A struct
+parameter becomes one scalar input per field in declaration order, each
+bound by its field's declared type exactly like a scalar parameter of
+that type (`bool` 0/1, subrange bounds, refined-alias predicates). The
+struct value itself is never a scalar: it may only be read through a
+field or passed by name to a sibling parameter of the same struct,
+which flattens to the same field slots — so the call-site obligation
+still checks the callee's `requires` and field domains over the passed
+fields. The contract binders report the flattened fields (`p.x`), and
+the specification identity includes the struct's field layout.
+
+Admission is fail-closed. Rejected: generic structs, struct invariants,
+`impl` methods, `where` constraints on fields, empty structs, duplicate
+fields or structs, struct names shadowing a scalar name or colliding
+with a `type` or atom name, and fields outside the scalar vocabulary
+(`u64`/`usize`/`f64`/arrays/other structs, so no recursion). Struct
+construction (`P { .. }`), struct results, struct-valued `let`s, struct
+values in scalar positions, nested or computed field targets, a field
+read through a name a scalar binding shadows, rebinding a struct
+parameter, and pass-through arguments of another struct or shape all
+stay outside.
+
+The LLVM snapshot recheck does not decompose the aggregate formal the
+emitter produces for a struct parameter (`{ i64, i64 }` plus
+`extractvalue`): `recheck-llvm` and every stage built on it fail closed
+on a `/v4` bundle whose members take struct parameters, instead of
+pairing flattened source inputs with IR formals. Within reach today:
+identity `check` and the fresh `recheck-source` postcondition recheck.
+As with the refined profiles, the admitted fragment grew and the
+assurance did not: no translation, optimizer/object/linker/runtime/ABI
+or final-executable semantics and no producer authenticity or
+attestation are claimed.
+
+Regression gate:
+`LLVM_SYS_170_PREFIX=/usr/lib/llvm-17 cargo test --test test_native_bundle -p mumei-core`.
 
 ### Pinned toolchain artifact recheck
 
