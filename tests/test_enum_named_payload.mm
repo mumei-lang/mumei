@@ -43,3 +43,10 @@ atom read_port(s: Chan) -> i64
             _ => 0
         }
     }
+
+atom make_ok() -> Chan
+    requires: true;
+    ensures: true;
+    body: {
+        Chan::Tcp(5)
+    }

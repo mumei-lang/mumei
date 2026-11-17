@@ -3087,6 +3087,67 @@ pub(crate) fn expr_to_z3<'a>(
                             for arg in args {
                                 ctor_args.push(expr_to_z3(vc, arg, env, solver_opt)?);
                             }
+                            // A payload argument must satisfy the declared
+                            // field type — `Chan::Tcp(0)` with `p: Port`
+                            // (`v in 1..=65535`) is a rejected construction,
+                            // not a value a later match may assume the
+                            // refined bounds on (the same contract a caller
+                            // satisfies for a refined callee parameter).
+                            if let (Some(solver), Some((enum_def, vidx))) =
+                                (solver_opt, datatype::resolve_enum_ctor(vc, name)?)
+                            {
+                                let variant_def = &enum_def.variants[vidx];
+                                for (i, arg_z3) in ctor_args.iter().enumerate() {
+                                    let Some(field_ty) = variant_def.field_types.get(i) else {
+                                        continue;
+                                    };
+                                    let Some(refined) =
+                                        vc.module_env.get_type(field_ty.name.as_str())
+                                    else {
+                                        continue;
+                                    };
+                                    let chain = vc
+                                        .module_env
+                                        .refined_chain(&refined.name)
+                                        .map_err(|cycle| {
+                                            MumeiError::type_error_at(cycle, refined.span.clone())
+                                        })?;
+                                    for decl in chain {
+                                        let mut local_env = env.clone();
+                                        local_env.insert(decl.operand.clone(), arg_z3.clone());
+                                        let predicate_ast = parse_expression(&decl.predicate_raw);
+                                        let Some(pred_bool) =
+                                            expr_to_z3(vc, &predicate_ast, &mut local_env, None)?
+                                                .as_bool()
+                                        else {
+                                            continue;
+                                        };
+                                        if vc.cover_obligations.is_some() {
+                                            record_cover_obligation(vc, pred_bool);
+                                            continue;
+                                        }
+                                        solver.push();
+                                        for cond in vc.path_cond_stack.borrow().iter() {
+                                            solver.assert(cond);
+                                        }
+                                        solver.assert(&pred_bool.not());
+                                        let refined_check =
+                                            crate::verification::phase_artifacts::check(solver);
+                                        solver.pop(1);
+                                        if refined_check == SatResult::Sat {
+                                            return Err(MumeiError::verification(
+                                                format!("Construction of '{name}': refinement on field '{}' ({}) not satisfied", variant_def.fields.get(i).cloned().unwrap_or_else(|| i.to_string()), decl.name)
+                                            ).with_help("enum を構築する引数が宣言されたフィールド型の制約を満たしていません。引数の値を確認してください")
+                                            .with_verdict(crate::verification::VerdictKind::Rejected));
+                                        }
+                                        if refined_check == SatResult::Unknown {
+                                            return Err(MumeiError::verification(
+                                                format!("Construction of '{name}': refinement on field '{}' ({}) could not be decided", variant_def.fields.get(i).cloned().unwrap_or_else(|| i.to_string()), decl.name)
+                                            ).with_verdict(crate::verification::VerdictKind::Inconclusive));
+                                        }
+                                    }
+                                }
+                            }
                             if let Some(value) = datatype::enum_ctor_apply(vc, name, &ctor_args)? {
                                 return Ok(value);
                             }

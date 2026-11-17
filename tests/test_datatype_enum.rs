@@ -159,3 +159,17 @@ fn enum_named_payload_type_drives_binding_and_refinement() {
         "named bool/refined payloads should verify:\n{combined}"
     );
 }
+
+#[test]
+fn enum_ctor_payload_must_satisfy_declared_field_type() {
+    let output = mumei_verify("tests/test_enum_ctor_refined_negative.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success() && combined.contains("not satisfied"),
+        "a payload violating its declared refined field type must be rejected:\n{combined}"
+    );
+}
