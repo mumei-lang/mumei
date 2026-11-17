@@ -4022,7 +4022,8 @@ declared recheck/accept routes re-derive under the record's own
 admission. The mumei-demo `native_composite_attempt` declared-route
 scenario exercises the v4 fragment end to end (produce → `native-check`
 consistent → a struct field typed by a refined alias refused).
-C10 stays partial — enum members, struct construction, deeper
+C10 stays partial — enum members, branch-merged struct values and
+struct-field assignment, deeper
 optimizer/ABI/runtime assurance and producer authenticity remain open.
 
 
