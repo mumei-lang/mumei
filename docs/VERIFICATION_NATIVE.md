@@ -1448,21 +1448,22 @@ Admission stays deliberately small and fail-closed. A `type` member is
 accepted only under the refined profile (v1 still rejects every non-atom
 item) and only when it carries no `unit` metadata — the profile does
 not model units, so it refuses to discard them silently. The base must
-resolve to the scalar vocabulary (`i64`, `bool`, `i8`–`u32`), either
-directly or through another declared alias; alias chains accumulate
-their predicates as conjuncts, cycles are rejected, and a base naming
-nothing declared fails closed. The `where` predicate must check as
-`Bool` over its declared operand under the existing `expression_kind`
-gate, with no calls admitted inside it. Duplicate type names and a type
-named like an atom are rejected, so `T(` is never ambiguous between a
-type position and a call.
+be a literal scalar in the integer-sort vocabulary (`i64`, `i8`–`u32`):
+a `bool` base cannot be admitted because the verifier encodes the
+refinement operand as `Int` (a `Bool` predicate would not check), and a
+base naming another declaration is rejected as a chain for the same
+reason — the verifier applies only a refinement's own predicate, so an
+ancestor's conjuncts would silently drop at build time. The `where`
+predicate must check as `Bool` over its declared operand under the
+existing `expression_kind` gate, with no calls admitted inside it.
+Duplicate type names and a type named like an atom are rejected, so
+`T(` is never ambiguous between a type position and a call.
 
 Signatures resolve through the declared environment: `x: Port` binds
-`x` as the base scalar carrying `Port`'s predicates. As part of the
-same fix, an undeclared signature type name is now rejected instead of
-falling back to `i64` — `x: Anything` can no longer silently verify as
-an integer parameter. Alias predicates fold into the obligations the
-profile already proves: a parameter's predicates join the signature
+`x` as the base scalar carrying `Port`'s predicates, while an undeclared
+signature type name stays rejected as before — only a name the refined
+environment resolves can stand in a signature. Alias predicates fold
+into the obligations the profile already proves: a parameter's predicates join the signature
 domain, so the atom assumes them as an antecedent and every call site
 must establish them alongside the callee's `requires` (the same
 `callee_precondition` obligation, with the conjuncts instantiated at
