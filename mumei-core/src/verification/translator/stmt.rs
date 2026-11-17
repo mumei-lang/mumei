@@ -39,7 +39,17 @@ fn collect_assigned_vars(
 ) {
     match stmt {
         Stmt::Assign { var, value, .. } => {
-            out.insert(var.clone());
+            // A field write `q.f = v` rebinds the whole `q` aggregate —
+            // havoc must reset `q` itself, since no env key is named
+            // `q.f`.
+            match var.split_once('.') {
+                Some((base, _)) => {
+                    out.insert(base.to_string());
+                }
+                None => {
+                    out.insert(var.clone());
+                }
+            }
             collect_expr_assigned_vars(env, vc, value, out, true);
         }
         Stmt::ArrayStore {
@@ -256,6 +266,48 @@ fn havoc_vars<'a>(vc: &VCtx<'a>, env: &mut Env<'a>, vars: &std::collections::Has
                     len_key,
                     Int::fresh_const(ctx, &format!("__havoc_len_{}_{}", name, uid)).into(),
                 );
+            }
+            // A struct binding's field projections are separate env
+            // keys keyed on the binding (`q_x`, `__struct_q_x`) and on
+            // the live handle (`__struct_<handle>_x`). Havoc the
+            // binding-keyed slots and mirror them under the fresh
+            // handle's name, or `q.f` resolves to the pre-loop
+            // projection (or fails to resolve at all).
+            if let Some(sdef) =
+                crate::verification::support::datatype::binding_declared_type(vc, name)
+                    .and_then(|type_name| vc.module_env.get_struct(&type_name))
+            {
+                let slot_keys: std::collections::HashSet<String> = sdef
+                    .fields
+                    .iter()
+                    .flat_map(|field| {
+                        [
+                            format!("{name}_{}", field.name),
+                            format!("__struct_{name}_{}", field.name),
+                        ]
+                    })
+                    .filter(|key| env.contains_key(key))
+                    .collect();
+                havoc_vars(vc, env, &slot_keys);
+                let handle_name = env.get(name).and_then(|handle| {
+                    (handle.kind() == z3::AstKind::App
+                        && handle.decl().kind() == z3::DeclKind::UNINTERPRETED)
+                        .then(|| handle.decl().name())
+                });
+                if let Some(handle_name) = handle_name {
+                    let values: Vec<(String, Dynamic)> = sdef
+                        .fields
+                        .iter()
+                        .filter_map(|field| {
+                            env.get(&format!("__struct_{name}_{}", field.name))
+                                .or_else(|| env.get(&format!("{name}_{}", field.name)))
+                                .map(|value| (field.name.clone(), value.clone()))
+                        })
+                        .collect();
+                    if !values.is_empty() {
+                        bind_struct_fields(env, &handle_name, &values);
+                    }
+                }
             }
         }
     }
@@ -620,6 +672,15 @@ fn struct_field_assign<'a>(
     let Some(sfield) = sdef.fields.iter().find(|f| f.name == field) else {
         return Ok(None);
     };
+    // A value that rebinds `base` (`q.x = { q.y = 2; 1 }`, a shadowing
+    // `let q`, a whole-struct `q = …`) would leave the field snapshot
+    // and the emitted `insertvalue` disagreeing about which `q` they
+    // update — reject rather than pick a winner.
+    if value.binds_name(base) {
+        return Err(MumeiError::type_error(format!(
+            "field write '{var}' value must not rebind '{base}'",
+        )));
+    }
     let Some(fields) = env
         .get(base)
         .and_then(|bound| struct_fields_of_value(env, bound, sdef))

@@ -406,7 +406,7 @@ fn field_type_at_path(module_env: &ModuleEnv, struct_name: &str, path: &str) -> 
 /// Declared type of a bare binding: a parameter's `type_name`, `result`'s
 /// return type, or the inferred enum type recorded for a `let`/`assign`
 /// binding (`let e = Mine::Cons(1)` records `e: Mine`).
-fn binding_declared_type(vc: &VCtx, name: &str) -> Option<String> {
+pub(crate) fn binding_declared_type(vc: &VCtx, name: &str) -> Option<String> {
     let atom = vc.current_atom;
     if name == "result" {
         return atom.and_then(|a| a.return_type.clone());

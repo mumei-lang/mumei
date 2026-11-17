@@ -1365,8 +1365,18 @@ pub fn collect_assigned_outer_variables_stmt(stmt: &HirStmt) -> HashSet<String> 
             assigned.extend(collect_assigned_outer_variables_expr(value));
         }
         HirStmt::Assign { var, value } => {
-            if !var.contains('.') {
-                assigned.insert(var.clone());
+            match var.split_once('.') {
+                // A field write rebinds the whole aggregate plus that
+                // field's slot keys — all three must reach the branch
+                // merge or post-branch reads keep the pre-branch slots.
+                Some((base, field)) => {
+                    assigned.insert(base.to_string());
+                    assigned.insert(format!("{base}_{field}"));
+                    assigned.insert(format!("__struct_{base}_{field}"));
+                }
+                None => {
+                    assigned.insert(var.clone());
+                }
             }
             assigned.extend(collect_assigned_outer_variables_expr(value));
         }

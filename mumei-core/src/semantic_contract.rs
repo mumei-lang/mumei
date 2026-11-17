@@ -2848,6 +2848,12 @@ pub struct PureI64Body<'ctx> {
     /// the bound is outside the profile, matching the LLVM side's
     /// bounded path drop. `None` for bodies without a `while`.
     pub loop_bound_exits: Option<Bool<'ctx>>,
+    /// Composite values top-level writes rebound — the post-state of a
+    /// struct parameter or result binding after a `q.f = v` write.
+    /// `ensures` reads these (the verifier and the emitted code both
+    /// see post-write fields); scalar rebinds keep the established
+    /// input-time view and stay out.
+    post_writes: HashMap<String, SourceValue<'ctx>>,
 }
 
 type BodyResult<T> = std::result::Result<T, SemanticContractError>;
@@ -2988,8 +2994,9 @@ fn encode_atom_body<'ctx>(
         .collect();
     // A `-> bool` body lowers to i64 carrying 0/1 — the emitter zexts
     // its i1 result, so the checked value is the same 0/1 materialization.
-    // Top-level reassignments land in `top_writes`; nothing reads the
-    // body afterwards, so the map is a sink for the write records.
+    // Top-level composite reassignments land in `top_writes`; the body
+    // report carries them so `ensures` evaluates post-write fields like
+    // the verifier and the emitted code do.
     let mut top_writes = HashMap::new();
     let mut loop_exits = Vec::new();
     let mut call_sites = Vec::new();
@@ -3093,6 +3100,10 @@ fn encode_atom_body<'ctx>(
             .and_then(|name| structs.get(name))
             .map(Vec::len),
         loop_bound_exits,
+        post_writes: top_writes
+            .into_iter()
+            .filter(|(_, value)| matches!(value, SourceValue::Composite(_)))
+            .collect(),
     })
 }
 
@@ -3512,6 +3523,12 @@ fn module_atom_obligations<'ctx>(
         "result".to_string(),
         result_value(&atom.name, &body.value, context, call_returns),
     );
+    // `ensures` reads post-write composite fields — the same post-state
+    // the verifier's env and the emitted code observe. Scalar rebinds
+    // keep the established input-time view.
+    for (name, value) in &body.post_writes {
+        env.insert(name.clone(), value.clone());
+    }
     let ensures =
         parse_expression_checked(&atom.ensures).map_err(|_| SemanticContractError::Parse)?;
     let mut ensures_exits = Vec::new();
@@ -3722,6 +3739,10 @@ fn atom_obligation<'ctx>(
         "result".to_string(),
         SourceValue::Integer(body.value.clone()),
     );
+    // Same post-state composite view as `module_atom_obligations`.
+    for (name, value) in &body.post_writes {
+        env.insert(name.clone(), value.clone());
+    }
     let ensures =
         parse_expression_checked(&atom.ensures).map_err(|_| SemanticContractError::Parse)?;
     let mut ensures_exits = Vec::new();
@@ -3895,6 +3916,15 @@ fn source_field_write<'ctx>(
     let Some((_, slot)) = fields.iter().find(|(name, _)| name == field) else {
         return Ok(None);
     };
+    // A value that rebinds `base` (`q.x = { q.y = 2; 1 }`, a shadowing
+    // `let q`, a whole-struct `q = …`) would leave the merged composite
+    // and the emitted `insertvalue` disagreeing about which `q` they
+    // update — reject rather than pick a winner.
+    if value.binds_name(base) {
+        return Err(SemanticContractError::Unsupported(
+            "field write value rebinds the base",
+        ));
+    }
     let bound = source_expr(
         value,
         ctx,
@@ -6458,7 +6488,7 @@ mod tests {
         // moved owner, in tail and mid-block positions.
         let source = format!(
             "{decl}\n\
-             atom bump(q: P) -> i64 requires: q.x >= 0; ensures: result == q.x + 1; body: {{ q.x = q.x + 1; q.x }};\n\
+             atom bump(q: P) -> i64 requires: q.x == 0; ensures: result == 1 && q.x == 1; body: {{ q.x = q.x + 1; q.x }};\n\
              atom lit(a: i64) -> i64 requires: true; ensures: result == a + 1; body: {{ let s = P {{ x: a, y: 0 }}; s.x = s.x + 1; s.x }};\n\
              atom mid(q: P) -> i64 requires: true; ensures: result == 2; body: {{ q.y = q.x + 1; q.y + 1 - q.x }};\n{MAIN0}"
         );
@@ -6475,7 +6505,7 @@ mod tests {
         // postconditions on the written field and the untouched sibling
         // refute, so the equivalence recheck is the real one.
         let pieces = [
-            "atom bump(q: P) -> i64 requires: q.x >= 0; ensures: result == q.x + 1; body: { q.x = q.x + 1; q.x };",
+            "atom bump(q: P) -> i64 requires: q.x == 0; ensures: result == 1 && q.x == 1; body: { q.x = q.x + 1; q.x };",
             "atom lit(a: i64) -> i64 requires: true; ensures: result == a + 1; body: { let s = P { x: a, y: 0 }; s.x = s.x + 1; s.x };",
             "atom mid(q: P) -> i64 requires: true; ensures: result == 2; body: { q.y = q.x + 1; q.y + 1 - q.x };",
             "atom keep(q: P) -> i64 requires: true; ensures: result == q.y; body: { q.x = q.x + 1; q.y };",
@@ -6490,7 +6520,9 @@ mod tests {
             );
         }
         for (piece, from, to) in [
-            (pieces[0], "result == q.x + 1", "result == q.x"),
+            // `q.x == 0` held on the *input* field — `ensures` reads
+            // post-write fields, so the stale reading refutes.
+            (pieces[0], "q.x == 1", "q.x == 0"),
             (pieces[1], "result == a + 1", "result == a"),
             (pieces[2], "result == 2", "result == 1"),
             (pieces[3], "result == q.y", "result == q.x"),

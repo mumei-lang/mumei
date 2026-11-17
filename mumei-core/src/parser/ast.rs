@@ -254,6 +254,54 @@ pub enum Expr {
     },
 }
 
+impl Expr {
+    /// True when evaluating this expression can bind or rebind `name`
+    /// through an embedded statement (`{ let name = …; }`,
+    /// `{ name = …; }`, `{ name.f = …; }`, including under a branch,
+    /// loop, or a lambda the evaluation may call). Conservative —
+    /// meant for fail-closed admission gates.
+    pub fn binds_name(&self, name: &str) -> bool {
+        match self {
+            Expr::Number(_)
+            | Expr::Float(_)
+            | Expr::StringLit(_)
+            | Expr::Variable(_)
+            | Expr::AtomRef { .. } => false,
+            Expr::ArrayLit(elements) => elements.iter().any(|e| e.binds_name(name)),
+            Expr::ArrayAccess(_, index) => index.binds_name(name),
+            Expr::BinaryOp(left, _, right) => left.binds_name(name) || right.binds_name(name),
+            Expr::Block(stmt) => stmt.binds_name(name),
+            Expr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                cond.binds_name(name)
+                    || then_branch.binds_name(name)
+                    || else_branch.binds_name(name)
+            }
+            Expr::Call(_, args) => args.iter().any(|a| a.binds_name(name)),
+            Expr::StructInit { fields, .. } => fields.iter().any(|(_, e)| e.binds_name(name)),
+            Expr::FieldAccess(inner, _) => inner.binds_name(name),
+            Expr::Match { target, arms } => {
+                target.binds_name(name)
+                    || arms.iter().any(|arm| {
+                        arm.guard.as_ref().is_some_and(|g| g.binds_name(name))
+                            || arm.body.binds_name(name)
+                    })
+            }
+            Expr::Async { body } | Expr::Lambda { body, .. } => body.binds_name(name),
+            Expr::Await { expr } => expr.binds_name(name),
+            Expr::CallRef { callee, args } => {
+                callee.binds_name(name) || args.iter().any(|a| a.binds_name(name))
+            }
+            Expr::Perform { args, .. } => args.iter().any(|a| a.binds_name(name)),
+            Expr::ChanSend { channel, value } => channel.binds_name(name) || value.binds_name(name),
+            Expr::ChanRecv { channel } => channel.binds_name(name),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Let {
@@ -310,6 +358,40 @@ pub enum Stmt {
 }
 
 impl Stmt {
+    /// True when executing this statement can bind or rebind `name`: a
+    /// `name`/`name.field` assignment, a `let name` shadow, or any of
+    /// those inside a nested block, branch, loop or lambda body (a
+    /// lambda's writes only fire if the lambda is later called, so this
+    /// is conservative — it is meant for fail-closed admission gates).
+    pub fn binds_name(&self, name: &str) -> bool {
+        match self {
+            Stmt::Let { var, value, .. } => var == name || value.binds_name(name),
+            Stmt::Assign { var, value, .. } => {
+                var == name || var.starts_with(&format!("{name}.")) || value.binds_name(name)
+            }
+            Stmt::ArrayStore { index, value, .. } => {
+                index.binds_name(name) || value.binds_name(name)
+            }
+            Stmt::Block(stmts, _) => stmts.iter().any(|s| s.binds_name(name)),
+            Stmt::While {
+                cond,
+                invariant,
+                decreases,
+                body,
+                ..
+            } => {
+                cond.binds_name(name)
+                    || invariant.binds_name(name)
+                    || decreases.as_ref().is_some_and(|d| d.binds_name(name))
+                    || body.binds_name(name)
+            }
+            Stmt::Acquire { body, .. } | Stmt::Task { body, .. } => body.binds_name(name),
+            Stmt::TaskGroup { children, .. } => children.iter().any(|c| c.binds_name(name)),
+            Stmt::Cancel { .. } => false,
+            Stmt::Expr(expr, _) => expr.binds_name(name),
+        }
+    }
+
     /// Get the Span associated with this statement.
     // NOTE: span() is infrastructure for future diagnostic passes that need statement-level source locations.
     #[allow(dead_code)]
