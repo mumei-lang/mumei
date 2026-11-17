@@ -1541,12 +1541,20 @@ read through a name a scalar binding shadows, rebinding a struct
 parameter, and pass-through arguments of another struct or shape all
 stay outside.
 
-The LLVM snapshot recheck does not decompose the aggregate formal the
-emitter produces for a struct parameter (`{ i64, i64 }` plus
-`extractvalue`): `recheck-llvm` and every stage built on it fail closed
-on a `/v4` bundle whose members take struct parameters, instead of
-pairing flattened source inputs with IR formals. Within reach today:
-identity `check` and the fresh `recheck-source` postcondition recheck.
+The LLVM snapshot recheck pairs the aggregate formal the emitter
+produces for a struct parameter with the source's flattened slots: a
+literal, non-packed `{ i64, ... }` formal (1–16 `i64` elements, a
+`bool` field being its 0/1 i64 carrier) must have exactly the struct's
+field count, element `i` is the struct's `i`-th declared field, a
+one-index `extractvalue` reads that slot, and a formal passed through
+to a call flattens into the same field arguments the source call site
+applies. Field order is compared positionally, so a snapshot reading
+the fields in a different order is `Different`. An aggregate anywhere
+else stays outside the translation profile and fails closed: built by
+`insertvalue`, merged by `phi`/`select`, spelled as a constant,
+returned, nested, packed, mixed-width, or paired with a scalar source
+parameter. `check`, `recheck-source`, `recheck-llvm` and the stages
+built on it all reach `/v4` bundles.
 As with the refined profiles, the admitted fragment grew and the
 assurance did not: no translation, optimizer/object/linker/runtime/ABI
 or final-executable semantics and no producer authenticity or

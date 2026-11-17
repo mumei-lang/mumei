@@ -2185,11 +2185,25 @@ fn module_bundle_with_struct_members_builds_as_v4_and_rechecks_its_source() {
     let output = recheck(&source, &bundle, &id);
     assert_success(&output);
     assert!(String::from_utf8_lossy(&output.stdout).contains(native_bundle::MODULE_RECHECK_PROFILE));
-    // The LLVM snapshot recheck does not decompose aggregate member
-    // signatures: it fails closed instead of claiming equivalence.
-    let llvm = recheck_llvm(&source, &bundle, &id);
+    // The LLVM snapshot recheck pairs each `{ i64, i64 }` formal with
+    // the struct parameter's flattened field slots.
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A snapshot reading the fields in the wrong order is a different
+    // member, even with every identity pin refreshed to match it.
+    let ir = fs::read_to_string(bundle.join("program.ll")).unwrap();
+    let swapped = ir
+        .replace("%0, 0", "%0, 9")
+        .replace("%0, 1", "%0, 0")
+        .replace("%0, 9", "%0, 1");
+    assert_ne!(swapped, ir);
+    fs::write(bundle.join("program.ll"), swapped).unwrap();
+    let swapped_id = repin_module(&bundle);
+    assert_success(&check(&source, &bundle, &swapped_id));
+    let llvm = recheck_llvm(&source, &bundle, &swapped_id);
     assert!(!llvm.status.success());
-    assert!(String::from_utf8_lossy(&llvm.stderr).contains("outside bounded module profile"));
+    fs::write(bundle.join("program.ll"), ir).unwrap();
+    let id = repin_module(&bundle);
+    assert_success(&recheck_llvm(&source, &bundle, &id));
     // A v4 record re-pinned under any narrower name is refused: those
     // gates keep `struct` out of the item vocabulary.
     for narrower in [
@@ -2289,7 +2303,7 @@ fn multifile_bundle_with_struct_member_builds_as_v4() {
     assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V4);
     assert_success(&check(&source, &bundle, &id));
     assert_success(&recheck(&source, &bundle, &id));
-    assert!(!recheck_llvm(&source, &bundle, &id).status.success());
+    assert_success(&recheck_llvm(&source, &bundle, &id));
     // Under a v3 pin the struct member is refused at the member gate.
     let mut record = module_record(&bundle);
     record["profile"] = serde_json::Value::String(native_bundle::MULTIFILE_PROFILE_V3.into());

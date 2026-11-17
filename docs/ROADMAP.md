@@ -3313,10 +3313,10 @@ construction and results, struct invariants, methods, field
 constraints, subrange/refined-alias fields (the verifier does not yet
 assume their domains for struct fields) and non-scalar fields stay
 rejected. `recheck-source`
-covers the composite fragment; `recheck-llvm` and the stages built on
-it fail closed on aggregate member signatures until the translation
-profile decomposes `extractvalue`/aggregate call arguments — the next
-composite slice. This is a wider admitted fragment, not deeper
+covers the composite fragment, and `recheck-llvm` pairs each emitted
+`{ i64, ... }` struct formal with the flattened field slots
+(`extractvalue` reads and pass-through call arguments); built, merged,
+returned or nested aggregates still fail closed. This is a wider admitted fragment, not deeper
 assurance: the same identity-plus-recheck scopes apply. See the
 [composite struct member profile](VERIFICATION_NATIVE.md#composite-struct-member-profile-v4).
 

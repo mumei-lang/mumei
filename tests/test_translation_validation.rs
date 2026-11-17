@@ -2505,3 +2505,149 @@ fn unreached_while_owes_no_exit() {
     assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
     assert_eq!(report.profile, tv::BOUNDED_LOOPS_PROFILE);
 }
+
+const COMPOSITE_SOURCE: &str = "struct S { on: bool, x: i64 }\n\
+    atom pick(s: S) -> i64 requires: true; ensures: result == 0 || result == s.x; body: { if s.on { s.x } else { 0 } };\n\
+    atom fwd(t: S, k: i64) -> i64 requires: true; ensures: true; body: { pick(t) + k };\n\
+    atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };";
+
+/// The emitter's own native snapshot of `COMPOSITE_SOURCE`: each struct
+/// parameter is one `{ i64, i64 }` formal read by `extractvalue` and
+/// passed through to `pick` unchanged.
+const COMPOSITE_IR: &str = r#"source_filename = "mumei_merged"
+target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
+target triple = "x86_64-pc-linux-gnu"
+define i64 @pick({ i64, i64 } %0) {
+entry:
+  %s.on = extractvalue { i64, i64 } %0, 0
+  %if_cond = icmp ne i64 %s.on, 0
+  br i1 %if_cond, label %then, label %else
+then:
+  %s.x = extractvalue { i64, i64 } %0, 1
+  br label %merge
+else:
+  br label %merge
+merge:
+  %if_result = phi i64 [ %s.x, %then ], [ 0, %else ]
+  ret i64 %if_result
+}
+define i64 @fwd({ i64, i64 } %0, i64 %1) {
+entry:
+  %call_pick = call i64 @pick({ i64, i64 } %0)
+  %add_tmp = add i64 %call_pick, %1
+  ret i64 %add_tmp
+}
+define i64 @__mumei_user_main() {
+entry:
+  ret i64 0
+}
+define i32 @main(i32 %0, ptr %1) {
+entry:
+  %result = call i64 @__mumei_user_main()
+  %exit_code = trunc i64 %result to i32
+  ret i32 %exit_code
+}
+"#;
+
+fn composite(source: &str, ir: &str) -> Result<tv::ModuleValidationReport, tv::ValidationError> {
+    tv::validate_native_module(
+        source,
+        ir,
+        Options::default(),
+        mumei_core::semantic_contract::RefinedAdmission::Composite,
+    )
+}
+
+#[test]
+fn composite_struct_formals_pair_with_flattened_field_slots() {
+    let report = composite(COMPOSITE_SOURCE, COMPOSITE_IR).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(
+        report.source_profile,
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE
+    );
+    // Field order is positional: reading slot 1 where the source reads
+    // `s.on` (slot 0) is a different member, not a renamed one.
+    let swapped = COMPOSITE_IR
+        .replace(
+            "%s.on = extractvalue { i64, i64 } %0, 0",
+            "%s.on = extractvalue { i64, i64 } %0, 1",
+        )
+        .replace(
+            "%s.x = extractvalue { i64, i64 } %0, 1",
+            "%s.x = extractvalue { i64, i64 } %0, 0",
+        );
+    assert_eq!(
+        composite(COMPOSITE_SOURCE, &swapped).unwrap().outcome,
+        Outcome::Different
+    );
+    let one_swapped = COMPOSITE_IR.replace(
+        "%s.x = extractvalue { i64, i64 } %0, 1",
+        "%s.x = extractvalue { i64, i64 } %0, 0",
+    );
+    assert_eq!(
+        composite(COMPOSITE_SOURCE, &one_swapped).unwrap().outcome,
+        Outcome::Different
+    );
+    // The pass-through call result is compared as an application on the
+    // flattened field arguments: reusing it in place of `k` differs.
+    let wrong_call = COMPOSITE_IR.replace(
+        "%call_pick = call i64 @pick({ i64, i64 } %0)\n  %add_tmp = add i64 %call_pick, %1",
+        "%call_pick = call i64 @pick({ i64, i64 } %0)\n  %add_tmp = add i64 %call_pick, %call_pick",
+    );
+    assert_eq!(
+        composite(COMPOSITE_SOURCE, &wrong_call).unwrap().outcome,
+        Outcome::Different
+    );
+}
+
+#[test]
+fn composite_aggregates_outside_struct_formal_reads_and_pass_through_fail_closed() {
+    let pick_body = "  %s.on = extractvalue { i64, i64 } %0, 0\n  %if_cond = icmp ne i64 %s.on, 0\n  br i1 %if_cond, label %then, label %else";
+    for (from, to) in [
+        // an aggregate built in the body, not a formal
+        (
+            pick_body,
+            "  %b = insertvalue { i64, i64 } %0, i64 1, 0\n  %s.on = extractvalue { i64, i64 } %b, 0\n  %if_cond = icmp ne i64 %s.on, 0\n  br i1 %if_cond, label %then, label %else",
+        ),
+        // a constant aggregate
+        (
+            "%s.on = extractvalue { i64, i64 } %0, 0",
+            "%s.on = extractvalue { i64, i64 } { i64 1, i64 0 }, 0",
+        ),
+        // an aggregate merged by select
+        (
+            pick_body,
+            "  %m = select i1 true, { i64, i64 } %0, { i64, i64 } %0\n  %s.on = extractvalue { i64, i64 } %m, 0\n  %if_cond = icmp ne i64 %s.on, 0\n  br i1 %if_cond, label %then, label %else",
+        ),
+        // nested, mixed-width and packed formals
+        ("define i64 @pick({ i64, i64 } %0)", "define i64 @pick({ { i64 }, i64 } %0)"),
+        ("define i64 @pick({ i64, i64 } %0)", "define i64 @pick({ i32, i64 } %0)"),
+        ("define i64 @pick({ i64, i64 } %0)", "define i64 @pick(<{ i64, i64 }> %0)"),
+        // a formal whose arity differs from the struct's field count
+        ("define i64 @pick({ i64, i64 } %0)", "define i64 @pick({ i64, i64, i64 } %0)"),
+        // a struct parameter lowered as two scalar formals instead
+        ("define i64 @pick({ i64, i64 } %0)", "define i64 @pick(i64 %0, i64 %9)"),
+    ] {
+        let ir = COMPOSITE_IR.replace(from, to);
+        assert_ne!(ir, COMPOSITE_IR, "probe did not apply: {to}");
+        assert!(
+            !matches!(
+                composite(COMPOSITE_SOURCE, &ir).map(|report| report.outcome),
+                Ok(Outcome::EquivalentWithinProfile)
+            ),
+            "aggregate probe accepted: {to}"
+        );
+    }
+    // Aggregate results stay outside: a member returning its formal.
+    let returning = COMPOSITE_IR.replace(
+        "define i64 @__mumei_user_main() {\nentry:\n  ret i64 0\n}",
+        "define i64 @__mumei_user_main() {\nentry:\n  ret i64 0\n}\ndefine { i64, i64 } @echo({ i64, i64 } %0) {\nentry:\n  ret { i64, i64 } %0\n}",
+    );
+    assert!(composite(COMPOSITE_SOURCE, &returning).is_err());
+    // A scalar source parameter never pairs with an aggregate formal.
+    let scalar = COMPOSITE_SOURCE
+        .replace("atom fwd(t: S, k: i64)", "atom fwd(t: i64, k: i64)")
+        .replace("pick(t) + k", "t + k");
+    assert!(composite(&scalar, COMPOSITE_IR).is_err());
+}
