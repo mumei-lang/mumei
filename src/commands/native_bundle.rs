@@ -2069,6 +2069,39 @@ mod tests {
     }
 
     #[test]
+    fn stderr_observation_drains_the_stderr_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let printer = dir.path().join("printer.sh");
+        std::fs::write(&printer, "#!/bin/sh\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&printer).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&printer, perms).unwrap();
+        }
+        // Distinct payloads per channel: a swapped drain would digest
+        // the stdout bytes — or the empty stream — and fail here.
+        std::fs::write(&printer, "#!/bin/sh\nprintf 'out'\nprintf 'err' >&2\n").unwrap();
+        assert_eq!(observed_stderr(&printer), Some(sha256(b"err")));
+        assert_eq!(observed_stdout(&printer), Some(sha256(b"out")));
+        // The cap bounds stderr the same way: exactly the cap is
+        // observable, one byte past it is not.
+        for (bytes, expected) in [
+            (OBSERVED_CHANNEL_MAX_BYTES, true),
+            (OBSERVED_CHANNEL_MAX_BYTES + 1, false),
+        ] {
+            std::fs::write(
+                &printer,
+                format!("#!/bin/sh\nhead -c {bytes} /dev/zero >&2\n"),
+            )
+            .unwrap();
+            assert_eq!(observed_stderr(&printer).is_some(), expected);
+        }
+        // A missing executable is unobservable, not a pin.
+        assert_eq!(observed_stderr(&dir.path().join("missing")), None);
+    }
+
+    #[test]
     fn claimed_success_cannot_replace_a_fresh_refuted_or_inconclusive_result() {
         let saved = evidence::decode(include_bytes!(
             "../../tests/fixtures/verification-evidence/native_consumer_shape.json"
