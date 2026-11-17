@@ -16,6 +16,18 @@ type Nat = i64 where v >= 0;
 type Pos = f64 where v > 0.0;
 type NonZero = i64 where v != 0;
 ```
+How the predicates are enforced by `mumei verify`:
+- **assumed** on every refined parameter — a caller may only pass values
+  that satisfy the predicate, so the callee verifies with it as a hypothesis;
+- **checked at every call site** — `need(x: Neg)` rejects `need(5)` even when
+  `need` has no explicit `requires`;
+- **checked on `result`** — a refined `-> Pos` return type is an implicit
+  postcondition, so `body: { -5 }` fails without any `ensures`;
+- **composed along alias chains** — `type Small = Pos where v < 10` means
+  `v > 0 && v < 10`: every ancestor declaration's predicate applies, each
+  with its own operand bound to the same value;
+- **cycles are a type error** — `type A = B; type B = A;` is rejected rather
+  than treated as a constraint-free alias.
 ### Units of Measure
 A type alias may carry a unit-of-measure tag with `unit <Name>`. Units are a
 second axis orthogonal to refinements: they never change the value's runtime

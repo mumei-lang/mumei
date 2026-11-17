@@ -3263,8 +3263,9 @@ use them in atom signatures, building under
 `mumei.pure-i64-refined-scalar/v1` and the `/v2` module/multifile
 profiles. The alias gate stays fail-closed — `unit` metadata, `bool` or
 non-scalar bases, bases naming another declaration (chains), and
-atom-name collisions are rejected, matching the fragment the verifier's
-own refinement application can encode — and each alias's predicates fold
+atom-name collisions are rejected. `bool` bases and chains stay out as
+a conservative admission choice — the verifier encodes both correctly,
+so widening either needs a new profile name — and each alias's predicates fold
 into the obligations the module already proves: parameters strengthen
 the signature domain established at every call site, and results
 strengthen the postcondition the callee guarantees. Recheckers dispatch

@@ -690,18 +690,20 @@ pub(crate) fn assert_parameter_refinements<'a>(
         let Some(refined) = module_env.get_type(type_name) else {
             continue;
         };
-        apply_refinement_constraint(vc, solver, &param.name, refined, env).map_err(|err| {
-            SpecContradiction::new(
-                &atom.name,
-                "refinement_invalid",
-                format!(
-                    "failed to lower refinement type '{}': {}",
-                    refined.name, err
-                ),
-                vec![refined.predicate_raw.clone()],
-                refined.span.clone(),
-            )
-        })?;
+        apply_refinement_constraint(vc, solver, &param.name, refined, module_env, env).map_err(
+            |err| {
+                SpecContradiction::new(
+                    &atom.name,
+                    "refinement_invalid",
+                    format!(
+                        "failed to lower refinement type '{}': {}",
+                        refined.name, err
+                    ),
+                    vec![refined.predicate_raw.clone()],
+                    refined.span.clone(),
+                )
+            },
+        )?;
     }
     Ok(())
 }
@@ -859,20 +861,26 @@ fn check_standalone_refinements(
         let mut env: Env<'_> = HashMap::new();
         env.insert("true".to_string(), Bool::from_bool(&ctx, true).into());
         env.insert("false".to_string(), Bool::from_bool(&ctx, false).into());
-        apply_refinement_constraint(&vc, &solver, &refined.operand, refined, &mut env).map_err(
-            |err| {
-                SpecContradiction::new(
-                    &atom.name,
-                    "refinement_invalid",
-                    format!(
-                        "failed to lower refinement type '{}': {}",
-                        refined.name, err
-                    ),
-                    vec![refined.predicate_raw.clone()],
-                    refined.span.clone(),
-                )
-            },
-        )?;
+        apply_refinement_constraint(
+            &vc,
+            &solver,
+            &refined.operand,
+            refined,
+            module_env,
+            &mut env,
+        )
+        .map_err(|err| {
+            SpecContradiction::new(
+                &atom.name,
+                "refinement_invalid",
+                format!(
+                    "failed to lower refinement type '{}': {}",
+                    refined.name, err
+                ),
+                vec![refined.predicate_raw.clone()],
+                refined.span.clone(),
+            )
+        })?;
         if check_with_deadline(&solver, &ctx, timeout_ms) == SatResult::Unsat {
             return Err(SpecContradiction::new(
                 &atom.name,

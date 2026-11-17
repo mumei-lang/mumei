@@ -1980,7 +1980,14 @@ fn verify_inner_impl(
     for param in &atom.params {
         if let Some(type_name) = &param.type_name {
             if let Some(refined) = module_env.get_type(type_name) {
-                apply_refinement_constraint(&vc, &solver, &param.name, refined, &mut env)?;
+                apply_refinement_constraint(
+                    &vc,
+                    &solver,
+                    &param.name,
+                    refined,
+                    module_env,
+                    &mut env,
+                )?;
             }
         }
     }
@@ -2414,6 +2421,55 @@ fn verify_inner_impl(
         ensures_outcomes.push((clause, ClauseOutcome::Assumed, label));
     }
     let body_ensures = contract_view(atom, ContractView::BodyEnsures);
+
+    // A refined return type is a postcondition the callee must guarantee:
+    // `atom bad() -> Pos ... { -5 }` cannot verify. Every conjunct of the
+    // declared chain must hold of `result` — checked with the same
+    // solver-push/assert-not/check shape as an ensures clause.
+    if let Some(type_name) = atom.return_type.as_deref() {
+        if module_env.get_type(type_name).is_some() {
+            let chain = module_env
+                .refined_chain(type_name)
+                .map_err(|cycle| MumeiError::type_error_at(cycle, atom.span.clone()))?;
+            for decl in chain {
+                let mut local_env = env.clone();
+                local_env.insert("result".to_string(), body_result.clone());
+                local_env.insert(decl.operand.clone(), body_result.clone());
+                let predicate_ast = parse_expression(&decl.predicate_raw);
+                let Some(pred_bool) =
+                    expr_to_z3(&vc, &predicate_ast, &mut local_env, None)?.as_bool()
+                else {
+                    continue;
+                };
+                solver.push();
+                solver.assert(&pred_bool.not());
+                let holds_check = crate::verification::phase_artifacts::check(&solver);
+                solver.pop(1);
+                if holds_check == SatResult::Sat {
+                    return Err(MumeiError::verification_at(
+                        format!("Return type '{}' refinement is not satisfied.", decl.name),
+                        atom.span.clone(),
+                    )
+                    .with_help(format!(
+                        "body の返り値が型 '{}' の制約 `{}` を満たすか検討してください",
+                        decl.name, decl.predicate_raw
+                    ))
+                    .with_verdict(VerdictKind::Rejected));
+                }
+                if holds_check == SatResult::Unknown {
+                    return Err(MumeiError::verification_at(
+                        format!(
+                            "Return type '{}' refinement could not be decided.",
+                            decl.name
+                        ),
+                        atom.span.clone(),
+                    )
+                    .with_verdict(VerdictKind::Inconclusive));
+                }
+            }
+        }
+    }
+
     if body_ensures.trim() != "true" {
         if tuple_component_types(atom.return_type.as_deref()).is_none() {
             // `[e0, …]` tail or `arr` tail: ensures clauses index `result[i]`
