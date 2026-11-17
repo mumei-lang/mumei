@@ -1826,6 +1826,11 @@ pub struct PureI64Body<'ctx> {
     /// parameter's fields flattened in declaration order, which no
     /// single scalar formal of the emitted member corresponds to.
     pub composite_signature: bool,
+    /// The declared parameter shapes in order: `None` for a scalar
+    /// parameter (one `inputs` slot), `Some(n)` for a struct parameter
+    /// flattened into the next `n` slots in field declaration order —
+    /// the layout a consumer pairs with an aggregate formal.
+    pub param_shapes: Vec<Option<usize>>,
     /// When the body contains a `while`, the conjunction of each loop's
     /// bounded-exit condition: `true` only on inputs where every loop's
     /// guard fails within `LOOP_BOUND` unrolled iterations. Equivalence
@@ -2030,6 +2035,11 @@ fn encode_atom_body<'ctx>(
         subrange_params,
         refined_signature,
         composite_signature,
+        param_shapes: atom
+            .params
+            .iter()
+            .map(|p| struct_fields(p, structs).map(<[ResolvedField]>::len))
+            .collect(),
         loop_bound_exits,
     })
 }
