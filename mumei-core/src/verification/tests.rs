@@ -756,6 +756,45 @@ fn test_rem_truncates_toward_zero_for_all_signs() {
 }
 
 #[test]
+fn test_div_truncates_toward_zero_for_all_signs() {
+    // `/` truncates toward zero like `%`, `sdiv`/`srem` in the
+    // emitted IR, and the ported source languages — Z3's `div` is
+    // Euclidean and would divide a negative dividend the other way.
+    verify_i64_div("div_pp", "a == 7 && b == 2", "result == 3", "{ a / b }").unwrap();
+    verify_i64_div(
+        "div_np",
+        "a == 0 - 7 && b == 2",
+        "result == 0 - 3",
+        "{ a / b }",
+    )
+    .unwrap();
+    verify_i64_div(
+        "div_pn",
+        "a == 7 && b == 0 - 2",
+        "result == 0 - 3",
+        "{ a / b }",
+    )
+    .unwrap();
+    verify_i64_div(
+        "div_nn",
+        "a == 0 - 7 && b == 0 - 2",
+        "result == 3",
+        "{ a / b }",
+    )
+    .unwrap();
+    // The Euclidean answer a negative dividend gave before the fix is
+    // now refuted.
+    let err = verify_i64_div(
+        "div_np_euclidean",
+        "a == 0 - 7 && b == 2",
+        "result == 0 - 4",
+        "{ a / b }",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("Postcondition"), "{err}");
+}
+
+#[test]
 fn test_rem_bounds_and_identity() {
     verify_rem_atom(
         "rem_bounds",
@@ -764,13 +803,23 @@ fn test_rem_bounds_and_identity() {
         "{ a % b }",
     )
     .unwrap();
+    // `/` and `%` pair on the same truncating quotient, so the
+    // div/rem identity holds for every nonzero divisor.
     verify_rem_atom(
         "rem_identity",
         "b != 0",
         "result == a",
         "{ (a / b) * b + a % b }",
     )
+    .unwrap();
+    let err = verify_rem_atom(
+        "rem_identity_plus_one",
+        "b != 0",
+        "result == a + 1",
+        "{ (a / b) * b + a % b }",
+    )
     .unwrap_err();
+    assert!(err.to_string().contains("Postcondition"), "{err}");
     verify_rem_atom("rem_sign", "b != 0 && a < 0", "result <= 0", "{ a % b }").unwrap();
 }
 

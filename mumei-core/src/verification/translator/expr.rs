@@ -3962,7 +3962,11 @@ pub(crate) fn expr_to_z3<'a>(
                         if matches!(op, Op::Rem) {
                             Ok(truncated_rem(ctx, &li, &ri).into())
                         } else {
-                            Ok((&li / &ri).into())
+                            // Truncate toward zero like `%` and the
+                            // emitted `sdiv` — Z3's `div` is Euclidean
+                            // and diverges from native semantics on
+                            // negative dividends.
+                            Ok(truncated_div(ctx, &li, &ri).into())
                         }
                     }
                     Op::Gt => Ok(li.gt(&ri).into()),
@@ -6256,7 +6260,15 @@ mod rec_fn_args_tests {
 /// sign. Z3 `Int` division is Euclidean, which already truncates for a
 /// non-negative dividend; a negative one is divided as `-(-l / r)`.
 fn truncated_rem<'a>(ctx: &'a Context, l: &Int<'a>, r: &Int<'a>) -> Int<'a> {
+    l - &(r * &truncated_div(ctx, l, r))
+}
+
+/// Integer `/` truncates toward zero — the same quotient
+/// `truncated_rem` pairs with, matching `%`, `sdiv`/`srem` in the
+/// emitted IR and every ported source language. Z3's `div` is
+/// Euclidean (remainder always non-negative), so on a negative
+/// dividend `a / b` must round the other way: `-((-a) div b)`.
+fn truncated_div<'a>(ctx: &'a Context, l: &Int<'a>, r: &Int<'a>) -> Int<'a> {
     let zero = Int::from_i64(ctx, 0);
-    let quotient = l.ge(&zero).ite(&(l / r), &(-(&(-l) / r)));
-    l - &(r * &quotient)
+    l.ge(&zero).ite(&(l / r), &(-(&(-l) / r)))
 }
