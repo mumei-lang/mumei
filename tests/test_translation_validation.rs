@@ -3150,6 +3150,31 @@ fn bounded_memory_alias_write_reaches_every_alias() {
     );
 }
 
+const BOUNDED_SHADOWED_ALIAS_SOURCE: &str = "atom shadow(c: i64) -> i64 requires: true; ensures: true; body: { let a = [1, 2]; let b = a; if c > 0 { let a = [7, 8]; b[0] = 9; 0 } else { 0 }; a[0] + a[1] };\n\
+     atom main() -> i64 requires: true; ensures: true; body: { shadow(1) };";
+
+#[test]
+fn bounded_memory_shadowed_name_still_shares_the_backing_store() {
+    // A block `let` shadows the array name inside a branch, but `b`
+    // still points at the original backing: the emitted code writes
+    // through the shared data pointer, so `b[0] = 9` reaches the outer
+    // `a` — the source model must merge that write too.
+    let items = parse_module_checked(BOUNDED_SHADOWED_ALIAS_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let report = tv::validate_native_module(
+        BOUNDED_SHADOWED_ALIAS_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV11,
+    )
+    .unwrap();
+    assert_eq!(
+        report.outcome,
+        Outcome::EquivalentWithinProfile,
+        "shadowed-array alias write must validate\n{ir}"
+    );
+}
+
 #[test]
 fn bounded_memory_byte_indexed_gep_fails_closed() {
     // A `gep i8` indexes bytes, not cells — the source element type

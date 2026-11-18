@@ -1512,13 +1512,13 @@ fn return_shape(
 /// bitvector and a struct-returning callee's call to one slot per
 /// field, so `source_expr` needs the callee's declared return shape to
 /// materialize that convention at the call site.
-fn call_return_kinds(
+fn call_return_kinds<'ctx>(
     items: &[Item],
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
     admission: RefinedAdmission,
-) -> CallShapes {
+) -> CallShapes<'ctx> {
     CallShapes {
         returns: items
             .iter()
@@ -1566,6 +1566,7 @@ fn call_return_kinds(
             .collect(),
         merged_composites: admission.admits_merged_composites(),
         next_array_id: std::cell::Cell::new(0),
+        alloc_stores: std::cell::RefCell::new(HashMap::new()),
     }
 }
 
@@ -1580,7 +1581,7 @@ type EnumVariantLayout = Vec<EnumVariant>;
 /// order, so the source encoder can build struct literals and split a
 /// struct-valued call result into its field slots.
 #[derive(Default)]
-struct CallShapes {
+struct CallShapes<'ctx> {
     returns: BTreeMap<String, ValueKind>,
     /// Each admitted struct's declared fields in declaration order —
     /// `(name, shape)` pairs where a `Struct` shape names a nested
@@ -1600,9 +1601,17 @@ struct CallShapes {
     /// of bindings from different literals takes a fresh one so a
     /// later indexed write propagates to exactly the right aliases.
     next_array_id: std::cell::Cell<u64>,
+    /// The canonical backing store per `alloc` — the model of the one
+    /// data pointer the emitter emits for the alias group. Reads and
+    /// indexed writes go through this map instead of each binding's
+    /// `store` snapshot, so a write through one alias reaches every
+    /// binding on the same backing, including a name a block `let`
+    /// shadowed: the flat `inner` map overwrites its entry, so name
+    /// lookup alone can no longer carry the update.
+    alloc_stores: std::cell::RefCell<HashMap<u64, Array<'ctx>>>,
 }
 
-impl CallShapes {
+impl<'ctx> CallShapes<'ctx> {
     /// A fresh backing-store identity for an `Array` value: a
     /// literal's own, or a merged value's when its two sides came
     /// from different literals (reusing either side's id would let a
@@ -4616,7 +4625,7 @@ fn encode_atom_body<'ctx>(
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
     bounded_memory: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
     // A struct parameter contributes one input per field, so the limit
@@ -5260,7 +5269,7 @@ fn module_atom_obligations<'ctx>(
     body: &PureI64Body<'ctx>,
     callees: &BTreeMap<String, &crate::parser::ast::Atom>,
     callee_bodies: &BTreeMap<String, &PureI64Body<'ctx>>,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
     context: &'ctx Context,
     refined: &RefinedEnv,
     structs: &StructEnv,
@@ -5495,7 +5504,7 @@ fn module_atom_obligations<'ctx>(
 fn atom_obligation<'ctx>(
     atom: &Atom,
     body: &PureI64Body<'ctx>,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
     context: &'ctx Context,
     refined: &RefinedEnv,
 ) -> BodyResult<Bool<'ctx>> {
@@ -5756,7 +5765,7 @@ fn source_field_write<'ctx>(
     written: &mut HashMap<String, SourceValue<'ctx>>,
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<Option<(String, SourceValue<'ctx>)>> {
     let Some((base, field)) = var.split_once('.') else {
         return Ok(None);
@@ -5852,7 +5861,7 @@ fn merge_source_values<'ctx>(
     cond: &Bool<'ctx>,
     a: SourceValue<'ctx>,
     b: SourceValue<'ctx>,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<SourceValue<'ctx>> {
     use SourceValue::{Boolean as B, Integer as I, Number as N, Unsigned as U};
     let merged_composites = call_returns.merged_composites;
@@ -5944,7 +5953,7 @@ fn source_stmt<'ctx>(
     // to inputs satisfying all of them.
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<SourceValue<'ctx>> {
     if depth > MAX_DEPTH {
         return Err(SemanticContractError::Unsupported("source depth limit"));
@@ -6199,33 +6208,34 @@ fn source_stmt<'ctx>(
                             call_returns,
                         )?
                         .integer()?;
-                        let new_store = array_in_bounds(ctx, &index, len)
-                            .ite(&store.store(&index, &bound), store);
                         // `let b = a` aliases the same backing store
-                        // (`alloc`): an indexed write through any name
-                        // rebinds every member of the alias group,
-                        // matching the shared data pointer the
-                        // emitter emits.
-                        let alloc = *alloc;
-                        let mut updated = Vec::new();
-                        for (name, member) in inner.iter_mut() {
-                            if let SourceValue::Array {
-                                store: member_store,
-                                alloc: member_alloc,
-                                ..
-                            } = member
-                            {
-                                if *member_alloc == alloc {
-                                    *member_store = new_store.clone();
-                                    updated.push(name.clone());
-                                }
-                            }
+                        // (`alloc`), the one data pointer the emitter
+                        // emits for the group: the write updates the
+                        // canonical per-`alloc` store so every binding
+                        // on the backing sees it — including a name a
+                        // block `let` shadowed, which the flat `inner`
+                        // map can no longer reach.
+                        let cur_store = canonical_store(call_returns, *alloc, store);
+                        let new_store = array_in_bounds(ctx, &index, len)
+                            .ite(&cur_store.store(&index, &bound), &cur_store);
+                        call_returns
+                            .alloc_stores
+                            .borrow_mut()
+                            .insert(*alloc, new_store.clone());
+                        // The written name's own snapshot tracks the
+                        // canonical store so name-level merges pair
+                        // up-to-date branch sides, and its rebind
+                        // escapes like any write.
+                        if let Some(SourceValue::Array {
+                            store: member_store,
+                            ..
+                        }) = inner.get_mut(array)
+                        {
+                            *member_store = new_store;
                         }
-                        for name in updated {
-                            if escapable.contains(&name) {
-                                if let Some(value) = inner.get(&name) {
-                                    written.insert(name, value.clone());
-                                }
+                        if escapable.contains(array.as_str()) {
+                            if let Some(value) = inner.get(array) {
+                                written.insert(array.clone(), value.clone());
                             }
                         }
                     }
@@ -6329,7 +6339,7 @@ fn source_while<'ctx>(
     written: &mut HashMap<String, SourceValue<'ctx>>,
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<()> {
     use SourceValue::{Boolean as B, Integer as I, Number as N, Unsigned as U};
     let mut cur = env.clone();
@@ -6360,6 +6370,7 @@ fn source_while<'ctx>(
             }
         };
         let body_guard = Bool::and(ctx, &[&alive, &c]);
+        let pre_body_stores = call_returns.alloc_stores.borrow().clone();
         let mut body_writes = HashMap::new();
         source_stmt(
             body,
@@ -6374,6 +6385,18 @@ fn source_while<'ctx>(
             call_sites,
             call_returns,
         )?;
+        let post_body_stores = call_returns.alloc_stores.borrow().clone();
+        // The body's writes to a shared backing apply only where the
+        // loop actually ran — the canonical map's counterpart of the
+        // per-name `body_guard.ite` merge below.
+        {
+            let mut stores = call_returns.alloc_stores.borrow_mut();
+            for (alloc, store) in stores.iter_mut() {
+                if let Some(pre) = pre_body_stores.get(alloc) {
+                    *store = body_guard.ite(store, pre);
+                }
+            }
+        }
         for (name, bound) in body_writes {
             // Writes escape only where the body actually ran: an
             // already-exited path keeps its entry values however the
@@ -6405,16 +6428,35 @@ fn source_while<'ctx>(
                         elem: ne,
                         alloc: na,
                     },
-                ) if oe == ne => SourceValue::Array {
-                    store: body_guard.ite(ns, os),
-                    len: body_guard.ite(nl, ol),
-                    elem: *oe,
-                    alloc: if oa == na {
+                ) if oe == ne => {
+                    let alloc = if oa == na {
                         *oa
                     } else {
-                        call_returns.fresh_array_alloc()
-                    },
-                },
+                        // A body rebinding mints a fresh backing: its
+                        // canonical store is the guard-merge of each
+                        // side's canonical state.
+                        let fresh = call_returns.fresh_array_alloc();
+                        let body_store = post_body_stores
+                            .get(na)
+                            .cloned()
+                            .unwrap_or_else(|| ns.clone());
+                        let cur_store = pre_body_stores
+                            .get(oa)
+                            .cloned()
+                            .unwrap_or_else(|| os.clone());
+                        call_returns
+                            .alloc_stores
+                            .borrow_mut()
+                            .insert(fresh, body_guard.ite(&body_store, &cur_store));
+                        fresh
+                    };
+                    SourceValue::Array {
+                        store: body_guard.ite(ns, os),
+                        len: body_guard.ite(nl, ol),
+                        elem: *oe,
+                        alloc,
+                    }
+                }
                 (None, _) => bound.clone(),
                 _ => {
                     return Err(SemanticContractError::Unsupported(
@@ -6529,7 +6571,7 @@ fn split_slots<'ctx>(value: &BV<'ctx>, n: usize) -> Vec<BV<'ctx>> {
 /// a struct-typed field consumes its own leaves into a nested
 /// `Composite` (`pure-i64-composite/v8`).
 fn composite_from_slots<'ctx>(
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
     fields: &[(String, ValueKind)],
     slots: &mut std::slice::Iter<'_, BV<'ctx>>,
     ctx: &'ctx Context,
@@ -6608,6 +6650,99 @@ fn array_read<'ctx>(
     array_in_bounds(ctx, index, len).ite(&selected, &BV::from_u64(ctx, 0, 64))
 }
 
+/// The canonical backing store for `alloc` — the model's shared data
+/// pointer — or the binding's own `store` snapshot when the alloc has
+/// no tracked entry (a `CallShapes::default()` context evaluating a
+/// pre-seeded environment).
+fn canonical_store<'ctx>(
+    call_returns: &CallShapes<'ctx>,
+    alloc: u64,
+    snapshot: &Array<'ctx>,
+) -> Array<'ctx> {
+    call_returns
+        .alloc_stores
+        .borrow()
+        .get(&alloc)
+        .cloned()
+        .unwrap_or_else(|| snapshot.clone())
+}
+
+/// Merge the canonical per-`alloc` stores after a branch: every
+/// backing present before the branch becomes the `ite` of the two
+/// sides' states, regardless of which source names still point at it —
+/// a shadowed binding's array joins no `written` name but still shares
+/// the merged backing. Backings minted inside a branch keep that
+/// side's store (no binding on the other side can reference them).
+fn merge_alloc_stores<'ctx>(
+    call_returns: &CallShapes<'ctx>,
+    cond: &Bool<'ctx>,
+    then_stores: &HashMap<u64, Array<'ctx>>,
+    else_stores: &HashMap<u64, Array<'ctx>>,
+) {
+    let mut merged: HashMap<u64, Array<'ctx>> = else_stores.clone();
+    for (alloc, then_store) in then_stores {
+        merged.insert(
+            *alloc,
+            match else_stores.get(alloc) {
+                Some(else_store) => cond.ite(then_store, else_store),
+                None => then_store.clone(),
+            },
+        );
+    }
+    *call_returns.alloc_stores.borrow_mut() = merged;
+}
+
+/// Seed the canonical store for a merged `Array` binding that the
+/// name-level merge gave a fresh `alloc`: each side's store is that
+/// side's canonical state for its own `alloc` (the binding's `store`
+/// snapshot may predate later indexed writes), merged under `cond`.
+/// A same-`alloc` merge is already covered by the surrounding
+/// per-`alloc` map merge, so re-seeding would only rebuild its term.
+fn seed_merged_alloc<'ctx>(
+    call_returns: &CallShapes<'ctx>,
+    cond: &Bool<'ctx>,
+    merged: &SourceValue<'ctx>,
+    then_side: &SourceValue<'ctx>,
+    else_side: &SourceValue<'ctx>,
+    then_stores: &HashMap<u64, Array<'ctx>>,
+    else_stores: &HashMap<u64, Array<'ctx>>,
+) {
+    let (
+        SourceValue::Array {
+            alloc: then_alloc,
+            store: then_snapshot,
+            ..
+        },
+        SourceValue::Array {
+            alloc: else_alloc,
+            store: else_snapshot,
+            ..
+        },
+        SourceValue::Array {
+            alloc: merged_alloc,
+            ..
+        },
+    ) = (then_side, else_side, merged)
+    else {
+        return;
+    };
+    if merged_alloc == then_alloc || merged_alloc == else_alloc {
+        return;
+    }
+    let then_store = then_stores
+        .get(then_alloc)
+        .cloned()
+        .unwrap_or_else(|| then_snapshot.clone());
+    let else_store = else_stores
+        .get(else_alloc)
+        .cloned()
+        .unwrap_or_else(|| else_snapshot.clone());
+    call_returns
+        .alloc_stores
+        .borrow_mut()
+        .insert(*merged_alloc, cond.ite(&then_store, &else_store));
+}
+
 /// The `result` binding of an atom's (or call site's) result value:
 /// a struct result splits into its field slots, a `bool` result reads
 /// the 0/1 convention, an i64 result binds directly.
@@ -6615,7 +6750,7 @@ fn result_value<'ctx>(
     atom: &str,
     value: &BV<'ctx>,
     ctx: &'ctx Context,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
 ) -> SourceValue<'ctx> {
     if let Some(fields) = call_returns.result_fields(atom) {
         let leaf_count = call_returns.flattened_kinds(fields).len();
@@ -6656,7 +6791,7 @@ fn source_expr<'ctx>(
     written: &mut HashMap<String, SourceValue<'ctx>>,
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<SourceValue<'ctx>> {
     use SourceValue::{Boolean as B, Integer as I, Number as N, Unsigned as U};
     if depth > MAX_DEPTH {
@@ -6983,34 +7118,42 @@ fn source_expr<'ctx>(
             // never reach `then_writes`/`else_writes`.
             let mut then_writes = HashMap::new();
             let mut else_writes = HashMap::new();
-            let (then_value, else_value) = (
-                source_stmt(
-                    then_branch,
-                    ctx,
-                    env,
-                    &Bool::and(ctx, &[guard, &cond]),
-                    definedness,
-                    depth + 1,
-                    assignable,
-                    &mut then_writes,
-                    loop_exits,
-                    call_sites,
-                    call_returns,
-                )?,
-                source_stmt(
-                    else_branch,
-                    ctx,
-                    env,
-                    &Bool::and(ctx, &[guard, &cond.not()]),
-                    definedness,
-                    depth + 1,
-                    assignable,
-                    &mut else_writes,
-                    loop_exits,
-                    call_sites,
-                    call_returns,
-                )?,
-            );
+            // The canonical per-`alloc` stores branch the same way the
+            // name-level writes do: snapshot each side's end state and
+            // merge every shared backing under the condition — a
+            // shadowed binding's array joins no `written` name but
+            // still shares the merged backing.
+            let pre_alloc_stores = call_returns.alloc_stores.borrow().clone();
+            let then_value = source_stmt(
+                then_branch,
+                ctx,
+                env,
+                &Bool::and(ctx, &[guard, &cond]),
+                definedness,
+                depth + 1,
+                assignable,
+                &mut then_writes,
+                loop_exits,
+                call_sites,
+                call_returns,
+            )?;
+            let then_alloc_stores = call_returns.alloc_stores.borrow().clone();
+            *call_returns.alloc_stores.borrow_mut() = pre_alloc_stores;
+            let else_value = source_stmt(
+                else_branch,
+                ctx,
+                env,
+                &Bool::and(ctx, &[guard, &cond.not()]),
+                definedness,
+                depth + 1,
+                assignable,
+                &mut else_writes,
+                loop_exits,
+                call_sites,
+                call_returns,
+            )?;
+            let else_alloc_stores = call_returns.alloc_stores.borrow().clone();
+            merge_alloc_stores(call_returns, &cond, &then_alloc_stores, &else_alloc_stores);
             let names: BTreeSet<&String> = then_writes.keys().chain(else_writes.keys()).collect();
             for name in names {
                 let then_bound = match then_writes.get(name) {
@@ -7027,10 +7170,35 @@ fn source_expr<'ctx>(
                         .cloned()
                         .ok_or(SemanticContractError::Unsupported("source binding"))?,
                 };
-                let merged = merge_source_values(&cond, then_bound, else_bound, call_returns)?;
+                let merged = merge_source_values(
+                    &cond,
+                    then_bound.clone(),
+                    else_bound.clone(),
+                    call_returns,
+                )?;
+                seed_merged_alloc(
+                    call_returns,
+                    &cond,
+                    &merged,
+                    &then_bound,
+                    &else_bound,
+                    &then_alloc_stores,
+                    &else_alloc_stores,
+                );
                 written.insert(name.clone(), merged);
             }
-            merge_source_values(&cond, then_value, else_value, call_returns)?
+            let merged_value =
+                merge_source_values(&cond, then_value.clone(), else_value.clone(), call_returns)?;
+            seed_merged_alloc(
+                call_returns,
+                &cond,
+                &merged_value,
+                &then_value,
+                &else_value,
+                &then_alloc_stores,
+                &else_alloc_stores,
+            );
+            merged_value
         }
         // First-match order, like the emitter's try-chain and
         // `--bitvec-i64` verification: an arm runs under the negation of
@@ -7065,8 +7233,11 @@ fn source_expr<'ctx>(
                 None => Some(target_value.clone().integer()?),
             };
             let mut missed: Vec<Bool> = Vec::new();
-            let mut selected: Vec<(Bool, SourceValue)> = Vec::new();
-            let mut fallback = None;
+            // Each arm also carries the canonical per-`alloc` state its
+            // body produced, so a merged array-valued result seeds its
+            // fresh backing from that arm's actual stores.
+            let mut selected: Vec<(Bool, SourceValue, HashMap<u64, Array>)> = Vec::new();
+            let mut fallback: Option<(SourceValue, HashMap<u64, Array>)> = None;
             for arm in arms {
                 // An arm after a catch-all is never reached: its body is
                 // still encoded (under an unsatisfiable guard, so its
@@ -7213,6 +7384,7 @@ fn source_expr<'ctx>(
                     None => reach.clone(),
                 };
                 let mut arm_writes = HashMap::new();
+                let pre_arm_stores = call_returns.alloc_stores.borrow().clone();
                 let value = source_stmt(
                     &arm.body,
                     ctx,
@@ -7226,6 +7398,7 @@ fn source_expr<'ctx>(
                     call_sites,
                     call_returns,
                 )?;
+                let post_arm_stores = call_returns.alloc_stores.borrow().clone();
                 // Arm writes escape like `if` branch writes: each merges
                 // under the arm-local hit (earlier arms' misses and this
                 // arm's `pattern ∧ guard`), matching the emitter's
@@ -7235,28 +7408,63 @@ fn source_expr<'ctx>(
                     Some(h) => Bool::and(ctx, &[&arm_reach, h]),
                     None => arm_reach.clone(),
                 };
+                // The canonical per-`alloc` stores merge under the same
+                // arm hit — a backing written through a shadowed name
+                // has no `arm_writes` entry but still merges.
+                {
+                    let mut stores = call_returns.alloc_stores.borrow_mut();
+                    for (alloc, store) in stores.iter_mut() {
+                        if let Some(pre) = pre_arm_stores.get(alloc) {
+                            *store = arm_hit.ite(store, pre);
+                        }
+                    }
+                }
                 for (name, bound) in arm_writes {
                     let prior = written
                         .get(&name)
                         .cloned()
                         .or_else(|| env.get(&name).cloned())
                         .ok_or(SemanticContractError::Unsupported("source binding"))?;
-                    let merged = merge_source_values(&arm_hit, bound, prior, call_returns)?;
+                    let merged =
+                        merge_source_values(&arm_hit, bound.clone(), prior.clone(), call_returns)?;
+                    seed_merged_alloc(
+                        call_returns,
+                        &arm_hit,
+                        &merged,
+                        &bound,
+                        &prior,
+                        &post_arm_stores,
+                        &pre_arm_stores,
+                    );
                     written.insert(name, merged);
                 }
                 if let Some(cond) = hit {
-                    selected.push((cond, value));
+                    selected.push((cond, value, post_arm_stores));
                 } else if fallback.is_none() {
-                    fallback = Some(value);
+                    fallback = Some((value, post_arm_stores));
                 }
             }
-            let Some(mut result) = fallback else {
+            let Some((mut result, _)) = fallback else {
                 return Err(SemanticContractError::Unsupported(
                     "match without a catch-all arm",
                 ));
             };
-            for (cond, value) in selected.into_iter().rev() {
-                result = merge_source_values(&cond, value, result, call_returns)?;
+            for (cond, value, value_stores) in selected.into_iter().rev() {
+                let merged =
+                    merge_source_values(&cond, value.clone(), result.clone(), call_returns)?;
+                // The prior side's canonical state is the running map —
+                // every earlier fold already merged into it.
+                let prior_stores = call_returns.alloc_stores.borrow().clone();
+                seed_merged_alloc(
+                    call_returns,
+                    &cond,
+                    &merged,
+                    &value,
+                    &result,
+                    &value_stores,
+                    &prior_stores,
+                );
+                result = merged;
             }
             result
         }
@@ -7295,6 +7503,13 @@ fn source_expr<'ctx>(
                 };
                 store = store.store(&BV::from_u64(ctx, i as u64, 64), &cell);
             }
+            let alloc = call_returns.fresh_array_alloc();
+            // The canonical backing-store entry: every binding on this
+            // `alloc` reads and writes through `alloc_stores`.
+            call_returns
+                .alloc_stores
+                .borrow_mut()
+                .insert(alloc, store.clone());
             SourceValue::Array {
                 store,
                 len: BV::from_u64(ctx, elems.len() as u64, 64),
@@ -7303,7 +7518,7 @@ fn source_expr<'ctx>(
                 } else {
                     ScalarKind::I64
                 },
-                alloc: call_returns.fresh_array_alloc(),
+                alloc,
             }
         }
         // An indexed read `a[i]`: the in-bounds `select` or the merged
@@ -7311,7 +7526,10 @@ fn source_expr<'ctx>(
         // matching the emitted bounds-check + `phi(loaded, 0)`.
         Expr::ArrayAccess(name, index) => {
             let Some(SourceValue::Array {
-                store, len, elem, ..
+                store,
+                len,
+                elem,
+                alloc,
             }) = env.get(name.as_str())
             else {
                 return Err(SemanticContractError::Unsupported(
@@ -7332,7 +7550,14 @@ fn source_expr<'ctx>(
                 call_returns,
             )?
             .integer()?;
-            let read = array_read(ctx, store, len, &index);
+            // The canonical store carries every indexed write to this
+            // backing — including ones a shadowed sibling wrote.
+            let read = array_read(
+                ctx,
+                &canonical_store(call_returns, *alloc, store),
+                len,
+                &index,
+            );
             match elem {
                 ScalarKind::U64 => U(read),
                 _ => I(read),
