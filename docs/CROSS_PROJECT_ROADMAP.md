@@ -4755,6 +4755,35 @@ and `recovery-eval` recovers the record's declared
 pin reports `evidence_failed`. Steps chain through `depends_on`, so a
 failed keygen skips the lane rather than running on stale artifacts.
 
+### Agent producer signing + audit manifest-map dispatch (#920, #921)
+
+`python -m agent signature-sign` (#921) emits the same closed
+`mumei.producer-signature/v1` envelope as Core `mumei evidence sign` —
+sha256 over the record's raw bytes, ed25519 over the digest's
+lowercase-hex ASCII, the secret key file held to exactly 64 lowercase
+hex bytes and never printed — so an agent-side producer is
+interchangeable with the Core producer downstream. `signature-verify`
+and `recovery-eval` accept either producer's envelope, and a
+`producer_signature_recovery`-style lane works end to end without
+Core on the sign side.
+
+With #920, `audit --enable-summary-attempts --summaries-manifest-map`
+dispatches each mapped unit through `<route>-reuse-attempt`, so the
+manifest replay now runs inside the attempt lifecycle (declared
+attempt, bounded plan, observed acceptance) instead of the bare reuse
+route. An unreadable, malformed or rejected prior manifest still
+falls back to the plain `-attempt` route with
+`reuse_status: "stale_manifest"`.
+
+This wave also closed the implemented design memos — the landed code
+now serves as their decision record: mumei-agent #884 (carrier ABI:
+u64/f64/Str all landed), #885 (C09 bounded stack memory + `opt-o2`
+profiles), #893 (audit summary integration, all stages), #894
+(record freshness), #897 (check recovery), #900
+(`--summary-aware-calls` in all four languages), #886 (producer
+signature envelope across every layer), and mumei #1118 (Str leaf
+Option B).
+
 
 ## No-`.mm` front door and V1 order
 
