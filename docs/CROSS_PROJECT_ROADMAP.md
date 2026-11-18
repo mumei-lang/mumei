@@ -4394,6 +4394,23 @@ exactly once; an empty manifest still counts as declared
 manifest read at `MAX_MANIFEST_BYTES + 1`, reports `exc.strerror`
 only, and the drift recheck catches `(OSError, ValueError)`.
 
+### Wave 3 summary-aware call modeling, TypeScript port (mumei-agent)
+
+[mumei-agent#903](https://github.com/mumei-lang/mumei-agent/pull/903)
+ports the same fold to `ts-summaries`: an opaque call matching a
+declared manifest entry folds `return_dependencies` over the
+actuals; local-bound names and imported bindings keep their opaque
+union. Matching is exact then one-token prefix on the recorded call
+text; gates are `not void`, `available`, arity and
+`max(deps, default=-1) < len(actual)`. The advisory counters are
+call-site-span-deduped sets, so a callee already summarized inline
+is counted exactly once while a callee re-derived after a
+depth-limited cache hit still counts the calls the first walk
+never reached. An empty manifest still counts as declared
+(`_declared_set is not None`), the attempt fingerprint bounds the
+manifest read at `MAX_MANIFEST_BYTES + 1`, reports `exc.strerror`
+only, and the drift recheck catches `(OSError, ValueError)`.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
