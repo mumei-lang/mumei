@@ -114,6 +114,15 @@ pub const PURE_I64_COMPOSITE_PROFILE_V7: &str = "mumei.pure-i64-composite/v7";
 /// the parser does not even produce `q.inner.a = v` — and generic or
 /// recursive declarations fail closed (`pure-i64-composite/v8`).
 pub const PURE_I64_COMPOSITE_PROFILE_V8: &str = "mumei.pure-i64-composite/v8";
+/// v9 admits generic `struct` declarations: each concrete
+/// instantiation used in the module monomorphizes to an ordinary
+/// non-generic declaration before admission, so instantiated fields
+/// face the same leaf, nesting, recursion and shape gates a
+/// hand-written declaration would. Generic `enum` or `atom`
+/// declarations stay rejected, and instantiation is bounded so a
+/// self-deepening type argument (`B<A<T>>`) cannot expand forever
+/// (`pure-i64-composite/v9`).
+pub const PURE_I64_COMPOSITE_PROFILE_V9: &str = "mumei.pure-i64-composite/v9";
 
 /// How much of the refined-scalar declaration fragment a gate admits:
 /// `Reject` keeps `Item::TypeDef` out of the item vocabulary entirely,
@@ -136,7 +145,10 @@ pub const PURE_I64_COMPOSITE_PROFILE_V8: &str = "mumei.pure-i64-composite/v8";
 /// `if`/`match` expressions producing struct or enum values
 /// (`pure-i64-composite/v7`). `CompositeV8` additionally admits
 /// struct-valued fields — a non-generic, non-recursive struct nested
-/// inside another (`pure-i64-composite/v8`). A
+/// inside another (`pure-i64-composite/v8`). `CompositeV9`
+/// additionally admits generic `struct` declarations whose concrete
+/// instantiations monomorphize to the admitted fragment
+/// (`pure-i64-composite/v9`). A
 /// pinned record names which level produced it, so a
 /// rechecker re-derives under the record's own admission — never a
 /// wider one.
@@ -153,6 +165,7 @@ pub enum RefinedAdmission {
     CompositeV6,
     CompositeV7,
     CompositeV8,
+    CompositeV9,
 }
 
 impl RefinedAdmission {
@@ -204,6 +217,13 @@ impl RefinedAdmission {
     /// (`pure-i64-composite/v8`).
     pub fn admits_nested_structs(self) -> bool {
         self >= Self::CompositeV8
+    }
+
+    /// Whether generic `struct` declarations — instantiated by
+    /// monomorphization before the profile gates run
+    /// (`pure-i64-composite/v9`).
+    pub fn admits_generic_structs(self) -> bool {
+        self >= Self::CompositeV9
     }
 }
 
@@ -310,7 +330,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _, _, _, _) =
+    let (items, refined, structs, _, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -331,6 +351,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         false,
         false,
@@ -357,7 +378,7 @@ pub fn extract_pure_i64_module_contracts(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, enums, struct_values, field_writes, enum_values, merged) =
+    let (items, refined, structs, enums, struct_values, field_writes, enum_values, merged, generic) =
         admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
@@ -395,6 +416,7 @@ pub fn extract_pure_i64_module_contracts(
                 field_writes,
                 enum_values,
                 merged,
+                generic,
                 &cert_env,
             )),
             // Type and struct declarations carry no per-atom contract;
@@ -412,8 +434,17 @@ pub fn module_source_profile(
     source: &str,
     admission: RefinedAdmission,
 ) -> Result<&'static str, SemanticContractError> {
-    let (_items, refined, structs, enums, struct_values, field_writes, enum_values, merged) =
-        admit_pure_i64_atoms(source, true, admission)?;
+    let (
+        _items,
+        refined,
+        structs,
+        enums,
+        struct_values,
+        field_writes,
+        enum_values,
+        merged,
+        generic,
+    ) = admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
         true,
         &refined,
@@ -423,6 +454,7 @@ pub fn module_source_profile(
         field_writes,
         enum_values,
         merged,
+        generic,
     ))
 }
 
@@ -445,6 +477,7 @@ type AdmittedModule = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -474,6 +507,34 @@ fn admit_pure_i64_atoms(
         return Err(SemanticContractError::Unsupported(
             "expected at least one atom",
         ));
+    }
+    // v9: generic `struct` declarations are admitted by instantiation —
+    // every concrete use is monomorphized into an ordinary declaration
+    // before the profile gates see it. Generic atoms and enums stay
+    // closed: there is no contract- or variant-instantiation model for
+    // them, so they are rejected up front either way.
+    for item in &items {
+        match item {
+            Item::Atom(atom) if !atom.type_params.is_empty() => {
+                return Err(SemanticContractError::Unsupported("generic atoms"));
+            }
+            Item::EnumDef(edef) if !edef.type_params.is_empty() => {
+                return Err(SemanticContractError::Unsupported("generic enums"));
+            }
+            _ => {}
+        }
+    }
+    let generic_structs_declared = items
+        .iter()
+        .any(|item| matches!(item, Item::StructDef(def) if !def.type_params.is_empty()));
+    let mut items = items;
+    if generic_structs_declared {
+        if !admission.admits_generic_structs() {
+            return Err(SemanticContractError::Unsupported(
+                "generic struct declarations",
+            ));
+        }
+        items = monomorphize_generic_structs(items)?;
     }
     // Sibling atoms are potential call targets: each must independently
     // satisfy the atom profile. A call itself is modeled as an
@@ -581,7 +642,78 @@ fn admit_pure_i64_atoms(
         field_writes_used.get(),
         enum_values_used.get(),
         merged_composites_used.get(),
+        generic_structs_declared,
     ))
+}
+
+/// Instantiate every generic `struct` declaration a module uses, as a
+/// fixpoint: a generated instantiation can itself name still-new
+/// instances (`struct Box<T> { p: Pair<T> }`). The instance bound keeps
+/// `L<T> { n: L<L<T>> }`-style expansion from running away. Only call
+/// sites under `RefinedAdmission::CompositeV9` reach this — callers
+/// below it reject a generic declaration before instantiating.
+pub fn monomorphize_generic_structs(items: Vec<Item>) -> Result<Vec<Item>, SemanticContractError> {
+    let mut seen = BTreeSet::new();
+    for item in &items {
+        if let Item::StructDef(def) = item {
+            if !def.type_params.is_empty() && !seen.insert(def.name.clone()) {
+                return Err(SemanticContractError::Unsupported(
+                    "duplicate generic struct name",
+                ));
+            }
+        }
+    }
+    const MAX_GENERIC_STRUCT_INSTANCES: usize = 64;
+    // An instance's display name encodes its whole type-argument tree, so
+    // `L<T> { n: L<(T,T)> }`-style recursion doubles the name each round:
+    // bound its length as well as the instance count, or the fixpoint
+    // exhausts memory before reaching the count bound.
+    const MAX_GENERIC_INSTANCE_NAME_LEN: usize = 512;
+    let mut mono = crate::ast::Monomorphizer::new();
+    let mut items = items;
+    let mut produced = std::collections::HashSet::new();
+    loop {
+        mono.collect(&items);
+        if mono.instances().len() > MAX_GENERIC_STRUCT_INSTANCES {
+            return Err(SemanticContractError::Unsupported(
+                "generic struct instantiation bound exceeded",
+            ));
+        }
+        if mono
+            .instances()
+            .iter()
+            .any(|name| name.len() > MAX_GENERIC_INSTANCE_NAME_LEN)
+        {
+            return Err(SemanticContractError::Unsupported(
+                "generic struct instantiation type too large",
+            ));
+        }
+        // `monomorphize` re-appends every collected instance each
+        // call, so previously generated declarations are stripped
+        // from the input first — termination is driven by the
+        // instance set reaching a fixpoint, not by item count.
+        let fresh: Vec<String> = mono
+            .instances()
+            .iter()
+            .filter(|name| !produced.contains(*name))
+            .cloned()
+            .collect();
+        if fresh.is_empty() {
+            break;
+        }
+        let rest: Vec<Item> = items
+            .into_iter()
+            .filter(|item| !matches!(item, Item::StructDef(def) if produced.contains(&def.name)))
+            .collect();
+        items = mono.monomorphize(&rest, None);
+        produced.extend(fresh);
+    }
+    if !mono.body_parse_failures.is_empty() {
+        return Err(SemanticContractError::Unsupported(
+            "generic struct body could not be monomorphized",
+        ));
+    }
+    Ok(items)
 }
 
 /// Build the `SemanticContract` for one already-admitted atom — binders,
@@ -623,9 +755,15 @@ fn fragment_profile(
     field_writes: bool,
     enum_values: bool,
     merged_composites: bool,
+    generic_structs: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if generic_structs {
+        // A generic declaration is only ever admitted under v9: the
+        // flag was set before monomorphization, so the instantiated
+        // module pins v9 even when no instance used a lower feature.
+        PURE_I64_COMPOSITE_PROFILE_V9
     } else if has_nested_fields(structs) {
         // A nested field is only ever admitted under v8, so a module
         // containing one pins it — even when no atom reads the field.
@@ -674,6 +812,7 @@ fn atom_contract(
     field_writes: bool,
     enum_values: bool,
     merged_composites: bool,
+    generic_structs: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
@@ -686,6 +825,7 @@ fn atom_contract(
         field_writes,
         enum_values,
         merged_composites,
+        generic_structs,
     );
     let result_fields = atom
         .return_type
@@ -1113,15 +1253,19 @@ fn declared_param_kind(
     plain_param(param, name).then_some(kind)
 }
 
-/// An owned, by-value parameter whose type reference is exactly the
-/// declared name — no type arguments, effects, capabilities, borrows or
-/// function contracts.
+/// An owned, by-value parameter whose type reference names exactly the
+/// declared (possibly instantiated) type — no effects, capabilities,
+/// borrows or function contracts. Type arguments are part of the
+/// display name, so `p: Pair<i64>` matches the `Pair<i64>` instance
+/// declaration while `p: S<undeclared>` still cannot name a declared
+/// type.
 fn plain_param(param: &crate::parser::ast::Param, name: &str) -> bool {
     !(param.type_ref.as_ref().is_some_and(|ty| {
-        ty.name != name
-            || !ty.type_args.is_empty()
-            || ty.effect_set.is_some()
-            || ty.capability.is_some()
+        // Instantiated types carry the concrete display name
+        // (`Pair<i64>`) — matching `ty.display_name()` covers both
+        // plain and instantiated uses while still rejecting an
+        // effect- or capability-annotated reference.
+        ty.display_name() != name || ty.effect_set.is_some() || ty.capability.is_some()
     }) || param.consume
         || param.is_ref
         || param.is_ref_mut
@@ -2204,8 +2348,10 @@ fn build_struct_env(
                 _ => None,
             };
             let Some(shape) = shape.filter(|_| {
-                ty.name == field.type_name
-                    && ty.type_args.is_empty()
+                // `field.type_name` is the declared display name, so an
+                // instantiated leaf (`inner: Pair<i64>`) matches by the
+                // same convention `plain_param` uses.
+                ty.display_name() == field.type_name
                     && ty.effect_set.is_none()
                     && ty.capability.is_none()
             }) else {
@@ -4028,7 +4174,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _, _, _) =
+    let (items, refined, structs, enums, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -8479,6 +8625,270 @@ mod tests {
             module_source_profile(&flat, RefinedAdmission::CompositeV8).unwrap(),
             PURE_I64_COMPOSITE_PROFILE
         );
+    }
+
+    #[test]
+    fn composite_v9_admits_generic_structs() {
+        let v9 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV9)
+        };
+        let outcomes =
+            |source: &str| refined_module_outcomes_admission(source, RefinedAdmission::CompositeV9);
+        let decl = "struct Pair<T> { a: T, b: T }\nstruct Box<T> { inner: T }";
+        let module = |piece: &str| format!("{decl}\n{piece}\n{MAIN0}");
+        for piece in [
+            // An instantiated parameter type and a literal with an
+            // explicit `Pair<i64>{…}` instantiation.
+            "atom sum(p: Pair<i64>) -> i64 requires: p.a >= 0 && p.b >= 0 && p.a + p.b <= 100; ensures: result == p.a + p.b; body: { p.a + p.b };",
+            "atom mk(a: i64) -> Pair<i64> requires: a >= 0; ensures: result.a == a && result.b == a; body: { Pair<i64>{a: a, b: a} };",
+        ] {
+            let source = module(piece);
+            assert!(
+                v9(&source)
+                    .unwrap()
+                    .iter()
+                    .all(|c| c.profile == PURE_I64_COMPOSITE_PROFILE_V9),
+                "{piece}"
+            );
+            assert!(
+                outcomes(&source)
+                    .iter()
+                    .all(|result| *result == z3::SatResult::Unsat),
+                "{piece}"
+            );
+        }
+        // Admission (without the obligation encoder) covers the wider
+        // instantiation shapes — a `bool` leaf, an instantiation nested
+        // in another generic's field type, and a refined-alias leaf.
+        for piece in [
+            "atom flip(p: Pair<bool>) -> Pair<bool> requires: true; ensures: true; body: { p };",
+            "atom boxed(p: Pair<i64>) -> Box<Pair<i64>> requires: true; ensures: true; body: { Box<Pair<i64>>{inner: p} };",
+            "atom port_pair(p: Pair<Port>) -> Pair<Port> requires: true; ensures: true; body: { p };\ntype Port = i64 where v >= 1 && v <= 65535;",
+        ] {
+            let source = module(piece);
+            assert!(
+                v9(&source)
+                    .unwrap()
+                    .iter()
+                    .all(|c| c.profile == PURE_I64_COMPOSITE_PROFILE_V9),
+                "{piece}"
+            );
+        }
+        let source = module(
+            "atom sum(p: Pair<i64>) -> i64 requires: p.a >= 0 && p.b >= 0 && p.a + p.b <= 100; ensures: result == p.a + p.b; body: { p.a + p.b };",
+        );
+        assert_eq!(
+            module_source_profile(&source, RefinedAdmission::CompositeV9).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V9
+        );
+        // A wrong postcondition refutes, not vacuously passes.
+        let wrong = source.replace(
+            "ensures: result == p.a + p.b;",
+            "ensures: result == p.a + p.b + 1;",
+        );
+        assert!(outcomes(&wrong).contains(&z3::SatResult::Sat));
+        // Narrower admissions keep generic declarations out.
+        for admission in [
+            RefinedAdmission::Reject,
+            RefinedAdmission::V1,
+            RefinedAdmission::V2,
+            RefinedAdmission::Composite,
+            RefinedAdmission::CompositeV2,
+            RefinedAdmission::CompositeV3,
+            RefinedAdmission::CompositeV4,
+            RefinedAdmission::CompositeV5,
+            RefinedAdmission::CompositeV6,
+            RefinedAdmission::CompositeV7,
+            RefinedAdmission::CompositeV8,
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(&source, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+        }
+        // A module without generic declarations keeps the earlier
+        // profile — v9 is opt-in by declaration shape.
+        let flat = format!(
+            "struct P {{ x: i64, y: i64 }}\natom read(p: P) -> i64 requires: p.x >= 0; ensures: result >= 0; body: {{ p.x }};\n{MAIN0}"
+        );
+        assert_eq!(
+            module_source_profile(&flat, RefinedAdmission::CompositeV9).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE
+        );
+    }
+
+    #[test]
+    fn composite_v9_bounds_type_argument_explosion() {
+        // `L<T> { n: L<(T,T)> }` doubles the type-argument tree every
+        // instantiation round — well before the 64-instance count bound
+        // the name-length bound must reject it, not run out of memory.
+        let items = crate::parser::parse_module(
+            "struct L<T> { n: L<(T,T)> }\n             atom f(p: L<i64>) -> i64 requires: true; ensures: true; body: { 0 };",
+        );
+        let err = monomorphize_generic_structs(items).unwrap_err();
+        assert!(
+            matches!(err, SemanticContractError::Unsupported(msg) if msg.contains("too large")),
+            "{err:?}"
+        );
+        // Same through the module gate.
+        assert!(extract_pure_i64_module_contracts(
+            "struct L<T> { n: L<(T,T)> }\n             atom f(p: L<i64>) -> i64 requires: true; ensures: true; body: { 0 };\n             atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+            "m.mm",
+            None,
+            RefinedAdmission::CompositeV9,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn composite_v9_instantiates_only_concrete_nested_arguments() {
+        // `Outer<T> { inner: Box<Pair<T>> }`: the `T` inside the generic
+        // declaration is unresolved, so no phantom `Box<Pair<T>>`
+        // declaration is generated — only the concrete chain.
+        let items = crate::parser::parse_module(
+            "struct Pair<T> { a: T, b: T }\n             struct Box<T> { inner: T }\n             struct Outer<T> { inner: Box<Pair<T>> }\n             atom f(o: Outer<i64>) -> i64 requires: true; ensures: true; body: { o.inner.inner.a };\n             atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+        );
+        let mono = monomorphize_generic_structs(items).unwrap();
+        let names: Vec<&str> = mono
+            .iter()
+            .filter_map(|item| match item {
+                Item::StructDef(def) => Some(def.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.contains(&"Outer<i64>"), "{names:?}");
+        assert!(names.contains(&"Box<Pair<i64>>"), "{names:?}");
+        assert!(names.contains(&"Pair<i64>"), "{names:?}");
+        assert!(
+            !names.iter().any(|name| name.contains('T')),
+            "no unresolved declaration: {names:?}"
+        );
+        // A one-letter concrete struct used as a type argument is not a
+        // type parameter: `Box<I>` instantiates like `Box<i64>`.
+        let items = crate::parser::parse_module(
+            "struct I { v: i64 }\n             struct Box<T> { inner: T }\n             atom f(b: Box<I>) -> i64 requires: true; ensures: true; body: { b.inner.v };\n             atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+        );
+        let mono = monomorphize_generic_structs(items).unwrap();
+        let names: Vec<&str> = mono
+            .iter()
+            .filter_map(|item| match item {
+                Item::StructDef(def) => Some(def.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.contains(&"Box<I>"), "{names:?}");
+    }
+
+    #[test]
+    fn composite_v9_multi_param_structs_and_invariant_commas() {
+        let v9 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV9)
+        };
+        // Commas inside type arguments — `Duo<i64, bool>` — must not
+        // split a parameter or a struct-field declaration in two.
+        let source = format!(
+            "struct Duo<T, U> {{ first: T, second: U }}\n             struct Wrap {{ pair: Duo<i64, bool>, n: i64 }}\n             atom get(p: Duo<i64, bool>) -> i64 requires: p.first >= 0; ensures: result == p.first; body: {{ p.first }};\n             atom flag(w: Wrap) -> bool requires: true; ensures: result == w.pair.second; body: {{ w.pair.second }};\n             {{MAIN0}}"
+        );
+        let source = source.replace("{MAIN0}", MAIN0);
+        assert!(v9(&source).is_ok(), "{}", source);
+        // Splitting itself: the comma inside `Duo<i64, bool>` stays in
+        // the field, while a comparison inside an `invariant` clause
+        // still ends at the following comma — `<` there is an operator,
+        // never a bracket.
+        let items = crate::parser::parse_module(
+            "struct Duo<T, U> { first: T, second: U }\n\
+             struct R { lo: i64, hi: i64, invariant: self.lo < self.hi, n: i64, pair: Duo<i64, bool> }\n\
+             struct W { x: i64 where v < 10, y: i64 where v <= 20, z: Duo<i64, bool> where v.first >= 0 }\n\
+             atom g(p: Duo<i64, bool>, q: i64) -> i64 requires: true; ensures: true; body: { 0 };",
+        );
+        let r = items
+            .iter()
+            .find_map(|item| match item {
+                Item::StructDef(def) if def.name == "R" => Some(def),
+                _ => None,
+            })
+            .expect("struct R parsed");
+        assert_eq!(r.invariants.len(), 1, "{r:?}");
+        let field_names: Vec<&str> = r.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(field_names, ["lo", "hi", "n", "pair"], "{r:?}");
+        let pair = r
+            .fields
+            .iter()
+            .find(|f| f.name == "pair")
+            .expect("pair field");
+        assert_eq!(pair.type_name, "Duo<i64, bool>");
+        // A `<`/`<=` inside a `where` constraint is a comparison, not a
+        // type-argument bracket: the following fields must still split.
+        let w = items
+            .iter()
+            .find_map(|item| match item {
+                Item::StructDef(def) if def.name == "W" => Some(def),
+                _ => None,
+            })
+            .expect("struct W parsed");
+        let w_names: Vec<&str> = w.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(w_names, ["x", "y", "z"], "{w:?}");
+        let g = items
+            .iter()
+            .find_map(|item| match item {
+                Item::Atom(atom) if atom.name == "g" => Some(atom),
+                _ => None,
+            })
+            .expect("atom g parsed");
+        assert_eq!(g.params.len(), 2, "{g:?}");
+        assert_eq!(g.params[0].type_name.as_deref(), Some("Duo<i64, bool>"));
+    }
+
+    #[test]
+    fn composite_v9_rejects_generic_shapes_outside_the_fragment() {
+        let v9 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV9)
+        };
+        // Generic atoms and enums stay closed: instantiation models
+        // struct fields only, never a contract or a variant.
+        assert!(v9(&format!(
+            "atom id<T>(x: T) -> T requires: true; ensures: true; body: {{ x }};\n{MAIN0}"
+        ))
+        .is_err());
+        assert!(v9(&format!(
+            "enum Opt<T> {{ Some(T), None }}\natom f() -> i64 requires: true; ensures: true; body: {{ 0 }};\n{MAIN0}"
+        ))
+        .is_err());
+        // An enum type argument is no admitted leaf kind.
+        assert!(v9(&format!(
+            "enum Rgb {{ R, G, B }}\nstruct Pair<T> {{ a: T, b: T }}\natom f(p: Pair<Rgb>) -> i64 requires: true; ensures: true; body: {{ 0 }};\n{MAIN0}"
+        ))
+        .is_err());
+        // Neither is a float type argument.
+        assert!(v9(&format!(
+            "struct Pair<T> {{ a: T, b: T }}\natom f(p: Pair<f64>) -> i64 requires: true; ensures: true; body: {{ 0 }};\n{MAIN0}"
+        ))
+        .is_err());
+        // An instance with no generic declaration stays unresolved.
+        assert!(v9(&format!(
+            "struct Pair<T> {{ a: T, b: T }}\natom f(p: Triple<i64>) -> i64 requires: true; ensures: true; body: {{ 0 }};\n{MAIN0}"
+        ))
+        .is_err());
+        // Two generic declarations of one name are one declaration too
+        // many.
+        assert!(v9(&format!(
+            "struct Pair<T> {{ a: T }}\nstruct Pair<T> {{ a: T }}\natom f() -> i64 requires: true; ensures: true; body: {{ 0 }};\n{MAIN0}"
+        ))
+        .is_err());
+        // Self-expanding instantiation `L<T> { n: L<L<T>> }` hits the
+        // instance bound instead of unfolding forever.
+        assert!(v9(&format!(
+            "struct L<T> {{ n: L<L<T>> }}\natom f(p: L<i64>) -> i64 requires: true; ensures: true; body: {{ 0 }};\n{MAIN0}"
+        ))
+        .is_err());
+        // A literal naming an instance that was never used stays
+        // unknown — `Box<i64>` is instantiated here on use, so this
+        // one is fine only when declared… no: `Other<i64>` has no
+        // generic declaration at all.
+        assert!(v9(&format!(
+            "struct Pair<T> {{ a: T, b: T }}\natom f() -> i64 requires: true; ensures: true; body: {{ let x = Other<i64>{{a: 1, b: 2}}; 0 }};\n{MAIN0}"
+        ))
+        .is_err());
     }
 
     #[test]

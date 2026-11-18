@@ -79,6 +79,12 @@ pub const MODULE_PROFILE_V10: &str = "mumei.native-pure-i64-module-linux-x86_64/
 /// (`mumei.pure-i64-composite/v8`). v1–v10 records keep their own
 /// gates.
 pub const MODULE_PROFILE_V11: &str = "mumei.native-pure-i64-module-linux-x86_64/v11";
+/// Module profile v12: the composite gate additionally admits
+/// generic `struct` declarations — every concrete use is
+/// instantiated by monomorphization before verification
+/// (`mumei.pure-i64-composite/v9`). v1–v11 records keep their own
+/// gates.
+pub const MODULE_PROFILE_V12: &str = "mumei.native-pure-i64-module-linux-x86_64/v12";
 pub const MODULE_SCOPE: &str =
     "identity_consistency_only/no_authenticity_or_artifact_semantic_proof";
 pub const MODULE_RECHECK_PROFILE: &str = "mumei.native-module-source-recheck/v1";
@@ -104,6 +110,7 @@ pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, Bundl
         MODULE_PROFILE_V9 => Ok(RefinedAdmission::CompositeV6),
         MODULE_PROFILE_V10 => Ok(RefinedAdmission::CompositeV7),
         MODULE_PROFILE_V11 => Ok(RefinedAdmission::CompositeV8),
+        MODULE_PROFILE_V12 => Ok(RefinedAdmission::CompositeV9),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -145,6 +152,9 @@ pub const MULTIFILE_PROFILE_V10: &str = "mumei.native-pure-i64-multifile-linux-x
 /// Multifile v11: the nested-struct-field widening of
 /// `MODULE_PROFILE_V11`.
 pub const MULTIFILE_PROFILE_V11: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v11";
+/// Multifile v12: the generic-struct-declaration widening of
+/// `MODULE_PROFILE_V12`.
+pub const MULTIFILE_PROFILE_V12: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v12";
 pub const MULTIFILE_RECHECK_PROFILE: &str = "mumei.native-multifile-source-recheck/v1";
 
 pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, BundleError> {
@@ -160,6 +170,7 @@ pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, Bu
         MULTIFILE_PROFILE_V9 => Ok(RefinedAdmission::CompositeV6),
         MULTIFILE_PROFILE_V10 => Ok(RefinedAdmission::CompositeV7),
         MULTIFILE_PROFILE_V11 => Ok(RefinedAdmission::CompositeV8),
+        MULTIFILE_PROFILE_V12 => Ok(RefinedAdmission::CompositeV9),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
 }
@@ -650,6 +661,16 @@ pub fn prepare_module_source(
             .map_err(|_| BundleError("unsupported or invalid module source"))?;
     let mut items =
         parser::parse_module_checked(source).map_err(|_| BundleError("invalid source"))?;
+    // Under composite v9 the admission above instantiated every generic
+    // struct declaration — the emit inputs must see the same concrete
+    // declarations the verifier admitted.
+    if items
+        .iter()
+        .any(|item| matches!(item, parser::Item::StructDef(def) if !def.type_params.is_empty()))
+    {
+        items = semantic_contract::monomorphize_generic_structs(items)
+            .map_err(|_| BundleError("invalid source"))?;
+    }
     let mut atoms = Vec::with_capacity(items.len());
     let mut types = Vec::new();
     let mut structs = Vec::new();
@@ -1106,6 +1127,7 @@ pub fn load_pinned_module_record(
             MODULE_PROFILE_V9,
             MODULE_PROFILE_V10,
             MODULE_PROFILE_V11,
+            MODULE_PROFILE_V12,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE
@@ -1171,6 +1193,7 @@ pub fn load_pinned_multifile_record(
             MULTIFILE_PROFILE_V9,
             MULTIFILE_PROFILE_V10,
             MULTIFILE_PROFILE_V11,
+            MULTIFILE_PROFILE_V12,
         ]
         .contains(&record.profile.as_str())
         || record.scope != MODULE_SCOPE

@@ -772,9 +772,29 @@ fn parse_ident_continuation(ctx: &mut ParseContext, name: String) -> Expr {
             // (`apply<i64, Network>`), matching the monomorphizer's
             // `parse_type_ref(call_name)` convention and the atom
             // registry's `display_name()` keys.
-            if let Some(type_args) = parse_explicit_type_args(ctx) {
+            if let Some(type_args) = parse_explicit_type_args(ctx, &Token::LParen) {
                 let callee = TypeRef::generic(&name, type_args).display_name();
                 Expr::Call(callee, parse_call_args(ctx))
+            } else if let Some(type_args) = parse_explicit_type_args(ctx, &Token::LBrace) {
+                // `name<T>{f: v, …}`: an explicitly instantiated
+                // struct literal, matching the monomorphized
+                // declaration's `display_name()` key.
+                ctx.advance(); // {
+                let type_name = TypeRef::generic(&name, type_args).display_name();
+                let mut fields = Vec::new();
+                while ctx.peek() != &Token::RBrace && ctx.peek() != &Token::Eof {
+                    let field_name = ctx.expect_ident();
+                    if ctx.peek() == &Token::Colon {
+                        ctx.advance();
+                    }
+                    let value = parse_expr(ctx, 0);
+                    fields.push((field_name, value));
+                    if ctx.peek() == &Token::Comma {
+                        ctx.advance();
+                    }
+                }
+                ctx.expect(Token::RBrace);
+                Expr::StructInit { type_name, fields }
             } else {
                 Expr::Variable(name)
             }
@@ -789,7 +809,7 @@ fn parse_ident_continuation(ctx: &mut ParseContext, name: String) -> Expr {
 /// with the cursor on the argument list's `(` when the shape matches,
 /// else rewinds the stream — including any `>>` splits
 /// `parse_type_ref_from_ctx` spliced in — so `<` stays a comparison.
-fn parse_explicit_type_args(ctx: &mut ParseContext) -> Option<Vec<TypeRef>> {
+fn parse_explicit_type_args(ctx: &mut ParseContext, follower: &Token) -> Option<Vec<TypeRef>> {
     let snapshot = ctx.snapshot();
     ctx.advance(); // consume '<'
     let mut type_args = Vec::new();
@@ -812,9 +832,11 @@ fn parse_explicit_type_args(ctx: &mut ParseContext) -> Option<Vec<TypeRef>> {
             _ => break false,
         }
     };
-    // Only `>` directly followed by `(` makes this a call: `a < b > c`,
-    // `f<T> { … }` and `a < b > (x)`-less shapes all stay comparisons.
-    if !closed || ctx.peek() != &Token::LParen {
+    // Only `>` directly followed by the `follower` token (`(` for a
+    // call, `{` for a struct literal) commits: `a < b > c`,
+    // `f<T> { … }` when the follower is `(`, and `a < b > (x)`-less
+    // shapes all stay comparisons.
+    if !closed || ctx.peek() != follower {
         ctx.rewind(snapshot);
         return None;
     }

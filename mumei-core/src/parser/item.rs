@@ -362,6 +362,12 @@ fn split_variants(input: &str) -> Vec<String> {
 fn split_params(input: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut depth = 0;
+    // Angle brackets only appear in type-argument lists inside a
+    // parameter (`p: Duo<i64, bool>`) — parameter entries carry no
+    // expressions, so `<`/`>` never mean comparison here. The `>`
+    // decrement saturates at 0 so a `->` in a function type
+    // (`atom_ref(i64) -> i64`) cannot push the depth negative.
+    let mut angle_depth = 0i32;
     let mut current = String::new();
     for c in input.chars() {
         match c {
@@ -373,7 +379,17 @@ fn split_params(input: &str) -> Vec<String> {
                 depth -= 1;
                 current.push(c);
             }
-            ',' if depth == 0 => {
+            '<' => {
+                angle_depth += 1;
+                current.push(c);
+            }
+            '>' => {
+                if angle_depth > 0 {
+                    angle_depth -= 1;
+                }
+                current.push(c);
+            }
+            ',' if depth == 0 && angle_depth == 0 => {
                 let trimmed = current.trim().to_string();
                 if !trimmed.is_empty() {
                     result.push(trimmed);
@@ -548,10 +564,13 @@ fn struct_invariant_clause(clause: &str) -> Option<String> {
 
 /// Split a struct body on the commas that separate its clauses, leaving
 /// commas nested in `()`, `[]`, `{}` or string literals alone
-/// (`invariant: within(self.lo, self.hi)`). Angle brackets are not tracked
-/// because `<`/`>` are comparison operators inside invariants.
-fn split_struct_clauses(body: &str) -> Vec<&str> {
-    let mut clauses = Vec::new();
+/// (`invariant: within(self.lo, self.hi)`). Angle brackets cannot be
+/// tracked during the split because `<`/`>` are comparison operators
+/// inside invariants; instead a `name: Type` fragment whose type text is
+/// left with unbalanced `<`/`>` is rejoined with the following fragment
+/// (`inner: Duo<i64` + `bool>` → `inner: Duo<i64, bool>`).
+fn split_struct_clauses(body: &str) -> Vec<String> {
+    let mut fragments = Vec::new();
     let mut depth = 0i32;
     let mut in_string = false;
     let mut start = 0usize;
@@ -562,14 +581,101 @@ fn split_struct_clauses(body: &str) -> Vec<&str> {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth -= 1,
             ',' if depth <= 0 => {
-                clauses.push(&body[start..idx]);
+                fragments.push(&body[start..idx]);
                 start = idx + 1;
             }
             _ => {}
         }
     }
-    clauses.push(&body[start..]);
+    fragments.push(&body[start..]);
+
+    let mut clauses: Vec<String> = Vec::new();
+    let mut pending: Option<String> = None;
+    for fragment in fragments {
+        match pending.take() {
+            Some(mut acc) => {
+                acc.push(',');
+                acc.push_str(fragment);
+                if field_clause_angle_open(&acc) {
+                    pending = Some(acc);
+                } else {
+                    clauses.push(acc);
+                }
+            }
+            None => {
+                if field_clause_angle_open(fragment) {
+                    pending = Some(fragment.to_string());
+                } else {
+                    clauses.push(fragment.to_string());
+                }
+            }
+        }
+    }
+    if let Some(acc) = pending {
+        clauses.push(acc);
+    }
     clauses
+}
+
+/// Whether a clause is a `name: Type` field declaration whose type text
+/// still has an unclosed `<` — the fragment ended inside the type's
+/// argument list and must be joined with the next one. `invariant`
+/// clauses are expressions where `<`/`>` are comparisons and keep the
+/// previous split behavior.
+fn field_clause_angle_open(fragment: &str) -> bool {
+    let trimmed = fragment.trim_start();
+    if struct_invariant_clause(trimmed).is_some() {
+        return false;
+    }
+    let bytes = trimmed.as_bytes();
+    let mut ident_len = 0usize;
+    while ident_len < bytes.len()
+        && (bytes[ident_len].is_ascii_alphanumeric() || bytes[ident_len] == b'_')
+    {
+        ident_len += 1;
+    }
+    if ident_len == 0 {
+        return false;
+    }
+    if !trimmed[ident_len..].trim_start().starts_with(':') {
+        return false;
+    }
+    // Only the type text admits `<`/`>` as type-argument brackets; in a
+    // `where` constraint they are comparisons (`x: i64 where v < 10`).
+    // The type ends at the first `where` word outside string literals.
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut type_end = trimmed.len();
+    for i in 0..bytes.len() {
+        let b = bytes[i];
+        if in_string && escaped {
+            escaped = false;
+            continue;
+        }
+        match b {
+            b'"' => in_string = !in_string,
+            b'\\' if in_string => escaped = true,
+            b'w' if !in_string
+                && trimmed[i..].starts_with("where")
+                && (i == 0 || !is_ident(bytes[i - 1]))
+                && bytes.get(i + 5).is_none_or(|&b| !is_ident(b)) =>
+            {
+                type_end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let mut depth = 0i32;
+    for c in trimmed[..type_end].chars() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth > 0
 }
 
 fn collect_until_semicolon(ctx: &mut ParseContext) -> String {
@@ -953,13 +1059,13 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                 let mut invariants: Vec<String> = Vec::new();
                 let fields: Vec<StructField> = split_struct_clauses(&fields_raw)
                     .into_iter()
-                    .map(|s| s.trim())
+                    .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .filter(|s| {
                         // `invariant` is a keyword, so a clause that starts with it
                         // can never be a field declaration. `invariant: <expr>`
                         // (or `invariant <expr>`) declares a cross-field invariant.
-                        match struct_invariant_clause(s) {
+                        match struct_invariant_clause(s.as_str()) {
                             Some(expr) => {
                                 invariants.push(expr);
                                 false
@@ -979,9 +1085,12 @@ pub fn parse_module_from_tokens(ctx: &mut ParseContext) -> Vec<Item> {
                             .map(|t| t.trim().to_string())
                             .unwrap_or_else(|| "i64".to_string());
                         let type_ref = parse_type_ref(&type_name_str);
+                        // `type_name` is the normalized display name
+                        // (`Pair < i64 >` → `Pair<i64>`) so declared-name
+                        // lookups match the `type_ref`'s canonical form.
                         StructField {
                             name: parts[0].trim().to_string(),
-                            type_name: type_name_str,
+                            type_name: type_ref.display_name(),
                             type_ref,
                             constraint,
                         }
@@ -1814,7 +1923,10 @@ fn parse_atom_body(ctx: &mut ParseContext, start_tok: &SpannedToken) -> Atom {
                 let type_ref = parse_type_ref(&type_name_str);
                 Param {
                     name: param_name.trim().to_string(),
-                    type_name: Some(type_name_str),
+                    // Normalized display name (`Pair < i64 >` →
+                    // `Pair<i64>`) so declared-name lookups match the
+                    // `type_ref`'s canonical form.
+                    type_name: Some(type_ref.display_name()),
                     type_ref: Some(type_ref),
                     consume,
                     is_ref,
