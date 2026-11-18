@@ -133,6 +133,16 @@ pub const PURE_I64_COMPOSITE_PROFILE_V9: &str = "mumei.pure-i64-composite/v9";
 /// (`pure-i64-composite/v10`).
 pub const PURE_I64_COMPOSITE_PROFILE_V10: &str = "mumei.pure-i64-composite/v10";
 
+/// v11 admits `f64` leaves as pass-through slots only — parameters,
+/// results, struct fields and instantiated type arguments carry one
+/// 64-bit slot holding the IEEE-754 bit pattern. The leaf may be
+/// stored, copied, returned and merged across branches, but no
+/// arithmetic or comparison inside the fragment reads it — the same
+/// opaque treatment call-result slots already get, and the
+/// signature-domain layer applies no bound since every bit pattern is
+/// a valid carrier (`pure-i64-composite/v11`).
+pub const PURE_I64_COMPOSITE_PROFILE_V11: &str = "mumei.pure-i64-composite/v11";
+
 /// Bounded stack memory (`pure-i64-composite-bounded-memory/v1`): local
 /// fixed-size array literals, `a[i]` reads, `a[i] = v` writes and `len`
 /// — encoded as one SMT `BV64 -> BV64` array per binding, the model the
@@ -189,6 +199,7 @@ pub enum RefinedAdmission {
     CompositeV9,
     CompositeV10,
     CompositeV11,
+    CompositeV12,
 }
 
 impl RefinedAdmission {
@@ -260,6 +271,13 @@ impl RefinedAdmission {
     /// (`pure-i64-composite-bounded-memory/v1`).
     pub fn admits_bounded_memory(self) -> bool {
         self >= Self::CompositeV11
+    }
+
+    /// Whether `f64` scalar leaves are admitted pass-through — stored,
+    /// copied, returned and merged, never read by an arithmetic or
+    /// comparison operator (`pure-i64-composite/v11`).
+    pub fn admits_f64_leaves(self) -> bool {
+        self >= Self::CompositeV12
     }
 }
 
@@ -366,7 +384,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _, _, _, _, _, _, _) =
+    let (items, refined, structs, _, _, _, _, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -387,6 +405,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         false,
         false,
@@ -427,6 +446,7 @@ pub fn extract_pure_i64_module_contracts(
         merged,
         generic,
         u64_leaves,
+        f64_leaves,
         arrays,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
@@ -467,6 +487,7 @@ pub fn extract_pure_i64_module_contracts(
                 merged,
                 generic,
                 u64_leaves,
+                f64_leaves,
                 arrays,
                 &cert_env,
             )),
@@ -496,6 +517,7 @@ pub fn module_source_profile(
         merged,
         generic,
         u64_leaves,
+        f64_leaves,
         arrays,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
@@ -509,6 +531,7 @@ pub fn module_source_profile(
         merged,
         generic,
         u64_leaves,
+        f64_leaves,
         arrays,
     ))
 }
@@ -532,6 +555,7 @@ type AdmittedModule = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -664,6 +688,7 @@ fn admit_pure_i64_atoms(
             sibling,
             allow_wrapping_arithmetic,
             admission.admits_u64_leaves(),
+            admission.admits_f64_leaves(),
             &refined,
             &structs,
             &enums,
@@ -695,6 +720,7 @@ fn admit_pure_i64_atoms(
         )?;
     }
     let u64_leaves = uses_u64_leaves(&items);
+    let f64_leaves = uses_f64_leaves(&items);
     Ok((
         items,
         refined,
@@ -706,6 +732,7 @@ fn admit_pure_i64_atoms(
         merged_composites_used.get(),
         generic_structs_declared,
         u64_leaves,
+        f64_leaves,
         arrays_used.get(),
     ))
 }
@@ -798,6 +825,8 @@ fn binder_scalar_type(type_name: Option<&str>, refined: &RefinedEnv) -> &'static
         Some("u8") => "u8",
         Some("u16") => "u16",
         Some("u32") => "u32",
+        Some("u64") => "u64",
+        Some("f64") => "f64",
         Some(name) => refined.get(name).map(|alias| alias.base).unwrap_or("i64"),
         None => "i64",
     }
@@ -832,6 +861,27 @@ fn uses_u64_leaves(items: &[Item]) -> bool {
     })
 }
 
+/// Whether the admitted module declares an `f64` leaf anywhere — a
+/// parameter, a result, a struct field or an enum payload slot. Only
+/// `CompositeV12` admission ever produces one.
+fn uses_f64_leaves(items: &[Item]) -> bool {
+    items.iter().any(|item| match item {
+        Item::Atom(atom) => {
+            atom.params
+                .iter()
+                .any(|p| p.type_name.as_deref() == Some("f64"))
+                || atom.return_type.as_deref() == Some("f64")
+        }
+        Item::StructDef(def) => def.fields.iter().any(|f| f.type_name == "f64"),
+        Item::EnumDef(def) => def
+            .variants
+            .iter()
+            .flat_map(|v| v.field_types.iter())
+            .any(|ty| ty.display_name() == "f64"),
+        _ => false,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fragment_profile(
     allow_wrapping_arithmetic: bool,
@@ -844,10 +894,16 @@ fn fragment_profile(
     merged_composites: bool,
     generic_structs: bool,
     u64_leaves: bool,
+    f64_leaves: bool,
     bounded_memory: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if f64_leaves {
+        // An `f64` leaf is only ever admitted under v12 — the
+        // pass-through slot convention is the strongest claim the
+        // ladder makes.
+        PURE_I64_COMPOSITE_PROFILE_V11
     } else if bounded_memory {
         // Bounded memory is only ever admitted under CompositeV11 — it
         // outranks every earlier feature's profile name.
@@ -911,6 +967,7 @@ fn atom_contract(
     merged_composites: bool,
     generic_structs: bool,
     u64_leaves: bool,
+    f64_leaves: bool,
     bounded_memory: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
@@ -926,6 +983,7 @@ fn atom_contract(
         merged_composites,
         generic_structs,
         u64_leaves,
+        f64_leaves,
         bounded_memory,
     );
     let result_fields = atom
@@ -1172,6 +1230,7 @@ fn atom_contract(
         .chain(allow_wrapping_arithmetic.then_some("discarded_pure_expression_statements"))
         .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
         .chain(u64_leaves.then_some("unsigned_u64_leaves_bitvector_total"))
+        .chain(f64_leaves.then_some("f64_leaves_pass_through_bit_pattern_no_arithmetic"))
         .chain(allow_wrapping_arithmetic.then_some("bool_parameters_lowered_to_i64_zero_one"))
         .chain(allow_wrapping_arithmetic.then_some("subrange_integer_parameters_lowered_to_i64"))
         .chain(allow_wrapping_arithmetic.then_some("subrange_integer_results_lowered_to_i64"))
@@ -1373,6 +1432,7 @@ fn declared_param_kind(
     param: &crate::parser::ast::Param,
     admit_widened: bool,
     admit_u64: bool,
+    admit_f64: bool,
     refined: &RefinedEnv,
 ) -> Option<ScalarKind> {
     let name = param.type_name.as_deref()?;
@@ -1382,6 +1442,7 @@ fn declared_param_kind(
     let kind = match name {
         "i64" => ScalarKind::I64,
         "u64" if admit_u64 => ScalarKind::U64,
+        "f64" if admit_f64 => ScalarKind::F64,
         "bool" if admit_widened => ScalarKind::Bool,
         "i8" | "i16" | "i32" | "u8" | "u16" | "u32" if admit_widened => ScalarKind::I64,
         // A bool-leaf alias gives the parameter a boolean signature —
@@ -1421,6 +1482,7 @@ fn declared_param_shape(
     param: &crate::parser::ast::Param,
     admit_widened: bool,
     admit_u64: bool,
+    admit_f64: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
@@ -1432,7 +1494,8 @@ fn declared_param_shape(
         Some(name) if enums.contains_key(name) => {
             plain_param(param, name).then(|| ValueKind::Enum(name.to_owned()))
         }
-        _ => declared_param_kind(param, admit_widened, admit_u64, refined).map(ValueKind::Scalar),
+        _ => declared_param_kind(param, admit_widened, admit_u64, admit_f64, refined)
+            .map(ValueKind::Scalar),
     }
 }
 
@@ -1469,6 +1532,9 @@ fn param_kind(param: &crate::parser::ast::Param, refined: &RefinedEnv) -> Scalar
         // `u64` parameters only reach the kind checker under v10
         // admission — `validate_atom` rejects the leaf below it.
         Some("u64") => ScalarKind::U64,
+        // `f64` likewise only reaches here under v12 admission; the
+        // leaf is pass-through — no operator arm ever reads it.
+        Some("f64") => ScalarKind::F64,
         Some(name) => refined
             .get(name)
             .map(|alias| alias.kind)
@@ -1484,6 +1550,7 @@ fn return_kind(atom: &Atom, refined: &RefinedEnv) -> ScalarKind {
     match atom.return_type.as_deref() {
         Some("bool") => ScalarKind::Bool,
         Some("u64") => ScalarKind::U64,
+        Some("f64") => ScalarKind::F64,
         Some(name) => refined
             .get(name)
             .map(|alias| alias.kind)
@@ -1637,6 +1704,13 @@ impl<'ctx> CallShapes<'ctx> {
         )
     }
 
+    fn returns_f64(&self, name: &str) -> bool {
+        matches!(
+            self.returns.get(name),
+            Some(ValueKind::Scalar(ScalarKind::F64))
+        )
+    }
+
     /// The field layout of a struct-returning callee's result, in
     /// declaration order — nested fields carry their struct name.
     fn result_fields(&self, name: &str) -> Option<&[(String, ValueKind)]> {
@@ -1705,6 +1779,7 @@ fn enum_slot_value<'ctx>(kind: ScalarKind, v: &BV<'ctx>, ctx: &'ctx Context) -> 
     match kind {
         ScalarKind::Bool => SourceValue::Boolean(v._eq(&BV::from_u64(ctx, 0, 64)).not()),
         ScalarKind::U64 => SourceValue::Unsigned(v.clone()),
+        ScalarKind::F64 => SourceValue::Float64(v.clone()),
         _ => SourceValue::Integer(v.clone()),
     }
 }
@@ -1940,6 +2015,7 @@ fn validate_atom(
     atom: &Atom,
     admit_widened: bool,
     admit_u64: bool,
+    admit_f64: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
@@ -1956,6 +2032,7 @@ fn validate_atom(
     let return_ok = match atom.return_type.as_deref() {
         Some("i64") => true,
         Some("u64") => admit_u64,
+        Some("f64") => admit_f64,
         Some("bool") | Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32") => admit_widened,
         // An admitted struct result (`pure-i64-composite/v3`) returns
         // the struct's field slots. An admitted enum result
@@ -1969,7 +2046,16 @@ fn validate_atom(
     };
     if !return_ok
         || atom.params.iter().any(|p| {
-            declared_param_shape(p, admit_widened, admit_u64, refined, structs, enums).is_none()
+            declared_param_shape(
+                p,
+                admit_widened,
+                admit_u64,
+                admit_f64,
+                refined,
+                structs,
+                enums,
+            )
+            .is_none()
         })
     {
         return Err(SemanticContractError::Unsupported(
@@ -2031,6 +2117,12 @@ enum ScalarKind {
     ArrayI64,
     /// A `let`-bound fixed-size array of `u64` leaves.
     ArrayU64,
+    /// An `f64` leaf — one 64-bit slot carrying the IEEE-754 bit
+    /// pattern, pass-through only: stored, copied, returned and
+    /// merged, but never an operand of arithmetic or comparison
+    /// (`pure-i64-composite/v11`). No literal produces it and `Num`
+    /// never adapts to it.
+    F64,
 }
 
 fn expect_kind(actual: ScalarKind, expected: ScalarKind) -> Result<(), SemanticContractError> {
@@ -2218,6 +2310,7 @@ fn seed_struct_composite<'ctx>(
                         SourceValue::Boolean(v._eq(&BV::from_u64(ctx, 0, 64)).not())
                     }
                     Some(ScalarKind::U64) => SourceValue::Unsigned(v.clone()),
+                    Some(ScalarKind::F64) => SourceValue::Float64(v.clone()),
                     _ => SourceValue::Integer(v.clone()),
                 }
             }
@@ -2386,6 +2479,7 @@ fn build_enum_env(
                 let kind = match type_name {
                     "i64" => Some(ScalarKind::I64),
                     "u64" if admission.admits_u64_leaves() => Some(ScalarKind::U64),
+                    "f64" if admission.admits_f64_leaves() => Some(ScalarKind::F64),
                     "bool" => Some(ScalarKind::Bool),
                     name => refined
                         .get(name)
@@ -2554,6 +2648,7 @@ fn build_struct_env(
             let shape = match field.type_name.as_str() {
                 "i64" => Some(ValueKind::Scalar(ScalarKind::I64)),
                 "u64" if admission.admits_u64_leaves() => Some(ValueKind::Scalar(ScalarKind::U64)),
+                "f64" if admission.admits_f64_leaves() => Some(ValueKind::Scalar(ScalarKind::F64)),
                 "bool" => Some(ValueKind::Scalar(ScalarKind::Bool)),
                 name if nested_allowed && declared_names.contains(name) => {
                     Some(ValueKind::Struct(name.to_owned()))
@@ -4598,7 +4693,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _, _, _, _, _, arrays) =
+    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -4674,9 +4769,10 @@ fn encode_atom_body<'ctx>(
         &mut call_sites,
         call_returns,
     )? {
-        SourceValue::Integer(value) | SourceValue::Unsigned(value) | SourceValue::Number(value) => {
-            value
-        }
+        SourceValue::Integer(value)
+        | SourceValue::Unsigned(value)
+        | SourceValue::Number(value)
+        | SourceValue::Float64(value) => value,
         SourceValue::Boolean(value) => {
             value.ite(&BV::from_u64(context, 1, 64), &BV::from_u64(context, 0, 64))
         }
@@ -5582,6 +5678,11 @@ enum SourceValue<'ctx> {
     /// `Unsigned` against `u64` operands — the literal-adaptive
     /// counterpart of `ScalarKind::Num`.
     Number(BV<'ctx>),
+    /// An `f64` leaf — the slot carries the IEEE-754 bit pattern
+    /// opaquely: the value may be stored, copied, returned and merged,
+    /// but no arithmetic or comparison arm reads it
+    /// (`pure-i64-composite/v11`).
+    Float64(BV<'ctx>),
     Boolean(Bool<'ctx>),
     /// A struct parameter's flattened fields in declaration order. Only
     /// a field read or a pass-through call argument consumes it; every
@@ -5626,6 +5727,7 @@ fn substitute_source_value<'ctx>(
     match value {
         SourceValue::Integer(v) => SourceValue::Integer(v.substitute(substitutions)),
         SourceValue::Unsigned(v) => SourceValue::Unsigned(v.substitute(substitutions)),
+        SourceValue::Float64(v) => SourceValue::Float64(v.substitute(substitutions)),
         SourceValue::Number(v) => SourceValue::Number(v.substitute(substitutions)),
         SourceValue::Boolean(v) => SourceValue::Boolean(v.substitute(substitutions)),
         SourceValue::Composite(fields) => SourceValue::Composite(
@@ -5675,6 +5777,7 @@ fn param_env<'ctx>(
     let scalar = |kind: ScalarKind, v: &BV<'ctx>| match kind {
         ScalarKind::Bool => SourceValue::Boolean(v._eq(&BV::from_u64(ctx, 0, 64)).not()),
         ScalarKind::U64 => SourceValue::Unsigned(v.clone()),
+        ScalarKind::F64 => SourceValue::Float64(v.clone()),
         _ => SourceValue::Integer(v.clone()),
     };
     let mut slots = inputs.iter();
@@ -5696,12 +5799,14 @@ fn param_env<'ctx>(
                             ));
                         };
                         let kind = enum_slot_type(variants, i)
-                            .map(|name| {
-                                if name == "bool" {
-                                    ScalarKind::Bool
-                                } else {
-                                    refined.get(name).map_or(ScalarKind::I64, |a| a.kind)
-                                }
+                            .map(|name| match name {
+                                "bool" => ScalarKind::Bool,
+                                // `u64`/`f64` payloads keep their leaf
+                                // kind — `Integer` would read an
+                                // unsigned or bit-pattern slot signed.
+                                "u64" => ScalarKind::U64,
+                                "f64" => ScalarKind::F64,
+                                _ => refined.get(name).map_or(ScalarKind::I64, |a| a.kind),
                             })
                             .unwrap_or(ScalarKind::I64);
                         slot_values.push(scalar(kind, v));
@@ -5817,6 +5922,7 @@ fn source_field_write<'ctx>(
         | (SourceValue::Unsigned(_), SourceValue::Number(_))
         | (SourceValue::Number(_), SourceValue::Number(_))
         | (SourceValue::Boolean(_), SourceValue::Boolean(_))
+        | (SourceValue::Float64(_), SourceValue::Float64(_))
         | (SourceValue::Composite(_), SourceValue::Composite(_)) => {}
         _ => {
             return Err(SemanticContractError::Unsupported(
@@ -5863,13 +5969,15 @@ fn merge_source_values<'ctx>(
     b: SourceValue<'ctx>,
     call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<SourceValue<'ctx>> {
-    use SourceValue::{Boolean as B, Integer as I, Number as N, Unsigned as U};
+    use SourceValue::{Boolean as B, Float64 as F, Integer as I, Number as N, Unsigned as U};
     let merged_composites = call_returns.merged_composites;
     match (a, b) {
         (N(a), N(b)) => Ok(N(cond.ite(&a, &b))),
         (U(a), U(b) | N(b)) | (N(a), U(b)) => Ok(U(cond.ite(&a, &b))),
         (I(a) | N(a), I(b) | N(b)) => Ok(I(cond.ite(&a, &b))),
         (B(a), B(b)) => Ok(B(cond.ite(&a, &b))),
+        // Pass-through `f64`: the bit pattern merges like any leaf.
+        (F(a), F(b)) => Ok(F(cond.ite(&a, &b))),
         (SourceValue::Composite(a), SourceValue::Composite(b)) if merged_composites => {
             if a.len() != b.len() || a.iter().zip(b.iter()).any(|((an, _), (bn, _))| an != bn) {
                 return Err(SemanticContractError::Unsupported("branch composite kinds"));
@@ -6351,7 +6459,7 @@ fn source_while<'ctx>(
     call_sites: &mut Vec<CallSite<'ctx>>,
     call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<()> {
-    use SourceValue::{Boolean as B, Integer as I, Number as N, Unsigned as U};
+    use SourceValue::{Boolean as B, Float64 as F, Integer as I, Number as N, Unsigned as U};
     let mut cur = env.clone();
     let mut exited = Bool::from_bool(ctx, false);
     let mut merged: BTreeMap<String, SourceValue> = BTreeMap::new();
@@ -6421,6 +6529,7 @@ fn source_while<'ctx>(
                 }
                 (Some(I(old) | N(old)), I(new) | N(new)) => I(body_guard.ite(new, old)),
                 (Some(B(old)), B(new)) => B(body_guard.ite(new, old)),
+                (Some(F(old)), F(new)) => F(body_guard.ite(new, old)),
                 // A loop-carried `a[i] = v` keeps the merged array: the
                 // body's write applies only where the loop actually ran.
                 // A body rebinding `a = [...]` mints a fresh `alloc`,
@@ -6600,6 +6709,7 @@ fn composite_from_slots<'ctx>(
                                 SourceValue::Boolean(slot._eq(&BV::from_u64(ctx, 0, 64)).not())
                             }
                             ScalarKind::U64 => SourceValue::Unsigned(slot),
+                            ScalarKind::F64 => SourceValue::Float64(slot),
                             _ => SourceValue::Integer(slot),
                         }
                     }
@@ -6618,7 +6728,10 @@ fn composite_from_slots<'ctx>(
 /// A scalar value in the profile's lowered i64 representation.
 fn lower_scalar<'ctx>(value: SourceValue<'ctx>, ctx: &'ctx Context) -> BodyResult<BV<'ctx>> {
     match value {
-        SourceValue::Integer(v) | SourceValue::Unsigned(v) | SourceValue::Number(v) => Ok(v),
+        SourceValue::Integer(v)
+        | SourceValue::Unsigned(v)
+        | SourceValue::Number(v)
+        | SourceValue::Float64(v) => Ok(v),
         SourceValue::Boolean(b) => Ok(b.ite(&BV::from_u64(ctx, 1, 64), &BV::from_u64(ctx, 0, 64))),
         SourceValue::Composite(_) => Err(SemanticContractError::Unsupported(
             "source nested struct value",
@@ -6782,6 +6895,8 @@ fn result_value<'ctx>(
         }
     } else if call_returns.returns_u64(atom) {
         SourceValue::Unsigned(value.clone())
+    } else if call_returns.returns_f64(atom) {
+        SourceValue::Float64(value.clone())
     } else if call_returns.returns_bool(atom) {
         SourceValue::Boolean(value._eq(&BV::from_u64(ctx, 0, 64)).not())
     } else {
@@ -6803,7 +6918,7 @@ fn source_expr<'ctx>(
     call_sites: &mut Vec<CallSite<'ctx>>,
     call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<SourceValue<'ctx>> {
-    use SourceValue::{Boolean as B, Integer as I, Number as N, Unsigned as U};
+    use SourceValue::{Boolean as B, Float64 as F, Integer as I, Number as N, Unsigned as U};
     if depth > MAX_DEPTH {
         return Err(SemanticContractError::Unsupported("source depth limit"));
     }
@@ -6925,6 +7040,7 @@ fn source_expr<'ctx>(
                         ValueKind::Scalar(ScalarKind::U64),
                         SourceValue::Unsigned(_) | SourceValue::Number(_)
                     ) | (ValueKind::Scalar(ScalarKind::Bool), SourceValue::Boolean(_))
+                        | (ValueKind::Scalar(ScalarKind::F64), SourceValue::Float64(_))
                         | (ValueKind::Struct(_), SourceValue::Composite(_))
                 );
                 if !shape_ok || values.insert(name, value).is_some() {
@@ -7757,6 +7873,8 @@ fn source_expr<'ctx>(
             // convention, matching `param_env` and `env["result"]`.
             if call_returns.returns_u64(name) {
                 U(value)
+            } else if call_returns.returns_f64(name) {
+                F(value)
             } else if call_returns.returns_bool(name) {
                 B(value._eq(&BV::from_u64(ctx, 0, 64)).not())
             } else {
@@ -10068,6 +10186,127 @@ atom add(b: B, e: u64) -> B requires: true; ensures: result.t == b.t + e; body: 
             module_source_profile(&flat, RefinedAdmission::CompositeV10).unwrap(),
             PURE_I64_COMPOSITE_PROFILE_V10
         );
+    }
+
+    #[test]
+    fn composite_v12_admits_f64_leaves() {
+        let v12 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV12)
+        };
+        let outcomes = |source: &str| {
+            refined_module_outcomes_admission(source, RefinedAdmission::CompositeV12)
+        };
+        let module = |piece: &str| format!("{piece}\n{MAIN0}");
+        for piece in [
+            // Param → result copy: the bit pattern flows opaquely.
+            "atom copy(a: f64) -> f64 requires: true; ensures: true; body: { a };",
+            // A call result stays a pass-through leaf.
+            "atom copy(a: f64) -> f64 requires: true; ensures: true; body: { a };\natom dup(x: f64) -> f64 requires: true; ensures: true; body: { copy(x) };",
+            // A `let` rebinding keeps the slot.
+            "atom relay(x: f64) -> f64 requires: true; ensures: true; body: { let y = x; y };",
+            // Branch merge selects the slot like any leaf.
+            "atom pick(f: bool, x: f64, y: f64) -> f64 requires: true; ensures: true; body: { if f { x } else { y } };",
+            // A struct field and its read-back.
+            "struct B { v: f64, t: i64 }\natom wrap(x: f64, t: i64) -> B requires: t >= 0; ensures: result.t == t; body: { B{v: x, t: t} };\natom unwrap(b: B) -> f64 requires: b.t >= 0; ensures: true; body: { b.v };",
+            // An enum payload slot and its match binding.
+            "enum R { F(f64), N }\natom as_r(x: f64) -> R requires: true; ensures: true; body: { R::F(x) };\natom val(r: R, fb: f64) -> f64 requires: true; ensures: true; body: { match r { R::F(v) => v, _ => fb } };",
+        ] {
+            let source = module(piece);
+            match v12(&source) {
+                Ok(cs) => assert!(
+                    cs.iter()
+                        .all(|c| c.profile == PURE_I64_COMPOSITE_PROFILE_V11),
+                    "{piece}"
+                ),
+                Err(e) => panic!("{piece}: {e:?}"),
+            }
+            match std::panic::catch_unwind(|| outcomes(&source)) {
+                Ok(res) => assert!(
+                    res.iter().all(|r| *r == z3::SatResult::Unsat),
+                    "{piece}"
+                ),
+                Err(_) => panic!("outcomes failed for: {piece}"),
+            }
+        }
+        // v12 pins the profile: an f64 leaf anywhere selects it.
+        let source = module("atom copy(a: f64) -> f64 requires: true; ensures: true; body: { a };");
+        assert_eq!(
+            module_source_profile(&source, RefinedAdmission::CompositeV12).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V11
+        );
+        // Narrower admissions keep f64 leaves out — v11 (bounded
+        // arrays) included.
+        for admission in [
+            RefinedAdmission::Reject,
+            RefinedAdmission::V1,
+            RefinedAdmission::V2,
+            RefinedAdmission::Composite,
+            RefinedAdmission::CompositeV2,
+            RefinedAdmission::CompositeV5,
+            RefinedAdmission::CompositeV8,
+            RefinedAdmission::CompositeV9,
+            RefinedAdmission::CompositeV10,
+            RefinedAdmission::CompositeV11,
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(&source, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+        }
+        // A module without f64 keeps the earlier profile.
+        let flat = format!(
+            "atom ge(a: i64) -> i64 requires: a >= 0; ensures: result == 1; body: {{ 1 }};\n{MAIN0}"
+        );
+        assert_ne!(
+            module_source_profile(&flat, RefinedAdmission::CompositeV12).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V11
+        );
+    }
+
+    #[test]
+    fn composite_v12_rejects_f64_reads() {
+        let v12 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV12)
+        };
+        for (piece, why) in [
+            // Comparison reads the bit pattern.
+            (
+                "atom c(a: f64) -> i64 requires: true; ensures: result == 0; body: { if a >= a { 0 } else { 1 } };",
+                "f64 comparison",
+            ),
+            // Equality reads the bit pattern.
+            (
+                "atom c(a: f64) -> i64 requires: true; ensures: result == 0; body: { if a == a { 0 } else { 1 } };",
+                "f64 equality",
+            ),
+            // Arithmetic reads the bit pattern.
+            (
+                "atom c(a: f64) -> f64 requires: true; ensures: true; body: { a + a };",
+                "f64 arithmetic",
+            ),
+            // A declared f64 never mixes with a declared i64 operand.
+            (
+                "atom c(a: f64, b: i64) -> i64 requires: true; ensures: result == 0; body: { if a >= b { 0 } else { 1 } };",
+                "f64/i64 mix",
+            ),
+            // A requires clause may not read it either.
+            (
+                "atom c(a: f64) -> f64 requires: a == a; ensures: true; body: { a };",
+                "f64 requires read",
+            ),
+            // No numeric literal adapts to f64 — `Num` only adapts to
+            // integer kinds, so a literal body under an f64 signature
+            // stays out.
+            (
+                "atom c(a: f64) -> f64 requires: true; ensures: true; body: { 0 };",
+                "f64 literal",
+            ),
+        ] {
+            assert!(
+                v12(&format!("{piece}\n{MAIN0}")).is_err(),
+                "admitted: {why}"
+            );
+        }
     }
 
     #[test]

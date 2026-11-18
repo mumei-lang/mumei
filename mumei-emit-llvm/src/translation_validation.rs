@@ -765,6 +765,13 @@ fn input_domain_label<'ctx>(
 }
 
 unsafe fn width(ty: LLVMTypeRef) -> Result<u32> {
+    // A `double` is the emitter's lowering of a pass-through `f64`
+    // leaf (`pure-i64-composite/v11`): one 64-bit slot carrying the
+    // IEEE-754 bit pattern, compared bit-for-bit — the profile admits
+    // no float instructions, so the leaf only ever moves.
+    if LLVMGetTypeKind(ty) == LLVMTypeKind::LLVMDoubleTypeKind {
+        return Ok(64);
+    }
     if LLVMGetTypeKind(ty) != LLVMTypeKind::LLVMIntegerTypeKind {
         return Err(ValidationError("non-integer LLVM value"));
     }
@@ -802,6 +809,9 @@ unsafe fn aggregate_fields(ty: LLVMTypeRef) -> Option<u32> {
             {
                 1
             }
+            // A `double` element is one pass-through `f64` leaf slot
+            // (`pure-i64-composite/v11`).
+            None if LLVMGetTypeKind(element) == LLVMTypeKind::LLVMDoubleTypeKind => 1,
             None => return None,
         })?;
         // Leaf-first flattening bounds the shape the same way the
