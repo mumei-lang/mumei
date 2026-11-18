@@ -342,6 +342,24 @@ fn keygen_writes_secret_file_and_prints_only_public_key() {
     let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(envelope["signature"].as_str().unwrap().len(), 128);
 
+    // The printed public key really is the generated secret's pair: it
+    // verifies the envelope's signature over the subject digest, which
+    // is what `signature-verify` checks consumer-side.
+    let verifying_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&hex_bytes(public).try_into().unwrap()).unwrap();
+    let signature = ed25519_dalek::Signature::from_bytes(
+        &hex_bytes(envelope["signature"].as_str().unwrap())
+            .try_into()
+            .unwrap(),
+    );
+    use ed25519_dalek::Verifier;
+    assert!(verifying_key
+        .verify(
+            envelope["subject_digest"].as_str().unwrap().as_bytes(),
+            &signature,
+        )
+        .is_ok());
+
     // An existing file is never clobbered.
     let output = run({
         let mut command = keygen_command();
@@ -349,5 +367,14 @@ fn keygen_writes_secret_file_and_prints_only_public_key() {
         command
     });
     assert_failure(&output, 1);
-    assert_eq!(fs::read(&key).unwrap(), secret);
+    // Compare without printing the secret: `assert_eq!` would dump the
+    // key bytes into the failure diagnostic.
+    assert!(secret == fs::read(&key).unwrap());
+}
+
+fn hex_bytes(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&text[index..index + 2], 16).unwrap())
+        .collect()
 }
