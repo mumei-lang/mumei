@@ -6180,8 +6180,12 @@ fn source_stmt<'ctx>(
                                 "array write to a name not bound on the linear path",
                             ));
                         }
-                        let index = source_expr(
-                            index,
+                        // The assigned value evaluates before the index,
+                        // matching the emitter's `val` then `idx` order:
+                        // a write through an alias inside the index
+                        // expression must not reach the value's reads.
+                        let bound = source_expr(
+                            value,
                             ctx,
                             &inner,
                             guard,
@@ -6194,8 +6198,8 @@ fn source_stmt<'ctx>(
                             call_returns,
                         )?
                         .integer()?;
-                        let bound = source_expr(
-                            value,
+                        let index = source_expr(
+                            index,
                             ctx,
                             &inner,
                             guard,
