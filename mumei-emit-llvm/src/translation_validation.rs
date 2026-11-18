@@ -1382,7 +1382,8 @@ unsafe fn memory_claim_consistent(function: LLVMValueRef, claimed: u64) -> Resul
                     return Ok(false);
                 }
                 if LLVMIsDeclaration(callee) == 0 && callee != function {
-                    let callee_claim = callee_memory_claim(callee).unwrap_or(u64::MAX);
+                    let callee_claim =
+                        callee_memory_claim(callee).unwrap_or_else(unrestricted_memory_claim);
                     if callee_claim & !claimed != 0 {
                         return Ok(false);
                     }
@@ -1393,6 +1394,28 @@ unsafe fn memory_claim_consistent(function: LLVMValueRef, claimed: u64) -> Resul
         block = LLVMGetNextBasicBlock(block);
     }
     Ok(true)
+}
+
+/// The `memory` enum attribute's encoded value for `readwrite` —
+/// what a callee with no `memory` attribute can do. Probing parses a
+/// one-line declaration once because the encoding is an LLVM-internal
+/// bit layout; an attribute-less callee maps to this, not `u64::MAX`
+/// (which includes bits no valid claim ever sets and so rejects even
+/// an unrestricted caller's `memory(readwrite)`).
+fn unrestricted_memory_claim() -> u64 {
+    static CLAIM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CLAIM.get_or_init(|| {
+        let context = LlvmContext::create();
+        let module = context
+            .create_module_from_ir(MemoryBuffer::create_from_memory_range_copy(
+                b"declare i64 @f() memory(readwrite)\n",
+                "memory_probe",
+            ))
+            .expect("memory attribute probe");
+        let function = module.get_function("f").expect("probe function");
+        unsafe { callee_memory_claim(function.as_value_ref()) }
+            .expect("memory(readwrite) encodes a claim")
+    })
 }
 
 /// The callee's claimed whole-function memory bound: the `memory` enum
