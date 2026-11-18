@@ -22,6 +22,7 @@ pub mod mir_analysis;
 pub mod native_bundle;
 pub mod observe;
 pub mod parser;
+pub mod producer_signature;
 pub mod proof_cert;
 pub mod proof_graph;
 pub mod reconstruction_loss;

@@ -3210,6 +3210,21 @@ so the key stays absent; the bundle identity pin remains its binding. The
 fingerprint is a binding token, not claim identity: descriptors still decode
 as no reusable Evidence, certificate or grade.
 
+The first detached producer-authenticity slice adds `mumei evidence sign
+<record> --key-file <PATH> --producer-key-id <ID> [--json]`: any bounded
+record (65,536-byte limit; `--stdin` shares it) is hashed and signed over its
+raw bytes — never parsed or canonicalized — into the closed five-field
+`mumei.producer-signature/v1` envelope. `subject_digest` is the record's
+SHA-256 hex (the `evidence_fingerprint` convention); the signature covers the
+digest's ASCII bytes, matching `crypto_verify_signature`; `producer_key_id`
+is a caller-declared label, never derived from key bytes. `--key-file` must
+hold exactly the 64-char lowercase-hex ed25519 secret; malformed material,
+empty key ids, oversized inputs and non-regular files fail closed without
+echoing key material, and decoded key bytes are zeroized. The envelope binds
+only the declared key to the declared digest — no key or producer
+authenticity, freshness, revocation, claim truth or acceptance. See the
+[detached envelope contract](VERIFICATION_NATIVE.md#detached-producer-signature-envelope).
+
 The Agent C04/C11 planner also adds optional exact result-contract routing:
 one profile/method pair, scope, bound/assumption identifiers and correspondence
 relation/status must match one complete declared offer. Explicit/automatic
