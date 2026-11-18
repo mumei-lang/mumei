@@ -826,6 +826,8 @@ fn binder_scalar_type(type_name: Option<&str>, refined: &RefinedEnv) -> &'static
         Some("u16") => "u16",
         Some("u32") => "u32",
         Some("u64") => "u64",
+        Some("usize") => "usize",
+        Some("isize") => "isize",
         Some("f64") => "f64",
         Some(name) => refined.get(name).map(|alias| alias.base).unwrap_or("i64"),
         None => "i64",
@@ -839,24 +841,29 @@ fn binder_scalar_type(type_name: Option<&str>, refined: &RefinedEnv) -> &'static
 /// its v3 name only when some atom uses a struct value (a struct
 /// result, literal, `let` or call-result read).
 #[allow(clippy::too_many_arguments)]
-/// Whether the admitted module declares a `u64` leaf anywhere — a
-/// parameter, a result, a struct field (instantiated decls included,
-/// since monomorphization leaves the `u64` field name behind) or an
-/// enum payload slot. Only `CompositeV10` admission ever produces one.
+/// Whether the admitted module declares a `u64`-family leaf anywhere —
+/// `u64` itself, `usize` or `isize`, as a parameter, a result, a struct
+/// field (instantiated decls included, since monomorphization leaves
+/// the field name behind) or an enum payload slot. Only `CompositeV10`
+/// admission ever produces one.
 fn uses_u64_leaves(items: &[Item]) -> bool {
+    let target_width = |name: Option<&str>| matches!(name, Some("u64" | "usize" | "isize"));
     items.iter().any(|item| match item {
         Item::Atom(atom) => {
             atom.params
                 .iter()
-                .any(|p| p.type_name.as_deref() == Some("u64"))
-                || atom.return_type.as_deref() == Some("u64")
+                .any(|p| target_width(p.type_name.as_deref()))
+                || target_width(atom.return_type.as_deref())
         }
-        Item::StructDef(def) => def.fields.iter().any(|f| f.type_name == "u64"),
+        Item::StructDef(def) => def
+            .fields
+            .iter()
+            .any(|f| target_width(Some(f.type_name.as_str()))),
         Item::EnumDef(def) => def
             .variants
             .iter()
             .flat_map(|v| v.field_types.iter())
-            .any(|ty| ty.display_name() == "u64"),
+            .any(|ty| target_width(Some(ty.display_name().as_str()))),
         _ => false,
     })
 }
@@ -1264,7 +1271,7 @@ fn atom_contract(
             "HIR/MIR fingerprints identify internal snapshots, not semantic equivalence.",
             "Target availability, LLVM lowering and final machine code are not verified.",
             if u64_leaves {
-                "Unsigned division and logical right shift are admitted for `u64` leaves only; `usize`/`isize`/`i128`, heap, FFI, ownership, effects and concurrency are outside this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation. `while` loops are claimed only where every guard fails within the profile bound (4 evaluations); deeper executions are outside the compared domain."
+                "Unsigned division and logical right shift are admitted for `u64`/`usize`/`isize` leaves only (`usize` folds to `u64`, `isize` to `i64` on the 64-bit target); `i128`, heap, FFI, ownership, effects and concurrency are outside this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation. `while` loops are claimed only where every guard fails within the profile bound (4 evaluations); deeper executions are outside the compared domain."
             } else if allow_wrapping_arithmetic {
                 "No unsigned division, logical shifts, heap, FFI, ownership, effects or concurrency in this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation. `while` loops are claimed only where every guard fails within the profile bound (4 evaluations); deeper executions are outside the compared domain."
             } else {
@@ -1424,10 +1431,11 @@ impl<'a> KindEnv<'a> {
 /// profile's `allow_wrapping_arithmetic` flag). Subrange types are
 /// carried by i64 like `bool`; the declared signature then bounds the
 /// checked input to the type's range (`param_domain`). `u64`, `usize`
-/// and `isize` stay out: a full-width unsigned domain cannot be
-/// expressed as an i64 range bound. `u64` instead is admitted under
-/// `admit_u64` as its own unsigned kind (`pure-i64-composite/v10`) —
-/// `usize`/`isize` stay out either way.
+/// and `isize` cannot join the widened i64-equivalence profile either
+/// way: a full-width domain cannot be expressed as an i64 range bound.
+/// Under `admit_u64` (`pure-i64-composite/v10`) `u64` and `usize` both
+/// carry `U64` — `usize` is the target's 64-bit unsigned width — while
+/// `isize` carries `I64`.
 fn declared_param_kind(
     param: &crate::parser::ast::Param,
     admit_widened: bool,
@@ -1441,7 +1449,8 @@ fn declared_param_kind(
     // the `i64` default.
     let kind = match name {
         "i64" => ScalarKind::I64,
-        "u64" if admit_u64 => ScalarKind::U64,
+        "u64" | "usize" if admit_u64 => ScalarKind::U64,
+        "isize" if admit_u64 => ScalarKind::I64,
         "f64" if admit_f64 => ScalarKind::F64,
         "bool" if admit_widened => ScalarKind::Bool,
         "i8" | "i16" | "i32" | "u8" | "u16" | "u32" if admit_widened => ScalarKind::I64,
@@ -1531,7 +1540,10 @@ fn param_kind(param: &crate::parser::ast::Param, refined: &RefinedEnv) -> Scalar
         Some("bool") => ScalarKind::Bool,
         // `u64` parameters only reach the kind checker under v10
         // admission — `validate_atom` rejects the leaf below it.
-        Some("u64") => ScalarKind::U64,
+        // `usize` is the target's 64-bit unsigned width (folded to
+        // `u64`), `isize` its signed width (folded to `i64`).
+        Some("u64" | "usize") => ScalarKind::U64,
+        Some("isize") => ScalarKind::I64,
         // `f64` likewise only reaches here under v12 admission; the
         // leaf is pass-through — no operator arm ever reads it.
         Some("f64") => ScalarKind::F64,
@@ -1549,7 +1561,8 @@ fn param_kind(param: &crate::parser::ast::Param, refined: &RefinedEnv) -> Scalar
 fn return_kind(atom: &Atom, refined: &RefinedEnv) -> ScalarKind {
     match atom.return_type.as_deref() {
         Some("bool") => ScalarKind::Bool,
-        Some("u64") => ScalarKind::U64,
+        Some("u64" | "usize") => ScalarKind::U64,
+        Some("isize") => ScalarKind::I64,
         Some("f64") => ScalarKind::F64,
         Some(name) => refined
             .get(name)
@@ -2031,7 +2044,7 @@ fn validate_atom(
     // construction (`build_refined_env` rejects non-scalar bases).
     let return_ok = match atom.return_type.as_deref() {
         Some("i64") => true,
-        Some("u64") => admit_u64,
+        Some("u64" | "usize" | "isize") => admit_u64,
         Some("f64") => admit_f64,
         Some("bool") | Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32") => admit_widened,
         // An admitted struct result (`pure-i64-composite/v3`) returns
@@ -2382,18 +2395,24 @@ fn enum_max_arity(variants: &[ResolvedVariant]) -> usize {
 /// need tag-conditional slot domains, which the flattened signature
 /// does not express, so such an enum stays out.
 fn enum_slot_type<'a>(variants: &'a [ResolvedVariant], i: usize) -> Option<&'a str> {
-    let mut found: Option<&'a str> = None;
+    // Uniformity is by resolved slot kind, not the declared name: the
+    // width aliases (`usize`→`u64`, `isize`→`i64`) share a carrier with
+    // their base. The returned name is display-only.
+    let mut found: Option<(&'a str, ScalarKind)> = None;
     for variant in variants {
         let Some(field) = variant.fields.get(i) else {
             continue;
         };
+        let ValueKind::Scalar(kind) = field.shape else {
+            return None;
+        };
         match found {
-            None => found = Some(field.type_name.as_str()),
-            Some(name) if name == field.type_name => (),
+            None => found = Some((field.type_name.as_str(), kind)),
+            Some((_, k)) if k == kind => (),
             Some(_) => return None,
         }
     }
-    found
+    found.map(|(name, _)| name)
 }
 
 /// Collect the module's `Item::EnumDef` declarations under
@@ -2478,7 +2497,8 @@ fn build_enum_env(
                 let ty = &variant.field_types[index];
                 let kind = match type_name {
                     "i64" => Some(ScalarKind::I64),
-                    "u64" if admission.admits_u64_leaves() => Some(ScalarKind::U64),
+                    "u64" | "usize" if admission.admits_u64_leaves() => Some(ScalarKind::U64),
+                    "isize" if admission.admits_u64_leaves() => Some(ScalarKind::I64),
                     "f64" if admission.admits_f64_leaves() => Some(ScalarKind::F64),
                     "bool" => Some(ScalarKind::Bool),
                     name => refined
@@ -2647,7 +2667,12 @@ fn build_struct_env(
             // another admitted struct (`flatten_fields` decomposes it).
             let shape = match field.type_name.as_str() {
                 "i64" => Some(ValueKind::Scalar(ScalarKind::I64)),
-                "u64" if admission.admits_u64_leaves() => Some(ValueKind::Scalar(ScalarKind::U64)),
+                "u64" | "usize" if admission.admits_u64_leaves() => {
+                    Some(ValueKind::Scalar(ScalarKind::U64))
+                }
+                "isize" if admission.admits_u64_leaves() => {
+                    Some(ValueKind::Scalar(ScalarKind::I64))
+                }
                 "f64" if admission.admits_f64_leaves() => Some(ValueKind::Scalar(ScalarKind::F64)),
                 "bool" => Some(ValueKind::Scalar(ScalarKind::Bool)),
                 name if nested_allowed && declared_names.contains(name) => {
@@ -5864,7 +5889,8 @@ fn param_env<'ctx>(
                                 // `u64`/`f64` payloads keep their leaf
                                 // kind — `Integer` would read an
                                 // unsigned or bit-pattern slot signed.
-                                "u64" => ScalarKind::U64,
+                                "u64" | "usize" => ScalarKind::U64,
+                                "isize" => ScalarKind::I64,
                                 "f64" => ScalarKind::F64,
                                 _ => refined.get(name).map_or(ScalarKind::I64, |a| a.kind),
                             })
@@ -10249,6 +10275,78 @@ atom add(b: B, e: u64) -> B requires: true; ensures: result.t == b.t + e; body: 
     }
 
     #[test]
+    fn composite_v10_admits_usize_isize_leaves() {
+        let v10 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV10)
+        };
+        let outcomes = |source: &str| {
+            refined_module_outcomes_admission(source, RefinedAdmission::CompositeV10)
+        };
+        let module = |piece: &str| format!("{piece}\n{MAIN0}");
+        for piece in [
+            // `usize` folds to `u64`: unsigned comparison and wrap.
+            "atom ge(a: usize) -> i64 requires: a >= 0; ensures: result == 1; body: { 1 };",
+            "atom wrap(a: usize) -> usize requires: a == 0; ensures: result == 0 - 1; body: { a - 1 };",
+            "atom half(a: usize) -> usize requires: a % 2 == 0; ensures: result * 2 == a; body: { a / 2 };",
+            // `isize` folds to `i64`: a negative bound is admissible.
+            "atom neg(a: isize) -> isize requires: a < 0; ensures: result == a + 1; body: { a + 1 };",
+            // Width-typed leaves inside a struct and an enum payload.
+            "struct B { t: usize, s: isize }
+atom add(b: B, e: usize) -> B requires: true; ensures: result.t == b.t + e; body: { B{t: b.t + e, s: b.s} };",
+            // usize and u64 payload slots share the U64 kind.
+            "enum E { A(usize), B(u64) }
+atom mk(x: usize) -> E requires: true; ensures: true; body: { E::A(x) };",
+        ] {
+            let source = module(piece);
+            match v10(&source) {
+                Ok(cs) => assert!(
+                    cs.iter()
+                        .all(|c| c.profile == PURE_I64_COMPOSITE_PROFILE_V10),
+                    "{piece}"
+                ),
+                Err(e) => panic!("{piece}: {e:?}"),
+            }
+            match std::panic::catch_unwind(|| outcomes(&source)) {
+                Ok(res) => assert!(
+                    res.iter().all(|r| *r == z3::SatResult::Unsat),
+                    "{piece}"
+                ),
+                Err(_) => panic!("outcomes failed for: {piece}"),
+            }
+        }
+        // A `usize` or `isize` leaf pins the v10 profile like `u64`.
+        for ty in ["usize", "isize"] {
+            let source = module(&format!(
+                "atom ge(a: {ty}) -> i64 requires: a >= 0; ensures: result == 1; body: {{ 1 }};"
+            ));
+            assert_eq!(
+                module_source_profile(&source, RefinedAdmission::CompositeV10).unwrap(),
+                PURE_I64_COMPOSITE_PROFILE_V10,
+                "{ty}"
+            );
+        }
+        // Wrong `isize` arithmetic refutes under the signed reading.
+        let wrong = module(
+            "atom bad(a: isize) -> isize requires: a == 1; ensures: result == 3; body: { a + 1 };",
+        );
+        assert!(outcomes(&wrong).contains(&z3::SatResult::Sat));
+        // Narrower admissions keep the width-typed leaves out.
+        let source =
+            module("atom ge(a: usize) -> i64 requires: a >= 0; ensures: result == 1; body: { 1 };");
+        for admission in [
+            RefinedAdmission::Reject,
+            RefinedAdmission::V1,
+            RefinedAdmission::CompositeV2,
+            RefinedAdmission::CompositeV9,
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(&source, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+        }
+    }
+
+    #[test]
     fn composite_v12_admits_f64_leaves() {
         let v12 = |source: &str| {
             extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV12)
@@ -10382,14 +10480,21 @@ atom add(b: B, e: u64) -> B requires: true; ensures: result.t == b.t + e; body: 
         ] {
             assert!(v10(&format!("{piece}\n{MAIN0}")).is_err(), "{piece}");
         }
-        // Wider/machine-dependent widths stay closed — `u8`/`u16`/`u32`
-        // were already admitted by the earlier widened profiles.
+        // `usize`/`isize` fold to `u64`/`i64` under the same admission,
+        // so the operand-mix rule applies to a `usize`/`i64` mix too;
+        // only widths with no 64-bit fold stay closed.
         for piece in [
-            "atom f(a: usize) -> i64 requires: true; ensures: true; body: { 0 };",
-            "atom f(a: isize) -> i64 requires: true; ensures: true; body: { 0 };",
             "atom f(a: i128) -> i64 requires: true; ensures: true; body: { 0 };",
+            "atom mix(a: usize, b: i64) -> i64 requires: true; ensures: result == 0; body: { if a < b { 0 } else { 1 } };",
         ] {
             assert!(v10(&format!("{piece}\n{MAIN0}")).is_err(), "{piece}");
+        }
+        // Same-kind mixes stay open: `usize`/`u64` and `isize`/`i64`.
+        for piece in [
+            "atom ok(a: usize, b: u64) -> i64 requires: true; ensures: result == 0; body: { if a < b { 0 } else { 1 } };",
+            "atom ok(a: isize, b: i64) -> i64 requires: true; ensures: result == 0; body: { a + b };",
+        ] {
+            assert!(v10(&format!("{piece}\n{MAIN0}")).is_ok(), "{piece}");
         }
     }
 

@@ -4162,8 +4162,11 @@ profiles with true unsigned semantics: the source model's
 unsatisfiable (the prior signed-BV model could refute the
 first and satisfy the second — a soundness gap), with
 unsigned comparisons and wrap-free arithmetic bounds
-encoded per leaf. `check`, `recheck-source` and
-`recheck-llvm` cover both fragments.
+encoded per leaf. The target-width aliases `usize` and
+`isize` fold onto `u64`/`i64` under the same admission —
+parameters, results, struct fields and enum payload slots
+— and pin the v10 profile like a `u64` leaf. `check`,
+`recheck-source` and `recheck-llvm` cover both fragments.
 Let-bound arrays join the fragment under
 `mumei.pure-i64-composite/v11` and the `/v14` bundle
 profiles — the C09 bounded stack-memory slice: a

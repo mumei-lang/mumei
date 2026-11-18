@@ -405,7 +405,13 @@ impl ModuleEnv {
             }
             current = refined._base_type.as_str();
         }
-        current.to_string()
+        // The 64-bit target's width-typed leaves fold onto their machine
+        // base: `usize` is `u64`, `isize` is `i64`.
+        match current {
+            "usize" => "u64".to_string(),
+            "isize" => "i64".to_string(),
+            other => other.to_string(),
+        }
     }
 
     pub fn register_trait(&mut self, trait_def: &TraitDef) {
@@ -831,8 +837,8 @@ pub fn register_builtin_traits(module_env: &mut ModuleEnv) {
         span: Span::default(),
     });
 
-    // --- 組み込み impl: i64, u64, f64 は Eq + Ord + Numeric を自動実装 ---
-    for base_type in &["i64", "u64", "f64"] {
+    // --- 組み込み impl: i64, u64, f64 と幅別名は Eq + Ord + Numeric を自動実装 ---
+    for base_type in &["i64", "u64", "f64", "usize", "isize"] {
         module_env.register_impl(&ID {
             trait_name: "Eq".into(),
             target_type: base_type.to_string(),

@@ -244,6 +244,7 @@ pub fn movability_from_type(ty: &Option<String>) -> Movability {
     match ty.as_deref() {
         Some(
             "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "f64" | "f32" | "Int"
+            | "usize" | "isize"
             | "Nat" | "Pos" | "Float" | "bool" | "Bool"
             // Standard library refined types (all i64-based)
             | "RawPtr" | "NullablePtr" | "HumanAge"
