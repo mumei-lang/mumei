@@ -2244,7 +2244,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             return a;
         }
         let poisoned = Bool::or(self.ctx, &violated.iter().collect::<Vec<_>>());
-        poisoned.ite(&BV::fresh_const(self.ctx, "frz", 64), &a)
+        poisoned.ite(&BV::fresh_const(self.ctx, "frz", a.get_size()), &a)
     }
 
     /// A call's source callee name and flattened arguments: a struct
