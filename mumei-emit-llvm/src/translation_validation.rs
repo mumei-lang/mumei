@@ -24,6 +24,26 @@ pub const BOUNDED_LOOPS_PROFILE: &str = "mumei.llvm17-pure-i64-ssa-equivalence-b
 pub const BOUNDED_LOOPS_NATIVE_PROFILE: &str = "mumei.llvm17-native-main-snapshot-bounded-loops/v1";
 pub const BOUNDED_LOOPS_NATIVE_MODULE_PROFILE: &str =
     "mumei.llvm17-native-module-snapshot-bounded-loops/v1";
+/// Bounded-memory variants: the source model holds admitted `let`-bound
+/// arrays as Z3 arrays of i64 cells, and the IR whitelist admits the
+/// emitter's `alloca`/`getelementptr`/`load`/`store` lowering of them —
+/// pointer values still fail closed everywhere else.
+pub const BOUNDED_MEMORY_PROFILE: &str = "mumei.llvm17-pure-i64-ssa-equivalence-bounded-memory/v1";
+pub const BOUNDED_MEMORY_NATIVE_PROFILE: &str =
+    "mumei.llvm17-native-main-snapshot-bounded-memory/v1";
+pub const BOUNDED_MEMORY_NATIVE_MODULE_PROFILE: &str =
+    "mumei.llvm17-native-module-snapshot-bounded-memory/v1";
+/// A bounded-memory source may also contain an admitted `while`; the
+/// combined variant names both relaxations.
+pub const BOUNDED_MEMORY_LOOPS_PROFILE: &str =
+    "mumei.llvm17-pure-i64-ssa-equivalence-bounded-loops-bounded-memory/v1";
+pub const BOUNDED_MEMORY_LOOPS_NATIVE_PROFILE: &str =
+    "mumei.llvm17-native-main-snapshot-bounded-loops-bounded-memory/v1";
+pub const BOUNDED_MEMORY_LOOPS_NATIVE_MODULE_PROFILE: &str =
+    "mumei.llvm17-native-module-snapshot-bounded-loops-bounded-memory/v1";
+/// The largest array an `alloca` may declare — bounds the SMT array's
+/// concrete extent the same way `MAX_INSTRUCTIONS` bounds the CFG.
+const MAX_ARRAY_SLOTS: u32 = 256;
 pub const NATIVE_TARGET: &str = "x86_64-pc-linux-gnu";
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
 pub const DATA_LAYOUT: &str =
@@ -229,22 +249,21 @@ fn validate(
         if native {
             check_native_module(module.as_mut_ptr(), raw)?;
         } else {
-            check_module(module.as_mut_ptr())?;
+            check_module(module.as_mut_ptr(), model.bounded_memory)?;
         }
         compare_function(&context, raw, &model, &native_call_renames(native))?
     };
     let loops = model.loop_bound_exits.is_some();
     Ok(ValidationReport {
-        profile: if native {
-            if loops {
-                BOUNDED_LOOPS_NATIVE_PROFILE
-            } else {
-                NATIVE_PROFILE
-            }
-        } else if loops {
-            BOUNDED_LOOPS_PROFILE
-        } else {
-            PROFILE
+        profile: match (loops, model.bounded_memory, native) {
+            (false, false, false) => PROFILE,
+            (true, false, false) => BOUNDED_LOOPS_PROFILE,
+            (false, true, false) => BOUNDED_MEMORY_PROFILE,
+            (true, true, false) => BOUNDED_MEMORY_LOOPS_PROFILE,
+            (false, false, true) => NATIVE_PROFILE,
+            (true, false, true) => BOUNDED_LOOPS_NATIVE_PROFILE,
+            (false, true, true) => BOUNDED_MEMORY_NATIVE_PROFILE,
+            (true, true, true) => BOUNDED_MEMORY_LOOPS_NATIVE_PROFILE,
         },
         source_profile: PURE_I64_WRAPPING_PROFILE,
         target,
@@ -254,7 +273,10 @@ fn validate(
         } else {
             "supplied_llvm_ir_snapshot_no_pipeline_attestation"
         },
-        input_domain: loop_domain_label(input_domain_label(native, &model, &ir_definedness), loops),
+        input_domain: loop_domain_label(
+            &input_domain_label(native, &model, &ir_definedness),
+            loops,
+        ),
         source_sha256: model.source_sha256,
         llvm_sha256: mumei_core::native_bundle::sha256(llvm_ir.as_bytes()),
         timeout_ms: options.timeout_ms,
@@ -301,7 +323,11 @@ pub fn validate_pure_i64_module(
     {
         return Err(ValidationError("unsupported target or data layout"));
     }
-    unsafe { check_module(module.as_mut_ptr())? };
+    // Any atom admitting stack arrays switches the module pre-screen to
+    // the bounded-memory whitelist — sibling members are potential call
+    // targets and re-gate on their own model at comparison time.
+    let any_memory = models.iter().any(|model| model.bounded_memory);
+    unsafe { check_module(module.as_mut_ptr(), any_memory)? };
     let mut functions = Vec::new();
     let mut any_definedness = false;
     let mut any_param_domain = false;
@@ -336,10 +362,11 @@ pub fn validate_pure_i64_module(
         });
     }
     Ok(ModuleValidationReport {
-        profile: if any_loops {
-            BOUNDED_LOOPS_PROFILE
-        } else {
-            PROFILE
+        profile: match (any_loops, any_memory) {
+            (false, false) => PROFILE,
+            (true, false) => BOUNDED_LOOPS_PROFILE,
+            (false, true) => BOUNDED_MEMORY_PROFILE,
+            (true, true) => BOUNDED_MEMORY_LOOPS_PROFILE,
         },
         source_profile: PURE_I64_WRAPPING_PROFILE,
         target: TARGET,
@@ -447,7 +474,10 @@ pub fn validate_native_module(
     let user_main = module
         .get_function("__mumei_user_main")
         .ok_or(ValidationError("missing source function"))?;
-    unsafe { check_native_module_multi(module.as_mut_ptr(), user_main.as_value_ref())? };
+    let any_memory = models.iter().any(|model| model.bounded_memory);
+    unsafe {
+        check_native_module_multi(module.as_mut_ptr(), user_main.as_value_ref(), any_memory)?
+    };
     let call_renames = native_call_renames(true);
     let mut functions = Vec::new();
     let mut any_definedness = false;
@@ -492,10 +522,11 @@ pub fn validate_native_module(
         });
     }
     Ok(ModuleValidationReport {
-        profile: if any_loops {
-            BOUNDED_LOOPS_NATIVE_MODULE_PROFILE
-        } else {
-            NATIVE_MODULE_PROFILE
+        profile: match (any_loops, any_memory) {
+            (false, false) => NATIVE_MODULE_PROFILE,
+            (true, false) => BOUNDED_LOOPS_NATIVE_MODULE_PROFILE,
+            (false, true) => BOUNDED_MEMORY_NATIVE_MODULE_PROFILE,
+            (true, true) => BOUNDED_MEMORY_LOOPS_NATIVE_MODULE_PROFILE,
         },
         source_profile,
         target,
@@ -566,7 +597,13 @@ unsafe fn compare_function<'ctx>(
     // A struct parameter is one aggregate formal on the IR side and its
     // flattened field slots on the source side, so the IR arity is the
     // declared parameter count, not the slot count.
-    check_function(raw, model.param_shapes.len(), model.result_shape, loops)?;
+    check_function(
+        raw,
+        model.param_shapes.len(),
+        model.result_shape,
+        loops,
+        model.bounded_memory,
+    )?;
     let mut encoder = IrEncoder::new(context, call_renames, loops);
     let returns = encoder.encode(raw, &model.inputs, &model.param_shapes)?;
     let ir_definedness = encoder.definedness;
@@ -681,7 +718,7 @@ unsafe fn compare_function<'ctx>(
 
 /// Append the bounded-loop domain restriction to a base input-domain
 /// label so the report names the actual claim boundary.
-fn loop_domain_label(domain: &'static str, loops: bool) -> String {
+fn loop_domain_label(domain: &str, loops: bool) -> String {
     if loops {
         format!("{domain}_and_loops_exiting_within_bound_{LOOP_BOUND}")
     } else {
@@ -693,25 +730,37 @@ fn input_domain_label<'ctx>(
     native: bool,
     model: &PureI64Body<'ctx>,
     ir_definedness: &[(Bool<'ctx>, Bool<'ctx>)],
-) -> &'static str {
+) -> String {
+    // Bounded-memory models put each in-bounds obligation on the same
+    // definedness footing as division and shift — name it so the
+    // domain description does not overstate the claim.
+    let defined_what = if model.bounded_memory {
+        "division_and_shift_and_in_bounds_memory_accesses"
+    } else {
+        "division_and_shift"
+    };
     if !model.definedness.is_empty() || !ir_definedness.is_empty() {
         if native {
-            "zero_argument_main_i64_body_where_division_and_shift_defined_not_process_exit_status"
+            format!(
+                "zero_argument_main_i64_body_where_{defined_what}_defined_not_process_exit_status"
+            )
         } else if model.param_domain.is_empty() {
-            "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires"
+            format!("signed_i64_inputs_where_{defined_what}_defined_not_restricted_by_requires")
         } else if model.subrange_params {
-            "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires"
+            format!("signed_i64_inputs_with_signature_bounded_param_domains_where_{defined_what}_defined_not_restricted_by_requires")
         } else {
-            "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_restricted_by_requires"
+            format!("signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_{defined_what}_defined_not_restricted_by_requires")
         }
     } else if native {
-        "zero_argument_main_i64_body_not_process_exit_status"
+        "zero_argument_main_i64_body_not_process_exit_status".to_owned()
     } else if model.param_domain.is_empty() {
-        "all_signed_i64_inputs_not_restricted_by_requires"
+        "all_signed_i64_inputs_not_restricted_by_requires".to_owned()
     } else if model.subrange_params {
         "signed_i64_inputs_with_signature_bounded_param_domains_not_restricted_by_requires"
+            .to_owned()
     } else {
         "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_restricted_by_requires"
+            .to_owned()
     }
 }
 
@@ -818,7 +867,7 @@ unsafe fn check_module_environment(module: LLVMModuleRef) -> Result<()> {
     Ok(())
 }
 
-unsafe fn check_module(module: LLVMModuleRef) -> Result<()> {
+unsafe fn check_module(module: LLVMModuleRef, bounded_memory: bool) -> Result<()> {
     check_module_environment(module)?;
     let mut member = LLVMGetFirstFunction(module);
     if member.is_null() {
@@ -847,6 +896,7 @@ unsafe fn check_module(module: LLVMModuleRef) -> Result<()> {
             LLVMCountParams(member) as usize,
             member_result_shape(member),
             true,
+            bounded_memory,
         )?;
         member = LLVMGetNextFunction(member);
     }
@@ -982,6 +1032,7 @@ unsafe fn check_function(
     params: usize,
     result_shape: Option<usize>,
     allow_cycles: bool,
+    bounded_memory: bool,
 ) -> Result<()> {
     check_function_header(function, params)?;
     let ret = LLVMGetReturnType(LLVMGlobalGetValueType(function));
@@ -1032,6 +1083,37 @@ unsafe fn check_function(
                 // emitter's folded literal) holds integer or `undef`
                 // elements only; an `undef` slot stays undefined and
                 // fails closed wherever it is read.
+                // A pointer operand is admitted only at its provenance-
+                // preserving positions under the bounded-memory profile:
+                // the base of a `getelementptr`, the address of a
+                // `load`, the address of a `store`. Everywhere else a
+                // pointer would escape tracking, so it fails closed.
+                if !is_callee
+                    && LLVMGetTypeKind(LLVMTypeOf(value)) == LLVMTypeKind::LLVMPointerTypeKind
+                {
+                    let pointer_ok = bounded_memory
+                        && match opcode {
+                            LLVMOpcode::LLVMGetElementPtr | LLVMOpcode::LLVMLoad => i == 0,
+                            LLVMOpcode::LLVMStore => i == 1,
+                            _ => false,
+                        };
+                    if !pointer_ok {
+                        return Err(ValidationError("unsupported LLVM pointer operand"));
+                    }
+                    continue;
+                }
+                // An `alloca` may carry an element-count operand; only
+                // the single-element form is admitted (the count is a
+                // constant 1 when present).
+                if opcode == LLVMOpcode::LLVMAlloca {
+                    if i != 0
+                        || LLVMIsAConstantInt(value).is_null()
+                        || LLVMConstIntGetZExtValue(value) != 1
+                    {
+                        return Err(ValidationError("unsupported LLVM alloca"));
+                    }
+                    continue;
+                }
                 if !is_callee && aggregate_fields(LLVMTypeOf(value)).is_some() {
                     let use_ok = (matches!(
                         opcode,
@@ -1071,6 +1153,74 @@ unsafe fn check_function(
             }
             match opcode {
                 LLVMOpcode::LLVMRet | LLVMOpcode::LLVMBr | LLVMOpcode::LLVMUnreachable => (),
+                // `let a = [x, ...]` lowers to an entry-block
+                // `alloca [N x i64]` — N bounded so the SMT array's
+                // extent stays concrete.
+                LLVMOpcode::LLVMAlloca => {
+                    let allocated = LLVMGetAllocatedType(inst);
+                    let element = LLVMGetElementType(allocated);
+                    let slots = LLVMGetArrayLength2(allocated);
+                    if !bounded_memory
+                        || block != LLVMGetEntryBasicBlock(function)
+                        || LLVMGetTypeKind(allocated) != LLVMTypeKind::LLVMArrayTypeKind
+                        || LLVMGetTypeKind(element) != LLVMTypeKind::LLVMIntegerTypeKind
+                        || LLVMGetIntTypeWidth(element) != 64
+                        || slots == 0
+                        || slots > u64::from(MAX_ARRAY_SLOTS)
+                    {
+                        return Err(ValidationError("unsupported LLVM alloca"));
+                    }
+                }
+                // One-level indexing only: the emitter lowers `a[i]` to
+                // `gep i64, ptr, i64 %i` or the literal-initialisation
+                // `gep [N x i64], ptr, i64 0, i64 %i`. Every index is an
+                // i64 (the operand gate above) and a two-index form's
+                // outer index must be constant 0. The source element
+                // type must match the form too: `i64` for the dynamic
+                // access, an `i64` array for the initialisation — a
+                // `gep i8` would index bytes, not cells, and break the
+                // encoder's element-count offsets.
+                LLVMOpcode::LLVMGetElementPtr => {
+                    let operands = LLVMGetNumOperands(inst) as u32;
+                    let outer_zero = operands != 3
+                        || (!LLVMIsAConstantInt(LLVMGetOperand(inst, 1)).is_null()
+                            && LLVMConstIntGetZExtValue(LLVMGetOperand(inst, 1)) == 0);
+                    let source = LLVMGetGEPSourceElementType(inst);
+                    let cell_indexed = match LLVMGetTypeKind(source) {
+                        LLVMTypeKind::LLVMArrayTypeKind => {
+                            operands == 3
+                                && LLVMGetTypeKind(LLVMGetElementType(source))
+                                    == LLVMTypeKind::LLVMIntegerTypeKind
+                                && LLVMGetIntTypeWidth(LLVMGetElementType(source)) == 64
+                        }
+                        LLVMTypeKind::LLVMIntegerTypeKind => {
+                            operands == 2 && LLVMGetIntTypeWidth(source) == 64
+                        }
+                        _ => false,
+                    };
+                    if !bounded_memory
+                        || !(2..=3).contains(&operands)
+                        || !outer_zero
+                        || !cell_indexed
+                    {
+                        return Err(ValidationError("unsupported LLVM getelementptr"));
+                    }
+                }
+                // Loads read an i64 cell — a pointer-typed load would
+                // escape provenance tracking and is rejected by the
+                // `width` check the same way an aggregate load is.
+                LLVMOpcode::LLVMLoad => {
+                    if !bounded_memory || width(LLVMTypeOf(inst))? != 64 {
+                        return Err(ValidationError("unsupported LLVM load"));
+                    }
+                }
+                // Stores write an i64 cell — storing a pointer would let
+                // an array hold an untracked address.
+                LLVMOpcode::LLVMStore => {
+                    if !bounded_memory || width(LLVMTypeOf(LLVMGetOperand(inst, 0)))? != 64 {
+                        return Err(ValidationError("unsupported LLVM store"));
+                    }
+                }
                 LLVMOpcode::LLVMAdd | LLVMOpcode::LLVMSub | LLVMOpcode::LLVMMul => {
                     unflagged_arithmetic(inst)?;
                     width(LLVMTypeOf(inst))?;
@@ -1194,7 +1344,11 @@ unsafe fn check_native_module(module: LLVMModuleRef, user_main: LLVMValueRef) ->
 /// keeps its fixed call/trunc/ret shape against `__mumei_user_main`,
 /// and every other member is screened by the shared function profile
 /// against its own arity — each is a potential call target.
-unsafe fn check_native_module_multi(module: LLVMModuleRef, user_main: LLVMValueRef) -> Result<()> {
+unsafe fn check_native_module_multi(
+    module: LLVMModuleRef,
+    user_main: LLVMValueRef,
+    bounded_memory: bool,
+) -> Result<()> {
     check_module_environment(module)?;
     let main = LLVMGetNamedFunction(module, c"main".as_ptr());
     if main.is_null() {
@@ -1223,6 +1377,7 @@ unsafe fn check_native_module_multi(module: LLVMModuleRef, user_main: LLVMValueR
                 LLVMCountParams(member) as usize,
                 member_result_shape(member),
                 true,
+                bounded_memory,
             )?;
         }
         member = LLVMGetNextFunction(member);
@@ -1339,6 +1494,23 @@ struct IrEncoder<'ctx, 'renames> {
     /// re-enters its block (a later loop iteration) never leaks into a
     /// sibling path.
     aggregates: HashMap<usize, Vec<Option<BV<'ctx>>>>,
+    /// Bounded-memory state: each admitted `alloca`'s cells as a Z3
+    /// array `BV64 -> BV64` over an unconstrained base — a cell read
+    /// before any `store` yields an arbitrary value, so an
+    /// initialisation store the IR dropped stays distinguishable from
+    /// the source's definite 0. Restored at conditional branches like
+    /// `aggregates`.
+    arrays: HashMap<usize, z3::ast::Array<'ctx>>,
+    /// Each admitted `alloca`'s element count: the bound every load's
+    /// and store's offset must satisfy wherever the access executes —
+    /// out-of-bounds is recorded as a definedness obligation, i.e. UB.
+    /// Entries never change once written, so unlike `arrays` the map
+    /// needs no restore at branches.
+    alloca_lens: HashMap<usize, u64>,
+    /// Pointer provenance: `alloca` and `getelementptr` results map to
+    /// their backing `alloca` plus an element offset (the whitelist
+    /// keeps every index i64, so offsets stay element counts).
+    ptrs: HashMap<usize, (usize, BV<'ctx>)>,
 }
 impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
     fn new(
@@ -1354,6 +1526,9 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             loops,
             depths: HashMap::new(),
             aggregates: HashMap::new(),
+            arrays: HashMap::new(),
+            alloca_lens: HashMap::new(),
+            ptrs: HashMap::new(),
         }
     }
 
@@ -1377,6 +1552,30 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             .get(&(value as usize))
             .cloned()
             .ok_or(ValidationError("unresolved LLVM value"))
+    }
+
+    /// Record that `offset` must lie inside `alloca`'s extent wherever
+    /// the current path executes the access — the emitted IR bounds-
+    /// checks every dynamic index, but a mutated or hostile module can
+    /// read or write past the array, which is UB rather than a value
+    /// difference.
+    fn memory_in_bounds(
+        &mut self,
+        alloca: usize,
+        offset: &BV<'ctx>,
+        guard: &Bool<'ctx>,
+    ) -> Result<()> {
+        let slots = *self
+            .alloca_lens
+            .get(&alloca)
+            .ok_or(ValidationError("untracked LLVM pointer"))?;
+        let zero = BV::from_u64(self.ctx, 0, 64);
+        let limit = BV::from_u64(self.ctx, slots, 64);
+        self.definedness.push((
+            guard.clone(),
+            Bool::and(self.ctx, &[&offset.bvsge(&zero), &offset.bvslt(&limit)]),
+        ));
+        Ok(())
     }
 
     /// Every slot of an aggregate value, failing closed on a slot no
@@ -1709,6 +1908,8 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 // successor's subtree (a later loop iteration) rebound
                 // them.
                 let aggregates = self.aggregates.clone();
+                let arrays = self.arrays.clone();
+                let ptrs = self.ptrs.clone();
                 self.block(
                     LLVMGetSuccessor(inst, 0),
                     block,
@@ -1717,6 +1918,8 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     returns,
                 )?;
                 self.aggregates = aggregates;
+                self.arrays = arrays;
+                self.ptrs = ptrs;
                 return self.block(
                     LLVMGetSuccessor(inst, 1),
                     block,
@@ -1724,6 +1927,90 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     Bool::and(self.ctx, &[&guard, &cond.not()]),
                     returns,
                 );
+            }
+            if op == LLVMOpcode::LLVMAlloca {
+                // `let a = [x, ...]`'s entry-block `alloca` — a fresh
+                // array over an unconstrained base. Zero-initialising
+                // here instead would let an IR missing an
+                // initialisation store still read the source's 0 and
+                // mask the difference.
+                let sort = z3::Sort::bitvector(self.ctx, 64);
+                self.arrays.insert(
+                    inst as usize,
+                    z3::ast::Array::new_const(
+                        self.ctx,
+                        format!("array_base_{:x}", inst as usize),
+                        &sort,
+                        &sort,
+                    ),
+                );
+                self.alloca_lens.insert(
+                    inst as usize,
+                    LLVMGetArrayLength2(LLVMGetAllocatedType(inst)),
+                );
+                self.ptrs.insert(
+                    inst as usize,
+                    (inst as usize, BV::from_u64(self.ctx, 0, 64)),
+                );
+                inst = LLVMGetNextInstruction(inst);
+                continue;
+            }
+            if op == LLVMOpcode::LLVMGetElementPtr {
+                let (alloca, base) = self
+                    .ptrs
+                    .get(&(LLVMGetOperand(inst, 0) as usize))
+                    .cloned()
+                    .ok_or(ValidationError("untracked LLVM pointer"))?;
+                // Element offsets: the whitelist binds any leading
+                // constant 0 of the two-index array form, so summing
+                // every index is the addressed cell.
+                let mut offset = base;
+                for index in 1..LLVMGetNumOperands(inst) {
+                    offset =
+                        offset.bvadd(&self.value(LLVMGetOperand(inst, index as u32), &values)?);
+                }
+                self.ptrs.insert(inst as usize, (alloca, offset));
+                inst = LLVMGetNextInstruction(inst);
+                continue;
+            }
+            if op == LLVMOpcode::LLVMStore {
+                let cell = self.value(LLVMGetOperand(inst, 0), &values)?;
+                let (alloca, offset) = self
+                    .ptrs
+                    .get(&(LLVMGetOperand(inst, 1) as usize))
+                    .cloned()
+                    .ok_or(ValidationError("untracked LLVM pointer"))?;
+                self.memory_in_bounds(alloca, &offset, &guard)?;
+                let array = self
+                    .arrays
+                    .get(&alloca)
+                    .cloned()
+                    .ok_or(ValidationError("untracked LLVM pointer"))?;
+                self.arrays.insert(alloca, array.store(&offset, &cell));
+                inst = LLVMGetNextInstruction(inst);
+                continue;
+            }
+            if op == LLVMOpcode::LLVMLoad {
+                let (alloca, offset) = self
+                    .ptrs
+                    .get(&(LLVMGetOperand(inst, 0) as usize))
+                    .cloned()
+                    .ok_or(ValidationError("untracked LLVM pointer"))?;
+                self.memory_in_bounds(alloca, &offset, &guard)?;
+                let array = self
+                    .arrays
+                    .get(&alloca)
+                    .cloned()
+                    .ok_or(ValidationError("untracked LLVM pointer"))?;
+                values.insert(
+                    inst as usize,
+                    array
+                        .select(&offset)
+                        .as_bv()
+                        .ok_or(ValidationError("unsupported LLVM load"))?,
+                );
+                inst = LLVMGetNextInstruction(inst);
+                continue;
             }
             let value = if op == LLVMOpcode::LLVMExtractValue {
                 // `check_function` admitted only a one-index read of an

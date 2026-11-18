@@ -16,7 +16,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use z3::{
-    ast::{Ast, Bool, BV},
+    ast::{Array, Ast, Bool, BV},
     Context, FuncDecl, Sort,
 };
 
@@ -133,6 +133,15 @@ pub const PURE_I64_COMPOSITE_PROFILE_V9: &str = "mumei.pure-i64-composite/v9";
 /// (`pure-i64-composite/v10`).
 pub const PURE_I64_COMPOSITE_PROFILE_V10: &str = "mumei.pure-i64-composite/v10";
 
+/// Bounded stack memory (`pure-i64-composite-bounded-memory/v1`): local
+/// fixed-size array literals, `a[i]` reads, `a[i] = v` writes and `len`
+/// — encoded as one SMT `BV64 -> BV64` array per binding, the model the
+/// `bounded-memory` LLVM translation-validation profiles check against
+/// the emitted `alloca`/GEP/`store`/`load` shapes. Out-of-bounds
+/// accesses degrade exactly like the emitted code: reads yield `0`,
+/// writes are skipped — no definedness obligation is recorded.
+pub const PURE_I64_COMPOSITE_MEMORY_PROFILE: &str = "mumei.pure-i64-composite-bounded-memory/v1";
+
 /// How much of the refined-scalar declaration fragment a gate admits:
 /// `Reject` keeps `Item::TypeDef` out of the item vocabulary entirely,
 /// `V1` admits single-level declarations over the i64-family scalar
@@ -179,6 +188,7 @@ pub enum RefinedAdmission {
     CompositeV8,
     CompositeV9,
     CompositeV10,
+    CompositeV11,
 }
 
 impl RefinedAdmission {
@@ -243,6 +253,13 @@ impl RefinedAdmission {
     /// (`pure-i64-composite/v10`).
     pub fn admits_u64_leaves(self) -> bool {
         self >= Self::CompositeV10
+    }
+
+    /// Whether bounded stack memory — local array literals, indexed
+    /// reads/writes and `len` — is admitted
+    /// (`pure-i64-composite-bounded-memory/v1`).
+    pub fn admits_bounded_memory(self) -> bool {
+        self >= Self::CompositeV11
     }
 }
 
@@ -349,7 +366,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _, _, _, _, _, _) =
+    let (items, refined, structs, _, _, _, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -370,6 +387,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         false,
         false,
@@ -409,6 +427,7 @@ pub fn extract_pure_i64_module_contracts(
         merged,
         generic,
         u64_leaves,
+        arrays,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
@@ -448,6 +467,7 @@ pub fn extract_pure_i64_module_contracts(
                 merged,
                 generic,
                 u64_leaves,
+                arrays,
                 &cert_env,
             )),
             // Type and struct declarations carry no per-atom contract;
@@ -476,6 +496,7 @@ pub fn module_source_profile(
         merged,
         generic,
         u64_leaves,
+        arrays,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
         true,
@@ -488,6 +509,7 @@ pub fn module_source_profile(
         merged,
         generic,
         u64_leaves,
+        arrays,
     ))
 }
 
@@ -510,6 +532,7 @@ type AdmittedModule = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -632,6 +655,7 @@ fn admit_pure_i64_atoms(
     let field_writes_used = std::cell::Cell::new(false);
     let enum_values_used = std::cell::Cell::new(false);
     let merged_composites_used = std::cell::Cell::new(false);
+    let arrays_used = std::cell::Cell::new(false);
     for item in &items {
         let Item::Atom(sibling) = item else {
             continue;
@@ -662,10 +686,12 @@ fn admit_pure_i64_atoms(
             admission.admits_field_writes(),
             admission.admits_enum_values(),
             admission.admits_merged_composites(),
+            admission.admits_bounded_memory(),
             &struct_values_used,
             &field_writes_used,
             &enum_values_used,
             &merged_composites_used,
+            &arrays_used,
         )?;
     }
     let u64_leaves = uses_u64_leaves(&items);
@@ -680,6 +706,7 @@ fn admit_pure_i64_atoms(
         merged_composites_used.get(),
         generic_structs_declared,
         u64_leaves,
+        arrays_used.get(),
     ))
 }
 
@@ -817,9 +844,14 @@ fn fragment_profile(
     merged_composites: bool,
     generic_structs: bool,
     u64_leaves: bool,
+    bounded_memory: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if bounded_memory {
+        // Bounded memory is only ever admitted under CompositeV11 — it
+        // outranks every earlier feature's profile name.
+        PURE_I64_COMPOSITE_MEMORY_PROFILE
     } else if u64_leaves {
         // A `u64` leaf is only ever admitted under v10 — the unsigned
         // encoding it requires is the strongest claim the ladder makes.
@@ -879,6 +911,7 @@ fn atom_contract(
     merged_composites: bool,
     generic_structs: bool,
     u64_leaves: bool,
+    bounded_memory: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
@@ -893,6 +926,7 @@ fn atom_contract(
         merged_composites,
         generic_structs,
         u64_leaves,
+        bounded_memory,
     );
     let result_fields = atom
         .return_type
@@ -1252,6 +1286,13 @@ struct KindEnv<'a> {
     /// Set when the atom merges a composite value across branches, so
     /// the module names the v7 profile only when it needs it.
     merged_composites_used: &'a std::cell::Cell<bool>,
+    /// Whether bounded stack memory — array literals, `a[i]` reads,
+    /// `a[i] = v` writes and `len` — is admitted
+    /// (`pure-i64-composite-bounded-memory/v1`).
+    admit_bounded_memory: bool,
+    /// Set when the atom uses any bounded-memory vocabulary, so the
+    /// module names the bounded-memory profile only when it needs it.
+    arrays_used: &'a std::cell::Cell<bool>,
 }
 
 impl<'a> KindEnv<'a> {
@@ -1471,13 +1512,13 @@ fn return_shape(
 /// bitvector and a struct-returning callee's call to one slot per
 /// field, so `source_expr` needs the callee's declared return shape to
 /// materialize that convention at the call site.
-fn call_return_kinds(
+fn call_return_kinds<'ctx>(
     items: &[Item],
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
     admission: RefinedAdmission,
-) -> CallShapes {
+) -> CallShapes<'ctx> {
     CallShapes {
         returns: items
             .iter()
@@ -1524,6 +1565,8 @@ fn call_return_kinds(
             })
             .collect(),
         merged_composites: admission.admits_merged_composites(),
+        next_array_id: std::cell::Cell::new(0),
+        alloc_stores: std::cell::RefCell::new(HashMap::new()),
     }
 }
 
@@ -1538,7 +1581,7 @@ type EnumVariantLayout = Vec<EnumVariant>;
 /// order, so the source encoder can build struct literals and split a
 /// struct-valued call result into its field slots.
 #[derive(Default)]
-struct CallShapes {
+struct CallShapes<'ctx> {
     returns: BTreeMap<String, ValueKind>,
     /// Each admitted struct's declared fields in declaration order —
     /// `(name, shape)` pairs where a `Struct` shape names a nested
@@ -1554,9 +1597,32 @@ struct CallShapes {
     /// admitted: the source layer fails closed on a `Composite`/`Enum`
     /// reaching a branch merge below that admission.
     merged_composites: bool,
+    /// Mint for array `alloc` identities: each literal and each merge
+    /// of bindings from different literals takes a fresh one so a
+    /// later indexed write propagates to exactly the right aliases.
+    next_array_id: std::cell::Cell<u64>,
+    /// The canonical backing store per `alloc` — the model of the one
+    /// data pointer the emitter emits for the alias group. Reads and
+    /// indexed writes go through this map instead of each binding's
+    /// `store` snapshot, so a write through one alias reaches every
+    /// binding on the same backing, including a name a block `let`
+    /// shadowed: the flat `inner` map overwrites its entry, so name
+    /// lookup alone can no longer carry the update.
+    alloc_stores: std::cell::RefCell<HashMap<u64, Array<'ctx>>>,
 }
 
-impl CallShapes {
+impl<'ctx> CallShapes<'ctx> {
+    /// A fresh backing-store identity for an `Array` value: a
+    /// literal's own, or a merged value's when its two sides came
+    /// from different literals (reusing either side's id would let a
+    /// write through the merge reach bindings that alias only one
+    /// side).
+    fn fresh_array_alloc(&self) -> u64 {
+        let id = self.next_array_id.get();
+        self.next_array_id.set(id + 1);
+        id
+    }
+
     fn returns_bool(&self, name: &str) -> bool {
         matches!(
             self.returns.get(name),
@@ -1659,10 +1725,12 @@ fn check_atom_contract(
     admit_field_writes: bool,
     admit_enum_values: bool,
     admit_merged_composites: bool,
+    admit_bounded_memory: bool,
     struct_values_used: &std::cell::Cell<bool>,
     field_writes_used: &std::cell::Cell<bool>,
     enum_values_used: &std::cell::Cell<bool>,
     merged_composites_used: &std::cell::Cell<bool>,
+    arrays_used: &std::cell::Cell<bool>,
 ) -> Result<(), SemanticContractError> {
     // Struct parameters stay out of the scalar scope — so they are
     // neither scalar operands nor rebindable — and live in the
@@ -1734,6 +1802,8 @@ fn check_atom_contract(
         field_writes_used,
         enum_values_used,
         merged_composites_used,
+        admit_bounded_memory,
+        arrays_used,
     };
     for p in &atom.params {
         env.bind(&p.name)?;
@@ -1956,6 +2026,11 @@ enum ScalarKind {
     /// Only `Expr::Number` produces it; no declared type ever carries
     /// it, and it never survives into a `ValueKind`.
     Num,
+    /// A `let`-bound fixed-size array of `i64` leaves
+    /// (`pure-i64-composite-bounded-memory/v1`).
+    ArrayI64,
+    /// A `let`-bound fixed-size array of `u64` leaves.
+    ArrayU64,
 }
 
 fn expect_kind(actual: ScalarKind, expected: ScalarKind) -> Result<(), SemanticContractError> {
@@ -2704,6 +2779,8 @@ fn resolve_alias(
                     field_writes_used: &std::cell::Cell::new(false),
                     enum_values_used: &std::cell::Cell::new(false),
                     merged_composites_used: &std::cell::Cell::new(false),
+                    admit_bounded_memory: false,
+                    arrays_used: &std::cell::Cell::new(false),
                 },
             )?,
             ScalarKind::Bool,
@@ -3034,6 +3111,53 @@ fn block_prefix_kinds<'a>(
                     allow_wrapping_arithmetic,
                     &inner_assignable,
                     &inner_env,
+                )?;
+            }
+            // An indexed write `a[i] = v` (`bounded-memory`): the name
+            // must be a `let`-bound array on the linear path, the index
+            // an `i64` and the value the element kind. The binding
+            // stays bound — the write mutates the array's contents.
+            Stmt::ArrayStore {
+                array,
+                index,
+                value,
+                ..
+            } if inner_env.admit_bounded_memory => {
+                let elem = match inner.get(array.as_str()) {
+                    Some(ScalarKind::ArrayI64) => ScalarKind::I64,
+                    Some(ScalarKind::ArrayU64) => ScalarKind::U64,
+                    _ => {
+                        return Err(SemanticContractError::Unsupported(
+                            "array write on a non-array binding",
+                        ))
+                    }
+                };
+                if !inner_assignable.contains(array.as_str()) {
+                    return Err(SemanticContractError::Unsupported(
+                        "array write to a name not bound on the linear path",
+                    ));
+                }
+                expect_kind(
+                    expression_kind(
+                        index,
+                        &inner,
+                        result_in_scope,
+                        allow_wrapping_arithmetic,
+                        &BTreeSet::new(),
+                        &inner_env,
+                    )?,
+                    ScalarKind::I64,
+                )?;
+                expect_kind(
+                    expression_kind(
+                        value,
+                        &inner,
+                        result_in_scope,
+                        allow_wrapping_arithmetic,
+                        &BTreeSet::new(),
+                        &inner_env,
+                    )?,
+                    elem,
                 )?;
             }
             // A `while` is admitted only mid-block under the
@@ -4142,7 +4266,96 @@ fn expression_kind(
             }
             kind.ok_or(SemanticContractError::Unsupported("empty match"))
         }
+        // A fixed-size array literal (`bounded-memory`): every element
+        // must kind-check and unify to one integer kind — `Num`
+        // elements adapt like binary operands. Bool or empty literals
+        // stay outside: a bool cell would emit an `i1` store the
+        // bounded-memory profile does not model, and `[]` has no
+        // element kind to unify.
+        Expr::ArrayLit(elems)
+            if allow_wrapping_arithmetic && env.admit_bounded_memory && !elems.is_empty() =>
+        {
+            let mut elem_kind = ScalarKind::Num;
+            for elem in elems {
+                let kind = expression_kind(
+                    elem,
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                    env,
+                )?;
+                elem_kind = match (elem_kind, kind) {
+                    (ScalarKind::Num, k) | (k, ScalarKind::Num) => k,
+                    (l, r) if l == r => l,
+                    _ => {
+                        return Err(SemanticContractError::Unsupported(
+                            "array literal element kinds",
+                        ))
+                    }
+                };
+            }
+            match elem_kind {
+                ScalarKind::I64 | ScalarKind::Num => {
+                    env.arrays_used.set(true);
+                    Ok(ScalarKind::ArrayI64)
+                }
+                ScalarKind::U64 => {
+                    env.arrays_used.set(true);
+                    Ok(ScalarKind::ArrayU64)
+                }
+                _ => Err(SemanticContractError::Unsupported(
+                    "array literal element kinds",
+                )),
+            }
+        }
+        // An indexed read `a[i]` (`bounded-memory`): the name must be a
+        // `let`-bound array, the index an `i64` (literals adapt). The
+        // read carries the array's element kind.
+        Expr::ArrayAccess(name, index) if allow_wrapping_arithmetic && env.admit_bounded_memory => {
+            let elem = match scope.get(name.as_str()) {
+                Some(ScalarKind::ArrayI64) => ScalarKind::I64,
+                Some(ScalarKind::ArrayU64) => ScalarKind::U64,
+                _ => {
+                    return Err(SemanticContractError::Unsupported(
+                        "array access on a non-array binding",
+                    ))
+                }
+            };
+            expect_kind(
+                expression_kind(
+                    index,
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                    env,
+                )?,
+                ScalarKind::I64,
+            )?;
+            env.arrays_used.set(true);
+            Ok(elem)
+        }
         Expr::Call(name, args) if allow_wrapping_arithmetic => {
+            // `len(a)` reads the stored element count as `i64` — the
+            // emitted `arrlen` slot load. A scalar argument falls
+            // through to the ordinary callee check, so an atom named
+            // `len` keeps resolving as a call.
+            if name == "len" && args.len() == 1 && env.admit_bounded_memory {
+                if let Ok(kind) = expression_kind(
+                    &args[0],
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                    env,
+                ) {
+                    if matches!(kind, ScalarKind::ArrayI64 | ScalarKind::ArrayU64) {
+                        env.arrays_used.set(true);
+                        return Ok(ScalarKind::I64);
+                    }
+                }
+            }
             // Each argument carries the callee parameter's declared
             // kind — a widened bool parameter admits only bool
             // arguments — and the call takes the callee's return kind.
@@ -4284,6 +4497,12 @@ pub struct PureI64Body<'ctx> {
     /// see post-write fields); scalar rebinds keep the established
     /// input-time view and stay out.
     post_writes: HashMap<String, SourceValue<'ctx>>,
+    /// True when the module's atoms used bounded-memory vocabulary —
+    /// array literals, indexed reads/writes or `len`. The IR encoder
+    /// admits `alloca`/GEP/`load`/`store` shapes only for a model
+    /// carrying this flag, and the report names the bounded-memory
+    /// profile for it.
+    pub bounded_memory: bool,
 }
 
 type BodyResult<T> = std::result::Result<T, SemanticContractError>;
@@ -4296,7 +4515,7 @@ pub fn encode_pure_i64_body<'ctx>(
     context: &'ctx Context,
     allow_wrapping_arithmetic: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
-    let (source_sha256, mut items, refined, structs, enums) =
+    let (source_sha256, mut items, refined, structs, enums, bounded_memory) =
         bounded_pure_i64_module(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     let call_returns =
         call_return_kinds(&items, &refined, &structs, &enums, RefinedAdmission::Reject);
@@ -4311,6 +4530,7 @@ pub fn encode_pure_i64_body<'ctx>(
         &structs,
         &enums,
         &call_returns,
+        bounded_memory,
     )
 }
 
@@ -4324,7 +4544,7 @@ pub fn encode_pure_i64_module<'ctx>(
     allow_wrapping_arithmetic: bool,
     admission: RefinedAdmission,
 ) -> BodyResult<Vec<PureI64Body<'ctx>>> {
-    let (source_sha256, items, refined, structs, enums) =
+    let (source_sha256, items, refined, structs, enums, bounded_memory) =
         bounded_pure_i64_module(source, allow_wrapping_arithmetic, admission)?;
     let call_returns = call_return_kinds(&items, &refined, &structs, &enums, admission);
     items
@@ -4338,6 +4558,7 @@ pub fn encode_pure_i64_module<'ctx>(
                 &structs,
                 &enums,
                 &call_returns,
+                bounded_memory,
             )),
             _ => None,
         })
@@ -4353,7 +4574,7 @@ fn bounded_pure_i64_module(
     source: &str,
     allow_wrapping_arithmetic: bool,
     admission: RefinedAdmission,
-) -> BodyResult<(String, Vec<Item>, RefinedEnv, StructEnv, EnumEnv)> {
+) -> BodyResult<(String, Vec<Item>, RefinedEnv, StructEnv, EnumEnv, bool)> {
     if source.len() > 65_536 {
         return Err(SemanticContractError::Unsupported("source size limit"));
     }
@@ -4377,7 +4598,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _, _, _, _, _) =
+    let (items, refined, structs, enums, _, _, _, _, _, _, arrays) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -4386,9 +4607,17 @@ fn bounded_pure_i64_module(
             "expected exactly one atom",
         ));
     }
-    Ok((digest(source.as_bytes()), items, refined, structs, enums))
+    Ok((
+        digest(source.as_bytes()),
+        items,
+        refined,
+        structs,
+        enums,
+        arrays,
+    ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_atom_body<'ctx>(
     atom: &crate::parser::ast::Atom,
     context: &'ctx Context,
@@ -4396,7 +4625,8 @@ fn encode_atom_body<'ctx>(
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
+    bounded_memory: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
     // A struct parameter contributes one input per field, so the limit
     // bounds the flattened signature.
@@ -4449,6 +4679,11 @@ fn encode_atom_body<'ctx>(
         }
         SourceValue::Boolean(value) => {
             value.ite(&BV::from_u64(context, 1, 64), &BV::from_u64(context, 0, 64))
+        }
+        SourceValue::Array { .. } => {
+            return Err(SemanticContractError::Unsupported(
+                "array value in a result position",
+            ))
         }
         // A struct result's value is its field slots concatenated in
         // declaration order — the layout the emitter's returned
@@ -4557,9 +4792,12 @@ fn encode_atom_body<'ctx>(
                 .or_else(|| enums.get(name).map(|variants| 1 + enum_max_arity(variants)))
         }),
         loop_bound_exits,
+        bounded_memory,
         post_writes: top_writes
             .into_iter()
-            .filter(|(_, value)| matches!(value, SourceValue::Composite(_)))
+            .filter(|(_, value)| {
+                matches!(value, SourceValue::Composite(_) | SourceValue::Array { .. })
+            })
             .collect(),
     })
 }
@@ -4935,7 +5173,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
     context: &'ctx Context,
     admission: RefinedAdmission,
 ) -> BodyResult<Vec<ModuleAtomObligations<'ctx>>> {
-    let (source_sha256, items, refined, structs, enums) =
+    let (source_sha256, items, refined, structs, enums, bounded_memory) =
         bounded_pure_i64_module(source, true, admission)?;
     let atom_items: Vec<&crate::parser::ast::Atom> = items
         .iter()
@@ -4964,6 +5202,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
                 &structs,
                 &enums,
                 &call_returns,
+                bounded_memory,
             )
         })
         .collect::<BodyResult<_>>()?;
@@ -5030,7 +5269,7 @@ fn module_atom_obligations<'ctx>(
     body: &PureI64Body<'ctx>,
     callees: &BTreeMap<String, &crate::parser::ast::Atom>,
     callee_bodies: &BTreeMap<String, &PureI64Body<'ctx>>,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
     context: &'ctx Context,
     refined: &RefinedEnv,
     structs: &StructEnv,
@@ -5265,7 +5504,7 @@ fn module_atom_obligations<'ctx>(
 fn atom_obligation<'ctx>(
     atom: &Atom,
     body: &PureI64Body<'ctx>,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
     context: &'ctx Context,
     refined: &RefinedEnv,
 ) -> BodyResult<Bool<'ctx>> {
@@ -5359,6 +5598,22 @@ enum SourceValue<'ctx> {
         tag: BV<'ctx>,
         slots: Vec<SourceValue<'ctx>>,
     },
+    /// A `let`-bound fixed-size array (`bounded-memory`): cell contents
+    /// as an SMT `BV64 -> BV64` array — the same index-domain the
+    /// emitted `alloca`/GEP/`store`/`load` uses — plus the stored
+    /// element count `len(a)` returns and the element kind reads
+    /// produce.
+    Array {
+        store: Array<'ctx>,
+        len: BV<'ctx>,
+        elem: ScalarKind,
+        /// Which array literal this binding's backing store descends
+        /// from: `let b = a` shares `a`'s identity (the emitted code
+        /// shares the data pointer), so an indexed write through one
+        /// name reaches every alias. Mints from
+        /// `CallShapes::next_array_id`.
+        alloc: u64,
+    },
 }
 
 /// Instantiate a callee-side [`SourceValue`] (expressed over the
@@ -5386,6 +5641,17 @@ fn substitute_source_value<'ctx>(
                 .iter()
                 .map(|v| substitute_source_value(v, substitutions))
                 .collect(),
+        },
+        SourceValue::Array {
+            store,
+            len,
+            elem,
+            alloc,
+        } => SourceValue::Array {
+            store: store.substitute(substitutions),
+            len: len.substitute(substitutions),
+            elem: *elem,
+            alloc: *alloc,
         },
     }
 }
@@ -5499,7 +5765,7 @@ fn source_field_write<'ctx>(
     written: &mut HashMap<String, SourceValue<'ctx>>,
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<Option<(String, SourceValue<'ctx>)>> {
     let Some((base, field)) = var.split_once('.') else {
         return Ok(None);
@@ -5595,9 +5861,10 @@ fn merge_source_values<'ctx>(
     cond: &Bool<'ctx>,
     a: SourceValue<'ctx>,
     b: SourceValue<'ctx>,
-    merged_composites: bool,
+    call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<SourceValue<'ctx>> {
     use SourceValue::{Boolean as B, Integer as I, Number as N, Unsigned as U};
+    let merged_composites = call_returns.merged_composites;
     match (a, b) {
         (N(a), N(b)) => Ok(N(cond.ite(&a, &b))),
         (U(a), U(b) | N(b)) | (N(a), U(b)) => Ok(U(cond.ite(&a, &b))),
@@ -5609,7 +5876,7 @@ fn merge_source_values<'ctx>(
             }
             let mut fields = Vec::with_capacity(a.len());
             for ((name, av), (_, bv)) in a.into_iter().zip(b) {
-                fields.push((name, merge_source_values(cond, av, bv, merged_composites)?));
+                fields.push((name, merge_source_values(cond, av, bv, call_returns)?));
             }
             Ok(SourceValue::Composite(fields))
         }
@@ -5627,7 +5894,7 @@ fn merge_source_values<'ctx>(
         ) if merged_composites && an == bn && a_slots.len() == b_slots.len() => {
             let mut slots = Vec::with_capacity(a_slots.len());
             for (av, bv) in a_slots.into_iter().zip(b_slots) {
-                slots.push(merge_source_values(cond, av, bv, merged_composites)?);
+                slots.push(merge_source_values(cond, av, bv, call_returns)?);
             }
             Ok(SourceValue::Enum {
                 name: an,
@@ -5635,6 +5902,37 @@ fn merge_source_values<'ctx>(
                 slots,
             })
         }
+        // A branch writing `a[i] = v` rebinds the array under the
+        // branch condition — the merge is the SMT array `ite` of the
+        // store-chain and the incoming array, not a pointer `phi`
+        // (the emitted IR keeps one data pointer and merges the
+        // stored values). Two sides bound from different literals
+        // mint a fresh `alloc`: keeping either side's id would let a
+        // write through the merged name reach bindings that alias
+        // only one side.
+        (
+            SourceValue::Array {
+                store: as_,
+                len: al,
+                elem: ae,
+                alloc: aa,
+            },
+            SourceValue::Array {
+                store: bs,
+                len: bl,
+                elem: be,
+                alloc: ba,
+            },
+        ) if ae == be => Ok(SourceValue::Array {
+            store: cond.ite(&as_, &bs),
+            len: cond.ite(&al, &bl),
+            elem: ae,
+            alloc: if aa == ba {
+                aa
+            } else {
+                call_returns.fresh_array_alloc()
+            },
+        }),
         _ => Err(SemanticContractError::Unsupported("branch composite kinds")),
     }
 }
@@ -5655,7 +5953,7 @@ fn source_stmt<'ctx>(
     // to inputs satisfying all of them.
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<SourceValue<'ctx>> {
     if depth > MAX_DEPTH {
         return Err(SemanticContractError::Unsupported("source depth limit"));
@@ -5785,6 +6083,15 @@ fn source_stmt<'ctx>(
                                 "let shadows a struct binding with a different type",
                             ));
                         }
+                        // An array binding is name-keyed the same way:
+                        // only another array may shadow it.
+                        if matches!(inner.get(var), Some(SourceValue::Array { .. }))
+                            && !matches!(bound, SourceValue::Array { .. })
+                        {
+                            return Err(SemanticContractError::Unsupported(
+                                "let shadows an array binding with a different type",
+                            ));
+                        }
                         inner.insert(var.clone(), bound);
                         inner_assignable.insert(var.clone());
                         escapable.remove(var);
@@ -5848,6 +6155,98 @@ fn source_stmt<'ctx>(
                         inner.insert(var.clone(), bound.clone());
                         if escapable.contains(var) {
                             written.insert(var.clone(), bound);
+                        }
+                    }
+                    // An indexed write `a[i] = v` rebinds the array
+                    // under its in-bounds guard — the emitted code
+                    // skips the store entirely when the index is out
+                    // of bounds, so OOB keeps the incoming array.
+                    Stmt::ArrayStore {
+                        array,
+                        index,
+                        value,
+                        ..
+                    } => {
+                        let Some(SourceValue::Array {
+                            store, len, alloc, ..
+                        }) = inner.get(array)
+                        else {
+                            return Err(SemanticContractError::Unsupported(
+                                "array write on a non-array binding",
+                            ));
+                        };
+                        if !inner_assignable.contains(array.as_str()) {
+                            return Err(SemanticContractError::Unsupported(
+                                "array write to a name not bound on the linear path",
+                            ));
+                        }
+                        // The assigned value evaluates before the index,
+                        // matching the emitter's `val` then `idx` order:
+                        // a write through an alias inside the index
+                        // expression must not reach the value's reads.
+                        let bound = source_expr(
+                            value,
+                            ctx,
+                            &inner,
+                            guard,
+                            definedness,
+                            depth + 1,
+                            &BTreeSet::new(),
+                            written,
+                            loop_exits,
+                            call_sites,
+                            call_returns,
+                        )?
+                        .integer()?;
+                        let index = source_expr(
+                            index,
+                            ctx,
+                            &inner,
+                            guard,
+                            definedness,
+                            depth + 1,
+                            &BTreeSet::new(),
+                            written,
+                            loop_exits,
+                            call_sites,
+                            call_returns,
+                        )?
+                        .integer()?;
+                        // `let b = a` aliases the same backing store
+                        // (`alloc`), the one data pointer the emitter
+                        // emits for the group: the write updates the
+                        // canonical per-`alloc` store so every binding
+                        // on the backing sees it — including a name a
+                        // block `let` shadowed, which the flat `inner`
+                        // map can no longer reach.
+                        let cur_store = canonical_store(call_returns, *alloc, store);
+                        let new_store = array_in_bounds(ctx, &index, len)
+                            .ite(&cur_store.store(&index, &bound), &cur_store);
+                        // The store is a state mutation, so it binds
+                        // only where this statement actually runs — a
+                        // `false && { … a[i] = v … }` path keeps the
+                        // pre-statement backing, like the emitted
+                        // short-circuit branch that skips the block.
+                        let new_store = guard.ite(&new_store, &cur_store);
+                        call_returns
+                            .alloc_stores
+                            .borrow_mut()
+                            .insert(*alloc, new_store.clone());
+                        // The written name's own snapshot tracks the
+                        // canonical store so name-level merges pair
+                        // up-to-date branch sides, and its rebind
+                        // escapes like any write.
+                        if let Some(SourceValue::Array {
+                            store: member_store,
+                            ..
+                        }) = inner.get_mut(array)
+                        {
+                            *member_store = new_store;
+                        }
+                        if escapable.contains(array.as_str()) {
+                            if let Some(value) = inner.get(array) {
+                                written.insert(array.clone(), value.clone());
+                            }
                         }
                     }
                     Stmt::Expr(value, _) => {
@@ -5950,7 +6349,7 @@ fn source_while<'ctx>(
     written: &mut HashMap<String, SourceValue<'ctx>>,
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<()> {
     use SourceValue::{Boolean as B, Integer as I, Number as N, Unsigned as U};
     let mut cur = env.clone();
@@ -5981,6 +6380,7 @@ fn source_while<'ctx>(
             }
         };
         let body_guard = Bool::and(ctx, &[&alive, &c]);
+        let pre_body_stores = call_returns.alloc_stores.borrow().clone();
         let mut body_writes = HashMap::new();
         source_stmt(
             body,
@@ -5995,6 +6395,18 @@ fn source_while<'ctx>(
             call_sites,
             call_returns,
         )?;
+        let post_body_stores = call_returns.alloc_stores.borrow().clone();
+        // The body's writes to a shared backing apply only where the
+        // loop actually ran — the canonical map's counterpart of the
+        // per-name `body_guard.ite` merge below.
+        {
+            let mut stores = call_returns.alloc_stores.borrow_mut();
+            for (alloc, store) in stores.iter_mut() {
+                if let Some(pre) = pre_body_stores.get(alloc) {
+                    *store = body_guard.ite(store, pre);
+                }
+            }
+        }
         for (name, bound) in body_writes {
             // Writes escape only where the body actually ran: an
             // already-exited path keeps its entry values however the
@@ -6009,6 +6421,52 @@ fn source_while<'ctx>(
                 }
                 (Some(I(old) | N(old)), I(new) | N(new)) => I(body_guard.ite(new, old)),
                 (Some(B(old)), B(new)) => B(body_guard.ite(new, old)),
+                // A loop-carried `a[i] = v` keeps the merged array: the
+                // body's write applies only where the loop actually ran.
+                // A body rebinding `a = [...]` mints a fresh `alloc`,
+                // same as a branch merge of different literals.
+                (
+                    Some(SourceValue::Array {
+                        store: os,
+                        len: ol,
+                        elem: oe,
+                        alloc: oa,
+                    }),
+                    SourceValue::Array {
+                        store: ns,
+                        len: nl,
+                        elem: ne,
+                        alloc: na,
+                    },
+                ) if oe == ne => {
+                    let alloc = if oa == na {
+                        *oa
+                    } else {
+                        // A body rebinding mints a fresh backing: its
+                        // canonical store is the guard-merge of each
+                        // side's canonical state.
+                        let fresh = call_returns.fresh_array_alloc();
+                        let body_store = post_body_stores
+                            .get(na)
+                            .cloned()
+                            .unwrap_or_else(|| ns.clone());
+                        let cur_store = pre_body_stores
+                            .get(oa)
+                            .cloned()
+                            .unwrap_or_else(|| os.clone());
+                        call_returns
+                            .alloc_stores
+                            .borrow_mut()
+                            .insert(fresh, body_guard.ite(&body_store, &cur_store));
+                        fresh
+                    };
+                    SourceValue::Array {
+                        store: body_guard.ite(ns, os),
+                        len: body_guard.ite(nl, ol),
+                        elem: *oe,
+                        alloc,
+                    }
+                }
                 (None, _) => bound.clone(),
                 _ => {
                     return Err(SemanticContractError::Unsupported(
@@ -6123,7 +6581,7 @@ fn split_slots<'ctx>(value: &BV<'ctx>, n: usize) -> Vec<BV<'ctx>> {
 /// a struct-typed field consumes its own leaves into a nested
 /// `Composite` (`pure-i64-composite/v8`).
 fn composite_from_slots<'ctx>(
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
     fields: &[(String, ValueKind)],
     slots: &mut std::slice::Iter<'_, BV<'ctx>>,
     ctx: &'ctx Context,
@@ -6168,7 +6626,131 @@ fn lower_scalar<'ctx>(value: SourceValue<'ctx>, ctx: &'ctx Context) -> BodyResul
         SourceValue::Enum { .. } => Err(SemanticContractError::Unsupported(
             "source enum value in a scalar position",
         )),
+        SourceValue::Array { .. } => Err(SemanticContractError::Unsupported(
+            "source array value in a scalar position",
+        )),
     }
+}
+
+/// The in-bounds domain of an indexed array access: signed
+/// `0 <= i < len`, matching the `icmp sge`/`icmp slt` pair the
+/// emitter's bounds check emits.
+fn array_in_bounds<'ctx>(ctx: &'ctx Context, index: &BV<'ctx>, len: &BV<'ctx>) -> Bool<'ctx> {
+    Bool::and(
+        ctx,
+        &[&index.bvsge(&BV::from_u64(ctx, 0, 64)), &index.bvslt(len)],
+    )
+}
+
+/// The bounded-memory read the emitted bounds-check + `load` + merged
+/// `phi(loaded, 0)` encodes: `ite(0 <= i < len, select(arr, i), 0)` —
+/// an out-of-bounds read yields `0` exactly like the emitter's merged
+/// value, so no definedness obligation is recorded.
+fn array_read<'ctx>(
+    ctx: &'ctx Context,
+    store: &Array<'ctx>,
+    len: &BV<'ctx>,
+    index: &BV<'ctx>,
+) -> BV<'ctx> {
+    let selected = store.select(index).as_bv().unwrap_or_else(|| {
+        // The range sort is always BV64 — the fallback only keeps the
+        // helper total.
+        BV::from_u64(ctx, 0, 64)
+    });
+    array_in_bounds(ctx, index, len).ite(&selected, &BV::from_u64(ctx, 0, 64))
+}
+
+/// The canonical backing store for `alloc` — the model's shared data
+/// pointer — or the binding's own `store` snapshot when the alloc has
+/// no tracked entry (a `CallShapes::default()` context evaluating a
+/// pre-seeded environment).
+fn canonical_store<'ctx>(
+    call_returns: &CallShapes<'ctx>,
+    alloc: u64,
+    snapshot: &Array<'ctx>,
+) -> Array<'ctx> {
+    call_returns
+        .alloc_stores
+        .borrow()
+        .get(&alloc)
+        .cloned()
+        .unwrap_or_else(|| snapshot.clone())
+}
+
+/// Merge the canonical per-`alloc` stores after a branch: every
+/// backing present before the branch becomes the `ite` of the two
+/// sides' states, regardless of which source names still point at it —
+/// a shadowed binding's array joins no `written` name but still shares
+/// the merged backing. Backings minted inside a branch keep that
+/// side's store (no binding on the other side can reference them).
+fn merge_alloc_stores<'ctx>(
+    call_returns: &CallShapes<'ctx>,
+    cond: &Bool<'ctx>,
+    then_stores: &HashMap<u64, Array<'ctx>>,
+    else_stores: &HashMap<u64, Array<'ctx>>,
+) {
+    let mut merged: HashMap<u64, Array<'ctx>> = else_stores.clone();
+    for (alloc, then_store) in then_stores {
+        merged.insert(
+            *alloc,
+            match else_stores.get(alloc) {
+                Some(else_store) => cond.ite(then_store, else_store),
+                None => then_store.clone(),
+            },
+        );
+    }
+    *call_returns.alloc_stores.borrow_mut() = merged;
+}
+
+/// Seed the canonical store for a merged `Array` binding that the
+/// name-level merge gave a fresh `alloc`: each side's store is that
+/// side's canonical state for its own `alloc` (the binding's `store`
+/// snapshot may predate later indexed writes), merged under `cond`.
+/// A same-`alloc` merge is already covered by the surrounding
+/// per-`alloc` map merge, so re-seeding would only rebuild its term.
+fn seed_merged_alloc<'ctx>(
+    call_returns: &CallShapes<'ctx>,
+    cond: &Bool<'ctx>,
+    merged: &SourceValue<'ctx>,
+    then_side: &SourceValue<'ctx>,
+    else_side: &SourceValue<'ctx>,
+    then_stores: &HashMap<u64, Array<'ctx>>,
+    else_stores: &HashMap<u64, Array<'ctx>>,
+) {
+    let (
+        SourceValue::Array {
+            alloc: then_alloc,
+            store: then_snapshot,
+            ..
+        },
+        SourceValue::Array {
+            alloc: else_alloc,
+            store: else_snapshot,
+            ..
+        },
+        SourceValue::Array {
+            alloc: merged_alloc,
+            ..
+        },
+    ) = (then_side, else_side, merged)
+    else {
+        return;
+    };
+    if merged_alloc == then_alloc || merged_alloc == else_alloc {
+        return;
+    }
+    let then_store = then_stores
+        .get(then_alloc)
+        .cloned()
+        .unwrap_or_else(|| then_snapshot.clone());
+    let else_store = else_stores
+        .get(else_alloc)
+        .cloned()
+        .unwrap_or_else(|| else_snapshot.clone());
+    call_returns
+        .alloc_stores
+        .borrow_mut()
+        .insert(*merged_alloc, cond.ite(&then_store, &else_store));
 }
 
 /// The `result` binding of an atom's (or call site's) result value:
@@ -6178,7 +6760,7 @@ fn result_value<'ctx>(
     atom: &str,
     value: &BV<'ctx>,
     ctx: &'ctx Context,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
 ) -> SourceValue<'ctx> {
     if let Some(fields) = call_returns.result_fields(atom) {
         let leaf_count = call_returns.flattened_kinds(fields).len();
@@ -6219,7 +6801,7 @@ fn source_expr<'ctx>(
     written: &mut HashMap<String, SourceValue<'ctx>>,
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
-    call_returns: &CallShapes,
+    call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<SourceValue<'ctx>> {
     use SourceValue::{Boolean as B, Integer as I, Number as N, Unsigned as U};
     if depth > MAX_DEPTH {
@@ -6546,34 +7128,42 @@ fn source_expr<'ctx>(
             // never reach `then_writes`/`else_writes`.
             let mut then_writes = HashMap::new();
             let mut else_writes = HashMap::new();
-            let (then_value, else_value) = (
-                source_stmt(
-                    then_branch,
-                    ctx,
-                    env,
-                    &Bool::and(ctx, &[guard, &cond]),
-                    definedness,
-                    depth + 1,
-                    assignable,
-                    &mut then_writes,
-                    loop_exits,
-                    call_sites,
-                    call_returns,
-                )?,
-                source_stmt(
-                    else_branch,
-                    ctx,
-                    env,
-                    &Bool::and(ctx, &[guard, &cond.not()]),
-                    definedness,
-                    depth + 1,
-                    assignable,
-                    &mut else_writes,
-                    loop_exits,
-                    call_sites,
-                    call_returns,
-                )?,
-            );
+            // The canonical per-`alloc` stores branch the same way the
+            // name-level writes do: snapshot each side's end state and
+            // merge every shared backing under the condition — a
+            // shadowed binding's array joins no `written` name but
+            // still shares the merged backing.
+            let pre_alloc_stores = call_returns.alloc_stores.borrow().clone();
+            let then_value = source_stmt(
+                then_branch,
+                ctx,
+                env,
+                &Bool::and(ctx, &[guard, &cond]),
+                definedness,
+                depth + 1,
+                assignable,
+                &mut then_writes,
+                loop_exits,
+                call_sites,
+                call_returns,
+            )?;
+            let then_alloc_stores = call_returns.alloc_stores.borrow().clone();
+            *call_returns.alloc_stores.borrow_mut() = pre_alloc_stores;
+            let else_value = source_stmt(
+                else_branch,
+                ctx,
+                env,
+                &Bool::and(ctx, &[guard, &cond.not()]),
+                definedness,
+                depth + 1,
+                assignable,
+                &mut else_writes,
+                loop_exits,
+                call_sites,
+                call_returns,
+            )?;
+            let else_alloc_stores = call_returns.alloc_stores.borrow().clone();
+            merge_alloc_stores(call_returns, &cond, &then_alloc_stores, &else_alloc_stores);
             let names: BTreeSet<&String> = then_writes.keys().chain(else_writes.keys()).collect();
             for name in names {
                 let then_bound = match then_writes.get(name) {
@@ -6592,18 +7182,33 @@ fn source_expr<'ctx>(
                 };
                 let merged = merge_source_values(
                     &cond,
-                    then_bound,
-                    else_bound,
-                    call_returns.merged_composites,
+                    then_bound.clone(),
+                    else_bound.clone(),
+                    call_returns,
                 )?;
+                seed_merged_alloc(
+                    call_returns,
+                    &cond,
+                    &merged,
+                    &then_bound,
+                    &else_bound,
+                    &then_alloc_stores,
+                    &else_alloc_stores,
+                );
                 written.insert(name.clone(), merged);
             }
-            merge_source_values(
+            let merged_value =
+                merge_source_values(&cond, then_value.clone(), else_value.clone(), call_returns)?;
+            seed_merged_alloc(
+                call_returns,
                 &cond,
-                then_value,
-                else_value,
-                call_returns.merged_composites,
-            )?
+                &merged_value,
+                &then_value,
+                &else_value,
+                &then_alloc_stores,
+                &else_alloc_stores,
+            );
+            merged_value
         }
         // First-match order, like the emitter's try-chain and
         // `--bitvec-i64` verification: an arm runs under the negation of
@@ -6638,8 +7243,11 @@ fn source_expr<'ctx>(
                 None => Some(target_value.clone().integer()?),
             };
             let mut missed: Vec<Bool> = Vec::new();
-            let mut selected: Vec<(Bool, SourceValue)> = Vec::new();
-            let mut fallback = None;
+            // Each arm also carries the canonical per-`alloc` state its
+            // body produced, so a merged array-valued result seeds its
+            // fresh backing from that arm's actual stores.
+            let mut selected: Vec<(Bool, SourceValue, HashMap<u64, Array>)> = Vec::new();
+            let mut fallback: Option<(SourceValue, HashMap<u64, Array>)> = None;
             for arm in arms {
                 // An arm after a catch-all is never reached: its body is
                 // still encoded (under an unsatisfiable guard, so its
@@ -6786,6 +7394,7 @@ fn source_expr<'ctx>(
                     None => reach.clone(),
                 };
                 let mut arm_writes = HashMap::new();
+                let pre_arm_stores = call_returns.alloc_stores.borrow().clone();
                 let value = source_stmt(
                     &arm.body,
                     ctx,
@@ -6799,6 +7408,7 @@ fn source_expr<'ctx>(
                     call_sites,
                     call_returns,
                 )?;
+                let post_arm_stores = call_returns.alloc_stores.borrow().clone();
                 // Arm writes escape like `if` branch writes: each merges
                 // under the arm-local hit (earlier arms' misses and this
                 // arm's `pattern ∧ guard`), matching the emitter's
@@ -6808,37 +7418,183 @@ fn source_expr<'ctx>(
                     Some(h) => Bool::and(ctx, &[&arm_reach, h]),
                     None => arm_reach.clone(),
                 };
+                // The canonical per-`alloc` stores merge under the same
+                // arm hit — a backing written through a shadowed name
+                // has no `arm_writes` entry but still merges.
+                {
+                    let mut stores = call_returns.alloc_stores.borrow_mut();
+                    for (alloc, store) in stores.iter_mut() {
+                        if let Some(pre) = pre_arm_stores.get(alloc) {
+                            *store = arm_hit.ite(store, pre);
+                        }
+                    }
+                }
                 for (name, bound) in arm_writes {
                     let prior = written
                         .get(&name)
                         .cloned()
                         .or_else(|| env.get(&name).cloned())
                         .ok_or(SemanticContractError::Unsupported("source binding"))?;
-                    let merged = merge_source_values(
+                    let merged =
+                        merge_source_values(&arm_hit, bound.clone(), prior.clone(), call_returns)?;
+                    seed_merged_alloc(
+                        call_returns,
                         &arm_hit,
-                        bound,
-                        prior,
-                        call_returns.merged_composites,
-                    )?;
+                        &merged,
+                        &bound,
+                        &prior,
+                        &post_arm_stores,
+                        &pre_arm_stores,
+                    );
                     written.insert(name, merged);
                 }
                 if let Some(cond) = hit {
-                    selected.push((cond, value));
+                    selected.push((cond, value, post_arm_stores));
                 } else if fallback.is_none() {
-                    fallback = Some(value);
+                    fallback = Some((value, post_arm_stores));
                 }
             }
-            let Some(mut result) = fallback else {
+            let Some((mut result, _)) = fallback else {
                 return Err(SemanticContractError::Unsupported(
                     "match without a catch-all arm",
                 ));
             };
-            for (cond, value) in selected.into_iter().rev() {
-                result = merge_source_values(&cond, value, result, call_returns.merged_composites)?;
+            for (cond, value, value_stores) in selected.into_iter().rev() {
+                let merged =
+                    merge_source_values(&cond, value.clone(), result.clone(), call_returns)?;
+                // The prior side's canonical state is the running map —
+                // every earlier fold already merged into it.
+                let prior_stores = call_returns.alloc_stores.borrow().clone();
+                seed_merged_alloc(
+                    call_returns,
+                    &cond,
+                    &merged,
+                    &value,
+                    &result,
+                    &value_stores,
+                    &prior_stores,
+                );
+                result = merged;
             }
             result
         }
+        // A fixed-size array literal (`bounded-memory`): the zero-filled
+        // `BV64 -> BV64` array with each element stored at its literal
+        // index — the same cells the emitted `alloca [N x i64]` +
+        // per-element `store` writes.
+        Expr::ArrayLit(elems) => {
+            if elems.is_empty() {
+                return Err(SemanticContractError::Unsupported("empty array literal"));
+            }
+            let zero = BV::from_u64(ctx, 0, 64);
+            let mut store = Array::const_array(ctx, &Sort::bitvector(ctx, 64), &zero);
+            let mut unsigned = false;
+            for (i, elem) in elems.iter().enumerate() {
+                let value = source_expr(
+                    elem,
+                    ctx,
+                    env,
+                    guard,
+                    definedness,
+                    depth + 1,
+                    &BTreeSet::new(),
+                    written,
+                    loop_exits,
+                    call_sites,
+                    call_returns,
+                )?;
+                let cell = match value {
+                    I(v) | N(v) => v,
+                    U(v) => {
+                        unsigned = true;
+                        v
+                    }
+                    _ => return Err(SemanticContractError::Unsupported("array literal element")),
+                };
+                store = store.store(&BV::from_u64(ctx, i as u64, 64), &cell);
+            }
+            let alloc = call_returns.fresh_array_alloc();
+            // The canonical backing-store entry: every binding on this
+            // `alloc` reads and writes through `alloc_stores`.
+            call_returns
+                .alloc_stores
+                .borrow_mut()
+                .insert(alloc, store.clone());
+            SourceValue::Array {
+                store,
+                len: BV::from_u64(ctx, elems.len() as u64, 64),
+                elem: if unsigned {
+                    ScalarKind::U64
+                } else {
+                    ScalarKind::I64
+                },
+                alloc,
+            }
+        }
+        // An indexed read `a[i]`: the in-bounds `select` or the merged
+        // `0` an out-of-bounds read yields — no definedness obligation,
+        // matching the emitted bounds-check + `phi(loaded, 0)`.
+        Expr::ArrayAccess(name, index) => {
+            let Some(SourceValue::Array {
+                store,
+                len,
+                elem,
+                alloc,
+            }) = env.get(name.as_str())
+            else {
+                return Err(SemanticContractError::Unsupported(
+                    "array access on a non-array binding",
+                ));
+            };
+            let index = source_expr(
+                index,
+                ctx,
+                env,
+                guard,
+                definedness,
+                depth + 1,
+                &BTreeSet::new(),
+                written,
+                loop_exits,
+                call_sites,
+                call_returns,
+            )?
+            .integer()?;
+            // The canonical store carries every indexed write to this
+            // backing — including ones a shadowed sibling wrote.
+            let read = array_read(
+                ctx,
+                &canonical_store(call_returns, *alloc, store),
+                len,
+                &index,
+            );
+            match elem {
+                ScalarKind::U64 => U(read),
+                _ => I(read),
+            }
+        }
         Expr::Call(name, args) => {
+            // `len(a)` is the stored element count — no memory op on
+            // the IR side (the let's SSA value carries it). Only a
+            // binding (or inline literal) actually producing an array
+            // intercepts; anything else resolves as an ordinary call,
+            // so a user atom named `len` keeps working.
+            if name == "len" && args.len() == 1 {
+                let len = match &args[0] {
+                    Expr::Variable(var) => env.get(var.as_str()).and_then(|value| {
+                        if let SourceValue::Array { len, .. } = value {
+                            Some(len.clone())
+                        } else {
+                            None
+                        }
+                    }),
+                    Expr::ArrayLit(elems) => Some(BV::from_u64(ctx, elems.len() as u64, 64)),
+                    _ => None,
+                };
+                if let Some(len) = len {
+                    return Ok(I(len));
+                }
+            }
             // An `E::V(args..)` enum constructor produces the variant's
             // value directly — tag ordinal plus payload slots — not a
             // call site: it carries no obligation domain.

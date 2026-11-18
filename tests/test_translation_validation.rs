@@ -3049,3 +3049,195 @@ fn composite_v8_nested_struct_aggregates_validate_and_refute() {
         Outcome::Different
     );
 }
+
+const BOUNDED_ARRAY_SOURCE: &str = "atom sum() -> i64 requires: true; ensures: true; body: { let a = [1, 2, 3]; a[1] = 9; a[0] + a[1] + a[2] };\n\
+     atom pick(a0: i64, i: i64) -> i64 requires: 0 <= i && i < 3; ensures: true; body: { let a = [a0, 20, 30]; a[i] = 7; a[i] };\n\
+     atom main() -> i64 requires: true; ensures: true; body: { sum() + pick(1, 0) };";
+
+#[test]
+fn bounded_memory_arrays_validate_and_refute() {
+    // composite v11 admits `let`-bound stack arrays: the emitter lowers
+    // them to an entry-block `alloca [N x i64]` plus gep/load/store,
+    // which the bounded-memory whitelist and provenance map encode.
+    let items = parse_module_checked(BOUNDED_ARRAY_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let report = tv::validate_native_module(
+        BOUNDED_ARRAY_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV11,
+    )
+    .unwrap();
+    assert_eq!(
+        report.outcome,
+        Outcome::EquivalentWithinProfile,
+        "bounded-memory module must validate\n{ir}"
+    );
+    assert_eq!(report.profile, tv::BOUNDED_MEMORY_NATIVE_MODULE_PROFILE);
+}
+
+#[test]
+fn bounded_memory_arrays_need_v11_and_pointer_escapes_fail_closed() {
+    let items = parse_module_checked(BOUNDED_ARRAY_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    // Arrays are a v11 widening — under composite v10 the source itself
+    // is out of profile.
+    assert!(tv::validate_native_module(
+        BOUNDED_ARRAY_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV10,
+    )
+    .is_err());
+    // A stored value that does not match the source's cell refutes.
+    let stored = ir.replacen("store i64 9", "store i64 8", 1);
+    assert_ne!(stored, ir, "probe did not apply:\n{ir}");
+    assert_eq!(
+        tv::validate_native_module(
+            BOUNDED_ARRAY_SOURCE,
+            &stored,
+            Options::default(),
+            RefinedAdmission::CompositeV11,
+        )
+        .unwrap()
+        .outcome,
+        Outcome::Different
+    );
+    // A pointer operand outside the provenance-preserving slots —
+    // here an address compared by `icmp` — fails the whitelist even
+    // under bounded memory.
+    let alloca = ir.find("= alloca [").expect("probe needs an alloca");
+    let name_end = ir[..alloca]
+        .rfind('%')
+        .expect("probe needs the alloca name");
+    let name_start = ir[..name_end].rfind([' ', '\n']).map_or(0, |i| i + 1);
+    let alloca_name = &ir[name_start..alloca + 1];
+    let escaped = ir.replacen(
+        " ret i64",
+        &format!(" %ptr_eq = icmp eq ptr {alloca_name}, {alloca_name}\n ret i64"),
+        1,
+    );
+    assert_ne!(escaped, ir, "probe did not apply:\n{ir}");
+    assert!(tv::validate_native_module(
+        BOUNDED_ARRAY_SOURCE,
+        &escaped,
+        Options::default(),
+        RefinedAdmission::CompositeV11,
+    )
+    .is_err());
+}
+
+const BOUNDED_ALIAS_SOURCE: &str = "atom alias() -> i64 requires: true; ensures: true; body: { let a = [1, 2]; let b = a; b[0] = 9; a[0] + a[1] };\natom main() -> i64 requires: true; ensures: true; body: { alias() };";
+
+#[test]
+fn bounded_memory_alias_write_reaches_every_alias() {
+    // `let b = a` copies the array's fat pointer — the emitted code
+    // shares one data pointer, so `b[0] = 9` must reach `a[0]` in the
+    // source model too (the value is 9 + 2 = 11 on both sides).
+    let items = parse_module_checked(BOUNDED_ALIAS_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let report = tv::validate_native_module(
+        BOUNDED_ALIAS_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV11,
+    )
+    .unwrap();
+    assert_eq!(
+        report.outcome,
+        Outcome::EquivalentWithinProfile,
+        "aliased array write must validate\n{ir}"
+    );
+}
+
+const BOUNDED_SHADOWED_ALIAS_SOURCE: &str = "atom shadow(c: i64) -> i64 requires: true; ensures: true; body: { let a = [1, 2]; let b = a; if c > 0 { let a = [7, 8]; b[0] = 9; 0 } else { 0 }; a[0] + a[1] };\n\
+     atom main() -> i64 requires: true; ensures: true; body: { shadow(1) };";
+
+#[test]
+fn bounded_memory_shadowed_name_still_shares_the_backing_store() {
+    // A block `let` shadows the array name inside a branch, but `b`
+    // still points at the original backing: the emitted code writes
+    // through the shared data pointer, so `b[0] = 9` reaches the outer
+    // `a` — the source model must merge that write too.
+    let items = parse_module_checked(BOUNDED_SHADOWED_ALIAS_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let report = tv::validate_native_module(
+        BOUNDED_SHADOWED_ALIAS_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV11,
+    )
+    .unwrap();
+    assert_eq!(
+        report.outcome,
+        Outcome::EquivalentWithinProfile,
+        "shadowed-array alias write must validate\n{ir}"
+    );
+}
+
+#[test]
+fn bounded_memory_byte_indexed_gep_fails_closed() {
+    // A `gep i8` indexes bytes, not cells — the source element type
+    // gate must fail closed on it.
+    let items = parse_module_checked(BOUNDED_ARRAY_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let byte = ir.replacen("getelementptr i64, ptr", "getelementptr i8, ptr", 1);
+    assert_ne!(byte, ir, "probe did not apply:\n{ir}");
+    assert!(tv::validate_native_module(
+        BOUNDED_ARRAY_SOURCE,
+        &byte,
+        Options::default(),
+        RefinedAdmission::CompositeV11,
+    )
+    .is_err());
+}
+
+const BOUNDED_ZERO_SOURCE: &str = "atom zero() -> i64 requires: true; ensures: true; body: { let a = [0, 5]; a[0] };\natom main() -> i64 requires: true; ensures: true; body: { zero() };";
+
+#[test]
+fn bounded_memory_unwritten_cell_is_not_silently_zero() {
+    // A dropped initialisation store must not pass: the unconstrained
+    // backing array yields an arbitrary cell where a zero-filled base
+    // would silently reproduce the source's 0.
+    let items = parse_module_checked(BOUNDED_ZERO_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let dropped = ir.replacen("  store i64 0, ptr %lit_slot, align 4\n", "", 1);
+    assert_ne!(dropped, ir, "probe did not apply:\n{ir}");
+    assert_eq!(
+        tv::validate_native_module(
+            BOUNDED_ZERO_SOURCE,
+            &dropped,
+            Options::default(),
+            RefinedAdmission::CompositeV11,
+        )
+        .unwrap()
+        .outcome,
+        Outcome::Different
+    );
+}
+
+#[test]
+fn bounded_memory_out_of_bounds_pair_is_ub_not_equivalent() {
+    // An out-of-bounds store+read pair agrees with the source on every
+    // value — 1 + 9 + 3 on both sides — but the access itself is UB,
+    // which the per-alloca bound obligation must flag.
+    let items = parse_module_checked(BOUNDED_ARRAY_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let oob = ir.replacen(
+        "getelementptr i64, ptr %arrlit_data, i64 1",
+        "getelementptr i64, ptr %arrlit_data, i64 5",
+        2,
+    );
+    assert_ne!(oob, ir, "probe did not apply:\n{ir}");
+    assert_eq!(
+        tv::validate_native_module(
+            BOUNDED_ARRAY_SOURCE,
+            &oob,
+            Options::default(),
+            RefinedAdmission::CompositeV11,
+        )
+        .unwrap()
+        .outcome,
+        Outcome::UndefinedBehavior
+    );
+}
