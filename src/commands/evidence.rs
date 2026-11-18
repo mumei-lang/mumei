@@ -322,7 +322,8 @@ fn sign(
     } else {
         format!(
             "Producer signature envelope issued for subject digest {}.\n\
-Scope: detached signature binds the declared producer key id to the declared subject digest only;\n\
+Scope: the detached signature covers the subject digest only; the producer key id is a\n\
+declared label the consumer pins separately, not signed or attested;\n\
 no key or producer authenticity, freshness, revocation, claim truth or acceptance evaluated.\n",
             envelope.subject_digest
         )
