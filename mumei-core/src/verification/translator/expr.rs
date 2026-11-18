@@ -469,7 +469,10 @@ fn constant_call_antecedent<'a>(
         // must carry `Pos`'s `v > 0` into the constant-call guard too.
         let chain = vc.module_env.refined_chain(type_name).ok()?;
         let leaf_base = chain.last().map_or("", |decl| decl._base_type.as_str());
-        if leaf_base == "u64" {
+        if leaf_base == "u64" && arg.as_bv().is_none() {
+            // `v >= 0` bounds an `Int` argument to the unsigned leaf; a
+            // `BV(64)` argument is already a machine word, where the signed
+            // `bv sge 0` reading would wrongly exclude values ≥ 2^63.
             terms.push(nonneg_constraint(vc.ctx, arg)?);
         }
 
@@ -525,7 +528,27 @@ fn unfold_constant_calls<'a>(
 
             let mut call_env = (*env).clone();
             for (param, arg) in atom.params.iter().zip(args.iter()) {
-                call_env.insert(param.name.clone(), arg.clone());
+                // An `Int` literal bound to a machine-word parameter must
+                // enter the callee's contract under the same `BV(64)`
+                // encoding `param_z3_value` gives it — otherwise the
+                // clause's `a + 1 > a` is read as unbounded integer
+                // arithmetic and the caller proves a value the compiled
+                // code never produces.
+                let encodes_as_bv = param.type_name.as_deref().is_some_and(|name| {
+                    match lower(&vc.module_env.resolve_base_type(name.trim())) {
+                        LoweredType::U64 => true,
+                        LoweredType::I64 => vc.bitvec_i64,
+                        _ => false,
+                    }
+                });
+                let bound = if encodes_as_bv {
+                    as_bv_i64(arg)
+                        .map(|bv| bv.into())
+                        .unwrap_or_else(|| arg.clone())
+                } else {
+                    arg.clone()
+                };
+                call_env.insert(param.name.clone(), bound);
             }
 
             let _contract_guard = vc.enter_contract_instantiation(&atom.name);
@@ -924,6 +947,19 @@ fn param_domain_facts<'a>(
                 ))
             })?;
             facts.push(nonnegative);
+        } else if type_name
+            .map(|t| vc.module_env.resolve_base_type(t) == "u64")
+            .unwrap_or(false)
+        {
+            // `u64` parameters of the callee carry the full unsigned range.
+            // A `BV(64)` argument is already total; an `Int` argument needs
+            // `0 <= v <= u64::MAX` so `v >= 0` is decided the way the
+            // unsigned semantics read it.
+            if let Some(v) = call_env.get(&param.name).and_then(|d| d.as_int()) {
+                let zero = Int::from_i64(vc.ctx, 0);
+                let max = Int::from_str(vc.ctx, "18446744073709551615").expect("u64::MAX literal");
+                facts.push(Bool::and(vc.ctx, &[&v.ge(&zero), &v.le(&max)]));
+            }
         } else if let Some(sdef) = type_name.and_then(|name| vc.module_env.get_struct(name)) {
             let fields: Vec<(String, Dynamic<'a>)> = sdef
                 .fields
@@ -1025,7 +1061,7 @@ pub(crate) enum DivSafetyStatus {
 /// holds, mirroring `shift_range_status`. An `unknown` answer is not a
 /// guarantee: reported as `Undecided` rather than folded into `Safe`.
 pub(crate) fn div_safety_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> DivSafetyStatus {
-    let obligations: Vec<(Bool<'a>, BV<'a>, BV<'a>)> =
+    let obligations: Vec<(Bool<'a>, BV<'a>, BV<'a>, bool)> =
         vc.bv_div_obligations.borrow_mut().drain(..).collect();
     let ctx = vc.ctx;
     let zero = BV::from_i64(ctx, 0, I64_BITS);
@@ -1046,7 +1082,7 @@ pub(crate) fn div_safety_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> DivSa
             SatResult::Unsat => {}
         }
     }
-    for (path_cond, lb, rb) in obligations {
+    for (path_cond, lb, rb, unsigned) in obligations {
         solver.push();
         solver.assert(&path_cond);
         solver.assert(&rb._eq(&zero));
@@ -1056,6 +1092,11 @@ pub(crate) fn div_safety_status<'a>(vc: &VCtx<'a>, solver: &Solver<'a>) -> DivSa
             SatResult::Sat => return DivSafetyStatus::DivisionByZero,
             SatResult::Unknown => status = DivSafetyStatus::Undecided,
             SatResult::Unsat => {}
+        }
+        // `udiv`/`urem` overflow nowhere: the `i64::MIN / -1` pair is an
+        // ordinary result under unsigned division.
+        if unsigned {
+            continue;
         }
         solver.push();
         solver.assert(&path_cond);
@@ -1118,7 +1159,7 @@ pub(crate) fn rebind_deferred_obligations<'a>(
     for (pc, _) in vc.bv_shift_obligations.borrow_mut()[marks.0..].iter_mut() {
         *pc = Bool::and(vc.ctx, &[pc, extra]);
     }
-    for (pc, _, _) in vc.bv_div_obligations.borrow_mut()[marks.1..].iter_mut() {
+    for (pc, _, _, _) in vc.bv_div_obligations.borrow_mut()[marks.1..].iter_mut() {
         *pc = Bool::and(vc.ctx, &[pc, extra]);
     }
     for (pc, _) in vc.div_zero_obligations.borrow_mut()[marks.2..].iter_mut() {
@@ -1171,17 +1212,106 @@ fn fixed_width_int(type_name: &str) -> Option<(&'static str, i128, i128)> {
     })
 }
 
+/// The declared fixed-width integer type of a name bound inside an atom's
+/// contract vocabulary: `result` is the return value, every other name is
+/// a parameter. `None` for anything else.
+fn contract_name_int_type(
+    vc: &VCtx,
+    atom: &crate::parser::Atom,
+    name: &str,
+) -> Option<&'static str> {
+    if name == "result" {
+        let base = vc
+            .module_env
+            .resolve_base_type(atom.return_type.as_deref()?);
+        return fixed_width_int(&base).map(|(ty, _, _)| ty);
+    }
+    let param = atom.params.iter().find(|p| p.name == name)?;
+    let base = vc.module_env.resolve_base_type(param.type_name.as_deref()?);
+    fixed_width_int(&base).map(|(ty, _, _)| ty)
+}
+
+/// The declared struct type a body expression evaluates to (`s` in `s.f`,
+/// `s.point` in `s.point.x`), resolved through local and parameter
+/// declarations — including the callee's signature while a contract is
+/// instantiated. `None` for non-struct values.
+fn expr_struct_type(vc: &VCtx, expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Variable(name) => {
+            let instantiated = vc.contracts_in_instantiation.borrow().last().cloned();
+            let atom = instantiated
+                .as_deref()
+                .and_then(|n| vc.module_env.get_atom(n))
+                .or(vc.current_atom)?;
+            // While a callee contract is instantiated its parameter names
+            // bind before any same-named caller local (same rule as
+            // `fixed_width_int_type`'s Variable arm).
+            if instantiated.is_some() {
+                if let Some(base) = atom
+                    .params
+                    .iter()
+                    .find(|p| p.name == *name)
+                    .and_then(|p| p.type_name.as_deref())
+                    .map(|n| vc.module_env.resolve_base_type(n))
+                {
+                    if vc.module_env.get_struct(&base).is_some() {
+                        return Some(base);
+                    }
+                }
+            }
+            if let Some(ty) = vc.local_struct_types.borrow().get(name) {
+                return Some(ty.clone());
+            }
+            let param = atom.params.iter().find(|p| p.name == *name)?;
+            let base = vc.module_env.resolve_base_type(param.type_name.as_deref()?);
+            vc.module_env.get_struct(&base).map(|_| base)
+        }
+        Expr::FieldAccess(inner, field) => {
+            let inner_ty = expr_struct_type(vc, inner)?;
+            let sdef = vc.module_env.get_struct(&inner_ty)?;
+            let f = sdef.fields.iter().find(|f| f.name == *field)?;
+            let base = vc.module_env.resolve_base_type(f.type_name.trim());
+            vc.module_env.get_struct(&base).map(|_| base)
+        }
+        _ => None,
+    }
+}
+
 /// The declared fixed-width integer type of a body expression, taken from
 /// the parameter or local it reads. `None` when nothing declares one
 /// (literals, calls, lengths), which the overflow check treats as `i64`.
 pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static str> {
     match expr {
         Expr::Variable(name) => {
+            // Inside an instantiated callee contract (`ensures`/`requires`
+            // evaluated in `call_env`) names bind to the callee's signature,
+            // not the caller's: `result` is the callee's return value and a
+            // clause variable is a callee parameter — even when the caller
+            // happens to hold a same-named local of a different type. The
+            // innermost instantiation names that atom.
+            let instantiated = vc.contracts_in_instantiation.borrow().last().cloned();
+            let atom = instantiated
+                .as_deref()
+                .and_then(|name| vc.module_env.get_atom(name))
+                .or(vc.current_atom)?;
+            if instantiated.is_some() {
+                if let Some(ty) = contract_name_int_type(vc, atom, name) {
+                    return Some(ty);
+                }
+            }
             if let Some(ty) = vc.local_int_types.borrow().get(name) {
                 return Some(ty);
             }
-            let param = vc.current_atom?.params.iter().find(|p| &p.name == name)?;
-            let base = vc.module_env.resolve_base_type(param.type_name.as_deref()?);
+            contract_name_int_type(vc, atom, name)
+        }
+        Expr::Call(name, _) => {
+            // A call's declared return type fixes its signedness: `f()`
+            // returning `i64` in a `u64` operand context must still be
+            // caught as a mixed pair rather than adapting.
+            let atom = vc.module_env.get_atom(name)?;
+            let base = vc
+                .module_env
+                .resolve_base_type(atom.return_type.as_deref()?);
             fixed_width_int(&base).map(|(ty, _, _)| ty)
         }
         Expr::BinaryOp(l, Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Rem, r) => {
@@ -1192,6 +1322,16 @@ pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static st
             else_branch,
             ..
         } => stmt_tail_int_type(vc, then_branch).or_else(|| stmt_tail_int_type(vc, else_branch)),
+        Expr::FieldAccess(inner, field) => {
+            // A struct field read keeps its declared signedness — without
+            // this `s.n < 5` on a `u64` field falls back to a signed
+            // comparison over the field's `BV(64)` value.
+            let ty = expr_struct_type(vc, inner)?;
+            let sdef = vc.module_env.get_struct(&ty)?;
+            let f = sdef.fields.iter().find(|f| f.name == *field)?;
+            let base = vc.module_env.resolve_base_type(f.type_name.trim());
+            fixed_width_int(&base).map(|(ty, _, _)| ty)
+        }
         _ => None,
     }
 }
@@ -1308,6 +1448,8 @@ fn bv_binary_op<'a>(
     l: &Dynamic<'a>,
     r: &Dynamic<'a>,
     solver_opt: Option<&Solver<'a>>,
+    unsigned: bool,
+    ty: &'static str,
 ) -> MumeiResult<Dynamic<'a>> {
     let ctx = vc.ctx;
     let lb = as_bv_i64(l).ok_or_else(|| {
@@ -1343,11 +1485,41 @@ fn bv_binary_op<'a>(
         }
     }
 
+    // `--check-i64-overflow` under the BV encoding: `bvadd`/`bvsub`/`bvmul`
+    // wrap by definition, so "may overflow" asks whether the machine-word
+    // result can differ from the mathematical one.
+    if matches!(op, Op::Add | Op::Sub | Op::Mul)
+        && vc.check_i64_overflow.get()
+        && vc.recursion.lambda_bind_depth.get() == 0
+        && vc.contracts_in_instantiation.borrow().is_empty()
+    {
+        let no_wrap = match op {
+            Op::Add => lb.bvadd_no_overflow(&rb, !unsigned),
+            // Unsigned subtraction wraps downward (underflow); the signed
+            // no-overflow predicate describes the i64 range.
+            Op::Sub if unsigned => lb.bvsub_no_underflow(&rb, false),
+            Op::Sub => lb.bvsub_no_overflow(&rb),
+            _ => lb.bvmul_no_overflow(&rb, !unsigned),
+        };
+        let overflows = no_wrap.not();
+        match solver_opt {
+            Some(solver) => check_i64_range(vc, solver, &overflows, ty)?,
+            None => {
+                vc.i64_overflow_obligations
+                    .borrow_mut()
+                    .push((vc.path_cond_conj(), overflows, ty))
+            }
+        }
+    }
+
     match op {
         Op::BitAnd => Ok(lb.bvand(&rb).into()),
         Op::BitOr => Ok(lb.bvor(&rb).into()),
         Op::BitXor => Ok(lb.bvxor(&rb).into()),
         Op::Shl => Ok(lb.bvshl(&rb).into()),
+        // `>>` on a `u64` operand is the logical shift `lshr`; the
+        // sign-propagating `ashr` only applies to signed operands.
+        Op::Shr if unsigned => Ok(lb.bvlshr(&rb).into()),
         Op::Shr => Ok(lb.bvashr(&rb).into()),
         Op::Add => Ok(lb.bvadd(&rb).into()),
         Op::Sub => Ok(lb.bvsub(&rb).into()),
@@ -1372,26 +1544,29 @@ fn bv_binary_op<'a>(
                 }
                 // `bvsdiv` gives `i64::MIN / -1` the value `i64::MIN`, while
                 // the emitted `sdiv` is undefined there, so a proof about that
-                // pair would not describe the executable.
-                let min = BV::from_i64(ctx, i64::MIN, I64_BITS);
-                let minus_one = BV::from_i64(ctx, -1, I64_BITS);
-                solver.push();
-                for cond in vc.path_cond_stack.borrow().iter() {
-                    solver.assert(cond);
-                }
-                solver.assert(&Bool::and(ctx, &[&lb._eq(&min), &rb._eq(&minus_one)]));
-                let overflows =
-                    crate::verification::phase_artifacts::check(solver) == SatResult::Sat;
-                solver.pop(1);
-                if overflows {
-                    return Err(MumeiError::verification(
-                        "Division may overflow (i64::MIN / -1).".to_string(),
-                    )
-                    .with_help(
-                        "Add a condition ruling out the pair, e.g. `divisor != 0 - 1` \
-                         or `dividend != 0 - 9223372036854775807 - 1`, to requires",
-                    )
-                    .with_verdict(crate::verification::VerdictKind::Rejected));
+                // pair would not describe the executable. `udiv`/`urem`
+                // overflow nowhere — unsigned division skips this check.
+                if !unsigned {
+                    let min = BV::from_i64(ctx, i64::MIN, I64_BITS);
+                    let minus_one = BV::from_i64(ctx, -1, I64_BITS);
+                    solver.push();
+                    for cond in vc.path_cond_stack.borrow().iter() {
+                        solver.assert(cond);
+                    }
+                    solver.assert(&Bool::and(ctx, &[&lb._eq(&min), &rb._eq(&minus_one)]));
+                    let overflows =
+                        crate::verification::phase_artifacts::check(solver) == SatResult::Sat;
+                    solver.pop(1);
+                    if overflows {
+                        return Err(MumeiError::verification(
+                            "Division may overflow (i64::MIN / -1).".to_string(),
+                        )
+                        .with_help(
+                            "Add a condition ruling out the pair, e.g. `divisor != 0 - 1` \
+                             or `dividend != 0 - 9223372036854775807 - 1`, to requires",
+                        )
+                        .with_verdict(crate::verification::VerdictKind::Rejected));
+                    }
                 }
             } else {
                 // Contract clauses are lowered without a solver; defer the
@@ -1402,15 +1577,29 @@ fn bv_binary_op<'a>(
                     vc.path_cond_conj(),
                     lb.clone(),
                     rb.clone(),
+                    unsigned,
                 ));
             }
-            if matches!(op, Op::Rem) {
+            if unsigned {
+                // `bvudiv`/`bvurem` like the emitted `udiv`/`urem`: the
+                // only domain bound is a nonzero divisor — `i64::MIN / -1`
+                // is an ordinary result unsigned, so that check is skipped.
+                if matches!(op, Op::Rem) {
+                    Ok(lb.bvurem(&rb).into())
+                } else {
+                    Ok(lb.bvudiv(&rb).into())
+                }
+            } else if matches!(op, Op::Rem) {
                 // `bvsrem` truncates and takes the dividend's sign, like LLVM `srem`.
                 Ok(lb.bvsrem(&rb).into())
             } else {
                 Ok(lb.bvsdiv(&rb).into())
             }
         }
+        Op::Gt if unsigned => Ok(lb.bvugt(&rb).into()),
+        Op::Lt if unsigned => Ok(lb.bvult(&rb).into()),
+        Op::Ge if unsigned => Ok(lb.bvuge(&rb).into()),
+        Op::Le if unsigned => Ok(lb.bvule(&rb).into()),
         Op::Gt => Ok(lb.bvsgt(&rb).into()),
         Op::Lt => Ok(lb.bvslt(&rb).into()),
         Op::Ge => Ok(lb.bvsge(&rb).into()),
@@ -3497,12 +3686,26 @@ pub(crate) fn expr_to_z3<'a>(
             let both_literals = [&l, &r]
                 .iter()
                 .all(|value| value.as_int().and_then(|i| i.as_i64()).is_some());
+            let (lt, rt) = (
+                fixed_width_int_type(vc, left),
+                fixed_width_int_type(vc, right),
+            );
+            if (lt == Some("u64") && rt.is_some_and(|t| t != "u64"))
+                || (rt == Some("u64") && lt.is_some_and(|t| t != "u64"))
+            {
+                return Err(MumeiError::type_error(
+                    "Cannot mix a u64 operand with a declared non-u64 integer operand",
+                )
+                .with_help("Keep both sides u64, or convert the signed operand explicitly"));
+            }
+            let unsigned = lt == Some("u64") || rt == Some("u64");
             if !has_fp_operand
                 && (is_bv_i64(&l)
                     || is_bv_i64(&r)
                     || (vc.bitvec_i64 && (bitwise_op || both_literals)))
             {
-                return bv_binary_op(vc, op, &l, &r, solver_opt);
+                let ty = lt.or(rt).unwrap_or(if unsigned { "u64" } else { "i64" });
+                return bv_binary_op(vc, op, &l, &r, solver_opt, unsigned, ty);
             }
 
             if l.as_real().is_some() || r.as_real().is_some() {

@@ -1,6 +1,7 @@
 use crate::codegen::expr_emit::{
     chan_payload_key, chan_payload_type_name, compile_hir_expr, emit_array_literal,
-    infer_struct_type_name, resolve_named_type, LAMBDA_MARK,
+    hir_int_type_name, infer_struct_type_name, is_fixed_int_type_name, resolve_named_type,
+    LAMBDA_MARK,
 };
 use crate::codegen::lowering::ArrayPtr;
 use crate::codegen::pattern_emit::find_field_index;
@@ -306,9 +307,11 @@ pub(crate) fn compile_hir_stmt<'a>(
                 module_env,
             )?;
             variables.insert(var.clone(), val);
-            let inferred_ty = ty
+            let declared_base = ty
                 .as_deref()
-                .map(|ty_name| resolve_named_type(module_env, ty_name))
+                .map(|ty_name| resolve_named_type(module_env, ty_name));
+            let inferred_ty = declared_base
+                .clone()
                 .filter(|base| {
                     module_env.get_struct(base).is_some() || module_env.get_enum(base).is_some()
                 })
@@ -316,9 +319,24 @@ pub(crate) fn compile_hir_stmt<'a>(
             if let Some(struct_ty) = inferred_ty {
                 var_types.insert(var.clone(), struct_ty);
             } else {
-                // Clear any stale type from a prior binding of this name so a
-                // later field access cannot resolve against the wrong struct.
-                var_types.remove(var);
+                // Record the scalar's declared/inferred integer type too: a
+                // `let t = <u64 expr>` keeps `u64` so later `t / 2` lowers to
+                // `udiv` (mirrors the verifier's `record_binding_int_type`).
+                let int_ty = declared_base
+                    .filter(|base| is_fixed_int_type_name(base))
+                    .or_else(|| hir_int_type_name(value, var_types, module_env))
+                    .filter(|base| is_fixed_int_type_name(base));
+                match int_ty {
+                    Some(int_ty) => {
+                        var_types.insert(var.clone(), int_ty);
+                    }
+                    // Clear any stale type from a prior binding of this name
+                    // so a later field access cannot resolve against the
+                    // wrong struct.
+                    None => {
+                        var_types.remove(var);
+                    }
+                }
             }
             rebind_chan_payload(var, value, var_types);
             Ok(val)
@@ -455,9 +473,20 @@ pub(crate) fn compile_hir_stmt<'a>(
             if let Some(struct_ty) = infer_struct_type_name(value, var_types, module_env) {
                 var_types.insert(var.clone(), struct_ty);
             } else {
-                // Reassignment to a value with no known struct type must not
-                // leave a stale mapping from the previous binding.
-                var_types.remove(var);
+                // Same scalar tracking as `let`: `t = <u64 expr>` keeps `u64`
+                // so later `t / 2` lowers to `udiv`.
+                match hir_int_type_name(value, var_types, module_env)
+                    .filter(|base| is_fixed_int_type_name(base))
+                {
+                    Some(int_ty) => {
+                        var_types.insert(var.clone(), int_ty);
+                    }
+                    // Reassignment to a value with no known type must not
+                    // leave a stale mapping from the previous binding.
+                    None => {
+                        var_types.remove(var);
+                    }
+                }
             }
             rebind_chan_payload(var, value, var_types);
             Ok(val)

@@ -79,7 +79,12 @@ pub fn compile_atom_into_module<'ctx>(
             let base = super::expr_emit::resolve_named_type(module_env, type_name);
             // Struct AND enum declared types — match arms on an enum-typed
             // parameter resolve the owning enum from this hint.
-            if module_env.get_struct(&base).is_some() || module_env.get_enum(&base).is_some() {
+            if module_env.get_struct(&base).is_some()
+                || module_env.get_enum(&base).is_some()
+                // `u64` params are recorded so the emitted comparison/divide
+                // ops switch to their unsigned forms like the verifier does.
+                || base == "u64"
+            {
                 var_types.insert(param.name.clone(), base);
             }
             // P25: remember a channel parameter's declared payload type so

@@ -123,6 +123,15 @@ pub const PURE_I64_COMPOSITE_PROFILE_V8: &str = "mumei.pure-i64-composite/v8";
 /// self-deepening type argument (`B<A<T>>`) cannot expand forever
 /// (`pure-i64-composite/v9`).
 pub const PURE_I64_COMPOSITE_PROFILE_V9: &str = "mumei.pure-i64-composite/v9";
+/// v10 admits `u64` leaves — parameters, results, struct fields and
+/// instantiated type arguments — under unsigned two's-complement
+/// semantics: unsigned comparisons (`bvult`/`bvule`/`bvugt`/`bvuge`),
+/// `bvudiv`/`bvurem` with only a nonzero-divisor obligation, `bvlshr`,
+/// and no signed interpretation anywhere. Literals adapt to the
+/// unsigned context without a suffix; mixing a `u64` operand with a
+/// declared `i64` operand in one binary expression stays outside
+/// (`pure-i64-composite/v10`).
+pub const PURE_I64_COMPOSITE_PROFILE_V10: &str = "mumei.pure-i64-composite/v10";
 
 /// How much of the refined-scalar declaration fragment a gate admits:
 /// `Reject` keeps `Item::TypeDef` out of the item vocabulary entirely,
@@ -148,7 +157,10 @@ pub const PURE_I64_COMPOSITE_PROFILE_V9: &str = "mumei.pure-i64-composite/v9";
 /// inside another (`pure-i64-composite/v8`). `CompositeV9`
 /// additionally admits generic `struct` declarations whose concrete
 /// instantiations monomorphize to the admitted fragment
-/// (`pure-i64-composite/v9`). A
+/// (`pure-i64-composite/v9`). `CompositeV10` additionally admits `u64`
+/// scalar leaves — parameters, results, fields and instantiated type
+/// arguments carrying unsigned two's-complement semantics
+/// (`pure-i64-composite/v10`). A
 /// pinned record names which level produced it, so a
 /// rechecker re-derives under the record's own admission — never a
 /// wider one.
@@ -166,6 +178,7 @@ pub enum RefinedAdmission {
     CompositeV7,
     CompositeV8,
     CompositeV9,
+    CompositeV10,
 }
 
 impl RefinedAdmission {
@@ -224,6 +237,12 @@ impl RefinedAdmission {
     /// (`pure-i64-composite/v9`).
     pub fn admits_generic_structs(self) -> bool {
         self >= Self::CompositeV9
+    }
+
+    /// Whether `u64` scalar leaves with unsigned semantics
+    /// (`pure-i64-composite/v10`).
+    pub fn admits_u64_leaves(self) -> bool {
+        self >= Self::CompositeV10
     }
 }
 
@@ -330,7 +349,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _, _, _, _, _) =
+    let (items, refined, structs, _, _, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -351,6 +370,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         false,
         false,
@@ -378,8 +398,18 @@ pub fn extract_pure_i64_module_contracts(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, enums, struct_values, field_writes, enum_values, merged, generic) =
-        admit_pure_i64_atoms(source, true, admission)?;
+    let (
+        items,
+        refined,
+        structs,
+        enums,
+        struct_values,
+        field_writes,
+        enum_values,
+        merged,
+        generic,
+        u64_leaves,
+    ) = admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
     // refinement annotation only when the alias is registered, and a
@@ -417,6 +447,7 @@ pub fn extract_pure_i64_module_contracts(
                 enum_values,
                 merged,
                 generic,
+                u64_leaves,
                 &cert_env,
             )),
             // Type and struct declarations carry no per-atom contract;
@@ -444,6 +475,7 @@ pub fn module_source_profile(
         enum_values,
         merged,
         generic,
+        u64_leaves,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
         true,
@@ -455,6 +487,7 @@ pub fn module_source_profile(
         enum_values,
         merged,
         generic,
+        u64_leaves,
     ))
 }
 
@@ -477,6 +510,7 @@ type AdmittedModule = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -561,7 +595,7 @@ fn admit_pure_i64_atoms(
     // position and a call, so the admission is closed over both maps.
     let refined = build_refined_env(&items, admission)?;
     let structs = build_struct_env(&items, &refined, admission)?;
-    let enums = build_enum_env(&items, &refined, &structs)?;
+    let enums = build_enum_env(&items, &refined, &structs, admission)?;
     if refined
         .keys()
         .chain(structs.keys())
@@ -605,6 +639,7 @@ fn admit_pure_i64_atoms(
         validate_atom(
             sibling,
             allow_wrapping_arithmetic,
+            admission.admits_u64_leaves(),
             &refined,
             &structs,
             &enums,
@@ -633,6 +668,7 @@ fn admit_pure_i64_atoms(
             &merged_composites_used,
         )?;
     }
+    let u64_leaves = uses_u64_leaves(&items);
     Ok((
         items,
         refined,
@@ -643,6 +679,7 @@ fn admit_pure_i64_atoms(
         enum_values_used.get(),
         merged_composites_used.get(),
         generic_structs_declared,
+        u64_leaves,
     ))
 }
 
@@ -746,6 +783,29 @@ fn binder_scalar_type(type_name: Option<&str>, refined: &RefinedEnv) -> &'static
 /// its v3 name only when some atom uses a struct value (a struct
 /// result, literal, `let` or call-result read).
 #[allow(clippy::too_many_arguments)]
+/// Whether the admitted module declares a `u64` leaf anywhere — a
+/// parameter, a result, a struct field (instantiated decls included,
+/// since monomorphization leaves the `u64` field name behind) or an
+/// enum payload slot. Only `CompositeV10` admission ever produces one.
+fn uses_u64_leaves(items: &[Item]) -> bool {
+    items.iter().any(|item| match item {
+        Item::Atom(atom) => {
+            atom.params
+                .iter()
+                .any(|p| p.type_name.as_deref() == Some("u64"))
+                || atom.return_type.as_deref() == Some("u64")
+        }
+        Item::StructDef(def) => def.fields.iter().any(|f| f.type_name == "u64"),
+        Item::EnumDef(def) => def
+            .variants
+            .iter()
+            .flat_map(|v| v.field_types.iter())
+            .any(|ty| ty.display_name() == "u64"),
+        _ => false,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn fragment_profile(
     allow_wrapping_arithmetic: bool,
     refined: &RefinedEnv,
@@ -756,9 +816,14 @@ fn fragment_profile(
     enum_values: bool,
     merged_composites: bool,
     generic_structs: bool,
+    u64_leaves: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if u64_leaves {
+        // A `u64` leaf is only ever admitted under v10 — the unsigned
+        // encoding it requires is the strongest claim the ladder makes.
+        PURE_I64_COMPOSITE_PROFILE_V10
     } else if generic_structs {
         // A generic declaration is only ever admitted under v9: the
         // flag was set before monomorphization, so the instantiated
@@ -813,6 +878,7 @@ fn atom_contract(
     enum_values: bool,
     merged_composites: bool,
     generic_structs: bool,
+    u64_leaves: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
@@ -826,6 +892,7 @@ fn atom_contract(
         enum_values,
         merged_composites,
         generic_structs,
+        u64_leaves,
     );
     let result_fields = atom
         .return_type
@@ -995,21 +1062,41 @@ fn atom_contract(
         specification,
         source_span: atom.span.clone(),
         numeric_semantics: NumericSemantics {
-            source_integer: "signed_i64",
-            verifier_integer: "mathematical_integer",
+            source_integer: if u64_leaves {
+                "signed_i64_and_unsigned_u64_leaves"
+            } else {
+                "signed_i64"
+            },
+            // `u64` leaves encode as `BV(64)` in every mode, so the
+            // verifier's integer model is only partly mathematical once
+            // they are admitted — the metadata must distinguish the
+            // machine-word leaves from the `Int` ones.
+            verifier_integer: if u64_leaves {
+                "mathematical_integer_for_i64_bitvector_64_for_u64"
+            } else {
+                "mathematical_integer"
+            },
             llvm_integer: "i64_twos_complement",
-            comparisons: "signed",
+            comparisons: if u64_leaves {
+                "signed_for_i64_unsigned_for_u64"
+            } else {
+                "signed"
+            },
             arithmetic: if allow_wrapping_arithmetic {
                 "wrapping_i64_add_sub_mul_no_overflow_claim"
             } else {
                 "unsupported_no_overflow_claim"
             },
-            division: if allow_wrapping_arithmetic {
+            division: if u64_leaves {
+                "signed_i64_truncating_defined_only_for_nonzero_divisor_excluding_min_div_neg1_and_unsigned_u64_defined_only_for_nonzero_divisor"
+            } else if allow_wrapping_arithmetic {
                 "signed_i64_truncating_defined_only_for_nonzero_divisor_excluding_min_div_neg1"
             } else {
                 "unsupported"
             },
-            shifts: if allow_wrapping_arithmetic {
+            shifts: if u64_leaves {
+                "shl_ashr_for_i64_lshr_for_u64_defined_only_for_amounts_0_to_63"
+            } else if allow_wrapping_arithmetic {
                 "shl_ashr_defined_only_for_amounts_0_to_63"
             } else {
                 "unsupported"
@@ -1050,6 +1137,7 @@ fn atom_contract(
         .chain(allow_wrapping_arithmetic.then_some("nested_block_sequences"))
         .chain(allow_wrapping_arithmetic.then_some("discarded_pure_expression_statements"))
         .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
+        .chain(u64_leaves.then_some("unsigned_u64_leaves_bitvector_total"))
         .chain(allow_wrapping_arithmetic.then_some("bool_parameters_lowered_to_i64_zero_one"))
         .chain(allow_wrapping_arithmetic.then_some("subrange_integer_parameters_lowered_to_i64"))
         .chain(allow_wrapping_arithmetic.then_some("subrange_integer_results_lowered_to_i64"))
@@ -1071,7 +1159,9 @@ fn atom_contract(
         normalization:
             "checked_parser_comparison_chains_to_conjunction_not_independently_validated",
         correspondence: "unchecked_not_translation_validated",
-        assumptions: vec![if allow_wrapping_arithmetic {
+        assumptions: vec![if u64_leaves {
+            "Inputs are representable signed 64-bit integers or declared unsigned 64-bit leaves; declared booleans carry 0/1."
+        } else if allow_wrapping_arithmetic {
             "Inputs are representable signed 64-bit integers; declared booleans carry 0/1."
         } else {
             "Inputs are representable signed 64-bit integers."
@@ -1080,7 +1170,9 @@ fn atom_contract(
             "Extraction does not prove the postcondition or precondition satisfiability.",
             "HIR/MIR fingerprints identify internal snapshots, not semantic equivalence.",
             "Target availability, LLVM lowering and final machine code are not verified.",
-            if allow_wrapping_arithmetic {
+            if u64_leaves {
+                "Unsigned division and logical right shift are admitted for `u64` leaves only; `usize`/`isize`/`i128`, heap, FFI, ownership, effects and concurrency are outside this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation. `while` loops are claimed only where every guard fails within the profile bound (4 evaluations); deeper executions are outside the compared domain."
+            } else if allow_wrapping_arithmetic {
                 "No unsigned division, logical shifts, heap, FFI, ownership, effects or concurrency in this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation. `while` loops are claimed only where every guard fails within the profile bound (4 evaluations); deeper executions are outside the compared domain."
             } else {
                 "No arithmetic, heap, calls, FFI, ownership, effects or concurrency in this profile."
@@ -1144,6 +1236,10 @@ struct KindEnv<'a> {
     /// Whether `if`/`match` expressions producing composite values are
     /// admitted (`pure-i64-composite/v7`).
     admit_merged_composites: bool,
+    /// The scalar kind the implicit `result` name carries — the atom's
+    /// declared return kind, so a `u64` result keeps unsigned
+    /// semantics in `ensures`.
+    result_kind: ScalarKind,
     /// Set when the atom actually uses a struct-value shape, so the
     /// module names the v3 profile only when it needs it.
     struct_values_used: &'a std::cell::Cell<bool>,
@@ -1229,10 +1325,13 @@ impl<'a> KindEnv<'a> {
 /// carried by i64 like `bool`; the declared signature then bounds the
 /// checked input to the type's range (`param_domain`). `u64`, `usize`
 /// and `isize` stay out: a full-width unsigned domain cannot be
-/// expressed as an i64 range bound.
+/// expressed as an i64 range bound. `u64` instead is admitted under
+/// `admit_u64` as its own unsigned kind (`pure-i64-composite/v10`) —
+/// `usize`/`isize` stay out either way.
 fn declared_param_kind(
     param: &crate::parser::ast::Param,
     admit_widened: bool,
+    admit_u64: bool,
     refined: &RefinedEnv,
 ) -> Option<ScalarKind> {
     let name = param.type_name.as_deref()?;
@@ -1241,6 +1340,7 @@ fn declared_param_kind(
     // the `i64` default.
     let kind = match name {
         "i64" => ScalarKind::I64,
+        "u64" if admit_u64 => ScalarKind::U64,
         "bool" if admit_widened => ScalarKind::Bool,
         "i8" | "i16" | "i32" | "u8" | "u16" | "u32" if admit_widened => ScalarKind::I64,
         // A bool-leaf alias gives the parameter a boolean signature —
@@ -1279,6 +1379,7 @@ fn plain_param(param: &crate::parser::ast::Param, name: &str) -> bool {
 fn declared_param_shape(
     param: &crate::parser::ast::Param,
     admit_widened: bool,
+    admit_u64: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
@@ -1290,7 +1391,7 @@ fn declared_param_shape(
         Some(name) if enums.contains_key(name) => {
             plain_param(param, name).then(|| ValueKind::Enum(name.to_owned()))
         }
-        _ => declared_param_kind(param, admit_widened, refined).map(ValueKind::Scalar),
+        _ => declared_param_kind(param, admit_widened, admit_u64, refined).map(ValueKind::Scalar),
     }
 }
 
@@ -1324,6 +1425,9 @@ fn param_shape(
 fn param_kind(param: &crate::parser::ast::Param, refined: &RefinedEnv) -> ScalarKind {
     match param.type_name.as_deref() {
         Some("bool") => ScalarKind::Bool,
+        // `u64` parameters only reach the kind checker under v10
+        // admission — `validate_atom` rejects the leaf below it.
+        Some("u64") => ScalarKind::U64,
         Some(name) => refined
             .get(name)
             .map(|alias| alias.kind)
@@ -1338,6 +1442,7 @@ fn param_kind(param: &crate::parser::ast::Param, refined: &RefinedEnv) -> Scalar
 fn return_kind(atom: &Atom, refined: &RefinedEnv) -> ScalarKind {
     match atom.return_type.as_deref() {
         Some("bool") => ScalarKind::Bool,
+        Some("u64") => ScalarKind::U64,
         Some(name) => refined
             .get(name)
             .map(|alias| alias.kind)
@@ -1459,6 +1564,13 @@ impl CallShapes {
         )
     }
 
+    fn returns_u64(&self, name: &str) -> bool {
+        matches!(
+            self.returns.get(name),
+            Some(ValueKind::Scalar(ScalarKind::U64))
+        )
+    }
+
     /// The field layout of a struct-returning callee's result, in
     /// declaration order — nested fields carry their struct name.
     fn result_fields(&self, name: &str) -> Option<&[(String, ValueKind)]> {
@@ -1524,10 +1636,10 @@ fn enum_shape_slot_kinds(variants: &[(String, Vec<ScalarKind>)]) -> Vec<ScalarKi
 /// the profile's 0/1 `bool` convention — the same wrap a struct
 /// field slot gets.
 fn enum_slot_value<'ctx>(kind: ScalarKind, v: &BV<'ctx>, ctx: &'ctx Context) -> SourceValue<'ctx> {
-    if kind == ScalarKind::Bool {
-        SourceValue::Boolean(v._eq(&BV::from_u64(ctx, 0, 64)).not())
-    } else {
-        SourceValue::Integer(v.clone())
+    match kind {
+        ScalarKind::Bool => SourceValue::Boolean(v._eq(&BV::from_u64(ctx, 0, 64)).not()),
+        ScalarKind::U64 => SourceValue::Unsigned(v.clone()),
+        _ => SourceValue::Integer(v.clone()),
     }
 }
 
@@ -1612,6 +1724,12 @@ fn check_atom_contract(
         admit_field_writes,
         admit_enum_values,
         admit_merged_composites,
+        result_kind: match return_shape(atom, refined, structs, enums) {
+            ValueKind::Scalar(kind) => kind,
+            // A composite `result` resolves through `composites`, not
+            // the scalar scope — the scalar fallback never sees it.
+            _ => ScalarKind::I64,
+        },
         struct_values_used,
         field_writes_used,
         enum_values_used,
@@ -1747,9 +1865,11 @@ fn check_atom_contract(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_atom(
     atom: &Atom,
     admit_widened: bool,
+    admit_u64: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
@@ -1765,6 +1885,7 @@ fn validate_atom(
     // construction (`build_refined_env` rejects non-scalar bases).
     let return_ok = match atom.return_type.as_deref() {
         Some("i64") => true,
+        Some("u64") => admit_u64,
         Some("bool") | Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32") => admit_widened,
         // An admitted struct result (`pure-i64-composite/v3`) returns
         // the struct's field slots. An admitted enum result
@@ -1777,10 +1898,9 @@ fn validate_atom(
         None => false,
     };
     if !return_ok
-        || atom
-            .params
-            .iter()
-            .any(|p| declared_param_shape(p, admit_widened, refined, structs, enums).is_none())
+        || atom.params.iter().any(|p| {
+            declared_param_shape(p, admit_widened, admit_u64, refined, structs, enums).is_none()
+        })
     {
         return Err(SemanticContractError::Unsupported(
             "explicit owned scalar i64 signature required",
@@ -1822,14 +1942,31 @@ fn validate_atom(
     Ok(())
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ScalarKind {
     I64,
+    /// A `u64` leaf — full-width unsigned two's-complement semantics:
+    /// unsigned comparisons, `udiv`/`urem`/`lshr` and no signed-domain
+    /// interpretation anywhere.
+    U64,
     Bool,
+    /// A numeric literal before it meets an operand kind: literals
+    /// adapt to whichever integer kind their context declares, so
+    /// `a(u64) >= 0` and `s.count + 2` kind-check without a suffix.
+    /// Only `Expr::Number` produces it; no declared type ever carries
+    /// it, and it never survives into a `ValueKind`.
+    Num,
 }
 
 fn expect_kind(actual: ScalarKind, expected: ScalarKind) -> Result<(), SemanticContractError> {
-    if actual == expected {
+    // `Num` is the unresolved-literal kind: it adapts to either integer
+    // kind on BOTH sides — a `let s = 0` binding stays `Num` until an
+    // `i64`/`u64` write or use pins it, and that write itself must
+    // check (`s = s + n` with `s: Num` accepts an `I64` value).
+    if actual == expected
+        || (actual == ScalarKind::Num && matches!(expected, ScalarKind::I64 | ScalarKind::U64))
+        || (expected == ScalarKind::Num && matches!(actual, ScalarKind::I64 | ScalarKind::U64))
+    {
         Ok(())
     } else {
         Err(SemanticContractError::Unsupported("scalar kind mismatch"))
@@ -2001,10 +2138,12 @@ fn seed_struct_composite<'ctx>(
                 let Some(v) = slots.next() else {
                     return Err(SemanticContractError::Unsupported("source signature arity"));
                 };
-                if field.leaf_kind() == Some(ScalarKind::Bool) {
-                    SourceValue::Boolean(v._eq(&BV::from_u64(ctx, 0, 64)).not())
-                } else {
-                    SourceValue::Integer(v.clone())
+                match field.leaf_kind() {
+                    Some(ScalarKind::Bool) => {
+                        SourceValue::Boolean(v._eq(&BV::from_u64(ctx, 0, 64)).not())
+                    }
+                    Some(ScalarKind::U64) => SourceValue::Unsigned(v.clone()),
+                    _ => SourceValue::Integer(v.clone()),
                 }
             }
         };
@@ -2103,6 +2242,7 @@ fn build_enum_env(
     items: &[Item],
     refined: &RefinedEnv,
     structs: &StructEnv,
+    admission: RefinedAdmission,
 ) -> Result<EnumEnv, SemanticContractError> {
     let mut env = EnumEnv::new();
     for item in items {
@@ -2170,6 +2310,7 @@ fn build_enum_env(
                 let ty = &variant.field_types[index];
                 let kind = match type_name {
                     "i64" => Some(ScalarKind::I64),
+                    "u64" if admission.admits_u64_leaves() => Some(ScalarKind::U64),
                     "bool" => Some(ScalarKind::Bool),
                     name => refined
                         .get(name)
@@ -2337,6 +2478,7 @@ fn build_struct_env(
             // another admitted struct (`flatten_fields` decomposes it).
             let shape = match field.type_name.as_str() {
                 "i64" => Some(ValueKind::Scalar(ScalarKind::I64)),
+                "u64" if admission.admits_u64_leaves() => Some(ValueKind::Scalar(ScalarKind::U64)),
                 "bool" => Some(ValueKind::Scalar(ScalarKind::Bool)),
                 name if nested_allowed && declared_names.contains(name) => {
                     Some(ValueKind::Struct(name.to_owned()))
@@ -2557,6 +2699,7 @@ fn resolve_alias(
                     admit_field_writes: false,
                     admit_enum_values: false,
                     admit_merged_composites: false,
+                    result_kind: ScalarKind::I64,
                     struct_values_used: &std::cell::Cell::new(false),
                     field_writes_used: &std::cell::Cell::new(false),
                     enum_values_used: &std::cell::Cell::new(false),
@@ -3705,17 +3848,23 @@ fn match_arm_envs<'a>(
         }
         return Ok(out);
     }
-    expect_kind(
-        expression_kind(
-            target,
-            scope,
-            result_in_scope,
-            allow_wrapping_arithmetic,
-            &BTreeSet::new(),
-            env,
-        )?,
-        ScalarKind::I64,
+    let scrutinee_kind = expression_kind(
+        target,
+        scope,
+        result_in_scope,
+        allow_wrapping_arithmetic,
+        &BTreeSet::new(),
+        env,
     )?;
+    // An integer scrutinee — `i64` or `u64` (`pure-i64-composite/v10`),
+    // literals adapt to either; arm bindings carry the scrutinee's kind
+    // so a bound `u64` arm variable keeps unsigned semantics.
+    if !matches!(
+        scrutinee_kind,
+        ScalarKind::I64 | ScalarKind::U64 | ScalarKind::Num
+    ) {
+        return Err(SemanticContractError::Unsupported("match scrutinee kind"));
+    }
     let Some(last) = arms.last() else {
         return Err(SemanticContractError::Unsupported("empty match"));
     };
@@ -3736,7 +3885,7 @@ fn match_arm_envs<'a>(
             Pattern::Literal(_) | Pattern::Wildcard => {}
             Pattern::Variable(name) => {
                 env.bind(name)?;
-                arm_scope.insert(name.clone(), ScalarKind::I64);
+                arm_scope.insert(name.clone(), scrutinee_kind);
                 arm_assignable.remove(name);
             }
             _ => {
@@ -3776,7 +3925,10 @@ fn expression_kind(
     env: &KindEnv<'_>,
 ) -> Result<ScalarKind, SemanticContractError> {
     match expr {
-        Expr::Number(_) => Ok(ScalarKind::I64),
+        // Literals are kind-adaptive (`Num`): a `u64` operand context
+        // and an `i64` one both accept them, so `a(u64) >= 0` kind-checks
+        // like `a(i64) >= 0` does — with no numeric-suffix syntax.
+        Expr::Number(_) => Ok(ScalarKind::Num),
         Expr::Variable(name) if matches!(name.as_str(), "true" | "false") => Ok(ScalarKind::Bool),
         // Lexical bindings (including a shadowing `let result`) win over
         // the implicit result name, so the kind checker and the BV encoder
@@ -3784,7 +3936,7 @@ fn expression_kind(
         Expr::Variable(name) => scope
             .get(name.as_str())
             .copied()
-            .or((result_in_scope && name == "result").then_some(ScalarKind::I64))
+            .or((result_in_scope && name == "result").then_some(env.result_kind))
             .ok_or(SemanticContractError::Unsupported(
                 "expression or unbound name",
             )),
@@ -3805,9 +3957,36 @@ fn expression_kind(
                 &BTreeSet::new(),
                 env,
             )?;
+            // Literal kinds adapt to the operand they meet: the
+            // operand kind a binary expression carries — `Num`
+            // appearing on both sides resolves to `i64` (literal
+            // arithmetic is signed until a `u64` context fixes it).
+            let unified = match (left, right) {
+                (ScalarKind::Num, k) | (k, ScalarKind::Num) => k,
+                (l, r) if l == r => l,
+                _ => {
+                    return Err(SemanticContractError::Unsupported(
+                        "operator or operand kinds",
+                    ))
+                }
+            };
+            // Literal-only arithmetic keeps `Num` so `0 - 1` still
+            // adapts to a `u64` context it meets higher up; `Num` in
+            // `unified` reads as adaptive-i64 in the op arms below.
+
             match op {
-                Op::Eq | Op::Neq if left == right => Ok(ScalarKind::Bool),
-                Op::Lt | Op::Le | Op::Gt | Op::Ge if left == ScalarKind::I64 && right == left => {
+                Op::Eq | Op::Neq
+                    if matches!(
+                        unified,
+                        ScalarKind::I64 | ScalarKind::U64 | ScalarKind::Num | ScalarKind::Bool
+                    ) && (left != ScalarKind::Bool || right == left)
+                        && (right != ScalarKind::Bool || left == right) =>
+                {
+                    Ok(ScalarKind::Bool)
+                }
+                Op::Lt | Op::Le | Op::Gt | Op::Ge
+                    if matches!(unified, ScalarKind::I64 | ScalarKind::U64 | ScalarKind::Num) =>
+                {
                     Ok(ScalarKind::Bool)
                 }
                 Op::And | Op::Or | Op::Implies if left == ScalarKind::Bool && right == left => {
@@ -3817,7 +3996,10 @@ fn expression_kind(
                 // Division, remainder and shifts are admitted as partial
                 // operations: the caller's BV encoder records their defined
                 // domain (nonzero divisor excluding i64::MIN / -1, shift
-                // amount in 0..64) as explicit obligations.
+                // amount in 0..64) as explicit obligations. A `u64`
+                // operand unifies the pair to unsigned: the encoder
+                // selects `bvudiv`/`bvurem`/`bvlshr` for it and drops the
+                // `i64::MIN / -1` exclusion, which cannot occur unsigned.
                 Op::Add
                 | Op::Sub
                 | Op::Mul
@@ -3828,9 +4010,13 @@ fn expression_kind(
                 | Op::BitAnd
                 | Op::BitOr
                 | Op::BitXor
-                    if allow_wrapping_arithmetic && left == ScalarKind::I64 && right == left =>
+                    if allow_wrapping_arithmetic
+                        && matches!(
+                            unified,
+                            ScalarKind::I64 | ScalarKind::U64 | ScalarKind::Num
+                        ) =>
                 {
-                    Ok(ScalarKind::I64)
+                    Ok(unified)
                 }
                 _ => Err(SemanticContractError::Unsupported(
                     "operator or operand kinds",
@@ -3874,23 +4060,29 @@ fn expression_kind(
                 assignable,
                 env,
             )?;
-            expect_kind(
-                statement_kind(
-                    else_branch,
-                    scope,
-                    result_in_scope,
-                    allow_wrapping_arithmetic,
-                    assignable,
-                    env,
-                )?,
-                then_kind,
+            let else_kind = statement_kind(
+                else_branch,
+                scope,
+                result_in_scope,
+                allow_wrapping_arithmetic,
+                assignable,
+                env,
             )?;
+            // `Num` is adaptive on either side: `{ 0 } else { x }`
+            // yields the declared integer kind, same as a binary
+            // operand — but only toward `I64`/`U64`, never `Bool`.
+            let branch_kind = match (then_kind, else_kind) {
+                (ScalarKind::Num, k @ (ScalarKind::I64 | ScalarKind::U64))
+                | (k @ (ScalarKind::I64 | ScalarKind::U64), ScalarKind::Num) => k,
+                (l, r) if l == r => l,
+                _ => return Err(SemanticContractError::Unsupported("scalar kind mismatch")),
+            };
             if stmt_writes_composite(then_branch, scope, env)
                 || stmt_writes_composite(else_branch, scope, env)
             {
                 env.merged_composites_used.set(true);
             }
-            Ok(then_kind)
+            Ok(branch_kind)
         }
         // First-match-order `match` on an i64 scrutinee: literal patterns
         // test `target == n` and a `Variable`/`Wildcard` arm binds or
@@ -3926,7 +4118,18 @@ fn expression_kind(
                 )?;
                 match kind {
                     None => kind = Some(arm_kind),
-                    Some(first) => expect_kind(arm_kind, first)?,
+                    Some(first) => {
+                        kind = Some(match (first, arm_kind) {
+                            (ScalarKind::Num, k @ (ScalarKind::I64 | ScalarKind::U64))
+                            | (k @ (ScalarKind::I64 | ScalarKind::U64), ScalarKind::Num) => k,
+                            (l, r) if l == r => l,
+                            _ => {
+                                return Err(SemanticContractError::Unsupported(
+                                    "scalar kind mismatch",
+                                ))
+                            }
+                        });
+                    }
                 }
             }
             // As in the `if` merge: an arm writing a composite binding
@@ -4174,7 +4377,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _, _, _, _) =
+    let (items, refined, structs, enums, _, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -4241,7 +4444,9 @@ fn encode_atom_body<'ctx>(
         &mut call_sites,
         call_returns,
     )? {
-        SourceValue::Integer(value) => value,
+        SourceValue::Integer(value) | SourceValue::Unsigned(value) | SourceValue::Number(value) => {
+            value
+        }
         SourceValue::Boolean(value) => {
             value.ite(&BV::from_u64(context, 1, 64), &BV::from_u64(context, 0, 64))
         }
@@ -5096,7 +5301,7 @@ fn atom_obligation<'ctx>(
     .boolean()?;
     env.insert(
         "result".to_string(),
-        SourceValue::Integer(body.value.clone()),
+        result_value(&atom.name, &body.value, context, call_returns),
     );
     // Same post-state composite view as `module_atom_obligations`.
     for (name, value) in &body.post_writes {
@@ -5129,6 +5334,15 @@ fn atom_obligation<'ctx>(
 #[derive(Clone)]
 enum SourceValue<'ctx> {
     Integer(BV<'ctx>),
+    /// A `u64` leaf — unsigned comparisons and `udiv`/`urem`/`lshr`
+    /// (`pure-i64-composite/v10`). Mixing it with a declared `i64`
+    /// operand in one binary operation fails closed; literals adapt.
+    Unsigned(BV<'ctx>),
+    /// A numeric literal before it meets an operand sort: it encodes
+    /// like `Integer` against `i64`/`u8`-family operands and like
+    /// `Unsigned` against `u64` operands — the literal-adaptive
+    /// counterpart of `ScalarKind::Num`.
+    Number(BV<'ctx>),
     Boolean(Bool<'ctx>),
     /// A struct parameter's flattened fields in declaration order. Only
     /// a field read or a pass-through call argument consumes it; every
@@ -5156,6 +5370,8 @@ fn substitute_source_value<'ctx>(
 ) -> SourceValue<'ctx> {
     match value {
         SourceValue::Integer(v) => SourceValue::Integer(v.substitute(substitutions)),
+        SourceValue::Unsigned(v) => SourceValue::Unsigned(v.substitute(substitutions)),
+        SourceValue::Number(v) => SourceValue::Number(v.substitute(substitutions)),
         SourceValue::Boolean(v) => SourceValue::Boolean(v.substitute(substitutions)),
         SourceValue::Composite(fields) => SourceValue::Composite(
             fields
@@ -5190,12 +5406,10 @@ fn param_env<'ctx>(
     if signature_slots(params, structs, enums).len() != inputs.len() {
         return Err(SemanticContractError::Unsupported("source signature arity"));
     }
-    let scalar = |kind: ScalarKind, v: &BV<'ctx>| {
-        if kind == ScalarKind::Bool {
-            SourceValue::Boolean(v._eq(&BV::from_u64(ctx, 0, 64)).not())
-        } else {
-            SourceValue::Integer(v.clone())
-        }
+    let scalar = |kind: ScalarKind, v: &BV<'ctx>| match kind {
+        ScalarKind::Bool => SourceValue::Boolean(v._eq(&BV::from_u64(ctx, 0, 64)).not()),
+        ScalarKind::U64 => SourceValue::Unsigned(v.clone()),
+        _ => SourceValue::Integer(v.clone()),
     };
     let mut slots = inputs.iter();
     let mut env = HashMap::new();
@@ -5247,7 +5461,7 @@ fn param_env<'ctx>(
 impl<'ctx> SourceValue<'ctx> {
     fn integer(self) -> BodyResult<BV<'ctx>> {
         match self {
-            Self::Integer(v) => Ok(v),
+            Self::Integer(v) | Self::Unsigned(v) | Self::Number(v) => Ok(v),
             _ => Err(SemanticContractError::Unsupported(
                 "source integer expected",
             )),
@@ -5321,9 +5535,21 @@ fn source_field_write<'ctx>(
     // The encoded slot shape cannot change: an integer field takes
     // only an integer value, a boolean field only a boolean, and a
     // struct field (`pure-i64-composite/v8`) only a composite — the
-    // kind layer already checked the composite's declared type.
+    // kind layer already checked the composite's declared type. A
+    // `Number` bound lands under the slot's leaf, the same coercion a
+    // struct literal applies, so the slot cannot drift signed where
+    // the field is unsigned (`pure-i64-composite/v10`).
+    let bound = match (slot, bound) {
+        (SourceValue::Integer(_), SourceValue::Number(v)) => SourceValue::Integer(v),
+        (SourceValue::Unsigned(_), SourceValue::Number(v)) => SourceValue::Unsigned(v),
+        (_, bound) => bound,
+    };
     match (slot, &bound) {
-        (SourceValue::Integer(_), SourceValue::Integer(_))
+        (SourceValue::Integer(_) | SourceValue::Number(_), SourceValue::Integer(_))
+        | (SourceValue::Integer(_), SourceValue::Number(_))
+        | (SourceValue::Unsigned(_) | SourceValue::Number(_), SourceValue::Unsigned(_))
+        | (SourceValue::Unsigned(_), SourceValue::Number(_))
+        | (SourceValue::Number(_), SourceValue::Number(_))
         | (SourceValue::Boolean(_), SourceValue::Boolean(_))
         | (SourceValue::Composite(_), SourceValue::Composite(_)) => {}
         _ => {
@@ -5371,9 +5597,11 @@ fn merge_source_values<'ctx>(
     b: SourceValue<'ctx>,
     merged_composites: bool,
 ) -> BodyResult<SourceValue<'ctx>> {
-    use SourceValue::{Boolean as B, Integer as I};
+    use SourceValue::{Boolean as B, Integer as I, Number as N, Unsigned as U};
     match (a, b) {
-        (I(a), I(b)) => Ok(I(cond.ite(&a, &b))),
+        (N(a), N(b)) => Ok(N(cond.ite(&a, &b))),
+        (U(a), U(b) | N(b)) | (N(a), U(b)) => Ok(U(cond.ite(&a, &b))),
+        (I(a) | N(a), I(b) | N(b)) => Ok(I(cond.ite(&a, &b))),
         (B(a), B(b)) => Ok(B(cond.ite(&a, &b))),
         (SourceValue::Composite(a), SourceValue::Composite(b)) if merged_composites => {
             if a.len() != b.len() || a.iter().zip(b.iter()).any(|((an, _), (bn, _))| an != bn) {
@@ -5724,7 +5952,7 @@ fn source_while<'ctx>(
     call_sites: &mut Vec<CallSite<'ctx>>,
     call_returns: &CallShapes,
 ) -> BodyResult<()> {
-    use SourceValue::{Boolean as B, Integer as I};
+    use SourceValue::{Boolean as B, Integer as I, Number as N, Unsigned as U};
     let mut cur = env.clone();
     let mut exited = Bool::from_bool(ctx, false);
     let mut merged: BTreeMap<String, SourceValue> = BTreeMap::new();
@@ -5770,9 +5998,16 @@ fn source_while<'ctx>(
         for (name, bound) in body_writes {
             // Writes escape only where the body actually ran: an
             // already-exited path keeps its entry values however the
-            // stale condition evaluates.
+            // stale condition evaluates. A literal-bound `N` pins to the
+            // kind its write produces (`let s = 0; s = s + n` → `I`), and
+            // an unsigned slot keeps its `U` (`merge_source_values` uses
+            // the same lattice for branch merges).
             let value = match (cur.get(&name), &bound) {
-                (Some(I(old)), I(new)) => I(body_guard.ite(new, old)),
+                (Some(N(old)), N(new)) => N(body_guard.ite(new, old)),
+                (Some(U(old)), U(new) | N(new)) | (Some(N(old)), U(new)) => {
+                    U(body_guard.ite(new, old))
+                }
+                (Some(I(old) | N(old)), I(new) | N(new)) => I(body_guard.ite(new, old)),
                 (Some(B(old)), B(new)) => B(body_guard.ite(new, old)),
                 (None, _) => bound.clone(),
                 _ => {
@@ -5808,6 +6043,13 @@ fn div_defined<'ctx>(a: &BV<'ctx>, b: &BV<'ctx>, ctx: &'ctx Context) -> Bool<'ct
             &Bool::and(ctx, &[&a._eq(&min), &b._eq(&minus_one)]).not(),
         ],
     )
+}
+
+/// The unsigned counterpart of `div_defined` (`pure-i64-composite/v10`):
+/// `udiv`/`urem` only require a nonzero divisor — `u64::MAX / -1` is
+/// an ordinary result, not an overflow.
+fn udiv_defined<'ctx>(b: &BV<'ctx>, ctx: &'ctx Context) -> Bool<'ctx> {
+    b._eq(&BV::from_i64(ctx, 0, 64)).not()
 }
 
 /// The domain `shl`/`ashr` share: a shift amount in 0..64 (an unsigned
@@ -5895,10 +6137,12 @@ fn composite_from_slots<'ctx>(
                         let slot = slots.next().cloned().unwrap_or_else(|| {
                             unreachable!("admitted structs always match their lowered arity")
                         });
-                        if *kind == ScalarKind::Bool {
-                            SourceValue::Boolean(slot._eq(&BV::from_u64(ctx, 0, 64)).not())
-                        } else {
-                            SourceValue::Integer(slot)
+                        match kind {
+                            ScalarKind::Bool => {
+                                SourceValue::Boolean(slot._eq(&BV::from_u64(ctx, 0, 64)).not())
+                            }
+                            ScalarKind::U64 => SourceValue::Unsigned(slot),
+                            _ => SourceValue::Integer(slot),
                         }
                     }
                     ValueKind::Struct(child) => {
@@ -5916,7 +6160,7 @@ fn composite_from_slots<'ctx>(
 /// A scalar value in the profile's lowered i64 representation.
 fn lower_scalar<'ctx>(value: SourceValue<'ctx>, ctx: &'ctx Context) -> BodyResult<BV<'ctx>> {
     match value {
-        SourceValue::Integer(v) => Ok(v),
+        SourceValue::Integer(v) | SourceValue::Unsigned(v) | SourceValue::Number(v) => Ok(v),
         SourceValue::Boolean(b) => Ok(b.ite(&BV::from_u64(ctx, 1, 64), &BV::from_u64(ctx, 0, 64))),
         SourceValue::Composite(_) => Err(SemanticContractError::Unsupported(
             "source nested struct value",
@@ -5954,6 +6198,8 @@ fn result_value<'ctx>(
                 .map(|(kind, slot)| enum_slot_value(*kind, slot, ctx))
                 .collect(),
         }
+    } else if call_returns.returns_u64(atom) {
+        SourceValue::Unsigned(value.clone())
     } else if call_returns.returns_bool(atom) {
         SourceValue::Boolean(value._eq(&BV::from_u64(ctx, 0, 64)).not())
     } else {
@@ -5975,12 +6221,12 @@ fn source_expr<'ctx>(
     call_sites: &mut Vec<CallSite<'ctx>>,
     call_returns: &CallShapes,
 ) -> BodyResult<SourceValue<'ctx>> {
-    use SourceValue::{Boolean as B, Integer as I};
+    use SourceValue::{Boolean as B, Integer as I, Number as N, Unsigned as U};
     if depth > MAX_DEPTH {
         return Err(SemanticContractError::Unsupported("source depth limit"));
     }
     Ok(match expr {
-        Expr::Number(n) => I(BV::from_i64(ctx, *n, 64)),
+        Expr::Number(n) => N(BV::from_i64(ctx, *n, 64)),
         Expr::Variable(n) if n == "true" || n == "false" => B(Bool::from_bool(ctx, n == "true")),
         Expr::Variable(n) => env
             .get(n.as_str())
@@ -6069,18 +6315,36 @@ fn source_expr<'ctx>(
                 )?;
                 // A nested struct field takes a composite value —
                 // everything else must be scalar (`v8` declarations
-                // only ever produce these two shapes).
-                let shape_ok = declared
-                    .iter()
-                    .find(|(decl_name, _)| decl_name == name)
-                    .is_some_and(|(_, shape)| {
-                        matches!(
-                            (shape, &value),
-                            (ValueKind::Scalar(_), SourceValue::Integer(_))
-                                | (ValueKind::Scalar(_), SourceValue::Boolean(_))
-                                | (ValueKind::Struct(_), SourceValue::Composite(_))
-                        )
-                    });
+                // only ever produce these two shapes). A `Number` literal
+                // lands under the declared leaf: `Unsigned` in a `u64`
+                // field, `Integer` in an `i64` one — otherwise the slot
+                // would keep adapting and later reads could go signed
+                // where the field is unsigned (`pure-i64-composite/v10`).
+                let Some((_, declared_shape)) =
+                    declared.iter().find(|(decl_name, _)| decl_name == name)
+                else {
+                    return Err(SemanticContractError::Unsupported("source struct literal"));
+                };
+                let value = match (declared_shape, value) {
+                    (ValueKind::Scalar(ScalarKind::I64), SourceValue::Number(v)) => {
+                        SourceValue::Integer(v)
+                    }
+                    (ValueKind::Scalar(ScalarKind::U64), SourceValue::Number(v)) => {
+                        SourceValue::Unsigned(v)
+                    }
+                    (_, value) => value,
+                };
+                let shape_ok = matches!(
+                    (declared_shape, &value),
+                    (
+                        ValueKind::Scalar(ScalarKind::I64),
+                        SourceValue::Integer(_) | SourceValue::Number(_)
+                    ) | (
+                        ValueKind::Scalar(ScalarKind::U64),
+                        SourceValue::Unsigned(_) | SourceValue::Number(_)
+                    ) | (ValueKind::Scalar(ScalarKind::Bool), SourceValue::Boolean(_))
+                        | (ValueKind::Struct(_), SourceValue::Composite(_))
+                );
                 if !shape_ok || values.insert(name, value).is_some() {
                     return Err(SemanticContractError::Unsupported("source struct literal"));
                 }
@@ -6146,42 +6410,105 @@ fn source_expr<'ctx>(
                 call_returns,
             )?;
             match (a, op, b) {
-                (I(a), Op::Eq, I(b)) => B(a._eq(&b)),
-                (I(a), Op::Neq, I(b)) => B(a._eq(&b).not()),
+                (I(a) | N(a), Op::Eq, I(b) | N(b))
+                | (U(a), Op::Eq, U(b) | N(b))
+                | (N(a), Op::Eq, U(b)) => B(a._eq(&b)),
+                (I(a) | N(a), Op::Neq, I(b) | N(b))
+                | (U(a), Op::Neq, U(b) | N(b))
+                | (N(a), Op::Neq, U(b)) => B(a._eq(&b).not()),
                 (B(a), Op::Eq, B(b)) => B(a._eq(&b)),
                 (B(a), Op::Neq, B(b)) => B(a._eq(&b).not()),
-                (I(a), Op::Lt, I(b)) => B(a.bvslt(&b)),
-                (I(a), Op::Le, I(b)) => B(a.bvsle(&b)),
-                (I(a), Op::Gt, I(b)) => B(a.bvsgt(&b)),
-                (I(a), Op::Ge, I(b)) => B(a.bvsge(&b)),
+                // Signed comparisons: i64 operands plus literals.
+                (I(a) | N(a), Op::Lt, I(b) | N(b)) => B(a.bvslt(&b)),
+                (I(a) | N(a), Op::Le, I(b) | N(b)) => B(a.bvsle(&b)),
+                (I(a) | N(a), Op::Gt, I(b) | N(b)) => B(a.bvsgt(&b)),
+                (I(a) | N(a), Op::Ge, I(b) | N(b)) => B(a.bvsge(&b)),
+                // Unsigned comparisons (`pure-i64-composite/v10`): a
+                // `u64` operand fixes the comparison — literals adapt,
+                // a declared `i64` operand on the other side fails
+                // closed through to the reject arm.
+                (U(a), Op::Lt, U(b) | N(b)) | (N(a), Op::Lt, U(b)) => B(a.bvult(&b)),
+                (U(a), Op::Le, U(b) | N(b)) | (N(a), Op::Le, U(b)) => B(a.bvule(&b)),
+                (U(a), Op::Gt, U(b) | N(b)) | (N(a), Op::Gt, U(b)) => B(a.bvugt(&b)),
+                (U(a), Op::Ge, U(b) | N(b)) | (N(a), Op::Ge, U(b)) => B(a.bvuge(&b)),
+                // Literal-only arithmetic keeps the literal carrier so
+                // `0 - 1` still adapts when it meets a u64 operand.
+                (N(a), Op::Add, N(b)) => N(a.bvadd(&b)),
+                (N(a), Op::Sub, N(b)) => N(a.bvsub(&b)),
+                (N(a), Op::Mul, N(b)) => N(a.bvmul(&b)),
+                (N(a), Op::BitAnd, N(b)) => N(a.bvand(&b)),
+                (N(a), Op::BitOr, N(b)) => N(a.bvor(&b)),
+                (N(a), Op::BitXor, N(b)) => N(a.bvxor(&b)),
+                (N(a), Op::Div, N(b)) => {
+                    definedness.push(guard.implies(&div_defined(&a, &b, ctx)));
+                    N(a.bvsdiv(&b))
+                }
+                (N(a), Op::Rem, N(b)) => {
+                    definedness.push(guard.implies(&div_defined(&a, &b, ctx)));
+                    N(a.bvsrem(&b))
+                }
+                (N(a), Op::Shl, N(b)) => {
+                    definedness.push(guard.implies(&shift_defined(&b, ctx)));
+                    N(a.bvshl(&b))
+                }
+                (N(a), Op::Shr, N(b)) => {
+                    definedness.push(guard.implies(&shift_defined(&b, ctx)));
+                    N(a.bvashr(&b))
+                }
                 // i64 arithmetic wraps mod 2^64, matching the emitted
                 // `add`/`sub`/`mul` (the emitter never sets nsw/nuw).
-                (I(a), Op::Add, I(b)) => I(a.bvadd(&b)),
-                (I(a), Op::Sub, I(b)) => I(a.bvsub(&b)),
-                (I(a), Op::Mul, I(b)) => I(a.bvmul(&b)),
+                (I(a) | N(a), Op::Add, I(b) | N(b)) => I(a.bvadd(&b)),
+                (I(a) | N(a), Op::Sub, I(b) | N(b)) => I(a.bvsub(&b)),
+                (I(a) | N(a), Op::Mul, I(b) | N(b)) => I(a.bvmul(&b)),
                 // Bitwise ops are total on i64 — no definedness obligation.
-                (I(a), Op::BitAnd, I(b)) => I(a.bvand(&b)),
-                (I(a), Op::BitOr, I(b)) => I(a.bvor(&b)),
-                (I(a), Op::BitXor, I(b)) => I(a.bvxor(&b)),
+                (I(a) | N(a), Op::BitAnd, I(b) | N(b)) => I(a.bvand(&b)),
+                (I(a) | N(a), Op::BitOr, I(b) | N(b)) => I(a.bvor(&b)),
+                (I(a) | N(a), Op::BitXor, I(b) | N(b)) => I(a.bvxor(&b)),
                 // `bvsdiv`/`bvsrem` truncate like the emitted `sdiv`/`srem`;
                 // both sides are partial in the same way, so the defined
                 // domain is an explicit obligation, not an assumption.
-                (I(a), Op::Div, I(b)) => {
+                (I(a) | N(a), Op::Div, I(b) | N(b)) => {
                     definedness.push(guard.implies(&div_defined(&a, &b, ctx)));
                     I(a.bvsdiv(&b))
                 }
-                (I(a), Op::Rem, I(b)) => {
+                (I(a) | N(a), Op::Rem, I(b) | N(b)) => {
                     definedness.push(guard.implies(&div_defined(&a, &b, ctx)));
                     I(a.bvsrem(&b))
                 }
-                (I(a), Op::Shl, I(b)) => {
+                (I(a) | N(a), Op::Shl, I(b) | N(b)) => {
                     definedness.push(guard.implies(&shift_defined(&b, ctx)));
                     I(a.bvshl(&b))
                 }
                 // `>>` is the arithmetic (sign-propagating) shift `ashr`.
-                (I(a), Op::Shr, I(b)) => {
+                (I(a) | N(a), Op::Shr, I(b) | N(b)) => {
                     definedness.push(guard.implies(&shift_defined(&b, ctx)));
                     I(a.bvashr(&b))
+                }
+                // `u64` arithmetic: same wrapping add/sub/mul and the
+                // same bitwise ops, but `bvudiv`/`bvurem`/`bvlshr` —
+                // whose only domain bound is a nonzero divisor / in-range
+                // amount (no `i64::MIN / -1` pair exists unsigned).
+                (U(a), Op::Add, U(b) | N(b)) | (N(a), Op::Add, U(b)) => U(a.bvadd(&b)),
+                (U(a), Op::Sub, U(b) | N(b)) | (N(a), Op::Sub, U(b)) => U(a.bvsub(&b)),
+                (U(a), Op::Mul, U(b) | N(b)) | (N(a), Op::Mul, U(b)) => U(a.bvmul(&b)),
+                (U(a), Op::BitAnd, U(b) | N(b)) | (N(a), Op::BitAnd, U(b)) => U(a.bvand(&b)),
+                (U(a), Op::BitOr, U(b) | N(b)) | (N(a), Op::BitOr, U(b)) => U(a.bvor(&b)),
+                (U(a), Op::BitXor, U(b) | N(b)) | (N(a), Op::BitXor, U(b)) => U(a.bvxor(&b)),
+                (U(a), Op::Div, U(b) | N(b)) | (N(a), Op::Div, U(b)) => {
+                    definedness.push(guard.implies(&udiv_defined(&b, ctx)));
+                    U(a.bvudiv(&b))
+                }
+                (U(a), Op::Rem, U(b) | N(b)) | (N(a), Op::Rem, U(b)) => {
+                    definedness.push(guard.implies(&udiv_defined(&b, ctx)));
+                    U(a.bvurem(&b))
+                }
+                (U(a), Op::Shl, U(b) | N(b)) | (N(a), Op::Shl, U(b)) => {
+                    definedness.push(guard.implies(&shift_defined(&b, ctx)));
+                    U(a.bvshl(&b))
+                }
+                (U(a), Op::Shr, U(b) | N(b)) | (N(a), Op::Shr, U(b)) => {
+                    definedness.push(guard.implies(&shift_defined(&b, ctx)));
+                    U(a.bvlshr(&b))
                 }
                 (B(a), Op::And, B(b)) => B(Bool::and(ctx, &[&a, &b])),
                 (B(a), Op::Or, B(b)) => B(Bool::or(ctx, &[&a, &b])),
@@ -6339,7 +6666,18 @@ fn source_expr<'ctx>(
                             Vec::new(),
                         ),
                         (Pattern::Variable(name), None) => {
-                            (None, vec![(name.clone(), I(target.clone().unwrap()))])
+                            // The arm binding keeps the scrutinee's scalar
+                            // wrapper — a `u64` scrutinee binds an `Unsigned`
+                            // (`pure-i64-composite/v10`), not a signed leaf.
+                            let bound = match &target_value {
+                                I(_) | U(_) | N(_) => target_value.clone(),
+                                _ => {
+                                    return Err(SemanticContractError::Unsupported(
+                                        "match scrutinee not scalar",
+                                    ));
+                                }
+                            };
+                            (None, vec![(name.clone(), bound)])
                         }
                         (Pattern::Wildcard, _) => (None, Vec::new()),
                         (
@@ -6661,7 +6999,9 @@ fn source_expr<'ctx>(
             // The uninterpreted result is a bitvector; a callee whose
             // return kind is bool reads it under the profile's 0/1
             // convention, matching `param_env` and `env["result"]`.
-            if call_returns.returns_bool(name) {
+            if call_returns.returns_u64(name) {
+                U(value)
+            } else if call_returns.returns_bool(name) {
                 B(value._eq(&BV::from_u64(ctx, 0, 64)).not())
             } else {
                 I(value)
@@ -8889,6 +9229,113 @@ mod tests {
             "struct Pair<T> {{ a: T, b: T }}\natom f() -> i64 requires: true; ensures: true; body: {{ let x = Other<i64>{{a: 1, b: 2}}; 0 }};\n{MAIN0}"
         ))
         .is_err());
+    }
+
+    #[test]
+    fn composite_v10_admits_u64_leaves() {
+        let v10 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV10)
+        };
+        let outcomes = |source: &str| {
+            refined_module_outcomes_admission(source, RefinedAdmission::CompositeV10)
+        };
+        let module = |piece: &str| format!("{piece}\n{MAIN0}");
+        for piece in [
+            // A `u64` parameter: `a >= 0` is trivially true under the
+            // unsigned reading, and `a - 1` wraps to u64::MAX at `a == 0`.
+            "atom ge(a: u64) -> i64 requires: a >= 0; ensures: result == 1; body: { 1 };",
+            "atom wrap(a: u64) -> u64 requires: a == 0; ensures: result == 0 - 1; body: { a - 1 };",
+            "atom half(a: u64) -> u64 requires: a % 2 == 0; ensures: result * 2 == a; body: { a / 2 };",
+            // A `u64` field inside a struct and a `u64` result.
+            "struct B { t: u64 }
+atom add(b: B, e: u64) -> B requires: true; ensures: result.t == b.t + e; body: { B{t: b.t + e} };",
+            // Literals adapt: `e` declares u64 so `e < 10` is unsigned.
+            "atom lt(e: u64) -> i64 requires: e < 10; ensures: result == 0; body: { 0 };",
+        ] {
+            let source = module(piece);
+            match v10(&source) {
+                Ok(cs) => assert!(
+                    cs.iter()
+                        .all(|c| c.profile == PURE_I64_COMPOSITE_PROFILE_V10),
+                    "{piece}"
+                ),
+                Err(e) => panic!("{piece}: {e:?}"),
+            }
+            match std::panic::catch_unwind(|| outcomes(&source)) {
+                Ok(res) => assert!(
+                    res.iter().all(|r| *r == z3::SatResult::Unsat),
+                    "{piece}"
+                ),
+                Err(_) => panic!("outcomes failed for: {piece}"),
+            }
+        }
+        // v10 pins the profile: a u64 leaf anywhere in the module is what
+        // selects it.
+        let source =
+            module("atom ge(a: u64) -> i64 requires: a >= 0; ensures: result == 1; body: { 1 };");
+        assert_eq!(
+            module_source_profile(&source, RefinedAdmission::CompositeV10).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V10
+        );
+        // `a < 0` is unsatisfiable for a u64 — the verifier's vacuity
+        // phase rejects the atom rather than passing it vacuously; the
+        // fragment obligation itself stays the honest `requires⇒ensures`
+        // encoding, so what this layer proves is that `a < 0` reads
+        // unsigned: `a bvult 0` is refutable, which the e2e negative
+        // fixture turns into a rejection.
+        // A wrong postcondition over u64 arithmetic refutes.
+        let wrong = module(
+            "atom bad(a: u64, b: u64) -> u64 requires: a == 1 && b == 1; ensures: result == 3; body: { a + b };",
+        );
+        assert!(outcomes(&wrong).contains(&z3::SatResult::Sat));
+        // Narrower admissions keep u64 leaves out.
+        for admission in [
+            RefinedAdmission::Reject,
+            RefinedAdmission::V1,
+            RefinedAdmission::V2,
+            RefinedAdmission::Composite,
+            RefinedAdmission::CompositeV2,
+            RefinedAdmission::CompositeV5,
+            RefinedAdmission::CompositeV8,
+            RefinedAdmission::CompositeV9,
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(&source, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+        }
+        // A module without u64 keeps the earlier profile.
+        let flat = format!(
+            "atom ge(a: i64) -> i64 requires: a >= 0; ensures: result == 1; body: {{ 1 }};\n{MAIN0}"
+        );
+        assert_ne!(
+            module_source_profile(&flat, RefinedAdmission::CompositeV10).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V10
+        );
+    }
+
+    #[test]
+    fn composite_v10_rejects_u64_shapes_outside_the_fragment() {
+        let v10 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV10)
+        };
+        // A declared u64 operand must not mix with a declared non-u64
+        // operand — the fragment stays closed on signed/unsigned mixes.
+        for piece in [
+            "atom mix(a: u64, b: i64) -> i64 requires: true; ensures: result == 0; body: { if a < b { 0 } else { 1 } };",
+            "atom mix_ret(a: u64, b: i64) -> i64 requires: true; ensures: result == 0; body: { a + b };",
+        ] {
+            assert!(v10(&format!("{piece}\n{MAIN0}")).is_err(), "{piece}");
+        }
+        // Wider/machine-dependent widths stay closed — `u8`/`u16`/`u32`
+        // were already admitted by the earlier widened profiles.
+        for piece in [
+            "atom f(a: usize) -> i64 requires: true; ensures: true; body: { 0 };",
+            "atom f(a: isize) -> i64 requires: true; ensures: true; body: { 0 };",
+            "atom f(a: i128) -> i64 requires: true; ensures: true; body: { 0 };",
+        ] {
+            assert!(v10(&format!("{piece}\n{MAIN0}")).is_err(), "{piece}");
+        }
     }
 
     #[test]

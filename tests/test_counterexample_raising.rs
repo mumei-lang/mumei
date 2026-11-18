@@ -816,7 +816,7 @@ body: x;
     );
     assert_eq!(
         report["counterexample_provenance"]["values"]["x"]["lowering"],
-        "int"
+        "bitvec_u64"
     );
     let reconstruction_loss = &report["semantic_feedback"]["reconstruction_loss"];
     assert_eq!(reconstruction_loss["counter_example"]["x"], 7);

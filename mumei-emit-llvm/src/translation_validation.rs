@@ -1080,7 +1080,10 @@ unsafe fn check_function(
                 // admits for `add`/`sub`/`mul` have no counterpart there.
                 LLVMOpcode::LLVMSDiv
                 | LLVMOpcode::LLVMSRem
+                | LLVMOpcode::LLVMUDiv
+                | LLVMOpcode::LLVMURem
                 | LLVMOpcode::LLVMShl
+                | LLVMOpcode::LLVMLShr
                 | LLVMOpcode::LLVMAShr => {
                     unflagged_arithmetic(inst)?;
                     if width(LLVMTypeOf(inst))? != 64 {
@@ -1139,9 +1142,10 @@ unsafe fn check_function(
 /// `add`/`sub`/`mul` wrap mod 2^64 on both sides of the comparison — the
 /// Mumei emitter never sets wrap flags. The nsw/nuw flags instead make
 /// overflow produce poison, which this profile rejects wholesale, so a
-/// flagged arithmetic instruction stays unsupported. `sdiv`/`shl`/`ashr`
-/// can carry nsw/nuw (`shl`) or `exact`, which likewise strengthen the
-/// poison domain, so they are rejected by the same whole-token check.
+/// flagged arithmetic instruction stays unsupported. `sdiv`/`udiv`/`shl`/
+/// `ashr`/`lshr` can carry nsw/nuw (`shl`) or `exact`, which likewise
+/// strengthen the poison domain, so they are rejected by the same
+/// whole-token check.
 unsafe fn unflagged_arithmetic(inst: LLVMValueRef) -> Result<()> {
     let printed = LLVMPrintValueToString(inst);
     let text = std::ffi::CStr::from_ptr(printed)
@@ -1794,6 +1798,18 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                             LLVMOpcode::LLVMAdd => a.bvadd(&b),
                             LLVMOpcode::LLVMSub => a.bvsub(&b),
                             LLVMOpcode::LLVMMul => a.bvmul(&b),
+                            LLVMOpcode::LLVMUDiv | LLVMOpcode::LLVMURem => {
+                                // `udiv`/`urem` are poison only for a zero
+                                // divisor — there is no unsigned analogue
+                                // of the `i64::MIN / -1` case.
+                                let zero = BV::from_i64(self.ctx, 0, 64);
+                                self.definedness.push((guard.clone(), b._eq(&zero).not()));
+                                if op == LLVMOpcode::LLVMUDiv {
+                                    a.bvudiv(&b)
+                                } else {
+                                    a.bvurem(&b)
+                                }
+                            }
                             LLVMOpcode::LLVMSDiv | LLVMOpcode::LLVMSRem => {
                                 // `sdiv`/`srem` are poison for a zero
                                 // divisor and for i64::MIN / -1 — the same
@@ -1816,15 +1832,17 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                                     a.bvsrem(&b)
                                 }
                             }
-                            LLVMOpcode::LLVMShl | LLVMOpcode::LLVMAShr => {
-                                // `shl`/`ashr` are poison for amounts >= 64
+                            LLVMOpcode::LLVMShl | LLVMOpcode::LLVMAShr | LLVMOpcode::LLVMLShr => {
+                                // `shl`/`ashr`/`lshr` are poison for amounts >= 64
                                 // (unsigned comparison covers negatives).
                                 let max = BV::from_i64(self.ctx, 64, 64);
                                 self.definedness.push((guard.clone(), b.bvult(&max)));
                                 if op == LLVMOpcode::LLVMShl {
                                     a.bvshl(&b)
-                                } else {
+                                } else if op == LLVMOpcode::LLVMAShr {
                                     a.bvashr(&b)
+                                } else {
+                                    a.bvlshr(&b)
                                 }
                             }
                             LLVMOpcode::LLVMICmp => {

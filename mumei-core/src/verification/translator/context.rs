@@ -180,10 +180,12 @@ pub(crate) struct VCtx<'a> {
     pub(crate) bv_shift_obligations: std::cell::RefCell<Vec<(Bool<'a>, BV<'a>)>>,
     /// `(dividend, divisor)` pairs lowered without a solver, like shift
     /// amounts above, so `divisor != 0` and `!(i64::MIN / -1)` are enforced
-    /// for contract divisions too, not just body divisions.
+    /// for contract divisions too, not just body divisions. The trailing
+    /// flag marks a `u64` (unsigned) pair, which skips the overflow check —
+    /// unsigned division overflow is undefined behavior nowhere.
     /// `discharge_bv_div_obligations` replays them under each entry's path
     /// condition.
-    pub(crate) bv_div_obligations: std::cell::RefCell<Vec<(Bool<'a>, BV<'a>, BV<'a>)>>,
+    pub(crate) bv_div_obligations: std::cell::RefCell<Vec<(Bool<'a>, BV<'a>, BV<'a>, bool)>>,
     /// Integer and real divisions lowered without a solver, as
     /// `(path condition, divisor == 0)`. Without them a `requires` such as
     /// `a / b > 0` would leave `b == 0` unconstrained and let any `ensures`

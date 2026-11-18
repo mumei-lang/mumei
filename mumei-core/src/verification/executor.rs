@@ -2037,6 +2037,25 @@ fn verify_inner_impl(
         }
     }
 
+    // 2d. `u64` params: under the `Int` encoding the symbol is unbounded —
+    // assert `0 <= v <= u64::MAX` so `a >= 0` and `a < 0` are decided
+    // correctly. The `BV(64)` encoding needs no bound (every value is valid;
+    // the unsigned ops carry the semantics).
+    let u64_max = z3::ast::Int::from_u64(&ctx, u64::MAX);
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        if module_env.resolve_base_type(type_name) != "u64" {
+            continue;
+        }
+        let Some(v) = env.get(&param.name).and_then(|d| d.as_int()) else {
+            continue;
+        };
+        solver.assert(&v.ge(&z3::ast::Int::from_u64(&ctx, 0)));
+        solver.assert(&v.le(&u64_max));
+    }
+
     // 2c. 全パラメータに対して配列長シンボルを事前生成
     #[allow(clippy::map_entry)]
     for param in &atom.params {
@@ -2574,6 +2593,43 @@ fn verify_inner_impl(
                                 .unwrap_or_default();
                             let mut model_map = HashMap::new();
                             let mut model_values: HashMap<String, CexValue> = HashMap::new();
+                            // `u64`-declared names decode their `BV(64)`
+                            // model values as unsigned; everything else
+                            // (including `i64` under `--bitvec-i64`) keeps
+                            // the signed reading.
+                            let mut unsigned_names: std::collections::HashSet<String> =
+                                std::collections::HashSet::new();
+                            for param in &atom.params {
+                                let Some(type_name) = param.type_name.as_deref() else {
+                                    continue;
+                                };
+                                let base = module_env.resolve_base_type(type_name.trim());
+                                if base == "u64" {
+                                    unsigned_names.insert(param.name.clone());
+                                } else if let Some(sdef) = module_env.get_struct(&base) {
+                                    // A struct param's `u64` fields live in
+                                    // env under their flattened slot keys.
+                                    for field in &sdef.fields {
+                                        if module_env.resolve_base_type(field.type_name.trim())
+                                            == "u64"
+                                        {
+                                            unsigned_names.insert(format!(
+                                                "__struct_{}_{}",
+                                                param.name, field.name
+                                            ));
+                                            unsigned_names
+                                                .insert(format!("{}_{}", param.name, field.name));
+                                        }
+                                    }
+                                }
+                            }
+                            if atom
+                                .return_type
+                                .as_deref()
+                                .is_some_and(|t| module_env.resolve_base_type(t.trim()) == "u64")
+                            {
+                                unsigned_names.insert("result".to_string());
+                            }
                             for (name, var_z3) in &env {
                                 let model_value =
                                     if atom.params.iter().any(|param| param.name == *name) {
@@ -2585,7 +2641,10 @@ fn verify_inner_impl(
                                     if let Some(int_value) = z3_dynamic_to_i64(&val) {
                                         model_map.insert(name.clone(), int_value);
                                     }
-                                    if let Some(cex_value) = z3_dynamic_to_cex_value(&val) {
+                                    if let Some(cex_value) = z3_dynamic_to_cex_value(
+                                        &val,
+                                        unsigned_names.contains(name.as_str()),
+                                    ) {
                                         model_values.insert(name.clone(), cex_value);
                                     }
                                 }
@@ -3795,12 +3854,30 @@ fn z3_dynamic_to_i64(value: &Dynamic) -> Option<i64> {
 /// native `Str` values so replay can validate string builtin bodies.
 /// `f64` encodings used by verification: `Int`, `Bool`, exact-rational `Real`
 /// (default `f64`), and IEEE 754 `Float` (under `--ieee754-f64`).
-fn z3_dynamic_to_cex_value(value: &Dynamic) -> Option<CexValue> {
+/// `unsigned` is the leaf's declared `u64` type — the only `BV(64)` sort
+/// that must decode without a sign.
+fn z3_dynamic_to_cex_value(value: &Dynamic, unsigned: bool) -> Option<CexValue> {
     if let Some(string_value) = value.as_string().and_then(|s| s.as_string()) {
         return Some(CexValue::Str(string_value));
     }
     if let Some(int_value) = value.as_int().and_then(|v| v.as_i64()) {
         return Some(CexValue::Int(int_value));
+    }
+    // A machine-word leaf encodes as `BV(64)`. Which reading the numeral
+    // takes comes from the declared type, not the sort: a `u64` leaf
+    // decodes unsigned so replay keeps leaves >= 2^63, while an `i64`
+    // under `--bitvec-i64` shares the same `BV(64)` sort but must keep
+    // its negative values or the replay cannot reproduce the violation.
+    if let Some(bv) = value.as_bv() {
+        if bv.get_size() == 64 {
+            if let Some(bits) = bv.as_u64() {
+                return Some(if unsigned {
+                    CexValue::UInt(bits)
+                } else {
+                    CexValue::Int(bits as i64)
+                });
+            }
+        }
     }
     if let Some(bool_value) = value.as_bool().and_then(|v| v.as_bool()) {
         return Some(CexValue::Bool(bool_value));

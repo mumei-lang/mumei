@@ -1068,6 +1068,83 @@ pub(crate) fn chan_payload_type_name(
 /// Resolve a declared type name to its base name with generics stripped —
 /// `get_enum`/`get_struct` are keyed on the unparameterized name, so
 /// `Option<i64>` resolves to `Option`.
+/// A resolved base name that denotes a fixed-width machine integer
+/// (`i8`..`i64`, `u8`..`u64`) — the names `hir_int_type_name` may legitimately
+/// return for a scalar binding.
+pub(crate) fn is_fixed_int_type_name(base: &str) -> bool {
+    matches!(
+        base,
+        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
+    )
+}
+
+/// Resolved integer type of a `HirExpr` operand — `Some("u64")` marks a
+/// `u64` operand, `Some("i64")` a declared signed one, `None` an adaptive
+/// literal or unresolvable expr. Mirrors the verifier's
+/// `fixed_width_int_type` so codegen picks `udiv`/`urem`/`lshr`/`icmp u*`
+/// for the same operands the verifier encoded with unsigned BV ops.
+pub(crate) fn hir_int_type_name(
+    expr: &HirExpr,
+    var_types: &HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    match expr {
+        HirExpr::Variable(name) => var_types
+            .get(name)
+            .map(|t| resolve_named_type(module_env, t)),
+        HirExpr::Call { name, .. } => module_env
+            .get_atom(name)
+            .and_then(|atom| atom.return_type.clone())
+            .map(|t| resolve_named_type(module_env, &t)),
+        // Only integer-producing operators propagate a leaf's signedness —
+        // a comparison or logical op yields `bool`, so `(a > 0) == (s.n > 0)`
+        // must not read `u64`/`i64` from its operands and trip the mix check.
+        HirExpr::BinaryOp(
+            l,
+            HirBinOp::Add
+            | HirBinOp::Sub
+            | HirBinOp::Mul
+            | HirBinOp::Pow
+            | HirBinOp::Div
+            | HirBinOp::Rem
+            | HirBinOp::BitAnd
+            | HirBinOp::BitOr
+            | HirBinOp::BitXor
+            | HirBinOp::Shl
+            | HirBinOp::Shr,
+            r,
+        ) => hir_int_type_name(l, var_types, module_env)
+            .or_else(|| hir_int_type_name(r, var_types, module_env)),
+        HirExpr::FieldAccess(inner, field) => infer_struct_type_name(inner, var_types, module_env)
+            .and_then(|s| {
+                module_env
+                    .get_struct(&s)
+                    .and_then(|sdef| sdef.fields.iter().find(|f| f.name == *field))
+                    .map(|f| resolve_named_type(module_env, &f.type_name))
+            }),
+        _ => None,
+    }
+}
+
+/// `u64` operand semantics for an int binop: `Some(true)` unsigned,
+/// `Some(false)` both signed or adaptive, `Err` on a declared u64/non-u64 mix.
+fn binop_unsigned_operands(
+    left: &HirExpr,
+    right: &HirExpr,
+    var_types: &HashMap<String, String>,
+    module_env: &ModuleEnv,
+) -> Result<bool, MumeiError> {
+    let lt = hir_int_type_name(left, var_types, module_env);
+    let rt = hir_int_type_name(right, var_types, module_env);
+    let (lu, ru) = (lt.as_deref() == Some("u64"), rt.as_deref() == Some("u64"));
+    if (lu && rt.is_some() && !ru) || (ru && lt.is_some() && !lu) {
+        return Err(MumeiError::codegen(
+            "Cannot mix a u64 operand with a declared non-u64 integer operand".to_string(),
+        ));
+    }
+    Ok(lu || ru)
+}
+
 pub(crate) fn resolve_named_type(module_env: &ModuleEnv, type_name: &str) -> String {
     let base = module_env.resolve_base_type(type_name);
     base.split('<')
@@ -2119,12 +2196,19 @@ pub(crate) fn compile_hir_expr<'a>(
                 }
                 let l = lhs.into_int_value();
                 let r = rhs.into_int_value();
+                let unsigned = binop_unsigned_operands(left, right, var_types, module_env)?;
                 match op {
                     HirBinOp::Add => Ok(llvm!(builder.build_int_add(l, r, "add_tmp")).into()),
                     HirBinOp::Sub => Ok(llvm!(builder.build_int_sub(l, r, "sub_tmp")).into()),
                     HirBinOp::Mul => Ok(llvm!(builder.build_int_mul(l, r, "mul_tmp")).into()),
+                    HirBinOp::Div if unsigned => {
+                        Ok(llvm!(builder.build_int_unsigned_div(l, r, "udiv_tmp")).into())
+                    }
                     HirBinOp::Div => {
                         Ok(llvm!(builder.build_int_signed_div(l, r, "div_tmp")).into())
+                    }
+                    HirBinOp::Rem if unsigned => {
+                        Ok(llvm!(builder.build_int_unsigned_rem(l, r, "urem_tmp")).into())
                     }
                     HirBinOp::Rem => {
                         // `srem i64::MIN, -1` is undefined in LLVM; `x % -1` is
@@ -2155,6 +2239,9 @@ pub(crate) fn compile_hir_expr<'a>(
                     HirBinOp::BitOr => Ok(llvm!(builder.build_or(l, r, "or_tmp")).into()),
                     HirBinOp::BitXor => Ok(llvm!(builder.build_xor(l, r, "xor_tmp")).into()),
                     HirBinOp::Shl => Ok(llvm!(builder.build_left_shift(l, r, "shl_tmp")).into()),
+                    HirBinOp::Shr if unsigned => {
+                        Ok(llvm!(builder.build_right_shift(l, r, false, "lshr_tmp")).into())
+                    }
                     HirBinOp::Shr => {
                         Ok(llvm!(builder.build_right_shift(l, r, true, "ashr_tmp")).into())
                     }
@@ -2164,13 +2251,17 @@ pub(crate) fn compile_hir_expr<'a>(
                     | HirBinOp::Gt
                     | HirBinOp::Ge
                     | HirBinOp::Le => {
-                        let pred = match op {
-                            HirBinOp::Eq => IntPredicate::EQ,
-                            HirBinOp::Neq => IntPredicate::NE,
-                            HirBinOp::Lt => IntPredicate::SLT,
-                            HirBinOp::Gt => IntPredicate::SGT,
-                            HirBinOp::Ge => IntPredicate::SGE,
-                            HirBinOp::Le => IntPredicate::SLE,
+                        let pred = match (op, unsigned) {
+                            (HirBinOp::Eq, _) => IntPredicate::EQ,
+                            (HirBinOp::Neq, _) => IntPredicate::NE,
+                            (HirBinOp::Lt, true) => IntPredicate::ULT,
+                            (HirBinOp::Gt, true) => IntPredicate::UGT,
+                            (HirBinOp::Ge, true) => IntPredicate::UGE,
+                            (HirBinOp::Le, true) => IntPredicate::ULE,
+                            (HirBinOp::Lt, false) => IntPredicate::SLT,
+                            (HirBinOp::Gt, false) => IntPredicate::SGT,
+                            (HirBinOp::Ge, false) => IntPredicate::SGE,
+                            (HirBinOp::Le, false) => IntPredicate::SLE,
                             _ => unreachable!(),
                         };
                         let cmp = llvm!(builder.build_int_compare(pred, l, r, "cmp_tmp"));
@@ -2214,8 +2305,11 @@ pub(crate) fn compile_hir_expr<'a>(
 
             // Lambda bindings are branch-scoped like the verifier's
             // `local_lambdas`: restore the pre-branch markers before the
-            // else side, then keep only markers both sides agree on.
-            let pre_marks = lambda_marks(var_types);
+            // else side, then keep only markers both sides agree on. The
+            // same scoping applies to every `var_types` entry — a type a
+            // `then` assignment records must not retype the value `else`
+            // still holds from before the branch.
+            let pre_var_types = var_types.clone();
 
             llvm!(builder.build_conditional_branch(cond_bool, then_block, else_block));
 
@@ -2234,8 +2328,8 @@ pub(crate) fn compile_hir_expr<'a>(
             let then_vars = variables.clone();
             let then_arrays = array_ptrs.clone();
             let then_marks = lambda_marks(var_types);
-            var_types.retain(|_, v| !v.starts_with(LAMBDA_MARK));
-            var_types.extend(pre_marks.iter().map(|(k, v)| (k.clone(), v.clone())));
+            let then_var_types = var_types.clone();
+            *var_types = pre_var_types.clone();
             let then_end_block = builder.get_insert_block().unwrap();
             llvm!(builder.build_unconditional_branch(merge_block));
 
@@ -2256,7 +2350,28 @@ pub(crate) fn compile_hir_expr<'a>(
             let else_vars = variables.clone();
             let else_arrays = array_ptrs.clone();
             let else_marks = lambda_marks(var_types);
+            let else_var_types = var_types.clone();
             merge_lambda_marks(var_types, &then_marks, &else_marks);
+            // Non-lambda type tracking merges like the values below: both
+            // branches must record the same type for a name, or the name's
+            // declared pre-branch type stands. An entry only one branch
+            // produced is dropped unless the name existed before the
+            // branch.
+            let mut merged_types: HashMap<String, String> = pre_var_types
+                .iter()
+                .filter(|(_, v)| !v.starts_with(LAMBDA_MARK))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            merged_types.retain(|name, _| {
+                then_var_types.contains_key(name) || else_var_types.contains_key(name)
+            });
+            for (name, ty) in &then_var_types {
+                if !ty.starts_with(LAMBDA_MARK) && else_var_types.get(name) == Some(ty) {
+                    merged_types.insert(name.clone(), ty.clone());
+                }
+            }
+            var_types.retain(|_, v| v.starts_with(LAMBDA_MARK));
+            var_types.extend(merged_types);
             let else_end_block = builder.get_insert_block().unwrap();
             llvm!(builder.build_unconditional_branch(merge_block));
 
