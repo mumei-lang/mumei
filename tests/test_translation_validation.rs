@@ -3166,3 +3166,53 @@ fn bounded_memory_byte_indexed_gep_fails_closed() {
     )
     .is_err());
 }
+
+const BOUNDED_ZERO_SOURCE: &str = "atom zero() -> i64 requires: true; ensures: true; body: { let a = [0, 5]; a[0] };\natom main() -> i64 requires: true; ensures: true; body: { zero() };";
+
+#[test]
+fn bounded_memory_unwritten_cell_is_not_silently_zero() {
+    // A dropped initialisation store must not pass: the unconstrained
+    // backing array yields an arbitrary cell where a zero-filled base
+    // would silently reproduce the source's 0.
+    let items = parse_module_checked(BOUNDED_ZERO_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let dropped = ir.replacen("  store i64 0, ptr %lit_slot, align 4\n", "", 1);
+    assert_ne!(dropped, ir, "probe did not apply:\n{ir}");
+    assert_eq!(
+        tv::validate_native_module(
+            BOUNDED_ZERO_SOURCE,
+            &dropped,
+            Options::default(),
+            RefinedAdmission::CompositeV11,
+        )
+        .unwrap()
+        .outcome,
+        Outcome::Different
+    );
+}
+
+#[test]
+fn bounded_memory_out_of_bounds_pair_is_ub_not_equivalent() {
+    // An out-of-bounds store+read pair agrees with the source on every
+    // value — 1 + 9 + 3 on both sides — but the access itself is UB,
+    // which the per-alloca bound obligation must flag.
+    let items = parse_module_checked(BOUNDED_ARRAY_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let oob = ir.replacen(
+        "getelementptr i64, ptr %arrlit_data, i64 1",
+        "getelementptr i64, ptr %arrlit_data, i64 5",
+        2,
+    );
+    assert_ne!(oob, ir, "probe did not apply:\n{ir}");
+    assert_eq!(
+        tv::validate_native_module(
+            BOUNDED_ARRAY_SOURCE,
+            &oob,
+            Options::default(),
+            RefinedAdmission::CompositeV11,
+        )
+        .unwrap()
+        .outcome,
+        Outcome::UndefinedBehavior
+    );
+}

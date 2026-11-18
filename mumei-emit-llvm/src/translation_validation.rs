@@ -273,7 +273,10 @@ fn validate(
         } else {
             "supplied_llvm_ir_snapshot_no_pipeline_attestation"
         },
-        input_domain: loop_domain_label(input_domain_label(native, &model, &ir_definedness), loops),
+        input_domain: loop_domain_label(
+            &input_domain_label(native, &model, &ir_definedness),
+            loops,
+        ),
         source_sha256: model.source_sha256,
         llvm_sha256: mumei_core::native_bundle::sha256(llvm_ir.as_bytes()),
         timeout_ms: options.timeout_ms,
@@ -715,7 +718,7 @@ unsafe fn compare_function<'ctx>(
 
 /// Append the bounded-loop domain restriction to a base input-domain
 /// label so the report names the actual claim boundary.
-fn loop_domain_label(domain: &'static str, loops: bool) -> String {
+fn loop_domain_label(domain: &str, loops: bool) -> String {
     if loops {
         format!("{domain}_and_loops_exiting_within_bound_{LOOP_BOUND}")
     } else {
@@ -727,25 +730,37 @@ fn input_domain_label<'ctx>(
     native: bool,
     model: &PureI64Body<'ctx>,
     ir_definedness: &[(Bool<'ctx>, Bool<'ctx>)],
-) -> &'static str {
+) -> String {
+    // Bounded-memory models put each in-bounds obligation on the same
+    // definedness footing as division and shift — name it so the
+    // domain description does not overstate the claim.
+    let defined_what = if model.bounded_memory {
+        "division_and_shift_and_in_bounds_memory_accesses"
+    } else {
+        "division_and_shift"
+    };
     if !model.definedness.is_empty() || !ir_definedness.is_empty() {
         if native {
-            "zero_argument_main_i64_body_where_division_and_shift_defined_not_process_exit_status"
+            format!(
+                "zero_argument_main_i64_body_where_{defined_what}_defined_not_process_exit_status"
+            )
         } else if model.param_domain.is_empty() {
-            "signed_i64_inputs_where_division_and_shift_defined_not_restricted_by_requires"
+            format!("signed_i64_inputs_where_{defined_what}_defined_not_restricted_by_requires")
         } else if model.subrange_params {
-            "signed_i64_inputs_with_signature_bounded_param_domains_where_division_and_shift_defined_not_restricted_by_requires"
+            format!("signed_i64_inputs_with_signature_bounded_param_domains_where_{defined_what}_defined_not_restricted_by_requires")
         } else {
-            "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_division_and_shift_defined_not_restricted_by_requires"
+            format!("signed_i64_inputs_with_bool_params_restricted_to_0_or_1_where_{defined_what}_defined_not_restricted_by_requires")
         }
     } else if native {
-        "zero_argument_main_i64_body_not_process_exit_status"
+        "zero_argument_main_i64_body_not_process_exit_status".to_owned()
     } else if model.param_domain.is_empty() {
-        "all_signed_i64_inputs_not_restricted_by_requires"
+        "all_signed_i64_inputs_not_restricted_by_requires".to_owned()
     } else if model.subrange_params {
         "signed_i64_inputs_with_signature_bounded_param_domains_not_restricted_by_requires"
+            .to_owned()
     } else {
         "signed_i64_inputs_with_bool_params_restricted_to_0_or_1_not_restricted_by_requires"
+            .to_owned()
     }
 }
 
@@ -1480,11 +1495,18 @@ struct IrEncoder<'ctx, 'renames> {
     /// sibling path.
     aggregates: HashMap<usize, Vec<Option<BV<'ctx>>>>,
     /// Bounded-memory state: each admitted `alloca`'s cells as a Z3
-    /// array `BV64 -> BV64`, zero-initialised to mirror the source's
-    /// array-literal semantics (a cell read before any `store` binds 0
-    /// on both sides). Restored at conditional branches like
+    /// array `BV64 -> BV64` over an unconstrained base — a cell read
+    /// before any `store` yields an arbitrary value, so an
+    /// initialisation store the IR dropped stays distinguishable from
+    /// the source's definite 0. Restored at conditional branches like
     /// `aggregates`.
     arrays: HashMap<usize, z3::ast::Array<'ctx>>,
+    /// Each admitted `alloca`'s element count: the bound every load's
+    /// and store's offset must satisfy wherever the access executes —
+    /// out-of-bounds is recorded as a definedness obligation, i.e. UB.
+    /// Entries never change once written, so unlike `arrays` the map
+    /// needs no restore at branches.
+    alloca_lens: HashMap<usize, u64>,
     /// Pointer provenance: `alloca` and `getelementptr` results map to
     /// their backing `alloca` plus an element offset (the whitelist
     /// keeps every index i64, so offsets stay element counts).
@@ -1505,6 +1527,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             depths: HashMap::new(),
             aggregates: HashMap::new(),
             arrays: HashMap::new(),
+            alloca_lens: HashMap::new(),
             ptrs: HashMap::new(),
         }
     }
@@ -1529,6 +1552,30 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             .get(&(value as usize))
             .cloned()
             .ok_or(ValidationError("unresolved LLVM value"))
+    }
+
+    /// Record that `offset` must lie inside `alloca`'s extent wherever
+    /// the current path executes the access — the emitted IR bounds-
+    /// checks every dynamic index, but a mutated or hostile module can
+    /// read or write past the array, which is UB rather than a value
+    /// difference.
+    fn memory_in_bounds(
+        &mut self,
+        alloca: usize,
+        offset: &BV<'ctx>,
+        guard: &Bool<'ctx>,
+    ) -> Result<()> {
+        let slots = *self
+            .alloca_lens
+            .get(&alloca)
+            .ok_or(ValidationError("untracked LLVM pointer"))?;
+        let zero = BV::from_u64(self.ctx, 0, 64);
+        let limit = BV::from_u64(self.ctx, slots, 64);
+        self.definedness.push((
+            guard.clone(),
+            Bool::and(self.ctx, &[&offset.bvsge(&zero), &offset.bvslt(&limit)]),
+        ));
+        Ok(())
     }
 
     /// Every slot of an aggregate value, failing closed on a slot no
@@ -1883,17 +1930,28 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             }
             if op == LLVMOpcode::LLVMAlloca {
                 // `let a = [x, ...]`'s entry-block `alloca` — a fresh
-                // zero-filled array, like the source's cell state.
-                let zero = BV::from_u64(self.ctx, 0, 64);
+                // array over an unconstrained base. Zero-initialising
+                // here instead would let an IR missing an
+                // initialisation store still read the source's 0 and
+                // mask the difference.
+                let sort = z3::Sort::bitvector(self.ctx, 64);
                 self.arrays.insert(
                     inst as usize,
-                    z3::ast::Array::const_array(
+                    z3::ast::Array::new_const(
                         self.ctx,
-                        &z3::Sort::bitvector(self.ctx, 64),
-                        &zero,
+                        format!("array_base_{:x}", inst as usize),
+                        &sort,
+                        &sort,
                     ),
                 );
-                self.ptrs.insert(inst as usize, (inst as usize, zero));
+                self.alloca_lens.insert(
+                    inst as usize,
+                    LLVMGetArrayLength2(LLVMGetAllocatedType(inst)),
+                );
+                self.ptrs.insert(
+                    inst as usize,
+                    (inst as usize, BV::from_u64(self.ctx, 0, 64)),
+                );
                 inst = LLVMGetNextInstruction(inst);
                 continue;
             }
@@ -1922,6 +1980,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     .get(&(LLVMGetOperand(inst, 1) as usize))
                     .cloned()
                     .ok_or(ValidationError("untracked LLVM pointer"))?;
+                self.memory_in_bounds(alloca, &offset, &guard)?;
                 let array = self
                     .arrays
                     .get(&alloca)
@@ -1937,6 +1996,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     .get(&(LLVMGetOperand(inst, 0) as usize))
                     .cloned()
                     .ok_or(ValidationError("untracked LLVM pointer"))?;
+                self.memory_in_bounds(alloca, &offset, &guard)?;
                 let array = self
                     .arrays
                     .get(&alloca)
