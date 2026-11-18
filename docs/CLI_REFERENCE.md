@@ -12,9 +12,9 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 |---|---:|---|
 | `mumei` | 1 | Formally verified language: parse → resolve → monomorphize → verify (Z3) → codegen (LLVM IR) |
 | `mumei evidence` | 0 | Check common Evidence representation or produce fresh scoped source Evidence; no proof acceptance |
-| `mumei evidence recheck-source` | 4 | Freshly recheck saved source Evidence with linked Z3 and caller-supplied source/budgets; not proof acceptance |
-| `mumei evidence accept-source` | 4 | Evaluate representation plus fresh same-profile source consistency into a bounded acceptance descriptor |
-| `mumei evidence verify-source` | 3 | Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance |
+| `mumei evidence recheck-source` | 5 | Freshly recheck saved source Evidence with linked Z3 and caller-supplied source/budgets; not proof acceptance |
+| `mumei evidence accept-source` | 5 | Evaluate representation plus fresh same-profile source consistency into a bounded acceptance descriptor |
+| `mumei evidence verify-source` | 4 | Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance |
 | `mumei evidence sign` | 4 | Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only |
 | `mumei evidence check` | 3 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
 | `mumei evidence check-list` | 3 | Validate a bounded Evidence list envelope's representation — every record individually, not their truth or consistency |
@@ -118,6 +118,7 @@ Usage: mumei evidence recheck-source [OPTIONS] --source <SOURCE> <INPUT>
 | `--json` | false | — | Emit a static consistency diagnostic, not Evidence or an acceptance receipt |
 | `--solver-timeout <SOLVER_TIMEOUT>` | 10000 | — | Solver timeout in milliseconds (1..=10000); must match the producer's explicit budget |
 | `--solver-resource-limit <SOLVER_RESOURCE_LIMIT>` | 1000000 | — | Solver resource units (1..=1000000); no saved/ambient policy is loaded |
+| `--produced-at <PRODUCED_AT>` | — | — | Declared RFC 3339 timestamp the producer stamped; must equal the saved record's produced_at |
 
 ## `mumei evidence accept-source`
 
@@ -143,6 +144,7 @@ Usage: mumei evidence accept-source [OPTIONS] --source <SOURCE> <INPUT>
 | `--json` | false | — | Emit a static acceptance descriptor, not reusable Evidence or a certificate |
 | `--solver-timeout <SOLVER_TIMEOUT>` | 10000 | — | Solver timeout in milliseconds (1..=10000); must match the producer's explicit budget |
 | `--solver-resource-limit <SOLVER_RESOURCE_LIMIT>` | 1000000 | — | Solver resource units (1..=1000000); no saved/ambient policy is loaded |
+| `--produced-at <PRODUCED_AT>` | — | — | Declared RFC 3339 timestamp the producer stamped; must equal the saved record's produced_at |
 
 ## `mumei evidence verify-source`
 
@@ -167,6 +169,7 @@ Usage: mumei evidence verify-source [OPTIONS] <INPUT>
 | `--json` | false | — | Emit one common Evidence v1 record on fresh unsat only (not an acceptance receipt) |
 | `--solver-timeout <SOLVER_TIMEOUT>` | 10000 | — | Solver timeout in milliseconds (1..=10000); no project/ambient policy loaded |
 | `--solver-resource-limit <SOLVER_RESOURCE_LIMIT>` | 1000000 | — | Solver resource units (1..=1000000); zero/unlimited is rejected |
+| `--produced-at <PRODUCED_AT>` | — | — | Declared RFC 3339 timestamp stamped on the emitted record; never read from the system clock |
 
 ## `mumei evidence sign`
 
