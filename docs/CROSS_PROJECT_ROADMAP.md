@@ -4411,6 +4411,26 @@ never reached. An empty manifest still counts as declared
 manifest read at `MAX_MANIFEST_BYTES + 1`, reports `exc.strerror`
 only, and the drift recheck catches `(OSError, ValueError)`.
 
+### Wave 3 summary-aware call modeling, Solidity port (mumei-agent)
+
+[mumei-agent#904](https://github.com/mumei-lang/mumei-agent/pull/904)
+lands the same fold for `sol-summaries`, closing issue #900 across
+all four adapters. Sol's manifest is name-based rather than
+binding-id-based, so an opaque `ext.Lib.g` call matches an entry
+named `Lib.g` (one module-token prefix) or `ext.Lib.g` exactly; a
+name match counts toward `summary_unmatched` even when a gate
+rejects the fold. The fold narrows only the result set — `effects`
+stays `unknown` because a Sol manifest cannot bound writes through
+argument objects or state — and discarded-result, `named`-argument,
+gapped, arity-mismatched or out-of-range-ordinal entries keep the
+opaque record, so a partial manifest can never narrow below the
+flag-less report. `context_key` binds the manifest's canonical
+bytes; produce/check/reuse/accept all take the flag, `--output`
+refuses the manifest path, and `sol-summaries-attempt` forwards
+the flag and binds the manifest into the request fingerprint. The
+re-derivation counters are call-site-span-deduped sets, so calls
+first reached after a depth-limited cache hit still count.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
