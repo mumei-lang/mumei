@@ -45,7 +45,12 @@ use std::path::Path;
 /// double-declaration rejected), so previously-verifying programs that
 /// reuse an argument after calling a signature-`consume` callee may now
 /// fail verification and cached results must be re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 17;
+/// Version 18 encodes `u64` leaves as machine words (`BV(64)`, unsigned
+/// comparisons and `udiv`/`urem`/`lshr`) instead of unbounded `Int`s: a
+/// `u64` atom verified under version 17 proved wrap-sensitive clauses like
+/// `a + 1 > a` that the compiled code cannot satisfy, so cached `u64`
+/// verdicts must be re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 18;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -2426,7 +2431,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "e6866e0e716c21536d04504143c8f6ee524351ddbadbed6c7f6e7ecd71d505ee"
+            "b15ab68885a99dcbebf734fee6330eec53cf6c49845a0799eb5022f887aaa613"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -2450,7 +2455,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "9e1ad8675ce5b94972092795e1f7583c37747cf2ace33fb3a601f459de1631b3"
+            "14ca07fced328cba06f438abe87598215670240aca3db4369a2015a5ef588dea"
         );
     }
 }
