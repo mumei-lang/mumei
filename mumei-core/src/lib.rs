@@ -10,6 +10,7 @@ pub mod controls;
 pub mod cross_spec;
 pub mod emitter;
 pub mod erosion;
+pub mod evidence_acceptance;
 // NOTE: ffi module contains HTTP/JSON/server FFI backends not yet wired into the public API
 #[allow(dead_code)]
 pub mod ffi;

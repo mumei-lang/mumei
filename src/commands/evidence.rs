@@ -1,4 +1,5 @@
 use crate::cli::EvidenceCommand;
+use mumei_core::evidence_acceptance::{self, Verdict};
 use mumei_core::producer_signature::{self, PRODUCER_SIGNATURE_SCHEMA};
 use mumei_core::source_evidence::{self, AcceptOutcome, Options, Outcome, RecheckOutcome};
 use mumei_core::verification_evidence::{self, MAX_INPUT_BYTES, SCHEMA_VERSION};
@@ -53,6 +54,21 @@ pub(crate) fn run(command: EvidenceCommand) {
                 },
             ),
             "Source evidence acceptance failed",
+        ),
+        EvidenceCommand::Accept {
+            input,
+            stdin,
+            requirement,
+            json,
+        } => (
+            accept(
+                input.as_deref().map(Path::new),
+                stdin,
+                json,
+                Path::new(&requirement),
+                &mut output,
+            ),
+            "Evidence acceptance evaluation failed",
         ),
         EvidenceCommand::Check {
             input,
@@ -135,14 +151,21 @@ pub(crate) fn run(command: EvidenceCommand) {
     match result {
         Ok(0) => (),
         Ok(code) => {
-            eprintln!(
-                "{}",
-                if code == 3 {
+            let message = match (prefix, code) {
+                ("Evidence acceptance evaluation failed", 3) => {
+                    "Evidence acceptance inconclusive under the declared requirement; nothing accepted"
+                }
+                ("Evidence acceptance evaluation failed", _) => {
+                    "Evidence rejected under the declared requirement; nothing accepted"
+                }
+                (_, 3) => {
                     "Source query inconclusive within bounded profile; no Evidence emitted"
-                } else {
+                }
+                (_, _) => {
                     "Source postcondition refuted within restricted profile; no Evidence emitted"
                 }
-            );
+            };
+            eprintln!("{message}");
             std::process::exit(code);
         }
         Err(error) => {
@@ -397,6 +420,79 @@ fn declared_adapter_gate(
     } else {
         Err("declared producer does not match the expected adapter")
     }
+}
+
+fn accept(
+    input: Option<&Path>,
+    stdin: bool,
+    json: bool,
+    requirement: &Path,
+    output: &mut impl Write,
+) -> Result<i32, &'static str> {
+    let record_bytes = match (input, stdin) {
+        (Some(path), false) => super::input::read_regular(path, MAX_INPUT_BYTES as u64)?,
+        (None, true) => super::input::read_stdin(MAX_INPUT_BYTES as u64)?,
+        _ => return Err("choose exactly one evidence input"),
+    };
+    let requirement_bytes = super::input::read_regular(requirement, MAX_INPUT_BYTES as u64)?;
+    let requirement = evidence_acceptance::decode_requirement(&requirement_bytes)
+        .map_err(|_| "invalid evidence requirement representation")?;
+    let record = verification_evidence::decode(&record_bytes)
+        .map_err(|_| "invalid evidence representation")?;
+    let evaluation = evidence_acceptance::evaluate(&requirement, &record);
+    let code = match evaluation.verdict {
+        Verdict::Accepted => 0,
+        Verdict::Rejected => 1,
+        Verdict::Inconclusive => 3,
+    };
+    let descriptor = if json {
+        use sha2::{Digest, Sha256};
+        let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": evidence_acceptance::ACCEPTANCE_SCHEMA,
+            "evidence_schema_version": SCHEMA_VERSION,
+            "requirement_schema_version": evidence_acceptance::REQUIREMENT_SCHEMA,
+            "requirement_fingerprint": format!("{:x}", Sha256::digest(&requirement_bytes)),
+            "evidence_fingerprint": format!("{:x}", Sha256::digest(&record_bytes)),
+            "acceptance": "evaluated",
+            "verdict": evaluation.verdict.as_str(),
+            "checks": evaluation
+                .checks
+                .iter()
+                .map(|check| serde_json::json!({"name": check.name, "outcome": check.outcome}))
+                .collect::<Vec<_>>(),
+            "checks_performed": ["representation_gate", "declared_requirement_normalization"],
+            "checks_not_performed": ["claim_truth", "producer_authenticity",
+                "historical_execution", "record_freshness",
+                "independent_model_correspondence", "artifact_semantics",
+                "tool_execution", "grade_promotion"],
+        }))
+        .map_err(|_| "cannot encode evidence acceptance descriptor")?;
+        bytes.push(b'\n');
+        bytes
+    } else {
+        let failed = evaluation
+            .checks
+            .iter()
+            .filter(|check| check.outcome == "failed")
+            .count();
+        let open = evaluation
+            .checks
+            .iter()
+            .filter(|check| check.outcome == "indeterminate")
+            .count();
+        format!(
+            "Evidence acceptance: {} ({} check(s) failed, {} indeterminate).\n\
+Scope: declared-requirement normalization over the record's representation only; no claim truth, producer authenticity, freshness, independent correspondence, artifact semantics, tool execution or grade promotion checked.\n",
+            evaluation.verdict.as_str(),
+            failed,
+            open,
+        )
+        .into_bytes()
+    };
+    output
+        .write_all(&descriptor)
+        .map_err(|_| "cannot write evidence acceptance descriptor")?;
+    Ok(code)
 }
 
 fn check(

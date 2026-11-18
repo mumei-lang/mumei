@@ -4602,6 +4602,29 @@ clause checks the same quotient at runtime. Rounding matches
 `bvsdiv` on defined inputs; `i64::MIN / -1` remains BV-level UB
 but defined in the int model.
 
+### General declared-requirement Evidence acceptance (mumei)
+
+`mumei evidence accept <record> --requirement <req.json>` normalizes
+one declared `mumei.evidence-requirement/v1` document against one
+common Evidence record and emits a `mumei.evidence-acceptance/v1`
+descriptor — `accepted`/`rejected`/`inconclusive` plus per-check
+outcomes (subject/obligation/profile/integer-model/target-triple
+pins, `execution_completed`, `result_polarity`,
+`method_sufficient`, `scope_sufficient`, `correspondence_status`,
+`excluded_assumptions`). The requirement names its assurance floor:
+`unbounded_proof`, `bounded_proof`, `bounded_check`,
+`observation` or `identity`; finite execution satisfies only the
+observation floor and can never answer a proof-level requirement
+(C02). A counterexample/finding result or a mismatched pin is an
+affirmative rejection (exit 1); a non-completed execution or an
+unknown-class result is inconclusive (exit 3), never a silent pass.
+Normalization only — `checks_not_performed` keeps claim truth,
+producer authenticity, freshness, independent correspondence,
+artifact semantics, tool execution and grade promotion out of the
+verdict. Consumer-side arbitration across multiple records and
+verdict-bearing acceptance into grades remain open.
+
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:

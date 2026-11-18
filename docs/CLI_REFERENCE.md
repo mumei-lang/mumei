@@ -17,6 +17,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei evidence verify-source` | 4 | Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance |
 | `mumei evidence sign` | 4 | Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only |
 | `mumei evidence check` | 3 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
+| `mumei evidence accept` | 3 | Normalize one declared requirement against one Evidence record into a bounded verdict; no tool execution or proof acceptance |
 | `mumei evidence check-list` | 3 | Validate a bounded Evidence list envelope's representation — every record individually, not their truth or consistency |
 | `mumei evidence check-consistency` | 3 | Check a bounded Evidence list envelope's cross-record identity-pin agreement, not pin correctness or truth |
 | `mumei native-bundle` | 0 | Build/check a restricted native identity bundle (not artifact semantic proof) |
@@ -219,6 +220,30 @@ Usage: mumei evidence check [OPTIONS] [INPUT]
 | `--stdin` | false | — | Read one common Evidence record from standard input (at most 65,536 bytes); never infer stdin from a missing file |
 | `--json` | false | — | Print a static representation-only diagnostic, not an accepted Evidence record or certificate |
 | `--expected-adapter <EXPECTED_ADAPTER>` | — | — | Require the record's declared producer adapter id; declared identity only, not producer authenticity |
+
+## `mumei evidence accept`
+
+Normalize one declared requirement against one Evidence record into a bounded verdict; no tool execution or proof acceptance
+
+Usage:
+
+```text
+Usage: mumei evidence accept [OPTIONS] --requirement <REQUIREMENT> [INPUT]
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `INPUT` | No | Regular Evidence v1 JSON record file (at most 65,536 bytes); not a native report envelope or proof certificate |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--stdin` | false | — | Read one common Evidence record from standard input (at most 65,536 bytes); never infer stdin from a missing file |
+| `--requirement <REQUIREMENT>` | — | — | Regular mumei.evidence-requirement/v1 JSON file (at most 65,536 bytes); the declared pins and assurance floor |
+| `--json` | false | — | Emit a static mumei.evidence-acceptance/v1 descriptor, not reusable Evidence or a certificate |
 
 ## `mumei evidence check-list`
 
