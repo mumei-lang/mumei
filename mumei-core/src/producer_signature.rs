@@ -80,7 +80,10 @@ pub fn generate_keypair() -> (String, String) {
     OsRng.fill_bytes(&mut secret);
     let key = SigningKey::from_bytes(&secret);
     secret.zeroize();
-    (hex(&key.to_bytes()), hex(key.verifying_key().as_bytes()))
+    let mut bytes = key.to_bytes();
+    let secret_hex = hex(&bytes);
+    bytes.zeroize();
+    (secret_hex, hex(key.verifying_key().as_bytes()))
 }
 
 /// SHA-256 over the record's raw bytes — the consumer reproduces it with
