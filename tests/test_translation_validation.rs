@@ -3361,3 +3361,207 @@ fn fast_math_flags_on_admitted_instructions_are_rejected() {
         );
     }
 }
+
+/// `opt-o2` snapshot helpers: `default<O2>` canonical output carries a
+/// `tail` call marker, a function-scope attribute group and the
+/// canonical optimizer intrinsics.
+fn opt_attrs() -> &'static str {
+    "attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn memory(none) }\n\
+     attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }"
+}
+
+#[test]
+fn opt_o2_canonical_snapshot_is_equivalent_under_the_pinned_profile() {
+    // `if x < y { x } else { y }` is exactly `llvm.smin.i64`.
+    let src = source("x: i64, y: i64", "if x < y { x } else { y }");
+    let ir = pin(&format!(
+        "define i64 @f(i64 %0, i64 %1) local_unnamed_addr #0 {{\n\
+         %3 = tail call i64 @llvm.smin.i64(i64 %0, i64 %1)\n\
+         ret i64 %3\n\
+         }}\n\
+         declare i64 @llvm.smin.i64(i64, i64) #1\n\
+         {}",
+        opt_attrs()
+    ));
+    let report = tv::validate_pure_i64_optimized(&src, &ir, Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(report.profile, tv::OPT_PROFILE);
+    assert_eq!(
+        report.checked_stage,
+        "supplied_llvm_ir_snapshot_post_default_O2"
+    );
+    // The same snapshot stays outside the pre-pipeline profile: the
+    // declaration, `tail` marker and attribute group all reject there.
+    assert!(tv::validate_pure_i64(&src, &ir, Options::default()).is_err());
+}
+
+#[test]
+fn opt_o2_scalar_intrinsics_encode_their_source_semantics() {
+    // `smax` = signed max; `umin` is the unsigned min — a different
+    // function than the signed comparison the source expresses, so a
+    // snapshot naming it is a real difference, not an equivalence.
+    let smin = source("x: i64, y: i64", "if x < y { x } else { y }");
+    let smax = source("x: i64, y: i64", "if x > y { x } else { y }");
+    for (src, intrinsic) in [(&smin, "llvm.smin.i64"), (&smax, "llvm.smax.i64")] {
+        let ir = pin(&format!(
+            "define i64 @f(i64 %0, i64 %1) {{\n\
+             %3 = call i64 @{intrinsic}(i64 %0, i64 %1)\n\
+             ret i64 %3\n\
+             }}\n\
+             declare i64 @{intrinsic}(i64, i64)"
+        ));
+        assert_eq!(
+            tv::validate_pure_i64_optimized(src, &ir, Options::default())
+                .unwrap()
+                .outcome,
+            Outcome::EquivalentWithinProfile,
+            "{intrinsic}"
+        );
+    }
+    let umin = pin("define i64 @f(i64 %0, i64 %1) {\n\
+         %3 = call i64 @llvm.umin.i64(i64 %0, i64 %1)\n\
+         ret i64 %3\n\
+         }\n\
+         declare i64 @llvm.umin.i64(i64, i64)");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&smin, &umin, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::Different
+    );
+    // `abs` wraps `if x < 0 { 0 - x } else { x }`; with a false
+    // `is_int_min_poison` flag the semantics match exactly.
+    let abs_src = source("x: i64", "if x < 0 { 0 - x } else { x }");
+    let abs_wrapping = pin("define i64 @f(i64 %0) {\n\
+         %2 = call i64 @llvm.abs.i64(i64 %0, i1 false)\n\
+         ret i64 %2\n\
+         }\n\
+         declare i64 @llvm.abs.i64(i64, i1)");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&abs_src, &abs_wrapping, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    // With `is_int_min_poison` the intrinsic poisons i64::MIN where the
+    // source wraps — a poisoned-input failure, not a value difference.
+    let abs_poison = abs_wrapping.replace("i1 false", "i1 true");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&abs_src, &abs_poison, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::UndefinedBehavior
+    );
+}
+
+#[test]
+fn opt_o2_with_overflow_pair_yields_result_and_flag_leaves() {
+    // The wrapped result leaf equals the source's wrapping add; the
+    // `i1` flag leaf is readable and binds 1 exactly on overflow.
+    let src = source("x: i64, y: i64", "x + y");
+    let ir = pin("define i64 @f(i64 %0, i64 %1) {\n\
+         %3 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %0, i64 %1)\n\
+         %4 = extractvalue {i64, i1} %3, 0\n\
+         ret i64 %4\n\
+         }\n\
+         declare {i64, i1} @llvm.sadd.with.overflow.i64(i64, i64)");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&src, &ir, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    // Feeding the flag into a branch makes a value the source cannot
+    // express: equivalent only if the flag encoding is right. `x + y`
+    // overflows iff `result < x` when `y >= 0` — the source-side
+    // approximation differs on `y < 0` inputs and is a real difference.
+    let flagged = ir.replace(
+        "%4 = extractvalue {i64, i1} %3, 0\nret i64 %4",
+        "%4 = extractvalue {i64, i1} %3, 1\n%5 = select i1 %4, i64 0, i64 1\nret i64 %5",
+    );
+    let approx = source(
+        "x: i64, y: i64",
+        "if y >= 0 { if x + y < x { 0 } else { 1 } } else { if x + y > x { 0 } else { 1 } }",
+    );
+    // The approximation is genuinely different: the flag goes the other
+    // way on inputs where the sign of y flips the comparison direction.
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&approx, &flagged, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::Different
+    );
+    // Same source against the `usub` flag: unsigned subtraction
+    // underflows exactly when x < y — unsignedness the source cannot
+    // say either, and the wrapped subtraction still matches.
+    let usub = pin("define i64 @f(i64 %0, i64 %1) {\n\
+         %3 = call {i64, i1} @llvm.usub.with.overflow.i64(i64 %0, i64 %1)\n\
+         %4 = extractvalue {i64, i1} %3, 0\n\
+         ret i64 %4\n\
+         }\n\
+         declare {i64, i1} @llvm.usub.with.overflow.i64(i64, i64)");
+    let sub_src = source("x: i64, y: i64", "x - y");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&sub_src, &usub, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn opt_o2_freeze_encodes_as_its_operand() {
+    let src = source("x: i64", "x + 1");
+    let ir = pin("define i64 @f(i64 %0) {\n\
+         %2 = freeze i64 %0\n\
+         %3 = add i64 %2, 1\n\
+         ret i64 %3\n\
+         }");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&src, &ir, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    assert!(tv::validate_pure_i64(&src, &ir, Options::default()).is_err());
+}
+
+#[test]
+fn opt_o2_keeps_poison_strengthening_forms_rejected() {
+    let src = source("x: i64, y: i64", "x | y");
+    // `or disjoint`, `nsw`/`nuw`/`exact` and parameter/return
+    // attributes constrain the value or the input domain — they stay
+    // rejected under every profile.
+    for ir in [
+        pin("define i64 @f(i64 %0, i64 %1) {\n%3 = or disjoint i64 %0, %1\nret i64 %3\n}"),
+        pin("define i64 @f(i64 %0, i64 %1) {\n%3 = or i64 %0, %1\nret i64 %3\n}\nmodule asm \"x\""),
+        pin("define noundef i64 @f(i64 %0, i64 %1) {\n%3 = or i64 %0, %1\nret i64 %3\n}"),
+        pin("define i64 @f(i64 noundef %0, i64 %1) {\n%3 = or i64 %0, %1\nret i64 %3\n}"),
+    ] {
+        assert!(
+            tv::validate_pure_i64_optimized(&src, &ir, Options::default()).is_err(),
+            "{ir}"
+        );
+    }
+}
+
+#[test]
+fn opt_o2_module_profile_covers_member_snapshots() {
+    let src = "atom f(x: i64) -> i64 requires: true; ensures: true; body: { x + 1 };";
+    let ir = pin(&format!(
+        "define i64 @f(i64 %0) local_unnamed_addr #0 {{\n\
+         %2 = freeze i64 %0\n\
+         %3 = add i64 %2, 1\n\
+         ret i64 %3\n\
+         }}\n\
+         {}",
+        opt_attrs()
+    ));
+    let report = tv::validate_pure_i64_module_optimized(src, &ir, Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(report.profile, tv::OPT_PROFILE);
+    assert_eq!(
+        report.checked_stage,
+        "supplied_llvm_ir_snapshot_post_default_O2"
+    );
+}
