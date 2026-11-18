@@ -4431,6 +4431,47 @@ the flag and binds the manifest into the request fingerprint. The
 re-derivation counters are call-site-span-deduped sets, so calls
 first reached after a depth-limited cache hit still count.
 
+### f64 pass-through leaf (mumei, issue #884 Option A)
+
+[mumei#1115](https://github.com/mumei-lang/mumei/pull/1115) lands
+`double` as a pass-through leaf — composite v12 /
+pure-i64-composite/v11 / bundle v15. The value rides one 64-bit
+slot carrying the IEEE-754 bit pattern opaquely: it can be stored,
+copied, returned, fielded, payloaded into enums and merged across
+branches, but it is never an arithmetic or comparison operand and
+no `f64` literal exists. Admission mirrors the u64 leaf: every
+kind-bearing gate (`declared_param_kind`, `param_kind`,
+`return_kind`, the `return_ok` gate, the enum field/struct
+shape/slot kind maps) admits `f64` under `admit_f64`, and
+`uses_f64_leaves` pins the v12/v15 profiles. The emitter keeps the
+leaf honest — aggregate lowering treats `double` like `u64` (one
+64-bit slot, moved bitwise), constant folding rejects float
+constants inside admitted aggregates, and the `has_fast_math`
+translation-validation scan fails closed: an instruction that
+cannot be printed cannot be proven flag-free, so a NULL print
+rejects rather than admits (the printed string is disposed through
+`LLVMDisposeMessage`).
+
+### usize/isize fold onto u64/i64 (mumei, issue #884 memo)
+
+[mumei#1116](https://github.com/mumei-lang/mumei/pull/1116) folds
+the target-width aliases onto the 64-bit leaves under the same v10
+admission — `usize` is `u64`, `isize` is `i64` — completing #884's
+actionable scope (`Str` stays blocked on the C09 memory-semantics
+encoding decision). `module_env::resolve_base_type` performs the
+single central fold, so the general verifier, the emitter's
+`resolve_named_type` and `mumei_type_to_c` all agree; `lowering`
+maps `usize`→`U64` / `isize`→`I64` and `mir::movability_from_type`
+counts them Copy. Both leaves count in `uses_u64_leaves`, so an
+`usize` parameter pins v10 exactly like `u64`. Enum payload-slot
+uniformity compares declared names, not resolved kinds — only the
+builtin width pairs (`u64`/`usize`, `i64`/`isize`) may mix, since a
+refined alias shares the base's kind while carrying a domain
+conjunct the signature would wrongly apply to the other variant's
+payloads. The widened i64-equivalence profile and refined-alias
+bases keep refusing all three names — a full-width domain cannot
+be an i64 range bound.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
