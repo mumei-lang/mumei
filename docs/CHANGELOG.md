@@ -9,7 +9,9 @@
   invalidates earlier verdicts.
 - Generated Python and Rust contract wrappers emit truncating
   division (a `divmod` correction in Python, plain `/` in Rust) so a
-  clause verified by `mumei verify` checks the same value at runtime.
+  clause verified by `mumei verify` checks the same value at runtime
+  on inputs where the runtime division is defined — Rust's `/` still
+  rejects `i64::MIN / -1`, which the unbounded int model admits.
 
 ### Unreleased: `--check-i64-overflow`
 
