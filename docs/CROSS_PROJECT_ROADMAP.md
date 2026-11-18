@@ -4557,8 +4557,8 @@ planner decisions.
 the `Str` leaf decided in #1118: `let s = "lit"` enters the
 composite fragment as an immutable byte sequence, inlined as a
 bounded `[u8; 64]` reusing the v11 alloc_stores mechanism —
-`mumei.llvm17-pure-i64-composite/v13`,
-`mumei.llvm17-pure-i64-string-composite/v1` and bundle `v16`.
+source-side profile `mumei.pure-i64-composite/v13` and bundle
+profile `mumei.native-pure-i64-module-linux-x86_64/v16`.
 `s[i]` lowers to a `u64` read with a proven in-range index,
 `len(s)` to an `i64`; assignment, index writes and branch merges
 of `Str` values stay fail-closed outside the fragment. General
