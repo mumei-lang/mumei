@@ -4786,6 +4786,38 @@ signature envelope across every layer), and mumei #1118 (Str leaf
 Option B).
 
 
+### Demo agent producer lane + Go nested element fields (mumei-demo #159, mumei-agent #922, #923)
+
+The optional C13 scenario `agent_signature_sign` (#159) exercises the
+agent-side producer lane end to end: `python -m agent signature-sign`
+emits a `mumei.producer-signature/v1` envelope over a record the demo
+writes itself (the secret key file is generated in the scenario's
+output dir and never leaves it), `signature-verify` verifies it under
+a pinned producer key, `recovery-eval` recovers the declared
+`producer_authenticity` check, and a wrong-key pin reports
+`evidence_failed` — mirroring the Core-side
+`producer_signature_recovery` lane without Core on the sign side.
+
+On the Go deep-analysis frontier, #922 admits one deeper named-struct
+element field level: `(*p)[i].F.G` resolves when the intermediate `F`
+is a `var`/`variable` member with `type.kind == "struct"` and a named
+`type_id` (which pins it for `stale_dependents`), while the leaf `G`
+resolves exactly like the single-level leaf. The dependency model is
+identical to `(*p)[i].F` — pointer deps ∪ index deps ∪
+`indirect_writes` for reads, with stores folding value deps through
+the alias fold — and index expressions now evaluate before the
+`indirect_writes` snapshot so a call index that performs an indirect
+write (e.g. `(*p)[Set(q,x)].V.G`) reports its full dep set. A third
+selection level and an anonymous `struct{...}` intermediate stay
+closed.
+
+#923 corrected two stale ROADMAP caveats: pre-start cancellation is
+landed (`ready → cancelled` via `AttemptSequence.withdraw_attempt()`),
+and evidence normalization/acceptance ride the summaries routes, with
+Core `mumei evidence accept` producing `mumei.evidence-acceptance/v1`
+verdicts.
+
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
