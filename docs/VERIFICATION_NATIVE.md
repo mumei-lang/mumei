@@ -431,9 +431,11 @@ Success is only a **same-profile snapshot/record consistency** diagnostic. Text
 and JSON are static and anonymous: JSON uses
 `schema_version: mumei.source-evidence-recheck/v1`, `recheck: consistent`, the
 restricted scope and `acceptance: not_evaluated`, with explicit exclusions.
-It has no subject/digest/provenance and is not reusable Evidence, a certificate
+It carries no subject or provenance and is not reusable Evidence, a certificate
 or an acceptance receipt; neither common `check` nor this recheck accepts it as
-Evidence. It does not prove historical producer execution/authenticity, binary
+Evidence. Its only binding is `evidence_fingerprint` — the SHA-256 hex of the
+rechecked record's input bytes — which lets a holder prove *which* record the
+diagnostic covers without replaying any claim or digest as identity. It does not prove historical producer execution/authenticity, binary
 provenance, parser/encoder/solver correctness, independent model correspondence,
 LLVM/object/linker/runtime/ABI/final-executable semantics, or general Evidence
 acceptance. Grade/Claim Book/Lean and Native consumer policies are unchanged.

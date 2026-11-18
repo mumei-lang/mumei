@@ -62,6 +62,14 @@ fn successful_diagnostics_are_static_not_evidence_or_acceptance_receipts() {
             assert_eq!(value["schema_version"], "mumei.source-evidence-recheck/v1");
             assert_eq!(value["recheck"], "consistent");
             assert_eq!(value["acceptance"], "not_evaluated");
+            // The fingerprint binds the diagnostic to the rechecked
+            // record's bytes — sha256 hex — without echoing the claim.
+            let saved_bytes = std::fs::read(&saved).unwrap();
+            use sha2::{Digest, Sha256};
+            assert_eq!(
+                value["evidence_fingerprint"],
+                format!("{:x}", Sha256::digest(&saved_bytes))
+            );
             assert!(verification_evidence::decode(&first.stdout).is_err());
         } else {
             assert!(text.contains("Evidence acceptance: not evaluated"));
@@ -82,7 +90,33 @@ fn successful_diagnostics_are_static_not_evidence_or_acceptance_receipts() {
         let second = command(&source, &saved, json).output().unwrap();
         assert!(second.status.success());
         assert!(second.stderr.is_empty());
-        assert_eq!(first.stdout, second.stdout);
+        if json {
+            // The diagnostic is static except for the fingerprint,
+            // which follows the rechecked record's bytes.
+            let mut first_value: Value = serde_json::from_slice(&first.stdout).unwrap();
+            let mut second_value: Value = serde_json::from_slice(&second.stdout).unwrap();
+            let saved_bytes = std::fs::read(&saved).unwrap();
+            use sha2::{Digest, Sha256};
+            assert_eq!(
+                second_value["evidence_fingerprint"],
+                format!("{:x}", Sha256::digest(&saved_bytes))
+            );
+            assert_ne!(
+                first_value["evidence_fingerprint"],
+                second_value["evidence_fingerprint"]
+            );
+            first_value
+                .as_object_mut()
+                .unwrap()
+                .remove("evidence_fingerprint");
+            second_value
+                .as_object_mut()
+                .unwrap()
+                .remove("evidence_fingerprint");
+            assert_eq!(first_value, second_value);
+        } else {
+            assert_eq!(first.stdout, second.stdout);
+        }
         fs::write(&saved, &first.stdout).unwrap();
         failure(&command(&source, &saved, json).output().unwrap(), 1);
         fs::write(&source, CLAMP).unwrap();

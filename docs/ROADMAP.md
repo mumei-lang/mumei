@@ -3225,6 +3225,13 @@ only the declared key to the declared digest — no key or producer
 authenticity, freshness, revocation, claim truth or acceptance. See the
 [detached envelope contract](VERIFICATION_NATIVE.md#detached-producer-signature-envelope).
 
+The `mumei.source-evidence-recheck/v1` diagnostic carries the same optional
+`evidence_fingerprint` binding — the SHA-256 hex of the rechecked record's
+input bytes — so a holder can prove *which* record the consistency diagnostic
+covers and host folds (for example Agent's declared binding evaluation) can
+attribute it. The diagnostic stays anonymous and non-reusable: no subject,
+no provenance, no new trust over the same-profile recheck itself.
+
 The Agent C04/C11 planner also adds optional exact result-contract routing:
 one profile/method pair, scope, bound/assumption identifiers and correspondence
 relation/status must match one complete declared offer. Explicit/automatic

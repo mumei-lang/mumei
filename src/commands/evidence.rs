@@ -175,12 +175,13 @@ fn recheck_source(
             }
             _ => "source outside restricted profile or cannot encode evidence",
         })?;
-    write_recheck(outcome, json, output)
+    write_recheck(outcome, json, &saved, output)
 }
 
 fn write_recheck(
     outcome: RecheckOutcome,
     json: bool,
+    saved: &[u8],
     output: &mut impl Write,
 ) -> Result<i32, &'static str> {
     match outcome {
@@ -189,9 +190,12 @@ fn write_recheck(
         RecheckOutcome::Consistent => (),
     }
     let bytes = if json {
+        use sha2::{Digest, Sha256};
+        let evidence_fingerprint = format!("{:x}", Sha256::digest(saved));
         let mut bytes = serde_json::to_vec_pretty(&serde_json::json!({
             "schema_version": "mumei.source-evidence-recheck/v1",
             "evidence_schema_version": SCHEMA_VERSION,
+            "evidence_fingerprint": evidence_fingerprint,
             "recheck": "consistent",
             "scope": "restricted_c03_source_postcondition_and_same_profile_record_consistency",
             "acceptance": "not_evaluated",
@@ -593,11 +597,20 @@ mod tests {
                 (RecheckOutcome::Inconclusive, 3),
             ] {
                 let mut output = Vec::new();
-                assert_eq!(write_recheck(outcome, json, &mut output).unwrap(), code);
+                assert_eq!(
+                    write_recheck(outcome, json, b"record", &mut output).unwrap(),
+                    code
+                );
                 assert!(output.is_empty());
             }
             assert_eq!(
-                write_recheck(RecheckOutcome::Consistent, json, &mut BrokenOutput).unwrap_err(),
+                write_recheck(
+                    RecheckOutcome::Consistent,
+                    json,
+                    b"record",
+                    &mut BrokenOutput
+                )
+                .unwrap_err(),
                 "cannot write source recheck diagnostic"
             );
         }
