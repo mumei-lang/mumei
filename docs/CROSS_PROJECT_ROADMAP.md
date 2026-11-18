@@ -4832,6 +4832,26 @@ under the same member-with-named-type_id pinning rule #922 used —
 anonymous `struct{...}` intermediates and selector-field writes stay
 closed.
 
+### Go deep-analysis: channel frontier — aliases, len/cap and external operands (mumei-agent #927–#930)
+
+Four channel slices widened the same conflated/external queue
+model. #927 admits unconditional channel-name copies (`ch2 := ch`,
+`var ch2 = ch`, `ch2 = ch3`) as queue aliases resolving to the
+root's dep set — tuple-assign pre-state and params/closure reads
+included; conditional rebinds stay closed. #928 admits
+`len(ch)`/`cap(ch)` as dep-free runtime state (a `chan` parameter's
+calls record an imported transfer like a receive). #929 admits
+channel operands in external state — package-level `var GC chan T`
+and imported `lib.GC` — under the `chan`-parameter model: ops
+record imported transfers on the var's/member's identity, sends
+broadcast into `indirect_writes`, and a callee's external-channel
+ops broadcast the call's argument deps back to the caller. #930
+admits bound-pointer `chan` fields (`p.C <- x`, `<-p.W.C`,
+`close(p.C)`, `for range p.C`) the same way — a send folds into
+the root like `p.F = v` and `p.C = ch` may-aliases the member to
+the RHS queue's tokens. `chan` results, non-scalar elements and
+`select` stay closed.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
