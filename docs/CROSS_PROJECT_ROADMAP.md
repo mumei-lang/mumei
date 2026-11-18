@@ -4317,6 +4317,164 @@ The stamp is a producer claim: `clock_authenticity` /
 unperformed, and binding the stamp into the signed `subject_digest`
 waits on producer-side signing.
 
+### C11 declared evidence binding over record bytes (mumei-agent)
+
+[mumei-agent#899](https://github.com/mumei-lang/mumei-agent/pull/899)
+adds `agent.core_evidence.evaluate_evidence_binding(record, document)`
+and the `binding-eval` route — the last representation-level gap the
+recovery fold names, `evidence_binding`. The route reads a record's
+raw bytes (never parsed, so any bounded document binds the same way)
+and emits `mumei.evidence-binding/v1` reporting the recomputed
+`record_digest` (SHA-256 of the bytes, the same convention as
+`subject_digest`/`evidence_fingerprint`), `carrier_match`,
+`subject_declared` and `bound`. `_BINDING_CARRIERS` pins the subject
+field per schema so a document never declares its own coverage and a
+foreign schema never binds. A `bound` document now performs
+`evidence_binding` in the recovery fold (`_CHECK_PERFORMERS`), counted
+only when its `record_digest` equals the record's own SHA-256 —
+`carrier_authenticity` and `binding_enforcement` stay in
+`checks_not_performed` as documented host decisions. C11 stays partial.
+
+### C11 declared binding over the recheck carrier (mumei-agent)
+
+[mumei-agent#902](https://github.com/mumei-lang/mumei-agent/pull/902)
+binds `mumei.source-evidence-recheck/v1` diagnostics into the
+binding-eval carrier map — the recheck diagnostic's
+`evidence_fingerprint` joins `mumei.source-evidence-acceptance/v1` and
+`mumei.native-evidence-acceptance/v1` as a declared subject-bearing
+field, so a `binding-eval` report over a recheck output binds to the
+same record-bytes digest convention.
+
+### C02 evidence_fingerprint on the source recheck diagnostic (mumei)
+
+[mumei#1113](https://github.com/mumei-lang/mumei/pull/1113) adds
+`evidence_fingerprint` (SHA-256 of the record bytes) to the
+`mumei.source-evidence-recheck/v1` diagnostic, making the recheck
+output a declared subject-bearing carrier the binding-eval route can
+attribute to its record — same digest convention as
+`evidence-acceptance` documents.
+
+### Wave 3 summary-aware call modeling, Go port (mumei-agent)
+
+[mumei-agent#901](https://github.com/mumei-lang/mumei-agent/pull/901)
+lands issue #900 Option B for Go: `go-summaries --summary-aware-calls
+<MANIFEST>` folds a declared callee summary manifest
+(`mumei.go-scalar-parameter-deps/v1`) into `direct_import` calls it
+covers, replacing the opaque every-argument union with the declared
+`return_dependencies`/`pinned`/`effects` — unknown-effects callees
+keep the store-through-alias write widening. Matching keys on
+`(file digest, declaration start)` since the binding id carries a
+package-unit file index single-file units lack; colliding entries
+fold neither. Monotone-widening only: missed callees, gapped or
+unavailable entries, arity mismatch, out-of-range ordinals and
+method/receiver calls keep the opaque approximation, so a partial or
+stale manifest never narrows. The callee manifest's canonical bytes
+fold into `context_key`, so a changed manifest invalidates the strict
+whole-context gate; manifests derived with the flag carry advisory
+`call_modeling` counts (`summary_modeled_calls`/`opaque_calls`/
+`summary_unmatched`). `reuse` keeps `call_modeling` in the merged
+manifest, and the callee manifest's declared identities join `known`
+— its own `binding_id` does not, so a callee change without a
+manifest regen flags the folded caller stale. The flag joins the
+declared inputs (the attempt route forwards it and binds it into the
+request fingerprint; the fingerprint streams input hashes and hides
+checkout-local paths in errors).
+
+### Wave 3 summary-aware call modeling, Rust port (mumei-agent)
+
+[mumei-agent#905](https://github.com/mumei-lang/mumei-agent/pull/905)
+ports the same fold to `rust-summaries`: opaque calls matching a
+declared entry fold `return_dependencies`; receiver calls
+(`fld is not None`) and local-bound names (membership in `locals_`,
+not bound-set truthiness — an empty-dep binding produces an empty
+`bound`) never fold. Matching is on recorded call text with
+`::`→`.` normalization and one `crate.`/`self.`/`super.` root strip,
+exact then one-token prefix; gates are `not void`, `available`,
+arity and `max(deps, default=-1) < len(actual)`. The top-level build
+loop reuses inline-summarized callees so each call site is counted
+exactly once; an empty manifest still counts as declared
+(`_declared_set is not None`). The attempt fingerprint bounds the
+manifest read at `MAX_MANIFEST_BYTES + 1`, reports `exc.strerror`
+only, and the drift recheck catches `(OSError, ValueError)`.
+
+### Wave 3 summary-aware call modeling, TypeScript port (mumei-agent)
+
+[mumei-agent#903](https://github.com/mumei-lang/mumei-agent/pull/903)
+ports the same fold to `ts-summaries`: an opaque call matching a
+declared manifest entry folds `return_dependencies` over the
+actuals; local-bound names and imported bindings keep their opaque
+union. Matching is exact then one-token prefix on the recorded call
+text; gates are `not void`, `available`, arity and
+`max(deps, default=-1) < len(actual)`. The advisory counters are
+call-site-span-deduped sets, so a callee already summarized inline
+is counted exactly once while a callee re-derived after a
+depth-limited cache hit still counts the calls the first walk
+never reached. An empty manifest still counts as declared
+(`_declared_set is not None`), the attempt fingerprint bounds the
+manifest read at `MAX_MANIFEST_BYTES + 1`, reports `exc.strerror`
+only, and the drift recheck catches `(OSError, ValueError)`.
+
+### Wave 3 summary-aware call modeling, Solidity port (mumei-agent)
+
+[mumei-agent#904](https://github.com/mumei-lang/mumei-agent/pull/904)
+lands the same fold for `sol-summaries`, closing issue #900 across
+all four adapters. Sol's manifest is name-based rather than
+binding-id-based, so an opaque `ext.Lib.g` call matches an entry
+named `Lib.g` (one module-token prefix) or `ext.Lib.g` exactly; a
+name match counts toward `summary_unmatched` even when a gate
+rejects the fold. The fold narrows only the result set — `effects`
+stays `unknown` because a Sol manifest cannot bound writes through
+argument objects or state — and discarded-result, `named`-argument,
+gapped, arity-mismatched or out-of-range-ordinal entries keep the
+opaque record, so a partial manifest can never narrow below the
+flag-less report. `context_key` binds the manifest's canonical
+bytes; produce/check/reuse/accept all take the flag, `--output`
+refuses the manifest path, and `sol-summaries-attempt` forwards
+the flag and binds the manifest into the request fingerprint. The
+re-derivation counters are call-site-span-deduped sets, so calls
+first reached after a depth-limited cache hit still count.
+
+### f64 pass-through leaf (mumei, issue #884 Option A)
+
+[mumei#1115](https://github.com/mumei-lang/mumei/pull/1115) lands
+`double` as a pass-through leaf — composite v12 /
+pure-i64-composite/v11 / bundle v15. The value rides one 64-bit
+slot carrying the IEEE-754 bit pattern opaquely: it can be stored,
+copied, returned, fielded, payloaded into enums and merged across
+branches, but it is never an arithmetic or comparison operand and
+no `f64` literal exists. Admission mirrors the u64 leaf: every
+kind-bearing gate (`declared_param_kind`, `param_kind`,
+`return_kind`, the `return_ok` gate, the enum field/struct
+shape/slot kind maps) admits `f64` under `admit_f64`, and
+`uses_f64_leaves` pins the v12/v15 profiles. The emitter keeps the
+leaf honest — aggregate lowering treats `double` like `u64` (one
+64-bit slot, moved bitwise), constant folding rejects float
+constants inside admitted aggregates, and the `has_fast_math`
+translation-validation scan fails closed: an instruction that
+cannot be printed cannot be proven flag-free, so a NULL print
+rejects rather than admits (the printed string is disposed through
+`LLVMDisposeMessage`).
+
+### usize/isize fold onto u64/i64 (mumei, issue #884 memo)
+
+[mumei#1116](https://github.com/mumei-lang/mumei/pull/1116) folds
+the target-width aliases onto the 64-bit leaves under the same v10
+admission — `usize` is `u64`, `isize` is `i64` — completing #884's
+actionable scope (`Str` stays blocked on the C09 memory-semantics
+encoding decision). `module_env::resolve_base_type` performs the
+single central fold, so the general verifier, the emitter's
+`resolve_named_type` and `mumei_type_to_c` all agree; `lowering`
+maps `usize`→`U64` / `isize`→`I64` and `mir::movability_from_type`
+counts them Copy. Both leaves count in `uses_u64_leaves`, so an
+`usize` parameter pins v10 exactly like `u64`. Enum payload-slot
+uniformity compares declared names, not resolved kinds — only the
+builtin width pairs (`u64`/`usize`, `i64`/`isize`) may mix, since a
+refined alias shares the base's kind while carrying a domain
+conjunct the signature would wrongly apply to the other variant's
+payloads. The widened i64-equivalence profile and refined-alias
+bases keep refusing all three names — a full-width domain cannot
+be an i64 range bound.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
