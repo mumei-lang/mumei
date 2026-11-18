@@ -1463,6 +1463,12 @@ pub(crate) fn param_z3_value<'a>(
             // and `+`/`-`/`*` wrap like machine arithmetic. See
             // `docs/SPEC_GUIDE.md` § "Bit-Vector Mode".
             LoweredType::I64 if bitvec_i64 => BV::new_const(ctx, name, I64_BITS).into(),
+            // A `u64` leaf is a machine word in every mode: the unbounded
+            // `Int` encoding would prove `a + 1 > a` at `u64::MAX`, where the
+            // compiled code wraps, so it always encodes as `BV(64)` — the
+            // unsigned op selection reads `unsigned` from the declared type,
+            // not from `--bitvec-i64` (`pure-i64-composite/v10`).
+            LoweredType::U64 => BV::new_const(ctx, name, I64_BITS).into(),
             _ => Int::new_const(ctx, name).into(),
         }
     }

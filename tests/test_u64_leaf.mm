@@ -21,6 +21,14 @@ body: {
     a - 1
 };
 
+// `a + 1` wraps to zero at `u64::MAX` in the machine-word model.
+atom succ_wraps(a: u64) -> u64
+requires: a == 0 - 1;
+ensures: result == 0;
+body: {
+    a + 1
+};
+
 // Unsigned division/remainder: no `i64::MIN / -1` analog exists.
 atom halve(a: u64) -> u64
 requires: a % 2 == 0;

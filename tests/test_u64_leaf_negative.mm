@@ -20,6 +20,14 @@ body: {
     a + b
 };
 
+// `a + 1 > a` does not hold for a machine-word `u64`: at `u64::MAX` it wraps.
+atom bad_wrap(a: u64) -> u64
+requires: a == 0 - 1;
+ensures: result > a;
+body: {
+    a + 1
+};
+
 // A declared u64 must not mix with a declared non-u64 operand.
 atom mixed(a: u64, b: i64) -> i64
 requires: true;

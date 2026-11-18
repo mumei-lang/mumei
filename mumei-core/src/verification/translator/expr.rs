@@ -469,7 +469,10 @@ fn constant_call_antecedent<'a>(
         // must carry `Pos`'s `v > 0` into the constant-call guard too.
         let chain = vc.module_env.refined_chain(type_name).ok()?;
         let leaf_base = chain.last().map_or("", |decl| decl._base_type.as_str());
-        if leaf_base == "u64" {
+        if leaf_base == "u64" && arg.as_bv().is_none() {
+            // `v >= 0` bounds an `Int` argument to the unsigned leaf; a
+            // `BV(64)` argument is already a machine word, where the signed
+            // `bv sge 0` reading would wrongly exclude values ≥ 2^63.
             terms.push(nonneg_constraint(vc.ctx, arg)?);
         }
 
@@ -1344,6 +1347,7 @@ fn bv_binary_op<'a>(
     r: &Dynamic<'a>,
     solver_opt: Option<&Solver<'a>>,
     unsigned: bool,
+    ty: &'static str,
 ) -> MumeiResult<Dynamic<'a>> {
     let ctx = vc.ctx;
     let lb = as_bv_i64(l).ok_or_else(|| {
@@ -1376,6 +1380,33 @@ fn bv_binary_op<'a>(
                 .bv_shift_obligations
                 .borrow_mut()
                 .push((vc.path_cond_conj(), rb.clone())),
+        }
+    }
+
+    // `--check-i64-overflow` under the BV encoding: `bvadd`/`bvsub`/`bvmul`
+    // wrap by definition, so "may overflow" asks whether the machine-word
+    // result can differ from the mathematical one.
+    if matches!(op, Op::Add | Op::Sub | Op::Mul)
+        && vc.check_i64_overflow.get()
+        && vc.recursion.lambda_bind_depth.get() == 0
+        && vc.contracts_in_instantiation.borrow().is_empty()
+    {
+        let no_wrap = match op {
+            Op::Add => lb.bvadd_no_overflow(&rb, !unsigned),
+            // Unsigned subtraction wraps downward (underflow); the signed
+            // no-overflow predicate describes the i64 range.
+            Op::Sub if unsigned => lb.bvsub_no_underflow(&rb, false),
+            Op::Sub => lb.bvsub_no_overflow(&rb),
+            _ => lb.bvmul_no_overflow(&rb, !unsigned),
+        };
+        let overflows = no_wrap.not();
+        match solver_opt {
+            Some(solver) => check_i64_range(vc, solver, &overflows, ty)?,
+            None => {
+                vc.i64_overflow_obligations
+                    .borrow_mut()
+                    .push((vc.path_cond_conj(), overflows, ty))
+            }
         }
     }
 
@@ -3571,7 +3602,8 @@ pub(crate) fn expr_to_z3<'a>(
                     || is_bv_i64(&r)
                     || (vc.bitvec_i64 && (bitwise_op || both_literals)))
             {
-                return bv_binary_op(vc, op, &l, &r, solver_opt, unsigned);
+                let ty = lt.or(rt).unwrap_or(if unsigned { "u64" } else { "i64" });
+                return bv_binary_op(vc, op, &l, &r, solver_opt, unsigned, ty);
             }
 
             if l.as_real().is_some() || r.as_real().is_some() {

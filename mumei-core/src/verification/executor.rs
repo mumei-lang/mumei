@@ -3821,6 +3821,14 @@ fn z3_dynamic_to_cex_value(value: &Dynamic) -> Option<CexValue> {
     if let Some(int_value) = value.as_int().and_then(|v| v.as_i64()) {
         return Some(CexValue::Int(int_value));
     }
+    // A `u64` leaf encodes as `BV(64)`: decode the numeral as unsigned so
+    // replay keeps leaves >= 2^63 instead of reinterpreting them as `i64`.
+    if let Some(bits) = value
+        .as_bv()
+        .and_then(|bv| (bv.get_size() == 64).then(|| bv.as_u64()).flatten())
+    {
+        return Some(CexValue::UInt(bits));
+    }
     if let Some(bool_value) = value.as_bool().and_then(|v| v.as_bool()) {
         return Some(CexValue::Bool(bool_value));
     }
