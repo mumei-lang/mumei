@@ -4673,6 +4673,21 @@ without the enable is a static error, `--output` may not overwrite
 any declared schedule input (realpath-compared like
 `verify-schedule`), and declared-path load failures are redacted.
 
+### Producer keypair generation (mumei #1126)
+
+`mumei evidence keygen --secret-file <path>` closes the
+"key generation" residual of the issue #886 Option A
+producer-authenticity stack: it draws 32 bytes from OS entropy,
+derives the ed25519 signing key and writes the 64-char lowercase-hex
+secret — exactly the shape `evidence sign --key-file` reads — to a
+new regular file (`create_new`, never clobbered; `0o600` on unix, and
+a printed ACL-inheritance warning on platforms without mode bits).
+Only the public key reaches stdout; every intermediate secret copy —
+the raw entropy buffer, the `to_bytes()` array and the hex string —
+is zeroized after use, and no secret material is ever printed or
+logged. Rotation and revocation stay out of scope per #886, as the
+command's scope line states.
+
 
 ## No-`.mm` front door and V1 order
 
