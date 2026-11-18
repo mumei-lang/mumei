@@ -1062,21 +1062,33 @@ fn atom_contract(
         specification,
         source_span: atom.span.clone(),
         numeric_semantics: NumericSemantics {
-            source_integer: "signed_i64",
+            source_integer: if u64_leaves {
+                "signed_i64_and_unsigned_u64_leaves"
+            } else {
+                "signed_i64"
+            },
             verifier_integer: "mathematical_integer",
             llvm_integer: "i64_twos_complement",
-            comparisons: "signed",
+            comparisons: if u64_leaves {
+                "signed_for_i64_unsigned_for_u64"
+            } else {
+                "signed"
+            },
             arithmetic: if allow_wrapping_arithmetic {
                 "wrapping_i64_add_sub_mul_no_overflow_claim"
             } else {
                 "unsupported_no_overflow_claim"
             },
-            division: if allow_wrapping_arithmetic {
+            division: if u64_leaves {
+                "signed_i64_truncating_defined_only_for_nonzero_divisor_excluding_min_div_neg1_and_unsigned_u64_defined_only_for_nonzero_divisor"
+            } else if allow_wrapping_arithmetic {
                 "signed_i64_truncating_defined_only_for_nonzero_divisor_excluding_min_div_neg1"
             } else {
                 "unsupported"
             },
-            shifts: if allow_wrapping_arithmetic {
+            shifts: if u64_leaves {
+                "shl_ashr_for_i64_lshr_for_u64_defined_only_for_amounts_0_to_63"
+            } else if allow_wrapping_arithmetic {
                 "shl_ashr_defined_only_for_amounts_0_to_63"
             } else {
                 "unsupported"
@@ -1117,6 +1129,7 @@ fn atom_contract(
         .chain(allow_wrapping_arithmetic.then_some("nested_block_sequences"))
         .chain(allow_wrapping_arithmetic.then_some("discarded_pure_expression_statements"))
         .chain(allow_wrapping_arithmetic.then_some("guarded_i64_division_shift_partial_domain"))
+        .chain(u64_leaves.then_some("unsigned_u64_leaves_bitvector_total"))
         .chain(allow_wrapping_arithmetic.then_some("bool_parameters_lowered_to_i64_zero_one"))
         .chain(allow_wrapping_arithmetic.then_some("subrange_integer_parameters_lowered_to_i64"))
         .chain(allow_wrapping_arithmetic.then_some("subrange_integer_results_lowered_to_i64"))
@@ -1138,7 +1151,9 @@ fn atom_contract(
         normalization:
             "checked_parser_comparison_chains_to_conjunction_not_independently_validated",
         correspondence: "unchecked_not_translation_validated",
-        assumptions: vec![if allow_wrapping_arithmetic {
+        assumptions: vec![if u64_leaves {
+            "Inputs are representable signed 64-bit integers or declared unsigned 64-bit leaves; declared booleans carry 0/1."
+        } else if allow_wrapping_arithmetic {
             "Inputs are representable signed 64-bit integers; declared booleans carry 0/1."
         } else {
             "Inputs are representable signed 64-bit integers."
@@ -1147,7 +1162,9 @@ fn atom_contract(
             "Extraction does not prove the postcondition or precondition satisfiability.",
             "HIR/MIR fingerprints identify internal snapshots, not semantic equivalence.",
             "Target availability, LLVM lowering and final machine code are not verified.",
-            if allow_wrapping_arithmetic {
+            if u64_leaves {
+                "Unsigned division and logical right shift are admitted for `u64` leaves only; `usize`/`isize`/`i128`, heap, FFI, ownership, effects and concurrency are outside this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation. `while` loops are claimed only where every guard fails within the profile bound (4 evaluations); deeper executions are outside the compared domain."
+            } else if allow_wrapping_arithmetic {
                 "No unsigned division, logical shifts, heap, FFI, ownership, effects or concurrency in this profile. Arithmetic wraps mod 2^64; overflow is not flagged or proven. Division, remainder and shifts bind inputs only where defined. Calls are call-site comparisons only: the callee's own contract is a separate obligation. `while` loops are claimed only where every guard fails within the profile bound (4 evaluations); deeper executions are outside the compared domain."
             } else {
                 "No arithmetic, heap, calls, FFI, ownership, effects or concurrency in this profile."
