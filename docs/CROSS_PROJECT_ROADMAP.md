@@ -4624,6 +4624,40 @@ artifact semantics, tool execution and grade promotion out of the
 verdict. Consumer-side arbitration across multiple records and
 verdict-bearing acceptance into grades remain open.
 
+### Bounded attempt scheduling with declared retry/fallback (mumei-agent #913)
+
+[mumei-agent#913](https://github.com/mumei-lang/mumei-agent/pull/913)
+adds `run_attempt_schedule`: the declared
+plan→dispatch→observe→replan loop over `AdapterRegistry`,
+`PreparedSourceRequest`, `AttemptSequence` and `dispatch_attempt`
+with no new authority — a failed or `not_dispatched` round replans
+with the adapter excluded until `max_attempts` (≤ 8), permissive
+routing is required for fallback (`fallback_denied` otherwise), and
+a host `cancel_event` ends the schedule as `cancelled` even between
+rounds. The result folds into `mumei.attempt-schedule/v1`:
+per-round ordinal/adapter/plan+request fingerprints/terminal state
+(`exited`, `failed`, `timed_out`, `cancelled`, `not_dispatched`)/exit
+code and the schedule `outcome` (`selected`, `exhausted`,
+`not_schedulable`, `fallback_denied`, `cancelled`). Dispatch record
+only — a `selected` outcome names which adapter produced a
+declared-success exit, never an Evidence acceptance.
+
+### verify-schedule CLI and MCP consumable surface (mumei-agent #914, #915)
+
+[mumei-agent#914](https://github.com/mumei-lang/mumei-agent/pull/914)
+adds `python -m agent verify-schedule`: closed-shape declared inputs
+(`--request`, `--adapters`, `--argv-map`, `--policy` with explicit
+`allowed_permissions`, `--observations`, `--source`, schedule bounds
+`--max-attempts`/`--success-exit-code`/`--memory-bound-mb`) feed
+`run_attempt_schedule` and print `mumei.attempt-schedule/v1`;
+`--output` may not overwrite any declared input and error text
+redacts declared paths. `allowed_locations: []` reaches the planner
+as declared instead of collapsing to `{local}`.
+[mumei-agent#915](https://github.com/mumei-lang/mumei-agent/pull/915)
+exposes the same wiring as the `verify_schedule` MCP tool.
+Together they close the scheduler's "default CLI/MCP integration"
+gap; audit-lane wiring of scheduled verification stays open.
+
 
 ## No-`.mm` front door and V1 order
 
