@@ -7,7 +7,8 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
-const SECRET: &str = "9d61b19deffeec3c69f39b01dd55de1e3d3eb9f7d45d1bb6c0c8bd8d11d0f3b9";
+// Obviously fake sentinel key material (AGENTS.md: never a real-looking secret).
+const SECRET: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
 fn sign_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));

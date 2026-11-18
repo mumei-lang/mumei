@@ -2,7 +2,8 @@ use super::*;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::Value;
 
-const SECRET: &str = "9d61b19deffeec3c69f39b01dd55de1e3d3eb9f7d45d1bb6c0c8bd8d11d0f3b9";
+// Obviously fake sentinel key material (AGENTS.md: never a real-looking secret).
+const SECRET: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
 fn envelope(record: &[u8]) -> Value {
     let key = decode_secret_key(SECRET).unwrap();
