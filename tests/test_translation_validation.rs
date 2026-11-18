@@ -3049,3 +3049,80 @@ fn composite_v8_nested_struct_aggregates_validate_and_refute() {
         Outcome::Different
     );
 }
+
+const BOUNDED_ARRAY_SOURCE: &str = "atom sum() -> i64 requires: true; ensures: true; body: { let a = [1, 2, 3]; a[1] = 9; a[0] + a[1] + a[2] };\n\
+     atom pick(a0: i64, i: i64) -> i64 requires: 0 <= i && i < 3; ensures: true; body: { let a = [a0, 20, 30]; a[i] = 7; a[i] };\n\
+     atom main() -> i64 requires: true; ensures: true; body: { sum() + pick(1, 0) };";
+
+#[test]
+fn bounded_memory_arrays_validate_and_refute() {
+    // composite v11 admits `let`-bound stack arrays: the emitter lowers
+    // them to an entry-block `alloca [N x i64]` plus gep/load/store,
+    // which the bounded-memory whitelist and provenance map encode.
+    let items = parse_module_checked(BOUNDED_ARRAY_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let report = tv::validate_native_module(
+        BOUNDED_ARRAY_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV11,
+    )
+    .unwrap();
+    assert_eq!(
+        report.outcome,
+        Outcome::EquivalentWithinProfile,
+        "bounded-memory module must validate\n{ir}"
+    );
+    assert_eq!(report.profile, tv::BOUNDED_MEMORY_NATIVE_MODULE_PROFILE);
+}
+
+#[test]
+fn bounded_memory_arrays_need_v11_and_pointer_escapes_fail_closed() {
+    let items = parse_module_checked(BOUNDED_ARRAY_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    // Arrays are a v11 widening — under composite v10 the source itself
+    // is out of profile.
+    assert!(tv::validate_native_module(
+        BOUNDED_ARRAY_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV10,
+    )
+    .is_err());
+    // A stored value that does not match the source's cell refutes.
+    let stored = ir.replacen("store i64 9", "store i64 8", 1);
+    assert_ne!(stored, ir, "probe did not apply:\n{ir}");
+    assert_eq!(
+        tv::validate_native_module(
+            BOUNDED_ARRAY_SOURCE,
+            &stored,
+            Options::default(),
+            RefinedAdmission::CompositeV11,
+        )
+        .unwrap()
+        .outcome,
+        Outcome::Different
+    );
+    // A pointer operand outside the provenance-preserving slots —
+    // here an address compared by `icmp` — fails the whitelist even
+    // under bounded memory.
+    let alloca = ir.find("= alloca [").expect("probe needs an alloca");
+    let name_end = ir[..alloca]
+        .rfind('%')
+        .expect("probe needs the alloca name");
+    let name_start = ir[..name_end].rfind([' ', '\n']).map_or(0, |i| i + 1);
+    let alloca_name = &ir[name_start..alloca + 1];
+    let escaped = ir.replacen(
+        " ret i64",
+        &format!(" %ptr_eq = icmp eq ptr {alloca_name}, {alloca_name}\n ret i64"),
+        1,
+    );
+    assert_ne!(escaped, ir, "probe did not apply:\n{ir}");
+    assert!(tv::validate_native_module(
+        BOUNDED_ARRAY_SOURCE,
+        &escaped,
+        Options::default(),
+        RefinedAdmission::CompositeV11,
+    )
+    .is_err());
+}

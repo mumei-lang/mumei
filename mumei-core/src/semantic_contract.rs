@@ -16,7 +16,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use z3::{
-    ast::{Ast, Bool, BV},
+    ast::{Array, Ast, Bool, BV},
     Context, FuncDecl, Sort,
 };
 
@@ -133,6 +133,15 @@ pub const PURE_I64_COMPOSITE_PROFILE_V9: &str = "mumei.pure-i64-composite/v9";
 /// (`pure-i64-composite/v10`).
 pub const PURE_I64_COMPOSITE_PROFILE_V10: &str = "mumei.pure-i64-composite/v10";
 
+/// Bounded stack memory (`pure-i64-composite-bounded-memory/v1`): local
+/// fixed-size array literals, `a[i]` reads, `a[i] = v` writes and `len`
+/// — encoded as one SMT `BV64 -> BV64` array per binding, the model the
+/// `bounded-memory` LLVM translation-validation profiles check against
+/// the emitted `alloca`/GEP/`store`/`load` shapes. Out-of-bounds
+/// accesses degrade exactly like the emitted code: reads yield `0`,
+/// writes are skipped — no definedness obligation is recorded.
+pub const PURE_I64_COMPOSITE_MEMORY_PROFILE: &str = "mumei.pure-i64-composite-bounded-memory/v1";
+
 /// How much of the refined-scalar declaration fragment a gate admits:
 /// `Reject` keeps `Item::TypeDef` out of the item vocabulary entirely,
 /// `V1` admits single-level declarations over the i64-family scalar
@@ -179,6 +188,7 @@ pub enum RefinedAdmission {
     CompositeV8,
     CompositeV9,
     CompositeV10,
+    CompositeV11,
 }
 
 impl RefinedAdmission {
@@ -243,6 +253,13 @@ impl RefinedAdmission {
     /// (`pure-i64-composite/v10`).
     pub fn admits_u64_leaves(self) -> bool {
         self >= Self::CompositeV10
+    }
+
+    /// Whether bounded stack memory — local array literals, indexed
+    /// reads/writes and `len` — is admitted
+    /// (`pure-i64-composite-bounded-memory/v1`).
+    pub fn admits_bounded_memory(self) -> bool {
+        self >= Self::CompositeV11
     }
 }
 
@@ -349,7 +366,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _, _, _, _, _, _) =
+    let (items, refined, structs, _, _, _, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -370,6 +387,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         false,
         false,
@@ -409,6 +427,7 @@ pub fn extract_pure_i64_module_contracts(
         merged,
         generic,
         u64_leaves,
+        arrays,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
@@ -448,6 +467,7 @@ pub fn extract_pure_i64_module_contracts(
                 merged,
                 generic,
                 u64_leaves,
+                arrays,
                 &cert_env,
             )),
             // Type and struct declarations carry no per-atom contract;
@@ -476,6 +496,7 @@ pub fn module_source_profile(
         merged,
         generic,
         u64_leaves,
+        arrays,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
         true,
@@ -488,6 +509,7 @@ pub fn module_source_profile(
         merged,
         generic,
         u64_leaves,
+        arrays,
     ))
 }
 
@@ -510,6 +532,7 @@ type AdmittedModule = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -632,6 +655,7 @@ fn admit_pure_i64_atoms(
     let field_writes_used = std::cell::Cell::new(false);
     let enum_values_used = std::cell::Cell::new(false);
     let merged_composites_used = std::cell::Cell::new(false);
+    let arrays_used = std::cell::Cell::new(false);
     for item in &items {
         let Item::Atom(sibling) = item else {
             continue;
@@ -662,10 +686,12 @@ fn admit_pure_i64_atoms(
             admission.admits_field_writes(),
             admission.admits_enum_values(),
             admission.admits_merged_composites(),
+            admission.admits_bounded_memory(),
             &struct_values_used,
             &field_writes_used,
             &enum_values_used,
             &merged_composites_used,
+            &arrays_used,
         )?;
     }
     let u64_leaves = uses_u64_leaves(&items);
@@ -680,6 +706,7 @@ fn admit_pure_i64_atoms(
         merged_composites_used.get(),
         generic_structs_declared,
         u64_leaves,
+        arrays_used.get(),
     ))
 }
 
@@ -817,9 +844,14 @@ fn fragment_profile(
     merged_composites: bool,
     generic_structs: bool,
     u64_leaves: bool,
+    bounded_memory: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if bounded_memory {
+        // Bounded memory is only ever admitted under CompositeV11 — it
+        // outranks every earlier feature's profile name.
+        PURE_I64_COMPOSITE_MEMORY_PROFILE
     } else if u64_leaves {
         // A `u64` leaf is only ever admitted under v10 — the unsigned
         // encoding it requires is the strongest claim the ladder makes.
@@ -879,6 +911,7 @@ fn atom_contract(
     merged_composites: bool,
     generic_structs: bool,
     u64_leaves: bool,
+    bounded_memory: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
@@ -893,6 +926,7 @@ fn atom_contract(
         merged_composites,
         generic_structs,
         u64_leaves,
+        bounded_memory,
     );
     let result_fields = atom
         .return_type
@@ -1252,6 +1286,13 @@ struct KindEnv<'a> {
     /// Set when the atom merges a composite value across branches, so
     /// the module names the v7 profile only when it needs it.
     merged_composites_used: &'a std::cell::Cell<bool>,
+    /// Whether bounded stack memory — array literals, `a[i]` reads,
+    /// `a[i] = v` writes and `len` — is admitted
+    /// (`pure-i64-composite-bounded-memory/v1`).
+    admit_bounded_memory: bool,
+    /// Set when the atom uses any bounded-memory vocabulary, so the
+    /// module names the bounded-memory profile only when it needs it.
+    arrays_used: &'a std::cell::Cell<bool>,
 }
 
 impl<'a> KindEnv<'a> {
@@ -1659,10 +1700,12 @@ fn check_atom_contract(
     admit_field_writes: bool,
     admit_enum_values: bool,
     admit_merged_composites: bool,
+    admit_bounded_memory: bool,
     struct_values_used: &std::cell::Cell<bool>,
     field_writes_used: &std::cell::Cell<bool>,
     enum_values_used: &std::cell::Cell<bool>,
     merged_composites_used: &std::cell::Cell<bool>,
+    arrays_used: &std::cell::Cell<bool>,
 ) -> Result<(), SemanticContractError> {
     // Struct parameters stay out of the scalar scope — so they are
     // neither scalar operands nor rebindable — and live in the
@@ -1734,6 +1777,8 @@ fn check_atom_contract(
         field_writes_used,
         enum_values_used,
         merged_composites_used,
+        admit_bounded_memory,
+        arrays_used,
     };
     for p in &atom.params {
         env.bind(&p.name)?;
@@ -1956,6 +2001,11 @@ enum ScalarKind {
     /// Only `Expr::Number` produces it; no declared type ever carries
     /// it, and it never survives into a `ValueKind`.
     Num,
+    /// A `let`-bound fixed-size array of `i64` leaves
+    /// (`pure-i64-composite-bounded-memory/v1`).
+    ArrayI64,
+    /// A `let`-bound fixed-size array of `u64` leaves.
+    ArrayU64,
 }
 
 fn expect_kind(actual: ScalarKind, expected: ScalarKind) -> Result<(), SemanticContractError> {
@@ -2704,6 +2754,8 @@ fn resolve_alias(
                     field_writes_used: &std::cell::Cell::new(false),
                     enum_values_used: &std::cell::Cell::new(false),
                     merged_composites_used: &std::cell::Cell::new(false),
+                    admit_bounded_memory: false,
+                    arrays_used: &std::cell::Cell::new(false),
                 },
             )?,
             ScalarKind::Bool,
@@ -3034,6 +3086,53 @@ fn block_prefix_kinds<'a>(
                     allow_wrapping_arithmetic,
                     &inner_assignable,
                     &inner_env,
+                )?;
+            }
+            // An indexed write `a[i] = v` (`bounded-memory`): the name
+            // must be a `let`-bound array on the linear path, the index
+            // an `i64` and the value the element kind. The binding
+            // stays bound — the write mutates the array's contents.
+            Stmt::ArrayStore {
+                array,
+                index,
+                value,
+                ..
+            } if inner_env.admit_bounded_memory => {
+                let elem = match inner.get(array.as_str()) {
+                    Some(ScalarKind::ArrayI64) => ScalarKind::I64,
+                    Some(ScalarKind::ArrayU64) => ScalarKind::U64,
+                    _ => {
+                        return Err(SemanticContractError::Unsupported(
+                            "array write on a non-array binding",
+                        ))
+                    }
+                };
+                if !inner_assignable.contains(array.as_str()) {
+                    return Err(SemanticContractError::Unsupported(
+                        "array write to a name not bound on the linear path",
+                    ));
+                }
+                expect_kind(
+                    expression_kind(
+                        index,
+                        &inner,
+                        result_in_scope,
+                        allow_wrapping_arithmetic,
+                        &BTreeSet::new(),
+                        &inner_env,
+                    )?,
+                    ScalarKind::I64,
+                )?;
+                expect_kind(
+                    expression_kind(
+                        value,
+                        &inner,
+                        result_in_scope,
+                        allow_wrapping_arithmetic,
+                        &BTreeSet::new(),
+                        &inner_env,
+                    )?,
+                    elem,
                 )?;
             }
             // A `while` is admitted only mid-block under the
@@ -4142,7 +4241,96 @@ fn expression_kind(
             }
             kind.ok_or(SemanticContractError::Unsupported("empty match"))
         }
+        // A fixed-size array literal (`bounded-memory`): every element
+        // must kind-check and unify to one integer kind — `Num`
+        // elements adapt like binary operands. Bool or empty literals
+        // stay outside: a bool cell would emit an `i1` store the
+        // bounded-memory profile does not model, and `[]` has no
+        // element kind to unify.
+        Expr::ArrayLit(elems)
+            if allow_wrapping_arithmetic && env.admit_bounded_memory && !elems.is_empty() =>
+        {
+            let mut elem_kind = ScalarKind::Num;
+            for elem in elems {
+                let kind = expression_kind(
+                    elem,
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                    env,
+                )?;
+                elem_kind = match (elem_kind, kind) {
+                    (ScalarKind::Num, k) | (k, ScalarKind::Num) => k,
+                    (l, r) if l == r => l,
+                    _ => {
+                        return Err(SemanticContractError::Unsupported(
+                            "array literal element kinds",
+                        ))
+                    }
+                };
+            }
+            match elem_kind {
+                ScalarKind::I64 | ScalarKind::Num => {
+                    env.arrays_used.set(true);
+                    Ok(ScalarKind::ArrayI64)
+                }
+                ScalarKind::U64 => {
+                    env.arrays_used.set(true);
+                    Ok(ScalarKind::ArrayU64)
+                }
+                _ => Err(SemanticContractError::Unsupported(
+                    "array literal element kinds",
+                )),
+            }
+        }
+        // An indexed read `a[i]` (`bounded-memory`): the name must be a
+        // `let`-bound array, the index an `i64` (literals adapt). The
+        // read carries the array's element kind.
+        Expr::ArrayAccess(name, index) if allow_wrapping_arithmetic && env.admit_bounded_memory => {
+            let elem = match scope.get(name.as_str()) {
+                Some(ScalarKind::ArrayI64) => ScalarKind::I64,
+                Some(ScalarKind::ArrayU64) => ScalarKind::U64,
+                _ => {
+                    return Err(SemanticContractError::Unsupported(
+                        "array access on a non-array binding",
+                    ))
+                }
+            };
+            expect_kind(
+                expression_kind(
+                    index,
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                    env,
+                )?,
+                ScalarKind::I64,
+            )?;
+            env.arrays_used.set(true);
+            Ok(elem)
+        }
         Expr::Call(name, args) if allow_wrapping_arithmetic => {
+            // `len(a)` reads the stored element count as `i64` — the
+            // emitted `arrlen` slot load. A scalar argument falls
+            // through to the ordinary callee check, so an atom named
+            // `len` keeps resolving as a call.
+            if name == "len" && args.len() == 1 && env.admit_bounded_memory {
+                if let Ok(kind) = expression_kind(
+                    &args[0],
+                    scope,
+                    result_in_scope,
+                    allow_wrapping_arithmetic,
+                    &BTreeSet::new(),
+                    env,
+                ) {
+                    if matches!(kind, ScalarKind::ArrayI64 | ScalarKind::ArrayU64) {
+                        env.arrays_used.set(true);
+                        return Ok(ScalarKind::I64);
+                    }
+                }
+            }
             // Each argument carries the callee parameter's declared
             // kind — a widened bool parameter admits only bool
             // arguments — and the call takes the callee's return kind.
@@ -4284,6 +4472,12 @@ pub struct PureI64Body<'ctx> {
     /// see post-write fields); scalar rebinds keep the established
     /// input-time view and stay out.
     post_writes: HashMap<String, SourceValue<'ctx>>,
+    /// True when the module's atoms used bounded-memory vocabulary —
+    /// array literals, indexed reads/writes or `len`. The IR encoder
+    /// admits `alloca`/GEP/`load`/`store` shapes only for a model
+    /// carrying this flag, and the report names the bounded-memory
+    /// profile for it.
+    pub bounded_memory: bool,
 }
 
 type BodyResult<T> = std::result::Result<T, SemanticContractError>;
@@ -4296,7 +4490,7 @@ pub fn encode_pure_i64_body<'ctx>(
     context: &'ctx Context,
     allow_wrapping_arithmetic: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
-    let (source_sha256, mut items, refined, structs, enums) =
+    let (source_sha256, mut items, refined, structs, enums, bounded_memory) =
         bounded_pure_i64_module(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     let call_returns =
         call_return_kinds(&items, &refined, &structs, &enums, RefinedAdmission::Reject);
@@ -4311,6 +4505,7 @@ pub fn encode_pure_i64_body<'ctx>(
         &structs,
         &enums,
         &call_returns,
+        bounded_memory,
     )
 }
 
@@ -4324,7 +4519,7 @@ pub fn encode_pure_i64_module<'ctx>(
     allow_wrapping_arithmetic: bool,
     admission: RefinedAdmission,
 ) -> BodyResult<Vec<PureI64Body<'ctx>>> {
-    let (source_sha256, items, refined, structs, enums) =
+    let (source_sha256, items, refined, structs, enums, bounded_memory) =
         bounded_pure_i64_module(source, allow_wrapping_arithmetic, admission)?;
     let call_returns = call_return_kinds(&items, &refined, &structs, &enums, admission);
     items
@@ -4338,6 +4533,7 @@ pub fn encode_pure_i64_module<'ctx>(
                 &structs,
                 &enums,
                 &call_returns,
+                bounded_memory,
             )),
             _ => None,
         })
@@ -4353,7 +4549,7 @@ fn bounded_pure_i64_module(
     source: &str,
     allow_wrapping_arithmetic: bool,
     admission: RefinedAdmission,
-) -> BodyResult<(String, Vec<Item>, RefinedEnv, StructEnv, EnumEnv)> {
+) -> BodyResult<(String, Vec<Item>, RefinedEnv, StructEnv, EnumEnv, bool)> {
     if source.len() > 65_536 {
         return Err(SemanticContractError::Unsupported("source size limit"));
     }
@@ -4377,7 +4573,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _, _, _, _, _) =
+    let (items, refined, structs, enums, _, _, _, _, _, _, arrays) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -4386,9 +4582,17 @@ fn bounded_pure_i64_module(
             "expected exactly one atom",
         ));
     }
-    Ok((digest(source.as_bytes()), items, refined, structs, enums))
+    Ok((
+        digest(source.as_bytes()),
+        items,
+        refined,
+        structs,
+        enums,
+        arrays,
+    ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_atom_body<'ctx>(
     atom: &crate::parser::ast::Atom,
     context: &'ctx Context,
@@ -4397,6 +4601,7 @@ fn encode_atom_body<'ctx>(
     structs: &StructEnv,
     enums: &EnumEnv,
     call_returns: &CallShapes,
+    bounded_memory: bool,
 ) -> BodyResult<PureI64Body<'ctx>> {
     // A struct parameter contributes one input per field, so the limit
     // bounds the flattened signature.
@@ -4449,6 +4654,11 @@ fn encode_atom_body<'ctx>(
         }
         SourceValue::Boolean(value) => {
             value.ite(&BV::from_u64(context, 1, 64), &BV::from_u64(context, 0, 64))
+        }
+        SourceValue::Array { .. } => {
+            return Err(SemanticContractError::Unsupported(
+                "array value in a result position",
+            ))
         }
         // A struct result's value is its field slots concatenated in
         // declaration order — the layout the emitter's returned
@@ -4557,9 +4767,12 @@ fn encode_atom_body<'ctx>(
                 .or_else(|| enums.get(name).map(|variants| 1 + enum_max_arity(variants)))
         }),
         loop_bound_exits,
+        bounded_memory,
         post_writes: top_writes
             .into_iter()
-            .filter(|(_, value)| matches!(value, SourceValue::Composite(_)))
+            .filter(|(_, value)| {
+                matches!(value, SourceValue::Composite(_) | SourceValue::Array { .. })
+            })
             .collect(),
     })
 }
@@ -4935,7 +5148,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
     context: &'ctx Context,
     admission: RefinedAdmission,
 ) -> BodyResult<Vec<ModuleAtomObligations<'ctx>>> {
-    let (source_sha256, items, refined, structs, enums) =
+    let (source_sha256, items, refined, structs, enums, bounded_memory) =
         bounded_pure_i64_module(source, true, admission)?;
     let atom_items: Vec<&crate::parser::ast::Atom> = items
         .iter()
@@ -4964,6 +5177,7 @@ pub fn encode_pure_i64_module_obligations<'ctx>(
                 &structs,
                 &enums,
                 &call_returns,
+                bounded_memory,
             )
         })
         .collect::<BodyResult<_>>()?;
@@ -5359,6 +5573,16 @@ enum SourceValue<'ctx> {
         tag: BV<'ctx>,
         slots: Vec<SourceValue<'ctx>>,
     },
+    /// A `let`-bound fixed-size array (`bounded-memory`): cell contents
+    /// as an SMT `BV64 -> BV64` array — the same index-domain the
+    /// emitted `alloca`/GEP/`store`/`load` uses — plus the stored
+    /// element count `len(a)` returns and the element kind reads
+    /// produce.
+    Array {
+        store: Array<'ctx>,
+        len: BV<'ctx>,
+        elem: ScalarKind,
+    },
 }
 
 /// Instantiate a callee-side [`SourceValue`] (expressed over the
@@ -5386,6 +5610,11 @@ fn substitute_source_value<'ctx>(
                 .iter()
                 .map(|v| substitute_source_value(v, substitutions))
                 .collect(),
+        },
+        SourceValue::Array { store, len, elem } => SourceValue::Array {
+            store: store.substitute(substitutions),
+            len: len.substitute(substitutions),
+            elem: *elem,
         },
     }
 }
@@ -5635,6 +5864,27 @@ fn merge_source_values<'ctx>(
                 slots,
             })
         }
+        // A branch writing `a[i] = v` rebinds the array under the
+        // branch condition — the merge is the SMT array `ite` of the
+        // store-chain and the incoming array, not a pointer `phi`
+        // (the emitted IR keeps one data pointer and merges the
+        // stored values).
+        (
+            SourceValue::Array {
+                store: as_,
+                len: al,
+                elem: ae,
+            },
+            SourceValue::Array {
+                store: bs,
+                len: bl,
+                elem: be,
+            },
+        ) if ae == be => Ok(SourceValue::Array {
+            store: cond.ite(&as_, &bs),
+            len: cond.ite(&al, &bl),
+            elem: ae,
+        }),
         _ => Err(SemanticContractError::Unsupported("branch composite kinds")),
     }
 }
@@ -5785,6 +6035,15 @@ fn source_stmt<'ctx>(
                                 "let shadows a struct binding with a different type",
                             ));
                         }
+                        // An array binding is name-keyed the same way:
+                        // only another array may shadow it.
+                        if matches!(inner.get(var), Some(SourceValue::Array { .. }))
+                            && !matches!(bound, SourceValue::Array { .. })
+                        {
+                            return Err(SemanticContractError::Unsupported(
+                                "let shadows an array binding with a different type",
+                            ));
+                        }
                         inner.insert(var.clone(), bound);
                         inner_assignable.insert(var.clone());
                         escapable.remove(var);
@@ -5848,6 +6107,65 @@ fn source_stmt<'ctx>(
                         inner.insert(var.clone(), bound.clone());
                         if escapable.contains(var) {
                             written.insert(var.clone(), bound);
+                        }
+                    }
+                    // An indexed write `a[i] = v` rebinds the array
+                    // under its in-bounds guard — the emitted code
+                    // skips the store entirely when the index is out
+                    // of bounds, so OOB keeps the incoming array.
+                    Stmt::ArrayStore {
+                        array,
+                        index,
+                        value,
+                        ..
+                    } => {
+                        let Some(SourceValue::Array { store, len, elem }) = inner.get(array) else {
+                            return Err(SemanticContractError::Unsupported(
+                                "array write on a non-array binding",
+                            ));
+                        };
+                        if !inner_assignable.contains(array.as_str()) {
+                            return Err(SemanticContractError::Unsupported(
+                                "array write to a name not bound on the linear path",
+                            ));
+                        }
+                        let index = source_expr(
+                            index,
+                            ctx,
+                            &inner,
+                            guard,
+                            definedness,
+                            depth + 1,
+                            &BTreeSet::new(),
+                            written,
+                            loop_exits,
+                            call_sites,
+                            call_returns,
+                        )?
+                        .integer()?;
+                        let bound = source_expr(
+                            value,
+                            ctx,
+                            &inner,
+                            guard,
+                            definedness,
+                            depth + 1,
+                            &BTreeSet::new(),
+                            written,
+                            loop_exits,
+                            call_sites,
+                            call_returns,
+                        )?
+                        .integer()?;
+                        let stored = SourceValue::Array {
+                            store: array_in_bounds(ctx, &index, len)
+                                .ite(&store.store(&index, &bound), store),
+                            len: len.clone(),
+                            elem: *elem,
+                        };
+                        inner.insert(array.clone(), stored.clone());
+                        if escapable.contains(array.as_str()) {
+                            written.insert(array.clone(), stored);
                         }
                     }
                     Stmt::Expr(value, _) => {
@@ -6009,6 +6327,24 @@ fn source_while<'ctx>(
                 }
                 (Some(I(old) | N(old)), I(new) | N(new)) => I(body_guard.ite(new, old)),
                 (Some(B(old)), B(new)) => B(body_guard.ite(new, old)),
+                // A loop-carried `a[i] = v` keeps the merged array: the
+                // body's write applies only where the loop actually ran.
+                (
+                    Some(SourceValue::Array {
+                        store: os,
+                        len: ol,
+                        elem: oe,
+                    }),
+                    SourceValue::Array {
+                        store: ns,
+                        len: nl,
+                        elem: ne,
+                    },
+                ) if oe == ne => SourceValue::Array {
+                    store: body_guard.ite(ns, os),
+                    len: body_guard.ite(nl, ol),
+                    elem: *oe,
+                },
                 (None, _) => bound.clone(),
                 _ => {
                     return Err(SemanticContractError::Unsupported(
@@ -6168,7 +6504,38 @@ fn lower_scalar<'ctx>(value: SourceValue<'ctx>, ctx: &'ctx Context) -> BodyResul
         SourceValue::Enum { .. } => Err(SemanticContractError::Unsupported(
             "source enum value in a scalar position",
         )),
+        SourceValue::Array { .. } => Err(SemanticContractError::Unsupported(
+            "source array value in a scalar position",
+        )),
     }
+}
+
+/// The in-bounds domain of an indexed array access: signed
+/// `0 <= i < len`, matching the `icmp sge`/`icmp slt` pair the
+/// emitter's bounds check emits.
+fn array_in_bounds<'ctx>(ctx: &'ctx Context, index: &BV<'ctx>, len: &BV<'ctx>) -> Bool<'ctx> {
+    Bool::and(
+        ctx,
+        &[&index.bvsge(&BV::from_u64(ctx, 0, 64)), &index.bvslt(len)],
+    )
+}
+
+/// The bounded-memory read the emitted bounds-check + `load` + merged
+/// `phi(loaded, 0)` encodes: `ite(0 <= i < len, select(arr, i), 0)` —
+/// an out-of-bounds read yields `0` exactly like the emitter's merged
+/// value, so no definedness obligation is recorded.
+fn array_read<'ctx>(
+    ctx: &'ctx Context,
+    store: &Array<'ctx>,
+    len: &BV<'ctx>,
+    index: &BV<'ctx>,
+) -> BV<'ctx> {
+    let selected = store.select(index).as_bv().unwrap_or_else(|| {
+        // The range sort is always BV64 — the fallback only keeps the
+        // helper total.
+        BV::from_u64(ctx, 0, 64)
+    });
+    array_in_bounds(ctx, index, len).ite(&selected, &BV::from_u64(ctx, 0, 64))
 }
 
 /// The `result` binding of an atom's (or call site's) result value:
@@ -6838,7 +7205,102 @@ fn source_expr<'ctx>(
             }
             result
         }
+        // A fixed-size array literal (`bounded-memory`): the zero-filled
+        // `BV64 -> BV64` array with each element stored at its literal
+        // index — the same cells the emitted `alloca [N x i64]` +
+        // per-element `store` writes.
+        Expr::ArrayLit(elems) => {
+            if elems.is_empty() {
+                return Err(SemanticContractError::Unsupported("empty array literal"));
+            }
+            let zero = BV::from_u64(ctx, 0, 64);
+            let mut store = Array::const_array(ctx, &Sort::bitvector(ctx, 64), &zero);
+            let mut unsigned = false;
+            for (i, elem) in elems.iter().enumerate() {
+                let value = source_expr(
+                    elem,
+                    ctx,
+                    env,
+                    guard,
+                    definedness,
+                    depth + 1,
+                    &BTreeSet::new(),
+                    written,
+                    loop_exits,
+                    call_sites,
+                    call_returns,
+                )?;
+                let cell = match value {
+                    I(v) | N(v) => v,
+                    U(v) => {
+                        unsigned = true;
+                        v
+                    }
+                    _ => return Err(SemanticContractError::Unsupported("array literal element")),
+                };
+                store = store.store(&BV::from_u64(ctx, i as u64, 64), &cell);
+            }
+            SourceValue::Array {
+                store,
+                len: BV::from_u64(ctx, elems.len() as u64, 64),
+                elem: if unsigned {
+                    ScalarKind::U64
+                } else {
+                    ScalarKind::I64
+                },
+            }
+        }
+        // An indexed read `a[i]`: the in-bounds `select` or the merged
+        // `0` an out-of-bounds read yields — no definedness obligation,
+        // matching the emitted bounds-check + `phi(loaded, 0)`.
+        Expr::ArrayAccess(name, index) => {
+            let Some(SourceValue::Array { store, len, elem }) = env.get(name.as_str()) else {
+                return Err(SemanticContractError::Unsupported(
+                    "array access on a non-array binding",
+                ));
+            };
+            let index = source_expr(
+                index,
+                ctx,
+                env,
+                guard,
+                definedness,
+                depth + 1,
+                &BTreeSet::new(),
+                written,
+                loop_exits,
+                call_sites,
+                call_returns,
+            )?
+            .integer()?;
+            let read = array_read(ctx, store, len, &index);
+            match elem {
+                ScalarKind::U64 => U(read),
+                _ => I(read),
+            }
+        }
         Expr::Call(name, args) => {
+            // `len(a)` is the stored element count — no memory op on
+            // the IR side (the let's SSA value carries it). Only a
+            // binding (or inline literal) actually producing an array
+            // intercepts; anything else resolves as an ordinary call,
+            // so a user atom named `len` keeps working.
+            if name == "len" && args.len() == 1 {
+                let len = match &args[0] {
+                    Expr::Variable(var) => env.get(var.as_str()).and_then(|value| {
+                        if let SourceValue::Array { len, .. } = value {
+                            Some(len.clone())
+                        } else {
+                            None
+                        }
+                    }),
+                    Expr::ArrayLit(elems) => Some(BV::from_u64(ctx, elems.len() as u64, 64)),
+                    _ => None,
+                };
+                if let Some(len) = len {
+                    return Ok(I(len));
+                }
+            }
             // An `E::V(args..)` enum constructor produces the variant's
             // value directly — tag ordinal plus payload slots — not a
             // call site: it carries no obligation domain.

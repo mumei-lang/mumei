@@ -2652,6 +2652,70 @@ fn module_bundle_with_u64_leaves_builds_as_v13_and_rechecks() {
 }
 
 #[test]
+fn module_bundle_with_bounded_arrays_builds_as_v14_and_rechecks() {
+    // `let`-bound stack arrays pin the module at composite v11 /
+    // bundle v14: the bounded-memory source encoding (SMT-array cells
+    // with graceful out-of-bounds semantics) pairs with the emitter's
+    // `alloca [N x i64]` + gep/load/store lowering.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "atom sum() -> i64 requires: true; ensures: result == 13; body: { let a = [1, 2, 3]; a[1] = 9; a[0] + a[1] + a[2] };\n\
+         atom pick(a0: i64, i: i64) -> i64 requires: 0 <= i && i < 3; ensures: result == 7; body: { let a = [a0, 20, 30]; a[i] = 7; a[i] };\n\
+         atom main() -> i64 requires: true; ensures: result == 20; body: { sum() + pick(1, 0) };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V14);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_MEMORY_PROFILE
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A v14 record re-pinned as v13 is refused: v13 keeps arrays out of
+    // the vocabulary.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V13.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
+fn multifile_bundle_with_bounded_arrays_builds_as_v14() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        root.path().join("cell.mm"),
+        "atom pick(i: i64) -> i64 requires: 0 <= i && i < 2; ensures: result == 5; body: { let a = [3, 5]; a[i] = 5; a[i] };\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"cell\" as c;\n\natom main() -> i64 requires: true; ensures: true; body: { c::pick(1) };\n",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MULTIFILE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V14);
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+}
+
+#[test]
 fn multifile_bundle_with_u64_leaves_builds_as_v13() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("app.mm");
