@@ -2395,24 +2395,36 @@ fn enum_max_arity(variants: &[ResolvedVariant]) -> usize {
 /// need tag-conditional slot domains, which the flattened signature
 /// does not express, so such an enum stays out.
 fn enum_slot_type<'a>(variants: &'a [ResolvedVariant], i: usize) -> Option<&'a str> {
-    // Uniformity is by resolved slot kind, not the declared name: the
-    // width aliases (`usize`→`u64`, `isize`→`i64`) share a carrier with
-    // their base. The returned name is display-only.
-    let mut found: Option<(&'a str, ScalarKind)> = None;
+    // Uniformity stays by declared name, except the width aliases:
+    // `usize`/`u64` and `isize`/`i64` name the same domain and carrier.
+    // Comparing resolved kinds instead would conflate a refined alias
+    // with its bare base — `A(Pos)` and `B(i64)` share `I64` but the
+    // slot's declared domain differs, and the signature would apply
+    // `Pos`'s conjunct to `B`'s payloads.
+    let mut found: Option<&'a str> = None;
     for variant in variants {
         let Some(field) = variant.fields.get(i) else {
             continue;
         };
-        let ValueKind::Scalar(kind) = field.shape else {
-            return None;
-        };
         match found {
-            None => found = Some((field.type_name.as_str(), kind)),
-            Some((_, k)) if k == kind => (),
+            None => found = Some(field.type_name.as_str()),
+            Some(name) if name == field.type_name => (),
+            Some(name) if width_alias_pair(name, field.type_name.as_str()) => (),
             Some(_) => return None,
         }
     }
-    found.map(|(name, _)| name)
+    found
+}
+
+/// The declared-name pairs that fold to the same 64-bit leaf:
+/// `usize`/`u64` (unsigned) and `isize`/`i64` (signed). Only builtin
+/// names pair — a refined alias never does, since it carries a domain
+/// conjunct its base lacks.
+fn width_alias_pair(a: &str, b: &str) -> bool {
+    matches!(
+        (a, b),
+        ("u64", "usize") | ("usize", "u64") | ("i64", "isize") | ("isize", "i64")
+    )
 }
 
 /// Collect the module's `Item::EnumDef` declarations under
@@ -10330,6 +10342,21 @@ atom mk(x: usize) -> E requires: true; ensures: true; body: { E::A(x) };",
             "atom bad(a: isize) -> isize requires: a == 1; ensures: result == 3; body: { a + 1 };",
         );
         assert!(outcomes(&wrong).contains(&z3::SatResult::Sat));
+        // Kind-uniform but domain-distinct payloads stay out: a refined
+        // alias carries a domain conjunct its bare base lacks, so
+        // `A(Pos)`/`B(i64)` has no uniform slot domain even though both
+        // resolve to `I64`.
+        for piece in [
+            "type Pos = i64 where v > 0;
+enum E { A(Pos), B(i64) }
+atom mk(x: Pos) -> E requires: true; ensures: true; body: { E::A(x) };",
+            "type Pos = i64 where v > 0;
+enum E { A(i64), B(Pos) }
+atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
+        ] {
+            let source = module(piece);
+            assert!(v10(&source).is_err(), "{piece}");
+        }
         // Narrower admissions keep the width-typed leaves out.
         let source =
             module("atom ge(a: usize) -> i64 requires: a >= 0; ensures: result == 1; body: { 1 };");
