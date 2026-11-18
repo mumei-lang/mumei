@@ -39,6 +39,7 @@ def test_schema_is_valid_and_accepts_the_closed_envelope() -> None:
         ("subject_digest", "a" * 65),
         ("subject_digest", "A" * 64),  # uppercase
         ("subject_digest", "g" * 64),
+        ("subject_digest", "a" * 64 + "\n"),  # `$` matches before a trailing newline
         ("subject_digest", 0),
         ("algorithm", "ed25519ph"),
         ("algorithm", "rsa"),
@@ -47,6 +48,7 @@ def test_schema_is_valid_and_accepts_the_closed_envelope() -> None:
         ("signature", "b" * 129),
         ("signature", "B" * 128),  # uppercase
         ("signature", "z" * 128),
+        ("signature", "b" * 128 + "\n"),  # `$` matches before a trailing newline
         ("signature", 0),
         ("producer_key_id", ""),
         ("producer_key_id", None),

@@ -14,9 +14,9 @@
   ],
   "properties": {
     "schema_version": {"const":"mumei.producer-signature/v1"},
-    "subject_digest": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "subject_digest": {"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-f]{64}$"},
     "algorithm": {"const":"ed25519"},
-    "signature": {"type":"string","pattern":"^[0-9a-f]{128}$"},
+    "signature": {"type":"string","minLength":128,"maxLength":128,"pattern":"^[0-9a-f]{128}$"},
     "producer_key_id": {"type":"string","minLength":1}
   }
 }
