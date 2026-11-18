@@ -3361,3 +3361,476 @@ fn fast_math_flags_on_admitted_instructions_are_rejected() {
         );
     }
 }
+
+/// `opt-o2` snapshot helpers: `default<O2>` canonical output carries a
+/// `tail` call marker, a function-scope attribute group and the
+/// canonical optimizer intrinsics.
+fn opt_attrs() -> &'static str {
+    "attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn memory(none) }\n\
+     attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }"
+}
+
+#[test]
+fn opt_o2_canonical_snapshot_is_equivalent_under_the_pinned_profile() {
+    // `if x < y { x } else { y }` is exactly `llvm.smin.i64`.
+    let src = source("x: i64, y: i64", "if x < y { x } else { y }");
+    let ir = pin(&format!(
+        "define i64 @f(i64 %0, i64 %1) local_unnamed_addr #0 {{\n\
+         %3 = tail call i64 @llvm.smin.i64(i64 %0, i64 %1)\n\
+         ret i64 %3\n\
+         }}\n\
+         declare i64 @llvm.smin.i64(i64, i64) #1\n\
+         {}",
+        opt_attrs()
+    ));
+    let report = tv::validate_pure_i64_optimized(&src, &ir, Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(report.profile, tv::OPT_PROFILE);
+    assert_eq!(
+        report.checked_stage,
+        "supplied_llvm_ir_snapshot_post_default_O2"
+    );
+    // The same snapshot stays outside the pre-pipeline profile: the
+    // declaration, `tail` marker and attribute group all reject there.
+    assert!(tv::validate_pure_i64(&src, &ir, Options::default()).is_err());
+}
+
+#[test]
+fn opt_o2_scalar_intrinsics_encode_their_source_semantics() {
+    // `smax` = signed max; `umin` is the unsigned min — a different
+    // function than the signed comparison the source expresses, so a
+    // snapshot naming it is a real difference, not an equivalence.
+    let smin = source("x: i64, y: i64", "if x < y { x } else { y }");
+    let smax = source("x: i64, y: i64", "if x > y { x } else { y }");
+    for (src, intrinsic) in [(&smin, "llvm.smin.i64"), (&smax, "llvm.smax.i64")] {
+        let ir = pin(&format!(
+            "define i64 @f(i64 %0, i64 %1) {{\n\
+             %3 = call i64 @{intrinsic}(i64 %0, i64 %1)\n\
+             ret i64 %3\n\
+             }}\n\
+             declare i64 @{intrinsic}(i64, i64)"
+        ));
+        assert_eq!(
+            tv::validate_pure_i64_optimized(src, &ir, Options::default())
+                .unwrap()
+                .outcome,
+            Outcome::EquivalentWithinProfile,
+            "{intrinsic}"
+        );
+    }
+    let umin = pin("define i64 @f(i64 %0, i64 %1) {\n\
+         %3 = call i64 @llvm.umin.i64(i64 %0, i64 %1)\n\
+         ret i64 %3\n\
+         }\n\
+         declare i64 @llvm.umin.i64(i64, i64)");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&smin, &umin, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::Different
+    );
+    // `abs` wraps `if x < 0 { 0 - x } else { x }`; with a false
+    // `is_int_min_poison` flag the semantics match exactly.
+    let abs_src = source("x: i64", "if x < 0 { 0 - x } else { x }");
+    let abs_wrapping = pin("define i64 @f(i64 %0) {\n\
+         %2 = call i64 @llvm.abs.i64(i64 %0, i1 false)\n\
+         ret i64 %2\n\
+         }\n\
+         declare i64 @llvm.abs.i64(i64, i1)");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&abs_src, &abs_wrapping, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    // With `is_int_min_poison` the intrinsic poisons i64::MIN where the
+    // source wraps — a poisoned-input failure, not a value difference.
+    let abs_poison = abs_wrapping.replace("i1 false", "i1 true");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&abs_src, &abs_poison, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::UndefinedBehavior
+    );
+}
+
+#[test]
+fn opt_o2_with_overflow_pair_yields_result_and_flag_leaves() {
+    // The wrapped result leaf equals the source's wrapping add; the
+    // `i1` flag leaf is readable and binds 1 exactly on overflow.
+    let src = source("x: i64, y: i64", "x + y");
+    let ir = pin("define i64 @f(i64 %0, i64 %1) {\n\
+         %3 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %0, i64 %1)\n\
+         %4 = extractvalue {i64, i1} %3, 0\n\
+         ret i64 %4\n\
+         }\n\
+         declare {i64, i1} @llvm.sadd.with.overflow.i64(i64, i64)");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&src, &ir, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    // Feeding the flag into a branch makes a value the source cannot
+    // express: equivalent only if the flag encoding is right. `x + y`
+    // overflows iff `result < x` when `y >= 0` — the source-side
+    // approximation differs on `y < 0` inputs and is a real difference.
+    let flagged = ir.replace(
+        "%4 = extractvalue {i64, i1} %3, 0\nret i64 %4",
+        "%4 = extractvalue {i64, i1} %3, 1\n%5 = select i1 %4, i64 0, i64 1\nret i64 %5",
+    );
+    let approx = source(
+        "x: i64, y: i64",
+        "if y >= 0 { if x + y < x { 0 } else { 1 } } else { if x + y > x { 0 } else { 1 } }",
+    );
+    // The approximation is genuinely different: the flag goes the other
+    // way on inputs where the sign of y flips the comparison direction.
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&approx, &flagged, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::Different
+    );
+    // Same source against the `usub` flag: unsigned subtraction
+    // underflows exactly when x < y — unsignedness the source cannot
+    // say either, and the wrapped subtraction still matches.
+    let usub = pin("define i64 @f(i64 %0, i64 %1) {\n\
+         %3 = call {i64, i1} @llvm.usub.with.overflow.i64(i64 %0, i64 %1)\n\
+         %4 = extractvalue {i64, i1} %3, 0\n\
+         ret i64 %4\n\
+         }\n\
+         declare {i64, i1} @llvm.usub.with.overflow.i64(i64, i64)");
+    let sub_src = source("x: i64, y: i64", "x - y");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&sub_src, &usub, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn opt_o2_freeze_encodes_as_its_operand() {
+    let src = source("x: i64", "x + 1");
+    let ir = pin("define i64 @f(i64 %0) {\n\
+         %2 = freeze i64 %0\n\
+         %3 = add i64 %2, 1\n\
+         ret i64 %3\n\
+         }");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&src, &ir, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    assert!(tv::validate_pure_i64(&src, &ir, Options::default()).is_err());
+}
+
+#[test]
+fn opt_o2_keeps_poison_strengthening_forms_rejected() {
+    let src = source("x: i64, y: i64", "x | y");
+    // `or disjoint`, `nsw`/`nuw`/`exact` and parameter/return
+    // attributes constrain the value or the input domain — they stay
+    // rejected under every profile.
+    for ir in [
+        pin("define i64 @f(i64 %0, i64 %1) {\n%3 = or disjoint i64 %0, %1\nret i64 %3\n}"),
+        pin("define i64 @f(i64 %0, i64 %1) {\n%3 = or i64 %0, %1\nret i64 %3\n}\nmodule asm \"x\""),
+        pin("define noundef i64 @f(i64 %0, i64 %1) {\n%3 = or i64 %0, %1\nret i64 %3\n}"),
+        pin("define i64 @f(i64 noundef %0, i64 %1) {\n%3 = or i64 %0, %1\nret i64 %3\n}"),
+    ] {
+        assert!(
+            tv::validate_pure_i64_optimized(&src, &ir, Options::default()).is_err(),
+            "{ir}"
+        );
+    }
+}
+
+#[test]
+fn opt_o2_module_profile_covers_member_snapshots() {
+    let src = "atom f(x: i64) -> i64 requires: true; ensures: true; body: { x + 1 };";
+    let ir = pin(&format!(
+        "define i64 @f(i64 %0) local_unnamed_addr #0 {{\n\
+         %2 = freeze i64 %0\n\
+         %3 = add i64 %2, 1\n\
+         ret i64 %3\n\
+         }}\n\
+         {}",
+        opt_attrs()
+    ));
+    let report = tv::validate_pure_i64_module_optimized(src, &ir, Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    assert_eq!(report.profile, tv::OPT_PROFILE);
+    assert_eq!(
+        report.checked_stage,
+        "supplied_llvm_ir_snapshot_post_default_O2"
+    );
+}
+
+#[test]
+fn opt_o2_unsigned_overflow_flags_use_unsigned_predicates() {
+    // `uadd`/`usub`/`umul` flags mean unsigned overflow: a
+    // signed-predicate encoding would read these inputs as
+    // non-overflowing and report the IR different from the source.
+    // The comparison domain is unrestricted by `requires`, so each
+    // flag is fed a constant bound operand whose overflow corner is
+    // expressible in the signed source.
+    let uadd = pin("define i64 @f(i64 %0, i64 %1) {\n\
+         %3 = call {i64, i1} @llvm.uadd.with.overflow.i64(i64 %0, i64 1)\n\
+         %4 = extractvalue {i64, i1} %3, 1\n\
+         %5 = select i1 %4, i64 0, i64 1\n\
+         ret i64 %5\n\
+         }\n\
+         declare {i64, i1} @llvm.uadd.with.overflow.i64(i64, i64)");
+    // x + 1 wraps unsigned exactly when x is -1 (u64::MAX).
+    let add_src = "atom f(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { if x == 0 - 1 { 0 } else { 1 } };";
+    assert_eq!(
+        tv::validate_pure_i64_optimized(add_src, &uadd, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    // x - 1 borrows unsigned exactly when x is 0.
+    let usub = uadd.replace("uadd", "usub");
+    let sub_src = "atom f(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { if x == 0 { 0 } else { 1 } };";
+    assert_eq!(
+        tv::validate_pure_i64_optimized(sub_src, &usub, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    // 2 * x wraps unsigned exactly when x is negative.
+    let umul = pin("define i64 @f(i64 %0, i64 %1) {\n\
+         %3 = call {i64, i1} @llvm.umul.with.overflow.i64(i64 %0, i64 2)\n\
+         %4 = extractvalue {i64, i1} %3, 1\n\
+         %5 = select i1 %4, i64 0, i64 1\n\
+         ret i64 %5\n\
+         }\n\
+         declare {i64, i1} @llvm.umul.with.overflow.i64(i64, i64)");
+    let mul_src = "atom f(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { if x < 0 { 0 } else { 1 } };";
+    assert_eq!(
+        tv::validate_pure_i64_optimized(mul_src, &umul, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn opt_o2_function_attributes_are_whitelisted_not_blanketed() {
+    let src = source("x: i64", "x");
+    // The canonical `default<O2>` function attributes are admitted.
+    let canonical = pin(
+        "define i64 @f(i64 %x) local_unnamed_addr #0 { ret i64 %x }\n\
+         attributes #0 = { mustprogress nofree norecurse nosync nounwind willreturn memory(none) }",
+    );
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&src, &canonical, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    // `noreturn` is a semantic contract the comparison does not read:
+    // a returning body marked `noreturn` is UB, not an annotation.
+    let noreturn = pin("define noreturn i64 @f(i64 %x) { ret i64 %x }");
+    assert!(tv::validate_pure_i64_optimized(&src, &noreturn, Options::default()).is_err());
+    // An under-claimed `memory` bound is inconsistent: `@f` claims
+    // `none` while calling a callee claiming `readwrite`.
+    let under = pin("define i64 @f(i64 %x) #0 {\n\
+         %r = call i64 @g(i64 %x)\n\
+         ret i64 %r\n\
+         }\n\
+         define i64 @g(i64 %x) #1 { ret i64 %x }\n\
+         attributes #0 = { memory(none) }\n\
+         attributes #1 = { memory(readwrite) }");
+    assert!(tv::validate_pure_i64_optimized(&src, &under, Options::default()).is_err());
+}
+
+#[test]
+fn opt_o2_freeze_rescues_the_operand_poison_obligation() {
+    // `freeze` masks the `abs` i64::MIN poison: the old global
+    // obligation reported UndefinedBehavior although the program is
+    // defined everywhere. With every use frozen the value becomes
+    // arbitrary on the poisoned input, so the comparison still
+    // distinguishes it from a source that returns a definite value
+    // there — the verdict is Different, not UndefinedBehavior.
+    let src = source("x: i64", "if x < 0 { 0 - x } else { x }");
+    let frozen = pin("define i64 @f(i64 %x) {\n\
+         %v = call i64 @llvm.abs.i64(i64 %x, i1 true)\n\
+         %f = freeze i64 %v\n\
+         ret i64 %f\n\
+         }\n\
+         declare i64 @llvm.abs.i64(i64, i1)");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&src, &frozen, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::Different
+    );
+    // An unfrozen use keeps the obligation: the same function without
+    // the freeze still reports UndefinedBehavior on i64::MIN.
+    assert_eq!(
+        tv::validate_pure_i64_optimized(
+            &src,
+            &frozen.replace("ret i64 %f", "ret i64 %v"),
+            Options::default()
+        )
+        .unwrap()
+        .outcome,
+        Outcome::UndefinedBehavior
+    );
+}
+
+#[test]
+fn opt_o2_keeps_the_cancel_poll_call_admitted() {
+    // The cancellation poll is a declaration-shaped call that is not
+    // an optimizer intrinsic: routing it into the intrinsic table
+    // would reject every loop-header snapshot the pipeline emits.
+    let ir = pin("define i64 @f(i64 %x) {\n\
+         %p = call i64 @__mumei_task_group_should_cancel_current()\n\
+         %r = add i64 %x, %p\n\
+         ret i64 %r\n\
+         }\n\
+         declare i64 @__mumei_task_group_should_cancel_current()");
+    let src = source("x: i64", "x");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&src, &ir, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn opt_o2_reads_constant_overflow_pairs() {
+    // A literal `{i64, i1}` pair constant reaches the extractor through
+    // the same leaf layout a computed pair does.
+    let ir = pin("define i64 @f(i64 %x) {\n\
+         %v = extractvalue {i64, i1} zeroinitializer, 0\n\
+         ret i64 %v\n\
+         }");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&source("x: i64", "0"), &ir, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+    // A non-opt profile still refuses the pair constant.
+    assert!(tv::validate_pure_i64(&source("x: i64", "0"), &ir, Options::default()).is_err());
+}
+
+#[test]
+fn opt_o2_division_is_immediate_ub_not_freeze_rescuable() {
+    // `sdiv`/`udiv` by zero is immediate UB in LLVM, not poison: a
+    // `freeze` of the quotient must not rescue the obligation the way
+    // it rescues a poisoned `abs`. Tagging division obligations as
+    // rescuable would hide the UB and report a mere value difference.
+    // The quotient is frozen then cancelled to a constant, so both
+    // sides return `0` on every defined input and only the zero-divisor
+    // obligation separates them: tagging division as rescuable would
+    // let the `freeze` mask it and report a vacuous equivalence.
+    for op in ["sdiv", "udiv", "srem", "urem"] {
+        let ir = pin(&format!(
+            "define i64 @f(i64 %x, i64 %y) {{\n\
+             %q = {op} i64 %x, %y\n\
+             %f = freeze i64 %q\n\
+             %r = sub i64 %f, %f\n\
+             ret i64 %r\n\
+             }}"
+        ));
+        assert_eq!(
+            tv::validate_pure_i64_optimized(
+                &source("x: i64, y: i64", "0"),
+                &ir,
+                Options::default()
+            )
+            .unwrap()
+            .outcome,
+            Outcome::UndefinedBehavior,
+            "{op} by a possibly-zero operand is immediate UB"
+        );
+    }
+    // A definite divisor still validates normally: `sdiv x, 1` is the
+    // identity and its `freeze` encodes as the operand.
+    let identity = pin("define i64 @f(i64 %x, i64 %y) {\n\
+         %q = sdiv i64 %x, 1\n\
+         %f = freeze i64 %q\n\
+         ret i64 %f\n\
+         }");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(
+            &source("x: i64, y: i64", "x"),
+            &identity,
+            Options::default()
+        )
+        .unwrap()
+        .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn opt_o2_freeze_rescue_requires_every_operand_use_frozen() {
+    // Poison escapes a rescue when the operand is also consumed by a
+    // non-freeze instruction: `%v` feeds both the `freeze` and an
+    // ordinary `add`. The derived use is dead here, but the checker
+    // fails closed — an unfrozen use of a poisoned operand is not
+    // provably harmless, so the obligation stays and i64::MIN reports
+    // UndefinedBehavior instead of being hidden by the rescue.
+    let src = source("x: i64", "if x < 0 { 0 - x } else { x }");
+    let leaky = pin("define i64 @f(i64 %x) {\n\
+         %v = call i64 @llvm.abs.i64(i64 %x, i1 true)\n\
+         %a = add i64 %v, 1\n\
+         %f = freeze i64 %v\n\
+         ret i64 %f\n\
+         }\n\
+         declare i64 @llvm.abs.i64(i64, i1)");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&src, &leaky, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::UndefinedBehavior
+    );
+}
+
+#[test]
+fn opt_o2_freeze_of_an_i1_flag_uses_the_operand_width() {
+    // The rescue's fresh value must carry the operand's bit width: a
+    // 64-bit constant against an `i1` operand sorts-mismatches Z3's
+    // `ite` and fails the whole check instead of validating.
+    let ir = pin("define i64 @f(i64 %x, i64 %y) {\n\
+         %p = call {i64, i1} @llvm.uadd.with.overflow.i64(i64 %x, i64 1)\n\
+         %flag = extractvalue {i64, i1} %p, 1\n\
+         %f = freeze i1 %flag\n\
+         %r = select i1 %f, i64 0, i64 1\n\
+         ret i64 %r\n\
+         }\n\
+         declare {i64, i1} @llvm.uadd.with.overflow.i64(i64, i64)");
+    // x + 1 wraps unsigned exactly when x is -1 (u64::MAX).
+    let src = "atom f(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { if x == 0 - 1 { 0 } else { 1 } };";
+    assert_eq!(
+        tv::validate_pure_i64_optimized(src, &ir, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn opt_o2_module_absent_callee_memory_claim_is_unrestricted() {
+    // A callee without a `memory` attribute may touch anything, so
+    // its implicit claim is `memory(readwrite)`, not a superset of
+    // every encodable bit. A caller claiming `readwrite` is exactly
+    // consistent with that and must validate — the previous `u64::MAX`
+    // fallback made every real caller under-claim.
+    let ir = pin("define i64 @g(i64 %x) { ret i64 %x }\n\
+         define i64 @f(i64 %y) #0 {\n\
+           %a = call i64 @g(i64 %y)\n\
+           %b = add i64 %y, 1\n\
+           %c = call i64 @g(i64 %b)\n\
+           %d = add i64 %a, %c\n\
+           ret i64 %d\n\
+         }\n\
+         attributes #0 = { memory(readwrite) }");
+    let report = tv::validate_pure_i64_module_optimized(CALLING, &ir, Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+}
