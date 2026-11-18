@@ -845,8 +845,8 @@ unsafe fn aggregate_leaf_range(ty: LLVMTypeRef, index: u32) -> Option<(usize, us
 
 /// A constant of an admitted aggregate type whose slots the encoder can
 /// read: whole `undef`/`poison` (every slot undefined),
-/// `zeroinitializer`, or a literal struct of integer and `undef`
-/// elements.
+/// `zeroinitializer`, or a literal struct of integer, `double` and
+/// `undef` elements.
 unsafe fn constant_aggregate(value: LLVMValueRef) -> bool {
     if LLVMIsConstant(value) == 0 || aggregate_fields(LLVMTypeOf(value)).is_none() {
         return false;
@@ -859,6 +859,7 @@ unsafe fn constant_aggregate(value: LLVMValueRef) -> bool {
             let element = LLVMGetOperand(value, i);
             LLVMIsUndef(element) != 0
                 || !LLVMIsAConstantInt(element).is_null()
+                || !LLVMIsAConstantFP(element).is_null()
                 || constant_aggregate(element)
         })
 }
@@ -1156,7 +1157,10 @@ unsafe fn check_function(
                 }
                 if !is_callee && LLVMValueIsBasicBlock(value) == 0 {
                     width(LLVMTypeOf(value))?;
-                    if LLVMIsConstant(value) != 0 && LLVMIsAConstantInt(value).is_null() {
+                    if LLVMIsConstant(value) != 0
+                        && LLVMIsAConstantInt(value).is_null()
+                        && LLVMIsAConstantFP(value).is_null()
+                    {
                         return Err(ValidationError("unsupported LLVM constant"));
                     }
                 }
@@ -1558,6 +1562,16 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 bits,
             ));
         }
+        if !LLVMIsAConstantFP(value).is_null() {
+            // A `double` literal is the pass-through `f64` leaf's bit
+            // pattern — the model compares it as the raw 64 bits.
+            let mut loses = 0;
+            return Ok(BV::from_u64(
+                self.ctx,
+                LLVMConstRealGetDouble(value, &mut loses).to_bits(),
+                bits,
+            ));
+        }
         values
             .get(&(value as usize))
             .cloned()
@@ -1634,6 +1648,13 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 self.constant_leaves(element, out);
             } else if LLVMIsUndef(element) != 0 || LLVMIsPoison(element) != 0 {
                 out.push(None);
+            } else if !LLVMIsAConstantFP(element).is_null() {
+                let mut loses = 0;
+                out.push(Some(BV::from_u64(
+                    self.ctx,
+                    LLVMConstRealGetDouble(element, &mut loses).to_bits(),
+                    64,
+                )));
             } else {
                 out.push(Some(BV::from_u64(
                     self.ctx,

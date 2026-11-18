@@ -75,6 +75,15 @@ body: {
     match r { Rate::Fixed(v) => v, _ => fallback }
 };
 
+// An empty variant lowers to a constant aggregate whose f64 slot is a
+// `double 0.0` leaf (BUG: constant aggregates must admit FP elements).
+atom none_rate() -> Rate
+requires: true;
+ensures: true;
+body: {
+    Rate::None
+};
+
 atom main() -> i64
 requires: true;
 ensures: result == 1;
