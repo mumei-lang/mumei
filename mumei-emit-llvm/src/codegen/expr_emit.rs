@@ -1312,7 +1312,26 @@ pub(crate) fn emit_array_literal<'a>(
     let elem_ty = elem_vals[0].get_type();
     let n = elements.len() as u32;
     let array_ty = elem_ty.array_type(n);
-    let data_ptr = llvm!(builder.build_alloca(array_ty, "arrlit_data"));
+    // Every `alloca` goes in the entry block — the canonical LLVM form
+    // (mem2reg only promotes entry allocas, and the bounded-memory
+    // validator's whitelist only admits them there). A literal in a
+    // branch or loop body would otherwise emit a non-entry alloca.
+    let data_ptr = {
+        let placement = builder
+            .get_insert_block()
+            .expect("array literal emission has an insertion block");
+        let entry = function
+            .get_first_basic_block()
+            .expect("a function being emitted has an entry block");
+        if let Some(first) = entry.get_first_instruction() {
+            builder.position_before(&first);
+        } else {
+            builder.position_at_end(entry);
+        }
+        let data_ptr = llvm!(builder.build_alloca(array_ty, "arrlit_data"));
+        builder.position_at_end(placement);
+        data_ptr
+    };
     for (i, elem) in elem_vals.iter().enumerate() {
         // Int elements in an f64 literal widen via sitofp — matching the
         // verifier's int→real coercion for array literals.
