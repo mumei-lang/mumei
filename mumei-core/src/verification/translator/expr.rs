@@ -1212,35 +1212,97 @@ fn fixed_width_int(type_name: &str) -> Option<(&'static str, i128, i128)> {
     })
 }
 
+/// The declared fixed-width integer type of a name bound inside an atom's
+/// contract vocabulary: `result` is the return value, every other name is
+/// a parameter. `None` for anything else.
+fn contract_name_int_type(
+    vc: &VCtx,
+    atom: &crate::parser::Atom,
+    name: &str,
+) -> Option<&'static str> {
+    if name == "result" {
+        let base = vc
+            .module_env
+            .resolve_base_type(atom.return_type.as_deref()?);
+        return fixed_width_int(&base).map(|(ty, _, _)| ty);
+    }
+    let param = atom.params.iter().find(|p| p.name == name)?;
+    let base = vc.module_env.resolve_base_type(param.type_name.as_deref()?);
+    fixed_width_int(&base).map(|(ty, _, _)| ty)
+}
+
+/// The declared struct type a body expression evaluates to (`s` in `s.f`,
+/// `s.point` in `s.point.x`), resolved through local and parameter
+/// declarations — including the callee's signature while a contract is
+/// instantiated. `None` for non-struct values.
+fn expr_struct_type(vc: &VCtx, expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Variable(name) => {
+            let instantiated = vc.contracts_in_instantiation.borrow().last().cloned();
+            let atom = instantiated
+                .as_deref()
+                .and_then(|n| vc.module_env.get_atom(n))
+                .or(vc.current_atom)?;
+            // While a callee contract is instantiated its parameter names
+            // bind before any same-named caller local (same rule as
+            // `fixed_width_int_type`'s Variable arm).
+            if instantiated.is_some() {
+                if let Some(base) = atom
+                    .params
+                    .iter()
+                    .find(|p| p.name == *name)
+                    .and_then(|p| p.type_name.as_deref())
+                    .map(|n| vc.module_env.resolve_base_type(n))
+                {
+                    if vc.module_env.get_struct(&base).is_some() {
+                        return Some(base);
+                    }
+                }
+            }
+            if let Some(ty) = vc.local_struct_types.borrow().get(name) {
+                return Some(ty.clone());
+            }
+            let param = atom.params.iter().find(|p| p.name == *name)?;
+            let base = vc.module_env.resolve_base_type(param.type_name.as_deref()?);
+            vc.module_env.get_struct(&base).map(|_| base)
+        }
+        Expr::FieldAccess(inner, field) => {
+            let inner_ty = expr_struct_type(vc, inner)?;
+            let sdef = vc.module_env.get_struct(&inner_ty)?;
+            let f = sdef.fields.iter().find(|f| f.name == *field)?;
+            let base = vc.module_env.resolve_base_type(f.type_name.trim());
+            vc.module_env.get_struct(&base).map(|_| base)
+        }
+        _ => None,
+    }
+}
+
 /// The declared fixed-width integer type of a body expression, taken from
 /// the parameter or local it reads. `None` when nothing declares one
 /// (literals, calls, lengths), which the overflow check treats as `i64`.
 pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static str> {
     match expr {
         Expr::Variable(name) => {
-            if let Some(ty) = vc.local_int_types.borrow().get(name) {
-                return Some(ty);
-            }
             // Inside an instantiated callee contract (`ensures`/`requires`
             // evaluated in `call_env`) names bind to the callee's signature,
             // not the caller's: `result` is the callee's return value and a
-            // clause variable is a callee parameter. The innermost
-            // instantiation names that atom.
-            let atom = vc
-                .contracts_in_instantiation
-                .borrow()
-                .last()
+            // clause variable is a callee parameter — even when the caller
+            // happens to hold a same-named local of a different type. The
+            // innermost instantiation names that atom.
+            let instantiated = vc.contracts_in_instantiation.borrow().last().cloned();
+            let atom = instantiated
+                .as_deref()
                 .and_then(|name| vc.module_env.get_atom(name))
                 .or(vc.current_atom)?;
-            if name == "result" {
-                let base = vc
-                    .module_env
-                    .resolve_base_type(atom.return_type.as_deref()?);
-                return fixed_width_int(&base).map(|(ty, _, _)| ty);
+            if instantiated.is_some() {
+                if let Some(ty) = contract_name_int_type(vc, atom, name) {
+                    return Some(ty);
+                }
             }
-            let param = atom.params.iter().find(|p| &p.name == name)?;
-            let base = vc.module_env.resolve_base_type(param.type_name.as_deref()?);
-            fixed_width_int(&base).map(|(ty, _, _)| ty)
+            if let Some(ty) = vc.local_int_types.borrow().get(name) {
+                return Some(ty);
+            }
+            contract_name_int_type(vc, atom, name)
         }
         Expr::Call(name, _) => {
             // A call's declared return type fixes its signedness: `f()`
@@ -1260,6 +1322,16 @@ pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static st
             else_branch,
             ..
         } => stmt_tail_int_type(vc, then_branch).or_else(|| stmt_tail_int_type(vc, else_branch)),
+        Expr::FieldAccess(inner, field) => {
+            // A struct field read keeps its declared signedness — without
+            // this `s.n < 5` on a `u64` field falls back to a signed
+            // comparison over the field's `BV(64)` value.
+            let ty = expr_struct_type(vc, inner)?;
+            let sdef = vc.module_env.get_struct(&ty)?;
+            let f = sdef.fields.iter().find(|f| f.name == *field)?;
+            let base = vc.module_env.resolve_base_type(f.type_name.trim());
+            fixed_width_int(&base).map(|(ty, _, _)| ty)
+        }
         _ => None,
     }
 }
