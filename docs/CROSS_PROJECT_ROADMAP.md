@@ -4656,7 +4656,22 @@ as declared instead of collapsing to `{local}`.
 [mumei-agent#915](https://github.com/mumei-lang/mumei-agent/pull/915)
 exposes the same wiring as the `verify_schedule` MCP tool.
 Together they close the scheduler's "default CLI/MCP integration"
-gap; audit-lane wiring of scheduled verification stays open.
+gap.
+
+### Audit-lane scheduled verification (mumei-agent #916)
+
+`audit --enable-scheduled-verification` dispatches each audited
+unit's generated `.mm` spec through `run_attempt_schedule` with
+host-declared `--schedule-request`/`--schedule-adapters`/
+`--schedule-argv-map`/`--schedule-policy` inputs (declared argv is
+a prefix; the unit's spec path is appended as the final argument).
+The `mumei.attempt-schedule/v1` descriptor lands on
+`AuditResult.scheduled_verification` as a dispatch record only —
+it never alters `verification_status` or `success` and stays out
+of the MCP `audit_schema` vocabulary. Every `--schedule-*` flag
+without the enable is a static error, `--output` may not overwrite
+any declared schedule input (realpath-compared like
+`verify-schedule`), and declared-path load failures are redacted.
 
 
 ## No-`.mm` front door and V1 order
