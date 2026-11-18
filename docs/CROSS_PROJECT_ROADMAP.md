@@ -4181,7 +4181,58 @@ via the empty-assignable `Expr::Block` gate. `check`,
 `recheck-source` and `recheck-llvm` cover the fragment.
 C10 stays partial — deeper assurance layers remain open.
 
+### C11 bounded attempt stderr observation (mumei-agent)
 
+[mumei-agent#887](https://github.com/mumei-lang/mumei-agent/pull/887)
+extends `AttemptRunner`'s stream capture to stderr: an attempt's
+stderr is now collected as a bounded observation next to stdout —
+same per-stream byte cap, same truncation flag, and the stream
+keeps its own tail so a verbose stdout cannot starve the error
+channel. The observation is descriptive plumbing only: no verdict,
+acceptance or probe decision reads stderr bytes yet, and
+interleaved ordering across streams stays unclaimed. Cancellation
+(SIGTERM → SIGKILL escalation), stdin feeding and the existing
+stdout bound are unchanged.
+
+### Wave 3 adapter per-statement read attribution ports (mumei-agent)
+
+The `statement_reads` port from the Go model lands on all three
+multi-language adapters — TypeScript
+([#888](https://github.com/mumei-lang/mumei-agent/pull/888)),
+Solidity
+([#889](https://github.com/mumei-lang/mumei-agent/pull/889)) and
+Rust
+([#890](https://github.com/mumei-lang/mumei-agent/pull/890)).
+`_statement` pushes one frame per in-flight statement on a read
+stack and every evaluated dependency set unions into all open
+frames, so implicit reads that never route through
+`expression()` — Solidity modifier bodies, `_;` continuations,
+Rust macro token trees, break/closure children — still attribute
+to the enclosing statement. Unsupported-expression failures keep
+the reads already accumulated on the exception (`partial_deps`)
+so a partial record survives a fail-closed abort, while the
+callee boundary blanks `partial_deps` before re-raising so a
+failed callee's dep indexes never leak into the caller's index
+space — per-function attribution is preserved. The field stays
+optional on manifests and descriptive only:
+`for_function`/`stale_dependents` semantics are unchanged.
+
+### C11 declared producer-signature envelope fold (mumei-agent)
+
+[mumei-agent#891](https://github.com/mumei-lang/mumei-agent/pull/891)
+adds the `signature-eval` route — a declared fold over
+`mumei.producer-signature/v1` envelopes (`subject_digest`,
+`algorithm`, `signature`, `producer_key_id`) that emits
+`mumei.signature-envelope-evaluation/v1`. The evaluation is
+representation-level only: `envelope_match` checks the closed
+five-field shape, 128-hex ed25519 signature and algorithm tag,
+and `subject_bound`/`key_pinned` report whether the caller's
+expected subject/key pins match. `checks_not_performed` keeps
+`signature_verification`, `key_authenticity`, `envelope_freshness`
+and `key_revocation` honest — no cryptographic verification, key
+distribution or freshness is claimed, matching the established
+declared-fold pattern of `evidence-acceptance-eval`. A malformed
+or foreign envelope reports as an observation, never a verdict.
 
 ## No-`.mm` front door and V1 order
 
