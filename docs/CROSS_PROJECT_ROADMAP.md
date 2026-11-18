@@ -4539,6 +4539,69 @@ instead of the produce-route summary. The flag requires
 `--summaries-manifest-map` (declared input); attempt failures stay
 advisory like every summary-lane record.
 
+### Audit summary plans (mumei-agent #912)
+
+[mumei-agent#912](https://github.com/mumei-lang/mumei-agent/pull/912)
+adds `audit --enable-summary-plan`: for each collected summary
+unit the directory audit runs `plan_summary_route` and records the
+`mumei.summaries-plan/v1` document in `summary_plans` — the same
+shape the `summaries-plan` CLI/MCP emits, kept advisory like every
+summary-lane record. This is the production analysis-route
+integration: audits now emit not just the produced manifest but
+the plan that would generate it, so downstream recovery can replay
+planner decisions.
+
+### Str leaf under composite TV (mumei #1120, #1118 Option B)
+
+[mumei#1120](https://github.com/mumei-lang/mumei/pull/1120) lands
+the `Str` leaf decided in #1118: `let s = "lit"` enters the
+composite fragment as an immutable byte sequence, inlined as a
+bounded `[u8; 64]` reusing the v11 alloc_stores mechanism —
+`mumei.llvm17-pure-i64-composite/v13`,
+`mumei.llvm17-pure-i64-string-composite/v1` and bundle `v16`.
+`s[i]` lowers to a `u64` read with a proven in-range index,
+`len(s)` to an `i64`; assignment, index writes and branch merges
+of `Str` values stay fail-closed outside the fragment. General
+`mumei verify` keeps treating strings symbolically, so the leaf is
+exercised through the composite codegen path.
+
+### Post-`default<O2>` TV snapshot profiles (mumei #1121, #885 Option B)
+
+[mumei#1121](https://github.com/mumei-lang/mumei/pull/1121) admits
+`opt -S -passes='default<O2>'` output as a translation-validation
+snapshot — the supplied IR is itself the post-pipeline artifact
+and opt is never re-run in-process; the `-opt-o2` profile suffix
+pins the pipeline as attestation. Four profiles
+(`-opt-o2/v1` variants of the pure-i64 SSA equivalence and its
+bounded-loops/bounded-memory combinations) plus
+`tv::validate_pure_i64_optimized` entry points. Under
+`optimized` the whitelist widens only for canonical O2 forms:
+`tail`/`musttail` and a fixed fn-attr whitelist (`noreturn`
+excluded, memory claims checked for consistency), `freeze` (with a
+producer-tagged definedness rescue cone), the
+`llvm.{umin,umax,smin,smax,abs}.i64` family and
+`*.with.overflow.i64` (encoded as `[wrapped, flag]` leaf slots
+with unsigned carry/borrow predicates). Poison-strengthening
+forms — param/ret `noundef`, `signext`, `nsw`/`nuw`/`exact`,
+`disjoint`, module asm — stay rejected in every profile.
+
+### Int-model `/` truncates toward zero (mumei #1122, #781)
+
+[mumei#1122](https://github.com/mumei-lang/mumei/pull/1122) fixes
+the verifier's int model dividing with Z3's Euclidean `div` while
+the emitted `sdiv` and `%` truncate: `-7 / 2` proved `-4` where
+sdiv produces `-3`, so `verify` could prove postconditions the
+emitted code violates. `truncated_div(ctx, l, r) =
+l >= 0 ? l div r : -((-l) div r)` routes `Op::Div`; `/` and `%`
+pair on one quotient so `(a / b) * b + a % b == a` holds for every
+nonzero divisor. `VERIFIER_POLICY_VERSION` bumps to 19,
+invalidating verdicts cached under Euclidean division, and
+`contract_host` emits truncating division in generated Python
+(`divmod` correction) and Rust (native `/`) wrappers so a verified
+clause checks the same quotient at runtime. Rounding matches
+`bvsdiv` on defined inputs; `i64::MIN / -1` remains BV-level UB
+but defined in the int model.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
