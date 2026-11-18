@@ -601,11 +601,17 @@ unsafe fn compare_function<'ctx>(
         raw,
         model.param_shapes.len(),
         model.result_shape,
+        Some(&model.result_leaf_doubles),
         loops,
         model.bounded_memory,
     )?;
     let mut encoder = IrEncoder::new(context, call_renames, loops);
-    let returns = encoder.encode(raw, &model.inputs, &model.param_shapes)?;
+    let returns = encoder.encode(
+        raw,
+        &model.inputs,
+        &model.param_shapes,
+        &model.param_leaf_doubles,
+    )?;
     let ir_definedness = encoder.definedness;
     // Division, remainder and shifts bind both sides only where the operands
     // are defined — the same safety domain `--bitvec-i64` verification
@@ -765,6 +771,13 @@ fn input_domain_label<'ctx>(
 }
 
 unsafe fn width(ty: LLVMTypeRef) -> Result<u32> {
+    // A `double` is the emitter's lowering of a pass-through `f64`
+    // leaf (`pure-i64-composite/v11`): one 64-bit slot carrying the
+    // IEEE-754 bit pattern, compared bit-for-bit — the profile admits
+    // no float instructions, so the leaf only ever moves.
+    if LLVMGetTypeKind(ty) == LLVMTypeKind::LLVMDoubleTypeKind {
+        return Ok(64);
+    }
     if LLVMGetTypeKind(ty) != LLVMTypeKind::LLVMIntegerTypeKind {
         return Err(ValidationError("non-integer LLVM value"));
     }
@@ -802,6 +815,9 @@ unsafe fn aggregate_fields(ty: LLVMTypeRef) -> Option<u32> {
             {
                 1
             }
+            // A `double` element is one pass-through `f64` leaf slot
+            // (`pure-i64-composite/v11`).
+            None if LLVMGetTypeKind(element) == LLVMTypeKind::LLVMDoubleTypeKind => 1,
             None => return None,
         })?;
         // Leaf-first flattening bounds the shape the same way the
@@ -833,10 +849,69 @@ unsafe fn aggregate_leaf_range(ty: LLVMTypeRef, index: u32) -> Option<(usize, us
     None
 }
 
+/// `true` for a `double` leaf (the pass-through `f64` lowering),
+/// `false` for an `i64` leaf, `None` for anything else — the type
+/// check `width` alone cannot make, which an i64/f64 ABI confusion
+/// needs (`pure-i64-composite/v11`).
+unsafe fn leaf_is_double(ty: LLVMTypeRef) -> Option<bool> {
+    match LLVMGetTypeKind(ty) {
+        LLVMTypeKind::LLVMDoubleTypeKind => Some(true),
+        LLVMTypeKind::LLVMIntegerTypeKind if LLVMGetIntTypeWidth(ty) == 64 => Some(false),
+        _ => None,
+    }
+}
+
+/// The per-leaf element kinds of an admitted aggregate, flattened
+/// leaf-first exactly like `aggregate_fields`: `true` for a `double`
+/// leaf, `false` for an `i64` leaf. `None` unless `ty` is an admitted
+/// aggregate. A leaf count alone cannot pin the ABI — `{i64, double}`
+/// and `{double, i64}` both count two leaves — so the source model
+/// pairs each leaf with its declared kind.
+unsafe fn aggregate_leaf_doubles(ty: LLVMTypeRef) -> Option<Vec<bool>> {
+    aggregate_fields(ty)?;
+    let mut kinds = Vec::new();
+    for i in 0..LLVMCountStructElementTypes(ty) {
+        let element = LLVMStructGetTypeAtIndex(ty, i);
+        if let Some(mut inner) = aggregate_leaf_doubles(element) {
+            kinds.append(&mut inner);
+        } else {
+            kinds.push(leaf_is_double(element)?);
+        }
+    }
+    Some(kinds)
+}
+
+/// `true` when `inst` carries fast-math flags. LLVM 17's C API has no
+/// FMF getter, but `LLVMPrintValueToString` renders them as tokens
+/// right after the opcode (`select nnan i1 %c, double %a, double %b`,
+/// `call fast double @f(...)`). The flag set is closed, and a flag can
+/// never appear as a bare operand token (values print with a `%`, `@`
+/// or literal prefix), so a known flag token in the instruction's
+/// leading tokens means flags are set — the source model treats an
+/// `f64` leaf as an opaque bit pattern, which any flag could
+/// reinterpret.
+unsafe fn has_fast_math(inst: LLVMValueRef) -> bool {
+    let text = LLVMPrintValueToString(inst);
+    if text.is_null() {
+        // An unprintable instruction is not provably flag-free.
+        return true;
+    }
+    let body = std::ffi::CStr::from_ptr(text).to_str().unwrap_or("");
+    let body = body.split_once(" = ").map(|(_, rest)| rest).unwrap_or(body);
+    let flagged = body.split_ascii_whitespace().take(8).any(|token| {
+        matches!(
+            token,
+            "fast" | "nnan" | "ninf" | "nsz" | "arcp" | "contract" | "afn" | "reassoc"
+        )
+    });
+    LLVMDisposeMessage(text);
+    flagged
+}
+
 /// A constant of an admitted aggregate type whose slots the encoder can
 /// read: whole `undef`/`poison` (every slot undefined),
-/// `zeroinitializer`, or a literal struct of integer and `undef`
-/// elements.
+/// `zeroinitializer`, or a literal struct of integer, `double` and
+/// `undef` elements.
 unsafe fn constant_aggregate(value: LLVMValueRef) -> bool {
     if LLVMIsConstant(value) == 0 || aggregate_fields(LLVMTypeOf(value)).is_none() {
         return false;
@@ -849,6 +924,7 @@ unsafe fn constant_aggregate(value: LLVMValueRef) -> bool {
             let element = LLVMGetOperand(value, i);
             LLVMIsUndef(element) != 0
                 || !LLVMIsAConstantInt(element).is_null()
+                || !LLVMIsAConstantFP(element).is_null()
                 || constant_aggregate(element)
         })
 }
@@ -895,6 +971,7 @@ unsafe fn check_module(module: LLVMModuleRef, bounded_memory: bool) -> Result<()
             member,
             LLVMCountParams(member) as usize,
             member_result_shape(member),
+            None,
             true,
             bounded_memory,
         )?;
@@ -1031,18 +1108,30 @@ unsafe fn check_function(
     function: LLVMValueRef,
     params: usize,
     result_shape: Option<usize>,
+    result_leaf_doubles: Option<&[bool]>,
     allow_cycles: bool,
     bounded_memory: bool,
 ) -> Result<()> {
     check_function_header(function, params)?;
     let ret = LLVMGetReturnType(LLVMGlobalGetValueType(function));
-    match result_shape {
-        None => {
-            if width(ret)? != 64 {
+    match (result_shape, result_leaf_doubles) {
+        (None, leaf_kinds) => {
+            // Scalar result: an `i64` (a `bool` carries 0/1) or a
+            // `double` for a pass-through `f64` result — the declared
+            // kind decides which, so an i64/f64 swap fails here.
+            let expected = leaf_kinds.and_then(|k| k.first()).copied();
+            if expected.is_some() && leaf_is_double(ret) != expected || width(ret)? != 64 {
                 return Err(ValidationError("unsupported LLVM signature"));
             }
         }
-        Some(slots) => {
+        (Some(slots), Some(leaf_kinds)) => {
+            if aggregate_leaf_doubles(ret).as_deref() != Some(leaf_kinds)
+                || aggregate_fields(ret) != Some(slots as u32)
+            {
+                return Err(ValidationError("unsupported LLVM signature"));
+            }
+        }
+        (Some(slots), None) => {
             if aggregate_fields(ret) != Some(slots as u32) {
                 return Err(ValidationError("unsupported LLVM signature"));
             }
@@ -1068,6 +1157,9 @@ unsafe fn check_function(
                 return Err(ValidationError("LLVM metadata unsupported"));
             }
             let opcode = LLVMGetInstructionOpcode(inst);
+            if has_fast_math(inst) {
+                return Err(ValidationError("fast-math flags unsupported"));
+            }
             for i in 0..LLVMGetNumOperands(inst) {
                 let value = LLVMGetOperand(inst, i as u32);
                 // A call's last operand is the callee itself — a
@@ -1146,7 +1238,10 @@ unsafe fn check_function(
                 }
                 if !is_callee && LLVMValueIsBasicBlock(value) == 0 {
                     width(LLVMTypeOf(value))?;
-                    if LLVMIsConstant(value) != 0 && LLVMIsAConstantInt(value).is_null() {
+                    if LLVMIsConstant(value) != 0
+                        && LLVMIsAConstantInt(value).is_null()
+                        && LLVMIsAConstantFP(value).is_null()
+                    {
                         return Err(ValidationError("unsupported LLVM constant"));
                     }
                 }
@@ -1260,11 +1355,27 @@ unsafe fn check_function(
                 // struct field whole).
                 LLVMOpcode::LLVMInsertValue => {
                     let inserted = LLVMTypeOf(LLVMGetOperand(inst, 1));
-                    let leaf = width(inserted).map(|w| w == 64).unwrap_or(false);
-                    if LLVMGetNumIndices(inst) != 1
-                        || aggregate_fields(LLVMTypeOf(inst)).is_none()
-                        || (!leaf && aggregate_fields(inserted).is_none())
-                    {
+                    let inst_ty = LLVMTypeOf(inst);
+                    let kinds = aggregate_leaf_doubles(inst_ty);
+                    let range = (LLVMGetNumIndices(inst) == 1)
+                        .then(|| aggregate_leaf_range(inst_ty, unsafe { *LLVMGetIndices(inst) }))
+                        .flatten();
+                    // The written slot's kind must match too: a
+                    // `double` leaf inserted into an i64 field (or the
+                    // reverse) would pass a count-only check with the
+                    // wrong ABI.
+                    let ok = match (kinds.as_deref(), range) {
+                        (Some(kinds), Some((offset, span))) if offset + span <= kinds.len() => {
+                            match leaf_is_double(inserted) {
+                                Some(d) => span == 1 && kinds[offset] == d,
+                                None => aggregate_leaf_doubles(inserted)
+                                    .map(|inner| inner == kinds[offset..offset + span])
+                                    .unwrap_or(false),
+                            }
+                        }
+                        _ => false,
+                    };
+                    if !ok {
                         return Err(ValidationError("unsupported LLVM aggregate value"));
                     }
                 }
@@ -1376,6 +1487,7 @@ unsafe fn check_native_module_multi(
                 member,
                 LLVMCountParams(member) as usize,
                 member_result_shape(member),
+                None,
                 true,
                 bounded_memory,
             )?;
@@ -1548,6 +1660,16 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 bits,
             ));
         }
+        if !LLVMIsAConstantFP(value).is_null() {
+            // A `double` literal is the pass-through `f64` leaf's bit
+            // pattern — the model compares it as the raw 64 bits.
+            let mut loses = 0;
+            return Ok(BV::from_u64(
+                self.ctx,
+                LLVMConstRealGetDouble(value, &mut loses).to_bits(),
+                bits,
+            ));
+        }
         values
             .get(&(value as usize))
             .cloned()
@@ -1624,6 +1746,13 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 self.constant_leaves(element, out);
             } else if LLVMIsUndef(element) != 0 || LLVMIsPoison(element) != 0 {
                 out.push(None);
+            } else if !LLVMIsAConstantFP(element).is_null() {
+                let mut loses = 0;
+                out.push(Some(BV::from_u64(
+                    self.ctx,
+                    LLVMConstRealGetDouble(element, &mut loses).to_bits(),
+                    64,
+                )));
             } else {
                 out.push(Some(BV::from_u64(
                     self.ctx,
@@ -1688,6 +1817,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
         function: LLVMValueRef,
         inputs: &[BV<'ctx>],
         shapes: &[Option<usize>],
+        leaf_doubles: &[Vec<bool>],
     ) -> Result<Vec<(Bool<'ctx>, BV<'ctx>)>> {
         let mut values = HashMap::new();
         let mut slots = inputs.iter();
@@ -1701,15 +1831,25 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     let input = slots
                         .next()
                         .ok_or(ValidationError("LLVM parameter shape mismatch"))?;
-                    if width(LLVMTypeOf(param))? != input.get_size() {
-                        return Err(ValidationError("LLVM parameter width mismatch"));
+                    // The leaf's LLVM type must carry the declared kind
+                    // too — an `i64` where the source declares `f64`
+                    // (or a `double` where it declares `i64`) would
+                    // pass a width-only check with the wrong ABI.
+                    if leaf_is_double(LLVMTypeOf(param))
+                        != leaf_doubles.get(i).and_then(|k| k.first()).copied()
+                        || width(LLVMTypeOf(param))? != input.get_size()
+                    {
+                        return Err(ValidationError("LLVM parameter type mismatch"));
                     }
                     values.insert(param as usize, input.clone());
                 }
                 // A struct parameter's aggregate formal must have exactly
                 // its field count; element i is the i-th flattened slot.
                 Some(fields) => {
-                    if aggregate_fields(LLVMTypeOf(param)) != Some(*fields as u32) {
+                    if aggregate_fields(LLVMTypeOf(param)) != Some(*fields as u32)
+                        || aggregate_leaf_doubles(LLVMTypeOf(param)).as_deref()
+                            != leaf_doubles.get(i).map(Vec::as_slice)
+                    {
                         return Err(ValidationError("LLVM parameter shape mismatch"));
                     }
                     let fields: Vec<Option<BV<'ctx>>> =

@@ -3241,3 +3241,123 @@ fn bounded_memory_out_of_bounds_pair_is_ub_not_equivalent() {
         Outcome::UndefinedBehavior
     );
 }
+
+const F64_NATIVE_MODULE: &str = "enum Rate { Fixed(f64), None }\n\
+     atom copy(a: f64) -> f64 requires: true; ensures: true; body: { a };\n\
+     atom none_rate() -> Rate requires: true; ensures: true; body: { Rate::None };\n\
+     atom main() -> i64 requires: true; ensures: result == 1; body: { 1 };";
+
+fn f64_module_ir(members: &str) -> String {
+    pin(&format!(
+        "{members}\n\
+         define i64 @__mumei_user_main() {{ ret i64 1 }}\n\
+         define i32 @main(i32 %argc, ptr %argv) {{\n\
+         %result = call i64 @__mumei_user_main()\n\
+         %exit_code = trunc i64 %result to i32\n\
+         ret i32 %exit_code\n}}"
+    ))
+}
+
+#[test]
+fn f64_leaf_signature_kinds_pin_the_abi() {
+    // The good module: `copy`'s f64 leaf is a `double` formal, and the
+    // empty `Rate::None` variant lowers to a constant aggregate whose
+    // f64 slot is a `double 0.0` leaf.
+    let good = f64_module_ir(
+        "define double @copy(double %a) { ret double %a }\n\
+         define {i64, double} @none_rate() { ret {i64, double} {i64 1, double 0.000000e+00} }",
+    );
+    let report = tv::validate_native_module(
+        F64_NATIVE_MODULE,
+        &good,
+        Options::default(),
+        RefinedAdmission::CompositeV12,
+    )
+    .unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+
+    // A 64-bit leaf of the wrong kind passes a width-only check but is
+    // the wrong ABI: i64 where `f64` is declared, and `double` where
+    // `i64` is declared.
+    let int_for_f64 = f64_module_ir(
+        "define i64 @copy(i64 %a) { ret i64 %a }\n\
+         define {i64, double} @none_rate() { ret {i64, double} {i64 1, double 0.000000e+00} }",
+    );
+    assert!(tv::validate_native_module(
+        F64_NATIVE_MODULE,
+        &int_for_f64,
+        Options::default(),
+        RefinedAdmission::CompositeV12,
+    )
+    .is_err());
+
+    let i64_module =
+        "atom copy(a: i64) -> i64 requires: true; ensures: result == a; body: { a };\n\
+         atom main() -> i64 requires: true; ensures: result == 1; body: { copy(1) };";
+    let double_for_i64 = f64_module_ir(
+        "define double @copy(double %a) { ret double %a }\n\
+         define {i64, double} @none_rate() { ret {i64, double} {i64 1, double 0.000000e+00} }",
+    );
+    assert!(
+        tv::validate_native_module(
+            i64_module,
+            &double_for_i64,
+            Options::default(),
+            RefinedAdmission::CompositeV12,
+        )
+        .is_err(),
+        "extra none_rate member aside, the i64-source copy must not bind a double formal"
+    );
+
+    // Same leaf count, wrong order: `{i64, f64}` source vs
+    // `{i64, double}`-swapped aggregate leaf kinds.
+    let swapped = f64_module_ir(
+        "define double @copy(double %a) { ret double %a }\n\
+         define {double, i64} @none_rate() { ret {double, i64} {double 0.000000e+00, i64 1} }",
+    );
+    assert!(tv::validate_native_module(
+        F64_NATIVE_MODULE,
+        &swapped,
+        Options::default(),
+        RefinedAdmission::CompositeV12,
+    )
+    .is_err());
+}
+
+#[test]
+fn fast_math_flags_on_admitted_instructions_are_rejected() {
+    // The pass-through `f64` leaf's bit pattern must stay opaque — an
+    // `nnan`/`fast` flag on a `select` or `call` would let the IR
+    // reinterpret it, and LLVM 17's C API offers no getter, so the
+    // instruction's printed form is scanned for the closed flag set.
+    let module = "atom pick(flag: bool, x: f64, y: f64) -> f64 requires: true; ensures: true; body: { if flag { x } else { y } };\n\
+         atom main() -> i64 requires: true; ensures: result == 1; body: { 1 };";
+    let pick = |flags: &str| {
+        f64_module_ir(&format!(
+            "define double @pick(i64 %f, double %x, double %y) {{\n\
+             %c = icmp ne i64 %f, 0\n\
+             %r = select {flags} i1 %c, double %x, double %y\n\
+             ret double %r\n}}"
+        ))
+    };
+    let report = tv::validate_native_module(
+        module,
+        &pick(""),
+        Options::default(),
+        RefinedAdmission::CompositeV12,
+    )
+    .unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    for flags in ["nnan", "fast", "nnan nsz"] {
+        assert!(
+            tv::validate_native_module(
+                module,
+                &pick(flags),
+                Options::default(),
+                RefinedAdmission::CompositeV12,
+            )
+            .is_err(),
+            "select {flags} must reject"
+        );
+    }
+}
