@@ -1201,14 +1201,24 @@ pub(crate) fn fixed_width_int_type(vc: &VCtx, expr: &Expr) -> Option<&'static st
             if let Some(ty) = vc.local_int_types.borrow().get(name) {
                 return Some(ty);
             }
+            // Inside an instantiated callee contract (`ensures`/`requires`
+            // evaluated in `call_env`) names bind to the callee's signature,
+            // not the caller's: `result` is the callee's return value and a
+            // clause variable is a callee parameter. The innermost
+            // instantiation names that atom.
+            let atom = vc
+                .contracts_in_instantiation
+                .borrow()
+                .last()
+                .and_then(|name| vc.module_env.get_atom(name))
+                .or(vc.current_atom)?;
             if name == "result" {
-                let atom = vc.current_atom?;
                 let base = vc
                     .module_env
                     .resolve_base_type(atom.return_type.as_deref()?);
                 return fixed_width_int(&base).map(|(ty, _, _)| ty);
             }
-            let param = vc.current_atom?.params.iter().find(|p| &p.name == name)?;
+            let param = atom.params.iter().find(|p| &p.name == name)?;
             let base = vc.module_env.resolve_base_type(param.type_name.as_deref()?);
             fixed_width_int(&base).map(|(ty, _, _)| ty)
         }
