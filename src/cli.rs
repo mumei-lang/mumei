@@ -501,6 +501,12 @@ pub(crate) enum EvidenceCommand {
         #[arg(long)]
         producer_key_id: String,
     },
+    /// Generate a fresh ed25519 producer keypair; writes the 64-char hex secret to a new file and prints only the public key
+    Keygen {
+        /// New regular file receiving the 64-char lowercase-hex ed25519 secret key; must not already exist
+        #[arg(long)]
+        secret_file: String,
+    },
     /// Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity
     Check {
         /// Regular JSON file (at most 65,536 bytes); not a native report envelope or proof certificate

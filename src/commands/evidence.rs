@@ -136,6 +136,10 @@ pub(crate) fn run(command: EvidenceCommand) {
             .map(|()| 0),
             "Producer signature failed",
         ),
+        EvidenceCommand::Keygen { secret_file } => (
+            keygen(Path::new(&secret_file), &mut output).map(|()| 0),
+            "Producer key generation failed",
+        ),
         EvidenceCommand::VerifySource {
             input,
             json,
@@ -359,6 +363,42 @@ no key or producer authenticity, freshness, revocation, claim truth or acceptanc
     output
         .write_all(&bytes)
         .map_err(|_| "cannot write producer signature envelope")
+}
+
+fn keygen(secret_file: &Path, output: &mut impl Write) -> Result<(), &'static str> {
+    let (mut secret_hex, public_hex) = producer_signature::generate_keypair();
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = options
+        .open(secret_file)
+        .map_err(|_| "cannot create producer secret key file")
+        .and_then(|mut file| {
+            file.write_all(secret_hex.as_bytes())
+                .map_err(|_| "cannot write producer secret key file")
+        });
+    zeroize::Zeroize::zeroize(&mut secret_hex);
+    result?;
+    #[cfg(unix)]
+    let permissions_note = "";
+    #[cfg(not(unix))]
+    let permissions_note =
+        "The file inherits the directory's access policy on this platform — restrict it to the owner yourself.\n";
+    output
+        .write_all(
+            format!(
+                "Producer keypair generated; the secret key was written to the declared file only and is never printed.\n\
+Public key: {public_hex}\n\
+{permissions_note}\
+Scope: pin the public key over a separately trusted channel; no key authenticity, rotation or revocation evaluated.\n"
+            )
+            .as_bytes(),
+        )
+        .map_err(|_| "cannot write producer public key")
 }
 
 fn verify_source(

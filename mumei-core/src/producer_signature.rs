@@ -13,6 +13,7 @@
 //! and signing grants no acceptance, grade or truth claim.
 
 use ed25519_dalek::{Signer, SigningKey};
+use rand_core::{OsRng, RngCore};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
@@ -68,6 +69,21 @@ pub fn decode_secret_key_bytes(mut bytes: Vec<u8>) -> Result<SigningKey, SignErr
         .and_then(decode_secret_key);
     bytes.zeroize();
     result
+}
+
+/// Generate a fresh ed25519 producer keypair from OS entropy and return the
+/// 64-char lowercase-hex encodings `(secret, public)` — the same shapes
+/// `--key-file` and `signature-verify`'s producer key take. The caller owns
+/// persisting the secret; it must never be printed.
+pub fn generate_keypair() -> (String, String) {
+    let mut secret = ed25519_dalek::SecretKey::default();
+    OsRng.fill_bytes(&mut secret);
+    let key = SigningKey::from_bytes(&secret);
+    secret.zeroize();
+    let mut bytes = key.to_bytes();
+    let secret_hex = hex(&bytes);
+    bytes.zeroize();
+    (secret_hex, hex(key.verifying_key().as_bytes()))
 }
 
 /// SHA-256 over the record's raw bytes — the consumer reproduces it with
