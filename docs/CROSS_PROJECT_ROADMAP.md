@@ -4776,7 +4776,8 @@ falls back to the plain `-attempt` route with
 `reuse_status: "stale_manifest"`.
 
 This wave also closed the implemented design memos — the landed code
-now serves as their decision record: mumei-agent #884 (carrier ABI:
+now serves as their decision record: the mumei-agent design-memo
+issues #884 (carrier ABI:
 u64/f64/Str all landed), #885 (C09 bounded stack memory + `opt-o2`
 profiles), #893 (audit summary integration, all stages), #894
 (record freshness), #897 (check recovery), #900
