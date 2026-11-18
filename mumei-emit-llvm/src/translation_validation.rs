@@ -735,14 +735,18 @@ unsafe fn compare_function<'ctx>(
         model.bounded_memory,
         optimized,
     )?;
-    let mut encoder = IrEncoder::new(context, call_renames, loops);
+    let mut encoder = IrEncoder::new(context, call_renames, loops, optimized);
     let returns = encoder.encode(
         raw,
         &model.inputs,
         &model.param_shapes,
         &model.param_leaf_doubles,
     )?;
-    let ir_definedness = encoder.definedness;
+    let ir_definedness: Vec<(Bool<'ctx>, Bool<'ctx>)> = encoder
+        .definedness
+        .into_iter()
+        .map(|(path, defined, _)| (path, defined))
+        .collect();
     // Division, remainder and shifts bind both sides only where the operands
     // are defined — the same safety domain `--bitvec-i64` verification
     // requires. Inputs outside the source domain are don't-care; inputs the
@@ -1046,8 +1050,11 @@ unsafe fn has_fast_math(inst: LLVMValueRef) -> bool {
 /// read: whole `undef`/`poison` (every slot undefined),
 /// `zeroinitializer`, or a literal struct of integer, `double` and
 /// `undef` elements.
-unsafe fn constant_aggregate(value: LLVMValueRef) -> bool {
-    if LLVMIsConstant(value) == 0 || aggregate_fields(LLVMTypeOf(value)).is_none() {
+unsafe fn constant_aggregate(value: LLVMValueRef, optimized: bool) -> bool {
+    let ty = LLVMTypeOf(value);
+    if LLVMIsConstant(value) == 0
+        || (aggregate_fields(ty).is_none() && !(optimized && overflow_pair(ty)))
+    {
         return false;
     }
     if LLVMIsUndef(value) != 0 || !LLVMIsAConstantAggregateZero(value).is_null() {
@@ -1059,7 +1066,7 @@ unsafe fn constant_aggregate(value: LLVMValueRef) -> bool {
             LLVMIsUndef(element) != 0
                 || !LLVMIsAConstantInt(element).is_null()
                 || !LLVMIsAConstantFP(element).is_null()
-                || constant_aggregate(element)
+                || constant_aggregate(element, optimized)
         })
 }
 
@@ -1194,7 +1201,10 @@ unsafe fn check_call(call: LLVMValueRef, optimized: bool) -> Result<()> {
     }
     let signature = LLVMGetCalledFunctionType(call);
     let ret = LLVMGetReturnType(signature);
-    if optimized && LLVMIsDeclaration(callee) != 0 {
+    if optimized
+        && LLVMIsDeclaration(callee) != 0
+        && decl_name.as_deref() != Some(CANCEL_POLL_INTRINSIC)
+    {
         return check_intrinsic_signature(signature, decl_name.as_deref());
     }
     if (aggregate_fields(ret).is_none() && width(ret)? != 64)
@@ -1281,16 +1291,123 @@ unsafe fn check_function_header(
         return Err(ValidationError("unsupported LLVM signature"));
     }
     for index in (0..=params as u32).chain(std::iter::once(u32::MAX)) {
-        // Function-scope attributes (`local_unnamed_addr`,
-        // `mustprogress`, `memory(none)`) describe facts the pipeline
-        // proved — the comparison reads instructions, not attributes.
+        let count = LLVMGetAttributeCountAtIndex(function, index);
+        // Function-scope attributes describe facts the pipeline proved.
         // Parameter/return attributes (`noundef`, `signext`) constrain
         // the input domain and stay rejected in every profile.
-        if LLVMGetAttributeCountAtIndex(function, index) != 0 && !(optimized && index == u32::MAX) {
+        if count != 0 && !(optimized && index == u32::MAX) {
             return Err(ValidationError("LLVM attributes unsupported"));
+        }
+        if optimized && index == u32::MAX && count != 0 {
+            check_opt_function_attributes(function, count)?;
         }
     }
     Ok(())
+}
+
+/// Function-scope attribute kinds `default<O2>` emits on a canonical
+/// snapshot, resolved once by name: descriptive codegen facts the
+/// comparison ignores. Semantic contracts — `noreturn` (UB on a
+/// returning body), `returns_twice`, `null_pointer_is_valid`, legacy
+/// memory kinds, `speculatable`, sanitizer/fp knobs and every string
+/// attribute — stay rejected because the comparison cannot read what
+/// they claim.
+const OPT_FUNCTION_ATTRS: &[&str] = &[
+    "alwaysinline",
+    "cold",
+    "convergent",
+    "hot",
+    "inlinehint",
+    "minsize",
+    "mustprogress",
+    "nofree",
+    "noinline",
+    "norecurse",
+    "nosync",
+    "nounwind",
+    "optforfuzzing",
+    "optnone",
+    "optsize",
+    "willreturn",
+];
+
+unsafe fn check_opt_function_attributes(function: LLVMValueRef, count: u32) -> Result<()> {
+    let allowed: std::collections::HashSet<u32> = OPT_FUNCTION_ATTRS
+        .iter()
+        .map(|name| LLVMGetEnumAttributeKindForName(name.as_ptr() as *const i8, name.len()))
+        .filter(|kind| *kind != 0)
+        .collect();
+    let memory_kind = LLVMGetEnumAttributeKindForName(b"memory".as_ptr() as *const i8, 6);
+    let mut attrs = vec![std::ptr::null_mut(); count as usize];
+    LLVMGetAttributesAtIndex(function, u32::MAX, attrs.as_mut_ptr());
+    for attr in attrs {
+        // Only enum attributes are read: a string attribute's claim is
+        // opaque to the whitelist, so it stays out.
+        if LLVMIsEnumAttribute(attr) == 0 {
+            return Err(ValidationError("LLVM attributes unsupported"));
+        }
+        let kind = LLVMGetEnumAttributeKind(attr);
+        if allowed.contains(&kind) {
+            continue;
+        }
+        // `memory(...)` claims an upper bound on observable effects.
+        // Every load/store the IR profile admits goes through a
+        // function-local `alloca` — externally unobservable — so a
+        // claim is only inconsistent when a call's callee could
+        // observably touch more memory than the claim allows.
+        if kind == memory_kind
+            && memory_claim_consistent(function, LLVMGetEnumAttributeValue(attr))?
+        {
+            continue;
+        }
+        return Err(ValidationError("LLVM attributes unsupported"));
+    }
+    Ok(())
+}
+
+/// A `memory` claim is consistent when the function cannot observably
+/// touch more memory than `claimed`: admitted loads/stores go through
+/// local `alloca`s (unobservable in LLVM's effect lattice), so the only
+/// observable access is a call — the callee's own `memory` claim must
+/// be a subset of `claimed`. A defined callee with no `memory`
+/// attribute conservatively counts as full access.
+unsafe fn memory_claim_consistent(function: LLVMValueRef, claimed: u64) -> Result<bool> {
+    let mut block = LLVMGetFirstBasicBlock(function);
+    while !block.is_null() {
+        let mut inst = LLVMGetFirstInstruction(block);
+        while !inst.is_null() {
+            if LLVMGetInstructionOpcode(inst) == LLVMOpcode::LLVMCall {
+                let callee = LLVMGetCalledValue(inst);
+                if LLVMGetValueKind(callee) != llvm_sys::LLVMValueKind::LLVMFunctionValueKind {
+                    return Ok(false);
+                }
+                if LLVMIsDeclaration(callee) == 0 && callee != function {
+                    let callee_claim = callee_memory_claim(callee).unwrap_or(u64::MAX);
+                    if callee_claim & !claimed != 0 {
+                        return Ok(false);
+                    }
+                }
+            }
+            inst = LLVMGetNextInstruction(inst);
+        }
+        block = LLVMGetNextBasicBlock(block);
+    }
+    Ok(true)
+}
+
+/// The callee's claimed whole-function memory bound: the `memory` enum
+/// attribute's encoded effects value, `0` meaning `memory(none)`.
+unsafe fn callee_memory_claim(callee: LLVMValueRef) -> Option<u64> {
+    let count = LLVMGetAttributeCountAtIndex(callee, u32::MAX);
+    let memory_kind = LLVMGetEnumAttributeKindForName(b"memory".as_ptr() as *const i8, 6);
+    let mut attrs = vec![std::ptr::null_mut(); count as usize];
+    LLVMGetAttributesAtIndex(callee, u32::MAX, attrs.as_mut_ptr());
+    for attr in attrs {
+        if LLVMIsEnumAttribute(attr) != 0 && LLVMGetEnumAttributeKind(attr) == memory_kind {
+            return Some(LLVMGetEnumAttributeValue(attr));
+        }
+    }
+    None
 }
 
 /// A member's own result shape for the module pre-screen: an admitted
@@ -1427,7 +1544,7 @@ unsafe fn check_function(
                                     | LLVMOpcode::LLVMCall
                                     | LLVMOpcode::LLVMPHI
                             ))
-                        || constant_aggregate(value);
+                        || constant_aggregate(value, optimized);
                     if !use_ok || !source_ok {
                         return Err(ValidationError("unsupported LLVM aggregate value"));
                     }
@@ -1840,10 +1957,18 @@ struct IrEncoder<'ctx, 'renames> {
     ctx: &'ctx Context,
     call_renames: &'renames BTreeMap<String, String>,
     states: usize,
-    /// `(path condition, defined)` obligations for `sdiv`/`srem`/`shl`/`ashr`:
-    /// the instruction's operands must satisfy the condition wherever the
-    /// path executes it, or the IR produces poison there.
-    definedness: Vec<(Bool<'ctx>, Bool<'ctx>)>,
+    /// `(path condition, defined, producer)` obligations for
+    /// `sdiv`/`srem`/`shl`/`ashr`/`abs` and pointer bounds: the
+    /// instruction's operands must satisfy the condition wherever the
+    /// path executes it, or the IR produces poison there. `producer` is
+    /// the instruction the poisoned value came from (0 for sink-level
+    /// obligations like `unreachable` and store bounds): a `freeze`
+    /// that rescues every use of a producer drops its obligations.
+    definedness: Vec<(Bool<'ctx>, Bool<'ctx>, usize)>,
+    /// Whether the opt-o2 whitelist admits the canonical intrinsic and
+    /// `{i64, i1}` constant shapes — gates `constant_aggregate`'s
+    /// overflow-pair arm.
+    optimized: bool,
     /// Bounded-cycle mode (set only when the source model contains an
     /// admitted `while`): `depths` counts each block's visits along the
     /// current path; a revisit past `LOOP_BOUND` drops the path without
@@ -1882,12 +2007,14 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
         ctx: &'ctx Context,
         call_renames: &'renames BTreeMap<String, String>,
         loops: bool,
+        optimized: bool,
     ) -> Self {
         Self {
             ctx,
             call_renames,
             states: 0,
             definedness: Vec::new(),
+            optimized,
             loops,
             depths: HashMap::new(),
             aggregates: HashMap::new(),
@@ -1949,6 +2076,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
         self.definedness.push((
             guard.clone(),
             Bool::and(self.ctx, &[&offset.bvsge(&zero), &offset.bvslt(&limit)]),
+            0,
         ));
         Ok(())
     }
@@ -1966,7 +2094,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
     /// `undef` element) or the slots recorded for a formal,
     /// `insertvalue` or call result.
     unsafe fn aggregate(&self, value: LLVMValueRef) -> Result<Vec<Option<BV<'ctx>>>> {
-        if constant_aggregate(value) {
+        if constant_aggregate(value, self.optimized) {
             let mut leaves = Vec::new();
             self.constant_leaves(value, &mut leaves);
             return Ok(leaves);
@@ -2021,6 +2149,59 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 )));
             }
         }
+    }
+
+    /// `freeze` pins a poison operand to an arbitrary defined value.
+    /// A producer obligation is rescued exactly when every use of that
+    /// producer stays inside the operand's instruction cone or is the
+    /// freeze itself — a use escaping unfrozen keeps its obligation.
+    /// Rescued entries still shape the value: on an input where the
+    /// obligation fails the result is arbitrary, so it encodes as a
+    /// fresh unconstrained leaf instead of the operand's wrapped value.
+    unsafe fn rescue_frozen(
+        &mut self,
+        inst: LLVMValueRef,
+        operand: LLVMValueRef,
+        a: BV<'ctx>,
+    ) -> BV<'ctx> {
+        let mut cone = std::collections::HashSet::new();
+        let mut stack = vec![operand];
+        while let Some(value) = stack.pop() {
+            if LLVMIsAInstruction(value).is_null() || !cone.insert(value as usize) {
+                continue;
+            }
+            for i in 0..LLVMGetNumOperands(value) as u32 {
+                stack.push(LLVMGetOperand(value, i));
+            }
+        }
+        let rescued = |producer: usize| -> bool {
+            if !cone.contains(&producer) {
+                return false;
+            }
+            let mut use_ = LLVMGetFirstUse(producer as LLVMValueRef);
+            while !use_.is_null() {
+                let user = LLVMGetUser(use_);
+                if user != inst && !cone.contains(&(user as usize)) {
+                    return false;
+                }
+                use_ = LLVMGetNextUse(use_);
+            }
+            true
+        };
+        let mut violated: Vec<Bool<'ctx>> = Vec::new();
+        self.definedness.retain(|(path, defined, producer)| {
+            if *producer != 0 && rescued(*producer) {
+                violated.push(Bool::and(self.ctx, &[path, &defined.not()]));
+                false
+            } else {
+                true
+            }
+        });
+        if violated.is_empty() {
+            return a;
+        }
+        let poisoned = Bool::or(self.ctx, &violated.iter().collect::<Vec<_>>());
+        poisoned.ite(&BV::fresh_const(self.ctx, "frz", 64), &a)
     }
 
     /// A call's source callee name and flattened arguments: a struct
@@ -2091,11 +2272,17 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 "llvm.sadd.with.overflow.i64" => (a.bvadd(&b), a.bvadd_no_overflow(&b, true).not()),
                 "llvm.ssub.with.overflow.i64" => (a.bvsub(&b), a.bvsub_no_overflow(&b).not()),
                 "llvm.smul.with.overflow.i64" => (a.bvmul(&b), a.bvmul_no_overflow(&b, true).not()),
-                "llvm.uadd.with.overflow.i64" => (a.bvadd(&b), a.bvadd_no_underflow(&b).not()),
+                // Unsigned overflow is the carry/borrow direction the
+                // signed `*_no_underflow` predicates do not describe.
+                "llvm.uadd.with.overflow.i64" => {
+                    (a.bvadd(&b), a.bvadd_no_overflow(&b, false).not())
+                }
                 "llvm.usub.with.overflow.i64" => {
                     (a.bvsub(&b), a.bvsub_no_underflow(&b, false).not())
                 }
-                "llvm.umul.with.overflow.i64" => (a.bvmul(&b), a.bvmul_no_underflow(&b).not()),
+                "llvm.umul.with.overflow.i64" => {
+                    (a.bvmul(&b), a.bvmul_no_overflow(&b, false).not())
+                }
                 _ => unreachable!("table member checked above"),
             };
             let one = BV::from_u64(self.ctx, 1, 64);
@@ -2124,7 +2311,8 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     LLVMIsAConstantInt(flag).is_null() || LLVMConstIntGetZExtValue(flag) != 0;
                 if poison {
                     let min = BV::from_i64(self.ctx, i64::MIN, 64);
-                    self.definedness.push((guard.clone(), a._eq(&min).not()));
+                    self.definedness
+                        .push((guard.clone(), a._eq(&min).not(), inst as usize));
                 }
                 a.bvslt(&BV::from_i64(self.ctx, 0, 64)).ite(&a.bvneg(), &a)
             }
@@ -2369,7 +2557,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 // definedness obligation reports it as UndefinedBehavior
                 // and keeps it out of the value comparison.
                 self.definedness
-                    .push((guard.clone(), Bool::from_bool(self.ctx, false)));
+                    .push((guard.clone(), Bool::from_bool(self.ctx, false), 0));
                 return Ok(());
             }
             if op == LLVMOpcode::LLVMBr {
@@ -2555,9 +2743,10 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                         a.zero_ext(63)
                     }
                     // `freeze` pins a poison operand to an arbitrary
-                    // value — the operand itself is the sound encoding
-                    // without poison.
-                    LLVMOpcode::LLVMFreeze => a,
+                    // defined value — rescuing the operand's poison
+                    // obligations only when every poisoned use flows
+                    // here.
+                    LLVMOpcode::LLVMFreeze => self.rescue_frozen(inst, LLVMGetOperand(inst, 0), a),
                     LLVMOpcode::LLVMTrunc => {
                         if a.get_size() != 64 || width(LLVMTypeOf(inst))? != 1 {
                             return Err(ValidationError("unsupported LLVM cast"));
@@ -2583,7 +2772,11 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                                 // divisor — there is no unsigned analogue
                                 // of the `i64::MIN / -1` case.
                                 let zero = BV::from_i64(self.ctx, 0, 64);
-                                self.definedness.push((guard.clone(), b._eq(&zero).not()));
+                                self.definedness.push((
+                                    guard.clone(),
+                                    b._eq(&zero).not(),
+                                    inst as usize,
+                                ));
                                 if op == LLVMOpcode::LLVMUDiv {
                                     a.bvudiv(&b)
                                 } else {
@@ -2605,7 +2798,8 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                                             .not(),
                                     ],
                                 );
-                                self.definedness.push((guard.clone(), defined));
+                                self.definedness
+                                    .push((guard.clone(), defined, inst as usize));
                                 if op == LLVMOpcode::LLVMSDiv {
                                     a.bvsdiv(&b)
                                 } else {
@@ -2616,7 +2810,11 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                                 // `shl`/`ashr`/`lshr` are poison for amounts >= 64
                                 // (unsigned comparison covers negatives).
                                 let max = BV::from_i64(self.ctx, 64, 64);
-                                self.definedness.push((guard.clone(), b.bvult(&max)));
+                                self.definedness.push((
+                                    guard.clone(),
+                                    b.bvult(&max),
+                                    inst as usize,
+                                ));
                                 if op == LLVMOpcode::LLVMShl {
                                     a.bvshl(&b)
                                 } else if op == LLVMOpcode::LLVMAShr {
