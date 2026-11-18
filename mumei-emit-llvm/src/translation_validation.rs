@@ -892,14 +892,19 @@ unsafe fn aggregate_leaf_doubles(ty: LLVMTypeRef) -> Option<Vec<bool>> {
 /// reinterpret.
 unsafe fn has_fast_math(inst: LLVMValueRef) -> bool {
     let text = LLVMPrintValueToString(inst);
-    let text = std::ffi::CStr::from_ptr(text).to_str().unwrap_or("");
-    let body = text.split_once(" = ").map(|(_, rest)| rest).unwrap_or(text);
-    body.split_ascii_whitespace().take(8).any(|token| {
+    if text.is_null() {
+        return false;
+    }
+    let body = std::ffi::CStr::from_ptr(text).to_str().unwrap_or("");
+    let body = body.split_once(" = ").map(|(_, rest)| rest).unwrap_or(body);
+    let flagged = body.split_ascii_whitespace().take(8).any(|token| {
         matches!(
             token,
             "fast" | "nnan" | "ninf" | "nsz" | "arcp" | "contract" | "afn" | "reassoc"
         )
-    })
+    });
+    LLVMDisposeMessage(text);
+    flagged
 }
 
 /// A constant of an admitted aggregate type whose slots the encoder can
