@@ -6641,7 +6641,18 @@ fn source_expr<'ctx>(
                             Vec::new(),
                         ),
                         (Pattern::Variable(name), None) => {
-                            (None, vec![(name.clone(), I(target.clone().unwrap()))])
+                            // The arm binding keeps the scrutinee's scalar
+                            // wrapper — a `u64` scrutinee binds an `Unsigned`
+                            // (`pure-i64-composite/v10`), not a signed leaf.
+                            let bound = match &target_value {
+                                I(_) | U(_) | N(_) => target_value.clone(),
+                                _ => {
+                                    return Err(SemanticContractError::Unsupported(
+                                        "match scrutinee not scalar",
+                                    ));
+                                }
+                            };
+                            (None, vec![(name.clone(), bound)])
                         }
                         (Pattern::Wildcard, _) => (None, Vec::new()),
                         (
