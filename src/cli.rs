@@ -442,6 +442,9 @@ pub(crate) enum EvidenceCommand {
         /// Solver resource units (1..=1000000); no saved/ambient policy is loaded
         #[arg(long, default_value_t = mumei_core::source_evidence::MAX_RESOURCE_LIMIT.to_string(), allow_hyphen_values = true)]
         solver_resource_limit: String,
+        /// Declared RFC 3339 timestamp the producer stamped; must equal the saved record's produced_at
+        #[arg(long)]
+        produced_at: Option<String>,
     },
     /// Evaluate representation plus fresh same-profile source consistency into a bounded acceptance descriptor
     AcceptSource {
@@ -459,6 +462,9 @@ pub(crate) enum EvidenceCommand {
         /// Solver resource units (1..=1000000); no saved/ambient policy is loaded
         #[arg(long, default_value_t = mumei_core::source_evidence::MAX_RESOURCE_LIMIT.to_string(), allow_hyphen_values = true)]
         solver_resource_limit: String,
+        /// Declared RFC 3339 timestamp the producer stamped; must equal the saved record's produced_at
+        #[arg(long)]
+        produced_at: Option<String>,
     },
     /// Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance
     VerifySource {
@@ -473,6 +479,9 @@ pub(crate) enum EvidenceCommand {
         /// Solver resource units (1..=1000000); zero/unlimited is rejected
         #[arg(long, default_value_t = mumei_core::source_evidence::MAX_RESOURCE_LIMIT.to_string(), allow_hyphen_values = true)]
         solver_resource_limit: String,
+        /// Declared RFC 3339 timestamp stamped on the emitted record; never read from the system clock
+        #[arg(long)]
+        produced_at: Option<String>,
     },
     /// Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity
     Check {

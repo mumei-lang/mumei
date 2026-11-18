@@ -351,3 +351,38 @@ def test_evidence_gate_runs_when_only_schema_or_fixtures_change() -> None:
     runs = "\n".join(step.get("run", "") for step in steps)
     assert "jsonschema" in runs
     assert "tests/test_verification_evidence_schema.py" in runs
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        "2026-11-18T00:00:00Z",
+        "2026-11-18t00:00:00.9999999z",
+        "2026-11-18T23:59:60+09:30",
+    ],
+)
+def test_produced_at_admits_strict_rfc3339(stamp: str) -> None:
+    record = evidence()
+    record["produced_at"] = stamp
+    VALIDATOR.validate(record)
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        "2026-99-99T99:99:99+99:99",  # digit-shaped but out of range
+        "2026-11-18",                # date only
+        "2026-11-18T00:00:00",       # no offset
+        "2026-11-18T00:00:00+0900",  # unseparated offset
+        "2026-11-18T24:00:00Z",      # hour 24
+        "2026-11-18T00:00:00+09:60", # offset minute 60
+        None,                        # explicit null is not "absent"
+        0,                           # non-string
+        "",                          # empty
+    ],
+)
+def test_produced_at_rejects_non_rfc3339(stamp: object) -> None:
+    record = evidence()
+    record["produced_at"] = stamp
+    with pytest.raises(jsonschema.ValidationError):
+        VALIDATOR.validate(record)

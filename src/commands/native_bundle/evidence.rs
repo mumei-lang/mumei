@@ -166,6 +166,9 @@ fn make_evidence(
             bridge_lemma_hash: None,
         },
         artifact_paths: strings(artifact_paths),
+        // The native consumer emits no declared timestamp yet — the
+        // `--produced-at` opt-in currently covers `verify-source`.
+        produced_at: None,
     }
 }
 

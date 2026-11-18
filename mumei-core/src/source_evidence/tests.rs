@@ -24,9 +24,10 @@ fn saved_source_recheck_matches_decoded_fields_not_json_formatting() {
     let custom = Options {
         timeout_ms: 9000,
         resource_limit: 900_000,
+        produced_at: None,
     };
     assert_eq!(
-        recheck(CLAMP, &saved(CLAMP, custom), custom).unwrap(),
+        recheck(CLAMP, &saved(CLAMP, custom.clone()), custom.clone()).unwrap(),
         RecheckOutcome::Consistent
     );
     assert_eq!(
@@ -473,7 +474,8 @@ fn invalid_or_unlimited_budgets_are_rejected_before_querying() {
                 CLAMP,
                 Options {
                     timeout_ms,
-                    resource_limit
+                    resource_limit,
+                    produced_at: None,
                 }
             ),
             Err(SourceEvidenceError::InvalidBudget)
@@ -543,5 +545,37 @@ fn acceptance_reports_the_same_evaluation_in_the_acceptance_vocabulary() {
     assert_eq!(
         accept(CLAMP, &bytes, Options::default()),
         accept(CLAMP, &bytes, Options::default())
+    );
+}
+
+#[test]
+fn declared_produced_at_stamps_the_record_and_recheck_must_match() {
+    let stamped = Options {
+        produced_at: Some("2026-11-18T00:00:00Z".into()),
+        ..Options::default()
+    };
+    let record = established(CLAMP, stamped.clone());
+    assert_eq!(record.produced_at.as_deref(), Some("2026-11-18T00:00:00Z"));
+    let bytes = serde_json::to_vec(&record).unwrap();
+    assert_eq!(
+        recheck(CLAMP, &bytes, stamped).unwrap(),
+        RecheckOutcome::Consistent
+    );
+    // the timestamp is part of the record: recheck without the same
+    // declared value reports the records disagree
+    assert_eq!(
+        recheck(CLAMP, &bytes, Options::default()),
+        Err(SourceEvidenceError::InconsistentSavedEvidence)
+    );
+    // a malformed declared timestamp fails the record's own gate
+    assert_eq!(
+        verify(
+            CLAMP,
+            Options {
+                produced_at: Some("not-a-time".into()),
+                ..Options::default()
+            }
+        ),
+        Err(SourceEvidenceError::InvalidRepresentation)
     );
 }

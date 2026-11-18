@@ -15,10 +15,13 @@ pub const MAX_TIMEOUT_MS: u32 = 10_000;
 pub const MAX_RESOURCE_LIMIT: u32 = 1_000_000;
 pub const SOURCE_LABEL: &str = "source.mm";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Options {
     pub timeout_ms: u32,
     pub resource_limit: u32,
+    /// Declared production timestamp stamped on the emitted record
+    /// (`None` keeps the record byte-identical — emission is opt-in).
+    pub produced_at: Option<String>,
 }
 
 impl Default for Options {
@@ -26,6 +29,7 @@ impl Default for Options {
         Self {
             timeout_ms: MAX_TIMEOUT_MS,
             resource_limit: MAX_RESOURCE_LIMIT,
+            produced_at: None,
         }
     }
 }
@@ -234,6 +238,7 @@ fn record(contract: &SemanticContract, options: Options) -> Result<Evidence, Sou
             translator_version: None, bridge_lemma_hash: None,
         },
         artifact_paths: Vec::new(),
+        produced_at: options.produced_at.clone(),
     };
     evidence
         .validate()

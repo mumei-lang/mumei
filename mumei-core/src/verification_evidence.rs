@@ -32,6 +32,15 @@ pub struct Evidence {
     pub exclusions: Vec<String>,
     pub provenance: Provenance,
     pub artifact_paths: Vec<String>,
+    /// Declared production timestamp — present only when the producer
+    /// was given one (`evidence verify-source --produced-at`); the
+    /// record stays byte-identical when absent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "required_when_present"
+    )]
+    pub produced_at: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -139,6 +148,74 @@ impl fmt::Debug for Evidence {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Evidence").finish_non_exhaustive()
     }
+}
+
+/// Strict RFC 3339 timestamp: `YYYY-MM-DDThh:mm:ss[.f+](Z|±hh:mm)` with
+/// ASCII digits only — the same closed shape the consumer-side
+/// `freshness-eval` fold admits. Value ranges are checked at field
+/// granularity (month 01-12, day 01-31, hour 00-23, minute 00-59,
+/// second 00-60 for leap seconds); day-per-month is not modeled.
+pub fn is_rfc3339_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let digit = |index: usize| bytes.get(index).is_some_and(|byte| byte.is_ascii_digit());
+    let pair = |index: usize| digit(index) && digit(index + 1);
+    let number =
+        |index: usize| (bytes[index] - b'0') as u32 * 10 + (bytes[index + 1] - b'0') as u32;
+    if bytes.len() < 20
+        || !(0..4).all(digit)
+        || bytes[4] != b'-'
+        || !pair(5)
+        || bytes[7] != b'-'
+        || !pair(8)
+        || !matches!(bytes[10], b'T' | b't')
+        || !pair(11)
+        || bytes[13] != b':'
+        || !pair(14)
+        || bytes[16] != b':'
+        || !pair(17)
+    {
+        return false;
+    }
+    let (month, day, hour, minute, second) =
+        (number(5), number(8), number(11), number(14), number(17));
+    if month == 0 || month > 12 || day == 0 || day > 31 || hour > 23 || minute > 59 || second > 60 {
+        return false;
+    }
+    let mut index = 19;
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let start = index;
+        while bytes.get(index).is_some_and(|byte| byte.is_ascii_digit()) {
+            index += 1;
+        }
+        if index == start {
+            return false;
+        }
+    }
+    match bytes.get(index) {
+        Some(b'Z') | Some(b'z') => index + 1 == bytes.len(),
+        Some(b'+') | Some(b'-') => {
+            index + 6 == bytes.len()
+                && pair(index + 1)
+                && bytes[index + 3] == b':'
+                && pair(index + 4)
+                && number(index + 1) <= 23
+                && number(index + 4) <= 59
+        }
+        _ => false,
+    }
+}
+
+/// An explicit `null` is not "absent": the standalone schema admits
+/// `produced_at` only as a string, so a null must fail shape here too
+/// instead of decoding to `None`.
+fn required_when_present<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .ok_or_else(|| serde::de::Error::custom("produced_at must be a string"))
+        .map(Some)
 }
 
 /// Records are JSON objects only: serde's derived struct shape would also
@@ -415,6 +492,13 @@ impl Evidence {
                 == self.scope.bounds.is_empty()
         {
             return Err(InconsistentScope);
+        }
+        if self
+            .produced_at
+            .as_ref()
+            .is_some_and(|value| !is_rfc3339_timestamp(value))
+        {
+            return Err(InvalidValue);
         }
         if !results.contains(&self.result.as_str())
             && !["unknown", "unsupported", "not_checked", "inconsistent"]

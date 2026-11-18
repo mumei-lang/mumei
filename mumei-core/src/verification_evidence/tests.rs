@@ -522,3 +522,82 @@ fn consistency_check_compares_identity_pins_never_outcomes() {
     other["correspondence"]["status"] = json!("unverified");
     assert!(consistency_check(&[first, decode_one(&other)]).consistent);
 }
+
+#[test]
+fn produced_at_is_optional_and_strictly_rfc3339() {
+    let native: Value = serde_json::from_str(NATIVE).unwrap();
+    let base = native["evidence"].as_array().unwrap()[0].clone();
+
+    // absent: decodes and serializes with no key — byte-identical shape
+    let evidence = decode(&serde_json::to_vec(&base).unwrap()).unwrap();
+    assert_eq!(evidence.produced_at, None);
+    assert!(serde_json::to_value(&evidence)
+        .unwrap()
+        .get("produced_at")
+        .is_none());
+
+    for stamp in [
+        "2026-11-18T00:00:00Z",
+        "2026-11-18T00:00:00.9999999Z",
+        "2026-11-18t00:00:00z",
+        "2026-11-18T00:00:00+09:00",
+        "2026-02-31T23:59:60-00:30", // ranges, not day-per-month
+    ] {
+        let mut value = base.clone();
+        value["produced_at"] = json!(stamp);
+        let evidence = decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(evidence.produced_at.as_deref(), Some(stamp));
+        evidence.validate().unwrap();
+    }
+
+    for stamp in [
+        "not-a-time",
+        "2026-11-18",                // date only
+        "2026-11-18T00:00Z",         // missing seconds
+        "2026-11-18T00:00:00",       // no offset
+        "2026-11-18T00:00:00+0900",  // offset colon missing
+        "2026-11-18T00:00:00.١Z",    // non-ASCII digit
+        "2026-13-18T00:00:00Z",      // month 13
+        "2026-11-00T00:00:00Z",      // day 0
+        "2026-11-18T24:00:00Z",      // hour 24
+        "2026-11-18T00:00:61Z",      // second 61
+        "2026-11-18T00:00:00+24:00", // offset hour 24
+        "2026-11-18T00:00:00+09:60", // offset minute 60
+        "2026-11-18T00:00:00.Z",     // empty fraction
+        "",                          // empty
+    ] {
+        let mut value = base.clone();
+        value["produced_at"] = json!(stamp);
+        assert_eq!(
+            decode(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
+            RepresentationError::InvalidValue,
+            "stamp: {stamp}"
+        );
+    }
+
+    // The schema's "type": "string" admits no null: an explicit null is
+    // a shape error, never a silent absent field.
+    let mut value = base.clone();
+    value["produced_at"] = Value::Null;
+    assert_eq!(
+        decode(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
+        RepresentationError::InvalidShape
+    );
+
+    // Non-string scalars are shape errors too.
+    let mut value = base.clone();
+    value["produced_at"] = json!(0);
+    assert_eq!(
+        decode(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
+        RepresentationError::InvalidShape
+    );
+
+    // The schema pattern carries the same field ranges — the
+    // digit-shaped out-of-range stamp the reviewer tried fails both.
+    let mut value = base.clone();
+    value["produced_at"] = json!("2026-99-99T99:99:99+99:99");
+    assert_eq!(
+        decode(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
+        RepresentationError::InvalidValue
+    );
+}
