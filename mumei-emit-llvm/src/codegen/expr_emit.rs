@@ -2305,8 +2305,11 @@ pub(crate) fn compile_hir_expr<'a>(
 
             // Lambda bindings are branch-scoped like the verifier's
             // `local_lambdas`: restore the pre-branch markers before the
-            // else side, then keep only markers both sides agree on.
-            let pre_marks = lambda_marks(var_types);
+            // else side, then keep only markers both sides agree on. The
+            // same scoping applies to every `var_types` entry — a type a
+            // `then` assignment records must not retype the value `else`
+            // still holds from before the branch.
+            let pre_var_types = var_types.clone();
 
             llvm!(builder.build_conditional_branch(cond_bool, then_block, else_block));
 
@@ -2325,8 +2328,8 @@ pub(crate) fn compile_hir_expr<'a>(
             let then_vars = variables.clone();
             let then_arrays = array_ptrs.clone();
             let then_marks = lambda_marks(var_types);
-            var_types.retain(|_, v| !v.starts_with(LAMBDA_MARK));
-            var_types.extend(pre_marks.iter().map(|(k, v)| (k.clone(), v.clone())));
+            let then_var_types = var_types.clone();
+            *var_types = pre_var_types.clone();
             let then_end_block = builder.get_insert_block().unwrap();
             llvm!(builder.build_unconditional_branch(merge_block));
 
@@ -2347,7 +2350,28 @@ pub(crate) fn compile_hir_expr<'a>(
             let else_vars = variables.clone();
             let else_arrays = array_ptrs.clone();
             let else_marks = lambda_marks(var_types);
+            let else_var_types = var_types.clone();
             merge_lambda_marks(var_types, &then_marks, &else_marks);
+            // Non-lambda type tracking merges like the values below: both
+            // branches must record the same type for a name, or the name's
+            // declared pre-branch type stands. An entry only one branch
+            // produced is dropped unless the name existed before the
+            // branch.
+            let mut merged_types: HashMap<String, String> = pre_var_types
+                .iter()
+                .filter(|(_, v)| !v.starts_with(LAMBDA_MARK))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            merged_types.retain(|name, _| {
+                then_var_types.contains_key(name) || else_var_types.contains_key(name)
+            });
+            for (name, ty) in &then_var_types {
+                if !ty.starts_with(LAMBDA_MARK) && else_var_types.get(name) == Some(ty) {
+                    merged_types.insert(name.clone(), ty.clone());
+                }
+            }
+            var_types.retain(|_, v| v.starts_with(LAMBDA_MARK));
+            var_types.extend(merged_types);
             let else_end_block = builder.get_insert_block().unwrap();
             llvm!(builder.build_unconditional_branch(merge_block));
 
