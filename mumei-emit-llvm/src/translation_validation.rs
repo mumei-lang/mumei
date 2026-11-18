@@ -1160,13 +1160,34 @@ unsafe fn check_function(
                 // `gep i64, ptr, i64 %i` or the literal-initialisation
                 // `gep [N x i64], ptr, i64 0, i64 %i`. Every index is an
                 // i64 (the operand gate above) and a two-index form's
-                // outer index must be constant 0.
+                // outer index must be constant 0. The source element
+                // type must match the form too: `i64` for the dynamic
+                // access, an `i64` array for the initialisation — a
+                // `gep i8` would index bytes, not cells, and break the
+                // encoder's element-count offsets.
                 LLVMOpcode::LLVMGetElementPtr => {
                     let operands = LLVMGetNumOperands(inst) as u32;
                     let outer_zero = operands != 3
                         || (!LLVMIsAConstantInt(LLVMGetOperand(inst, 1)).is_null()
                             && LLVMConstIntGetZExtValue(LLVMGetOperand(inst, 1)) == 0);
-                    if !bounded_memory || !(2..=3).contains(&operands) || !outer_zero {
+                    let source = LLVMGetGEPSourceElementType(inst);
+                    let cell_indexed = match LLVMGetTypeKind(source) {
+                        LLVMTypeKind::LLVMArrayTypeKind => {
+                            operands == 3
+                                && LLVMGetTypeKind(LLVMGetElementType(source))
+                                    == LLVMTypeKind::LLVMIntegerTypeKind
+                                && LLVMGetIntTypeWidth(LLVMGetElementType(source)) == 64
+                        }
+                        LLVMTypeKind::LLVMIntegerTypeKind => {
+                            operands == 2 && LLVMGetIntTypeWidth(source) == 64
+                        }
+                        _ => false,
+                    };
+                    if !bounded_memory
+                        || !(2..=3).contains(&operands)
+                        || !outer_zero
+                        || !cell_indexed
+                    {
                         return Err(ValidationError("unsupported LLVM getelementptr"));
                     }
                 }

@@ -3149,3 +3149,20 @@ fn bounded_memory_alias_write_reaches_every_alias() {
         "aliased array write must validate\n{ir}"
     );
 }
+
+#[test]
+fn bounded_memory_byte_indexed_gep_fails_closed() {
+    // A `gep i8` indexes bytes, not cells — the source element type
+    // gate must fail closed on it.
+    let items = parse_module_checked(BOUNDED_ARRAY_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let byte = ir.replacen("getelementptr i64, ptr", "getelementptr i8, ptr", 1);
+    assert_ne!(byte, ir, "probe did not apply:\n{ir}");
+    assert!(tv::validate_native_module(
+        BOUNDED_ARRAY_SOURCE,
+        &byte,
+        Options::default(),
+        RefinedAdmission::CompositeV11,
+    )
+    .is_err());
+}
