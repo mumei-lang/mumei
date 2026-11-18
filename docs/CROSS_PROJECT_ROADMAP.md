@@ -4505,6 +4505,40 @@ schema-shaped document that fails its binding reports
 `recovery_enforcement`, `evidence_authenticity` and the remaining
 host-duty checks stay in `checks_not_performed`; C11 stays partial.
 
+### Attempt-route acceptance envelopes and audit attempt wiring (mumei-agent #908/#909/#910)
+
+[mumei-agent#908](https://github.com/mumei-lang/mumei-agent/pull/908)
+adds `evidence_check` and `acceptance` to the
+`go-summaries-attempt-report/v1` envelope: the emitted report names
+`candidate`, the `GoSummarySet.from_dict` representation check's
+outcome, `acceptance.accepted`, `discharged_checks` and
+`checks_not_performed`. The discharge set is byte/run-level only —
+`SUMMARY_ESTABLISHED` = file_identity + freshness +
+producer_authenticity — because parsing a manifest never verifies
+its declared dependency claims; claim_truth and
+semantic_correspondence stay unperformed until a strict accept
+re-derives them. `recovery-eval` follows the same shape: records
+that declare no check list fold over every known check, but
+undeclared records now recover only through bound documents —
+record-agnostic performers (signature-verification,
+freshness-evaluation) are skipped for them since nothing scopes
+such a document to the record.
+
+[mumei-agent#909](https://github.com/mumei-lang/mumei-agent/pull/909)
+ports the same envelope to the ts/sol/rust sibling attempt routes,
+each binding through `normalized.stdout.sha256` like Go.
+
+[mumei-agent#910](https://github.com/mumei-lang/mumei-agent/pull/910)
+wires the attempt lifecycle into directory audits: `audit
+--enable-summary-attempts` runs each discovered summary unit
+through `<route>-attempt` (with `--summary-attempt-timeout <MS>`,
+default 120000) and records the acceptance envelope per unit —
+mode=attempt, selected sequence index, check outcome, accepted —
+instead of the produce-route summary. The flag requires
+`--enable-summaries` and is incompatible with
+`--summaries-manifest-map` (declared input); attempt failures stay
+advisory like every summary-lane record.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
