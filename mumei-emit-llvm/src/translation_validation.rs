@@ -745,7 +745,7 @@ unsafe fn compare_function<'ctx>(
     let ir_definedness: Vec<(Bool<'ctx>, Bool<'ctx>)> = encoder
         .definedness
         .into_iter()
-        .map(|(path, defined, _)| (path, defined))
+        .map(|(path, defined, ..)| (path, defined))
         .collect();
     // Division, remainder and shifts bind both sides only where the operands
     // are defined — the same safety domain `--bitvec-i64` verification
@@ -1980,14 +1980,17 @@ struct IrEncoder<'ctx, 'renames> {
     ctx: &'ctx Context,
     call_renames: &'renames BTreeMap<String, String>,
     states: usize,
-    /// `(path condition, defined, producer)` obligations for
-    /// `sdiv`/`srem`/`shl`/`ashr`/`abs` and pointer bounds: the
+    /// `(path condition, defined, producer, rescuable)` obligations
+    /// for `sdiv`/`srem`/`shl`/`ashr`/`abs` and pointer bounds: the
     /// instruction's operands must satisfy the condition wherever the
-    /// path executes it, or the IR produces poison there. `producer` is
-    /// the instruction the poisoned value came from (0 for sink-level
-    /// obligations like `unreachable` and store bounds): a `freeze`
-    /// that rescues every use of a producer drops its obligations.
-    definedness: Vec<(Bool<'ctx>, Bool<'ctx>, usize)>,
+    /// path executes it, or the IR misbehaves there. `producer` is the
+    /// instruction the value came from (0 for sink-level obligations
+    /// like `unreachable` and store bounds): a `freeze` that covers
+    /// every use of a producer drops its `rescuable` obligations —
+    /// only poison obligations (`shl`/`ashr`/`lshr`, `abs` on
+    /// `i64::MIN`) are rescuable; a failed division or an
+    /// out-of-bounds access is immediate UB no `freeze` can undo.
+    definedness: Vec<(Bool<'ctx>, Bool<'ctx>, usize, bool)>,
     /// Whether the opt-o2 whitelist admits the canonical intrinsic and
     /// `{i64, i1}` constant shapes — gates `constant_aggregate`'s
     /// overflow-pair arm.
@@ -2100,6 +2103,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             guard.clone(),
             Bool::and(self.ctx, &[&offset.bvsge(&zero), &offset.bvslt(&limit)]),
             0,
+            false,
         ));
         Ok(())
     }
@@ -2212,14 +2216,15 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             true
         };
         let mut violated: Vec<Bool<'ctx>> = Vec::new();
-        self.definedness.retain(|(path, defined, producer)| {
-            if *producer != 0 && rescued(*producer) {
-                violated.push(Bool::and(self.ctx, &[path, &defined.not()]));
-                false
-            } else {
-                true
-            }
-        });
+        self.definedness
+            .retain(|(path, defined, producer, rescuable)| {
+                if *rescuable && *producer != 0 && rescued(*producer) {
+                    violated.push(Bool::and(self.ctx, &[path, &defined.not()]));
+                    false
+                } else {
+                    true
+                }
+            });
         if violated.is_empty() {
             return a;
         }
@@ -2335,7 +2340,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 if poison {
                     let min = BV::from_i64(self.ctx, i64::MIN, 64);
                     self.definedness
-                        .push((guard.clone(), a._eq(&min).not(), inst as usize));
+                        .push((guard.clone(), a._eq(&min).not(), inst as usize, true));
                 }
                 a.bvslt(&BV::from_i64(self.ctx, 0, 64)).ite(&a.bvneg(), &a)
             }
@@ -2580,7 +2585,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 // definedness obligation reports it as UndefinedBehavior
                 // and keeps it out of the value comparison.
                 self.definedness
-                    .push((guard.clone(), Bool::from_bool(self.ctx, false), 0));
+                    .push((guard.clone(), Bool::from_bool(self.ctx, false), 0, false));
                 return Ok(());
             }
             if op == LLVMOpcode::LLVMBr {
@@ -2791,14 +2796,15 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                             LLVMOpcode::LLVMSub => a.bvsub(&b),
                             LLVMOpcode::LLVMMul => a.bvmul(&b),
                             LLVMOpcode::LLVMUDiv | LLVMOpcode::LLVMURem => {
-                                // `udiv`/`urem` are poison only for a zero
-                                // divisor — there is no unsigned analogue
-                                // of the `i64::MIN / -1` case.
+                                // `udiv`/`urem` by a zero divisor is
+                                // immediate UB, not poison — `freeze`
+                                // cannot rescue it.
                                 let zero = BV::from_i64(self.ctx, 0, 64);
                                 self.definedness.push((
                                     guard.clone(),
                                     b._eq(&zero).not(),
                                     inst as usize,
+                                    false,
                                 ));
                                 if op == LLVMOpcode::LLVMUDiv {
                                     a.bvudiv(&b)
@@ -2807,9 +2813,11 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                                 }
                             }
                             LLVMOpcode::LLVMSDiv | LLVMOpcode::LLVMSRem => {
-                                // `sdiv`/`srem` are poison for a zero
-                                // divisor and for i64::MIN / -1 — the same
-                                // partial domain the source side records.
+                                // `sdiv`/`srem` are immediate UB for a
+                                // zero divisor and for i64::MIN / -1 —
+                                // `freeze` cannot rescue the obligation; the
+                                // source side records the same partial
+                                // domain.
                                 let zero = BV::from_i64(self.ctx, 0, 64);
                                 let min = BV::from_i64(self.ctx, i64::MIN, 64);
                                 let minus_one = BV::from_i64(self.ctx, -1, 64);
@@ -2821,8 +2829,12 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                                             .not(),
                                     ],
                                 );
-                                self.definedness
-                                    .push((guard.clone(), defined, inst as usize));
+                                self.definedness.push((
+                                    guard.clone(),
+                                    defined,
+                                    inst as usize,
+                                    false,
+                                ));
                                 if op == LLVMOpcode::LLVMSDiv {
                                     a.bvsdiv(&b)
                                 } else {
@@ -2837,6 +2849,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                                     guard.clone(),
                                     b.bvult(&max),
                                     inst as usize,
+                                    true,
                                 ));
                                 if op == LLVMOpcode::LLVMShl {
                                     a.bvshl(&b)

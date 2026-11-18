@@ -3717,3 +3717,120 @@ fn opt_o2_reads_constant_overflow_pairs() {
     // A non-opt profile still refuses the pair constant.
     assert!(tv::validate_pure_i64(&source("x: i64", "0"), &ir, Options::default()).is_err());
 }
+
+#[test]
+fn opt_o2_division_is_immediate_ub_not_freeze_rescuable() {
+    // `sdiv`/`udiv` by zero is immediate UB in LLVM, not poison: a
+    // `freeze` of the quotient must not rescue the obligation the way
+    // it rescues a poisoned `abs`. Tagging division obligations as
+    // rescuable would hide the UB and report a mere value difference.
+    // The quotient is frozen then cancelled to a constant, so both
+    // sides return `0` on every defined input and only the zero-divisor
+    // obligation separates them: tagging division as rescuable would
+    // let the `freeze` mask it and report a vacuous equivalence.
+    for op in ["sdiv", "udiv", "srem", "urem"] {
+        let ir = pin(&format!(
+            "define i64 @f(i64 %x, i64 %y) {{\n\
+             %q = {op} i64 %x, %y\n\
+             %f = freeze i64 %q\n\
+             %r = sub i64 %f, %f\n\
+             ret i64 %r\n\
+             }}"
+        ));
+        assert_eq!(
+            tv::validate_pure_i64_optimized(
+                &source("x: i64, y: i64", "0"),
+                &ir,
+                Options::default()
+            )
+            .unwrap()
+            .outcome,
+            Outcome::UndefinedBehavior,
+            "{op} by a possibly-zero operand is immediate UB"
+        );
+    }
+    // A definite divisor still validates normally: `sdiv x, 1` is the
+    // identity and its `freeze` encodes as the operand.
+    let identity = pin("define i64 @f(i64 %x, i64 %y) {\n\
+         %q = sdiv i64 %x, 1\n\
+         %f = freeze i64 %q\n\
+         ret i64 %f\n\
+         }");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(
+            &source("x: i64, y: i64", "x"),
+            &identity,
+            Options::default()
+        )
+        .unwrap()
+        .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn opt_o2_freeze_rescue_requires_every_operand_use_frozen() {
+    // Poison escapes a rescue when the operand is also consumed by a
+    // non-freeze instruction: `%v` feeds both the `freeze` and an
+    // ordinary `add`. The derived use is dead here, but the checker
+    // fails closed — an unfrozen use of a poisoned operand is not
+    // provably harmless, so the obligation stays and i64::MIN reports
+    // UndefinedBehavior instead of being hidden by the rescue.
+    let src = source("x: i64", "if x < 0 { 0 - x } else { x }");
+    let leaky = pin("define i64 @f(i64 %x) {\n\
+         %v = call i64 @llvm.abs.i64(i64 %x, i1 true)\n\
+         %a = add i64 %v, 1\n\
+         %f = freeze i64 %v\n\
+         ret i64 %f\n\
+         }\n\
+         declare i64 @llvm.abs.i64(i64, i1)");
+    assert_eq!(
+        tv::validate_pure_i64_optimized(&src, &leaky, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::UndefinedBehavior
+    );
+}
+
+#[test]
+fn opt_o2_freeze_of_an_i1_flag_uses_the_operand_width() {
+    // The rescue's fresh value must carry the operand's bit width: a
+    // 64-bit constant against an `i1` operand sorts-mismatches Z3's
+    // `ite` and fails the whole check instead of validating.
+    let ir = pin("define i64 @f(i64 %x, i64 %y) {\n\
+         %p = call {i64, i1} @llvm.uadd.with.overflow.i64(i64 %x, i64 1)\n\
+         %flag = extractvalue {i64, i1} %p, 1\n\
+         %f = freeze i1 %flag\n\
+         %r = select i1 %f, i64 0, i64 1\n\
+         ret i64 %r\n\
+         }\n\
+         declare {i64, i1} @llvm.uadd.with.overflow.i64(i64, i64)");
+    // x + 1 wraps unsigned exactly when x is -1 (u64::MAX).
+    let src = "atom f(x: i64, y: i64) -> i64 requires: true; ensures: true; body: { if x == 0 - 1 { 0 } else { 1 } };";
+    assert_eq!(
+        tv::validate_pure_i64_optimized(src, &ir, Options::default())
+            .unwrap()
+            .outcome,
+        Outcome::EquivalentWithinProfile
+    );
+}
+
+#[test]
+fn opt_o2_module_absent_callee_memory_claim_is_unrestricted() {
+    // A callee without a `memory` attribute may touch anything, so
+    // its implicit claim is `memory(readwrite)`, not a superset of
+    // every encodable bit. A caller claiming `readwrite` is exactly
+    // consistent with that and must validate — the previous `u64::MAX`
+    // fallback made every real caller under-claim.
+    let ir = pin("define i64 @g(i64 %x) { ret i64 %x }\n\
+         define i64 @f(i64 %y) #0 {\n\
+           %a = call i64 @g(i64 %y)\n\
+           %b = add i64 %y, 1\n\
+           %c = call i64 @g(i64 %b)\n\
+           %d = add i64 %a, %c\n\
+           ret i64 %d\n\
+         }\n\
+         attributes #0 = { memory(readwrite) }");
+    let report = tv::validate_pure_i64_module_optimized(CALLING, &ir, Options::default()).unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+}
