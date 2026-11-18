@@ -2191,6 +2191,21 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
         operand: LLVMValueRef,
         a: BV<'ctx>,
     ) -> BV<'ctx> {
+        // The freeze only pins the operand's own chain: a use of the
+        // operand outside a `freeze` sees the poison unmasked, so
+        // nothing is rescued unless every use of the operand is itself
+        // a freeze. A non-instruction user (a constant expression) is
+        // equally unfrozen.
+        let mut use_ = LLVMGetFirstUse(operand);
+        while !use_.is_null() {
+            let user = LLVMGetUser(use_);
+            if LLVMIsAInstruction(user).is_null()
+                || LLVMGetInstructionOpcode(user) != LLVMOpcode::LLVMFreeze
+            {
+                return a;
+            }
+            use_ = LLVMGetNextUse(use_);
+        }
         let mut cone = std::collections::HashSet::new();
         let mut stack = vec![operand];
         while let Some(value) = stack.pop() {
