@@ -4,43 +4,43 @@
       "name": "ext_clamp",
       "status": "trusted",
       "content_hash": "2de8ef0ff52930e7956f92d5f6d00b041d62fe81b0ed977c7c76266d0cccf335",
-      "proof_hash": "aab1f142c7ebe9b423abbe7f7181aa66363a836957fc71444794bf491435e7a3"
+      "proof_hash": "ea1aee55a08bc68ec99e11e688859159d2d4d676fd781965b7f21514ca6e940a"
     },
     {
       "name": "leaf",
       "status": "verified",
       "content_hash": "4a5f04b565b52cc4e485e8b2661ecf2969ca8cb66fb4716644168f337d9aed10",
-      "proof_hash": "7db9ee0d7f30710f3a3c6e65d1e7346b7aaaf2e013669a1fdfc8b63b2baa9813"
+      "proof_hash": "ff2a57e92e77d503f456c0247d6d4bfbe184074eb4d6d6bd5c6dc425c6cc44cf"
     },
     {
       "name": "mid",
       "status": "verified",
       "content_hash": "708c8a06b242cc28e7a1f073e777d790be75707298bdcda3b350c8996b8cb397",
-      "proof_hash": "778f428f1e0ee3e5320bddf44fe33f175c64ad47b5e0baafe8654bff2c16c632"
+      "proof_hash": "18522a00a6a4fdd42a7464d8a63fdcf9025794ce03b31a09ebda907b0b43189a"
     },
     {
       "name": "top",
       "status": "verified",
       "content_hash": "b0da5bb9293305444220f29ce011a69df8a45b8074564201a7d198fd8a078eb5",
-      "proof_hash": "b8b3283f458bf796230db96117d3b4706c3927caec7f8179d5e13780e0f5e133"
+      "proof_hash": "898297851d82a4f8a6b69678214ed46c41b5c41f8c48a291c325124315f7a7e1"
     },
     {
       "name": "span",
       "status": "verified",
       "content_hash": "639c5fa4a212c3f1841ae677d7ad929c8223ef4500afecc59aa60e991a8d55e8",
-      "proof_hash": "f59b0f12e24ac9107dd1893cfa27c51becd39040389f579c924e3dc84e1fabdb"
+      "proof_hash": "50d3312a2ce9c22d220b0a948f13ae2e8dcb369c44cd0fa0b702cfd39e273ed3"
     },
     {
       "name": "price",
       "status": "verified",
       "content_hash": "9bf6f4b2cfc40d83a98cf4e68d646058afa930af28e234ae3ccb136053106620",
-      "proof_hash": "3c1a09760879c73ec50b361cef035da6abbd2bf9e7a72072d6517d5282538870"
+      "proof_hash": "d4007908c7bb6546d378f5f2d075945c2a68391ce9335e784a268798256862b9"
     },
     {
       "name": "safe",
       "status": "verified",
       "content_hash": "1e90c946c98e5aea81f9a3722233babb379dc35f86de9ef21c92b1882adf4ddf",
-      "proof_hash": "32e2b7556d9890de43af35ffc555b403661293259877ed885a659f0f6e0b00ef"
+      "proof_hash": "dcef3c902c0c8220b532791bf5ac483271642e45837ed41d4e9adc95c39095d4"
     }
   ]
 }

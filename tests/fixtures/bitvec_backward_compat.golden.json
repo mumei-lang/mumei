@@ -1,58 +1,58 @@
 {
   "atoms": [
     {
-      "name": "bc_add",
-      "status": "verified",
-      "z3_check_result": "unsat",
+      "binder_lean_types": [
+        "Int",
+        "Int",
+        "Int"
+      ],
       "content_hash": "92917b208e7e6bf515a042bf9c02df1d844c438c872418b678e86d856856b55b",
-      "proof_hash": "f282b11164275a688c5bcad5283e79dba7682584eec87fe1533be3b14c9eb5a3",
       "logic_fragment_tag": "linear_arithmetic",
       "logic_fragment_tags": [],
       "lowering_rules": [
         "contract_lowering",
         "type_system_mapping"
       ],
-      "binder_lean_types": [
-        "Int",
-        "Int",
-        "Int"
-      ]
+      "name": "bc_add",
+      "proof_hash": "ea02b6816cfc7a84871bfdfa1fcf04392d5c7622b18cf4bae857a650a12da7e8",
+      "status": "verified",
+      "z3_check_result": "unsat"
     },
     {
-      "name": "bc_double",
-      "status": "verified",
-      "z3_check_result": "unsat",
+      "binder_lean_types": [
+        "Int",
+        "Int"
+      ],
       "content_hash": "eb61d06032be1a136cc83cfc31ab58867798cb8d78c783c596d02f766d6b6338",
-      "proof_hash": "622e955b59cfe5a48a2d0c79531bb296411c90e7367898f86325a10c84550b70",
       "logic_fragment_tag": "linear_arithmetic",
       "logic_fragment_tags": [],
       "lowering_rules": [
         "contract_lowering",
         "type_system_mapping"
       ],
-      "binder_lean_types": [
-        "Int",
-        "Int"
-      ]
+      "name": "bc_double",
+      "proof_hash": "1db535c360260c0f22061e13ff38de6e50801c175e5e871c5de157aa99c2cb1b",
+      "status": "verified",
+      "z3_check_result": "unsat"
     },
     {
-      "name": "bc_clamp",
-      "status": "verified",
-      "z3_check_result": "unsat",
+      "binder_lean_types": [
+        "Int",
+        "Int",
+        "Int",
+        "Int"
+      ],
       "content_hash": "fc9319795a229cd32a95bc9b8606ebd20189a5abcfdf15bad29d7dc29b1a3262",
-      "proof_hash": "dfd6023c9f9ccab4380da5726a6f4e00adfc23fa8b1401353e30dc8e741e6dbb",
       "logic_fragment_tag": "linear_arithmetic",
       "logic_fragment_tags": [],
       "lowering_rules": [
         "contract_lowering",
         "type_system_mapping"
       ],
-      "binder_lean_types": [
-        "Int",
-        "Int",
-        "Int",
-        "Int"
-      ]
+      "name": "bc_clamp",
+      "proof_hash": "6076704b73e35a92b5d5972da389378ccdc1a0c107cf22cef46c0cc6d9c4b6c6",
+      "status": "verified",
+      "z3_check_result": "unsat"
     }
   ]
 }

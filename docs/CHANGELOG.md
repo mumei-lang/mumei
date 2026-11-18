@@ -1,3 +1,18 @@
+### Unreleased: integer `/` truncates toward zero
+
+- The verifier's int model now divides like the emitted `sdiv` (and
+  like Go/Rust/LLVM): `-7 / 2 == -3`, where it previously proved the
+  Euclidean answer `-4`. `%` was already truncating, so `/` and `%`
+  again pair on one quotient and `(a / b) * b + a % b == a` holds for
+  every nonzero divisor. Clauses proved against Euclidean division on
+  negative dividends are now refuted; the proof-cache policy version
+  invalidates earlier verdicts.
+- Generated Python and Rust contract wrappers emit truncating
+  division (a `divmod` correction in Python, plain `/` in Rust) so a
+  clause verified by `mumei verify` checks the same value at runtime
+  on inputs where the runtime division is defined — Rust's `/` still
+  rejects `i64::MIN / -1`, which the unbounded int model admits.
+
 ### Unreleased: `--check-i64-overflow`
 
 - New opt-in `mumei verify --check-i64-overflow`. It keeps the default `Int`

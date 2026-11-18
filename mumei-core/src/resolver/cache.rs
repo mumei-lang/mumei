@@ -50,7 +50,11 @@ use std::path::Path;
 /// `u64` atom verified under version 17 proved wrap-sensitive clauses like
 /// `a + 1 > a` that the compiled code cannot satisfy, so cached `u64`
 /// verdicts must be re-derived.
-pub const VERIFIER_POLICY_VERSION: u32 = 18;
+/// Version 19 makes the int-model `/` truncate toward zero (the `sdiv`
+/// the emitted IR uses — #781) instead of Z3's Euclidean `div`: a
+/// clause like `-7 / 2 == -4` that verified under version 18 is now
+/// refuted, so every int-model verdict must be re-derived.
+pub const VERIFIER_POLICY_VERSION: u32 = 19;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CacheEntry {
@@ -2431,7 +2435,7 @@ body: { p.a };\n";
         let baseline = proof_hash_for(source, "g");
         assert_eq!(
             baseline,
-            "b15ab68885a99dcbebf734fee6330eec53cf6c49845a0799eb5022f887aaa613"
+            "8a7e844ac62a469f28b48b954a7b6fc2d3684c45edfbc8c2a872495e789c94a7"
         );
         let changed = proof_hash_for(
             &source.replace(
@@ -2455,7 +2459,7 @@ body: { p.a };\n";
 
         assert_eq!(
             hash,
-            "14ca07fced328cba06f438abe87598215670240aca3db4369a2015a5ef588dea"
+            "c9e77d06d1aa97f4b2935e9733093aaeeac671635ccd1722baa526d1e40d5ced"
         );
     }
 }
