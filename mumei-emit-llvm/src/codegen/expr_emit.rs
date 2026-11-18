@@ -1911,6 +1911,19 @@ pub(crate) fn compile_hir_expr<'a>(
                 let elem_ptr =
                     unsafe { llvm!(builder.build_gep(*elem_ty, data_ptr, &[idx], "elem_ptr")) };
                 let loaded = llvm!(builder.build_load(*elem_ty, elem_ptr, "elem_val"));
+                // `Str` cells are `i8` (`pure-i64-composite/v13`); the
+                // merged read is always `i64` — zero-extend narrower
+                // elements so the byte read carries 0–255 like the
+                // verifier's unsigned leaf.
+                let loaded = if loaded.into_int_value().get_type().get_bit_width() < 64 {
+                    llvm!(builder.build_int_z_extend(
+                        loaded.into_int_value(),
+                        context.i64_type(),
+                        "elem_zext"
+                    ))
+                } else {
+                    loaded.into_int_value()
+                };
                 let safe_end = builder.get_insert_block().unwrap();
                 llvm!(builder.build_unconditional_branch(merge_block));
 
@@ -3545,6 +3558,114 @@ mod tests {
 
         assert!(result.is_float_value());
         llvm!(builder.build_return(Some(&result)));
+        assert!(function.verify(false));
+        Ok(())
+    }
+
+    // `let s = "hi"` registers a `(len, i8, *i8)` fat pointer and `s[i]`
+    // emits the bounds-checked `i8` load zero-extended to `i64` — matching
+    // the verifier's byte-cell model (`pure-i64-composite/v13`).
+    #[test]
+    fn str_let_binds_fat_pointer_and_index_read_zero_extends(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = HashMap::new();
+
+        crate::codegen::stmt_emit::compile_hir_stmt(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &HirStmt::Let {
+                var: "s".to_string(),
+                ty: None,
+                value: Box::new(HirExpr::StringLit("hi".to_string())),
+            },
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+
+        // The bound value stays the `*i8` pointer; the fat pointer is i8-typed.
+        assert!(variables["s"].is_pointer_value());
+        let (len, elem_ty, _) = array_ptrs["s"];
+        assert_eq!(len.into_int_value().get_zero_extended_constant(), Some(2));
+        assert_eq!(elem_ty, context.i8_type().into());
+
+        let read = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &HirExpr::ArrayAccess("s".to_string(), Box::new(HirExpr::Number(0))),
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+        assert!(read.is_int_value());
+        assert_eq!(read.into_int_value().get_type().get_bit_width(), 64);
+
+        llvm!(builder.build_return(Some(&read)));
+        assert!(function.verify(false));
+        assert!(module.print_to_string().to_string().contains("zext i8"));
+        Ok(())
+    }
+
+    // `let t = s` on a `Str` binding aliases the fat pointer and keeps the
+    // `*i8` pointer as the scalar value, not the length.
+    #[test]
+    fn str_alias_keeps_pointer_value() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = HashMap::new();
+
+        for stmt in [
+            HirStmt::Let {
+                var: "s".to_string(),
+                ty: None,
+                value: Box::new(HirExpr::StringLit("hi".to_string())),
+            },
+            HirStmt::Let {
+                var: "t".to_string(),
+                ty: None,
+                value: Box::new(HirExpr::Variable("s".to_string())),
+            },
+        ] {
+            crate::codegen::stmt_emit::compile_hir_stmt(
+                &context,
+                &builder,
+                &module,
+                &function,
+                &stmt,
+                &mut variables,
+                &mut var_types,
+                &mut array_ptrs,
+                &module_env,
+            )?;
+        }
+
+        assert!(variables["t"].is_pointer_value());
+        assert_eq!(array_ptrs["t"].1, context.i8_type().into());
+        llvm!(builder.build_return(Some(&context.i64_type().const_int(0, false))));
         assert!(function.verify(false));
         Ok(())
     }

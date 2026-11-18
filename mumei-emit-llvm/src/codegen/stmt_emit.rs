@@ -273,19 +273,50 @@ pub(crate) fn compile_hir_stmt<'a>(
                 }
                 return Ok(len_val);
             }
+            // `let s = "lit"` (`pure-i64-composite/v13`): the `*i8` global
+            // stays the bound value (concat/extern uses are unchanged) and
+            // a read-only fat pointer `(len, i8, data)` registers beside
+            // it so `s[i]`/`len(s)` emit the same bounds-checked byte read
+            // the verifier's bounded-memory model encodes.
+            if let HirExpr::StringLit(s) = value.as_ref() {
+                let global = builder.build_global_string_ptr(s, "str_lit").map_err(|e| {
+                    MumeiError::codegen(format!("Failed to build string literal: {:?}", e))
+                })?;
+                let data_ptr: BasicValueEnum = global.as_pointer_value().into();
+                let len_val: BasicValueEnum =
+                    context.i64_type().const_int(s.len() as u64, false).into();
+                array_ptrs.insert(var.clone(), (len_val, context.i8_type().into(), data_ptr));
+                variables.insert(var.clone(), data_ptr);
+                return Ok(data_ptr);
+            }
             // `let a = arr` — the binding aliases the tracked fat pointer so
             // `a[i]`/`len(a)`/`a[i] = x` hit the source's slots.
             if let HirExpr::Variable(src) = value.as_ref() {
                 if let Some(&(len_val, elem_ty, data_ptr)) = array_ptrs.get(src.as_str()) {
                     array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
-                    variables.insert(var.clone(), len_val);
+                    // A `Str` (`pure-i64-composite/v13`, `i8` cells) keeps
+                    // its `*i8` pointer as the bound value — concat and
+                    // extern uses need it — while integer arrays expose
+                    // their length in scalar position.
+                    variables.insert(
+                        var.clone(),
+                        if elem_ty == context.i8_type().into() {
+                            data_ptr
+                        } else {
+                            len_val
+                        },
+                    );
                     if var_types
                         .get(var.as_str())
                         .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
                     {
                         var_types.remove(var.as_str());
                     }
-                    return Ok(len_val);
+                    return Ok(if elem_ty == context.i8_type().into() {
+                        data_ptr
+                    } else {
+                        len_val
+                    });
                 }
                 // `let g = f` on a lambda binding: alias the same lifted fn
                 // (same captures) by copying the `@lam:` marker.
