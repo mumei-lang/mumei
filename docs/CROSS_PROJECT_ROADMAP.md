@@ -4817,6 +4817,20 @@ and evidence normalization/acceptance ride the summaries routes, with
 Core `mumei evidence accept` producing `mumei.evidence-acceptance/v1`
 verdicts.
 
+### Go deep-analysis: named pointer types, deep derefs and deep fields (mumei-agent #924–#926)
+
+Three small frontier PRs widened the Go pointer model while keeping
+the dep-set semantics unchanged. #924 admits named/alias
+pointer-underlying types (`type PP *T`; `ppp **PT` resolves through
+the alias's underlying pointer chain). #925 admits arbitrarily-deep
+anonymous dereference chains (`***t`, `****q`) — the deref loop walks
+the pointer elem chain and each level reads the caller memory the
+previous level's aim selected (pointer deps ∪ `indirect_writes`),
+with intermediate bound-pointer folds pinned. #926 generalizes the
+named-struct element field walk to arbitrary depth (`(*p)[i].F.G.H`)
+under the same member-with-named-type_id pinning rule #922 used —
+anonymous `struct{...}` intermediates and selector-field writes stay
+closed.
 
 ## No-`.mm` front door and V1 order
 
