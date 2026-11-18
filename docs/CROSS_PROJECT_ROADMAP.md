@@ -4148,8 +4148,38 @@ every depth, and `q.inner = w` rebinds the projected
 to nested LLVM aggregates with leaf-slice
 `insertvalue`/`extractvalue` splices. `check`,
 `recheck-source` and `recheck-llvm` cover the fragment.
-C10 stays partial — generic structs, `u64`-family leaves
-and the deeper assurance layers remain open.
+Generic struct declarations join the fragment under
+`mumei.pure-i64-composite/v9` and the `/v12` bundle
+profiles: `struct Pair<A, B> { fst: A, snd: B }`
+monomorphizes at each use site — the signature's
+`<b>_<field>_<leaf>` naming pins concrete instantiations
+(`Pair<i64,bool>`), while recursive instantiations,
+unbounded depth and undeclared type parameters fail
+closed. `u64` leaves join the fragment under
+`mumei.pure-i64-composite/v10` and the `/v13` bundle
+profiles with true unsigned semantics: the source model's
+`a >= 0` is now `true` by construction and `a < 0`
+unsatisfiable (the prior signed-BV model could refute the
+first and satisfy the second — a soundness gap), with
+unsigned comparisons and wrap-free arithmetic bounds
+encoded per leaf. `check`, `recheck-source` and
+`recheck-llvm` cover both fragments.
+Let-bound arrays join the fragment under
+`mumei.pure-i64-composite/v11` and the `/v14` bundle
+profiles — the C09 bounded stack-memory slice: a
+`let a = [i64; N]` (N ≤ bound) lowers to `alloca` +
+per-cell `store`/`load`/`GEP`, the verifier models each
+alias group through a canonical `alloc_stores` array map
+(shared data pointer per group, merged at branches), and
+`a[i] = v` binds only where the statement runs — a
+`false && { … a[i] = v … }` path keeps the pre-statement
+backing, matching the emitted short-circuit branch. The
+value of an `a[i] = v` statement evaluates before its
+index, matching the emitter's `val` then `idx` order.
+Writes inside expression-position blocks stay fail-closed
+via the empty-assignable `Expr::Block` gate. `check`,
+`recheck-source` and `recheck-llvm` cover the fragment.
+C10 stays partial — deeper assurance layers remain open.
 
 
 
