@@ -147,7 +147,15 @@ fn bind_lambda_arg<'a>(
             })
             .unwrap_or_else(|| context.i64_type().into());
         array_ptrs.insert(name.to_string(), (len_val, elem_ty, data_ptr));
-        variables.insert(name.to_string(), len_val);
+        // A `Str` binding's scalar value is the `*i8` byte pointer, not
+        // the length (mirroring the `let s = "lit"` arm) — otherwise
+        // `concat(s, …)` inside the lambda hands an i64 to a string use.
+        let scalar = if elem_ty == context.i8_type().into() {
+            data_ptr
+        } else {
+            len_val
+        };
+        variables.insert(name.to_string(), scalar);
         return Ok(());
     }
     variables.insert(name.to_string(), val);
@@ -1128,14 +1136,36 @@ pub(crate) fn hir_int_type_name(
 
 /// `u64` operand semantics for an int binop: `Some(true)` unsigned,
 /// `Some(false)` both signed or adaptive, `Err` on a declared u64/non-u64 mix.
-fn binop_unsigned_operands(
+/// Integer-type name for an unsigned-semantics probe: a `Str` index
+/// read yields a `u64` byte leaf (`pure-i64-composite/v13`) — the i8
+/// element width marks the fat pointer, since `var_types` carries no
+/// marker for `let s = "lit"` bindings. Anything else delegates to
+/// `hir_int_type_name`.
+fn operand_int_type_name<'a>(
+    expr: &HirExpr,
+    var_types: &HashMap<String, String>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
+    module_env: &ModuleEnv,
+) -> Option<String> {
+    if let HirExpr::ArrayAccess(name, _) = expr {
+        if let Some(&(_, elem_ty, _)) = array_ptrs.get(name.as_str()) {
+            if elem_ty.is_int_type() && elem_ty.into_int_type().get_bit_width() == 8 {
+                return Some("u64".to_string());
+            }
+        }
+    }
+    hir_int_type_name(expr, var_types, module_env)
+}
+
+fn binop_unsigned_operands<'a>(
     left: &HirExpr,
     right: &HirExpr,
     var_types: &HashMap<String, String>,
+    array_ptrs: &HashMap<String, ArrayPtr<'a>>,
     module_env: &ModuleEnv,
 ) -> Result<bool, MumeiError> {
-    let lt = hir_int_type_name(left, var_types, module_env);
-    let rt = hir_int_type_name(right, var_types, module_env);
+    let lt = operand_int_type_name(left, var_types, array_ptrs, module_env);
+    let rt = operand_int_type_name(right, var_types, array_ptrs, module_env);
     let (lu, ru) = (lt.as_deref() == Some("u64"), rt.as_deref() == Some("u64"));
     if (lu && rt.is_some() && !ru) || (ru && lt.is_some() && !lu) {
         return Err(MumeiError::codegen(
@@ -2228,7 +2258,8 @@ pub(crate) fn compile_hir_expr<'a>(
                 }
                 let l = lhs.into_int_value();
                 let r = rhs.into_int_value();
-                let unsigned = binop_unsigned_operands(left, right, var_types, module_env)?;
+                let unsigned =
+                    binop_unsigned_operands(left, right, var_types, array_ptrs, module_env)?;
                 match op {
                     HirBinOp::Add => Ok(llvm!(builder.build_int_add(l, r, "add_tmp")).into()),
                     HirBinOp::Sub => Ok(llvm!(builder.build_int_sub(l, r, "sub_tmp")).into()),
@@ -3665,6 +3696,236 @@ mod tests {
 
         assert!(variables["t"].is_pointer_value());
         assert_eq!(array_ptrs["t"].1, context.i8_type().into());
+        llvm!(builder.build_return(Some(&context.i64_type().const_int(0, false))));
+        assert!(function.verify(false));
+        Ok(())
+    }
+
+    // `s[0] > (0 - 1)` must emit `ugt`: the verifier's `s[i]` byte leaf is
+    // `u64`, so a signed `sgt` would return `true` for `'h' > -1` while the
+    // source model says `104 > u64::MAX` is false.
+    #[test]
+    fn str_index_read_compares_unsigned() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = HashMap::new();
+
+        compile_hir_stmt(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &HirStmt::Let {
+                var: "s".to_string(),
+                ty: None,
+                value: Box::new(HirExpr::StringLit("hi".to_string())),
+            },
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+
+        let cmp = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &HirExpr::BinaryOp(
+                Box::new(HirExpr::ArrayAccess(
+                    "s".to_string(),
+                    Box::new(HirExpr::Number(0)),
+                )),
+                HirBinOp::Gt,
+                Box::new(HirExpr::BinaryOp(
+                    Box::new(HirExpr::Number(0)),
+                    HirBinOp::Sub,
+                    Box::new(HirExpr::Number(1)),
+                )),
+            ),
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+        llvm!(builder.build_return(Some(&cmp)));
+        assert!(function.verify(false));
+        assert!(module.print_to_string().to_string().contains("icmp ugt"));
+        Ok(())
+    }
+
+    // `s = "bb"` rebinds the fat pointer (general builds keep their
+    // pre-v13 string-reassign behavior) and `s = 5` drops it so a stale
+    // `s[i]` cannot read the old bytes.
+    #[test]
+    fn str_reassign_rebinds_or_drops_fat_pointer() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = HashMap::new();
+        macro_rules! run {
+            ($stmt:expr) => {
+                compile_hir_stmt(
+                    &context,
+                    &builder,
+                    &module,
+                    &function,
+                    $stmt,
+                    &mut variables,
+                    &mut var_types,
+                    &mut array_ptrs,
+                    &module_env,
+                )
+            };
+        }
+
+        run!(&HirStmt::Let {
+            var: "s".to_string(),
+            ty: None,
+            value: Box::new(HirExpr::StringLit("a".to_string())),
+        })?;
+        run!(&HirStmt::Assign {
+            var: "s".to_string(),
+            value: Box::new(HirExpr::StringLit("bb".to_string())),
+        })?;
+        assert!(variables["s"].is_pointer_value());
+        assert_eq!(
+            array_ptrs["s"]
+                .0
+                .into_int_value()
+                .get_zero_extended_constant(),
+            Some(2)
+        );
+
+        run!(&HirStmt::Assign {
+            var: "s".to_string(),
+            value: Box::new(HirExpr::Number(5)),
+        })?;
+        assert!(!array_ptrs.contains_key("s"));
+        assert!(variables["s"].is_int_value());
+
+        llvm!(builder.build_return(Some(&variables["s"])));
+        assert!(function.verify(false));
+        Ok(())
+    }
+
+    // `t = s` on a `Str` binding keeps the `*i8` pointer (not the length)
+    // in scalar position — the same rule as the `let t = s` alias.
+    #[test]
+    fn str_assign_alias_keeps_pointer_value() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = HashMap::new();
+        macro_rules! run {
+            ($stmt:expr) => {
+                compile_hir_stmt(
+                    &context,
+                    &builder,
+                    &module,
+                    &function,
+                    $stmt,
+                    &mut variables,
+                    &mut var_types,
+                    &mut array_ptrs,
+                    &module_env,
+                )
+            };
+        }
+
+        for stmt in [
+            HirStmt::Let {
+                var: "s".to_string(),
+                ty: None,
+                value: Box::new(HirExpr::StringLit("hi".to_string())),
+            },
+            HirStmt::Let {
+                var: "t".to_string(),
+                ty: None,
+                value: Box::new(HirExpr::Number(0)),
+            },
+            HirStmt::Assign {
+                var: "t".to_string(),
+                value: Box::new(HirExpr::Variable("s".to_string())),
+            },
+        ] {
+            run!(&stmt)?;
+        }
+
+        assert!(variables["t"].is_pointer_value());
+        assert_eq!(array_ptrs["t"].1, context.i8_type().into());
+        llvm!(builder.build_return(Some(&context.i64_type().const_int(0, false))));
+        assert!(function.verify(false));
+        Ok(())
+    }
+
+    // A captured `Str` fat pointer binds the `*i8` data pointer inside
+    // the lifted lambda — binding the length would hand an i64 to
+    // `concat`/string uses.
+    #[test]
+    fn str_capture_binds_data_pointer() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = HashMap::new();
+
+        let global = builder.build_global_string_ptr("hi", "str_lit")?;
+        let data_ptr: BasicValueEnum = global.as_pointer_value().into();
+        let len_val: BasicValueEnum = context.i64_type().const_int(2, false).into();
+        let struct_ty = array_struct_type(&context);
+        let mut agg: inkwell::values::AggregateValueEnum = struct_ty.get_undef().into();
+        agg = llvm!(builder.build_insert_value(agg, len_val, 0, "cap_len"));
+        agg = llvm!(builder.build_insert_value(agg, data_ptr, 1, "cap_data"));
+        let fat: BasicValueEnum = match agg {
+            inkwell::values::AggregateValueEnum::StructValue(s) => s.into(),
+            _ => panic!("expected struct"),
+        };
+
+        bind_lambda_arg(
+            &context,
+            &builder,
+            "s",
+            fat,
+            None,
+            Some((len_val, context.i8_type().into(), data_ptr)),
+            None,
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+
+        assert!(variables["s"].is_pointer_value());
+        assert_eq!(array_ptrs["s"].1, context.i8_type().into());
         llvm!(builder.build_return(Some(&context.i64_type().const_int(0, false))));
         assert!(function.verify(false));
         Ok(())
