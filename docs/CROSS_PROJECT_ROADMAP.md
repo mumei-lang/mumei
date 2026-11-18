@@ -4475,6 +4475,36 @@ payloads. The widened i64-equivalence profile and refined-alias
 bases keep refusing all three names — a full-width domain cannot
 be an i64 range bound.
 
+### Bound-document recovery of the C02 semantic checks (mumei-agent #897 fold)
+
+[mumei-agent#907](https://github.com/mumei-lang/mumei-agent/pull/907)
+extends `recovery-eval`'s performer table so all six C02 semantic
+checks recover through bound documents, mirroring each declared
+attempt route's `discharged_checks`: `claim_truth`, `freshness` and
+`semantic_correspondence` ← a consistent `source-evidence-recheck/v1`
+or an accepted `source-evidence-acceptance/v1`; `claim_truth` and
+`artifact_semantics` ← an accepted `native-evidence-acceptance/v1`;
+and `file_identity`, `producer_authenticity` plus the three shared
+checks ← an accepted `verify-attempt-report/v1`. Each record's bound
+digest is its declared carrier (`evidence_fingerprint` /
+`subject_digest` / `record_digest`) when it pins another artifact —
+so a descriptor folded AS the record recovers through the docs bound
+to the same evidence — else the record's own byte SHA-256. Attempt
+reports bind through `normalized.stdout.sha256` (the produced bytes'
+digest; `candidate.output_fingerprint` fingerprints the
+verifier-output manifest, not the record), and the report's attempt
+sequence also performs `historical_execution` on the record its run
+produced. `evidence_binding` stays byte-level: it compares against
+`record_digest` even when the record declares a carrier for a
+different artifact, and `record_freshness` recovers through a
+`freshness-evaluation/v1` doc over the record's `produced_at`.
+Outcome equality is strict — a declared `1`/`"true"` never counts as
+the boolean `true`, while `"consistent"` compares by value — and a
+schema-shaped document that fails its binding reports
+`evidence_failed`. The fold stays representation-level:
+`recovery_enforcement`, `evidence_authenticity` and the remaining
+host-duty checks stay in `checks_not_performed`; C11 stays partial.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
