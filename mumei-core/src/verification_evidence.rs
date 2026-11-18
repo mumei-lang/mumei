@@ -35,7 +35,11 @@ pub struct Evidence {
     /// Declared production timestamp — present only when the producer
     /// was given one (`evidence verify-source --produced-at`); the
     /// record stays byte-identical when absent.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "required_when_present"
+    )]
     pub produced_at: Option<String>,
 }
 
@@ -200,6 +204,18 @@ pub fn is_rfc3339_timestamp(value: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// An explicit `null` is not "absent": the standalone schema admits
+/// `produced_at` only as a string, so a null must fail shape here too
+/// instead of decoding to `None`.
+fn required_when_present<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .ok_or_else(|| serde::de::Error::custom("produced_at must be a string"))
+        .map(Some)
 }
 
 /// Records are JSON objects only: serde's derived struct shape would also

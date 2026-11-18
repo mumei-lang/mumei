@@ -574,4 +574,30 @@ fn produced_at_is_optional_and_strictly_rfc3339() {
             "stamp: {stamp}"
         );
     }
+
+    // The schema's "type": "string" admits no null: an explicit null is
+    // a shape error, never a silent absent field.
+    let mut value = base.clone();
+    value["produced_at"] = Value::Null;
+    assert_eq!(
+        decode(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
+        RepresentationError::InvalidShape
+    );
+
+    // Non-string scalars are shape errors too.
+    let mut value = base.clone();
+    value["produced_at"] = json!(0);
+    assert_eq!(
+        decode(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
+        RepresentationError::InvalidShape
+    );
+
+    // The schema pattern carries the same field ranges — the
+    // digit-shaped out-of-range stamp the reviewer tried fails both.
+    let mut value = base.clone();
+    value["produced_at"] = json!("2026-99-99T99:99:99+99:99");
+    assert_eq!(
+        decode(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
+        RepresentationError::InvalidValue
+    );
 }
