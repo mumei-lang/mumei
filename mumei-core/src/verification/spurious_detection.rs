@@ -1005,18 +1005,15 @@ fn eval_binary(left: EvalValue, op: &Op, right: EvalValue) -> Result<EvalValue, 
                 }
             }
         }
-        // Literals lower as `i64` replay values; a non-negative literal mixes
-        // with a `u64` operand as its own value (unsigned), matching the
-        // translator's literal bridging. A negative literal cannot be a `u64`.
+        // Literals lower as `i64` replay values; mixing one with a `u64`
+        // operand wraps it mod 2^64 — the same two's-complement reading
+        // the translator's `int2bv` bridge gives a literal like `0 - 1`
+        // in `requires a == 0 - 1` (u64::MAX).
         (EvalValue::UInt(left), EvalValue::Int(right)) => {
-            let right = u64::try_from(*right)
-                .map_err(|_| "negative literal cannot replay as a u64 operand".to_string())?;
-            eval_binary(EvalValue::UInt(*left), op, EvalValue::UInt(right))
+            eval_binary(EvalValue::UInt(*left), op, EvalValue::UInt(*right as u64))
         }
         (EvalValue::Int(left), EvalValue::UInt(right)) => {
-            let left = u64::try_from(*left)
-                .map_err(|_| "negative literal cannot replay as a u64 operand".to_string())?;
-            eval_binary(EvalValue::UInt(left), op, EvalValue::UInt(*right))
+            eval_binary(EvalValue::UInt(*left as u64), op, EvalValue::UInt(*right))
         }
         (EvalValue::Bool(left), EvalValue::Bool(right)) => {
             let (left, right) = (*left, *right);
