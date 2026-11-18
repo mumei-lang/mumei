@@ -4703,6 +4703,40 @@ too), and an unmatched envelope emits none. `key_authenticity`,
 `envelope_freshness` and `key_revocation` stay unperformed.
 
 
+### Manifest replay through the attempt lifecycle (mumei-agent #918)
+
+`go-summaries-reuse-attempt` closes the Go summary route family's
+last gap: manifest replay no longer stays out of attempt mode. The
+route spawns `python -m agent go-summaries-reuse` with the same
+declared inputs through `dispatch_attempt`, keyed to a
+`mumei.go-summaries-reuse-attempt-request/v1` fingerprint that also
+binds the declared `--manifest`'s bytes; an `exited` run's captured
+stdout (the merged manifest) is selected only when the drift gate
+re-hashes every declared input unchanged. The emitted
+`mumei.go-summaries-reuse-attempt-report/v1` mirrors the produce
+attempt's envelope — lineage, normalized run result, evidence
+candidate, `GoSummarySet.from_dict` check, acceptance verdict and
+the `SUMMARY_ESTABLISHED` discharge split — and recovery-eval folds
+it under the same four bound-report performer lists. The
+`go_summaries_reuse_attempt` MCP tool matches. The ts/sol/rust reuse
+routes still have no attempt variant, and audit
+`--enable-summary-attempts` still does not route
+`--summaries-manifest-map` units through the attempt lifecycle.
+
+### Demo: producer signature recovery lane (mumei-demo #158)
+
+The optional C13 scenario `producer_signature_recovery` exercises
+the lane end to end: `mumei evidence keygen` writes a demo-only
+ed25519 keypair (secret to file only, deleted by the sign step and
+never published as an artifact), `mumei evidence sign` detaches a
+`mumei.producer-signature/v1` envelope bound to `sha256(record
+bytes)`, `signature-verify` verifies it under a pinned producer key,
+and `recovery-eval` recovers the record's declared
+`producer_authenticity` check — while a wrong `--expected-producer-key`
+pin reports `evidence_failed`. Steps chain through `depends_on`, so a
+failed keygen skips the lane rather than running on stale artifacts.
+
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
