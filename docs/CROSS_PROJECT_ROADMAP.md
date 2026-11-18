@@ -4234,6 +4234,86 @@ distribution or freshness is claimed, matching the established
 declared-fold pattern of `evidence-acceptance-eval`. A malformed
 or foreign envelope reports as an observation, never a verdict.
 
+### C11 declared producer-signature verification (mumei-agent)
+
+[mumei-agent#892](https://github.com/mumei-lang/mumei-agent/pull/892)
+adds the `signature-verify` route — the cryptographic counterpart
+of `signature-eval`:
+`core_evidence.verify_signature_envelope(envelope, producer_key,
+expected_subject, expected_key)` emits
+`mumei.signature-verification/v1` over a declared
+`mumei.producer-signature/v1` envelope. The ed25519 signature is
+verified over the `subject_digest` lowercase-hex ASCII bytes —
+the same convention as Core's `crypto_verify_signature` FFI — and
+the fold reports `subject_bound`/`key_pinned`/`signature_valid`
+only. `checks_not_performed` keeps `key_authenticity` (the
+supplied public key is trusted as declared — a verifying signature
+binds that key to the digest, not to the producer),
+`envelope_freshness` (a stale-but-signed envelope verifies) and
+`key_revocation`; an unmatched envelope or failed verify reports
+`false` observations, never an error.
+
+### C11 declared unperformed-check recovery (mumei-agent)
+
+[mumei-agent#898](https://github.com/mumei-lang/mumei-agent/pull/898)
+adds `core_evidence.evaluate_unperformed_check_recovery(record,
+evidence)` and the `recovery-eval` route — the issue #897 design
+memo — which compose the family's folds: given a record's declared
+`checks_not_performed` and a set of supporting documents, emit
+`mumei.unperformed-check-recovery/v1` reporting each check as
+`recovered` (a supplied document carries the declared performer
+schema AND its outcome field is `true`), `evidence_failed` (the
+performer schema was supplied but the outcome is absent or not
+`true`) or `no_evidence`. Attribution is closed: `_CHECK_PERFORMERS`
+pins each check name to its emitted schema and outcome field, so a
+document never declares its own coverage and a foreign schema never
+counts. The fold stays representation-level: `recovery_enforcement`
+(no check is re-run), `evidence_authenticity` (documents are trusted
+as declared) and `evidence_binding` (a document is not pinned to the
+record it covers) stay in `checks_not_performed`.
+
+### C11 declared freshness evaluation over produced_at (mumei-agent)
+
+[mumei-agent#895](https://github.com/mumei-lang/mumei-agent/pull/895)
+adds `core_evidence.evaluate_freshness(record, reference_time,
+max_age_seconds)` and the `freshness-eval` route — slice 1 of the
+issue #894 design memo — emitting
+`mumei.freshness-evaluation/v1`. `freshness_claimed` holds only when
+`produced_at` is present and parses as a strict RFC 3339 timestamp
+(ASCII digits only, required seconds/offset, and sub-microsecond
+fractions use conservative low/high bounds so truncation can never
+flip a bound); `within_window` requires the claim to neither
+postdate the declared `--reference-time` nor exceed
+`--max-age-seconds`. The clock is declared, never the system clock,
+so two runs over the same documents always agree.
+`checks_not_performed` keeps `clock_authenticity`,
+`producer_time_authenticity` and `freshness_enforcement`; a record
+with no `produced_at` reports `freshness_claimed: false`, never an
+error, so the fold composes with every record that predates the
+optional field.
+
+### C02 opt-in produced_at stamp on Evidence records (mumei)
+
+[mumei#1110](https://github.com/mumei-lang/mumei/pull/1110) lands
+the Core half of the #894 design memo (slice 2): the Evidence v1
+record gains an optional `produced_at` field — absent records
+serialize byte-identically to before — validated at the byte level
+by `is_rfc3339_timestamp` (ASCII digits; month 01-12, day 01-31,
+hour ≤ 23, minute ≤ 59, second ≤ 60 leap allowance, offset
+≤ 23:59). An explicit `null` fails closed as `InvalidShape` via
+`required_when_present`, and the standalone
+`schema/verification-evidence.schema.json` pattern was tightened to
+the same ranges, so a schema-valid stamp is exactly a Core-valid
+one. `evidence verify-source --produced-at <RFC 3339>` stamps a
+caller-declared timestamp — never the system clock, keeping
+production reproducible — and because the stamp is part of the
+record bytes, `recheck-source`/`accept-source` take the same flag:
+a stamped record is only consistent under the same declared stamp.
+The stamp is a producer claim: `clock_authenticity` /
+`producer_time_authenticity` / `freshness_enforcement` remain
+unperformed, and binding the stamp into the signed `subject_digest`
+waits on producer-side signing.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
