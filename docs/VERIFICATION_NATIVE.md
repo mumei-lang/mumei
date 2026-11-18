@@ -483,6 +483,38 @@ assurance, or a Claim Book/Seal Grade/Lean decision. Saved fields never select
 files, tools, queries or budgets; existing commands and native/module evidence
 paths are unchanged.
 
+### Detached producer-signature envelope
+
+`mumei evidence sign <record> --key-file <PATH> --producer-key-id <ID>
+[--json]` is the first detached producer-authenticity surface. Any bounded
+regular file (at most 65,536 bytes; `--stdin` reads the same bound) is hashed
+and signed over its raw bytes — the record is never parsed, decoded or
+canonicalized, so non-UTF8 bytes sign identically and every pin on the record
+stays byte-identical. `subject_digest` is the record's SHA-256 lowercase hex,
+the same convention as `evidence_fingerprint`, so a consumer reproduces it
+with `sha256sum`. The signed payload is the digest's ASCII bytes, matching the
+`crypto_verify_signature` FFI convention, and the signature is emitted as
+128-char lowercase hex.
+
+`--key-file` must be a regular file holding exactly the 64-char lowercase-hex
+ed25519 secret (32 bytes): short, long, uppercase, prefixed, whitespace-padded
+and non-hex material, plus missing and non-regular files, fail closed with
+static diagnostics that never echo the key. Decoded key bytes are zeroized
+after use. `producer_key_id` is a caller-declared label the consumer pins
+separately — it is never derived from the key bytes, so relabeling does not
+change the signature. `--json` emits the closed five-field
+`mumei.producer-signature/v1` envelope; text mode prints a static scope
+summary carrying only the digest.
+
+The envelope is detached: it travels beside the record, never inside it. A
+valid envelope binds only the declared key to the declared digest — it
+asserts no key or producer authenticity, freshness, revocation, claim truth
+or acceptance, and it is not Evidence, a certificate or a receipt.
+Representation contract:
+[`schema/producer-signature.schema.json`](../schema/producer-signature.schema.json).
+Verifying an envelope against a pinned public key is the consumer side; key
+distribution, revocation and attestation remain open.
+
 ## 5. Minimal semantic contract (C03)
 
 Start with a pure integer/Boolean function: for a signed 64-bit input, return

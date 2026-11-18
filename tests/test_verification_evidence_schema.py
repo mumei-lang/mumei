@@ -342,6 +342,8 @@ def test_evidence_gate_runs_when_only_schema_or_fixtures_change() -> None:
         "mumei-core/src/verification_evidence.rs",
         "mumei-core/src/verification_evidence/**",
         "schema/proof-cert.schema.json",
+        "schema/producer-signature.schema.json",
+        "tests/test_producer_signature_schema.py",
         "tests/fixtures/proof-cert/**",
         "tests/test_proof_cert_schema.py",
     }

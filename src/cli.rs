@@ -483,6 +483,24 @@ pub(crate) enum EvidenceCommand {
         #[arg(long)]
         produced_at: Option<String>,
     },
+    /// Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only
+    Sign {
+        /// Regular file (at most 65,536 bytes) whose raw bytes become the signed subject; never parsed or canonicalized
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        input: Option<String>,
+        /// Read the record bytes from standard input (at most 65,536 bytes); never infer stdin from a missing file
+        #[arg(long)]
+        stdin: bool,
+        /// Emit the detached mumei.producer-signature/v1 envelope, not a verification or acceptance result
+        #[arg(long)]
+        json: bool,
+        /// Regular file holding exactly the 64-char lowercase-hex ed25519 secret key; the value is never printed
+        #[arg(long)]
+        key_file: String,
+        /// Caller-declared producer key label the consumer pins separately; never derived from the key bytes
+        #[arg(long)]
+        producer_key_id: String,
+    },
     /// Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity
     Check {
         /// Regular JSON file (at most 65,536 bytes); not a native report envelope or proof certificate

@@ -15,6 +15,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei evidence recheck-source` | 5 | Freshly recheck saved source Evidence with linked Z3 and caller-supplied source/budgets; not proof acceptance |
 | `mumei evidence accept-source` | 5 | Evaluate representation plus fresh same-profile source consistency into a bounded acceptance descriptor |
 | `mumei evidence verify-source` | 4 | Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance |
+| `mumei evidence sign` | 4 | Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only |
 | `mumei evidence check` | 3 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
 | `mumei evidence check-list` | 3 | Validate a bounded Evidence list envelope's representation — every record individually, not their truth or consistency |
 | `mumei evidence check-consistency` | 3 | Check a bounded Evidence list envelope's cross-record identity-pin agreement, not pin correctness or truth |
@@ -169,6 +170,31 @@ Usage: mumei evidence verify-source [OPTIONS] <INPUT>
 | `--solver-timeout <SOLVER_TIMEOUT>` | 10000 | — | Solver timeout in milliseconds (1..=10000); no project/ambient policy loaded |
 | `--solver-resource-limit <SOLVER_RESOURCE_LIMIT>` | 1000000 | — | Solver resource units (1..=1000000); zero/unlimited is rejected |
 | `--produced-at <PRODUCED_AT>` | — | — | Declared RFC 3339 timestamp stamped on the emitted record; never read from the system clock |
+
+## `mumei evidence sign`
+
+Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only
+
+Usage:
+
+```text
+Usage: mumei evidence sign [OPTIONS] --key-file <KEY_FILE> --producer-key-id <PRODUCER_KEY_ID> [INPUT]
+```
+
+### Positional arguments
+
+| Name | Required | Description |
+|---|---|---|
+| `INPUT` | No | Regular file (at most 65,536 bytes) whose raw bytes become the signed subject; never parsed or canonicalized |
+
+### Options
+
+| Option | Default | Possible values | Description |
+|---|---|---|---|
+| `--stdin` | false | — | Read the record bytes from standard input (at most 65,536 bytes); never infer stdin from a missing file |
+| `--json` | false | — | Emit the detached mumei.producer-signature/v1 envelope, not a verification or acceptance result |
+| `--key-file <KEY_FILE>` | — | — | Regular file holding exactly the 64-char lowercase-hex ed25519 secret key; the value is never printed |
+| `--producer-key-id <PRODUCER_KEY_ID>` | — | — | Caller-declared producer key label the consumer pins separately; never derived from the key bytes |
 
 ## `mumei evidence check`
 

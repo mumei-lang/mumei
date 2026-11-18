@@ -1,4 +1,5 @@
 use crate::cli::EvidenceCommand;
+use mumei_core::producer_signature::{self, PRODUCER_SIGNATURE_SCHEMA};
 use mumei_core::source_evidence::{self, AcceptOutcome, Options, Outcome, RecheckOutcome};
 use mumei_core::verification_evidence::{self, MAX_INPUT_BYTES, SCHEMA_VERSION};
 use std::{io::Write, path::Path};
@@ -100,6 +101,24 @@ pub(crate) fn run(command: EvidenceCommand) {
             )
             .map(|()| 0),
             "Evidence consistency check failed",
+        ),
+        EvidenceCommand::Sign {
+            input,
+            stdin,
+            json,
+            key_file,
+            producer_key_id,
+        } => (
+            sign(
+                input.as_deref().map(Path::new),
+                stdin,
+                json,
+                Path::new(&key_file),
+                &producer_key_id,
+                &mut output,
+            )
+            .map(|()| 0),
+            "Producer signature failed",
         ),
         EvidenceCommand::VerifySource {
             input,
@@ -269,6 +288,50 @@ fn source_options(
             .map_err(|_| "invalid bounded source-query budget")?,
         produced_at,
     })
+}
+
+fn sign(
+    input: Option<&Path>,
+    stdin: bool,
+    json: bool,
+    key_file: &Path,
+    producer_key_id: &str,
+    output: &mut impl Write,
+) -> Result<(), &'static str> {
+    let record = match (input, stdin) {
+        (Some(path), false) => super::input::read_regular(path, MAX_INPUT_BYTES as u64)?,
+        (None, true) => super::input::read_stdin(MAX_INPUT_BYTES as u64)?,
+        _ => return Err("choose exactly one evidence input"),
+    };
+    let key_bytes = super::input::read_regular(key_file, 64)?;
+    let key = producer_signature::decode_secret_key_bytes(key_bytes)
+        .map_err(|_| "invalid producer key material")?;
+    let envelope =
+        producer_signature::sign(&record, &key, producer_key_id).map_err(|error| match error {
+            producer_signature::SignError::InvalidProducerKeyId => {
+                "producer key id must not be empty"
+            }
+            producer_signature::SignError::InvalidKeyMaterial => "invalid producer key material",
+        })?;
+    debug_assert_eq!(envelope.schema_version, PRODUCER_SIGNATURE_SCHEMA);
+    let bytes = if json {
+        let mut bytes = serde_json::to_vec_pretty(&envelope)
+            .map_err(|_| "cannot encode producer signature envelope")?;
+        bytes.push(b'\n');
+        bytes
+    } else {
+        format!(
+            "Producer signature envelope issued for subject digest {}.\n\
+Scope: the detached signature covers the subject digest only; the producer key id is a\n\
+declared label the consumer pins separately, not signed or attested;\n\
+no key or producer authenticity, freshness, revocation, claim truth or acceptance evaluated.\n",
+            envelope.subject_digest
+        )
+        .into_bytes()
+    };
+    output
+        .write_all(&bytes)
+        .map_err(|_| "cannot write producer signature envelope")
 }
 
 fn verify_source(
