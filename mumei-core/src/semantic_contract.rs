@@ -1067,7 +1067,15 @@ fn atom_contract(
             } else {
                 "signed_i64"
             },
-            verifier_integer: "mathematical_integer",
+            // `u64` leaves encode as `BV(64)` in every mode, so the
+            // verifier's integer model is only partly mathematical once
+            // they are admitted — the metadata must distinguish the
+            // machine-word leaves from the `Int` ones.
+            verifier_integer: if u64_leaves {
+                "mathematical_integer_for_i64_bitvector_64_for_u64"
+            } else {
+                "mathematical_integer"
+            },
             llvm_integer: "i64_twos_complement",
             comparisons: if u64_leaves {
                 "signed_for_i64_unsigned_for_u64"
