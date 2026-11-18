@@ -1451,12 +1451,15 @@ fn merge_array_ptrs<'a>(
                 "incompatible branch array length type for '{name}'"
             )));
         }
+        let is_str = first.1.is_int_type() && first.1.into_int_type().get_bit_width() == 8;
         if values.iter().all(|(len, _, data_ptr)| {
             len.as_value_ref() == first.0.as_value_ref()
                 && data_ptr.as_value_ref() == first.2.as_value_ref()
         }) {
             array_ptrs.insert(name.clone(), first);
-            variables.insert(name.clone(), first.0);
+            // `i8` elements mark a `Str` binding: its scalar value is
+            // the `*i8` pointer (concat/extern uses), not the length.
+            variables.insert(name.clone(), if is_str { first.2 } else { first.0 });
             continue;
         }
         let len_phi = llvm!(builder.build_phi(first.0.get_type(), &format!("phi_{name}_len")));
@@ -1476,8 +1479,9 @@ fn merge_array_ptrs<'a>(
         data_phi.add_incoming(&data_incoming);
 
         let len = len_phi.as_basic_value();
-        array_ptrs.insert(name.clone(), (len, first.1, data_phi.as_basic_value()));
-        variables.insert(name.clone(), len);
+        let data = data_phi.as_basic_value();
+        array_ptrs.insert(name.clone(), (len, first.1, data));
+        variables.insert(name.clone(), if is_str { data } else { len });
     }
     Ok(())
 }
@@ -3927,6 +3931,172 @@ mod tests {
         assert!(variables["s"].is_pointer_value());
         assert_eq!(array_ptrs["s"].1, context.i8_type().into());
         llvm!(builder.build_return(Some(&context.i64_type().const_int(0, false))));
+        assert!(function.verify(false));
+        Ok(())
+    }
+
+    // `if c { s = "bb" }` merges the `Str` fat pointer; the merged
+    // scalar must be the `*i8` data pointer — binding the length phi
+    // instead makes a later `s + "!"` lower pointer concat onto an i64.
+    #[test]
+    fn str_branch_merge_keeps_data_pointer_scalar() -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = HashMap::new();
+        macro_rules! run {
+            ($stmt:expr) => {
+                compile_hir_stmt(
+                    &context,
+                    &builder,
+                    &module,
+                    &function,
+                    $stmt,
+                    &mut variables,
+                    &mut var_types,
+                    &mut array_ptrs,
+                    &module_env,
+                )
+            };
+        }
+
+        run!(&HirStmt::Let {
+            var: "s".to_string(),
+            ty: None,
+            value: Box::new(HirExpr::StringLit("a".to_string())),
+        })?;
+        run!(&HirStmt::Let {
+            var: "c".to_string(),
+            ty: None,
+            value: Box::new(HirExpr::Number(1)),
+        })?;
+        run!(&HirStmt::Let {
+            var: "r".to_string(),
+            ty: None,
+            value: Box::new(HirExpr::IfThenElse {
+                cond: Box::new(HirExpr::Variable("c".to_string())),
+                then_branch: Box::new(HirStmt::Block {
+                    stmts: vec![HirStmt::Assign {
+                        var: "s".to_string(),
+                        value: Box::new(HirExpr::StringLit("bb".to_string())),
+                    }],
+                    tail_expr: Some(Box::new(HirExpr::Number(1))),
+                }),
+                else_branch: Box::new(HirStmt::Block {
+                    stmts: vec![],
+                    tail_expr: Some(Box::new(HirExpr::Number(2))),
+                }),
+            }),
+        })?;
+
+        assert!(variables["s"].is_pointer_value());
+        assert_eq!(array_ptrs["s"].1, context.i8_type().into());
+
+        let concat = compile_hir_expr(
+            &context,
+            &builder,
+            &module,
+            &function,
+            &HirExpr::BinaryOp(
+                Box::new(HirExpr::Variable("s".to_string())),
+                HirBinOp::Add,
+                Box::new(HirExpr::StringLit("!".to_string())),
+            ),
+            &mut variables,
+            &mut var_types,
+            &mut array_ptrs,
+            &module_env,
+        )?;
+        assert!(concat.is_pointer_value());
+        assert!(module
+            .print_to_string()
+            .to_string()
+            .contains("mumei_str_concat"));
+        llvm!(builder.build_return(Some(&context.i64_type().const_int(0, false))));
+        assert!(function.verify(false));
+        Ok(())
+    }
+
+    // `s = f(1)` evaluates the RHS before dropping `s`'s fat pointer:
+    // a lambda capturing `s` packs `{i64, ptr}` from `array_ptrs`, so an
+    // early drop would pass the raw `*i8` against a struct parameter.
+    #[test]
+    fn str_reassign_evaluates_rhs_before_dropping_fat_pointer(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let context = Context::create();
+        let module = context.create_module("test");
+        let builder = context.create_builder();
+        let function = module.add_function("test", context.i64_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
+
+        let module_env = ModuleEnv::new();
+        let mut variables = HashMap::new();
+        let mut var_types = HashMap::new();
+        let mut array_ptrs = HashMap::new();
+        macro_rules! run {
+            ($stmt:expr) => {
+                compile_hir_stmt(
+                    &context,
+                    &builder,
+                    &module,
+                    &function,
+                    $stmt,
+                    &mut variables,
+                    &mut var_types,
+                    &mut array_ptrs,
+                    &module_env,
+                )
+            };
+        }
+
+        run!(&HirStmt::Let {
+            var: "s".to_string(),
+            ty: None,
+            value: Box::new(HirExpr::StringLit("hi".to_string())),
+        })?;
+        run!(&HirStmt::Let {
+            var: "f".to_string(),
+            ty: None,
+            value: Box::new(HirExpr::Lambda {
+                params: vec![mumei_core::hir::HirLambdaParam {
+                    name: "x".to_string(),
+                    type_ref: None,
+                }],
+                return_type: None,
+                body: Box::new(HirStmt::Block {
+                    stmts: vec![],
+                    tail_expr: Some(Box::new(HirExpr::BinaryOp(
+                        Box::new(HirExpr::ArrayAccess(
+                            "s".to_string(),
+                            Box::new(HirExpr::Number(0)),
+                        )),
+                        HirBinOp::Add,
+                        Box::new(HirExpr::Variable("x".to_string())),
+                    ))),
+                }),
+                captures: vec!["s".to_string()],
+            }),
+        })?;
+        run!(&HirStmt::Assign {
+            var: "s".to_string(),
+            value: Box::new(HirExpr::Call {
+                name: "f".to_string(),
+                args: vec![HirExpr::Number(1)],
+                callee_effects: None,
+            }),
+        })?;
+
+        assert!(!array_ptrs.contains_key("s"));
+        assert!(variables["s"].is_int_value());
+        llvm!(builder.build_return(Some(&variables["s"])));
         assert!(function.verify(false));
         Ok(())
     }

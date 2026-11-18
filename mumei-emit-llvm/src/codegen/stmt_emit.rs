@@ -526,25 +526,27 @@ pub(crate) fn compile_hir_stmt<'a>(
                     return Ok(scalar);
                 }
             }
-            if array_ptrs.contains_key(var.as_str()) {
-                // A `Str` binding reassigned to a non-array value keeps
-                // its pre-v13 emit semantics; drop the stale fat pointer
-                // so a later `s[i]` cannot read the old bytes.
-                if matches!(
-                    array_ptrs.get(var.as_str()),
-                    Some(&(_, elem_ty, _)) if elem_ty == context.i8_type().into()
-                ) {
-                    array_ptrs.remove(var.as_str());
-                } else {
-                    return Err(MumeiError::codegen(format!(
-                        "array '{var}' can only be reassigned from an array literal or another array binding"
-                    )));
-                }
+            let was_str = matches!(
+                array_ptrs.get(var.as_str()),
+                Some(&(_, elem_ty, _)) if elem_ty == context.i8_type().into()
+            );
+            if array_ptrs.contains_key(var.as_str()) && !was_str {
+                return Err(MumeiError::codegen(format!(
+                    "array '{var}' can only be reassigned from an array literal or another array binding"
+                )));
             }
             let val = compile_hir_expr(
                 context, builder, module, function, value, variables, var_types, array_ptrs,
                 module_env,
             )?;
+            if was_str {
+                // A `Str` binding reassigned to a non-array value keeps
+                // its pre-v13 emit semantics; drop the stale fat pointer
+                // so a later `s[i]` cannot read the old bytes. The drop
+                // must follow the RHS: a `s = f(...)` call whose lambda
+                // captures `s` packs the capture from `array_ptrs`.
+                array_ptrs.remove(var.as_str());
+            }
             variables.insert(var.clone(), val);
             if let Some(struct_ty) = infer_struct_type_name(value, var_types, module_env) {
                 var_types.insert(var.clone(), struct_ty);
