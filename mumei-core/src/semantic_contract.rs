@@ -4579,6 +4579,17 @@ pub struct PureI64Body<'ctx> {
     /// field slots concatenated in declaration order (field 0 in the
     /// most significant 64 bits, see `aggregate_value`).
     pub result_shape: Option<usize>,
+    /// Per-parameter leaf kinds in declaration order, flattened exactly
+    /// like `param_shapes`: `true` for a pass-through `f64` leaf
+    /// (`pure-i64-composite/v11`), `false` for an integer leaf (`i64`,
+    /// `bool`, `u64` — one LLVM `i64` each). The LLVM side pairs these
+    /// with the shapes so an i64/f64 ABI swap cannot pass a
+    /// leaf-count-only check.
+    pub param_leaf_doubles: Vec<Vec<bool>>,
+    /// The result's leaf kinds under the same convention: one entry for
+    /// a scalar result, one per flattened slot for an aggregate result.
+    /// Empty when the atom declares no return type.
+    pub result_leaf_doubles: Vec<bool>,
     /// When the body contains a `while`, the conjunction of each loop's
     /// bounded-exit condition: `true` only on inputs where every loop's
     /// guard fails within `LOOP_BOUND` unrolled iterations. Equivalence
@@ -4887,6 +4898,55 @@ fn encode_atom_body<'ctx>(
                 .map(|fields| flattened_struct_fields(structs, fields).len())
                 .or_else(|| enums.get(name).map(|variants| 1 + enum_max_arity(variants)))
         }),
+        param_leaf_doubles: atom
+            .params
+            .iter()
+            .map(|p| {
+                struct_fields(p, structs)
+                    .map(|fields| {
+                        flattened_struct_fields(structs, fields)
+                            .iter()
+                            .map(|(_, f)| f.type_name == "f64")
+                            .collect()
+                    })
+                    .or_else(|| {
+                        enum_variants(p, enums).map(|variants| {
+                            let mut kinds = vec![false];
+                            kinds.extend(
+                                (0..enum_max_arity(variants))
+                                    .map(|i| enum_slot_type(variants, i) == Some("f64")),
+                            );
+                            kinds
+                        })
+                    })
+                    .unwrap_or_else(|| vec![p.type_name.as_deref() == Some("f64")])
+            })
+            .collect(),
+        result_leaf_doubles: atom
+            .return_type
+            .as_deref()
+            .map(|name| {
+                structs
+                    .get(name)
+                    .map(|fields| {
+                        flattened_struct_fields(structs, fields)
+                            .iter()
+                            .map(|(_, f)| f.type_name == "f64")
+                            .collect()
+                    })
+                    .or_else(|| {
+                        enums.get(name).map(|variants| {
+                            let mut kinds = vec![false];
+                            kinds.extend(
+                                (0..enum_max_arity(variants))
+                                    .map(|i| enum_slot_type(variants, i) == Some("f64")),
+                            );
+                            kinds
+                        })
+                    })
+                    .unwrap_or_else(|| vec![name == "f64"])
+            })
+            .unwrap_or_default(),
         loop_bound_exits,
         bounded_memory,
         post_writes: top_writes
