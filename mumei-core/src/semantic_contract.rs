@@ -5510,12 +5510,21 @@ fn source_field_write<'ctx>(
     // The encoded slot shape cannot change: an integer field takes
     // only an integer value, a boolean field only a boolean, and a
     // struct field (`pure-i64-composite/v8`) only a composite — the
-    // kind layer already checked the composite's declared type.
+    // kind layer already checked the composite's declared type. A
+    // `Number` bound lands under the slot's leaf, the same coercion a
+    // struct literal applies, so the slot cannot drift signed where
+    // the field is unsigned (`pure-i64-composite/v10`).
+    let bound = match (slot, bound) {
+        (SourceValue::Integer(_), SourceValue::Number(v)) => SourceValue::Integer(v),
+        (SourceValue::Unsigned(_), SourceValue::Number(v)) => SourceValue::Unsigned(v),
+        (_, bound) => bound,
+    };
     match (slot, &bound) {
         (SourceValue::Integer(_) | SourceValue::Number(_), SourceValue::Integer(_))
         | (SourceValue::Integer(_), SourceValue::Number(_))
         | (SourceValue::Unsigned(_) | SourceValue::Number(_), SourceValue::Unsigned(_))
         | (SourceValue::Unsigned(_), SourceValue::Number(_))
+        | (SourceValue::Number(_), SourceValue::Number(_))
         | (SourceValue::Boolean(_), SourceValue::Boolean(_))
         | (SourceValue::Composite(_), SourceValue::Composite(_)) => {}
         _ => {
@@ -6281,23 +6290,36 @@ fn source_expr<'ctx>(
                 )?;
                 // A nested struct field takes a composite value —
                 // everything else must be scalar (`v8` declarations
-                // only ever produce these two shapes).
-                let shape_ok = declared
-                    .iter()
-                    .find(|(decl_name, _)| decl_name == name)
-                    .is_some_and(|(_, shape)| {
-                        matches!(
-                            (shape, &value),
-                            (
-                                ValueKind::Scalar(ScalarKind::I64),
-                                SourceValue::Integer(_) | SourceValue::Number(_)
-                            ) | (
-                                ValueKind::Scalar(ScalarKind::U64),
-                                SourceValue::Unsigned(_) | SourceValue::Number(_)
-                            ) | (ValueKind::Scalar(ScalarKind::Bool), SourceValue::Boolean(_))
-                                | (ValueKind::Struct(_), SourceValue::Composite(_))
-                        )
-                    });
+                // only ever produce these two shapes). A `Number` literal
+                // lands under the declared leaf: `Unsigned` in a `u64`
+                // field, `Integer` in an `i64` one — otherwise the slot
+                // would keep adapting and later reads could go signed
+                // where the field is unsigned (`pure-i64-composite/v10`).
+                let Some((_, declared_shape)) =
+                    declared.iter().find(|(decl_name, _)| decl_name == name)
+                else {
+                    return Err(SemanticContractError::Unsupported("source struct literal"));
+                };
+                let value = match (declared_shape, value) {
+                    (ValueKind::Scalar(ScalarKind::I64), SourceValue::Number(v)) => {
+                        SourceValue::Integer(v)
+                    }
+                    (ValueKind::Scalar(ScalarKind::U64), SourceValue::Number(v)) => {
+                        SourceValue::Unsigned(v)
+                    }
+                    (_, value) => value,
+                };
+                let shape_ok = matches!(
+                    (declared_shape, &value),
+                    (
+                        ValueKind::Scalar(ScalarKind::I64),
+                        SourceValue::Integer(_) | SourceValue::Number(_)
+                    ) | (
+                        ValueKind::Scalar(ScalarKind::U64),
+                        SourceValue::Unsigned(_) | SourceValue::Number(_)
+                    ) | (ValueKind::Scalar(ScalarKind::Bool), SourceValue::Boolean(_))
+                        | (ValueKind::Struct(_), SourceValue::Composite(_))
+                );
                 if !shape_ok || values.insert(name, value).is_some() {
                     return Err(SemanticContractError::Unsupported("source struct literal"));
                 }
