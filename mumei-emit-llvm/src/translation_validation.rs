@@ -843,6 +843,27 @@ unsafe fn aggregate_leaf_range(ty: LLVMTypeRef, index: u32) -> Option<(usize, us
     None
 }
 
+/// `true` when `inst` carries fast-math flags. LLVM 17's C API has no
+/// FMF getter, but `LLVMPrintValueToString` renders them as tokens
+/// right after the opcode (`select nnan i1 %c, double %a, double %b`,
+/// `call fast double @f(...)`). The flag set is closed, and a flag can
+/// never appear as a bare operand token (values print with a `%`, `@`
+/// or literal prefix), so a known flag token in the instruction's
+/// leading tokens means flags are set — the source model treats an
+/// `f64` leaf as an opaque bit pattern, which any flag could
+/// reinterpret.
+unsafe fn has_fast_math(inst: LLVMValueRef) -> bool {
+    let text = LLVMPrintValueToString(inst);
+    let text = std::ffi::CStr::from_ptr(text).to_str().unwrap_or("");
+    let body = text.split_once(" = ").map(|(_, rest)| rest).unwrap_or(text);
+    body.split_ascii_whitespace().take(8).any(|token| {
+        matches!(
+            token,
+            "fast" | "nnan" | "ninf" | "nsz" | "arcp" | "contract" | "afn" | "reassoc"
+        )
+    })
+}
+
 /// A constant of an admitted aggregate type whose slots the encoder can
 /// read: whole `undef`/`poison` (every slot undefined),
 /// `zeroinitializer`, or a literal struct of integer, `double` and
@@ -1079,6 +1100,9 @@ unsafe fn check_function(
                 return Err(ValidationError("LLVM metadata unsupported"));
             }
             let opcode = LLVMGetInstructionOpcode(inst);
+            if has_fast_math(inst) {
+                return Err(ValidationError("fast-math flags unsupported"));
+            }
             for i in 0..LLVMGetNumOperands(inst) {
                 let value = LLVMGetOperand(inst, i as u32);
                 // A call's last operand is the callee itself — a
