@@ -273,19 +273,50 @@ pub(crate) fn compile_hir_stmt<'a>(
                 }
                 return Ok(len_val);
             }
+            // `let s = "lit"` (`pure-i64-composite/v13`): the `*i8` global
+            // stays the bound value (concat/extern uses are unchanged) and
+            // a read-only fat pointer `(len, i8, data)` registers beside
+            // it so `s[i]`/`len(s)` emit the same bounds-checked byte read
+            // the verifier's bounded-memory model encodes.
+            if let HirExpr::StringLit(s) = value.as_ref() {
+                let global = builder.build_global_string_ptr(s, "str_lit").map_err(|e| {
+                    MumeiError::codegen(format!("Failed to build string literal: {:?}", e))
+                })?;
+                let data_ptr: BasicValueEnum = global.as_pointer_value().into();
+                let len_val: BasicValueEnum =
+                    context.i64_type().const_int(s.len() as u64, false).into();
+                array_ptrs.insert(var.clone(), (len_val, context.i8_type().into(), data_ptr));
+                variables.insert(var.clone(), data_ptr);
+                return Ok(data_ptr);
+            }
             // `let a = arr` — the binding aliases the tracked fat pointer so
             // `a[i]`/`len(a)`/`a[i] = x` hit the source's slots.
             if let HirExpr::Variable(src) = value.as_ref() {
                 if let Some(&(len_val, elem_ty, data_ptr)) = array_ptrs.get(src.as_str()) {
                     array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
-                    variables.insert(var.clone(), len_val);
+                    // A `Str` (`pure-i64-composite/v13`, `i8` cells) keeps
+                    // its `*i8` pointer as the bound value — concat and
+                    // extern uses need it — while integer arrays expose
+                    // their length in scalar position.
+                    variables.insert(
+                        var.clone(),
+                        if elem_ty == context.i8_type().into() {
+                            data_ptr
+                        } else {
+                            len_val
+                        },
+                    );
                     if var_types
                         .get(var.as_str())
                         .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
                     {
                         var_types.remove(var.as_str());
                     }
-                    return Ok(len_val);
+                    return Ok(if elem_ty == context.i8_type().into() {
+                        data_ptr
+                    } else {
+                        len_val
+                    });
                 }
                 // `let g = f` on a lambda binding: alias the same lifted fn
                 // (same captures) by copying the `@lam:` marker.
@@ -447,20 +478,59 @@ pub(crate) fn compile_hir_stmt<'a>(
                 }
                 return Ok(len_val);
             }
+            // `s = "lit"` on a `Str` binding rebinds the byte sequence —
+            // the composite fragment's immutability gate rejects the
+            // statement upstream, so this path only serves general
+            // builds, which allowed `let s = "a"; s = "b"` before v13
+            // registered the fat pointer.
+            if let HirExpr::StringLit(lit) = value.as_ref() {
+                if let Some(&(_, elem_ty, _)) = array_ptrs.get(var.as_str()) {
+                    if elem_ty == context.i8_type().into() {
+                        let global =
+                            builder
+                                .build_global_string_ptr(lit, "str_lit")
+                                .map_err(|e| {
+                                    MumeiError::codegen(format!(
+                                        "Failed to build string literal: {:?}",
+                                        e
+                                    ))
+                                })?;
+                        let data_ptr: BasicValueEnum = global.as_pointer_value().into();
+                        let len_val: BasicValueEnum =
+                            context.i64_type().const_int(lit.len() as u64, false).into();
+                        array_ptrs
+                            .insert(var.clone(), (len_val, context.i8_type().into(), data_ptr));
+                        variables.insert(var.clone(), data_ptr);
+                        return Ok(data_ptr);
+                    }
+                }
+            }
             if let HirExpr::Variable(src) = value.as_ref() {
                 if let Some(&(len_val, elem_ty, data_ptr)) = array_ptrs.get(src.as_str()) {
                     array_ptrs.insert(var.clone(), (len_val, elem_ty, data_ptr));
-                    variables.insert(var.clone(), len_val);
+                    // `i8` elements mark a `Str` binding: its scalar value
+                    // is the `*i8` pointer (concat/extern uses), not the
+                    // length integer arrays expose.
+                    let scalar = if elem_ty == context.i8_type().into() {
+                        data_ptr
+                    } else {
+                        len_val
+                    };
+                    variables.insert(var.clone(), scalar);
                     if var_types
                         .get(var.as_str())
                         .is_some_and(|mark| mark.starts_with(LAMBDA_MARK))
                     {
                         var_types.remove(var.as_str());
                     }
-                    return Ok(len_val);
+                    return Ok(scalar);
                 }
             }
-            if array_ptrs.contains_key(var.as_str()) {
+            let was_str = matches!(
+                array_ptrs.get(var.as_str()),
+                Some(&(_, elem_ty, _)) if elem_ty == context.i8_type().into()
+            );
+            if array_ptrs.contains_key(var.as_str()) && !was_str {
                 return Err(MumeiError::codegen(format!(
                     "array '{var}' can only be reassigned from an array literal or another array binding"
                 )));
@@ -469,6 +539,14 @@ pub(crate) fn compile_hir_stmt<'a>(
                 context, builder, module, function, value, variables, var_types, array_ptrs,
                 module_env,
             )?;
+            if was_str {
+                // A `Str` binding reassigned to a non-array value keeps
+                // its pre-v13 emit semantics; drop the stale fat pointer
+                // so a later `s[i]` cannot read the old bytes. The drop
+                // must follow the RHS: a `s = f(...)` call whose lambda
+                // captures `s` packs the capture from `array_ptrs`.
+                array_ptrs.remove(var.as_str());
+            }
             variables.insert(var.clone(), val);
             if let Some(struct_ty) = infer_struct_type_name(value, var_types, module_env) {
                 var_types.insert(var.clone(), struct_ty);

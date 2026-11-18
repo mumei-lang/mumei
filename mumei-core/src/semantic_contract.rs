@@ -142,6 +142,17 @@ pub const PURE_I64_COMPOSITE_PROFILE_V10: &str = "mumei.pure-i64-composite/v10";
 /// signature-domain layer applies no bound since every bit pattern is
 /// a valid carrier (`pure-i64-composite/v11`).
 pub const PURE_I64_COMPOSITE_PROFILE_V11: &str = "mumei.pure-i64-composite/v11";
+/// `Str` literal leaves (`pure-i64-composite/v13`): a `let`-bound
+/// string literal is a bounded inline byte sequence — up to
+/// `STR_BOUND` cells under the bounded-memory model, immutable,
+/// `s[i]` reads a `u64` byte and `len(s)` its cell count
+/// (`pure-i64-composite/v13`).
+pub const PURE_I64_COMPOSITE_PROFILE_V13: &str = "mumei.pure-i64-composite/v13";
+
+/// Maximum byte length a `Str` literal may declare under
+/// `pure-i64-composite/v13`: one cell per byte under the
+/// bounded-memory model.
+pub const STR_BOUND: usize = 64;
 
 /// Bounded stack memory (`pure-i64-composite-bounded-memory/v1`): local
 /// fixed-size array literals, `a[i]` reads, `a[i] = v` writes and `len`
@@ -200,6 +211,7 @@ pub enum RefinedAdmission {
     CompositeV10,
     CompositeV11,
     CompositeV12,
+    CompositeV13,
 }
 
 impl RefinedAdmission {
@@ -278,6 +290,13 @@ impl RefinedAdmission {
     /// comparison operator (`pure-i64-composite/v11`).
     pub fn admits_f64_leaves(self) -> bool {
         self >= Self::CompositeV12
+    }
+
+    /// Whether `Str` literals are admitted as bounded inline byte
+    /// sequences — one cell per byte under the bounded-memory model,
+    /// immutable, `s[i]` reads a `u64` byte (`pure-i64-composite/v13`).
+    pub fn admits_str_leaves(self) -> bool {
+        self >= Self::CompositeV13
     }
 }
 
@@ -384,7 +403,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _, _, _, _, _, _, _, _) =
+    let (items, refined, structs, _, _, _, _, _, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -405,6 +424,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         false,
         false,
@@ -448,6 +468,7 @@ pub fn extract_pure_i64_module_contracts(
         u64_leaves,
         f64_leaves,
         arrays,
+        strs,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
@@ -489,6 +510,7 @@ pub fn extract_pure_i64_module_contracts(
                 u64_leaves,
                 f64_leaves,
                 arrays,
+                strs,
                 &cert_env,
             )),
             // Type and struct declarations carry no per-atom contract;
@@ -519,6 +541,7 @@ pub fn module_source_profile(
         u64_leaves,
         f64_leaves,
         arrays,
+        strs,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
         true,
@@ -533,6 +556,7 @@ pub fn module_source_profile(
         u64_leaves,
         f64_leaves,
         arrays,
+        strs,
     ))
 }
 
@@ -555,6 +579,7 @@ type AdmittedModule = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -680,6 +705,7 @@ fn admit_pure_i64_atoms(
     let enum_values_used = std::cell::Cell::new(false);
     let merged_composites_used = std::cell::Cell::new(false);
     let arrays_used = std::cell::Cell::new(false);
+    let strs_used = std::cell::Cell::new(false);
     for item in &items {
         let Item::Atom(sibling) = item else {
             continue;
@@ -712,11 +738,13 @@ fn admit_pure_i64_atoms(
             admission.admits_enum_values(),
             admission.admits_merged_composites(),
             admission.admits_bounded_memory(),
+            admission.admits_str_leaves(),
             &struct_values_used,
             &field_writes_used,
             &enum_values_used,
             &merged_composites_used,
             &arrays_used,
+            &strs_used,
         )?;
     }
     let u64_leaves = uses_u64_leaves(&items);
@@ -734,6 +762,7 @@ fn admit_pure_i64_atoms(
         u64_leaves,
         f64_leaves,
         arrays_used.get(),
+        strs_used.get(),
     ))
 }
 
@@ -903,9 +932,15 @@ fn fragment_profile(
     u64_leaves: bool,
     f64_leaves: bool,
     bounded_memory: bool,
+    str_leaves: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if str_leaves {
+        // A `Str` literal is only ever admitted under v13 — the
+        // bounded byte-cell encoding it requires is the strongest
+        // claim the ladder makes.
+        PURE_I64_COMPOSITE_PROFILE_V13
     } else if f64_leaves {
         // An `f64` leaf is only ever admitted under v12 — the
         // pass-through slot convention is the strongest claim the
@@ -976,6 +1011,7 @@ fn atom_contract(
     u64_leaves: bool,
     f64_leaves: bool,
     bounded_memory: bool,
+    str_leaves: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
@@ -991,7 +1027,8 @@ fn atom_contract(
         generic_structs,
         u64_leaves,
         f64_leaves,
-        bounded_memory,
+        bounded_memory || str_leaves,
+        str_leaves,
     );
     let result_fields = atom
         .return_type
@@ -1359,6 +1396,12 @@ struct KindEnv<'a> {
     /// Set when the atom uses any bounded-memory vocabulary, so the
     /// module names the bounded-memory profile only when it needs it.
     arrays_used: &'a std::cell::Cell<bool>,
+    /// Whether `Str` literal leaves are admitted
+    /// (`pure-i64-composite/v13`).
+    admit_str: bool,
+    /// Set when the atom binds or reads a `Str` literal, so the module
+    /// names the v13 profile only when it needs it.
+    strs_used: &'a std::cell::Cell<bool>,
 }
 
 impl<'a> KindEnv<'a> {
@@ -1814,11 +1857,13 @@ fn check_atom_contract(
     admit_enum_values: bool,
     admit_merged_composites: bool,
     admit_bounded_memory: bool,
+    admit_str: bool,
     struct_values_used: &std::cell::Cell<bool>,
     field_writes_used: &std::cell::Cell<bool>,
     enum_values_used: &std::cell::Cell<bool>,
     merged_composites_used: &std::cell::Cell<bool>,
     arrays_used: &std::cell::Cell<bool>,
+    strs_used: &std::cell::Cell<bool>,
 ) -> Result<(), SemanticContractError> {
     // Struct parameters stay out of the scalar scope — so they are
     // neither scalar operands nor rebindable — and live in the
@@ -1892,6 +1937,8 @@ fn check_atom_contract(
         merged_composites_used,
         admit_bounded_memory,
         arrays_used,
+        admit_str,
+        strs_used,
     };
     for p in &atom.params {
         env.bind(&p.name)?;
@@ -2136,6 +2183,10 @@ enum ScalarKind {
     /// (`pure-i64-composite/v11`). No literal produces it and `Num`
     /// never adapts to it.
     F64,
+    /// A `let`-bound `Str` literal — a bounded inline byte sequence
+    /// (`pure-i64-composite/v13`). Not unifiable with `ArrayI64` or
+    /// `ArrayU64`: it is immutable and its cells carry bytes.
+    Str,
 }
 
 fn expect_kind(actual: ScalarKind, expected: ScalarKind) -> Result<(), SemanticContractError> {
@@ -2913,6 +2964,8 @@ fn resolve_alias(
                     merged_composites_used: &std::cell::Cell::new(false),
                     admit_bounded_memory: false,
                     arrays_used: &std::cell::Cell::new(false),
+                    admit_str: false,
+                    strs_used: &std::cell::Cell::new(false),
                 },
             )?,
             ScalarKind::Bool,
@@ -3223,6 +3276,13 @@ fn block_prefix_kinds<'a>(
                 if !inner_assignable.contains(var) {
                     return Err(SemanticContractError::Unsupported(
                         "assignment to a name not bound on the linear path",
+                    ));
+                }
+                // A `Str` binding is immutable (`pure-i64-composite/v13`):
+                // neither a fresh literal nor any other value re-seats it.
+                if inner.get(var) == Some(&ScalarKind::Str) {
+                    return Err(SemanticContractError::Unsupported(
+                        "assignment to a Str binding",
                     ));
                 }
                 let kind = expression_kind(
@@ -4185,6 +4245,16 @@ fn expression_kind(
         // and an `i64` one both accept them, so `a(u64) >= 0` kind-checks
         // like `a(i64) >= 0` does — with no numeric-suffix syntax.
         Expr::Number(_) => Ok(ScalarKind::Num),
+        // A `Str` literal (`pure-i64-composite/v13`): a bounded inline
+        // byte sequence, immutable, at most `STR_BOUND` cells under
+        // the bounded-memory model.
+        Expr::StringLit(s)
+            if allow_wrapping_arithmetic && env.admit_str && s.len() <= STR_BOUND =>
+        {
+            env.strs_used.set(true);
+            env.arrays_used.set(true);
+            Ok(ScalarKind::Str)
+        }
         Expr::Variable(name) if matches!(name.as_str(), "true" | "false") => Ok(ScalarKind::Bool),
         // Lexical bindings (including a shadowing `let result`) win over
         // the implicit result name, so the kind checker and the BV encoder
@@ -4330,6 +4400,14 @@ fn expression_kind(
             let branch_kind = match (then_kind, else_kind) {
                 (ScalarKind::Num, k @ (ScalarKind::I64 | ScalarKind::U64))
                 | (k @ (ScalarKind::I64 | ScalarKind::U64), ScalarKind::Num) => k,
+                // A `Str` value stays out of the branch-value merge for
+                // slice A (`pure-i64-composite/v13`): branch-local `let`
+                // literals still index/read inside their arm, but the
+                // merged `if` value admits no `Str` tail — matching the
+                // emitter's pointer-`if` which carries no length slot.
+                (ScalarKind::Str, _) | (_, ScalarKind::Str) => {
+                    return Err(SemanticContractError::Unsupported("str branch merge"))
+                }
                 (l, r) if l == r => l,
                 _ => return Err(SemanticContractError::Unsupported("scalar kind mismatch")),
             };
@@ -4378,6 +4456,11 @@ fn expression_kind(
                         kind = Some(match (first, arm_kind) {
                             (ScalarKind::Num, k @ (ScalarKind::I64 | ScalarKind::U64))
                             | (k @ (ScalarKind::I64 | ScalarKind::U64), ScalarKind::Num) => k,
+                            // As in the `if` merge: no `Str` arm value in
+                            // slice A (`pure-i64-composite/v13`).
+                            (ScalarKind::Str, _) | (_, ScalarKind::Str) => {
+                                return Err(SemanticContractError::Unsupported("str arm merge"))
+                            }
                             (l, r) if l == r => l,
                             _ => {
                                 return Err(SemanticContractError::Unsupported(
@@ -4448,6 +4531,9 @@ fn expression_kind(
             let elem = match scope.get(name.as_str()) {
                 Some(ScalarKind::ArrayI64) => ScalarKind::I64,
                 Some(ScalarKind::ArrayU64) => ScalarKind::U64,
+                // A `Str` index read yields the cell's byte — a `u64`
+                // leaf (`pure-i64-composite/v13`).
+                Some(ScalarKind::Str) if env.admit_str => ScalarKind::U64,
                 _ => {
                     return Err(SemanticContractError::Unsupported(
                         "array access on a non-array binding",
@@ -4482,7 +4568,9 @@ fn expression_kind(
                     &BTreeSet::new(),
                     env,
                 ) {
-                    if matches!(kind, ScalarKind::ArrayI64 | ScalarKind::ArrayU64) {
+                    if matches!(kind, ScalarKind::ArrayI64 | ScalarKind::ArrayU64)
+                        || (kind == ScalarKind::Str && env.admit_str)
+                    {
                         env.arrays_used.set(true);
                         return Ok(ScalarKind::I64);
                     }
@@ -4741,7 +4829,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays) =
+    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays, strs) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -4756,7 +4844,9 @@ fn bounded_pure_i64_module(
         refined,
         structs,
         enums,
-        arrays,
+        // A `Str` literal's byte cells live under the same bounded
+        // stack-memory model as an admitted array literal.
+        arrays || strs,
     ))
 }
 
@@ -7745,6 +7835,35 @@ fn source_expr<'ctx>(
                 alloc,
             }
         }
+        // A `Str` literal (`pure-i64-composite/v13`): one `BV64 -> BV64`
+        // array under the bounded-memory model, each byte stored as a
+        // constant cell — the same cells the emitted `alloca [N x i64]`
+        // + per-element `store` writes. `elem: Str` marks the backing
+        // immutable: the kind gate refuses `s[i] = v` and `s = _`.
+        Expr::StringLit(s) => {
+            if s.len() > STR_BOUND {
+                return Err(SemanticContractError::Unsupported("str literal bound"));
+            }
+            let zero = BV::from_u64(ctx, 0, 64);
+            let mut store = Array::const_array(ctx, &Sort::bitvector(ctx, 64), &zero);
+            for (i, byte) in s.bytes().enumerate() {
+                store = store.store(
+                    &BV::from_u64(ctx, i as u64, 64),
+                    &BV::from_u64(ctx, byte as u64, 64),
+                );
+            }
+            let alloc = call_returns.fresh_array_alloc();
+            call_returns
+                .alloc_stores
+                .borrow_mut()
+                .insert(alloc, store.clone());
+            SourceValue::Array {
+                store,
+                len: BV::from_u64(ctx, s.len() as u64, 64),
+                elem: ScalarKind::Str,
+                alloc,
+            }
+        }
         // An indexed read `a[i]`: the in-bounds `select` or the merged
         // `0` an out-of-bounds read yields — no definedness obligation,
         // matching the emitted bounds-check + `phi(loaded, 0)`.
@@ -7783,7 +7902,9 @@ fn source_expr<'ctx>(
                 &index,
             );
             match elem {
-                ScalarKind::U64 => U(read),
+                // `s[i]` on a `Str` backing reads a byte — a `u64`
+                // leaf like a `u64` cell (`pure-i64-composite/v13`).
+                ScalarKind::U64 | ScalarKind::Str => U(read),
                 _ => I(read),
             }
         }
@@ -10489,6 +10610,162 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
         ] {
             assert!(
                 v12(&format!("{piece}\n{MAIN0}")).is_err(),
+                "admitted: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn composite_v13_admits_str_leaves() {
+        let v13 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV13)
+        };
+        let outcomes = |source: &str| {
+            refined_module_outcomes_admission(source, RefinedAdmission::CompositeV13)
+        };
+        let module = |piece: &str| format!("{piece}\n{MAIN0}");
+        for piece in [
+            // Byte read: "hi"[0] is 104.
+            "atom fst() -> u64 requires: true; ensures: result == 104; body: { let s = \"hi\"; s[0] };",
+            // `len` is the literal's byte count (an `i64`, like an
+            // array's length).
+            "atom n() -> i64 requires: true; ensures: result == 2; body: { let s = \"hi\"; len(s) };",
+            // An out-of-bounds read yields 0, like an array's merged phi.
+            "atom oob() -> u64 requires: true; ensures: result == 0; body: { let s = \"hi\"; s[9] };",
+            "atom neg() -> u64 requires: true; ensures: result == 0; body: { let s = \"hi\"; s[0 - 1] };",
+            // Bytes combine in u64 arithmetic.
+            "atom sum() -> u64 requires: true; ensures: result == 195; body: { let s = \"ab\"; s[0] + s[1] };",
+            // An index expression bounds the read.
+            "atom idx(i: i64) -> u64 requires: i >= 0 && i < 2; ensures: result >= 97 && result <= 98; body: { let s = \"ab\"; s[i] };",
+            // An alias binding reads the same cells.
+            "atom alias() -> u64 requires: true; ensures: result == 104; body: { let s = \"hi\"; let t = s; t[0] };",
+            // An empty literal reads out-of-bounds everywhere.
+            "atom empty() -> u64 requires: true; ensures: result == 0; body: { let s = \"\"; s[0] };",
+            "atom empty_len() -> i64 requires: true; ensures: result == 0; body: { let s = \"\"; len(s) };",
+            // A non-ASCII literal is bytes (UTF-8): "é"[0] = 0xC3 = 195.
+            "atom utf8() -> u64 requires: true; ensures: result == 195; body: { let s = \"é\"; s[0] };",
+            // A branch-local literal reads inside its arm.
+            "atom branch(c: i64) -> u64 requires: c >= 0; ensures: result == 104; body: { if c == 0 { let s = \"hi\"; s[0] } else { 104 } };",
+        ] {
+            let source = module(piece);
+            match v13(&source) {
+                Ok(cs) => assert!(
+                    cs.iter()
+                        .all(|c| c.profile == PURE_I64_COMPOSITE_PROFILE_V13),
+                    "{piece}"
+                ),
+                Err(e) => panic!("{piece}: {e:?}"),
+            }
+            match std::panic::catch_unwind(|| outcomes(&source)) {
+                Ok(res) => assert!(
+                    res.iter().all(|r| *r == z3::SatResult::Unsat),
+                    "{piece}"
+                ),
+                Err(_) => panic!("outcomes failed for: {piece}"),
+            }
+        }
+        // A false byte claim refutes.
+        let wrong = module(
+            "atom fst() -> u64 requires: true; ensures: result == 105; body: { let s = \"hi\"; s[0] };",
+        );
+        match outcomes(&wrong).as_slice() {
+            [z3::SatResult::Sat, ..] | [.., z3::SatResult::Sat] => (),
+            res => panic!("expected a refuted postcondition, got {res:?}"),
+        }
+        // v13 pins the profile: a `Str` literal anywhere selects it.
+        let source = module(
+            "atom fst() -> u64 requires: true; ensures: result == 104; body: { let s = \"hi\"; s[0] };",
+        );
+        assert_eq!(
+            module_source_profile(&source, RefinedAdmission::CompositeV13).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V13
+        );
+        // Narrower admissions keep `Str` literals out — v12 (f64
+        // leaves) and the bounded-memory profile included.
+        for admission in [
+            RefinedAdmission::Reject,
+            RefinedAdmission::V1,
+            RefinedAdmission::V2,
+            RefinedAdmission::Composite,
+            RefinedAdmission::CompositeV5,
+            RefinedAdmission::CompositeV10,
+            RefinedAdmission::CompositeV11,
+            RefinedAdmission::CompositeV12,
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(&source, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+        }
+        // A module without `Str` keeps the earlier profile.
+        let flat = format!(
+            "atom ge(a: i64) -> i64 requires: a >= 0; ensures: result == 1; body: {{ 1 }};\n{MAIN0}"
+        );
+        assert_ne!(
+            module_source_profile(&flat, RefinedAdmission::CompositeV13).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V13
+        );
+    }
+
+    #[test]
+    fn composite_v13_rejects_str_shapes_outside_the_fragment() {
+        let v13 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV13)
+        };
+        for (piece, why) in [
+            // Indexed write: a `Str` backing is immutable.
+            (
+                "atom w() -> i64 requires: true; ensures: true; body: { let s = \"hi\"; s[0] = 97; s[0] };",
+                "str indexed write",
+            ),
+            // Reassignment: the binding cannot re-seat a literal.
+            (
+                "atom r() -> i64 requires: true; ensures: true; body: { let s = \"hi\"; s = \"yo\"; s[0] };",
+                "str reassignment",
+            ),
+            // The bound itself: past 64 bytes stays out.
+            (
+                "atom big() -> i64 requires: true; ensures: true; body: { let s = \"01234567890123456789012345678901234567890123456789012345678901234\"; s[0] };",
+                "str bound",
+            ),
+            // Scalar position: a `Str` is not an integer operand.
+            (
+                "atom arith() -> i64 requires: true; ensures: true; body: { let s = \"hi\"; s + 1 };",
+                "str arithmetic",
+            ),
+            // Equality between two `Str` values reads no defined slot.
+            (
+                "atom eq() -> bool requires: true; ensures: true; body: { let s = \"hi\"; s == s };",
+                "str equality",
+            ),
+            // An `if`-expression value cannot merge `Str` tails yet.
+            (
+                "atom m(c: i64) -> i64 requires: true; ensures: true; body: { let s = if c == 0 { \"a\" } else { \"b\" }; s[0] };",
+                "str branch merge",
+            ),
+            // Returning the `Str` itself mismatches an i64 signature.
+            (
+                "atom ret() -> i64 requires: true; ensures: true; body: { let s = \"hi\"; s };",
+                "str return",
+            ),
+            // No `str` parameter: only literal-borne `Str` bindings.
+            (
+                "atom p(s: str) -> i64 requires: true; ensures: true; body: { s[0] };",
+                "str param",
+            ),
+            // No `str` struct field either.
+            (
+                "struct B { s: str, n: i64 }\natom f(b: B) -> i64 requires: true; ensures: true; body: { b.n };",
+                "str struct field",
+            ),
+            // No `str` enum payload.
+            (
+                "enum E { S(str), N }\natom f(e: E) -> i64 requires: true; ensures: true; body: { 0 };",
+                "str enum payload",
+            ),
+        ] {
+            assert!(
+                v13(&format!("{piece}\n{MAIN0}")).is_err(),
                 "admitted: {why}"
             );
         }
