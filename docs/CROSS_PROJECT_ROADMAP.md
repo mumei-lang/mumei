@@ -4718,10 +4718,11 @@ attempt's envelope — lineage, normalized run result, evidence
 candidate, `GoSummarySet.from_dict` check, acceptance verdict and
 the `SUMMARY_ESTABLISHED` discharge split — and recovery-eval folds
 it under the same four bound-report performer lists. The
-`go_summaries_reuse_attempt` MCP tool matches. The ts/sol/rust reuse
-routes still have no attempt variant, and audit
-`--enable-summary-attempts` still does not route
-`--summaries-manifest-map` units through the attempt lifecycle.
+`go_summaries_reuse_attempt` MCP tool matches. At #918 the
+ts/sol/rust reuse routes still had no attempt variant, and audit
+`--enable-summary-attempts` did not yet route
+`--summaries-manifest-map` units through the attempt lifecycle —
+both gaps are closed by #919 and #920 below.
 
 ### Sibling reuse-attempts + audit manifest-map wiring (mumei-agent #919, #920)
 
@@ -4736,9 +4737,10 @@ Audit `--enable-summary-attempts` then combines with
 `--summaries-manifest-map` (#920): a mapped unit dispatches its
 `<route>-reuse-attempt` route and records
 `mode: "reuse-attempt"` with the acceptance-envelope fields, while
-an unreadable or malformed prior manifest falls back to the plain
-`-attempt` route with `reuse_status: "stale_manifest"` — a bad prior
-manifest can never weaken the audit.
+an unreadable, malformed or rejected prior manifest falls back to the
+plain `-attempt` route with `reuse_status: "stale_manifest"` (only an
+`exited` child counts as rejection — a timeout or transport failure
+is recorded as-is) — a bad prior manifest can never weaken the audit.
 
 ### Demo: producer signature recovery lane (mumei-demo #158)
 
