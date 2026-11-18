@@ -17,16 +17,19 @@ pub(crate) fn run(command: EvidenceCommand) {
             json,
             solver_timeout,
             solver_resource_limit,
+            produced_at,
         } => (
-            source_options(&solver_timeout, &solver_resource_limit).and_then(|options| {
-                recheck_source(
-                    Path::new(&input),
-                    Path::new(&source),
-                    json,
-                    options,
-                    &mut output,
-                )
-            }),
+            source_options(&solver_timeout, &solver_resource_limit, produced_at).and_then(
+                |options| {
+                    recheck_source(
+                        Path::new(&input),
+                        Path::new(&source),
+                        json,
+                        options,
+                        &mut output,
+                    )
+                },
+            ),
             "Source evidence recheck failed",
         ),
         EvidenceCommand::AcceptSource {
@@ -35,16 +38,19 @@ pub(crate) fn run(command: EvidenceCommand) {
             json,
             solver_timeout,
             solver_resource_limit,
+            produced_at,
         } => (
-            source_options(&solver_timeout, &solver_resource_limit).and_then(|options| {
-                accept_source(
-                    Path::new(&input),
-                    Path::new(&source),
-                    json,
-                    options,
-                    &mut output,
-                )
-            }),
+            source_options(&solver_timeout, &solver_resource_limit, produced_at).and_then(
+                |options| {
+                    accept_source(
+                        Path::new(&input),
+                        Path::new(&source),
+                        json,
+                        options,
+                        &mut output,
+                    )
+                },
+            ),
             "Source evidence acceptance failed",
         ),
         EvidenceCommand::Check {
@@ -100,8 +106,9 @@ pub(crate) fn run(command: EvidenceCommand) {
             json,
             solver_timeout,
             solver_resource_limit,
+            produced_at,
         } => (
-            source_options(&solver_timeout, &solver_resource_limit)
+            source_options(&solver_timeout, &solver_resource_limit, produced_at)
                 .and_then(|options| verify_source(Path::new(&input), json, options, &mut output)),
             "Source evidence check failed",
         ),
@@ -243,7 +250,16 @@ fn write_accept(
     Ok(0)
 }
 
-fn source_options(timeout: &str, resource_limit: &str) -> Result<Options, &'static str> {
+fn source_options(
+    timeout: &str,
+    resource_limit: &str,
+    produced_at: Option<String>,
+) -> Result<Options, &'static str> {
+    if let Some(value) = &produced_at {
+        if !verification_evidence::is_rfc3339_timestamp(value) {
+            return Err("--produced-at must be an RFC 3339 timestamp");
+        }
+    }
     Ok(Options {
         timeout_ms: timeout
             .parse()
@@ -251,6 +267,7 @@ fn source_options(timeout: &str, resource_limit: &str) -> Result<Options, &'stat
         resource_limit: resource_limit
             .parse()
             .map_err(|_| "invalid bounded source-query budget")?,
+        produced_at,
     })
 }
 

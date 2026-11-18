@@ -447,3 +447,47 @@ fn nonregular_inputs_and_saved_artifact_paths_are_not_followed_or_executed() {
     assert_eq!(fs::read(&source).unwrap(), before_source);
     assert_eq!(fs::read(&saved).unwrap(), before_saved);
 }
+
+#[test]
+fn stamped_records_recheck_only_with_the_same_declared_produced_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("FAKE_PRIVATE_SOURCE.mm");
+    let saved = dir.path().join("FAKE_PRIVATE_EVIDENCE.json");
+    fs::write(&source, CLAMP).unwrap();
+    let stamp = "2026-11-18T00:00:00Z";
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args(["evidence", "verify-source"])
+        .arg(&source)
+        .args(["--json", "--produced-at", stamp])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    fs::write(&saved, &output.stdout).unwrap();
+
+    // Same declared stamp: recheck consistent.
+    for json in [false, true] {
+        let recheck = command(&source, &saved, json)
+            .args(["--produced-at", stamp])
+            .output()
+            .unwrap();
+        assert!(
+            recheck.status.success(),
+            "{}",
+            String::from_utf8_lossy(&recheck.stderr)
+        );
+    }
+
+    // Missing or different stamp: the stamp is part of the record
+    // bytes, so the fresh result no longer matches.
+    for args in [vec![], vec!["--produced-at", "2026-11-18T00:00:01Z"]] {
+        let recheck = command(&source, &saved, true).args(&args).output().unwrap();
+        failure(&recheck, 1);
+    }
+
+    // Malformed stamp rejected before any solving.
+    let recheck = command(&source, &saved, true)
+        .args(["--produced-at", "not-a-time"])
+        .output()
+        .unwrap();
+    failure(&recheck, 1);
+}

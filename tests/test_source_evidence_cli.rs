@@ -457,3 +457,52 @@ fn cli_help_distinguishes_producer_from_acceptance_artifact_proof_and_representa
         assert!(help.contains(text), "missing help contract: {text}");
     }
 }
+
+#[test]
+fn declared_produced_at_stamps_the_record_and_is_strictly_rfc3339() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("clamp.mm");
+    fs::write(&source, CLAMP).unwrap();
+
+    // Valid stamps land on the record bytes.
+    for stamp in ["2026-11-18T00:00:00Z", "2026-11-18t00:00:00.123+09:30"] {
+        let output = command(&source, true)
+            .arg("--produced-at")
+            .arg(stamp)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let record = verification_evidence::decode(&output.stdout).unwrap();
+        assert_eq!(record.produced_at.as_deref(), Some(stamp));
+    }
+
+    // Malformed stamps are rejected before any solving.
+    for stamp in [
+        "2026-11-18",
+        "2026-11-18T00:00:00",
+        "2026-11-18T00:00:00Z tomorrow",
+        "not-a-time",
+    ] {
+        let output = command(&source, true)
+            .arg("--produced-at")
+            .arg(stamp)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.contains(stamp));
+    }
+
+    // Without the flag the record carries no produced_at key at all.
+    let output = command(&source, true).output().unwrap();
+    assert_success(&output, true);
+    assert!(serde_json::from_slice::<Value>(&output.stdout)
+        .unwrap()
+        .get("produced_at")
+        .is_none());
+}

@@ -3339,6 +3339,25 @@ out. This is a wider admitted fragment, not deeper
 assurance: the same identity-plus-recheck scopes apply. See the
 [composite member profile](VERIFICATION_NATIVE.md#composite-struct-member-profile-v4).
 
+The Evidence v1 record now carries an optional `produced_at` field —
+slice 2 of the mumei-agent issue #894 design memo. `evidence
+verify-source --produced-at <RFC 3339>` stamps a caller-declared
+timestamp onto the emitted record; the flag is opt-in and the value
+is never read from the system clock, so production stays
+reproducible. Validation is strict RFC 3339 at the byte level:
+`YYYY-MM-DD[Tt]hh:mm:ss[.f+](Z|z|±hh:mm)` with range checks (month
+1–12, day 1–31, hour ≤ 23, minute ≤ 59, second ≤ 60, offset hour
+≤ 23 / minute ≤ 59); non-ASCII digits, date-only, missing offsets
+and unseparated offsets fail closed. Because the stamp is part of
+the record bytes, a `verify-source` recheck must declare the same
+`produced_at` or the saved record is inconsistent. The standalone
+JSON schema and the shared Core gate accept the optional field
+identically, so records without it are byte-identical to before.
+Freshness, clock authenticity and producer-time authenticity are
+still claims: stamping declares, it does not authenticate — that
+binding waits on producer-side signing. `native-bundle` evidence
+production keeps omitting the field.
+
 ## Related Documents
 
 - [`docs/FFI.md`](FFI.md) — FFI extern block design (Phase A foundation)
