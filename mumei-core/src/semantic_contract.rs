@@ -6222,6 +6222,12 @@ fn source_stmt<'ctx>(
                         let cur_store = canonical_store(call_returns, *alloc, store);
                         let new_store = array_in_bounds(ctx, &index, len)
                             .ite(&cur_store.store(&index, &bound), &cur_store);
+                        // The store is a state mutation, so it binds
+                        // only where this statement actually runs — a
+                        // `false && { … a[i] = v … }` path keeps the
+                        // pre-statement backing, like the emitted
+                        // short-circuit branch that skips the block.
+                        let new_store = guard.ite(&new_store, &cur_store);
                         call_returns
                             .alloc_stores
                             .borrow_mut()
