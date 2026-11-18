@@ -4723,6 +4723,23 @@ routes still have no attempt variant, and audit
 `--enable-summary-attempts` still does not route
 `--summaries-manifest-map` units through the attempt lifecycle.
 
+### Sibling reuse-attempts + audit manifest-map wiring (mumei-agent #919, #920)
+
+`ts-summaries-reuse-attempt`, `rust-summaries-reuse-attempt` and
+`sol-summaries-reuse-attempt` (#919) mirror the Go variant
+one-to-one: single declared source, `--manifest` bytes bound into
+the request fingerprint, identical lineage/acceptance envelope and
+`SUMMARY_ESTABLISHED` discharge, matching
+`*_summaries_reuse_attempt` MCP tools, and the three new report
+schemas fold under the same four recovery-eval performer lists.
+Audit `--enable-summary-attempts` then combines with
+`--summaries-manifest-map` (#920): a mapped unit dispatches its
+`<route>-reuse-attempt` route and records
+`mode: "reuse-attempt"` with the acceptance-envelope fields, while
+an unreadable or malformed prior manifest falls back to the plain
+`-attempt` route with `reuse_status: "stale_manifest"` — a bad prior
+manifest can never weaken the audit.
+
 ### Demo: producer signature recovery lane (mumei-demo #158)
 
 The optional C13 scenario `producer_signature_recovery` exercises
