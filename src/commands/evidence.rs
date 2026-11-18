@@ -383,11 +383,17 @@ fn keygen(secret_file: &Path, output: &mut impl Write) -> Result<(), &'static st
         });
     zeroize::Zeroize::zeroize(&mut secret_hex);
     result?;
+    #[cfg(unix)]
+    let permissions_note = "";
+    #[cfg(not(unix))]
+    let permissions_note =
+        "The file inherits the directory's access policy on this platform — restrict it to the owner yourself.\n";
     output
         .write_all(
             format!(
                 "Producer keypair generated; the secret key was written to the declared file only and is never printed.\n\
 Public key: {public_hex}\n\
+{permissions_note}\
 Scope: pin the public key over a separately trusted channel; no key authenticity, rotation or revocation evaluated.\n"
             )
             .as_bytes(),
