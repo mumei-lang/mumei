@@ -119,6 +119,31 @@ fn owned_key_bytes_decode_and_are_consumed() {
     );
 }
 
+#[test]
+fn generated_keypair_signs_and_verifies() {
+    let (secret_hex, public_hex) = generate_keypair();
+    assert_eq!(secret_hex.len(), 64);
+    assert_eq!(public_hex.len(), 64);
+    assert!(secret_hex
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert!(public_hex
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+
+    let key = decode_secret_key(&secret_hex).unwrap();
+    let record = b"{\"claim\": 2}";
+    let signed = sign(record, &key, "producer-b").unwrap();
+    let public = VerifyingKey::from_bytes(&decode_hex(&public_hex).try_into().unwrap()).unwrap();
+    let signature = Signature::from_bytes(&decode_hex(&signed.signature).try_into().unwrap());
+    public
+        .verify(signed.subject_digest.as_bytes(), &signature)
+        .unwrap();
+
+    // Fresh entropy: two keypairs never collide.
+    assert_ne!(generate_keypair(), (secret_hex, public_hex));
+}
+
 fn decode_hex(text: &str) -> Vec<u8> {
     (0..text.len())
         .step_by(2)

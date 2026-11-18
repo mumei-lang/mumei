@@ -291,3 +291,63 @@ fn input_selection_and_bound_match_the_evidence_family() {
         format!("{:x}", Sha256::digest(b"stdin record"))
     );
 }
+
+fn keygen_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mumei"));
+    command.args(["evidence", "keygen"]);
+    command
+}
+
+#[test]
+fn keygen_writes_secret_file_and_prints_only_public_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("key.hex");
+    let output = run({
+        let mut command = keygen_command();
+        command.args(["--secret-file"]).arg(&key);
+        command
+    });
+    assert!(output.status.success(), "{:?}", output.stderr);
+
+    // The file holds exactly the 64-char lowercase-hex secret --key-file
+    // accepts; stdout carries the public key only (a public value).
+    let secret = fs::read(&key).unwrap();
+    assert_eq!(secret.len(), 64);
+    assert!(secret
+        .iter()
+        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let public = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Public key: "))
+        .unwrap();
+    assert_eq!(public.len(), 64);
+    let secret_text = String::from_utf8_lossy(&secret);
+    assert!(!stdout.contains(secret_text.as_ref()));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(secret_text.as_ref()));
+
+    // The generated secret signs; the printed public key is its pair.
+    let record = dir.path().join("record.json");
+    write(&record, b"{\"claim\":3}");
+    let output = run({
+        let mut command = sign_command();
+        command.arg(&record).args(["--key-file"]).arg(&key).args([
+            "--producer-key-id",
+            "producer-a",
+            "--json",
+        ]);
+        command
+    });
+    assert!(output.status.success(), "{:?}", output.stderr);
+    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["signature"].as_str().unwrap().len(), 128);
+
+    // An existing file is never clobbered.
+    let output = run({
+        let mut command = keygen_command();
+        command.args(["--secret-file"]).arg(&key);
+        command
+    });
+    assert_failure(&output, 1);
+    assert_eq!(fs::read(&key).unwrap(), secret);
+}
