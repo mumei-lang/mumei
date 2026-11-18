@@ -4314,6 +4314,86 @@ The stamp is a producer claim: `clock_authenticity` /
 unperformed, and binding the stamp into the signed `subject_digest`
 waits on producer-side signing.
 
+### C11 declared evidence binding over record bytes (mumei-agent)
+
+[mumei-agent#899](https://github.com/mumei-lang/mumei-agent/pull/899)
+adds `agent.core_evidence.evaluate_evidence_binding(record, document)`
+and the `binding-eval` route — the last representation-level gap the
+recovery fold names, `evidence_binding`. The route reads a record's
+raw bytes (never parsed, so any bounded document binds the same way)
+and emits `mumei.evidence-binding/v1` reporting the recomputed
+`record_digest` (SHA-256 of the bytes, the same convention as
+`subject_digest`/`evidence_fingerprint`), `carrier_match`,
+`subject_declared` and `bound`. `_BINDING_CARRIERS` pins the subject
+field per schema so a document never declares its own coverage and a
+foreign schema never binds. A `bound` document now performs
+`evidence_binding` in the recovery fold (`_CHECK_PERFORMERS`), counted
+only when its `record_digest` equals the record's own SHA-256 —
+`carrier_authenticity` and `binding_enforcement` stay in
+`checks_not_performed` as documented host decisions. C11 stays partial.
+
+### C11 declared binding over the recheck carrier (mumei-agent)
+
+[mumei-agent#902](https://github.com/mumei-lang/mumei-agent/pull/902)
+binds `mumei.source-evidence-recheck/v1` diagnostics into the
+binding-eval carrier map — the recheck diagnostic's
+`evidence_fingerprint` joins `mumei.source-evidence-acceptance/v1` and
+`mumei.native-evidence-acceptance/v1` as a declared subject-bearing
+field, so a `binding-eval` report over a recheck output binds to the
+same record-bytes digest convention.
+
+### C02 evidence_fingerprint on the source recheck diagnostic (mumei)
+
+[mumei#1113](https://github.com/mumei-lang/mumei/pull/1113) adds
+`evidence_fingerprint` (SHA-256 of the record bytes) to the
+`mumei.source-evidence-recheck/v1` diagnostic, making the recheck
+output a declared subject-bearing carrier the binding-eval route can
+attribute to its record — same digest convention as
+`evidence-acceptance` documents.
+
+### Wave 3 summary-aware call modeling, Go port (mumei-agent)
+
+[mumei-agent#901](https://github.com/mumei-lang/mumei-agent/pull/901)
+lands issue #900 Option B for Go: `go-summaries --summary-aware-calls
+<MANIFEST>` folds a declared callee summary manifest
+(`mumei.go-scalar-parameter-deps/v1`) into `direct_import` calls it
+covers, replacing the opaque every-argument union with the declared
+`return_dependencies`/`pinned`/`effects` — unknown-effects callees
+keep the store-through-alias write widening. Matching keys on
+`(file digest, declaration start)` since the binding id carries a
+package-unit file index single-file units lack; colliding entries
+fold neither. Monotone-widening only: missed callees, gapped or
+unavailable entries, arity mismatch, out-of-range ordinals and
+method/receiver calls keep the opaque approximation, so a partial or
+stale manifest never narrows. The callee manifest's canonical bytes
+fold into `context_key`, so a changed manifest invalidates the strict
+whole-context gate; manifests derived with the flag carry advisory
+`call_modeling` counts (`summary_modeled_calls`/`opaque_calls`/
+`summary_unmatched`). `reuse` keeps `call_modeling` in the merged
+manifest, and the callee manifest's declared identities join `known`
+— its own `binding_id` does not, so a callee change without a
+manifest regen flags the folded caller stale. The flag joins the
+declared inputs (the attempt route forwards it and binds it into the
+request fingerprint; the fingerprint streams input hashes and hides
+checkout-local paths in errors).
+
+### Wave 3 summary-aware call modeling, Rust port (mumei-agent)
+
+[mumei-agent#905](https://github.com/mumei-lang/mumei-agent/pull/905)
+ports the same fold to `rust-summaries`: opaque calls matching a
+declared entry fold `return_dependencies`; receiver calls
+(`fld is not None`) and local-bound names (membership in `locals_`,
+not bound-set truthiness — an empty-dep binding produces an empty
+`bound`) never fold. Matching is on recorded call text with
+`::`→`.` normalization and one `crate.`/`self.`/`super.` root strip,
+exact then one-token prefix; gates are `not void`, `available`,
+arity and `max(deps, default=-1) < len(actual)`. The top-level build
+loop reuses inline-summarized callees so each call site is counted
+exactly once; an empty manifest still counts as declared
+(`_declared_set is not None`). The attempt fingerprint bounds the
+manifest read at `MAX_MANIFEST_BYTES + 1`, reports `exc.strerror`
+only, and the drift recheck catches `(OSError, ValueError)`.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
