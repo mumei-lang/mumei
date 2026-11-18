@@ -1565,6 +1565,7 @@ fn call_return_kinds(
             })
             .collect(),
         merged_composites: admission.admits_merged_composites(),
+        next_array_id: std::cell::Cell::new(0),
     }
 }
 
@@ -1595,9 +1596,24 @@ struct CallShapes {
     /// admitted: the source layer fails closed on a `Composite`/`Enum`
     /// reaching a branch merge below that admission.
     merged_composites: bool,
+    /// Mint for array `alloc` identities: each literal and each merge
+    /// of bindings from different literals takes a fresh one so a
+    /// later indexed write propagates to exactly the right aliases.
+    next_array_id: std::cell::Cell<u64>,
 }
 
 impl CallShapes {
+    /// A fresh backing-store identity for an `Array` value: a
+    /// literal's own, or a merged value's when its two sides came
+    /// from different literals (reusing either side's id would let a
+    /// write through the merge reach bindings that alias only one
+    /// side).
+    fn fresh_array_alloc(&self) -> u64 {
+        let id = self.next_array_id.get();
+        self.next_array_id.set(id + 1);
+        id
+    }
+
     fn returns_bool(&self, name: &str) -> bool {
         matches!(
             self.returns.get(name),
@@ -5582,6 +5598,12 @@ enum SourceValue<'ctx> {
         store: Array<'ctx>,
         len: BV<'ctx>,
         elem: ScalarKind,
+        /// Which array literal this binding's backing store descends
+        /// from: `let b = a` shares `a`'s identity (the emitted code
+        /// shares the data pointer), so an indexed write through one
+        /// name reaches every alias. Mints from
+        /// `CallShapes::next_array_id`.
+        alloc: u64,
     },
 }
 
@@ -5611,10 +5633,16 @@ fn substitute_source_value<'ctx>(
                 .map(|v| substitute_source_value(v, substitutions))
                 .collect(),
         },
-        SourceValue::Array { store, len, elem } => SourceValue::Array {
+        SourceValue::Array {
+            store,
+            len,
+            elem,
+            alloc,
+        } => SourceValue::Array {
             store: store.substitute(substitutions),
             len: len.substitute(substitutions),
             elem: *elem,
+            alloc: *alloc,
         },
     }
 }
@@ -5824,9 +5852,10 @@ fn merge_source_values<'ctx>(
     cond: &Bool<'ctx>,
     a: SourceValue<'ctx>,
     b: SourceValue<'ctx>,
-    merged_composites: bool,
+    call_returns: &CallShapes,
 ) -> BodyResult<SourceValue<'ctx>> {
     use SourceValue::{Boolean as B, Integer as I, Number as N, Unsigned as U};
+    let merged_composites = call_returns.merged_composites;
     match (a, b) {
         (N(a), N(b)) => Ok(N(cond.ite(&a, &b))),
         (U(a), U(b) | N(b)) | (N(a), U(b)) => Ok(U(cond.ite(&a, &b))),
@@ -5838,7 +5867,7 @@ fn merge_source_values<'ctx>(
             }
             let mut fields = Vec::with_capacity(a.len());
             for ((name, av), (_, bv)) in a.into_iter().zip(b) {
-                fields.push((name, merge_source_values(cond, av, bv, merged_composites)?));
+                fields.push((name, merge_source_values(cond, av, bv, call_returns)?));
             }
             Ok(SourceValue::Composite(fields))
         }
@@ -5856,7 +5885,7 @@ fn merge_source_values<'ctx>(
         ) if merged_composites && an == bn && a_slots.len() == b_slots.len() => {
             let mut slots = Vec::with_capacity(a_slots.len());
             for (av, bv) in a_slots.into_iter().zip(b_slots) {
-                slots.push(merge_source_values(cond, av, bv, merged_composites)?);
+                slots.push(merge_source_values(cond, av, bv, call_returns)?);
             }
             Ok(SourceValue::Enum {
                 name: an,
@@ -5868,22 +5897,32 @@ fn merge_source_values<'ctx>(
         // branch condition — the merge is the SMT array `ite` of the
         // store-chain and the incoming array, not a pointer `phi`
         // (the emitted IR keeps one data pointer and merges the
-        // stored values).
+        // stored values). Two sides bound from different literals
+        // mint a fresh `alloc`: keeping either side's id would let a
+        // write through the merged name reach bindings that alias
+        // only one side.
         (
             SourceValue::Array {
                 store: as_,
                 len: al,
                 elem: ae,
+                alloc: aa,
             },
             SourceValue::Array {
                 store: bs,
                 len: bl,
                 elem: be,
+                alloc: ba,
             },
         ) if ae == be => Ok(SourceValue::Array {
             store: cond.ite(&as_, &bs),
             len: cond.ite(&al, &bl),
             elem: ae,
+            alloc: if aa == ba {
+                aa
+            } else {
+                call_returns.fresh_array_alloc()
+            },
         }),
         _ => Err(SemanticContractError::Unsupported("branch composite kinds")),
     }
@@ -6119,7 +6158,10 @@ fn source_stmt<'ctx>(
                         value,
                         ..
                     } => {
-                        let Some(SourceValue::Array { store, len, elem }) = inner.get(array) else {
+                        let Some(SourceValue::Array {
+                            store, len, alloc, ..
+                        }) = inner.get(array)
+                        else {
                             return Err(SemanticContractError::Unsupported(
                                 "array write on a non-array binding",
                             ));
@@ -6157,15 +6199,34 @@ fn source_stmt<'ctx>(
                             call_returns,
                         )?
                         .integer()?;
-                        let stored = SourceValue::Array {
-                            store: array_in_bounds(ctx, &index, len)
-                                .ite(&store.store(&index, &bound), store),
-                            len: len.clone(),
-                            elem: *elem,
-                        };
-                        inner.insert(array.clone(), stored.clone());
-                        if escapable.contains(array.as_str()) {
-                            written.insert(array.clone(), stored);
+                        let new_store = array_in_bounds(ctx, &index, len)
+                            .ite(&store.store(&index, &bound), store);
+                        // `let b = a` aliases the same backing store
+                        // (`alloc`): an indexed write through any name
+                        // rebinds every member of the alias group,
+                        // matching the shared data pointer the
+                        // emitter emits.
+                        let alloc = *alloc;
+                        let mut updated = Vec::new();
+                        for (name, member) in inner.iter_mut() {
+                            if let SourceValue::Array {
+                                store: member_store,
+                                alloc: member_alloc,
+                                ..
+                            } = member
+                            {
+                                if *member_alloc == alloc {
+                                    *member_store = new_store.clone();
+                                    updated.push(name.clone());
+                                }
+                            }
+                        }
+                        for name in updated {
+                            if escapable.contains(&name) {
+                                if let Some(value) = inner.get(&name) {
+                                    written.insert(name, value.clone());
+                                }
+                            }
                         }
                     }
                     Stmt::Expr(value, _) => {
@@ -6329,21 +6390,30 @@ fn source_while<'ctx>(
                 (Some(B(old)), B(new)) => B(body_guard.ite(new, old)),
                 // A loop-carried `a[i] = v` keeps the merged array: the
                 // body's write applies only where the loop actually ran.
+                // A body rebinding `a = [...]` mints a fresh `alloc`,
+                // same as a branch merge of different literals.
                 (
                     Some(SourceValue::Array {
                         store: os,
                         len: ol,
                         elem: oe,
+                        alloc: oa,
                     }),
                     SourceValue::Array {
                         store: ns,
                         len: nl,
                         elem: ne,
+                        alloc: na,
                     },
                 ) if oe == ne => SourceValue::Array {
                     store: body_guard.ite(ns, os),
                     len: body_guard.ite(nl, ol),
                     elem: *oe,
+                    alloc: if oa == na {
+                        *oa
+                    } else {
+                        call_returns.fresh_array_alloc()
+                    },
                 },
                 (None, _) => bound.clone(),
                 _ => {
@@ -6957,20 +7027,10 @@ fn source_expr<'ctx>(
                         .cloned()
                         .ok_or(SemanticContractError::Unsupported("source binding"))?,
                 };
-                let merged = merge_source_values(
-                    &cond,
-                    then_bound,
-                    else_bound,
-                    call_returns.merged_composites,
-                )?;
+                let merged = merge_source_values(&cond, then_bound, else_bound, call_returns)?;
                 written.insert(name.clone(), merged);
             }
-            merge_source_values(
-                &cond,
-                then_value,
-                else_value,
-                call_returns.merged_composites,
-            )?
+            merge_source_values(&cond, then_value, else_value, call_returns)?
         }
         // First-match order, like the emitter's try-chain and
         // `--bitvec-i64` verification: an arm runs under the negation of
@@ -7181,12 +7241,7 @@ fn source_expr<'ctx>(
                         .cloned()
                         .or_else(|| env.get(&name).cloned())
                         .ok_or(SemanticContractError::Unsupported("source binding"))?;
-                    let merged = merge_source_values(
-                        &arm_hit,
-                        bound,
-                        prior,
-                        call_returns.merged_composites,
-                    )?;
+                    let merged = merge_source_values(&arm_hit, bound, prior, call_returns)?;
                     written.insert(name, merged);
                 }
                 if let Some(cond) = hit {
@@ -7201,7 +7256,7 @@ fn source_expr<'ctx>(
                 ));
             };
             for (cond, value) in selected.into_iter().rev() {
-                result = merge_source_values(&cond, value, result, call_returns.merged_composites)?;
+                result = merge_source_values(&cond, value, result, call_returns)?;
             }
             result
         }
@@ -7248,13 +7303,17 @@ fn source_expr<'ctx>(
                 } else {
                     ScalarKind::I64
                 },
+                alloc: call_returns.fresh_array_alloc(),
             }
         }
         // An indexed read `a[i]`: the in-bounds `select` or the merged
         // `0` an out-of-bounds read yields — no definedness obligation,
         // matching the emitted bounds-check + `phi(loaded, 0)`.
         Expr::ArrayAccess(name, index) => {
-            let Some(SourceValue::Array { store, len, elem }) = env.get(name.as_str()) else {
+            let Some(SourceValue::Array {
+                store, len, elem, ..
+            }) = env.get(name.as_str())
+            else {
                 return Err(SemanticContractError::Unsupported(
                     "array access on a non-array binding",
                 ));

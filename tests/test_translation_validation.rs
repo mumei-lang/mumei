@@ -3126,3 +3126,26 @@ fn bounded_memory_arrays_need_v11_and_pointer_escapes_fail_closed() {
     )
     .is_err());
 }
+
+const BOUNDED_ALIAS_SOURCE: &str = "atom alias() -> i64 requires: true; ensures: true; body: { let a = [1, 2]; let b = a; b[0] = 9; a[0] + a[1] };\natom main() -> i64 requires: true; ensures: true; body: { alias() };";
+
+#[test]
+fn bounded_memory_alias_write_reaches_every_alias() {
+    // `let b = a` copies the array's fat pointer — the emitted code
+    // shares one data pointer, so `b[0] = 9` must reach `a[0]` in the
+    // source model too (the value is 9 + 2 = 11 on both sides).
+    let items = parse_module_checked(BOUNDED_ALIAS_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    let report = tv::validate_native_module(
+        BOUNDED_ALIAS_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV11,
+    )
+    .unwrap();
+    assert_eq!(
+        report.outcome,
+        Outcome::EquivalentWithinProfile,
+        "aliased array write must validate\n{ir}"
+    );
+}
