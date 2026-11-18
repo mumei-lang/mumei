@@ -1068,12 +1068,22 @@ pub(crate) fn chan_payload_type_name(
 /// Resolve a declared type name to its base name with generics stripped —
 /// `get_enum`/`get_struct` are keyed on the unparameterized name, so
 /// `Option<i64>` resolves to `Option`.
+/// A resolved base name that denotes a fixed-width machine integer
+/// (`i8`..`i64`, `u8`..`u64`) — the names `hir_int_type_name` may legitimately
+/// return for a scalar binding.
+pub(crate) fn is_fixed_int_type_name(base: &str) -> bool {
+    matches!(
+        base,
+        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
+    )
+}
+
 /// Resolved integer type of a `HirExpr` operand — `Some("u64")` marks a
 /// `u64` operand, `Some("i64")` a declared signed one, `None` an adaptive
 /// literal or unresolvable expr. Mirrors the verifier's
 /// `fixed_width_int_type` so codegen picks `udiv`/`urem`/`lshr`/`icmp u*`
 /// for the same operands the verifier encoded with unsigned BV ops.
-fn hir_int_type_name(
+pub(crate) fn hir_int_type_name(
     expr: &HirExpr,
     var_types: &HashMap<String, String>,
     module_env: &ModuleEnv,
@@ -1086,7 +1096,24 @@ fn hir_int_type_name(
             .get_atom(name)
             .and_then(|atom| atom.return_type.clone())
             .map(|t| resolve_named_type(module_env, &t)),
-        HirExpr::BinaryOp(l, _, r) => hir_int_type_name(l, var_types, module_env)
+        // Only integer-producing operators propagate a leaf's signedness —
+        // a comparison or logical op yields `bool`, so `(a > 0) == (s.n > 0)`
+        // must not read `u64`/`i64` from its operands and trip the mix check.
+        HirExpr::BinaryOp(
+            l,
+            HirBinOp::Add
+            | HirBinOp::Sub
+            | HirBinOp::Mul
+            | HirBinOp::Pow
+            | HirBinOp::Div
+            | HirBinOp::Rem
+            | HirBinOp::BitAnd
+            | HirBinOp::BitOr
+            | HirBinOp::BitXor
+            | HirBinOp::Shl
+            | HirBinOp::Shr,
+            r,
+        ) => hir_int_type_name(l, var_types, module_env)
             .or_else(|| hir_int_type_name(r, var_types, module_env)),
         HirExpr::FieldAccess(inner, field) => infer_struct_type_name(inner, var_types, module_env)
             .and_then(|s| {
