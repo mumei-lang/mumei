@@ -893,7 +893,8 @@ unsafe fn aggregate_leaf_doubles(ty: LLVMTypeRef) -> Option<Vec<bool>> {
 unsafe fn has_fast_math(inst: LLVMValueRef) -> bool {
     let text = LLVMPrintValueToString(inst);
     if text.is_null() {
-        return false;
+        // An unprintable instruction is not provably flag-free.
+        return true;
     }
     let body = std::ffi::CStr::from_ptr(text).to_str().unwrap_or("");
     let body = body.split_once(" = ").map(|(_, rest)| rest).unwrap_or(body);
