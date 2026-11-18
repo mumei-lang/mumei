@@ -528,7 +528,27 @@ fn unfold_constant_calls<'a>(
 
             let mut call_env = (*env).clone();
             for (param, arg) in atom.params.iter().zip(args.iter()) {
-                call_env.insert(param.name.clone(), arg.clone());
+                // An `Int` literal bound to a machine-word parameter must
+                // enter the callee's contract under the same `BV(64)`
+                // encoding `param_z3_value` gives it — otherwise the
+                // clause's `a + 1 > a` is read as unbounded integer
+                // arithmetic and the caller proves a value the compiled
+                // code never produces.
+                let encodes_as_bv = param.type_name.as_deref().is_some_and(|name| {
+                    match lower(&vc.module_env.resolve_base_type(name.trim())) {
+                        LoweredType::U64 => true,
+                        LoweredType::I64 => vc.bitvec_i64,
+                        _ => false,
+                    }
+                });
+                let bound = if encodes_as_bv {
+                    as_bv_i64(arg)
+                        .map(|bv| bv.into())
+                        .unwrap_or_else(|| arg.clone())
+                } else {
+                    arg.clone()
+                };
+                call_env.insert(param.name.clone(), bound);
             }
 
             let _contract_guard = vc.enter_contract_instantiation(&atom.name);
