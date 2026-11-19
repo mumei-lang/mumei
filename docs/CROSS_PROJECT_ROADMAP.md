@@ -5531,6 +5531,42 @@ and the public schema
 signature covers the digest alone — which is exactly the honesty
 level mumei-agent#982's `envelope_fresh` consumes.
 
+### Enum equality under composite TV (mumei #1137)
+
+[mumei#1137](https://github.com/mumei-lang/mumei/pull/1137) lands
+`e == e'` / `e != e'` on two values of one declared enum under
+`mumei.pure-i64-composite/v14` and the `/v17` module/multifile
+bundle profiles. `enum_slot_eq` pairs `(Integer|Unsigned,
+Integer|Unsigned)` and `(Boolean, Boolean)` payload slots to an
+`_eq` obligation and refuses mixed or non-scalar shapes — the
+join walks the declared enum's slot list, so `==` on a payload
+slot resolves the concrete declared type rather than a name
+match. Ordering, arithmetic and `.tag` composition stay closed.
+Two review-round repairs shipped with it: the
+translation-validation slot model's `LLVMIsUndef` handling is
+reverted to fail-closed `None` slots (poison subclasses `undef`
+in LLVM, and a stored per-slot BV wrongly equated two extractions
+of one `undef` leaf — undef is fresh per use), and the match
+codegen's unreachable phi arm emits a concrete `const_zero()`
+aggregate instead of `get_undef()`, matching the zero/null
+already produced for the int/float/pointer arms. `check`,
+`recheck-source` and `recheck-llvm` cover the fragment.
+
+### `.tag` reads on bound enum values lower to slot 0 (mumei #1138)
+
+[mumei#1138](https://github.com/mumei-lang/mumei/pull/1138) closes
+the emitter gap where `e.tag` verified (the tagged-union slot-0
+binder) but had no codegen lowering — `FieldAccess` on a bound
+variable now dispatches on the receiver's declared type first: an
+enum resolves `.tag` to the slot-0 `extractvalue` and rejects
+other fields; a declared struct reads only its own declared
+fields; the name-only `find_field_index` scan remains the last
+resort for uninferable receivers. The dispatch order is what
+keeps `Meta { tag: i64 }.tag` reading the struct's field while
+`Chan.Tcp(x).tag` reads the enum tag even when a `Meta` struct
+coexists — the earlier every-struct scan would have hijacked
+`c.tag` to Meta's field index.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
