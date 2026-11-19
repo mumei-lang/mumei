@@ -5410,7 +5410,34 @@ drains queued func-arg invocations itself, promotes chan
 arguments, pins member signature types, and counts the bodyless
 call opaque; chan-alias sends resolve to the root queue and an
 empty bodyless `call.target` falls back to the member id so no
-empty transfer identity is recorded.
+empty transfer identity is recorded. A method receiver reads like
+an argument for the callback-write path, and a map's range key is
+stored data — it carries the call deps while slice and array
+indices stay dep-free.
+
+### Go deep-analysis: len/cap on call results (mumei-agent #976)
+
+#976 admits `len(lib.G(a))` and `cap(lib.G(a))` through the same
+container fact as the range form: the length of a callee-produced
+container is not stored data, so the result is dep-free while the
+call itself still folds (argument union, writes, chan promotion).
+`len` of true external state — package variables and bound-pointer
+contents — stays dep-free as before.
+
+### Go deep-analysis: bare composite bindings of call results (mumei-agent #977)
+
+#977 admits `s := lib.G(a)` when the callee's declared result is a
+container whose element is scalar-or-pointer: the binding holds a
+conflated dep set over the call's arguments, and a backing-token
+set tracks which call produced it. Slice and map re-binds share
+tokens, array re-binds mint fresh ones, and a conditional reseat
+unions rather than replaces. Tuple element writes snapshot the
+pre-state sharers (Go evaluates LHS operands before stores),
+union the index deps into the stored value, and publish through
+`indirect_writes` so pointer, range and callee readers see them.
+Arguments that are opaque containers may-alias a call result or
+receive callee element writes; map range keys carry deps, and
+comma-ok reads on bound opaque maps admit.
 
 ## No-`.mm` front door and V1 order
 
