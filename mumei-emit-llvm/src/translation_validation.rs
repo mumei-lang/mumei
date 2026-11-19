@@ -2145,7 +2145,6 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
 
     /// The leaf slots of a constant aggregate, flattened element-first:
     /// `{ {i64 3, i64 4}, i64 5 }` yields `[3, 4, 5]`; an `undef` element
-    /// contributes a fresh unconstrained leaf and a `poison` element
     /// contributes `None` slots for its whole leaf range.
     unsafe fn constant_leaves(&self, value: LLVMValueRef, out: &mut Vec<Option<BV<'ctx>>>) {
         let leaf_count = |v: LLVMValueRef| {
@@ -2156,19 +2155,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 aggregate_fields(ty).unwrap_or(1) as usize
             }
         };
-        if LLVMIsUndef(value) != 0 {
-            // `undef` is an arbitrary value, not an error: each leaf
-            // gets its own unconstrained symbolic leaf. The emitter
-            // only writes `undef` on provably-unreachable `match`
-            // fallback arms, so the pick never reaches a checked
-            // path — and if it did, an existential leaf is the
-            // standard undef encoding. `poison` stays fail-closed.
-            out.extend(
-                (0..leaf_count(value)).map(|_| Some(BV::fresh_const(self.ctx, "undef", 64))),
-            );
-            return;
-        }
-        if LLVMIsPoison(value) != 0 {
+        if LLVMIsUndef(value) != 0 || LLVMIsPoison(value) != 0 {
             out.extend(std::iter::repeat_n(None, leaf_count(value)));
             return;
         }
@@ -2183,9 +2170,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             let element = LLVMGetOperand(value, i);
             if aggregate_fields(LLVMTypeOf(element)).is_some() {
                 self.constant_leaves(element, out);
-            } else if LLVMIsUndef(element) != 0 {
-                out.push(Some(BV::fresh_const(self.ctx, "undef", 64)));
-            } else if LLVMIsPoison(element) != 0 {
+            } else if LLVMIsUndef(element) != 0 || LLVMIsPoison(element) != 0 {
                 out.push(None);
             } else if !LLVMIsAConstantFP(element).is_null() {
                 let mut loses = 0;
