@@ -4689,6 +4689,22 @@ is zeroized after use, and no secret material is ever printed or
 logged. Rotation and revocation stay out of scope per #886, as the
 command's scope line states.
 
+### Envelope `produced_at` stamp (mumei #1136)
+
+`mumei evidence sign --produced-at <RFC3339>` stamps a declared
+production timestamp onto the `mumei.producer-signature/v1`
+envelope — the missing input for the `envelope_freshness` check
+that `signature-eval`/`signature-verify` still list under
+`checks_not_performed`. Like `producer_key_id` the stamp is
+declared, never signed: the detached signature continues to cover
+the subject digest alone, so a stamped envelope verifies
+byte-identically to an unstamped one. The field joins the record
+only when stamped (`skip_serializing_if`), keeping the closed v1
+shape for unsigned envelopes; non-RFC3339 values fail
+`InvalidProducedAt` before signing. The consumer-side
+`envelope_fresh` fold (`--reference-time` + `--max-age-seconds`)
+is the mumei-agent half.
+
 ### Recovery fold: producer_authenticity via pinned signature verification (mumei-agent #917)
 
 `recovery-eval`'s `producer_authenticity` check recovers through a

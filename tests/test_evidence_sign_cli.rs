@@ -378,3 +378,55 @@ fn hex_bytes(text: &str) -> Vec<u8> {
         .map(|index| u8::from_str_radix(&text[index..index + 2], 16).unwrap())
         .collect()
 }
+
+#[test]
+fn produced_at_stamps_the_envelope_and_is_rejected_when_not_rfc3339() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("key.hex");
+    let record = dir.path().join("record.json");
+    write(&key, SECRET.as_bytes());
+    write(&record, b"{\"claim\":1}");
+
+    // `--produced-at` stamps a declared timestamp; the signature is
+    // unaffected since the signed payload is the digest alone.
+    let stamped = run({
+        let mut command = sign_command();
+        command.arg(&record).args(["--key-file"]).arg(&key).args([
+            "--producer-key-id",
+            "producer-a",
+            "--produced-at",
+            "2026-01-01T00:00:00Z",
+            "--json",
+        ]);
+        command
+    });
+    assert!(stamped.status.success(), "{:?}", stamped.stderr);
+    let envelope: Value = serde_json::from_slice(&stamped.stdout).unwrap();
+    assert_eq!(envelope["produced_at"], "2026-01-01T00:00:00Z");
+
+    let plain = run({
+        let mut command = sign_command();
+        command.arg(&record).args(["--key-file"]).arg(&key).args([
+            "--producer-key-id",
+            "producer-a",
+            "--json",
+        ]);
+        command
+    });
+    let plain_env: Value = serde_json::from_slice(&plain.stdout).unwrap();
+    assert_eq!(envelope["signature"], plain_env["signature"]);
+
+    // A malformed timestamp is rejected before signing.
+    let bad = run({
+        let mut command = sign_command();
+        command.arg(&record).args(["--key-file"]).arg(&key).args([
+            "--producer-key-id",
+            "producer-a",
+            "--produced-at",
+            "yesterday",
+            "--json",
+        ]);
+        command
+    });
+    assert_failure(&bad, 1);
+}

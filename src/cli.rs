@@ -500,6 +500,9 @@ pub(crate) enum EvidenceCommand {
         /// Caller-declared producer key label the consumer pins separately; never derived from the key bytes
         #[arg(long)]
         producer_key_id: String,
+        /// Optional declared production timestamp stamped into the envelope (RFC 3339); unsigned like the key id — freshness is a consumer-side check
+        #[arg(long)]
+        produced_at: Option<String>,
     },
     /// Generate a fresh ed25519 producer keypair; writes the 64-char hex secret to a new file and prints only the public key
     Keygen {

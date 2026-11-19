@@ -124,6 +124,7 @@ pub(crate) fn run(command: EvidenceCommand) {
             json,
             key_file,
             producer_key_id,
+            produced_at,
         } => (
             sign(
                 input.as_deref().map(Path::new),
@@ -131,6 +132,7 @@ pub(crate) fn run(command: EvidenceCommand) {
                 json,
                 Path::new(&key_file),
                 &producer_key_id,
+                produced_at.as_deref(),
                 &mut output,
             )
             .map(|()| 0),
@@ -327,6 +329,7 @@ fn sign(
     json: bool,
     key_file: &Path,
     producer_key_id: &str,
+    produced_at: Option<&str>,
     output: &mut impl Write,
 ) -> Result<(), &'static str> {
     let record = match (input, stdin) {
@@ -338,11 +341,18 @@ fn sign(
     let key = producer_signature::decode_secret_key_bytes(key_bytes)
         .map_err(|_| "invalid producer key material")?;
     let envelope =
-        producer_signature::sign(&record, &key, producer_key_id).map_err(|error| match error {
-            producer_signature::SignError::InvalidProducerKeyId => {
-                "producer key id must not be empty"
+        producer_signature::sign(&record, &key, producer_key_id, produced_at).map_err(|error| {
+            match error {
+                producer_signature::SignError::InvalidProducerKeyId => {
+                    "producer key id must not be empty"
+                }
+                producer_signature::SignError::InvalidKeyMaterial => {
+                    "invalid producer key material"
+                }
+                producer_signature::SignError::InvalidProducedAt => {
+                    "--produced-at must be an RFC 3339 timestamp"
+                }
             }
-            producer_signature::SignError::InvalidKeyMaterial => "invalid producer key material",
         })?;
     debug_assert_eq!(envelope.schema_version, PRODUCER_SIGNATURE_SCHEMA);
     let bytes = if json {

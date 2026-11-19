@@ -16,12 +16,17 @@ use ed25519_dalek::{Signer, SigningKey};
 use rand_core::{OsRng, RngCore};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+
+use crate::verification_evidence;
 use zeroize::Zeroize;
 
 pub const PRODUCER_SIGNATURE_SCHEMA: &str = "mumei.producer-signature/v1";
 
 /// Closed envelope shape; `producer_key_id` is a caller-declared label the
 /// consumer pins separately — it is never derived from the key bytes.
+/// `produced_at` joins the envelope only when the caller stamps one; like
+/// the key id it is declared, never signed — the signature covers the
+/// digest alone.
 #[derive(Debug, Serialize)]
 pub struct Envelope {
     pub schema_version: &'static str,
@@ -29,6 +34,8 @@ pub struct Envelope {
     pub algorithm: &'static str,
     pub signature: String,
     pub producer_key_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub produced_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +44,8 @@ pub enum SignError {
     InvalidKeyMaterial,
     /// The declared producer key id is empty.
     InvalidProducerKeyId,
+    /// The declared `produced_at` is not an RFC 3339 timestamp.
+    InvalidProducedAt,
 }
 
 /// Decode a 32-byte ed25519 secret from its 64-char lowercase-hex form —
@@ -98,9 +107,15 @@ pub fn sign(
     record: &[u8],
     secret_key: &SigningKey,
     producer_key_id: &str,
+    produced_at: Option<&str>,
 ) -> Result<Envelope, SignError> {
     if producer_key_id.is_empty() {
         return Err(SignError::InvalidProducerKeyId);
+    }
+    if let Some(value) = produced_at {
+        if !verification_evidence::is_rfc3339_timestamp(value) {
+            return Err(SignError::InvalidProducedAt);
+        }
     }
     let digest = subject_digest(record);
     let signature = secret_key.sign(digest.as_bytes());
@@ -110,6 +125,7 @@ pub fn sign(
         algorithm: "ed25519",
         signature: hex(&signature.to_bytes()),
         producer_key_id: producer_key_id.to_string(),
+        produced_at: produced_at.map(str::to_owned),
     })
 }
 

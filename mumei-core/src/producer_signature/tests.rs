@@ -7,14 +7,14 @@ const SECRET: &str = "1111111111111111111111111111111111111111111111111111111111
 
 fn envelope(record: &[u8]) -> Value {
     let key = decode_secret_key(SECRET).unwrap();
-    serde_json::to_value(sign(record, &key, "producer-a").unwrap()).unwrap()
+    serde_json::to_value(sign(record, &key, "producer-a", None).unwrap()).unwrap()
 }
 
 #[test]
 fn signed_envelope_verifies_against_the_public_key() {
     let key = decode_secret_key(SECRET).unwrap();
     let record = b"{\"claim\": 1}";
-    let signed = sign(record, &key, "producer-a").unwrap();
+    let signed = sign(record, &key, "producer-a", None).unwrap();
     let value = serde_json::to_value(&signed).unwrap();
     assert_eq!(value["schema_version"], PRODUCER_SIGNATURE_SCHEMA);
     assert_eq!(value["algorithm"], "ed25519");
@@ -39,7 +39,7 @@ fn signed_envelope_verifies_against_the_public_key() {
 
     // The same record under a different key id signs identically (the
     // label is declared, never derived).
-    let other = sign(record, &key, "producer-b").unwrap();
+    let other = sign(record, &key, "producer-b", None).unwrap();
     assert_eq!(signed.signature, other.signature);
 }
 
@@ -75,7 +75,7 @@ fn envelope_shape_is_exactly_the_closed_v1_fields() {
 fn empty_producer_key_id_is_rejected() {
     let key = decode_secret_key(SECRET).unwrap();
     assert_eq!(
-        sign(b"{}", &key, "").unwrap_err(),
+        sign(b"{}", &key, "", None).unwrap_err(),
         SignError::InvalidProducerKeyId
     );
 }
@@ -133,7 +133,7 @@ fn generated_keypair_signs_and_verifies() {
 
     let key = decode_secret_key(&secret_hex).unwrap();
     let record = b"{\"claim\": 2}";
-    let signed = sign(record, &key, "producer-b").unwrap();
+    let signed = sign(record, &key, "producer-b", None).unwrap();
     let public = VerifyingKey::from_bytes(&decode_hex(&public_hex).try_into().unwrap()).unwrap();
     let signature = Signature::from_bytes(&decode_hex(&signed.signature).try_into().unwrap());
     public
@@ -149,4 +149,35 @@ fn decode_hex(text: &str) -> Vec<u8> {
         .step_by(2)
         .map(|index| u8::from_str_radix(&text[index..index + 2], 16).unwrap())
         .collect()
+}
+
+#[test]
+fn produced_at_joins_the_envelope_only_when_stamped() {
+    let key = decode_secret_key(SECRET).unwrap();
+    let record = b"{\"claim\": 1}";
+
+    // Unstamped envelopes keep the closed v1 field set.
+    let plain = serde_json::to_value(sign(record, &key, "producer-a", None).unwrap()).unwrap();
+    assert!(plain.get("produced_at").is_none());
+
+    // A stamped timestamp lands on the envelope and the signature is
+    // unaffected — the signed payload is the digest alone.
+    let stamped = sign(record, &key, "producer-a", Some("2026-01-01T00:00:00Z")).unwrap();
+    let value = serde_json::to_value(&stamped).unwrap();
+    assert_eq!(value["produced_at"], "2026-01-01T00:00:00Z");
+    assert_eq!(
+        stamped.signature,
+        sign(record, &key, "producer-a", None).unwrap().signature
+    );
+}
+
+#[test]
+fn non_rfc3339_produced_at_is_rejected() {
+    let key = decode_secret_key(SECRET).unwrap();
+    for bad in ["yesterday", "2026-01-01", "2026-01-01T00:00:00"] {
+        assert_eq!(
+            sign(b"{}", &key, "producer-a", Some(bad)).unwrap_err(),
+            SignError::InvalidProducedAt
+        );
+    }
 }
