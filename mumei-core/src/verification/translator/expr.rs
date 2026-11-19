@@ -4161,6 +4161,13 @@ pub(crate) fn expr_to_z3<'a>(
                             if let Some(constraint_bool) = constraint_z3.as_bool() {
                                 if let Some(solver) = solver_opt {
                                     solver.push();
+                                    // Hold under the current path
+                                    // condition — without it, inputs on
+                                    // not-taken branches falsify the
+                                    // clause and a write guarded by `if`
+                                    // rejects even though the constraint
+                                    // holds on every reachable path.
+                                    solver.assert(&vc.path_cond_conj());
                                     solver.assert(&constraint_bool.not());
                                     if crate::verification::phase_artifacts::check(solver)
                                         == SatResult::Sat
