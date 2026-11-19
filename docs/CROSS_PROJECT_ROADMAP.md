@@ -4870,7 +4870,23 @@ per-binding direct-name sets so name-unified field resolutions
 (`cp.V` hitting the first identical literal) admit while promoted
 names (`Q.V` colliding with nested `A.V`, `s.A *Q`, embedded
 pointers, map/slice field mutation, interface params) stay
-closed. Non-scalar channel elements and `select` stay closed.
+closed. Non-scalar channel elements stay closed.
+
+### Go deep-analysis: unconditional channel rebinding (mumei-agent #934)
+
+#934 lands the `=` counterpart of #931's `ch := g()`: a chan-typed
+name reassigned to a call declaring a single scalar `chan`
+result reseats to the callee-produced queue — a `return q`
+passthrough callee aliases the argument's queue exactly like
+`ch = q`, otherwise the name keeps an external queue and drops
+its prior alias entry while `locals_` keeps the old contents
+reachable through remaining aliases. The reseat targets are
+resolved against the pre-state, so a tuple `a, b = b, g(a)`
+binds `b` to the queue `a` named before `a`'s own store, and a
+non-passthrough `ch = g(x)` unions the evaluated call deps into
+the name's conflated slot so `<-ch` observes what `g`'s result
+can carry. Conditional/loop rebinding stays closed (a
+maybe-skipped `ch = g()` could mean either queue).
 
 ## No-`.mm` front door and V1 order
 
