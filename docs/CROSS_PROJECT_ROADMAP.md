@@ -5439,6 +5439,31 @@ Arguments that are opaque containers may-alias a call result or
 receive callee element writes; map range keys carry deps, and
 comma-ok reads on bound opaque maps admit.
 
+### Declared key-revocation list on the signature folds (mumei-agent #978)
+
+#978 performs `key_revocation` — the first signature-family
+supplementary check — via a declared `mumei.key-revocation-list/v1`
+document (`{schema_version, revoked_keys}`) supplied through
+`--revocation-list PATH` on `signature-eval`/`signature-verify`,
+trusted as declared over a separately trusted channel exactly like
+the existing pins. `key_not_revoked` holds only when the envelope
+matched AND its `producer_key_id` is absent from the list; an
+unmatched envelope emits no `subject_digest` echo so nothing binds
+to a malformed envelope.
+
+The eval fold now echoes `subject_digest` on match (the carrier
+convention verification already used), `_BINDING_CARRIERS` binds
+signature-evaluation docs on it, and `_CHECK_PERFORMERS` names both
+folds' `key_not_revoked` bound through that carrier — a bound doc
+reporting `key_not_revoked: true` recovers a record's
+`key_revocation`, while `false` or a doc bound to other bytes fails
+the evidence. Recovery conflict semantics tightened with it: the
+all-agree veto scopes to bound (digest-carried) docs of a
+(schema, fields) group — record-agnostic performers keep their
+any-of-docs semantics since disagreement across unrelated records
+is expected, not a conflict. `--output` refuses to overwrite the
+revocation list like the other declared inputs.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
