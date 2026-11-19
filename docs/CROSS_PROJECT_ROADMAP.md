@@ -5229,6 +5229,38 @@ with union semantics; the index call then folds the
 captured bindings' current deps and writes like a bound
 anonymous callee.
 
+### Go deep-analysis: bound func-element containers (mumei-agent #963)
+
+#963 admits `fs := mk(x); fs[k]()` — binding a `[]func`/`[N]func`
+call result to a local and later calling through a computed index.
+The container local binds the same conflated dep set the call
+result carried (`fs := mk(x)`, `var fs = mk(x)`, and
+`var fs []func() T; fs = mk(x)`), so `fs[k]()` runs opaque on the
+container's slot: the callee read is the container's dep set and
+the computed index evaluates like an argument. Element literals
+inside the composite record their captures under the container's
+name with union semantics, so `fs := []func(){func(){ return y }}`
+followed by `y = x` resolves at the `fs[0]()` call site and a
+captured write target gets the call's write-back fold. The
+container's `chan` arguments promote like `f := mk(ch)`: a later
+`ch <- x` reaches `fs[k]()` via `indirect_writes`. The same slice
+admits a `nil` literal as a dep-free value in every expression
+position (`return nil`, `G(nil)`, `f = nil`, `p == nil`).
+
+### Go deep-analysis: map[K]func call results (mumei-agent #964)
+
+#964 admits `lib.Mk(x)["k"]()` — calling through a `map[K]func`
+call result. A keyed slot is as unknowable as a numbered index, so
+the keyed element runs as an opaque call on the container's slot;
+go-types admits the signature because a `map` underlying whose
+element is `*types.Signature` joins the imported-results gate, and
+`signatureTypeIDs` now walks map/slice/array element types plus
+the underlying signature's params and results so anonymous
+`func(N)` and collection-element named types pin. A computed key
+evaluates like an argument (`lib.Mk(x)[k]()` folds the key's
+deps); binding the map to a local stays closed until #965's bound
+map containers.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
