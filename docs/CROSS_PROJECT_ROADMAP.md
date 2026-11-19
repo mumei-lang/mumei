@@ -5090,6 +5090,62 @@ closed — interface-typed values are always unsupported
 bindings, so no receiver could ever reach the call — and a
 non-scalar result keeps `method_generic_or_variadic`.
 
+### Go deep-analysis: function-name reads in call arguments (mumei-agent #952)
+
+#952 admits a declared function name used as a call argument
+— `H(G, x)` evaluates `G` as a dep-free read of a stable
+declaration (matching the existing `h := G` alias read), so
+the argument list no longer fails on a `function`-typed
+operand. The callee receives no provenance for the function
+value itself — only the scalar arguments contribute deps —
+and the call record keeps its ordinary classification. A
+function name in non-argument positions (assignments,
+returns, comparisons) was already handled by the alias
+machinery and is unchanged.
+
+### Go deep-analysis: `go`/`defer` statements (mumei-agent #953)
+
+#953 admits `go f(args)` and `defer f(args)`: the callee
+expression and arguments evaluate at the statement and their
+reads land in the enclosing walk like a plain call, while
+the launched call's result is discarded. The call record
+carries a `special` marker (`concurrent`/`deferred`) so
+consumers can tell the call site from an ordinary one. For
+`defer`, the deferred call runs after the function's named
+result is evaluated but before it returns to the caller, so
+a deferred call that may write through a pointer argument
+adds its argument deps to a named-result return — the bound
+deps are matched against the recorded `CallTransfer`s by
+call span (opaque/interface paths record `()` args), falling
+back to the call result's own deps when the call has
+syntactic arguments but recorded none. A callee provably
+pure in the fragment adds nothing.
+
+### Go deep-analysis: void callees (mumei-agent #954)
+
+#954 lifts the signature gate's `not fn.results` rejection:
+a result-less body summarises with an empty return dep set —
+bare `return` and falling off the end both satisfy
+`saw_return`, and a statement-position call `s(x)` folds the
+callee's calls and effects exactly like a result-typed
+one. The transitive external-chan probe gained a
+`seen`-bounded walk so `mid(x)` calling `inner` which sends
+on a shared package chan flags the write two hops out, not
+just one. An empty void body still fails `unsupported_body`
+rather than claiming `effects: none`.
+
+### Go deep-analysis: non-identifier select receive targets (mumei-agent #955)
+
+#955 extends `select` communication cases to the write-target
+shapes the ordinary assignment admits: `case s.V = <-ch`
+folds the received deps into the composite's continuing dep
+set (and the pointer-provenance/indirect-stores destination
+read mirrors `=`), `case *p = <-ch`, `(*p)[i] = <-ch` and
+`(*p)[i].F = <-ch` alias-fold into every escaped binding plus
+`indirect_writes` — all inside the case's alternative scope
+with may-skip union semantics. An index into an unbound
+container (`a[i] = <-ch`) stays closed.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
