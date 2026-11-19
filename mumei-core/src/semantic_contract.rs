@@ -149,6 +149,13 @@ pub const PURE_I64_COMPOSITE_PROFILE_V11: &str = "mumei.pure-i64-composite/v11";
 /// (`pure-i64-composite/v13`).
 pub const PURE_I64_COMPOSITE_PROFILE_V13: &str = "mumei.pure-i64-composite/v13";
 
+/// v15 admits field writes through a nested field path —
+/// `q.inner.a = v` writes the leaf inside `q`'s `inner` subtree and
+/// `q.inner = s` keeps its whole-subtree meaning; the write updates
+/// the same flattened leaf slots the IR `insertvalue` chain touches
+/// (`pure-i64-composite/v15`).
+pub const PURE_I64_COMPOSITE_PROFILE_V15: &str = "mumei.pure-i64-composite/v15";
+
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
 /// bounded-memory model.
@@ -212,6 +219,7 @@ pub enum RefinedAdmission {
     CompositeV11,
     CompositeV12,
     CompositeV13,
+    CompositeV15,
 }
 
 impl RefinedAdmission {
@@ -297,6 +305,13 @@ impl RefinedAdmission {
     /// immutable, `s[i]` reads a `u64` byte (`pure-i64-composite/v13`).
     pub fn admits_str_leaves(self) -> bool {
         self >= Self::CompositeV13
+    }
+
+    /// Whether a field write may traverse into a nested struct field
+    /// — `q.inner.a = v` or a whole-subtree write at depth
+    /// (`pure-i64-composite/v15`).
+    pub fn admits_nested_writes(self) -> bool {
+        self >= Self::CompositeV15
     }
 }
 
@@ -403,7 +418,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _, _, _, _, _, _, _, _, _) =
+    let (items, refined, structs, _, _, _, _, _, _, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -424,6 +439,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         false,
         false,
@@ -469,6 +485,7 @@ pub fn extract_pure_i64_module_contracts(
         f64_leaves,
         arrays,
         strs,
+        nested_writes,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
@@ -511,6 +528,7 @@ pub fn extract_pure_i64_module_contracts(
                 f64_leaves,
                 arrays,
                 strs,
+                nested_writes,
                 &cert_env,
             )),
             // Type and struct declarations carry no per-atom contract;
@@ -542,6 +560,7 @@ pub fn module_source_profile(
         f64_leaves,
         arrays,
         strs,
+        nested_writes,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
         true,
@@ -557,6 +576,7 @@ pub fn module_source_profile(
         f64_leaves,
         arrays,
         strs,
+        nested_writes,
     ))
 }
 
@@ -579,6 +599,7 @@ type AdmittedModule = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -706,6 +727,7 @@ fn admit_pure_i64_atoms(
     let merged_composites_used = std::cell::Cell::new(false);
     let arrays_used = std::cell::Cell::new(false);
     let strs_used = std::cell::Cell::new(false);
+    let nested_writes_used = std::cell::Cell::new(false);
     for item in &items {
         let Item::Atom(sibling) = item else {
             continue;
@@ -739,12 +761,14 @@ fn admit_pure_i64_atoms(
             admission.admits_merged_composites(),
             admission.admits_bounded_memory(),
             admission.admits_str_leaves(),
+            admission.admits_nested_writes(),
             &struct_values_used,
             &field_writes_used,
             &enum_values_used,
             &merged_composites_used,
             &arrays_used,
             &strs_used,
+            &nested_writes_used,
         )?;
     }
     let u64_leaves = uses_u64_leaves(&items);
@@ -763,6 +787,7 @@ fn admit_pure_i64_atoms(
         f64_leaves,
         arrays_used.get(),
         strs_used.get(),
+        nested_writes_used.get(),
     ))
 }
 
@@ -933,9 +958,14 @@ fn fragment_profile(
     f64_leaves: bool,
     bounded_memory: bool,
     str_leaves: bool,
+    nested_writes: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if nested_writes {
+        // A nested-path write is only ever admitted under v15 — the
+        // deepest grammar the ladder admits.
+        PURE_I64_COMPOSITE_PROFILE_V15
     } else if str_leaves {
         // A `Str` literal is only ever admitted under v13 — the
         // bounded byte-cell encoding it requires is the strongest
@@ -1012,6 +1042,7 @@ fn atom_contract(
     f64_leaves: bool,
     bounded_memory: bool,
     str_leaves: bool,
+    nested_writes: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
@@ -1029,6 +1060,7 @@ fn atom_contract(
         f64_leaves,
         bounded_memory || str_leaves,
         str_leaves,
+        nested_writes,
     );
     let result_fields = atom
         .return_type
@@ -1402,6 +1434,12 @@ struct KindEnv<'a> {
     /// Set when the atom binds or reads a `Str` literal, so the module
     /// names the v13 profile only when it needs it.
     strs_used: &'a std::cell::Cell<bool>,
+    /// Whether field writes may traverse nested field paths
+    /// (`pure-i64-composite/v15`).
+    admit_nested_writes: bool,
+    /// Set when the atom writes through a nested field path, so the
+    /// module names the v15 profile only when it needs it.
+    nested_writes_used: &'a std::cell::Cell<bool>,
 }
 
 impl<'a> KindEnv<'a> {
@@ -1858,12 +1896,14 @@ fn check_atom_contract(
     admit_merged_composites: bool,
     admit_bounded_memory: bool,
     admit_str: bool,
+    admit_nested_writes: bool,
     struct_values_used: &std::cell::Cell<bool>,
     field_writes_used: &std::cell::Cell<bool>,
     enum_values_used: &std::cell::Cell<bool>,
     merged_composites_used: &std::cell::Cell<bool>,
     arrays_used: &std::cell::Cell<bool>,
     strs_used: &std::cell::Cell<bool>,
+    nested_writes_used: &std::cell::Cell<bool>,
 ) -> Result<(), SemanticContractError> {
     // Struct parameters stay out of the scalar scope — so they are
     // neither scalar operands nor rebindable — and live in the
@@ -1939,6 +1979,8 @@ fn check_atom_contract(
         arrays_used,
         admit_str,
         strs_used,
+        admit_nested_writes,
+        nested_writes_used,
     };
     for p in &atom.params {
         env.bind(&p.name)?;
@@ -2966,6 +3008,8 @@ fn resolve_alias(
                     arrays_used: &std::cell::Cell::new(false),
                     admit_str: false,
                     strs_used: &std::cell::Cell::new(false),
+                    admit_nested_writes: false,
+                    nested_writes_used: &std::cell::Cell::new(false),
                 },
             )?,
             ScalarKind::Bool,
@@ -3399,15 +3443,18 @@ fn block_prefix_kinds<'a>(
 
 /// The declared shape a dotted `q.f` assignment writes: `q` an
 /// unshadowed struct binding and `f` one of its declared fields —
-/// under `pure-i64-composite/v5` admission only. `None` keeps the
+/// under `pure-i64-composite/v5` admission only. Under
+/// `pure-i64-composite/v15` the path may keep descending through
+/// struct-typed fields — `q.inner.a = v` writes the leaf `a` inside
+/// `q`'s `inner` subtree; a mid-path segment naming a non-struct
+/// field or an undeclared field fails the walk. `None` keeps the
 /// ordinary assignable check: a non-dotted target, a deeper `a.b.c`
-/// path (`f` containing a `.` matches no declared field), a scalar or
-/// enum binding, or an undeclared field all fall through and fail
-/// there. An enum binding resolves through `composites` but never
-/// through `structs`, so enum field writes stay closed. Under
-/// `pure-i64-composite/v8` the target may name a struct-typed field —
-/// a whole-subtree write — which the callers handle as a composite
-/// rebind, never a scalar assignable.
+/// path under a lower admission, a scalar or enum binding, or an
+/// undeclared field all fall through and fail there. An enum binding
+/// resolves through `composites` but never through `structs`, so enum
+/// field writes stay closed. Under `pure-i64-composite/v8` the target
+/// may name a struct-typed field — a whole-subtree write — which the
+/// callers handle as a composite rebind, never a scalar assignable.
 fn field_write_shape<'a>(
     env: &KindEnv<'a>,
     scope: &BTreeMap<String, ScalarKind>,
@@ -3416,10 +3463,38 @@ fn field_write_shape<'a>(
     if !env.admit_field_writes {
         return None;
     }
-    let (base, field) = var.split_once('.')?;
-    let struct_name = env.composite_name(base, scope)?;
-    let declared = env.structs.get(struct_name)?;
-    declared.iter().find(|f| f.name == field).map(|f| &f.shape)
+    let mut segments = var.split('.').peekable();
+    let base = segments.next()?;
+    let mut struct_name = env.composite_name(base, scope)?;
+    let mut declared = env.structs.get(struct_name)?;
+    let mut shape = None;
+    let mut depth = 0usize;
+    while let Some(segment) = segments.next() {
+        // A leaf shape mid-path dead-ends the descent — the next
+        // segment must not resolve against the enclosing struct's
+        // declared fields.
+        if shape.is_some() {
+            return None;
+        }
+        let field = declared.iter().find(|f| f.name == segment)?;
+        depth += 1;
+        match &field.shape {
+            ValueKind::Struct(child) if segments.peek().is_some() => {
+                struct_name = child;
+                declared = env.structs.get(struct_name)?;
+            }
+            shape_kind => {
+                shape = Some(shape_kind);
+            }
+        }
+    }
+    if depth > 1 {
+        if !env.admit_nested_writes {
+            return None;
+        }
+        env.nested_writes_used.set(true);
+    }
+    shape
 }
 
 /// The declared struct name a field-access target carries, if the
@@ -4829,7 +4904,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays, strs) =
+    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays, strs, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -6043,9 +6118,12 @@ impl<'ctx> SourceValue<'ctx> {
 /// fragment). The base needs no `assignable` entry: `assignable` names
 /// scalar rebind targets, while a composite base's mutability is
 /// inherent — `env.get(base)` holding a `Composite` already proves the
-/// binding is live on the linear path. Returns the base name and the
-/// encoded field value so the caller can rebind the composite under
-/// it; `None` falls through to the ordinary assignable check.
+/// binding is live on the linear path. Under
+/// `pure-i64-composite/v15` the path descends nested composites —
+/// `q.inner.a = v` rewrites the leaf inside `q`'s `inner` subtree.
+/// Returns the base name, the composite with the slot replaced and the
+/// encoded field value, so the caller rebinds the base and yields the
+/// leaf; `None` falls through to the ordinary assignable check.
 #[allow(clippy::too_many_arguments)]
 fn source_field_write<'ctx>(
     var: &str,
@@ -6059,14 +6137,63 @@ fn source_field_write<'ctx>(
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
     call_returns: &CallShapes<'ctx>,
-) -> BodyResult<Option<(String, SourceValue<'ctx>)>> {
-    let Some((base, field)) = var.split_once('.') else {
+) -> BodyResult<Option<(String, SourceValue<'ctx>, SourceValue<'ctx>)>> {
+    // The composite with the value bound into `path`: descends the
+    // declared field names and rebuilds each level around the one
+    // changed slot — the same `insertvalue` chain the emitter emits.
+    fn update_at_path<'ctx>(
+        fields: &[(String, SourceValue<'ctx>)],
+        path: &[String],
+        bound: &SourceValue<'ctx>,
+    ) -> Option<SourceValue<'ctx>> {
+        let (head, rest) = path.split_first()?;
+        Some(SourceValue::Composite(
+            fields
+                .iter()
+                .map(|(name, slot)| {
+                    if name != head {
+                        return Some((name.clone(), slot.clone()));
+                    }
+                    if rest.is_empty() {
+                        return Some((name.clone(), bound.clone()));
+                    }
+                    let SourceValue::Composite(inner) = slot else {
+                        return None;
+                    };
+                    Some((name.clone(), update_at_path(inner, rest, bound)?))
+                })
+                .collect::<Option<Vec<_>>>()?,
+        ))
+    }
+
+    let mut segments = var.split('.');
+    let base = segments.next().unwrap_or(var);
+    let path: Vec<String> = segments.map(str::to_owned).collect();
+    if path.is_empty() {
         return Ok(None);
-    };
+    }
     let Some(SourceValue::Composite(fields)) = env.get(base) else {
         return Ok(None);
     };
-    let Some((_, slot)) = fields.iter().find(|(name, _)| name == field) else {
+    // Descend to the leaf slot the path names — a mid-path segment
+    // must land on a nested composite, and every segment must be a
+    // declared field of the composite it descends into.
+    let mut level: &[(String, SourceValue<'ctx>)] = fields;
+    let mut slot = None;
+    for (i, segment) in path.iter().enumerate() {
+        let Some((_, found)) = level.iter().find(|(name, _)| name == segment) else {
+            return Ok(None);
+        };
+        if i + 1 == path.len() {
+            slot = Some(found);
+            break;
+        }
+        match found {
+            SourceValue::Composite(inner) => level = inner,
+            _ => return Ok(None),
+        }
+    }
+    let Some(slot) = slot else {
         return Ok(None);
     };
     // A value that rebinds `base` (`q.x = { q.y = 2; 1 }`, a shadowing
@@ -6118,7 +6245,10 @@ fn source_field_write<'ctx>(
             ));
         }
     }
-    Ok(Some((base.to_owned(), bound)))
+    let Some(updated) = update_at_path(fields, &path, &bound) else {
+        return Ok(None);
+    };
+    Ok(Some((base.to_owned(), updated, bound)))
 }
 
 /// Whether a name rebound inside a block escapes into `written`: an
@@ -6269,7 +6399,7 @@ fn source_stmt<'ctx>(
             call_returns,
         ),
         Stmt::Assign { var, value, .. } => {
-            if let Some((base, bound)) = source_field_write(
+            if let Some((base, updated, bound)) = source_field_write(
                 var,
                 value,
                 ctx,
@@ -6285,22 +6415,6 @@ fn source_stmt<'ctx>(
                 // A field write rebinds the whole composite under the
                 // base name: the escape record sees the updated fields
                 // exactly like a scalar rebind of `base`.
-                let Some(SourceValue::Composite(fields)) = env.get(&base) else {
-                    return Err(SemanticContractError::Unsupported("source binding"));
-                };
-                let field = &var[base.len() + 1..];
-                let updated = SourceValue::Composite(
-                    fields
-                        .iter()
-                        .map(|(name, slot)| {
-                            if name == field {
-                                (name.clone(), bound.clone())
-                            } else {
-                                (name.clone(), slot.clone())
-                            }
-                        })
-                        .collect(),
-                );
                 written.insert(base, updated);
                 return Ok(bound);
             }
@@ -6393,7 +6507,7 @@ fn source_stmt<'ctx>(
                         escapable.remove(var);
                     }
                     Stmt::Assign { var, value, .. } => {
-                        if let Some((base, bound)) = source_field_write(
+                        if let Some((base, updated, _bound)) = source_field_write(
                             var,
                             value,
                             ctx,
@@ -6408,22 +6522,6 @@ fn source_stmt<'ctx>(
                         )? {
                             // Same rebind as the tail-position arm,
                             // escaping per `write_escapes`.
-                            let Some(SourceValue::Composite(fields)) = inner.get(&base) else {
-                                return Err(SemanticContractError::Unsupported("source binding"));
-                            };
-                            let field = &var[base.len() + 1..];
-                            let updated = SourceValue::Composite(
-                                fields
-                                    .iter()
-                                    .map(|(name, slot)| {
-                                        if name == field {
-                                            (name.clone(), bound.clone())
-                                        } else {
-                                            (name.clone(), slot.clone())
-                                        }
-                                    })
-                                    .collect(),
-                            );
                             inner.insert(base.clone(), updated.clone());
                             if write_escapes(env, &inner_assignable, &escapable, &base) {
                                 written.insert(base, updated);
