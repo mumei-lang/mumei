@@ -5190,6 +5190,31 @@ rebinding pops stale `chan_aliases` when the name rebinds
 external, and a maybe-skipped `c = <-cc` externalizes the old
 root before overwriting the alias.
 
+### Go deep-analysis: call-result field reads (mumei-agent #958)
+
+#958 admits `g(a).V` and nested chains `g(a).A.B`: the selector
+walks to a `call_expression` base and the call's conflated
+result dep set covers whichever field is read. Review rounds
+hardened promoted-field reads — `_promotion_path` searches
+embedded fields shallowest-first, go-types emits `embedded` on
+every binding (absent key falls back to the pre-marker
+search-all), same-depth pointer crossings win over named-field
+lookalikes, name-mismatched fields (`R *Q`) skip outright, and
+a known value match beats an unenumerable embedded sibling.
+`g().M` method values and `g(a)[0]` index reads stay closed.
+
+### Go deep-analysis: call-result callees (mumei-agent #961)
+
+#961 admits `mk(x)()` — an `indirect_or_selector` call whose
+callee operand is a `call_expression`: the inner call evaluates
+first (Go order), then the outer call unions the inner dep set
+with the arguments' and records an `imported` transfer on the
+inner call's span identity. `mk()()()` nests the same
+evaluation, and the producing call's `chan` arguments join the
+external queue model like `f := mk(ch)`, so `mk(ch)(x)` can
+send `x` into `ch`. An unevaluable inner call keeps the outer
+call closed.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
