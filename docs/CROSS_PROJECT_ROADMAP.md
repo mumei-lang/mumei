@@ -1767,8 +1767,9 @@ unsupported. See the
 Agent's C07 fragment now admits `expression_switch_statement` bodies:
 no initializer, no `fallthrough`; tag and case guards are evaluated
 effect-free, clause bodies run scoped with union-join (a may-analysis),
-and returns inside clauses union into the result. Type switches and
-`select` stay unsupported. See the
+and returns inside clauses union into the result. Type switches stay
+unsupported; `select` admits in the Go interprocedural frontier
+(#933). See the
 [Agent expression switches](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-expression-switches-in-bodies).
 
 ### Wave 3 var declarations in scalar summaries
@@ -4887,6 +4888,20 @@ non-passthrough `ch = g(x)` unions the evaluated call deps into
 the name's conflated slot so `<-ch` observes what `g`'s result
 can carry. Conditional/loop rebinding stays closed (a
 maybe-skipped `ch = g()` could mean either queue).
+
+### Go deep-analysis: select communication cases (mumei-agent #933)
+
+#933 admits `select` in the interprocedural fragment: each
+communication case — a receive (`v := <-ch`, `v, ok := <-ch`,
+`v = <-ch`, a bare `<-ch`) or a send (`ch <- v`) — runs in a
+fresh alternative scope and every alternative joins back by
+union, an if/else chain whose guards are comm ops. A receive
+binds the queue's deps like any other receive, `break` exits
+the select like a switch clause, an empty `select {}` blocks
+forever and stays closed, and a non-identifier receive target
+(`s.V = <-ch`) stays closed. The CFG admits `operator=select`
+and suppresses the no-default following edge since a select
+without default blocks.
 
 ## No-`.mm` front door and V1 order
 
