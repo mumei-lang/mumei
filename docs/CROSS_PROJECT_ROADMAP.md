@@ -5365,6 +5365,172 @@ inside a generic type argument (`new(map[ /* key */ string]int64)`)
 are skipped so the map pins cleanly; generic composite literals
 and conversions stay closed by design.
 
+### Go deep-analysis: func-value callees declaring scalar chan results (mumei-agent #972)
+
+#972 admits `ch := g(x)` / `var ch = g(x)` / `ch = g(x)` where `g`
+is a func-typed parameter or bound func value: go-types resolves
+the bound name's declared `chan` type from `g`'s signature, so the
+name binds an external queue like `ch := lib.G()` — no signature
+record needed on the `indirect_or_selector` call. Chan arguments
+promote into the external model and `ch = g(x)` reseats like
+`ch = G()`. Non-identifier callees and multi-result func-value
+callees stay closed.
+
+### Go deep-analysis: func-element index callees declaring scalar chan results (mumei-agent #973)
+
+#973 extends the #972 arm to `ch := fs[k](x)` / `ch := fm["k"](x)`:
+tree-sitter-go parses an identifier-index element call as a
+`type_conversion_expression` (`generic_type` carrying the
+collection's `type_identifier`), while `fs[0](x)` stays a
+`call_expression` — both shapes unwrap to the same element
+signature gate, and the conversion form's single `operand`
+argument feeds chan-arg promotion so `ch := fs[k](q)` promotes
+`q` external. Nested-index and call-result callees stay closed.
+
+### Go deep-analysis: index reads on call results (mumei-agent #974)
+
+#974 admits `lib.G(a)[i]` / `lib.M(a)["k"]` / `lib.N(a)[i][j]` —
+index reads on a call's composite result: the callee's declared
+single-result type must name a container with a scalar-or-pointer
+element, and the element's provenance is the call's dep set union
+each index's deps. `external_or_bodyless` callees admit through a
+minimal opaque fold (argument union, `_store_call_writes`, chan
+promotion, transfer on the member id, signature pins, func-arg
+invocation drain), and the comma-ok form `v, ok := lib.M(a)["k"]`
+admits when the outermost container is a map. Bare composite
+bindings, struct elements and multi-result calls stay closed.
+
+### Go deep-analysis: range over imported call results (mumei-agent #975)
+
+#975 admits `for _, v := range lib.G(a)` and `for range *lib.P(a)`
+on the same container fact the local `for range g(a)` path uses —
+the member's `result_types` carry the shape even when the
+composite result keeps the call `external_or_bodyless`. The fold
+drains queued func-arg invocations itself, promotes chan
+arguments, pins member signature types, and counts the bodyless
+call opaque; chan-alias sends resolve to the root queue and an
+empty bodyless `call.target` falls back to the member id so no
+empty transfer identity is recorded. A method receiver reads like
+an argument for the callback-write path, and a map's range key is
+stored data — it carries the call deps while slice and array
+indices stay dep-free.
+
+### Go deep-analysis: len/cap on call results (mumei-agent #976)
+
+#976 admits `len(lib.G(a))` and `cap(lib.G(a))` through the same
+container fact as the range form: the length of a callee-produced
+container is not stored data, so the result is dep-free while the
+call itself still folds (argument union, writes, chan promotion).
+`len` of true external state — package variables and bound-pointer
+contents — stays dep-free as before.
+
+### Go deep-analysis: bare composite bindings of call results (mumei-agent #977)
+
+#977 admits `s := lib.G(a)` when the callee's declared result is a
+container whose element is scalar-or-pointer: the binding holds a
+conflated dep set over the call's arguments, and a backing-token
+set tracks which call produced it. Slice and map re-binds share
+tokens, array re-binds mint fresh ones, and a conditional reseat
+unions rather than replaces. Tuple element writes snapshot the
+pre-state sharers (Go evaluates LHS operands before stores),
+union the index deps into the stored value, and publish through
+`indirect_writes` so pointer, range and callee readers see them.
+Arguments that are opaque containers may-alias a call result or
+receive callee element writes; map range keys carry deps, and
+comma-ok reads on bound opaque maps admit.
+
+### Declared key-revocation list on the signature folds (mumei-agent #978)
+
+#978 performs `key_revocation` — the first signature-family
+supplementary check — via a declared `mumei.key-revocation-list/v1`
+document (`{schema_version, revoked_keys}`) supplied through
+`--revocation-list PATH` on `signature-eval`/`signature-verify`,
+trusted as declared over a separately trusted channel exactly like
+the existing pins. `key_not_revoked` holds only when the envelope
+matched AND its `producer_key_id` is absent from the list; an
+unmatched envelope emits no `subject_digest` echo so nothing binds
+to a malformed envelope.
+
+The eval fold now echoes `subject_digest` on match (the carrier
+convention verification already used), `_BINDING_CARRIERS` binds
+signature-evaluation docs on it, and `_CHECK_PERFORMERS` names both
+folds' `key_not_revoked` bound through that carrier — a bound doc
+reporting `key_not_revoked: true` recovers a record's
+`key_revocation`, while `false` or a doc bound to other bytes fails
+the evidence. Recovery conflict semantics tightened with it: the
+all-agree veto scopes to bound (digest-carried) docs of a
+(schema, fields) group — record-agnostic performers keep their
+any-of-docs semantics since disagreement across unrelated records
+is expected, not a conflict. `--output` refuses to overwrite the
+revocation list like the other declared inputs.
+
+### Declared producer-key registry on the signature folds (mumei-agent #981)
+
+#981 performs `key_authenticity` — the second signature-family
+supplementary check — via a declared
+`mumei.producer-key-registry/v1` document
+(`{schema_version, registry}`) supplied through `--key-registry
+PATH` on `signature-eval`/`signature-verify`, trusted as declared
+like the pins and the revocation list. `registry` maps each
+producer key id to a closed entry `{principal, not_before,
+not_after}` — a non-empty principal label plus two RFC 3339
+timestamps bracketing the window the key is authorized for, with
+duplicate ids and definitely-inverted windows rejected at parse
+time. `key_authentic` holds only when the envelope matched AND its
+`producer_key_id` names an entry whose window covers the declared
+reference — the conservative `within_window` bounds, so a
+sub-microsecond fraction never widens a window into a pass.
+`--reference-time RFC3339` joins the flags for it: the consumer's
+declared trusted clock, stamped onto both folds' `reference_time`
+— declared, never read from the wall clock. A registry without a
+reference time performs nothing, and a reference time without a
+registry (or, after #982, a max-age window) is a caller error.
+`_CHECK_PERFORMERS` names both folds' `key_authentic` bound through
+`subject_digest`, the same carrier convention as `key_not_revoked`.
+
+### Signature-envelope freshness via `--max-age-seconds` (mumei-agent #982)
+
+#982 performs `envelope_freshness` — the consumer side of the
+optional `produced_at` stamp Core's `evidence sign` can write —
+via `--max-age-seconds N` on `signature-eval`/`signature-verify`.
+`produced_at` joins `mumei.producer-signature/v1` as its only
+optional field: the closed-shape `envelope_match` admits
+`required <= fields <= required | {produced_at}` when the stamp is
+a string; a non-string stamp or any other extra field still fails
+the match, so stamped and unstamped envelopes both verify.
+`--max-age-seconds` requires `--reference-time`, and
+`--reference-time` now requires a declared consumer
+(`--key-registry` or `--max-age-seconds`). `envelope_fresh` uses
+the same conservative (low, high) bounds as `evaluate_freshness`:
+the claim must not postdate the declared reference and
+`produced_at + N` must reach it; absent or unparseable stamps fail
+closed. `_CHECK_PERFORMERS` names both folds' `envelope_fresh`
+bound through `subject_digest`, so recovery-eval recovers a
+record's `envelope_freshness` from a bound fold doc. The stamp is
+declared, not signed (like `producer_key_id`), so
+`producer_time_authenticity` and `clock_authenticity` stay
+not-performed by design — both now named in the folds'
+`checks_not_performed`, matching `evaluate_freshness`' declared
+set.
+
+### Bounded-while TV records declare `unroll_bound` (mumei #1135)
+
+mumei#1135 adds `unroll_bound` to the translation-validation record
+when the bounded-while profile applies, so a consumer reading the
+pinned module contract sees the loop bound the proof was checked
+under rather than re-deriving it from the source.
+
+### Optional `--produced-at` stamp on `evidence sign` (mumei #1136)
+
+mumei#1136 adds `--produced-at RFC3339` to `mumei evidence sign`:
+the flag writes a declared production timestamp into the
+`mumei.producer-signature/v1` envelope as its only optional field,
+and the public schema
+(`schema/producer-signature.schema.json`) admits it as an optional
+`date-time` string. The stamp is declared, not signed — the
+signature covers the digest alone — which is exactly the honesty
+level mumei-agent#982's `envelope_fresh` consumes.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
