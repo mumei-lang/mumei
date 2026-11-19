@@ -3348,6 +3348,25 @@ pub(crate) fn compile_hir_expr<'a>(
                         }
                     }
                 }
+                // `e.tag` reads slot 0 of a bound enum's tagged-union
+                // layout — the index `emit_enum_variant_init` writes and
+                // `match` dispatch compares. A struct declaring a real
+                // `tag` field resolves above, so this only fires for a
+                // declared enum type.
+                if field_name == "tag"
+                    && infer_struct_type_name(inner_expr, var_types, module_env)
+                        .is_some_and(|t| module_env.get_enum(&t).is_some())
+                {
+                    if let Some(val) = variables.get(var_name.as_str()) {
+                        if val.is_struct_value() {
+                            return Ok(llvm!(builder.build_extract_value(
+                                val.into_struct_value(),
+                                0,
+                                &format!("{}.tag", var_name)
+                            )));
+                        }
+                    }
+                }
                 // `E::V` / `E.V` unit-variant construction — only when
                 // `var_name` is NOT a bound value (a bound variable named
                 // like an enum shadows it, matching the verifier's

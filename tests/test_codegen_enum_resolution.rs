@@ -514,3 +514,84 @@ trusted atom bad_len(m: Mine) -> i64
         "is only supported on arrays and Str",
     );
 }
+
+// A `.tag` read on a bound enum is slot 0 of its tagged-union layout —
+// the same index `match` dispatch compares and `emit_enum_variant_init`
+// writes. Before this, `.tag` verified but had no emitter lowering.
+#[test]
+fn tag_read_on_enum_param_extracts_slot_zero() {
+    let ir = emit_atom_ir(
+        "tag_param",
+        r#"
+enum Chan { Tcp(i64), Idle }
+
+atom tag_of(c: Chan) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        c.tag
+    }
+"#,
+        "tag_of",
+    );
+    let read = ir
+        .lines()
+        .find(|l| l.contains("extractvalue") && l.contains(", 0"))
+        .unwrap_or_else(|| panic!("no slot-0 extractvalue for c.tag:\n{ir}"));
+    assert!(
+        read.contains("{ i64, i64 }"),
+        "c.tag must read slot 0 of the tagged union:\n{ir}"
+    );
+}
+
+#[test]
+fn tag_read_on_let_bound_enum_extracts_slot_zero() {
+    let ir = emit_atom_ir(
+        "tag_let",
+        r#"
+enum Chan { Tcp(i64), Idle }
+
+atom idle_tag(c: Chan) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        let m = c;
+        m.tag
+    }
+"#,
+        "idle_tag",
+    );
+    assert!(
+        ir.lines()
+            .any(|l| l.contains("extractvalue") && l.contains(", 0")),
+        "m.tag must read slot 0 of the tagged union:\n{ir}"
+    );
+}
+
+// A struct declaring a real `tag` field reads that field — the enum
+// shortcut must not hijack it.
+#[test]
+fn tag_field_on_struct_reads_the_field_not_a_variant_index() {
+    let ir = emit_atom_ir(
+        "tag_struct",
+        r#"
+struct Meta { tag: i64, weight: i64 }
+
+atom weight_of(m: Meta) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        m.tag + m.weight
+    }
+"#,
+        "weight_of",
+    );
+    assert!(
+        ir.contains("add"),
+        "m.tag must add as a plain field read:\n{ir}"
+    );
+    assert!(
+        !ir.contains("pat_tag_eq") && !ir.contains("variant"),
+        "struct tag must not dispatch like an enum:\n{ir}"
+    );
+}
