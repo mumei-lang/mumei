@@ -109,3 +109,37 @@ body: {
     tp.mid.m = w;
     tp
 };
+
+// A tail-position write whose RHS reads the same leaf evaluates the
+// RHS once, before the write — result equals the post-write leaf
+// (input + 1), not the post-write leaf plus one again.
+atom write_self_read_tail(o: Outer) -> i64
+requires: o.inner.a >= 0 && o.inner.a < 100;
+ensures: result == o.inner.a;
+body: {
+    o.inner.a = o.inner.a + 1
+};
+
+struct NonNeg {
+    a: i64 where v >= 0
+}
+
+struct HoldNonNeg {
+    n: NonNeg,
+    t: i64
+}
+
+// A nested write inside a branch only has to satisfy the leaf's
+// `where` clause under that branch's path condition — the else arm
+// never reaches the write.
+atom write_branch_constraint(h: HoldNonNeg, v: i64) -> HoldNonNeg
+requires: true;
+ensures: result.n.a >= 0;
+body: {
+    if v >= 0 {
+        h.n.a = v;
+    } else {
+        h.n.a = 0;
+    }
+    h
+};

@@ -72,3 +72,23 @@ body: {
     o.inner.a = v;
     o.inner.b
 };
+
+// A callee writing a nested field must havoc the caller's nested
+// leaves — asserting `ensures q.inner.a == 0` against the input slot
+// (5) must not collapse the caller's assumptions into a vacuous
+// proof of a false postcondition.
+atom nested_setter(q: Outer) -> Outer
+requires: true;
+ensures: q.inner.a == 0;
+body: {
+    q.inner.a = 0;
+    q
+};
+
+atom bad_callee_havoc(q: Outer) -> i64
+requires: q.inner.a == 5;
+ensures: result == 999;
+body: {
+    let q2 = nested_setter(q);
+    1
+};
