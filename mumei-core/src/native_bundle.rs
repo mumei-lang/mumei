@@ -104,6 +104,11 @@ pub const MODULE_PROFILE_V15: &str = "mumei.native-pure-i64-module-linux-x86_64/
 /// bounded inline byte sequence under the bounded-memory model
 /// (`pure-i64-composite/v13`). v1–v15 records keep their own gates.
 pub const MODULE_PROFILE_V16: &str = "mumei.native-pure-i64-module-linux-x86_64/v16";
+/// Module v17: the enum-equality widening of `MODULE_PROFILE_V16` —
+/// `e == e'`/`e != e'` on two values of one declared enum, a
+/// positional compare over the tagged-union layout
+/// (`pure-i64-composite/v14`). v1–v16 records keep their own gates.
+pub const MODULE_PROFILE_V17: &str = "mumei.native-pure-i64-module-linux-x86_64/v17";
 /// Module v18: the nested-field-write widening — a field assignment
 /// may descend through struct-typed fields (`q.inner.a = v`, or a
 /// whole-subtree write at depth) under `pure-i64-composite/v15`.
@@ -140,6 +145,7 @@ pub fn module_refined_admission(profile: &str) -> Result<RefinedAdmission, Bundl
         MODULE_PROFILE_V14 => Ok(RefinedAdmission::CompositeV11),
         MODULE_PROFILE_V15 => Ok(RefinedAdmission::CompositeV12),
         MODULE_PROFILE_V16 => Ok(RefinedAdmission::CompositeV13),
+        MODULE_PROFILE_V17 => Ok(RefinedAdmission::CompositeV14),
         MODULE_PROFILE_V18 => Ok(RefinedAdmission::CompositeV15),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
@@ -195,6 +201,8 @@ pub const MULTIFILE_PROFILE_V14: &str = "mumei.native-pure-i64-multifile-linux-x
 pub const MULTIFILE_PROFILE_V15: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v15";
 /// Multifile v16: the `Str` leaf widening of `MODULE_PROFILE_V16`.
 pub const MULTIFILE_PROFILE_V16: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v16";
+/// Multifile v17: the enum-equality widening of `MODULE_PROFILE_V17`.
+pub const MULTIFILE_PROFILE_V17: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v17";
 /// Multifile v18: the nested-field-write widening of
 /// `MODULE_PROFILE_V18`.
 pub const MULTIFILE_PROFILE_V18: &str = "mumei.native-pure-i64-multifile-linux-x86_64/v18";
@@ -218,6 +226,7 @@ pub fn multifile_refined_admission(profile: &str) -> Result<RefinedAdmission, Bu
         MULTIFILE_PROFILE_V14 => Ok(RefinedAdmission::CompositeV11),
         MULTIFILE_PROFILE_V15 => Ok(RefinedAdmission::CompositeV12),
         MULTIFILE_PROFILE_V16 => Ok(RefinedAdmission::CompositeV13),
+        MULTIFILE_PROFILE_V17 => Ok(RefinedAdmission::CompositeV14),
         MULTIFILE_PROFILE_V18 => Ok(RefinedAdmission::CompositeV15),
         _ => Err(BundleError("unsupported schema, scope or settings")),
     }
@@ -1180,6 +1189,7 @@ pub fn load_pinned_module_record(
             MODULE_PROFILE_V14,
             MODULE_PROFILE_V15,
             MODULE_PROFILE_V16,
+            MODULE_PROFILE_V17,
             MODULE_PROFILE_V18,
         ]
         .contains(&record.profile.as_str())
@@ -1251,6 +1261,7 @@ pub fn load_pinned_multifile_record(
             MULTIFILE_PROFILE_V14,
             MULTIFILE_PROFILE_V15,
             MULTIFILE_PROFILE_V16,
+            MULTIFILE_PROFILE_V17,
             MULTIFILE_PROFILE_V18,
         ]
         .contains(&record.profile.as_str())

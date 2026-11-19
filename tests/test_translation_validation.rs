@@ -3842,3 +3842,122 @@ fn opt_o2_module_absent_callee_memory_claim_is_unrestricted() {
     let report = tv::validate_pure_i64_module_optimized(CALLING, &ir, Options::default()).unwrap();
     assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
 }
+
+const ENUM_EQUALITY_SOURCE: &str = "enum Chan { Tcp(p: i64), Idle }\nenum Tag { Some(b: bool), None }\natom is_idle(c: Chan) -> bool requires: true; ensures: true; body: { c == Chan::Idle };\natom differs(a: Chan, b: Chan) -> bool requires: true; ensures: true; body: { a != b };\natom same_tag(t: Tag) -> bool requires: true; ensures: true; body: { t == Tag::None };\natom main() -> i64 requires: true; ensures: true; body: { 0 };";
+
+#[test]
+fn composite_v14_enum_equality_compares_the_whole_tagged_union_layout() {
+    // The emitter lowers `e == e'` to an `extractvalue`/`icmp` chain
+    // over the tag and every payload slot (padding included), anded —
+    // the source model's conjuncts must track that exact layout.
+    let items = parse_module_checked(ENUM_EQUALITY_SOURCE).unwrap();
+    let ir = emitted_module(&items);
+    assert!(
+        ir.contains("icmp eq") && ir.contains("extractvalue"),
+        "emitter did not lower enum equality positionally:\n{ir}"
+    );
+    let report = tv::validate_native_module(
+        ENUM_EQUALITY_SOURCE,
+        &ir,
+        Options::default(),
+        RefinedAdmission::CompositeV14,
+    )
+    .unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+
+    // Comparing only the tag and skipping the payload slot is a wrong
+    // result under `Tcp(x) == Tcp(y)` — must refute.
+    let tag_only = ir.replacen(
+        "%enum_eq_l1 = extractvalue { i64, i64 } %0, 1",
+        "%enum_eq_l1 = extractvalue { i64, i64 } %0, 0",
+        1,
+    );
+    assert_ne!(tag_only, ir, "probe did not apply");
+    assert_eq!(
+        tv::validate_native_module(
+            ENUM_EQUALITY_SOURCE,
+            &tag_only,
+            Options::default(),
+            RefinedAdmission::CompositeV14,
+        )
+        .unwrap()
+        .outcome,
+        Outcome::Different
+    );
+}
+
+#[test]
+fn composite_v14_enum_equality_is_a_new_widening_not_a_relaxation() {
+    // Below v14 the enum-equality source itself is refused.
+    assert!(tv::validate_native_module(
+        ENUM_EQUALITY_SOURCE,
+        "define i64 @main() { ret i64 0 }",
+        Options::default(),
+        RefinedAdmission::CompositeV13,
+    )
+    .is_err());
+
+    // Equality across two different enum types stays rejected at v14.
+    let mixed = "enum Chan { Tcp(p: i64), Idle }\nenum Mode { On, Off }\natom bad(c: Chan, m: Mode) -> bool requires: true; ensures: true; body: { c == m };\natom main() -> i64 requires: true; ensures: true; body: { 0 };";
+    assert!(tv::validate_native_module(
+        mixed,
+        "define i64 @main() { ret i64 0 }",
+        Options::default(),
+        RefinedAdmission::CompositeV14,
+    )
+    .is_err());
+
+    // `.tag` reads have no emitter lowering — they stay out of the
+    // fragment even at v14.
+    let tag_read = "enum Chan { Tcp(p: i64), Idle }\natom tag_of(c: Chan) -> i64 requires: true; ensures: true; body: { c.tag };\natom main() -> i64 requires: true; ensures: true; body: { 0 };";
+    assert!(tv::validate_native_module(
+        tag_read,
+        "define i64 @main() { ret i64 0 }",
+        Options::default(),
+        RefinedAdmission::CompositeV14,
+    )
+    .is_err());
+}
+
+#[test]
+fn composite_v14_match_produced_enum_equality_validates() {
+    // A `match` that produces enum values in every arm types as the
+    // enum — the emitter resolves the declared type for `==` and the
+    // model merges the arms slot-wise. The source model requires a
+    // catch-all arm, same as the emitter's unreachable fallback.
+    let src = "enum Chan { Tcp(p: i64), Idle }\natom pick(c: Chan, a: Chan) -> bool requires: true; ensures: true; body: { match c { Chan::Tcp(p) => a, _ => Chan::Idle } == a };\natom main() -> i64 requires: true; ensures: true; body: { 0 };";
+    let items = parse_module_checked(src).unwrap();
+    let ir = emitted_module(&items);
+    assert!(ir.contains("enum_eq"), "no enum eq emitted:\n{ir}");
+    let report =
+        tv::validate_native_module(src, &ir, Options::default(), RefinedAdmission::CompositeV14)
+            .unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    // The let-bound form takes the same phi + `undef` fallback arm on
+    // the IR side and the same per-slot merge on the source side.
+    let let_src = "enum Chan { Tcp(p: i64), Idle }\natom pick(c: Chan, a: Chan) -> bool requires: true; ensures: true; body: { let m = match c { Chan::Tcp(p) => a, _ => Chan::Idle, }; m == a };\natom main() -> i64 requires: true; ensures: true; body: { 0 };";
+    let let_items = parse_module_checked(let_src).unwrap();
+    let let_ir = emitted_module(&let_items);
+    let report = tv::validate_native_module(
+        let_src,
+        &let_ir,
+        Options::default(),
+        RefinedAdmission::CompositeV14,
+    )
+    .unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+}
+
+#[test]
+fn composite_v14_f64_payload_enum_equality_is_refused() {
+    // The emitter compares f64 slots with `fcmp oeq`, which bitwise
+    // equality cannot model — fail closed until the model encodes it.
+    let src = "enum Rate { Fixed(v: f64), None }\natom same(a: Rate, b: Rate) -> bool requires: true; ensures: true; body: { a == b };\natom main() -> i64 requires: true; ensures: true; body: { 0 };";
+    assert!(tv::validate_native_module(
+        src,
+        "define i64 @main() { ret i64 0 }",
+        Options::default(),
+        RefinedAdmission::CompositeV14,
+    )
+    .is_err());
+}
