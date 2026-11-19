@@ -75,9 +75,10 @@ fn rejected_enum_field_writes_fail() {
 /// Emit LLVM IR for a fixture file and return the module of `atom`.
 fn emit_atom_ir(fixture: &Path, atom: &str, tag: &str) -> String {
     let dir = std::env::temp_dir().join(format!(
-        "mumei_enum_write_ir_{}_{}",
+        "mumei_enum_write_ir_{}_{}_{}",
         std::process::id(),
-        tag
+        tag,
+        atom
     ));
     if dir.exists() {
         std::fs::remove_dir_all(&dir).expect("clean stale emit dir");
