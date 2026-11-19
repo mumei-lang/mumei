@@ -5146,6 +5146,192 @@ read mirrors `=`), `case *p = <-ch`, `(*p)[i] = <-ch` and
 with may-skip union semantics. An index into an unbound
 container (`a[i] = <-ch`) stays closed.
 
+### Go deep-analysis: func-typed results (mumei-agent #956)
+
+#956 admits `func`-typed results at the signature gate like a
+`func` parameter: the value carries no scalar deps, `return G`
+reads dep-free, and `return func() int64 { return x }` lets the
+literal's captured deps ride the result's dep set — `f :=
+mk(x)` (also `var f = mk()` / `f = mk()` / multi-result unpacks)
+binds an opaque func value whose calls resolve through the
+ordinary func-value path. `return nil` stays closed, and
+review-driven hardening covers captured-dep re-resolution
+before the return and chan arguments entering the external
+queue model.
+
+### Go deep-analysis: imported func-typed results (mumei-agent #957)
+
+#957 admits imported callees declaring `func`-typed results:
+`funcResultOK` lifts the `importedResultsOK` gate so `lib.Mk()`
+/ `lib.M2()` record `direct_import` and `f := lib.Mk()` binds
+the same opaque func value as the local form. `chan chan T`
+and other composites stay `external_or_bodyless`. The same
+rounds hardened `_fold_func_arg_invocations` for all Go code:
+parenthesized args `P((h), x)`, `h := Id` aliases, unbounded
+callback write-back, and `opaque_callees` joining the loop
+fixed point.
+
+### Go deep-analysis: one level of `chan chan T` (mumei-agent #959)
+
+#959 admits `chan chan T` params/results through the external
+queue model one level deep: the outer queue is the tracked
+resource and channels sent through it promote to external
+queues (`chanChanElemOK` gates scalar-element inner channels).
+Deeper nesting and `make(chan chan T)` locals stay closed.
+
+### Go deep-analysis: chan chan follow-on forms (mumei-agent #960)
+
+#960 extends the `chan chan T` admission to the binding and
+iteration forms the ordinary chan path admits: `cc = G()`
+rebind, `var cc = G()` / `var cc, n = G()`, `for c :=/= range
+cc`, and comma-ok tuple receives `c2, _ = <-cc`. Two
+review-found precision fixes landed beside it: `:=`/range
+rebinding pops stale `chan_aliases` when the name rebinds
+external, and a maybe-skipped `c = <-cc` externalizes the old
+root before overwriting the alias.
+
+### Go deep-analysis: call-result field reads (mumei-agent #958)
+
+#958 admits `g(a).V` and nested chains `g(a).A.B`: the selector
+walks to a `call_expression` base and the call's conflated
+result dep set covers whichever field is read. Review rounds
+hardened promoted-field reads — `_promotion_path` searches
+embedded fields shallowest-first, go-types emits `embedded` on
+every binding (absent key falls back to the pre-marker
+search-all), same-depth pointer crossings win over named-field
+lookalikes, name-mismatched fields (`R *Q`) skip outright, and
+a known value match beats an unenumerable embedded sibling.
+`g().M` method values and `g(a)[0]` index reads stay closed.
+
+### Go deep-analysis: call-result callees (mumei-agent #961)
+
+#961 admits `mk(x)()` — an `indirect_or_selector` call whose
+callee operand is a `call_expression`: the inner call evaluates
+first (Go order), then the outer call unions the inner dep set
+with the arguments' and records an `imported` transfer on the
+inner call's span identity. `mk()()()` nests the same
+evaluation, and the producing call's `chan` arguments join the
+external queue model like `f := mk(ch)`, so `mk(ch)(x)` can
+send `x` into `ch`. An unevaluable inner call keeps the outer
+call closed.
+
+### Go deep-analysis: func-element collection results (mumei-agent #962)
+
+#962 admits `mk(x)[0]()` — indexing a `[]func`/`[N]func`
+call result and calling the element. The index callee's
+operand `call_expression` evaluates through the same
+inner-first rule as #961 (the producing call's `chan`
+arguments join the external model like `f := mk(ch)`), and
+the callee binding resolves from the inner call's span
+identity. Element literals the callee returned in a
+composite record their captures under the container binding
+with union semantics; the index call then folds the
+captured bindings' current deps and writes like a bound
+anonymous callee.
+
+### Go deep-analysis: bound func-element containers (mumei-agent #963)
+
+#963 admits `fs := mk(x); fs[k]()` — binding a `[]func`/`[N]func`
+call result to a local and later calling through a computed index.
+The container local binds the same conflated dep set the call
+result carried (`fs := mk(x)`, `var fs = mk(x)`, and
+`var fs []func() T; fs = mk(x)`), so `fs[k]()` runs opaque on the
+container's slot: the callee read is the container's dep set and
+the computed index evaluates like an argument. Element literals
+inside the composite record their captures under the container's
+name with union semantics, so `fs := []func(){func(){ return y }}`
+followed by `y = x` resolves at the `fs[0]()` call site and a
+captured write target gets the call's write-back fold. The
+container's `chan` arguments promote like `f := mk(ch)`: a later
+`ch <- x` reaches `fs[k]()` via `indirect_writes`. The same slice
+admits a `nil` literal as a dep-free value in every expression
+position (`return nil`, `G(nil)`, `f = nil`, `p == nil`).
+
+### Go deep-analysis: map[K]func call results (mumei-agent #964)
+
+#964 admits `lib.Mk(x)["k"]()` — calling through a `map[K]func`
+call result. A keyed slot is as unknowable as a numbered index, so
+the keyed element runs as an opaque call on the container's slot;
+go-types admits the signature because a `map` underlying whose
+element is `*types.Signature` joins the imported-results gate, and
+`signatureTypeIDs` now walks map/slice/array element types plus
+the underlying signature's params and results so anonymous
+`func(N)` and collection-element named types pin. A computed key
+evaluates like an argument (`lib.Mk(x)[k]()` folds the key's
+deps); binding the map to a local stays closed until #965's bound
+map containers.
+
+### Go deep-analysis: bound map[K]func containers (mumei-agent #965)
+
+#965 admits `fm := lib.Mk(x); fm["k"]()` — binding a `map[K]func`
+call result to a local and calling through a key. The bound map
+binds the producing call's conflated dep set (`fm := lib.Mk(x)`,
+`var fm = lib.Mk(x)`, `fm = lib.Mk(x)`), so `fm["k"]()` runs
+opaque on the container's slot and a computed key evaluates like
+an argument; the producing call's `chan` arguments promote through
+the container like the `[]func` form. A declared collection type
+(`type FM map[K]func() T`) binds through the type's fact the same
+way.
+
+### Go deep-analysis: element writes into bound func-element containers (mumei-agent #966)
+
+#966 admits `fs[i] = f`, `fm[k] = f`, `append(fs, f)`, and
+`make([]func, n)`/`make(map[K]func)`/`make(FM)` into a bound
+func-element container: the stored value's captures, writes and
+deps union into every name sharing the container's current backing,
+so `fs[k]()` re-resolves the elements through the one conflated
+slot. Literals, identifiers, `nil` and call results all land as
+element values; a share group is an eval-time connected component,
+so a store through one name reaches every alias. Param containers
+stay closed — their elements live in caller memory.
+
+### Go deep-analysis: one level of nested func-element containers (mumei-agent #967)
+
+#967 admits `fm := [][]func{fs}` / `map[K][]func{fs}` (and the
+named-type forms) — exactly one level of nesting. `fm[k][i] = f`
+writes through the outer slot's donor backings (`fm[k]` aliases
+`fs`'s slice, slices and maps being the only aliasing element
+carriers), and `fm[k][i](x)` calls opaque folding every donor
+group's element records. A reseated inner slice parks its records
+under a unique surrogate so the abandoned backing still resolves.
+A third index, an element read (`v := fm[k][i]`), `append(fm[k], f)`,
+a whole-inner store (`fm[k] = sub`) and a call-result nested
+container stay closed.
+
+### C11: opt-in FileAttemptSequenceStore (mumei-agent #968)
+
+#968 adds a file-backed `AttemptSequenceStore`: canonical attempt
+lineage publications persist to disk with fsync and advisory
+locking, so a crash between dispatch and publication cannot lose
+or reorder the canonical sequence. In-memory behaviour is
+unchanged for stores that do not opt in.
+
+### C11: attempt-sequence reconcile (mumei-agent #969)
+
+#969 arbitrates cross-lineage conflicts by prefix order: when two
+published attempt sequences diverge, the reconcile pass decides
+which prefix stays canonical and records the arbitration, so a
+restarted or duplicated attempt stream converges deterministically
+instead of racing.
+
+### Go deep-analysis: func-element collection parameters (mumei-agent #970)
+
+#970 admits a `[]func` / `[N]func` / `map[K]func` *parameter*:
+`fs[i](x)` calls opaque on the parameter's own slot like the
+result form — the callee read carries the container's deps and a
+computed index evaluates like an argument. Element writes into a
+parameter container stay closed (caller-memory writes the model
+cannot scope).
+
+### Go deep-analysis: new(struct{...}) anonymous pointee (mumei-agent #971)
+
+#971 admits `new(struct{ ... })` — an anonymous struct pointee
+allocation whose field access `p.F` / `p.F = v` resolves through
+the bound-pointer model like `new(NamedStruct)` does. Comments
+inside a generic type argument (`new(map[ /* key */ string]int64)`)
+are skipped so the map pins cleanly; generic composite literals
+and conversions stay closed by design.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
