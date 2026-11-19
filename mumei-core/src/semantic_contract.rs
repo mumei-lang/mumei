@@ -1852,24 +1852,22 @@ impl<'ctx> CallShapes<'ctx> {
 
 /// Positional payload-slot equality for enum values
 /// (`pure-i64-composite/v14`): two slots of one declared enum share a
-/// kind (`build_enum_env` rejects a disagreeing index), so BV-carrying
-/// kinds compare bitwise — the `icmp` the emitter emits — and `bool`
-/// slots compare as booleans, which coincides with the raw compare
-/// because the signature domain keeps `bool` slots canonical `{0,1}`
-/// under every tag.
+/// kind (`build_enum_env` rejects a disagreeing index), so the BV
+/// `i64`/`u64` kinds compare bitwise — the `icmp` the emitter emits —
+/// and `bool` slots compare as booleans, which coincides with the raw
+/// compare because the signature domain keeps `bool` slots canonical
+/// `{0,1}` under every tag.
 fn enum_slot_eq<'ctx>(a: &SourceValue<'ctx>, b: &SourceValue<'ctx>) -> Option<Bool<'ctx>> {
     match (a, b) {
         (
-            SourceValue::Integer(x)
-            | SourceValue::Unsigned(x)
-            | SourceValue::Number(x)
-            | SourceValue::Float64(x),
-            SourceValue::Integer(y)
-            | SourceValue::Unsigned(y)
-            | SourceValue::Number(y)
-            | SourceValue::Float64(y),
+            SourceValue::Integer(x) | SourceValue::Unsigned(x),
+            SourceValue::Integer(y) | SourceValue::Unsigned(y),
         ) => Some(x._eq(y)),
         (SourceValue::Boolean(x), SourceValue::Boolean(y)) => Some(x._eq(y)),
+        // `f64` slots stay out: the emitter compares them with
+        // `fcmp oeq`, which bitwise `_eq` cannot model (NaN != NaN,
+        // -0.0 == +0.0). `Str` slots need a content compare the model
+        // does not encode. Both fail closed here.
         _ => None,
     }
 }
