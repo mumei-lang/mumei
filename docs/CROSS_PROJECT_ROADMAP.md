@@ -1767,8 +1767,9 @@ unsupported. See the
 Agent's C07 fragment now admits `expression_switch_statement` bodies:
 no initializer, no `fallthrough`; tag and case guards are evaluated
 effect-free, clause bodies run scoped with union-join (a may-analysis),
-and returns inside clauses union into the result. Type switches and
-`select` stay unsupported. See the
+and returns inside clauses union into the result. Type switches stay
+unsupported; `select` admits in the Go interprocedural frontier
+(#933). See the
 [Agent expression switches](https://github.com/mumei-lang/mumei-agent/blob/develop/docs/ROADMAP.md#c07-expression-switches-in-bodies).
 
 ### Wave 3 var declarations in scalar summaries
@@ -4817,6 +4818,333 @@ and evidence normalization/acceptance ride the summaries routes, with
 Core `mumei evidence accept` producing `mumei.evidence-acceptance/v1`
 verdicts.
 
+### Go deep-analysis: named pointer types, deep derefs and deep fields (mumei-agent #924–#926)
+
+Three small frontier PRs widened the Go pointer model while keeping
+the dep-set semantics unchanged. #924 admits named/alias
+pointer-underlying types (`type PP *T`; `ppp **PT` resolves through
+the alias's underlying pointer chain). #925 admits arbitrarily-deep
+anonymous dereference chains (`***t`, `****q`) — the deref loop walks
+the pointer elem chain and each level reads the caller memory the
+previous level's aim selected (pointer deps ∪ `indirect_writes`),
+with intermediate bound-pointer folds pinned. #926 generalizes the
+named-struct element field walk to arbitrary depth (`(*p)[i].F.G.H`)
+under the same member-with-named-type_id pinning rule #922 used —
+anonymous `struct{...}` intermediates and selector-field writes stay
+closed.
+
+### Go deep-analysis: channel frontier — aliases, len/cap and external operands (mumei-agent #927–#930)
+
+Four channel slices widened the same conflated/external queue
+model. #927 admits unconditional channel-name copies (`ch2 := ch`,
+`var ch2 = ch`, `ch2 = ch3`) as queue aliases resolving to the
+root's dep set — tuple-assign pre-state and params/closure reads
+included; conditional rebinds stay closed. #928 admits
+`len(ch)`/`cap(ch)` as dep-free runtime state (a `chan` parameter's
+calls record an imported transfer like a receive). #929 admits
+channel operands in external state — package-level `var GC chan T`
+and imported `lib.GC` — under the `chan`-parameter model: ops
+record imported transfers on the var's/member's identity, sends
+broadcast into `indirect_writes`, and a callee's external-channel
+ops broadcast the call's argument deps back to the caller. #930
+admits bound-pointer `chan` fields (`p.C <- x`, `<-p.W.C`,
+`close(p.C)`, `for range p.C`) the same way — a send folds into
+the root like `p.F = v` and `p.C = ch` may-aliases the member to
+the RHS queue's tokens.
+
+### Go deep-analysis: `chan` results and struct-typed params/results (mumei-agent #931, #932)
+
+#931 admits a scalar `chan T` function result: `ch := g()` /
+`var ch = g()` binds a callee-produced queue when the (local)
+callee declares a single scalar `chan` result — ops on the bound
+name follow the external model exactly like a `chan` parameter,
+an alias tracks through the root, and a function literal
+capturing the name records the same imported effect a captured
+parameter does. Imported `lib.G()` results (no element kind in
+the signature), multi-result callees and `ch = g()` rebinds stay
+closed. #932 admits `struct`-typed parameters and results into
+the scalar signature fragment: a `struct` parameter's binding is
+seeded like a composite local — `s.V = x` and `s.A.W = x` fold
+in, reads carry the conflated set, and `p := G(x)` binds the
+callee's declared result deps. Anonymous-struct literals anchor
+per-binding direct-name sets so name-unified field resolutions
+(`cp.V` hitting the first identical literal) admit while promoted
+names (`Q.V` colliding with nested `A.V`, `s.A *Q`, embedded
+pointers, map/slice field mutation, interface params) stay
+closed. Non-scalar channel elements stay closed.
+
+### Go deep-analysis: unconditional channel rebinding (mumei-agent #934)
+
+#934 lands the `=` counterpart of #931's `ch := g()`: a chan-typed
+name reassigned to a call declaring a single scalar `chan`
+result reseats to the callee-produced queue — a `return q`
+passthrough callee aliases the argument's queue exactly like
+`ch = q`, otherwise the name keeps an external queue and drops
+its prior alias entry while `locals_` keeps the old contents
+reachable through remaining aliases. The reseat targets are
+resolved against the pre-state, so a tuple `a, b = b, g(a)`
+binds `b` to the queue `a` named before `a`'s own store, and a
+non-passthrough `ch = g(x)` unions the evaluated call deps into
+the name's conflated slot so `<-ch` observes what `g`'s result
+can carry. Conditional/loop rebinding stays closed (a
+maybe-skipped `ch = g()` could mean either queue).
+
+### Go deep-analysis: select communication cases (mumei-agent #933)
+
+#933 admits `select` in the interprocedural fragment: each
+communication case — a receive (`v := <-ch`, `v, ok := <-ch`,
+`v = <-ch`, a bare `<-ch`) or a send (`ch <- v`) — runs in a
+fresh alternative scope and every alternative joins back by
+union, an if/else chain whose guards are comm ops. A receive
+binds the queue's deps like any other receive, `break` exits
+the select like a switch clause, an empty `select {}` blocks
+forever and stays closed, and a non-identifier receive target
+(`s.V = <-ch`) stays closed. The CFG admits `operator=select`
+and suppresses the no-default following edge since a select
+without default blocks.
+
+### Go deep-analysis: package-level function-var calls (mumei-agent #935)
+
+#935 admits calls through a package-level function variable
+(`var Alias = Id; Alias(x)`): the callee is unknown mutable
+package state, so the call models as an opaque external call —
+dep-free callee, arguments evaluated normally, an imported
+transfer recorded against the var's real binding identity, and
+indirect writes unioned into the result like every opaque call.
+
+### Go deep-analysis: function-name aliases and same-package method calls (mumei-agent #936, #937)
+
+#936 admits function-name aliases (`h := G` / `h = G` / `var h = G`):
+the name binds a declared function and `h(args)` resolves through G's
+own summary via the shared `_direct_local_call` fold. The alias map
+holds only while every path binds that one function — a literal
+rebind, a maybe-skipped rebind to another target, or a non-identifier
+RHS clears it and the call falls back to the opaque external callee.
+Func-typed signature slots pin their inner named-type ids through the
+callee binding's `signature_type_ids` like an imported member's.
+
+#937 admits same-package method calls — both `st.M(args)` (receiver
+operand evaluated first, binding actual 0) and `T.M(st, args)`
+(receiver as argument 0, arity `parameters + 1`). A value receiver
+on a pointer operand auto-derefs: `p.Value()` reads the pointee set
+(`indirect_writes`), not `p`'s own. An effectful `*T`-receiver callee
+folds its writes into the receiver's ROOT binding — `s.A.Set(x)`
+lands in `s`'s conflated set, `(*p).Set(x)` broadcasts into
+`indirect_writes` and escaped bindings like a `*p = v` store. The
+receiver type pins in the signature loop the same way parameters do.
+
+### Go deep-analysis: bound method values (mumei-agent #938)
+
+#938 admits bound method values — `f := st.M`, `var f = st.M`,
+`f = st.M` — recording `(method, receiver)` pairs on the binding so
+`f(args)` resolves through the method's own summary with the
+receiver as actual 0, exactly like the direct `st.M(args)` call.
+The receiver's dep set freezes at bind time (Go evaluates and
+copies it), while an effectful `*T`-receiver callee's writes fold
+onto the receiver binding's CURRENT deps — into `indirect_writes`
+when the receiver is a bound pointer. Copies (`g := f`) propagate
+the pair; any other RHS drops it, and a conditional drop escapes
+the old receiver so an untaken-path call still reaches it. A chan
+receiver's sends broadcast through `indirect_writes` for
+parameter/external queues.
+
+### Go deep-analysis: method-expression values (mumei-agent #939)
+
+#939 extends bound method values to method *expression* values:
+`f := St.M` records `(method, None)` on the binding, and a call
+`f(recv, args)` puts the receiver at argument 0 exactly like the
+direct `St.M(st, args)` call. The record is a triple carrying the
+type operand's type_id, pinned at call time so `stale_dependents`
+flags the summary when the named type's method set changes; a
+`*T` method expression's writes broadcast into `indirect_writes`
+plus escaped bindings rather than a dead `locals_[None]` slot,
+and promoted selections read pointee memory for pointer
+receivers.
+
+### Go deep-analysis: conditional channel rebinding (mumei-agent #941)
+
+#941 admits rebinding a channel name under a branch or loop —
+`if c { ch = q }`, `ch = g(q)`, `ch = g()`, `ch = make(chan)` —
+by detaching the name to an external queue: its dep slot unions
+the old queue's contents with the RHS deps, and every queue it
+could still mean is promoted external so sends broadcast through
+`indirect_writes` and receives union it. A third name still
+holding the old queue's identity sees writes the untaken path
+delivered; select clauses snapshot and merge `chan_aliases`/
+`external_chan_locals` per clause; and the loop fixpoint carries
+both maps so a detach inside a body counts as change. A fresh
+`make` over an unaliased, non-target name keeps the conflated
+admission.
+
+### Go deep-analysis: multi-result callees (mumei-agent #940)
+
+#940 admits multi-result callees — `a, b := g()` — by binding
+every declared result position to the callee's conflated
+result-dep set: Go evaluates the call once, so each name carries
+the union of the callee's `return_dependencies`; single-result
+assignment keeps the per-position fold. A discarded position
+(`a, _ := g()`) skips its slot, and a `chan` element among the
+results keeps the whole tuple closed until a non-scalar element
+model exists.
+
+### Go deep-analysis: selector/computed func-value calls (mumei-agent #942)
+
+#942 admits calls through a computed or selector callee —
+`tbl[k](x)`, `s.f(x)`, `getF()(x)` — as opaque external calls:
+the callee expression's deps join the arguments and indirect
+writes, an imported transfer records against the callee node's
+synthetic span identity (`file:start:end`), and the result
+carries the conflated set — effects unknown, since the callee is
+whatever the lookup produced.
+
+### Go deep-analysis: in-place func literal calls (mumei-agent #943)
+
+#943 admits `func(...) T { ... }(args)` — an immediate literal
+call whose callee IS the literal — under the same model bound
+literals use: `_func_literal_capture` splits the free-variable
+scan out of `_func_literal` so both paths share the gate (an
+internal call, assignment, send, `go` or `defer` still closes),
+and `_immediate_literal_call` unions the captured bindings'
+current dep sets, the evaluated arguments, and `indirect_writes`.
+A pointer capture or a captured param/external channel records
+an imported chan-op transfer on that identity with effects
+unknown; aliases declared inside the literal (`c := ch`),
+parenthesized operands, and variadic chan params resolve to the
+arg queue through a pre-pass that runs before the reversed DFS
+walk consumes children.
+
+### Go deep-analysis: effectful func literal bodies (mumei-agent #945)
+
+#945 lets a bound literal's body carry effects to its call
+site: calls, stores and pointer stores inside `h :=
+func(){ ... }; h()` land in the caller's dep model instead of
+closing the literal outright. Conditional copies of bound
+method values union `bound_method_receiver_deps` so a value
+bound on one branch keeps every receiver set it may hold.
+
+### Go deep-analysis: multi-result chan slots (mumei-agent #946-#948)
+
+#946 admits `ch, n := g()` per slot — the callee declaring a
+scalar `chan` at the name's position binds an external queue,
+resolved in a pre-pass against the pre-state so mid-loop
+`chan_aliases` mutation (`a, c := g(a, b)`, `a, b := b, a`)
+cannot leak across slots. #947 extends the slot to the `var
+ch, n = g()` declaration form, and #948 to the plain
+assignment `ch, n = g()` — a passthrough callee aliases the
+argument's queue, otherwise the name binds external while
+every `chan` argument is promoted since the callee may hand
+one back through a local alias. A `make` reseat detaches
+each alias onto its own slot with the old queue's contents
+copied, so `<-ch` keeps the queued sends while `<-q` reads
+only the fresh queue.
+
+### Go deep-analysis: imported `lib.G()` chan results (mumei-agent #944)
+
+#944 admits `ch := lib.G()` where the imported member
+declares a scalar-element `chan` result: `result_types` on
+the member record carries each slot's fact, the call
+classifies `direct_import`, and the bound name joins the
+external queue model with ops recorded on the member's
+identity. `signatureTypeIDs` dedupes on `types.Type`
+identity instead of `Type.String()`, so a function-local
+`type T` shadowing a package `type T` pins both
+declarations.
+
+### Go deep-analysis: imported multi-result chan callees (mumei-agent #949)
+
+#949 admits `ch, n := lib.G()` where the imported member
+declares a scalar-element `chan` in one result slot with
+scalar results elsewhere: `result_types` on the member
+record resolves the chan slot positionally, so a `chan`
+slot at result index `i` seeds the i-th bound name into
+the external queue model while the scalar slots conflate
+into the call deps as before. The probe for chan args
+resolves against the shared call node — the same
+assignment shape a local multi-result callee takes —
+so `lib.G(q)` promotes `q` into `external_chan_locals`
+exactly like `g(q)` does.
+
+### Go deep-analysis: imported methods declaring chan results (mumei-agent #950)
+
+#950 extends the same result-slot rule to imported methods:
+`ch := st.M()` and `ch, n := st.M()` admit when the imported
+method's `result_types` declare a scalar-element `chan` slot.
+The bound name at that slot seeds an external queue; scalar
+sibling slots conflate into the call deps as with free
+functions. A `var`/assignment shape behaves identically, and
+a chan-typed receiver root or argument still promotes into
+`external_chan_locals` through the shared call probe.
+
+### Go deep-analysis: interface method calls (mumei-agent #951)
+
+#951 admits `I.M(recv, args)` — a method *expression* on a
+named interface — as an `interface_dispatch` opaque-external
+call: deps union the receiver (the method expression's first
+argument), the remaining arguments, indirect writes, escaped
+bindings, and promoted chan-argument contents. `target` pins
+the named interface's declaration; a `type A = I` alias target
+also pins the underlying named interface through the extra
+`type_arg_type_ids` slot. Instantiated interface type
+arguments pin likewise. Method-value calls `i.M(args)` stay
+closed — interface-typed values are always unsupported
+bindings, so no receiver could ever reach the call — and a
+non-scalar result keeps `method_generic_or_variadic`.
+
+### Go deep-analysis: function-name reads in call arguments (mumei-agent #952)
+
+#952 admits a declared function name used as a call argument
+— `H(G, x)` evaluates `G` as a dep-free read of a stable
+declaration (matching the existing `h := G` alias read), so
+the argument list no longer fails on a `function`-typed
+operand. The callee receives no provenance for the function
+value itself — only the scalar arguments contribute deps —
+and the call record keeps its ordinary classification. A
+function name in non-argument positions (assignments,
+returns, comparisons) was already handled by the alias
+machinery and is unchanged.
+
+### Go deep-analysis: `go`/`defer` statements (mumei-agent #953)
+
+#953 admits `go f(args)` and `defer f(args)`: the callee
+expression and arguments evaluate at the statement and their
+reads land in the enclosing walk like a plain call, while
+the launched call's result is discarded. The call record
+carries a `special` marker (`concurrent`/`deferred`) so
+consumers can tell the call site from an ordinary one. For
+`defer`, the deferred call runs after the function's named
+result is evaluated but before it returns to the caller, so
+a deferred call that may write through a pointer argument
+adds its argument deps to a named-result return — the bound
+deps are matched against the recorded `CallTransfer`s by
+call span (opaque/interface paths record `()` args), falling
+back to the call result's own deps when the call has
+syntactic arguments but recorded none. A callee provably
+pure in the fragment adds nothing.
+
+### Go deep-analysis: void callees (mumei-agent #954)
+
+#954 lifts the signature gate's `not fn.results` rejection:
+a result-less body summarises with an empty return dep set —
+bare `return` and falling off the end both satisfy
+`saw_return`, and a statement-position call `s(x)` folds the
+callee's calls and effects exactly like a result-typed
+one. The transitive external-chan probe gained a
+`seen`-bounded walk so `mid(x)` calling `inner` which sends
+on a shared package chan flags the write two hops out, not
+just one. An empty void body still fails `unsupported_body`
+rather than claiming `effects: none`.
+
+### Go deep-analysis: non-identifier select receive targets (mumei-agent #955)
+
+#955 extends `select` communication cases to the write-target
+shapes the ordinary assignment admits: `case s.V = <-ch`
+folds the received deps into the composite's continuing dep
+set (and the pointer-provenance/indirect-stores destination
+read mirrors `=`), `case *p = <-ch`, `(*p)[i] = <-ch` and
+`(*p)[i].F = <-ch` alias-fold into every escaped binding plus
+`indirect_writes` — all inside the case's alternative scope
+with may-skip union semantics. An index into an unbound
+container (`a[i] = <-ch`) stays closed.
 
 ## No-`.mm` front door and V1 order
 
