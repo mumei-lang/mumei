@@ -50,8 +50,8 @@ atom write_keeps_sibling(l: i64, r: i64) -> Pair
 requires: true;
 ensures: match result { Pair::Both(l2, r2) => l2 == l && r2 == r, _ => false };
 body: {
-    let e = Pair::Both(0, r);
-    e.l = l;
+    let e = Pair::Both(l, 0);
+    e.r = r;
     e
 };
 
@@ -66,4 +66,17 @@ body: {
         Pair::Both(l2, r2) => r2,
         _ => -1
     }
+};
+
+// A struct declaring the same field name must not hijack an enum
+// payload write — the receiver's declared type wins (emit side).
+struct Shadow { l: i64 }
+
+atom write_shadowed_field(l: i64, r: i64) -> Pair
+requires: true;
+ensures: match result { Pair::Both(l2, r2) => l2 == l && r2 == r, _ => false };
+body: {
+    let e = Pair::Both(0, r);
+    e.l = l;
+    e
 };

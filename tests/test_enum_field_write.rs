@@ -63,6 +63,7 @@ fn rejected_enum_field_writes_fail() {
         "bad_ambiguous",
         "bad_unknown_field",
         "bad_sort",
+        "bad_refined_payload",
     ] {
         assert!(
             stderr.contains(atom),
@@ -123,9 +124,25 @@ fn enum_second_slot_write_lowers_to_index_two() {
         "write_keeps_sibling",
         "ins2",
     );
-    // `e.l = l` on `{ i64 tag, slot0, slot1 }`: slot 0 → index 1.
+    // `e.r = r` on `{ i64 tag, slot0, slot1 }`: slot 1 → index 2 —
+    // the sibling slot (`l`) is carried over by the rebuild.
+    assert!(
+        ir.contains("insertvalue { i64, i64, i64 }") && ir.contains(", 2"),
+        "second-slot write must lower to insertvalue at index 2\n{ir}"
+    );
+}
+
+#[test]
+fn enum_write_named_like_struct_field_uses_enum_slot() {
+    let ir = emit_atom_ir(
+        &fixture("test_enum_field_write.mm"),
+        "write_shadowed_field",
+        "ins",
+    );
+    // `e.l = l` on `{ i64 tag, slot0, slot1 }` must write index 1 —
+    // not `Shadow.l`'s index 0, which would overwrite the tag.
     assert!(
         ir.contains("insertvalue { i64, i64, i64 }") && ir.contains(", 1"),
-        "first-slot write must lower to insertvalue at index 1\n{ir}"
+        "payload write must land on the enum slot, not a same-named struct field's index\n{ir}"
     );
 }

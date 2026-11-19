@@ -60,3 +60,18 @@ body: {
     c.port = v;
     c
 };
+
+type PosPort = i64 where v > 0;
+enum Refined { Good(x: PosPort), Blank }
+
+// The written value violates the payload's refined-alias predicate —
+// match-arm payload binding assumes it, so the write is rejected.
+atom bad_refined_payload(r: Refined) -> Refined
+requires: true;
+ensures: result == r;
+body: {
+    match r {
+        Refined::Good(x) => { r.x = 0 - 1; r }
+        _ => r
+    }
+};
