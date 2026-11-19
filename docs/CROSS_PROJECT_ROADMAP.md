@@ -5261,6 +5261,18 @@ evaluates like an argument (`lib.Mk(x)[k]()` folds the key's
 deps); binding the map to a local stays closed until #965's bound
 map containers.
 
+### Go deep-analysis: bound map[K]func containers (mumei-agent #965)
+
+#965 admits `fm := lib.Mk(x); fm["k"]()` — binding a `map[K]func`
+call result to a local and calling through a key. The bound map
+binds the producing call's conflated dep set (`fm := lib.Mk(x)`,
+`var fm = lib.Mk(x)`, `fm = lib.Mk(x)`), so `fm["k"]()` runs
+opaque on the container's slot and a computed key evaluates like
+an argument; the producing call's `chan` arguments promote through
+the container like the `[]func` form. A declared collection type
+(`type FM map[K]func() T`) binds through the type's fact the same
+way.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
