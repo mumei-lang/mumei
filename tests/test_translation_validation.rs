@@ -71,6 +71,8 @@ fn actual_emitter_clamp_is_equivalent_over_all_i64_inputs() {
         report.input_domain,
         "all_signed_i64_inputs_not_restricted_by_requires"
     );
+    // No loop is admitted, so no bound is claimed.
+    assert_eq!(report.unroll_bound, None);
     assert_eq!(
         report.source_sha256,
         mumei_core::native_bundle::sha256(CLAMP.as_bytes())
@@ -2339,6 +2341,12 @@ fn bounded_while_emitted_ir_is_equivalent_within_bound() {
     assert_eq!(
         report.input_domain,
         "all_signed_i64_inputs_not_restricted_by_requires_and_loops_exiting_within_bound_4"
+    );
+    // The bound also lands as a structured field so consumers read the
+    // coverage limit without parsing the domain label.
+    assert_eq!(
+        report.unroll_bound,
+        Some(mumei_core::semantic_contract::LOOP_BOUND)
     );
 }
 

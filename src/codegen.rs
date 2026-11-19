@@ -51,7 +51,7 @@ pub(crate) fn run_translation_validation_check(
                 })
             })
             .collect();
-        let bytes = match serde_json::to_vec_pretty(&serde_json::json!({
+        let mut record = serde_json::json!({
             "schema_version": "mumei.translation-validation-report/v1",
             "profile": report.profile,
             "source_profile": report.source_profile,
@@ -65,7 +65,14 @@ pub(crate) fn run_translation_validation_check(
             "resource_limit": report.resource_limit,
             "functions": functions,
             "outcome": label(&report.outcome),
-        })) {
+        });
+        // `unroll_bound` joins the record only when the profile admits
+        // a bounded `while` — its absence says loop coverage was never
+        // claimed, distinct from any bound value.
+        if let Some(bound) = report.unroll_bound {
+            record["unroll_bound"] = bound.into();
+        }
+        let bytes = match serde_json::to_vec_pretty(&record) {
             Ok(bytes) => bytes,
             Err(_) => return,
         };

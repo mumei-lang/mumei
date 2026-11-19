@@ -132,6 +132,11 @@ pub struct ValidationReport {
     pub data_layout: &'static str,
     pub checked_stage: &'static str,
     pub input_domain: String,
+    /// The bounded `while` unroll the equivalence claim covers —
+    /// `Some(LOOP_BOUND)` when the source admits a loop, `None`
+    /// otherwise, so consumers read the coverage limit without
+    /// parsing `input_domain`.
+    pub unroll_bound: Option<usize>,
     pub source_sha256: String,
     pub llvm_sha256: String,
     pub timeout_ms: u32,
@@ -157,6 +162,9 @@ pub struct ModuleValidationReport {
     pub data_layout: &'static str,
     pub checked_stage: &'static str,
     pub input_domain: String,
+    /// The bounded `while` unroll the equivalence claim covers —
+    /// `Some(LOOP_BOUND)` when any member admits a loop.
+    pub unroll_bound: Option<usize>,
     pub source_sha256: String,
     pub llvm_sha256: String,
     pub timeout_ms: u32,
@@ -336,6 +344,7 @@ fn validate(
     };
     let loops = model.loop_bound_exits.is_some();
     Ok(ValidationReport {
+        unroll_bound: loops.then_some(LOOP_BOUND),
         profile: match (loops, model.bounded_memory, native, optimized) {
             (false, false, false, false) => PROFILE,
             (true, false, false, false) => BOUNDED_LOOPS_PROFILE,
@@ -511,6 +520,7 @@ fn validate_module(
             },
             any_loops,
         ),
+        unroll_bound: any_loops.then_some(LOOP_BOUND),
         source_sha256: models
             .first()
             .map(|model| model.source_sha256.clone())
@@ -681,6 +691,7 @@ pub fn validate_native_module(
             },
             any_loops,
         ),
+        unroll_bound: any_loops.then_some(LOOP_BOUND),
         source_sha256: models
             .first()
             .map(|model| model.source_sha256.clone())

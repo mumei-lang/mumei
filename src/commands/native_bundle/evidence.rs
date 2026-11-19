@@ -598,6 +598,7 @@ mod tests {
             data_layout: "e",
             checked_stage: "llvm",
             input_domain: "i64".into(),
+            unroll_bound: None,
             source_sha256: "3".repeat(64),
             llvm_sha256: "4".repeat(64),
             timeout_ms: 10_000,
