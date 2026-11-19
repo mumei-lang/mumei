@@ -5050,6 +5050,20 @@ identity instead of `Type.String()`, so a function-local
 `type T` shadowing a package `type T` pins both
 declarations.
 
+### Go deep-analysis: imported multi-result chan callees (mumei-agent #949)
+
+#949 admits `ch, n := lib.G()` where the imported member
+declares a scalar-element `chan` in one result slot with
+scalar results elsewhere: `result_types` on the member
+record resolves the chan slot positionally, so a `chan`
+slot at result index `i` seeds the i-th bound name into
+the external queue model while the scalar slots conflate
+into the call deps as before. The probe for chan args
+resolves against the shared call node — the same
+assignment shape a local multi-result callee takes —
+so `lib.G(q)` promotes `q` into `external_chan_locals`
+exactly like `g(q)` does.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
