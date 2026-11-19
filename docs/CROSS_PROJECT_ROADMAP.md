@@ -5146,6 +5146,50 @@ read mirrors `=`), `case *p = <-ch`, `(*p)[i] = <-ch` and
 with may-skip union semantics. An index into an unbound
 container (`a[i] = <-ch`) stays closed.
 
+### Go deep-analysis: func-typed results (mumei-agent #956)
+
+#956 admits `func`-typed results at the signature gate like a
+`func` parameter: the value carries no scalar deps, `return G`
+reads dep-free, and `return func() int64 { return x }` lets the
+literal's captured deps ride the result's dep set — `f :=
+mk(x)` (also `var f = mk()` / `f = mk()` / multi-result unpacks)
+binds an opaque func value whose calls resolve through the
+ordinary func-value path. `return nil` stays closed, and
+review-driven hardening covers captured-dep re-resolution
+before the return and chan arguments entering the external
+queue model.
+
+### Go deep-analysis: imported func-typed results (mumei-agent #957)
+
+#957 admits imported callees declaring `func`-typed results:
+`funcResultOK` lifts the `importedResultsOK` gate so `lib.Mk()`
+/ `lib.M2()` record `direct_import` and `f := lib.Mk()` binds
+the same opaque func value as the local form. `chan chan T`
+and other composites stay `external_or_bodyless`. The same
+rounds hardened `_fold_func_arg_invocations` for all Go code:
+parenthesized args `P((h), x)`, `h := Id` aliases, unbounded
+callback write-back, and `opaque_callees` joining the loop
+fixed point.
+
+### Go deep-analysis: one level of `chan chan T` (mumei-agent #959)
+
+#959 admits `chan chan T` params/results through the external
+queue model one level deep: the outer queue is the tracked
+resource and channels sent through it promote to external
+queues (`chanChanElemOK` gates scalar-element inner channels).
+Deeper nesting and `make(chan chan T)` locals stay closed.
+
+### Go deep-analysis: chan chan follow-on forms (mumei-agent #960)
+
+#960 extends the `chan chan T` admission to the binding and
+iteration forms the ordinary chan path admits: `cc = G()`
+rebind, `var cc = G()` / `var cc, n = G()`, `for c :=/= range
+cc`, and comma-ok tuple receives `c2, _ = <-cc`. Two
+review-found precision fixes landed beside it: `:=`/range
+rebinding pops stale `chan_aliases` when the name rebinds
+external, and a maybe-skipped `c = <-cc` externalizes the old
+root before overwriting the alias.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
