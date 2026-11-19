@@ -670,6 +670,60 @@ fn struct_field_assign<'a>(
     let Some(type_name) = vc.local_struct_types.borrow().get(base).cloned() else {
         return Ok(None);
     };
+    let segments: Vec<&str> = field.split('.').collect();
+    if segments.len() > 1 {
+        // `q.inner.a = v` desugars to a whole-subtree write of the
+        // parent struct: `q.inner = Inner { a: v, <others>: q.inner.<f> }`.
+        // Re-running the write against the parent path reuses the field
+        // contract, invariant and fresh-handle logic at every depth —
+        // recursion peels one segment per level.
+        let mut parent_ty = type_name.as_str();
+        for segment in &segments[..segments.len() - 1] {
+            let Some(sdef) = vc.module_env.get_struct(parent_ty) else {
+                return Ok(None);
+            };
+            let Some(f) = sdef.fields.iter().find(|f| f.name == *segment) else {
+                return Ok(None);
+            };
+            parent_ty = f.type_name.as_str();
+        }
+        let leaf = segments[segments.len() - 1];
+        let Some(parent_sdef) = vc.module_env.get_struct(parent_ty) else {
+            return Ok(None);
+        };
+        if !parent_sdef.fields.iter().any(|f| f.name == leaf) {
+            return Ok(None);
+        }
+        let parent_expr = segments[..segments.len() - 1]
+            .iter()
+            .fold(Expr::Variable(base.to_string()), |acc, segment| {
+                Expr::FieldAccess(Box::new(acc), segment.to_string())
+            });
+        let init_fields: Vec<(String, Expr)> = parent_sdef
+            .fields
+            .iter()
+            .map(|f| {
+                if f.name == leaf {
+                    (f.name.clone(), value.clone())
+                } else {
+                    (
+                        f.name.clone(),
+                        Expr::FieldAccess(Box::new(parent_expr.clone()), f.name.clone()),
+                    )
+                }
+            })
+            .collect();
+        let desugared = Expr::StructInit {
+            type_name: parent_ty.to_string(),
+            fields: init_fields,
+        };
+        let parent_var = format!("{}.{}", base, segments[..segments.len() - 1].join("."));
+        struct_field_assign(vc, &parent_var, &desugared, env, solver_opt)?;
+        // The statement's value is the written leaf, not the rebuilt
+        // subtree — `o.inner.a = v` in tail position yields `v`.
+        let val = expr_to_z3(vc, value, env, solver_opt)?;
+        return Ok(Some(val));
+    }
     let Some(sdef) = vc.module_env.get_struct(&type_name) else {
         return Ok(None);
     };
