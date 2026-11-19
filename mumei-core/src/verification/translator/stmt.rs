@@ -3,6 +3,7 @@ use super::super::support::*;
 use super::super::*;
 use super::*;
 use crate::lowering::{lower, LoweredType};
+use crate::parser::expr::normalize_comparison_chains;
 use crate::verification::invariant_inference::{
     expr_to_string, generate_candidates, InferredInvariant,
 };
@@ -943,6 +944,44 @@ fn enum_field_assign<'a>(
                 sel.get_sort(),
                 val.get_sort()
             )));
+        }
+    }
+    // A payload declared with a refined-alias type must satisfy the
+    // alias's conjuncts — match-arm payload binding assumes them on
+    // the stored value, so admitting a violating write would let
+    // later proofs lean on a predicate the write never established
+    // (the same obligation `struct_field_assign` runs per field).
+    if let Some(field_ty) = edef.variants[vidx].field_types.get(fidx) {
+        if let Some(solver) = solver_opt {
+            if vc.module_env.types.contains_key(&field_ty.name) {
+                let chain = vc
+                    .module_env
+                    .refined_chain(&field_ty.name)
+                    .map_err(MumeiError::type_error)?;
+                for decl in chain {
+                    let mut local_env = env.clone();
+                    local_env.insert(decl.operand.clone(), val.clone());
+                    let predicate_ast =
+                        normalize_comparison_chains(parse_expression(&decl.predicate_raw));
+                    let Some(predicate) =
+                        expr_to_z3(vc, &predicate_ast, &mut local_env, None)?.as_bool()
+                    else {
+                        continue;
+                    };
+                    solver.push();
+                    solver.assert(&vc.path_cond_conj());
+                    solver.assert(&predicate.not());
+                    let verdict = crate::verification::phase_artifacts::check(solver);
+                    solver.pop(1);
+                    if verdict != SatResult::Unsat {
+                        return Err(MumeiError::verification(format!(
+                            "enum field write '{var}': field '{field}' type '{}' predicate violated",
+                            field_ty.name
+                        ))
+                        .with_verdict(crate::verification::VerdictKind::Rejected));
+                    }
+                }
+            }
         }
     }
     // Rebuild `e = V(sel_0(e),…,v,…)` so every accessor agrees with
