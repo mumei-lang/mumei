@@ -6514,8 +6514,10 @@ fn write_escapes<'ctx>(
     name: &str,
 ) -> bool {
     escapable.contains(name)
-        || (matches!(env.get(name), Some(SourceValue::Composite(_)))
-            && !inner_assignable.contains(name))
+        || (matches!(
+            env.get(name),
+            Some(SourceValue::Composite(_) | SourceValue::Enum { .. })
+        ) && !inner_assignable.contains(name))
 }
 
 /// `assignable` mirrors `statement_kind`: only names bound on the
