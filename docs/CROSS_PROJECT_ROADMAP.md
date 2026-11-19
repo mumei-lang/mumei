@@ -5215,6 +5215,20 @@ external queue model like `f := mk(ch)`, so `mk(ch)(x)` can
 send `x` into `ch`. An unevaluable inner call keeps the outer
 call closed.
 
+### Go deep-analysis: func-element collection results (mumei-agent #962)
+
+#962 admits `mk(x)[0]()` — indexing a `[]func`/`[N]func`
+call result and calling the element. The index callee's
+operand `call_expression` evaluates through the same
+inner-first rule as #961 (the producing call's `chan`
+arguments join the external model like `f := mk(ch)`), and
+the callee binding resolves from the inner call's span
+identity. Element literals the callee returned in a
+composite record their captures under the container binding
+with union semantics; the index call then folds the
+captured bindings' current deps and writes like a bound
+anonymous callee.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
