@@ -1292,6 +1292,19 @@ pub(crate) fn infer_struct_type_name(
                 _ => None,
             }
         }
+        // `match e { E::V(..) => .., _ => .. }` producing enum values
+        // in every arm types as that enum — the same join the
+        // if/else rule above gives, needed so enum equality on a
+        // match-produced operand resolves its declared type.
+        HirExpr::Match { arms, .. } => {
+            let mut names = arms
+                .iter()
+                .map(|arm| infer_stmt_struct_type_name(&arm.body, var_types, module_env));
+            match names.next() {
+                Some(Some(first)) if names.all(|n| n == Some(first.clone())) => Some(first),
+                _ => None,
+            }
+        }
         // P25: a joined `task` carries its body's tail value.
         HirExpr::Task { body, .. } => infer_stmt_struct_type_name(body, var_types, module_env),
         // P25: a joined `task_group` carries a child's tail value (all children
