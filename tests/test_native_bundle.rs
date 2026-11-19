@@ -3763,3 +3763,76 @@ fn multifile_bundle_builds_and_rechecks_with_honest_consumer_rejections() {
     assert_eq!(tampered.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&tampered.stderr).contains("source member"));
 }
+
+#[test]
+fn module_bundle_with_enum_equality_builds_as_v17_and_rechecks() {
+    // `e == e'`/`e != e'` on two values of one declared enum pins the
+    // module at composite v14: the source model compares the whole
+    // tagged-union layout — tag plus every payload slot — the same
+    // positional `extractvalue`/`icmp` chain the emitter lowers it to.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "enum Chan { Tcp(p: i64), Idle }\n\
+         atom is_idle(c: Chan) -> bool requires: true; ensures: true; body: { c == Chan::Idle };\n\
+         atom differs(a: Chan, b: Chan) -> bool requires: true; ensures: true; body: { a != b };\n\
+         atom main() -> i64 requires: true; ensures: result == 0; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V17);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V14
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A v17 record re-pinned as v16 is refused: v16 keeps enum
+    // equality out of the vocabulary.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V16.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
+fn multifile_bundle_with_enum_equality_builds_as_v17() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        root.path().join("chans.mm"),
+        "enum Chan { Tcp(p: i64), Idle }\natom is_idle(c: Chan) -> bool requires: true; ensures: true; body: { c == Chan::Idle };\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"chans\" as c;\n\natom main() -> i64 requires: true; ensures: true; body: { 0 };\n",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MULTIFILE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V17);
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // Under a v16 pin the member's enum equality stays refused.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MULTIFILE_PROFILE_V16.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
