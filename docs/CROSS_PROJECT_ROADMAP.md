@@ -5464,6 +5464,73 @@ any-of-docs semantics since disagreement across unrelated records
 is expected, not a conflict. `--output` refuses to overwrite the
 revocation list like the other declared inputs.
 
+### Declared producer-key registry on the signature folds (mumei-agent #981)
+
+#981 performs `key_authenticity` — the second signature-family
+supplementary check — via a declared
+`mumei.producer-key-registry/v1` document
+(`{schema_version, registry}`) supplied through `--key-registry
+PATH` on `signature-eval`/`signature-verify`, trusted as declared
+like the pins and the revocation list. `registry` maps each
+producer key id to a closed entry `{principal, not_before,
+not_after}` — a non-empty principal label plus two RFC 3339
+timestamps bracketing the window the key is authorized for, with
+duplicate ids and definitely-inverted windows rejected at parse
+time. `key_authentic` holds only when the envelope matched AND its
+`producer_key_id` names an entry whose window covers the declared
+reference — the conservative `within_window` bounds, so a
+sub-microsecond fraction never widens a window into a pass.
+`--reference-time RFC3339` joins the flags for it: the consumer's
+declared trusted clock, stamped onto both folds' `reference_time`
+— declared, never read from the wall clock. A registry without a
+reference time performs nothing, and a reference time without a
+registry (or, after #982, a max-age window) is a caller error.
+`_CHECK_PERFORMERS` names both folds' `key_authentic` bound through
+`subject_digest`, the same carrier convention as `key_not_revoked`.
+
+### Signature-envelope freshness via `--max-age-seconds` (mumei-agent #982)
+
+#982 performs `envelope_freshness` — the consumer side of the
+optional `produced_at` stamp Core's `evidence sign` can write —
+via `--max-age-seconds N` on `signature-eval`/`signature-verify`.
+`produced_at` joins `mumei.producer-signature/v1` as its only
+optional field: the closed-shape `envelope_match` admits
+`required <= fields <= required | {produced_at}` when the stamp is
+a string; a non-string stamp or any other extra field still fails
+the match, so stamped and unstamped envelopes both verify.
+`--max-age-seconds` requires `--reference-time`, and
+`--reference-time` now requires a declared consumer
+(`--key-registry` or `--max-age-seconds`). `envelope_fresh` uses
+the same conservative (low, high) bounds as `evaluate_freshness`:
+the claim must not postdate the declared reference and
+`produced_at + N` must reach it; absent or unparseable stamps fail
+closed. `_CHECK_PERFORMERS` names both folds' `envelope_fresh`
+bound through `subject_digest`, so recovery-eval recovers a
+record's `envelope_freshness` from a bound fold doc. The stamp is
+declared, not signed (like `producer_key_id`), so
+`producer_time_authenticity` and `clock_authenticity` stay
+not-performed by design — both now named in the folds'
+`checks_not_performed`, matching `evaluate_freshness`' declared
+set.
+
+### Bounded-while TV records declare `unroll_bound` (mumei #1135)
+
+mumei#1135 adds `unroll_bound` to the translation-validation record
+when the bounded-while profile applies, so a consumer reading the
+pinned module contract sees the loop bound the proof was checked
+under rather than re-deriving it from the source.
+
+### Optional `--produced-at` stamp on `evidence sign` (mumei #1136)
+
+mumei#1136 adds `--produced-at RFC3339` to `mumei evidence sign`:
+the flag writes a declared production timestamp into the
+`mumei.producer-signature/v1` envelope as its only optional field,
+and the public schema
+(`schema/producer-signature.schema.json`) admits it as an optional
+`date-time` string. The stamp is declared, not signed — the
+signature covers the digest alone — which is exactly the honesty
+level mumei-agent#982's `envelope_fresh` consumes.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
