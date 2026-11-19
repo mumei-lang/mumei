@@ -5323,6 +5323,15 @@ computed index evaluates like an argument. Element writes into a
 parameter container stay closed (caller-memory writes the model
 cannot scope).
 
+### Go deep-analysis: new(struct{...}) anonymous pointee (mumei-agent #971)
+
+#971 admits `new(struct{ ... })` — an anonymous struct pointee
+allocation whose field access `p.F` / `p.F = v` resolves through
+the bound-pointer model like `new(NamedStruct)` does. Comments
+inside a generic type argument (`new(map[ /* key */ string]int64)`)
+are skipped so the map pins cleanly; generic composite literals
+and conversions stay closed by design.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
