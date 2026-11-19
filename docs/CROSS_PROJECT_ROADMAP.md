@@ -4849,8 +4849,28 @@ ops broadcast the call's argument deps back to the caller. #930
 admits bound-pointer `chan` fields (`p.C <- x`, `<-p.W.C`,
 `close(p.C)`, `for range p.C`) the same way — a send folds into
 the root like `p.F = v` and `p.C = ch` may-aliases the member to
-the RHS queue's tokens. `chan` results, non-scalar elements and
-`select` stay closed.
+the RHS queue's tokens.
+
+### Go deep-analysis: `chan` results and struct-typed params/results (mumei-agent #931, #932)
+
+#931 admits a scalar `chan T` function result: `ch := g()` /
+`var ch = g()` binds a callee-produced queue when the (local)
+callee declares a single scalar `chan` result — ops on the bound
+name follow the external model exactly like a `chan` parameter,
+an alias tracks through the root, and a function literal
+capturing the name records the same imported effect a captured
+parameter does. Imported `lib.G()` results (no element kind in
+the signature), multi-result callees and `ch = g()` rebinds stay
+closed. #932 admits `struct`-typed parameters and results into
+the scalar signature fragment: a `struct` parameter's binding is
+seeded like a composite local — `s.V = x` and `s.A.W = x` fold
+in, reads carry the conflated set, and `p := G(x)` binds the
+callee's declared result deps. Anonymous-struct literals anchor
+per-binding direct-name sets so name-unified field resolutions
+(`cp.V` hitting the first identical literal) admit while promoted
+names (`Q.V` colliding with nested `A.V`, `s.A *Q`, embedded
+pointers, map/slice field mutation, interface params) stay
+closed. Non-scalar channel elements and `select` stay closed.
 
 ## No-`.mm` front door and V1 order
 
