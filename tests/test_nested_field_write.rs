@@ -65,6 +65,7 @@ fn rejected_nested_field_writes_fail() {
         "bad_unknown_leaf",
         "bad_breaks_invariant",
         "bad_sibling_changed",
+        "bad_callee_havoc",
     ] {
         assert!(
             stderr.contains(atom),
