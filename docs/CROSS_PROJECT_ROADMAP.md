@@ -5365,6 +5365,53 @@ inside a generic type argument (`new(map[ /* key */ string]int64)`)
 are skipped so the map pins cleanly; generic composite literals
 and conversions stay closed by design.
 
+### Go deep-analysis: func-value callees declaring scalar chan results (mumei-agent #972)
+
+#972 admits `ch := g(x)` / `var ch = g(x)` / `ch = g(x)` where `g`
+is a func-typed parameter or bound func value: go-types resolves
+the bound name's declared `chan` type from `g`'s signature, so the
+name binds an external queue like `ch := lib.G()` — no signature
+record needed on the `indirect_or_selector` call. Chan arguments
+promote into the external model and `ch = g(x)` reseats like
+`ch = G()`. Non-identifier callees and multi-result func-value
+callees stay closed.
+
+### Go deep-analysis: func-element index callees declaring scalar chan results (mumei-agent #973)
+
+#973 extends the #972 arm to `ch := fs[k](x)` / `ch := fm["k"](x)`:
+tree-sitter-go parses an identifier-index element call as a
+`type_conversion_expression` (`generic_type` carrying the
+collection's `type_identifier`), while `fs[0](x)` stays a
+`call_expression` — both shapes unwrap to the same element
+signature gate, and the conversion form's single `operand`
+argument feeds chan-arg promotion so `ch := fs[k](q)` promotes
+`q` external. Nested-index and call-result callees stay closed.
+
+### Go deep-analysis: index reads on call results (mumei-agent #974)
+
+#974 admits `lib.G(a)[i]` / `lib.M(a)["k"]` / `lib.N(a)[i][j]` —
+index reads on a call's composite result: the callee's declared
+single-result type must name a container with a scalar-or-pointer
+element, and the element's provenance is the call's dep set union
+each index's deps. `external_or_bodyless` callees admit through a
+minimal opaque fold (argument union, `_store_call_writes`, chan
+promotion, transfer on the member id, signature pins, func-arg
+invocation drain), and the comma-ok form `v, ok := lib.M(a)["k"]`
+admits when the outermost container is a map. Bare composite
+bindings, struct elements and multi-result calls stay closed.
+
+### Go deep-analysis: range over imported call results (mumei-agent #975)
+
+#975 admits `for _, v := range lib.G(a)` and `for range *lib.P(a)`
+on the same container fact the local `for range g(a)` path uses —
+the member's `result_types` carry the shape even when the
+composite result keeps the call `external_or_bodyless`. The fold
+drains queued func-arg invocations itself, promotes chan
+arguments, pins member signature types, and counts the bodyless
+call opaque; chan-alias sends resolve to the root queue and an
+empty bodyless `call.target` falls back to the member id so no
+empty transfer identity is recorded.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
