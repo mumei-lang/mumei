@@ -4903,6 +4903,15 @@ forever and stays closed, and a non-identifier receive target
 and suppresses the no-default following edge since a select
 without default blocks.
 
+### Go deep-analysis: package-level function-var calls (mumei-agent #935)
+
+#935 admits calls through a package-level function variable
+(`var Alias = Id; Alias(x)`): the callee is unknown mutable
+package state, so the call models as an opaque external call —
+dep-free callee, arguments evaluated normally, an imported
+transfer recorded against the var's real binding identity, and
+indirect writes unioned into the result like every opaque call.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
