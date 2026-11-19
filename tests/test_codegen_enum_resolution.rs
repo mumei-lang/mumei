@@ -595,3 +595,39 @@ atom weight_of(m: Meta) -> i64
         "struct tag must not dispatch like an enum:\n{ir}"
     );
 }
+
+// A struct with a `tag` field must not hijack an enum receiver's
+// `.tag` read: the field-index fallback scans every struct, so before
+// the typed dispatch `c.tag` read Meta's `tag` slot instead of the
+// tagged union's index slot.
+#[test]
+fn tag_read_on_enum_with_same_named_struct_field_reads_slot_zero() {
+    let ir = emit_atom_ir(
+        "tag_shadow",
+        r#"
+enum Chan { Tcp(i64), Idle }
+struct Meta { weight: i64, tag: i64 }
+
+atom tag_of(c: Chan) -> i64
+    requires: true;
+    ensures: true;
+    body: {
+        c.tag
+    }
+"#,
+        "tag_of",
+    );
+    let read = ir
+        .lines()
+        .find(|l| l.contains("extractvalue") && l.contains(", 0"))
+        .unwrap_or_else(|| panic!("no slot-0 extractvalue for c.tag:\n{ir}"));
+    assert!(
+        read.contains("{ i64, i64 }"),
+        "c.tag must read slot 0, not Meta's tag field slot:\n{ir}"
+    );
+    assert!(
+        !ir.lines()
+            .any(|l| l.contains("extractvalue") && l.contains(", 1")),
+        "c.tag must not read the payload slot via Meta's index:\n{ir}"
+    );
+}

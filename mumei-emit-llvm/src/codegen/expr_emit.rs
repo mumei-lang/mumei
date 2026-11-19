@@ -3335,9 +3335,38 @@ pub(crate) fn compile_hir_expr<'a>(
                 if let Some(struct_val) = variables.get(var_name.as_str()) {
                     if struct_val.is_struct_value() {
                         let sv = struct_val.into_struct_value();
-                        let idx = infer_struct_type_name(inner_expr, var_types, module_env)
-                            .and_then(|t| find_field_index(&t, field_name, module_env))
-                            .or_else(|| find_field_index(var_name, field_name, module_env));
+                        let idx = match infer_struct_type_name(inner_expr, var_types, module_env) {
+                            // A bound enum carries its tagged-union
+                            // layout: `.tag` reads slot 0 — the index
+                            // `emit_enum_variant_init` writes and `match`
+                            // dispatch compares. No other name is a
+                            // field, so the struct scan below must not
+                            // pick a same-named struct's slot for an
+                            // enum receiver.
+                            Some(t) if module_env.get_enum(&t).is_some() => {
+                                if field_name == "tag" {
+                                    return Ok(llvm!(builder.build_extract_value(
+                                        sv,
+                                        0,
+                                        &format!("{}.tag", var_name)
+                                    )));
+                                }
+                                None
+                            }
+                            // A declared receiver only reads its own
+                            // declared fields — an unrelated struct's
+                            // same-named field must not resolve, so
+                            // look the field up on `t` directly rather
+                            // than through find_field_index's
+                            // every-struct scan.
+                            Some(t) => module_env.get_struct(&t).and_then(|sdef| {
+                                sdef.fields
+                                    .iter()
+                                    .position(|f| f.name == *field_name)
+                                    .map(|i| i as u32)
+                            }),
+                            None => find_field_index(var_name, field_name, module_env),
+                        };
                         if let Some(idx) = idx {
                             let extracted = llvm!(builder.build_extract_value(
                                 sv,
@@ -3345,25 +3374,6 @@ pub(crate) fn compile_hir_expr<'a>(
                                 &format!("{}.{}", var_name, field_name)
                             ));
                             return Ok(extracted);
-                        }
-                    }
-                }
-                // `e.tag` reads slot 0 of a bound enum's tagged-union
-                // layout — the index `emit_enum_variant_init` writes and
-                // `match` dispatch compares. A struct declaring a real
-                // `tag` field resolves above, so this only fires for a
-                // declared enum type.
-                if field_name == "tag"
-                    && infer_struct_type_name(inner_expr, var_types, module_env)
-                        .is_some_and(|t| module_env.get_enum(&t).is_some())
-                {
-                    if let Some(val) = variables.get(var_name.as_str()) {
-                        if val.is_struct_value() {
-                            return Ok(llvm!(builder.build_extract_value(
-                                val.into_struct_value(),
-                                0,
-                                &format!("{}.tag", var_name)
-                            )));
                         }
                     }
                 }
