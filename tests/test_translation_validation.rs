@@ -3918,3 +3918,46 @@ fn composite_v14_enum_equality_is_a_new_widening_not_a_relaxation() {
     )
     .is_err());
 }
+
+#[test]
+fn composite_v14_match_produced_enum_equality_validates() {
+    // A `match` that produces enum values in every arm types as the
+    // enum — the emitter resolves the declared type for `==` and the
+    // model merges the arms slot-wise. The source model requires a
+    // catch-all arm, same as the emitter's unreachable fallback.
+    let src = "enum Chan { Tcp(p: i64), Idle }\natom pick(c: Chan, a: Chan) -> bool requires: true; ensures: true; body: { match c { Chan::Tcp(p) => a, _ => Chan::Idle } == a };\natom main() -> i64 requires: true; ensures: true; body: { 0 };";
+    let items = parse_module_checked(src).unwrap();
+    let ir = emitted_module(&items);
+    assert!(ir.contains("enum_eq"), "no enum eq emitted:\n{ir}");
+    let report =
+        tv::validate_native_module(src, &ir, Options::default(), RefinedAdmission::CompositeV14)
+            .unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+    // The let-bound form takes the same phi + `undef` fallback arm on
+    // the IR side and the same per-slot merge on the source side.
+    let let_src = "enum Chan { Tcp(p: i64), Idle }\natom pick(c: Chan, a: Chan) -> bool requires: true; ensures: true; body: { let m = match c { Chan::Tcp(p) => a, _ => Chan::Idle, }; m == a };\natom main() -> i64 requires: true; ensures: true; body: { 0 };";
+    let let_items = parse_module_checked(let_src).unwrap();
+    let let_ir = emitted_module(&let_items);
+    let report = tv::validate_native_module(
+        let_src,
+        &let_ir,
+        Options::default(),
+        RefinedAdmission::CompositeV14,
+    )
+    .unwrap();
+    assert_eq!(report.outcome, Outcome::EquivalentWithinProfile);
+}
+
+#[test]
+fn composite_v14_f64_payload_enum_equality_is_refused() {
+    // The emitter compares f64 slots with `fcmp oeq`, which bitwise
+    // equality cannot model — fail closed until the model encodes it.
+    let src = "enum Rate { Fixed(v: f64), None }\natom same(a: Rate, b: Rate) -> bool requires: true; ensures: true; body: { a == b };\natom main() -> i64 requires: true; ensures: true; body: { 0 };";
+    assert!(tv::validate_native_module(
+        src,
+        "define i64 @main() { ret i64 0 }",
+        Options::default(),
+        RefinedAdmission::CompositeV14,
+    )
+    .is_err());
+}
