@@ -4912,6 +4912,27 @@ dep-free callee, arguments evaluated normally, an imported
 transfer recorded against the var's real binding identity, and
 indirect writes unioned into the result like every opaque call.
 
+### Go deep-analysis: function-name aliases and same-package method calls (mumei-agent #936, #937)
+
+#936 admits function-name aliases (`h := G` / `h = G` / `var h = G`):
+the name binds a declared function and `h(args)` resolves through G's
+own summary via the shared `_direct_local_call` fold. The alias map
+holds only while every path binds that one function — a literal
+rebind, a maybe-skipped rebind to another target, or a non-identifier
+RHS clears it and the call falls back to the opaque external callee.
+Func-typed signature slots pin their inner named-type ids through the
+callee binding's `signature_type_ids` like an imported member's.
+
+#937 admits same-package method calls — both `st.M(args)` (receiver
+operand evaluated first, binding actual 0) and `T.M(st, args)`
+(receiver as argument 0, arity `parameters + 1`). A value receiver
+on a pointer operand auto-derefs: `p.Value()` reads the pointee set
+(`indirect_writes`), not `p`'s own. An effectful `*T`-receiver callee
+folds its writes into the receiver's ROOT binding — `s.A.Set(x)`
+lands in `s`'s conflated set, `(*p).Set(x)` broadcasts into
+`indirect_writes` and escaped bindings like a `*p = v` store. The
+receiver type pins in the signature loop the same way parameters do.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
