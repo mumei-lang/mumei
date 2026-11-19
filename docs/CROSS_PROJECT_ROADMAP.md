@@ -4586,6 +4586,23 @@ with unsigned carry/borrow predicates). Poison-strengthening
 forms — param/ret `noundef`, `signext`, `nsw`/`nuw`/`exact`,
 `disjoint`, module asm — stay rejected in every profile.
 
+### Bounded-`while` unroll bound declared on the TV record
+
+The `mumei.translation-validation-report/v1` family now carries
+`unroll_bound` whenever a bounded-`while` profile applies — the
+`ValidationReport`/`ModuleValidationReport` gain
+`unroll_bound: Option<usize>`, set to `Some(LOOP_BOUND)` exactly
+when `loop_bound_exits` admitted a loop, and the emitted record
+joins the field only in that case so its absence reads as "no
+loop coverage claimed" rather than an unknown bound. Consumers
+no longer parse `_and_loops_exiting_within_bound_4` out of
+`input_domain` to learn the coverage limit; `recheck-llvm` binds
+the value by re-deriving the report from the same
+`LOOP_BOUND`-unrolled model. Remaining: `for` is not a source
+form (`while` only), and the bound stays a compile-time constant
+— a declared per-atom `unroll_bound` input (mumei-agent #979) is
+the follow-on.
+
 ### Int-model `/` truncates toward zero (mumei #1122, #781)
 
 [mumei#1122](https://github.com/mumei-lang/mumei/pull/1122) fixes
