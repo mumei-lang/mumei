@@ -4997,6 +4997,22 @@ synthetic span identity (`file:start:end`), and the result
 carries the conflated set — effects unknown, since the callee is
 whatever the lookup produced.
 
+### Go deep-analysis: in-place func literal calls (mumei-agent #943)
+
+#943 admits `func(...) T { ... }(args)` — an immediate literal
+call whose callee IS the literal — under the same model bound
+literals use: `_func_literal_capture` splits the free-variable
+scan out of `_func_literal` so both paths share the gate (an
+internal call, assignment, send, `go` or `defer` still closes),
+and `_immediate_literal_call` unions the captured bindings'
+current dep sets, the evaluated arguments, and `indirect_writes`.
+A pointer capture or a captured param/external channel records
+an imported chan-op transfer on that identity with effects
+unknown; aliases declared inside the literal (`c := ch`),
+parenthesized operands, and variadic chan params resolve to the
+arg queue through a pre-pass that runs before the reversed DFS
+walk consumes children.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
