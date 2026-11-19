@@ -5064,6 +5064,32 @@ assignment shape a local multi-result callee takes —
 so `lib.G(q)` promotes `q` into `external_chan_locals`
 exactly like `g(q)` does.
 
+### Go deep-analysis: imported methods declaring chan results (mumei-agent #950)
+
+#950 extends the same result-slot rule to imported methods:
+`ch := st.M()` and `ch, n := st.M()` admit when the imported
+method's `result_types` declare a scalar-element `chan` slot.
+The bound name at that slot seeds an external queue; scalar
+sibling slots conflate into the call deps as with free
+functions. A `var`/assignment shape behaves identically, and
+a chan-typed receiver root or argument still promotes into
+`external_chan_locals` through the shared call probe.
+
+### Go deep-analysis: interface method calls (mumei-agent #951)
+
+#951 admits `I.M(recv, args)` — a method *expression* on a
+named interface — as an `interface_dispatch` opaque-external
+call: deps union the receiver (the method expression's first
+argument), the remaining arguments, indirect writes, escaped
+bindings, and promoted chan-argument contents. `target` pins
+the named interface's declaration; a `type A = I` alias target
+also pins the underlying named interface through the extra
+`type_arg_type_ids` slot. Instantiated interface type
+arguments pin likewise. Method-value calls `i.M(args)` stay
+closed — interface-typed values are always unsupported
+bindings, so no receiver could ever reach the call — and a
+non-scalar result keeps `method_generic_or_variadic`.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
