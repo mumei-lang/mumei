@@ -5013,6 +5013,43 @@ parenthesized operands, and variadic chan params resolve to the
 arg queue through a pre-pass that runs before the reversed DFS
 walk consumes children.
 
+### Go deep-analysis: effectful func literal bodies (mumei-agent #945)
+
+#945 lets a bound literal's body carry effects to its call
+site: calls, stores and pointer stores inside `h :=
+func(){ ... }; h()` land in the caller's dep model instead of
+closing the literal outright. Conditional copies of bound
+method values union `bound_method_receiver_deps` so a value
+bound on one branch keeps every receiver set it may hold.
+
+### Go deep-analysis: multi-result chan slots (mumei-agent #946-#948)
+
+#946 admits `ch, n := g()` per slot — the callee declaring a
+scalar `chan` at the name's position binds an external queue,
+resolved in a pre-pass against the pre-state so mid-loop
+`chan_aliases` mutation (`a, c := g(a, b)`, `a, b := b, a`)
+cannot leak across slots. #947 extends the slot to the `var
+ch, n = g()` declaration form, and #948 to the plain
+assignment `ch, n = g()` — a passthrough callee aliases the
+argument's queue, otherwise the name binds external while
+every `chan` argument is promoted since the callee may hand
+one back through a local alias. A `make` reseat detaches
+each alias onto its own slot with the old queue's contents
+copied, so `<-ch` keeps the queued sends while `<-q` reads
+only the fresh queue.
+
+### Go deep-analysis: imported `lib.G()` chan results (mumei-agent #944)
+
+#944 admits `ch := lib.G()` where the imported member
+declares a scalar-element `chan` result: `result_types` on
+the member record carries each slot's fact, the call
+classifies `direct_import`, and the bound name joins the
+external queue model with ops recorded on the member's
+identity. `signatureTypeIDs` dedupes on `types.Type`
+identity instead of `Type.String()`, so a function-local
+`type T` shadowing a package `type T` pins both
+declarations.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
