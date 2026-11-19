@@ -1272,21 +1272,30 @@ pub fn parse_statement(ctx: &mut ParseContext) -> Stmt {
         // Check for assignment: ident = expr (or array store: ident[idx] = expr)
         Token::Ident(ref name) => {
             let name_clone = name.clone();
-            if ctx.peek_at(1) == Some(&Token::Dot)
-                && matches!(ctx.peek_at(2), Some(Token::Ident(_)))
-                && ctx.peek_at(3) == Some(&Token::Assign)
+            // A field-path assignment `a.b(.c)* = expr`: collect the
+            // `Ident (Dot Ident)*` prefix, then require `=` — one dot
+            // is the v5 field write, deeper paths the v15 nested write.
+            let mut offset = 1usize;
+            let mut segments: Vec<String> = Vec::new();
+            while ctx.peek_at(offset) == Some(&Token::Dot)
+                && matches!(ctx.peek_at(offset + 1), Some(Token::Ident(_)))
             {
-                let field = match ctx.peek_at(2).cloned() {
-                    Some(Token::Ident(field)) => field,
-                    _ => unreachable!(),
+                let Some(Token::Ident(segment)) = ctx.peek_at(offset + 1).cloned() else {
+                    break;
                 };
-                ctx.advance(); // consume resource name
-                ctx.advance(); // consume dot
-                ctx.advance(); // consume field name
+                segments.push(segment);
+                offset += 2;
+            }
+            if !segments.is_empty() && ctx.peek_at(offset) == Some(&Token::Assign) {
+                ctx.advance(); // consume base name
+                for _ in &segments {
+                    ctx.advance(); // consume dot
+                    ctx.advance(); // consume segment name
+                }
                 ctx.advance(); // consume =
                 let value = parse_expr(ctx, 0);
                 Stmt::Assign {
-                    var: format!("{name_clone}.{field}"),
+                    var: format!("{name_clone}.{}", segments.join(".")),
                     value: Box::new(value),
                     span: stmt_span,
                 }

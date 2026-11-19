@@ -374,8 +374,36 @@ pub(crate) fn compile_hir_stmt<'a>(
         }
         HirStmt::Assign { var, value } => {
             if let Some((base, field)) = var.split_once('.') {
-                if let Some(struct_ty) = var_types.get(base) {
-                    if let Some(idx) = find_field_index(struct_ty, field, module_env) {
+                if let Some(struct_ty) = var_types.get(base).cloned() {
+                    // The write path's index list: each segment resolves
+                    // on the declared struct it descends into — no
+                    // every-struct scan, so `q.inner.a` cannot land on
+                    // an unrelated type's same-named field.
+                    let segments: Vec<&str> = field.split('.').collect();
+                    let mut index_path: Vec<u32> = Vec::with_capacity(segments.len());
+                    let mut level_ty: &str = struct_ty.as_str();
+                    let mut resolved = segments.len() > 1;
+                    if segments.len() == 1 {
+                        if let Some(idx) = find_field_index(&struct_ty, field, module_env) {
+                            index_path.push(idx);
+                            resolved = true;
+                        }
+                    } else {
+                        for segment in &segments {
+                            let Some(sdef) = module_env.get_struct(level_ty) else {
+                                resolved = false;
+                                break;
+                            };
+                            let Some(pos) = sdef.fields.iter().position(|f| f.name == *segment)
+                            else {
+                                resolved = false;
+                                break;
+                            };
+                            index_path.push(pos as u32);
+                            level_ty = sdef.fields[pos].type_name.as_str();
+                        }
+                    }
+                    if resolved {
                         let val = compile_hir_expr(
                             context, builder, module, function, value, variables, var_types,
                             array_ptrs, module_env,
@@ -385,20 +413,47 @@ pub(crate) fn compile_hir_stmt<'a>(
                                 "struct binding '{base}' has no aggregate value"
                             ))
                         })?;
-                        let agg: BasicValueEnum = llvm!(builder.build_insert_value(
-                            old.into_struct_value(),
-                            val,
-                            idx,
-                            var
-                        ))
-                        .into_struct_value()
-                        .into();
-                        variables.insert(base.to_string(), agg);
-                        for key in [
-                            format!("__struct_{base}_{field}"),
-                            format!("{base}_{field}"),
-                        ] {
-                            variables.insert(key, val);
+                        // Rebuild the insertvalue chain bottom-up:
+                        // extract each ancestor aggregate, replace the
+                        // leaf, then wrap each level back — the same
+                        // `insertvalue` path the source model's nested
+                        // composite update mirrors.
+                        let mut ancestors: Vec<inkwell::values::StructValue> =
+                            vec![old.into_struct_value()];
+                        for &idx in &index_path[..index_path.len() - 1] {
+                            let sub = llvm!(builder.build_extract_value(
+                                *ancestors.last().unwrap(),
+                                idx,
+                                "nest"
+                            ));
+                            ancestors.push(sub.into_struct_value());
+                        }
+                        let mut cur: BasicValueEnum = val;
+                        let mut first_subtree: Option<BasicValueEnum> = None;
+                        for (level, &idx) in index_path.iter().enumerate().rev() {
+                            cur =
+                                llvm!(builder.build_insert_value(ancestors[level], cur, idx, var))
+                                    .into_struct_value()
+                                    .into();
+                            if level == 1 {
+                                first_subtree = Some(cur);
+                            }
+                        }
+                        variables.insert(base.to_string(), cur);
+                        if let Some(subtree) = first_subtree {
+                            for key in [
+                                format!("__struct_{base}_{}", segments[0]),
+                                format!("{base}_{}", segments[0]),
+                            ] {
+                                variables.insert(key, subtree);
+                            }
+                        } else {
+                            for key in [
+                                format!("__struct_{base}_{field}"),
+                                format!("{base}_{field}"),
+                            ] {
+                                variables.insert(key, val);
+                            }
                         }
                         rebind_chan_payload(base, value, var_types);
                         return Ok(val);

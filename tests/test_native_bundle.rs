@@ -2829,6 +2829,78 @@ fn multifile_bundle_with_f64_leaves_builds_as_v15() {
 }
 
 #[test]
+fn module_bundle_with_nested_field_writes_builds_as_v18_and_rechecks() {
+    // `bump` writes a leaf two levels deep (`o.i.a = w`): the build,
+    // the source recheck and the LLVM snapshot recheck all carry the
+    // desugared subtree rebuild under composite v15.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "struct I { a: i64, b: i64 }\nstruct O { i: I, c: i64 }\n\
+         atom bump(o: O, w: i64) -> O requires: true; ensures: result.i.a == w; body: { o.i.a = w; o };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { bump(O { i: I { a: 1, b: 2 }, c: 0 }, 8).i.a };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V18);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V15
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A v18 record re-pinned as v16 is refused: v16 keeps nested
+    // leaf writes out of the composite shape.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V16.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
+fn multifile_bundle_with_nested_field_writes_builds_as_v18() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        root.path().join("shapes.mm"),
+        "struct I { a: i64, b: i64 }\nstruct O { i: I, c: i64 }\n\
+         atom bump(o: O, w: i64) -> O requires: true; ensures: result.i.a == w; body: { o.i.a = w; o };\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"shapes\" as s;\n\natom main() -> i64 requires: true; ensures: true; body: { 0 };\n",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MULTIFILE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V18);
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // Under a v16 pin the member's nested write stays refused.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MULTIFILE_PROFILE_V16.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn module_bundle_with_typedef_and_single_main_takes_the_module_path() {
     // A module holding one `main` plus a refined scalar declaration is
     // still a module — dispatch on atom count alone would send it to

@@ -1127,13 +1127,36 @@ pub(crate) fn havoc_written_callee_fields<'a>(
             written.extend(sdef.fields.iter().map(|f| f.name.clone()));
         }
         for field in &sdef.fields {
-            if !written.contains(&field.name) {
+            // A nested write `q.inner.a = …` replaces the whole `inner`
+            // subtree — count the direct field as written, then freshen
+            // every leaf key under `<param>_<field>_…` too, not just the
+            // `<param>_<field>` handle. Leaving `q_inner_a` bound to the
+            // input projection lets the callee's `ensures q.inner.a == k`
+            // constrain the caller's *input* slot — a contradiction that
+            // proves the caller's postconditions vacuously.
+            let nested_written = written
+                .iter()
+                .any(|w| w.starts_with(&format!("{}.", field.name)));
+            if !written.contains(&field.name) && !nested_written {
                 continue;
             }
-            for key in [
+            let prefixes = [
                 format!("{}_{}", param.name, field.name),
                 struct_field_key(&param.name, &field.name),
-            ] {
+            ];
+            let mut keys: Vec<String> = Vec::new();
+            for prefix in &prefixes {
+                if env.contains_key(prefix) {
+                    keys.push(prefix.clone());
+                }
+                let leaf_prefix = format!("{prefix}_");
+                keys.extend(
+                    env.keys()
+                        .filter(|key| key.starts_with(&leaf_prefix))
+                        .cloned(),
+                );
+            }
+            for key in keys {
                 let Some(old) = env.get(&key) else {
                     continue;
                 };
