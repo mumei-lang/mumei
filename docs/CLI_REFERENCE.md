@@ -15,7 +15,7 @@ description: "Generated exhaustive reference for visible Mumei commands, argumen
 | `mumei evidence recheck-source` | 5 | Freshly recheck saved source Evidence with linked Z3 and caller-supplied source/budgets; not proof acceptance |
 | `mumei evidence accept-source` | 5 | Evaluate representation plus fresh same-profile source consistency into a bounded acceptance descriptor |
 | `mumei evidence verify-source` | 4 | Freshly verify one C03 pure-i64 source postcondition, not LLVM/artifacts or proof acceptance |
-| `mumei evidence sign` | 4 | Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only |
+| `mumei evidence sign` | 5 | Detachably sign a bounded record's raw bytes with a declared ed25519 key into a producer-signature envelope; binds the declared key id only |
 | `mumei evidence keygen` | 1 | Generate a fresh ed25519 producer keypair; writes the 64-char hex secret to a new file and prints only the public key |
 | `mumei evidence check` | 3 | Validate one Evidence v1 JSON record's representation, not its truth, identity, freshness or authenticity |
 | `mumei evidence accept` | 3 | Normalize one declared requirement against one Evidence record into a bounded verdict; no tool execution or proof acceptance |
@@ -197,6 +197,7 @@ Usage: mumei evidence sign [OPTIONS] --key-file <KEY_FILE> --producer-key-id <PR
 | `--json` | false | — | Emit the detached mumei.producer-signature/v1 envelope, not a verification or acceptance result |
 | `--key-file <KEY_FILE>` | — | — | Regular file holding exactly the 64-char lowercase-hex ed25519 secret key; the value is never printed |
 | `--producer-key-id <PRODUCER_KEY_ID>` | — | — | Caller-declared producer key label the consumer pins separately; never derived from the key bytes |
+| `--produced-at <PRODUCED_AT>` | — | — | Optional declared production timestamp stamped into the envelope (RFC 3339); unsigned like the key id — freshness is a consumer-side check |
 
 ## `mumei evidence keygen`
 

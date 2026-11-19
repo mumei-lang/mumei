@@ -70,3 +70,13 @@ def test_envelope_is_closed_and_every_field_is_required() -> None:
     changed = deepcopy(ENVELOPE)
     changed["extra"] = True
     assert not VALIDATOR.is_valid(changed)
+
+
+def test_produced_at_is_the_only_optional_field() -> None:
+    stamped = deepcopy(ENVELOPE)
+    stamped["produced_at"] = "2026-11-18T12:00:00Z"
+    assert VALIDATOR.is_valid(stamped)
+    for bad in (0, None, ["2026-11-18T12:00:00Z"], ""):
+        changed = deepcopy(ENVELOPE)
+        changed["produced_at"] = bad
+        assert not VALIDATOR.is_valid(changed), bad
