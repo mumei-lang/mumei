@@ -4976,6 +4976,27 @@ both maps so a detach inside a body counts as change. A fresh
 `make` over an unaliased, non-target name keeps the conflated
 admission.
 
+### Go deep-analysis: multi-result callees (mumei-agent #940)
+
+#940 admits multi-result callees — `a, b := g()` — by binding
+every declared result position to the callee's conflated
+result-dep set: Go evaluates the call once, so each name carries
+the union of the callee's `return_dependencies`; single-result
+assignment keeps the per-position fold. A discarded position
+(`a, _ := g()`) skips its slot, and a `chan` element among the
+results keeps the whole tuple closed until a non-scalar element
+model exists.
+
+### Go deep-analysis: selector/computed func-value calls (mumei-agent #942)
+
+#942 admits calls through a computed or selector callee —
+`tbl[k](x)`, `s.f(x)`, `getF()(x)` — as opaque external calls:
+the callee expression's deps join the arguments and indirect
+writes, an imported transfer records against the callee node's
+synthetic span identity (`file:start:end`), and the result
+carries the conflated set — effects unknown, since the callee is
+whatever the lookup produced.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
