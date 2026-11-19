@@ -4948,6 +4948,34 @@ the old receiver so an untaken-path call still reaches it. A chan
 receiver's sends broadcast through `indirect_writes` for
 parameter/external queues.
 
+### Go deep-analysis: method-expression values (mumei-agent #939)
+
+#939 extends bound method values to method *expression* values:
+`f := St.M` records `(method, None)` on the binding, and a call
+`f(recv, args)` puts the receiver at argument 0 exactly like the
+direct `St.M(st, args)` call. The record is a triple carrying the
+type operand's type_id, pinned at call time so `stale_dependents`
+flags the summary when the named type's method set changes; a
+`*T` method expression's writes broadcast into `indirect_writes`
+plus escaped bindings rather than a dead `locals_[None]` slot,
+and promoted selections read pointee memory for pointer
+receivers.
+
+### Go deep-analysis: conditional channel rebinding (mumei-agent #941)
+
+#941 admits rebinding a channel name under a branch or loop —
+`if c { ch = q }`, `ch = g(q)`, `ch = g()`, `ch = make(chan)` —
+by detaching the name to an external queue: its dep slot unions
+the old queue's contents with the RHS deps, and every queue it
+could still mean is promoted external so sends broadcast through
+`indirect_writes` and receives union it. A third name still
+holding the old queue's identity sees writes the untaken path
+delivered; select clauses snapshot and merge `chan_aliases`/
+`external_chan_locals` per clause; and the loop fixpoint carries
+both maps so a detach inside a body counts as change. A fresh
+`make` over an unaliased, non-target name keeps the conflated
+admission.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
