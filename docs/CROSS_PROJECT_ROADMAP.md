@@ -5273,6 +5273,56 @@ the container like the `[]func` form. A declared collection type
 (`type FM map[K]func() T`) binds through the type's fact the same
 way.
 
+### Go deep-analysis: element writes into bound func-element containers (mumei-agent #966)
+
+#966 admits `fs[i] = f`, `fm[k] = f`, `append(fs, f)`, and
+`make([]func, n)`/`make(map[K]func)`/`make(FM)` into a bound
+func-element container: the stored value's captures, writes and
+deps union into every name sharing the container's current backing,
+so `fs[k]()` re-resolves the elements through the one conflated
+slot. Literals, identifiers, `nil` and call results all land as
+element values; a share group is an eval-time connected component,
+so a store through one name reaches every alias. Param containers
+stay closed — their elements live in caller memory.
+
+### Go deep-analysis: one level of nested func-element containers (mumei-agent #967)
+
+#967 admits `fm := [][]func{fs}` / `map[K][]func{fs}` (and the
+named-type forms) — exactly one level of nesting. `fm[k][i] = f`
+writes through the outer slot's donor backings (`fm[k]` aliases
+`fs`'s slice, slices and maps being the only aliasing element
+carriers), and `fm[k][i](x)` calls opaque folding every donor
+group's element records. A reseated inner slice parks its records
+under a unique surrogate so the abandoned backing still resolves.
+A third index, an element read (`v := fm[k][i]`), `append(fm[k], f)`,
+a whole-inner store (`fm[k] = sub`) and a call-result nested
+container stay closed.
+
+### C11: opt-in FileAttemptSequenceStore (mumei-agent #968)
+
+#968 adds a file-backed `AttemptSequenceStore`: canonical attempt
+lineage publications persist to disk with fsync and advisory
+locking, so a crash between dispatch and publication cannot lose
+or reorder the canonical sequence. In-memory behaviour is
+unchanged for stores that do not opt in.
+
+### C11: attempt-sequence reconcile (mumei-agent #969)
+
+#969 arbitrates cross-lineage conflicts by prefix order: when two
+published attempt sequences diverge, the reconcile pass decides
+which prefix stays canonical and records the arbitration, so a
+restarted or duplicated attempt stream converges deterministically
+instead of racing.
+
+### Go deep-analysis: func-element collection parameters (mumei-agent #970)
+
+#970 admits a `[]func` / `[N]func` / `map[K]func` *parameter*:
+`fs[i](x)` calls opaque on the parameter's own slot like the
+result form — the callee read carries the container's deps and a
+computed index evaluates like an argument. Element writes into a
+parameter container stay closed (caller-memory writes the model
+cannot scope).
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
