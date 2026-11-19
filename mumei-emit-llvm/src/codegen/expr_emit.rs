@@ -2714,7 +2714,10 @@ pub(crate) fn compile_hir_expr<'a>(
                     .const_null()
                     .into()
             } else if phi_type.is_struct_type() {
-                phi_type.into_struct_type().get_undef().into()
+                // The fallback arm is unreachable; a zero aggregate
+                // keeps it poison-free so translation validation can
+                // model every slot (an `undef` leaf has no slot value).
+                phi_type.into_struct_type().const_zero().into()
             } else {
                 context.i64_type().const_int(0, false).into()
             };
