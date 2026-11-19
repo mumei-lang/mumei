@@ -4933,6 +4933,21 @@ lands in `s`'s conflated set, `(*p).Set(x)` broadcasts into
 `indirect_writes` and escaped bindings like a `*p = v` store. The
 receiver type pins in the signature loop the same way parameters do.
 
+### Go deep-analysis: bound method values (mumei-agent #938)
+
+#938 admits bound method values — `f := st.M`, `var f = st.M`,
+`f = st.M` — recording `(method, receiver)` pairs on the binding so
+`f(args)` resolves through the method's own summary with the
+receiver as actual 0, exactly like the direct `st.M(args)` call.
+The receiver's dep set freezes at bind time (Go evaluates and
+copies it), while an effectful `*T`-receiver callee's writes fold
+onto the receiver binding's CURRENT deps — into `indirect_writes`
+when the receiver is a bound pointer. Copies (`g := f`) propagate
+the pair; any other RHS drops it, and a conditional drop escapes
+the old receiver so an untaken-path call still reaches it. A chan
+receiver's sends broadcast through `indirect_writes` for
+parameter/external queues.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
