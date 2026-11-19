@@ -3,7 +3,7 @@ use crate::codegen::expr_emit::{
     hir_int_type_name, infer_struct_type_name, is_fixed_int_type_name, resolve_named_type,
     LAMBDA_MARK,
 };
-use crate::codegen::lowering::ArrayPtr;
+use crate::codegen::lowering::{bitpreserve_cast, ArrayPtr};
 use crate::codegen::pattern_emit::find_field_index;
 use crate::codegen::task_runtime::declare_task_group_should_cancel_current_extern;
 use inkwell::builder::Builder;
@@ -384,9 +384,15 @@ pub(crate) fn compile_hir_stmt<'a>(
                     let mut level_ty: &str = struct_ty.as_str();
                     let mut resolved = segments.len() > 1;
                     if segments.len() == 1 {
-                        if let Some(idx) = find_field_index(&struct_ty, field, module_env) {
-                            index_path.push(idx);
-                            resolved = true;
+                        // An enum-typed base skips the name-only
+                        // fallback: a same-named field on an
+                        // unrelated struct would resolve a payload
+                        // write to the wrong aggregate slot.
+                        if module_env.get_enum(&struct_ty).is_none() {
+                            if let Some(idx) = find_field_index(&struct_ty, field, module_env) {
+                                index_path.push(idx);
+                                resolved = true;
+                            }
                         }
                     } else {
                         for segment in &segments {
@@ -493,12 +499,22 @@ pub(crate) fn compile_hir_stmt<'a>(
                                         "enum binding '{base}' has no aggregate value"
                                     ))
                                 })?;
-                                let cur = llvm!(builder.build_insert_value(
-                                    old.into_struct_value(),
-                                    val,
-                                    1 + fidx,
-                                    var
-                                ));
+                                // The union slot's LLVM type is the
+                                // widest across variants — coerce
+                                // the written value the same way the
+                                // constructor does, or an i64 write
+                                // into an f64 slot mismatches.
+                                let agg = old.into_struct_value();
+                                let Some(slot_ty) =
+                                    agg.get_type().get_field_type_at_index(1 + fidx)
+                                else {
+                                    return Err(MumeiError::codegen(format!(
+                                        "enum '{struct_ty}' has no payload slot {fidx}"
+                                    )));
+                                };
+                                let coerced = bitpreserve_cast(builder, val, slot_ty)?;
+                                let cur =
+                                    llvm!(builder.build_insert_value(agg, coerced, 1 + fidx, var));
                                 variables.insert(base.to_string(), cur.into_struct_value().into());
                                 return Ok(val);
                             }
