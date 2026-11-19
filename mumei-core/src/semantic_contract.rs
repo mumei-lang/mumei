@@ -148,6 +148,13 @@ pub const PURE_I64_COMPOSITE_PROFILE_V11: &str = "mumei.pure-i64-composite/v11";
 /// `s[i]` reads a `u64` byte and `len(s)` its cell count
 /// (`pure-i64-composite/v13`).
 pub const PURE_I64_COMPOSITE_PROFILE_V13: &str = "mumei.pure-i64-composite/v13";
+/// Enum scalar operations (`pure-i64-composite/v14`): equality `e ==
+/// e'` between two values of one declared enum compares the whole
+/// tagged-union layout — tag plus every payload slot — the same
+/// positional `extractvalue`/`icmp` chain the emitter lowers it to
+/// (`pure-i64-composite/v14`). Ordering, arithmetic and `.tag`
+/// projections stay outside: the emitter emits no IR for them.
+pub const PURE_I64_COMPOSITE_PROFILE_V14: &str = "mumei.pure-i64-composite/v14";
 
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
@@ -190,7 +197,9 @@ pub const PURE_I64_COMPOSITE_MEMORY_PROFILE: &str = "mumei.pure-i64-composite-bo
 /// (`pure-i64-composite/v9`). `CompositeV10` additionally admits `u64`
 /// scalar leaves — parameters, results, fields and instantiated type
 /// arguments carrying unsigned two's-complement semantics
-/// (`pure-i64-composite/v10`). A
+/// (`pure-i64-composite/v10`). `CompositeV14` additionally admits
+/// `e == e'`/`e != e'` equality between two values of one declared
+/// enum (`pure-i64-composite/v14`). A
 /// pinned record names which level produced it, so a
 /// rechecker re-derives under the record's own admission — never a
 /// wider one.
@@ -212,6 +221,7 @@ pub enum RefinedAdmission {
     CompositeV11,
     CompositeV12,
     CompositeV13,
+    CompositeV14,
 }
 
 impl RefinedAdmission {
@@ -297,6 +307,14 @@ impl RefinedAdmission {
     /// immutable, `s[i]` reads a `u64` byte (`pure-i64-composite/v13`).
     pub fn admits_str_leaves(self) -> bool {
         self >= Self::CompositeV13
+    }
+
+    /// Whether `e == e'`/`e != e'` on two values of one declared enum
+    /// is admitted — the whole tagged-union layout compares
+    /// positionally, the shape the emitter lowers it to
+    /// (`pure-i64-composite/v14`).
+    pub fn admits_enum_scalar_ops(self) -> bool {
+        self >= Self::CompositeV14
     }
 }
 
@@ -403,7 +421,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _, _, _, _, _, _, _, _, _) =
+    let (items, refined, structs, _, _, _, _, _, _, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -424,6 +442,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         false,
         false,
@@ -469,6 +488,7 @@ pub fn extract_pure_i64_module_contracts(
         f64_leaves,
         arrays,
         strs,
+        enum_scalar_ops,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
@@ -511,6 +531,7 @@ pub fn extract_pure_i64_module_contracts(
                 f64_leaves,
                 arrays,
                 strs,
+                enum_scalar_ops,
                 &cert_env,
             )),
             // Type and struct declarations carry no per-atom contract;
@@ -542,6 +563,7 @@ pub fn module_source_profile(
         f64_leaves,
         arrays,
         strs,
+        enum_scalar_ops,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
         true,
@@ -557,6 +579,7 @@ pub fn module_source_profile(
         f64_leaves,
         arrays,
         strs,
+        enum_scalar_ops,
     ))
 }
 
@@ -579,6 +602,7 @@ type AdmittedModule = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -706,6 +730,7 @@ fn admit_pure_i64_atoms(
     let merged_composites_used = std::cell::Cell::new(false);
     let arrays_used = std::cell::Cell::new(false);
     let strs_used = std::cell::Cell::new(false);
+    let enum_scalar_ops_used = std::cell::Cell::new(false);
     for item in &items {
         let Item::Atom(sibling) = item else {
             continue;
@@ -739,12 +764,14 @@ fn admit_pure_i64_atoms(
             admission.admits_merged_composites(),
             admission.admits_bounded_memory(),
             admission.admits_str_leaves(),
+            admission.admits_enum_scalar_ops(),
             &struct_values_used,
             &field_writes_used,
             &enum_values_used,
             &merged_composites_used,
             &arrays_used,
             &strs_used,
+            &enum_scalar_ops_used,
         )?;
     }
     let u64_leaves = uses_u64_leaves(&items);
@@ -763,6 +790,7 @@ fn admit_pure_i64_atoms(
         f64_leaves,
         arrays_used.get(),
         strs_used.get(),
+        enum_scalar_ops_used.get(),
     ))
 }
 
@@ -933,9 +961,15 @@ fn fragment_profile(
     f64_leaves: bool,
     bounded_memory: bool,
     str_leaves: bool,
+    enum_scalar_ops: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if enum_scalar_ops {
+        // Enum equality is only ever admitted under v14 — the
+        // positional-layout comparison it requires is the strongest
+        // claim the ladder makes.
+        PURE_I64_COMPOSITE_PROFILE_V14
     } else if str_leaves {
         // A `Str` literal is only ever admitted under v13 — the
         // bounded byte-cell encoding it requires is the strongest
@@ -1012,6 +1046,7 @@ fn atom_contract(
     f64_leaves: bool,
     bounded_memory: bool,
     str_leaves: bool,
+    enum_scalar_ops: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
@@ -1029,6 +1064,7 @@ fn atom_contract(
         f64_leaves,
         bounded_memory || str_leaves,
         str_leaves,
+        enum_scalar_ops,
     );
     let result_fields = atom
         .return_type
@@ -1402,6 +1438,12 @@ struct KindEnv<'a> {
     /// Set when the atom binds or reads a `Str` literal, so the module
     /// names the v13 profile only when it needs it.
     strs_used: &'a std::cell::Cell<bool>,
+    /// Whether `e == e'`/`e != e'` on two values of one declared enum
+    /// is admitted (`pure-i64-composite/v14`).
+    admit_enum_scalar_ops: bool,
+    /// Set when the atom compares enum values, so the module names
+    /// the v14 profile only when it needs it.
+    enum_scalar_ops_used: &'a std::cell::Cell<bool>,
 }
 
 impl<'a> KindEnv<'a> {
@@ -1808,6 +1850,28 @@ impl<'ctx> CallShapes<'ctx> {
     }
 }
 
+/// Positional payload-slot equality for enum values
+/// (`pure-i64-composite/v14`): two slots of one declared enum share a
+/// kind (`build_enum_env` rejects a disagreeing index), so the BV
+/// `i64`/`u64` kinds compare bitwise — the `icmp` the emitter emits —
+/// and `bool` slots compare as booleans, which coincides with the raw
+/// compare because the signature domain keeps `bool` slots canonical
+/// `{0,1}` under every tag.
+fn enum_slot_eq<'ctx>(a: &SourceValue<'ctx>, b: &SourceValue<'ctx>) -> Option<Bool<'ctx>> {
+    match (a, b) {
+        (
+            SourceValue::Integer(x) | SourceValue::Unsigned(x),
+            SourceValue::Integer(y) | SourceValue::Unsigned(y),
+        ) => Some(x._eq(y)),
+        (SourceValue::Boolean(x), SourceValue::Boolean(y)) => Some(x._eq(y)),
+        // `f64` slots stay out: the emitter compares them with
+        // `fcmp oeq`, which bitwise `_eq` cannot model (NaN != NaN,
+        // -0.0 == +0.0). `Str` slots need a content compare the model
+        // does not encode. Both fail closed here.
+        _ => None,
+    }
+}
+
 /// The payload-slot kinds of a variant layout — the shared slot at
 /// index `i` takes the kind every variant carrying it agrees on
 /// (`build_enum_env` already rejected a disagreeing index), `I64`
@@ -1858,12 +1922,14 @@ fn check_atom_contract(
     admit_merged_composites: bool,
     admit_bounded_memory: bool,
     admit_str: bool,
+    admit_enum_scalar_ops: bool,
     struct_values_used: &std::cell::Cell<bool>,
     field_writes_used: &std::cell::Cell<bool>,
     enum_values_used: &std::cell::Cell<bool>,
     merged_composites_used: &std::cell::Cell<bool>,
     arrays_used: &std::cell::Cell<bool>,
     strs_used: &std::cell::Cell<bool>,
+    enum_scalar_ops_used: &std::cell::Cell<bool>,
 ) -> Result<(), SemanticContractError> {
     // Struct parameters stay out of the scalar scope — so they are
     // neither scalar operands nor rebindable — and live in the
@@ -1939,6 +2005,8 @@ fn check_atom_contract(
         arrays_used,
         admit_str,
         strs_used,
+        admit_enum_scalar_ops,
+        enum_scalar_ops_used,
     };
     for p in &atom.params {
         env.bind(&p.name)?;
@@ -2966,6 +3034,8 @@ fn resolve_alias(
                     arrays_used: &std::cell::Cell::new(false),
                     admit_str: false,
                     strs_used: &std::cell::Cell::new(false),
+                    admit_enum_scalar_ops: false,
+                    enum_scalar_ops_used: &std::cell::Cell::new(false),
                 },
             )?,
             ScalarKind::Bool,
@@ -4267,6 +4337,36 @@ fn expression_kind(
                 "expression or unbound name",
             )),
         Expr::BinaryOp(left, op, right) => {
+            // Enum equality (`pure-i64-composite/v14`): `e == e'` on
+            // two values of one declared enum yields `bool` — the
+            // whole tagged-union layout compares positionally, the
+            // shape the emitter lowers it to. Only `==`/`!=`; ordering
+            // and arithmetic on enum values stay outside.
+            if matches!(op, Op::Eq | Op::Neq) && env.admit_enum_scalar_ops {
+                if let (Ok(left_name), Ok(right_name)) = (
+                    composite_kind(
+                        left,
+                        scope,
+                        result_in_scope,
+                        allow_wrapping_arithmetic,
+                        &BTreeSet::new(),
+                        env,
+                    ),
+                    composite_kind(
+                        right,
+                        scope,
+                        result_in_scope,
+                        allow_wrapping_arithmetic,
+                        &BTreeSet::new(),
+                        env,
+                    ),
+                ) {
+                    if left_name == right_name && env.enums.contains_key(left_name) {
+                        env.enum_scalar_ops_used.set(true);
+                        return Ok(ScalarKind::Bool);
+                    }
+                }
+            }
             let left = expression_kind(
                 left,
                 scope,
@@ -4829,7 +4929,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays, strs) =
+    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays, strs, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -7399,6 +7499,53 @@ fn source_expr<'ctx>(
                 (B(a), Op::And, B(b)) => B(Bool::and(ctx, &[&a, &b])),
                 (B(a), Op::Or, B(b)) => B(Bool::or(ctx, &[&a, &b])),
                 (B(a), Op::Implies, B(b)) => B(a.implies(&b)),
+                // Enum equality (`pure-i64-composite/v14`): the emitter
+                // lowers `e == e'` to a positional `extractvalue`/`icmp`
+                // chain over the whole tagged-union layout — tag plus
+                // every payload slot, including padding — so the model
+                // compares all slots, not only the variant-declared
+                // ones. Only one declared enum may meet on both sides.
+                (
+                    SourceValue::Enum {
+                        name: an,
+                        tag: at,
+                        slots: asl,
+                    },
+                    Op::Eq,
+                    SourceValue::Enum {
+                        name: bn,
+                        tag: bt,
+                        slots: bsl,
+                    },
+                )
+                | (
+                    SourceValue::Enum {
+                        name: an,
+                        tag: at,
+                        slots: asl,
+                    },
+                    Op::Neq,
+                    SourceValue::Enum {
+                        name: bn,
+                        tag: bt,
+                        slots: bsl,
+                    },
+                ) if an == bn && asl.len() == bsl.len() => {
+                    let mut conjuncts = Vec::with_capacity(asl.len() + 1);
+                    conjuncts.push(at._eq(&bt));
+                    for (x, y) in asl.iter().zip(bsl.iter()) {
+                        let Some(eq) = enum_slot_eq(x, y) else {
+                            return Err(SemanticContractError::Unsupported("enum slot equality"));
+                        };
+                        conjuncts.push(eq);
+                    }
+                    let conjuncts: Vec<&Bool> = conjuncts.iter().collect();
+                    let eq = Bool::and(ctx, &conjuncts);
+                    B(match op {
+                        Op::Neq => eq.not(),
+                        _ => eq,
+                    })
+                }
                 _ => {
                     return Err(SemanticContractError::Unsupported(
                         "unsupported source operator",
