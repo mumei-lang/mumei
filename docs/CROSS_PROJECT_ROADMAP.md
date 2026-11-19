@@ -4133,9 +4133,9 @@ profiles, pinned only when a module declares a field whose
 type is another declared struct: `Outer { inner: Inner, c:
 i64 }` admits nested literals, nested leaf reads
 (`o.inner.a`) and whole-subtree writes (`o.inner = w`),
-while nested-path leaf writes (`o.inner.a = v`),
-generic/recursive/mismatched-type declarations, depth > 8
-and > 16 leaf slots fail closed. Resolved fields carry
+while generic/recursive/mismatched-type declarations,
+depth > 8 and > 16 leaf slots fail closed (nested-path
+leaf writes landed at `/v15`, below). Resolved fields carry
 `shape: ValueKind` rather than `kind: ScalarKind`; field
 paths expand to leaf paths (`inner.a`) plus prefix paths
 (`inner`) for signature binders, reserved names and arity,
@@ -5551,6 +5551,31 @@ codegen's unreachable phi arm emits a concrete `const_zero()`
 aggregate instead of `get_undef()`, matching the zero/null
 already produced for the int/float/pointer arms. `check`,
 `recheck-source` and `recheck-llvm` cover the fragment.
+
+### Nested-path leaf writes under composite TV (mumei #1139)
+
+[mumei#1139](https://github.com/mumei-lang/mumei/pull/1139) admits
+`o.inner.a = v` — a leaf write through a nested field path — under
+`mumei.pure-i64-composite/v15` and the `/v18` bundle profiles,
+extending v11's whole-subtree writes. The verifier desugars the
+write through each enclosing level: the projected `<base>_<field>`
+leaf set rebinds along the path and untouched sibling leaves carry
+over, so `o.inner.a = v` updates `o_inner_a` while `o_inner_b` and
+`o.c` keep their pre-write values; the emitted IR splices a
+leaf-slice `insertvalue` into the nested aggregate. Deeper paths
+(e.g. `o.a.b.c = v`), writes through non-declared or
+mismatched-type segments and writes under refined sub-structs keep
+failing closed. Review-hardened: a callee's nested write now freshens
+every leaf under the enclosing direct field (`q_inner_*`), so an
+unmodified sibling can't be asserted stale, and tail-position
+`o.inner.a = o.inner.a + 1` evaluates the RHS before the subtree
+rebind — matching LLVM's single evaluation.
+
+### Nested-write admission rule corrects a stale v8 clause
+
+The v8 paragraph above now reads "nested-path leaf writes landed at
+`/v15`" where it previously listed `o.inner.a = v` among
+fail-closed shapes.
 
 ### `.tag` reads on bound enum values lower to slot 0 (mumei #1138)
 
