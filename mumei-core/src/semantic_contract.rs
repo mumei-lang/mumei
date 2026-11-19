@@ -162,6 +162,9 @@ pub const PURE_I64_COMPOSITE_PROFILE_V14: &str = "mumei.pure-i64-composite/v14";
 /// the same flattened leaf slots the IR `insertvalue` chain touches
 /// (`pure-i64-composite/v15`).
 pub const PURE_I64_COMPOSITE_PROFILE_V15: &str = "mumei.pure-i64-composite/v15";
+/// `pure-i64-composite/v16`: enum payload writes `e.p = v` — a named
+/// payload field of the variant the binding's tag provably carries.
+pub const PURE_I64_COMPOSITE_PROFILE_V16: &str = "mumei.pure-i64-composite/v16";
 
 /// Maximum byte length a `Str` literal may declare under
 /// `pure-i64-composite/v13`: one cell per byte under the
@@ -230,6 +233,7 @@ pub enum RefinedAdmission {
     CompositeV13,
     CompositeV14,
     CompositeV15,
+    CompositeV16,
 }
 
 impl RefinedAdmission {
@@ -330,6 +334,13 @@ impl RefinedAdmission {
     /// (`pure-i64-composite/v15`).
     pub fn admits_nested_writes(self) -> bool {
         self >= Self::CompositeV15
+    }
+
+    /// Whether `e.p = v` may write a named payload field of an enum
+    /// binding (`pure-i64-composite/v16`) — the variant owning the
+    /// field must be unique and the binding's tag provably `V`.
+    pub fn admits_enum_writes(self) -> bool {
+        self >= Self::CompositeV16
     }
 }
 
@@ -436,7 +447,7 @@ pub fn extract_pure_i64_contract(
             "missing source or target identity",
         ));
     }
-    let (items, refined, structs, _, _, _, _, _, _, _, _, _, _, _, _) =
+    let (items, refined, structs, _, _, _, _, _, _, _, _, _, _, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, RefinedAdmission::Reject)?;
     // The bounded profile stays a single-atom contract — sibling atoms
     // only serve as call targets, which the widened profile alone admits.
@@ -457,6 +468,7 @@ pub fn extract_pure_i64_contract(
         &refined,
         &structs,
         &EnumEnv::new(),
+        false,
         false,
         false,
         false,
@@ -506,6 +518,7 @@ pub fn extract_pure_i64_module_contracts(
         strs,
         enum_scalar_ops,
         nested_writes,
+        enum_writes,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     // The translator-IR pin must see the same type environment the
     // verifier's certificate does — a `Port`-typed binder carries its
@@ -550,6 +563,7 @@ pub fn extract_pure_i64_module_contracts(
                 strs,
                 enum_scalar_ops,
                 nested_writes,
+                enum_writes,
                 &cert_env,
             )),
             // Type and struct declarations carry no per-atom contract;
@@ -583,6 +597,7 @@ pub fn module_source_profile(
         strs,
         enum_scalar_ops,
         nested_writes,
+        enum_writes,
     ) = admit_pure_i64_atoms(source, true, admission)?;
     Ok(fragment_profile(
         true,
@@ -600,6 +615,7 @@ pub fn module_source_profile(
         strs,
         enum_scalar_ops,
         nested_writes,
+        enum_writes,
     ))
 }
 
@@ -622,6 +638,7 @@ type AdmittedModule = (
     RefinedEnv,
     StructEnv,
     EnumEnv,
+    bool,
     bool,
     bool,
     bool,
@@ -753,6 +770,7 @@ fn admit_pure_i64_atoms(
     let strs_used = std::cell::Cell::new(false);
     let enum_scalar_ops_used = std::cell::Cell::new(false);
     let nested_writes_used = std::cell::Cell::new(false);
+    let enum_writes_used = std::cell::Cell::new(false);
     for item in &items {
         let Item::Atom(sibling) = item else {
             continue;
@@ -788,6 +806,7 @@ fn admit_pure_i64_atoms(
             admission.admits_str_leaves(),
             admission.admits_enum_scalar_ops(),
             admission.admits_nested_writes(),
+            admission.admits_enum_writes(),
             &struct_values_used,
             &field_writes_used,
             &enum_values_used,
@@ -796,6 +815,7 @@ fn admit_pure_i64_atoms(
             &strs_used,
             &enum_scalar_ops_used,
             &nested_writes_used,
+            &enum_writes_used,
         )?;
     }
     let u64_leaves = uses_u64_leaves(&items);
@@ -816,6 +836,7 @@ fn admit_pure_i64_atoms(
         strs_used.get(),
         enum_scalar_ops_used.get(),
         nested_writes_used.get(),
+        enum_writes_used.get(),
     ))
 }
 
@@ -988,9 +1009,15 @@ fn fragment_profile(
     str_leaves: bool,
     enum_scalar_ops: bool,
     nested_writes: bool,
+    enum_writes: bool,
 ) -> &'static str {
     if !allow_wrapping_arithmetic {
         PURE_I64_PROFILE
+    } else if enum_writes {
+        // An enum payload write is only ever admitted under v16 — the
+        // tag-gated slot update it requires is the deepest grammar the
+        // ladder admits.
+        PURE_I64_COMPOSITE_PROFILE_V16
     } else if nested_writes {
         // A nested-path write is only ever admitted under v15 — the
         // deepest grammar the ladder admits.
@@ -1078,6 +1105,7 @@ fn atom_contract(
     str_leaves: bool,
     enum_scalar_ops: bool,
     nested_writes: bool,
+    enum_writes: bool,
     cert_env: &ModuleEnv,
 ) -> Result<SemanticContract, SemanticContractError> {
     atom.span.file = source_name.to_owned();
@@ -1097,6 +1125,7 @@ fn atom_contract(
         str_leaves,
         enum_scalar_ops,
         nested_writes,
+        enum_writes,
     );
     let result_fields = atom
         .return_type
@@ -1482,6 +1511,12 @@ struct KindEnv<'a> {
     /// Set when the atom writes through a nested field path, so the
     /// module names the v15 profile only when it needs it.
     nested_writes_used: &'a std::cell::Cell<bool>,
+    /// Whether `e.p = v` may write a named payload field of an enum
+    /// binding (`pure-i64-composite/v16`).
+    admit_enum_writes: bool,
+    /// Set when the atom writes an enum payload field, so the module
+    /// names the v16 profile only when it needs it.
+    enum_writes_used: &'a std::cell::Cell<bool>,
 }
 
 impl<'a> KindEnv<'a> {
@@ -1962,6 +1997,7 @@ fn check_atom_contract(
     admit_str: bool,
     admit_enum_scalar_ops: bool,
     admit_nested_writes: bool,
+    admit_enum_writes: bool,
     struct_values_used: &std::cell::Cell<bool>,
     field_writes_used: &std::cell::Cell<bool>,
     enum_values_used: &std::cell::Cell<bool>,
@@ -1970,6 +2006,7 @@ fn check_atom_contract(
     strs_used: &std::cell::Cell<bool>,
     enum_scalar_ops_used: &std::cell::Cell<bool>,
     nested_writes_used: &std::cell::Cell<bool>,
+    enum_writes_used: &std::cell::Cell<bool>,
 ) -> Result<(), SemanticContractError> {
     // Struct parameters stay out of the scalar scope — so they are
     // neither scalar operands nor rebindable — and live in the
@@ -2049,6 +2086,8 @@ fn check_atom_contract(
         enum_scalar_ops_used,
         admit_nested_writes,
         nested_writes_used,
+        admit_enum_writes,
+        enum_writes_used,
     };
     for p in &atom.params {
         env.bind(&p.name)?;
@@ -2577,6 +2616,29 @@ fn enum_slot_type<'a>(variants: &'a [ResolvedVariant], i: usize) -> Option<&'a s
     found
 }
 
+/// The payload slot `field` names on `variants`: the single variant
+/// that declares it — its ordinal, the field's index inside the
+/// variant (the payload slot is one past it, after the tag), and the
+/// resolved field. `None` when no variant declares `field`, or more
+/// than one does — an ambiguous name cannot pin the tag obligation
+/// the write requires.
+fn enum_field_slot<'a>(
+    variants: &'a [ResolvedVariant],
+    field: &str,
+) -> Option<(usize, usize, &'a ResolvedField)> {
+    let mut found: Option<(usize, usize, &'a ResolvedField)> = None;
+    for (ordinal, variant) in variants.iter().enumerate() {
+        let Some(index) = variant.fields.iter().position(|f| f.name == field) else {
+            continue;
+        };
+        if found.is_some() {
+            return None;
+        }
+        found = Some((ordinal, index, &variant.fields[index]));
+    }
+    found
+}
+
 /// The declared-name pairs that fold to the same 64-bit leaf:
 /// `usize`/`u64` (unsigned) and `isize`/`i64` (signed). Only builtin
 /// names pair — a refined alias never does, since it carries a domain
@@ -3080,6 +3142,8 @@ fn resolve_alias(
                     enum_scalar_ops_used: &std::cell::Cell::new(false),
                     admit_nested_writes: false,
                     nested_writes_used: &std::cell::Cell::new(false),
+                    admit_enum_writes: false,
+                    enum_writes_used: &std::cell::Cell::new(false),
                 },
             )?,
             ScalarKind::Bool,
@@ -3535,7 +3599,21 @@ fn field_write_shape<'a>(
     }
     let mut segments = var.split('.').peekable();
     let base = segments.next()?;
-    let mut struct_name = env.composite_name(base, scope)?;
+    let type_name = env.composite_name(base, scope)?;
+    // An enum-typed base takes a single payload-field segment —
+    // `e.p = v`. The field must name a payload of exactly one declared
+    // variant (`pure-i64-composite/v16`): a deeper path, a field no
+    // variant declares, or a name two variants share stays closed.
+    if let Some(variants) = env.enums.get(type_name) {
+        let field_name = segments.next()?;
+        if segments.next().is_some() || !env.admit_enum_writes {
+            return None;
+        }
+        let (_, _, field) = enum_field_slot(variants, field_name)?;
+        env.enum_writes_used.set(true);
+        return Some(&field.shape);
+    }
+    let mut struct_name = type_name;
     let mut declared = env.structs.get(struct_name)?;
     let mut shape = None;
     let mut depth = 0usize;
@@ -5004,7 +5082,7 @@ fn bounded_pure_i64_module(
             _ => (),
         }
     }
-    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays, strs, _, _) =
+    let (items, refined, structs, enums, _, _, _, _, _, _, _, arrays, strs, _, _, _) =
         admit_pure_i64_atoms(source, allow_wrapping_arithmetic, admission)?;
     // The bounded profile keeps its single-atom arity gate here the same
     // way `extract_pure_i64_contract` applies it.
@@ -5081,6 +5159,7 @@ fn encode_atom_body<'ctx>(
         &mut loop_exits,
         &mut call_sites,
         call_returns,
+        enums,
     )? {
         SourceValue::Integer(value)
         | SourceValue::Unsigned(value)
@@ -5499,6 +5578,7 @@ fn alias_predicates<'ctx>(
             &mut exits,
             &mut Vec::new(),
             &CallShapes::default(),
+            &EnumEnv::new(),
         )?
         .boolean()?;
         out.extend(definedness);
@@ -5767,6 +5847,7 @@ fn module_atom_obligations<'ctx>(
         &mut requires_exits,
         &mut Vec::new(),
         call_returns,
+        &EnumEnv::new(),
     )?
     .boolean()?;
     env.insert(
@@ -5794,6 +5875,7 @@ fn module_atom_obligations<'ctx>(
         &mut ensures_exits,
         &mut Vec::new(),
         call_returns,
+        &EnumEnv::new(),
     )?
     .boolean()?;
     // A refined result type adds its declaration conjuncts to the
@@ -5838,6 +5920,7 @@ fn module_atom_obligations<'ctx>(
             &mut site_exits,
             &mut Vec::new(),
             call_returns,
+            enums,
         )?
         .boolean()?;
         // A domain counterexample counts only where the callee's own
@@ -5914,6 +5997,7 @@ fn module_atom_obligations<'ctx>(
             &mut ensures_site_exits,
             &mut Vec::new(),
             call_returns,
+            enums,
         )?
         .boolean()?;
         // A refined callee result type strengthens the assumption the
@@ -5994,6 +6078,7 @@ fn atom_obligation<'ctx>(
         &mut requires_exits,
         &mut Vec::new(),
         call_returns,
+        &EnumEnv::new(),
     )?
     .boolean()?;
     env.insert(
@@ -6019,6 +6104,7 @@ fn atom_obligation<'ctx>(
         &mut ensures_exits,
         &mut Vec::new(),
         call_returns,
+        &EnumEnv::new(),
     )?
     .boolean()?;
     let mut terms = vec![requires, ensures.not()];
@@ -6237,6 +6323,7 @@ fn source_field_write<'ctx>(
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
     call_returns: &CallShapes<'ctx>,
+    enums: &EnumEnv,
 ) -> BodyResult<Option<(String, SourceValue<'ctx>, SourceValue<'ctx>)>> {
     // The composite with the value bound into `path`: descends the
     // declared field names and rebuilds each level around the one
@@ -6271,6 +6358,66 @@ fn source_field_write<'ctx>(
     let path: Vec<String> = segments.map(str::to_owned).collect();
     if path.is_empty() {
         return Ok(None);
+    }
+    if let Some(SourceValue::Enum { name, tag, slots }) = env.get(base) {
+        // `e.p = v`: a single segment naming one variant's payload
+        // field. The write is only defined when the tag provably
+        // carries that variant — the same `is-V` gate the general
+        // verifier's datatype model applies (`pure-i64-composite/v16`).
+        if path.len() != 1 {
+            return Ok(None);
+        }
+        let Some(variants) = enums.get(name.as_str()) else {
+            return Ok(None);
+        };
+        let Some((ordinal, index, _)) = enum_field_slot(variants, &path[0]) else {
+            return Ok(None);
+        };
+        if value.binds_name(base) {
+            return Err(SemanticContractError::Unsupported(
+                "field write value rebinds the base",
+            ));
+        }
+        let bound = source_expr(
+            value,
+            ctx,
+            env,
+            guard,
+            definedness,
+            depth + 1,
+            &BTreeSet::new(),
+            written,
+            loop_exits,
+            call_sites,
+            call_returns,
+            enums,
+        )?;
+        // The slot keeps its declared leaf shape — same coercion a
+        // composite field write applies.
+        let bound = match (slots.get(index), &bound) {
+            (Some(SourceValue::Integer(_)), SourceValue::Number(v)) => {
+                SourceValue::Integer(v.clone())
+            }
+            (Some(SourceValue::Unsigned(_)), SourceValue::Number(v)) => {
+                SourceValue::Unsigned(v.clone())
+            }
+            (_, bound) => bound.clone(),
+        };
+        definedness.push(guard.implies(&tag._eq(&BV::from_u64(ctx, ordinal as u64, 64))));
+        let mut updated = slots.clone();
+        if index >= updated.len() {
+            return Ok(None);
+        }
+        updated[index] = bound.clone();
+        return Ok(Some((
+            base.to_string(),
+            SourceValue::Enum {
+                name: name.clone(),
+                tag: tag.clone(),
+                slots: updated,
+            },
+            bound,
+        )));
     }
     let Some(SourceValue::Composite(fields)) = env.get(base) else {
         return Ok(None);
@@ -6317,6 +6464,7 @@ fn source_field_write<'ctx>(
         loop_exits,
         call_sites,
         call_returns,
+        enums,
     )?;
     // The encoded slot shape cannot change: an integer field takes
     // only an integer value, a boolean field only a boolean, and a
@@ -6480,6 +6628,7 @@ fn source_stmt<'ctx>(
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
     call_returns: &CallShapes<'ctx>,
+    enums: &EnumEnv,
 ) -> BodyResult<SourceValue<'ctx>> {
     if depth > MAX_DEPTH {
         return Err(SemanticContractError::Unsupported("source depth limit"));
@@ -6497,6 +6646,7 @@ fn source_stmt<'ctx>(
             loop_exits,
             call_sites,
             call_returns,
+            enums,
         ),
         Stmt::Assign { var, value, .. } => {
             if let Some((base, updated, bound)) = source_field_write(
@@ -6511,6 +6661,7 @@ fn source_stmt<'ctx>(
                 loop_exits,
                 call_sites,
                 call_returns,
+                enums,
             )? {
                 // A field write rebinds the whole composite under the
                 // base name: the escape record sees the updated fields
@@ -6535,6 +6686,7 @@ fn source_stmt<'ctx>(
                 loop_exits,
                 call_sites,
                 call_returns,
+                enums,
             )?;
             written.insert(var.clone(), bound.clone());
             Ok(bound)
@@ -6551,6 +6703,7 @@ fn source_stmt<'ctx>(
             loop_exits,
             call_sites,
             call_returns,
+            enums,
         ),
         Stmt::Block(stmts, _) if !stmts.is_empty() => {
             // Sequential blocks bind names lexically: each `let`
@@ -6581,6 +6734,7 @@ fn source_stmt<'ctx>(
                             loop_exits,
                             call_sites,
                             call_returns,
+                            enums,
                         )?;
                         // Same shadow rule as the kind layer and the
                         // verifier: a composite's slots are name-keyed,
@@ -6619,6 +6773,7 @@ fn source_stmt<'ctx>(
                             loop_exits,
                             call_sites,
                             call_returns,
+                            enums,
                         )? {
                             // Same rebind as the tail-position arm,
                             // escaping per `write_escapes`.
@@ -6645,6 +6800,7 @@ fn source_stmt<'ctx>(
                             loop_exits,
                             call_sites,
                             call_returns,
+                            enums,
                         )?;
                         inner.insert(var.clone(), bound.clone());
                         if escapable.contains(var) {
@@ -6690,6 +6846,7 @@ fn source_stmt<'ctx>(
                             loop_exits,
                             call_sites,
                             call_returns,
+                            enums,
                         )?
                         .integer()?;
                         let index = source_expr(
@@ -6704,6 +6861,7 @@ fn source_stmt<'ctx>(
                             loop_exits,
                             call_sites,
                             call_returns,
+                            enums,
                         )?
                         .integer()?;
                         // `let b = a` aliases the same backing store
@@ -6757,6 +6915,7 @@ fn source_stmt<'ctx>(
                             loop_exits,
                             call_sites,
                             call_returns,
+                            enums,
                         )?;
                         for (name, bound) in local {
                             inner.insert(name.clone(), bound.clone());
@@ -6780,6 +6939,7 @@ fn source_stmt<'ctx>(
                             loop_exits,
                             call_sites,
                             call_returns,
+                            enums,
                         )?;
                         for (name, bound) in local {
                             inner.insert(name.clone(), bound.clone());
@@ -6808,6 +6968,7 @@ fn source_stmt<'ctx>(
                 loop_exits,
                 call_sites,
                 call_returns,
+                enums,
             )?;
             for (name, bound) in tail_writes {
                 if write_escapes(env, &inner_assignable, &escapable, &name) {
@@ -6844,6 +7005,7 @@ fn source_while<'ctx>(
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
     call_returns: &CallShapes<'ctx>,
+    enums: &EnumEnv,
 ) -> BodyResult<()> {
     use SourceValue::{Boolean as B, Float64 as F, Integer as I, Number as N, Unsigned as U};
     let mut cur = env.clone();
@@ -6865,6 +7027,7 @@ fn source_while<'ctx>(
             loop_exits,
             call_sites,
             call_returns,
+            enums,
         )? {
             B(b) => b,
             _ => {
@@ -6888,6 +7051,7 @@ fn source_while<'ctx>(
             loop_exits,
             call_sites,
             call_returns,
+            enums,
         )?;
         let post_body_stores = call_returns.alloc_stores.borrow().clone();
         // The body's writes to a shared backing apply only where the
@@ -7303,6 +7467,7 @@ fn source_expr<'ctx>(
     loop_exits: &mut Vec<Bool<'ctx>>,
     call_sites: &mut Vec<CallSite<'ctx>>,
     call_returns: &CallShapes<'ctx>,
+    enums: &EnumEnv,
 ) -> BodyResult<SourceValue<'ctx>> {
     use SourceValue::{Boolean as B, Float64 as F, Integer as I, Number as N, Unsigned as U};
     if depth > MAX_DEPTH {
@@ -7364,6 +7529,7 @@ fn source_expr<'ctx>(
                 loop_exits,
                 call_sites,
                 call_returns,
+                enums,
             )?
             else {
                 return Err(SemanticContractError::Unsupported("source field read"));
@@ -7395,6 +7561,7 @@ fn source_expr<'ctx>(
                     loop_exits,
                     call_sites,
                     call_returns,
+                    enums,
                 )?;
                 // A nested struct field takes a composite value —
                 // everything else must be scalar (`v8` declarations
@@ -7457,6 +7624,7 @@ fn source_expr<'ctx>(
             loop_exits,
             call_sites,
             call_returns,
+            enums,
         )?,
         Expr::BinaryOp(a, op, b) => {
             let a = source_expr(
@@ -7471,6 +7639,7 @@ fn source_expr<'ctx>(
                 loop_exits,
                 call_sites,
                 call_returns,
+                enums,
             )?;
             // `&&`/`||`/`=>` short-circuit like the emitter and
             // `--bitvec-i64` verification: the right operand's partial
@@ -7492,6 +7661,7 @@ fn source_expr<'ctx>(
                 loop_exits,
                 call_sites,
                 call_returns,
+                enums,
             )?;
             match (a, op, b) {
                 (I(a) | N(a), Op::Eq, I(b) | N(b))
@@ -7668,6 +7838,7 @@ fn source_expr<'ctx>(
                 loop_exits,
                 call_sites,
                 call_returns,
+                enums,
             )?
             .boolean()?;
             // Branches may rebind linear-path names: each write merges
@@ -7695,6 +7866,7 @@ fn source_expr<'ctx>(
                 loop_exits,
                 call_sites,
                 call_returns,
+                enums,
             )?;
             let then_alloc_stores = call_returns.alloc_stores.borrow().clone();
             *call_returns.alloc_stores.borrow_mut() = pre_alloc_stores;
@@ -7710,6 +7882,7 @@ fn source_expr<'ctx>(
                 loop_exits,
                 call_sites,
                 call_returns,
+                enums,
             )?;
             let else_alloc_stores = call_returns.alloc_stores.borrow().clone();
             merge_alloc_stores(call_returns, &cond, &then_alloc_stores, &else_alloc_stores);
@@ -7778,6 +7951,7 @@ fn source_expr<'ctx>(
                 loop_exits,
                 call_sites,
                 call_returns,
+                enums,
             )?;
             // An enum scrutinee carries a tag plus the shared payload
             // slots of its tagged-union layout: a `Variant` arm's hit is
@@ -7920,6 +8094,7 @@ fn source_expr<'ctx>(
                                 loop_exits,
                                 call_sites,
                                 call_returns,
+                                enums,
                             )?
                             .boolean()?;
                             Some(match pattern {
@@ -7956,6 +8131,7 @@ fn source_expr<'ctx>(
                     loop_exits,
                     call_sites,
                     call_returns,
+                    enums,
                 )?;
                 let post_arm_stores = call_returns.alloc_stores.borrow().clone();
                 // Arm writes escape like `if` branch writes: each merges
@@ -8051,6 +8227,7 @@ fn source_expr<'ctx>(
                     loop_exits,
                     call_sites,
                     call_returns,
+                    enums,
                 )?;
                 let cell = match value {
                     I(v) | N(v) => v,
@@ -8136,6 +8313,7 @@ fn source_expr<'ctx>(
                 loop_exits,
                 call_sites,
                 call_returns,
+                enums,
             )?
             .integer()?;
             // The canonical store carries every indexed write to this
@@ -8208,6 +8386,7 @@ fn source_expr<'ctx>(
                             loop_exits,
                             call_sites,
                             call_returns,
+                            enums,
                         )?;
                         slots.push(enum_slot_value(*kind, &lower_scalar(value, ctx)?, ctx));
                     }
@@ -8241,6 +8420,7 @@ fn source_expr<'ctx>(
                     loop_exits,
                     call_sites,
                     call_returns,
+                    enums,
                 )? {
                     // A passed-through struct parameter flattens into its
                     // leaf slots — the callee's `param_env` and

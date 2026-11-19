@@ -5567,6 +5567,23 @@ keeps `Meta { tag: i64 }.tag` reading the struct's field while
 coexists — the earlier every-struct scan would have hijacked
 `c.tag` to Meta's field index.
 
+### Enum payload slot writes under composite TV (mumei #1141)
+
+[mumei#1141](https://github.com/mumei-lang/mumei/pull/1141) admits
+`e.p = v` as `mumei.pure-i64-composite/v16` and
+`module|multifile/v19`: a single-segment write to a payload name
+owned by exactly one declared variant. Admission requires the
+field to resolve to a unique (variant, slot) pair across the enum
+— ambiguous names, unknown fields and deeper paths still fail
+closed — and the verifier rebuilds the aggregate as
+`V(sel_0(e),..,v,..)` under a solver obligation `guard ⇒ is_V(e)`
+so writes under a wrong or unknown tag are rejected at
+verification, not assumed. The emitter lowers the write to
+`insertvalue` at aggregate index `1 + slot` with the tag and
+sibling payload slots carried over unchanged. Enum-typed atom
+parameters now seed `local_enum_types` the way struct params seed
+the struct map, so match-arm narrowing discharges the tag gate.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:

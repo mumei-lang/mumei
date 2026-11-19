@@ -853,6 +853,122 @@ fn struct_field_assign<'a>(
     Ok(Some(val))
 }
 
+/// `e.p = v` on an enum binding: defined only when `field` names a payload
+/// slot of exactly one declared variant `V` and the tag is provably `V`
+/// under the path condition — the same `is-V` gate a match arm applies
+/// before projecting a payload. Rebuilds `e = V(sel_0(e),…,v,…)` so every
+/// accessor keeps agreeing with the written slot. `None` falls through to
+/// the resource-state error.
+fn enum_field_assign<'a>(
+    vc: &VCtx<'a>,
+    var: &str,
+    value: &Expr,
+    env: &mut Env<'a>,
+    solver_opt: Option<&Solver<'a>>,
+) -> Result<Option<Dynamic<'a>>, MumeiError> {
+    let Some((base, field)) = var.split_once('.') else {
+        return Ok(None);
+    };
+    // A deeper path (`e.p.q`) would need the struct-write desugar
+    // recursion replayed inside a payload — closed for now.
+    if field.contains('.') {
+        return Ok(None);
+    }
+    let Some(type_name) = vc.local_enum_types.borrow().get(base).cloned() else {
+        return Ok(None);
+    };
+    let Some(edef) = vc.module_env.get_enum(&type_name) else {
+        return Ok(None);
+    };
+    // Admit a field owned by exactly one variant: an ambiguous `e.p`
+    // could be a write under either tag and has no single slot to land
+    // on.
+    // `variant.fields` keeps a named payload's verbatim `name: type`
+    // text; a positional payload (`Tcp(i64)`) carries no name a write
+    // could address, matching the source model's `#index` slots.
+    let mut owner: Option<(usize, usize)> = None;
+    for (vidx, variant) in edef.variants.iter().enumerate() {
+        let Some(fidx) = variant.fields.iter().position(|f| {
+            f.split_once(':')
+                .map(|(n, _)| n.trim())
+                .unwrap_or(f.as_str())
+                == field
+        }) else {
+            continue;
+        };
+        if owner.is_some() {
+            return Err(MumeiError::type_error(format!(
+                "enum field write '{var}': field '{field}' is a payload of more than one variant — narrow the tag with a match",
+            )));
+        }
+        owner = Some((vidx, fidx));
+    }
+    let Some((vidx, fidx)) = owner else {
+        return Ok(None);
+    };
+    if value.binds_name(base) {
+        return Err(MumeiError::type_error(format!(
+            "field write '{var}' value must not rebind '{base}'",
+        )));
+    }
+    let Some(target) = env.get(base).cloned() else {
+        return Ok(None);
+    };
+    let variant_name = edef.variants[vidx].name.clone();
+    let Some((sort, is_v, _)) = datatype::variant_tester_condition(vc, &target, &variant_name)
+    else {
+        return Ok(None);
+    };
+    // `path_cond ∧ ¬is_V(e)` must be unsatisfiable — the write is
+    // defined only where the tag carries the owning variant.
+    if let Some(solver) = solver_opt {
+        solver.push();
+        solver.assert(&vc.path_cond_conj());
+        solver.assert(&is_v.not());
+        let verdict = crate::verification::phase_artifacts::check(solver);
+        solver.pop(1);
+        if verdict != SatResult::Unsat {
+            return Err(MumeiError::verification(format!(
+                "enum field write '{var}' requires '{base}' to hold variant '{variant_name}' under the current path",
+            ))
+            .with_verdict(crate::verification::VerdictKind::Rejected));
+        }
+    }
+    let val = expr_to_z3(vc, value, env, solver_opt)?;
+    // The written value must agree with the accessor's sort.
+    if let Some(sel) = datatype::variant_selector_apply(&sort, vidx, fidx, &target) {
+        if val.get_sort() != sel.get_sort() {
+            return Err(MumeiError::type_error(format!(
+                "enum field '{var}' has type {} but value has type {}",
+                sel.get_sort(),
+                val.get_sort()
+            )));
+        }
+    }
+    // Rebuild `e = V(sel_0(e),…,v,…)` so every accessor agrees with
+    // the written slot and the untouched payload bits.
+    let field_count = edef.variants[vidx].fields.len();
+    let mut args: Vec<Dynamic> = Vec::with_capacity(field_count);
+    for i in 0..field_count {
+        if i == fidx {
+            args.push(val.clone());
+        } else {
+            let Some(sel) = datatype::variant_selector_apply(&sort, vidx, i, &target) else {
+                return Ok(None);
+            };
+            args.push(sel);
+        }
+    }
+    let Some(rebuilt) =
+        datatype::enum_ctor_apply(vc, &format!("{type_name}::{variant_name}"), &args)?
+    else {
+        return Ok(None);
+    };
+    env.insert(base.to_string(), rebuilt);
+    profile_solver_assertion(vc, &format!("assign_{}", var), None);
+    Ok(Some(val))
+}
+
 /// `let a = arr` / `a = arr` where `arr` is an array name: alias the backing
 /// Z3 array const and `len_<name>` symbol so `a[i]` accesses and stores share
 /// `arr`'s constraint state instead of starting over with an unconstrained
@@ -910,6 +1026,9 @@ pub(crate) fn stmt_to_z3<'a>(
             if var.contains('.') {
                 let Some((resource, _field)) = vc.module_env.is_resource_state_var(var) else {
                     if let Some(val) = struct_field_assign(vc, var, value, env, solver_opt)? {
+                        return Ok(val);
+                    }
+                    if let Some(val) = enum_field_assign(vc, var, value, env, solver_opt)? {
                         return Ok(val);
                     }
                     return Err(MumeiError::verification(format!(

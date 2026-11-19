@@ -458,6 +458,52 @@ pub(crate) fn compile_hir_stmt<'a>(
                         rebind_chan_payload(base, value, var_types);
                         return Ok(val);
                     }
+                    // `e.p = v` — `field` names a payload slot of
+                    // exactly one variant; the layout puts payload
+                    // slot i at aggregate index 1 + i (tag at 0).
+                    if !resolved && segments.len() == 1 {
+                        if let Some(edef) = module_env.get_enum(&struct_ty) {
+                            let mut owner: Option<u32> = None;
+                            let mut ambiguous = false;
+                            for variant in &edef.variants {
+                                // `fields` keeps a named payload's
+                                // verbatim `name: type` text — a
+                                // positional payload has no name a
+                                // write can address.
+                                if let Some(pos) = variant.fields.iter().position(|f| {
+                                    f.split_once(':')
+                                        .map(|(n, _)| n.trim())
+                                        .unwrap_or(f.as_str())
+                                        == field
+                                }) {
+                                    if owner.is_some() {
+                                        ambiguous = true;
+                                        break;
+                                    }
+                                    owner = Some(pos as u32);
+                                }
+                            }
+                            if let (Some(fidx), false) = (owner, ambiguous) {
+                                let val = compile_hir_expr(
+                                    context, builder, module, function, value, variables,
+                                    var_types, array_ptrs, module_env,
+                                )?;
+                                let old = variables.get(base).copied().ok_or_else(|| {
+                                    MumeiError::codegen(format!(
+                                        "enum binding '{base}' has no aggregate value"
+                                    ))
+                                })?;
+                                let cur = llvm!(builder.build_insert_value(
+                                    old.into_struct_value(),
+                                    val,
+                                    1 + fidx,
+                                    var
+                                ));
+                                variables.insert(base.to_string(), cur.into_struct_value().into());
+                                return Ok(val);
+                            }
+                        }
+                    }
                 }
             }
             if let Some((resource, field)) = module_env.is_resource_state_var(var) {
