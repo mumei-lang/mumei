@@ -5620,6 +5620,22 @@ anchor shape stays closed — unsigned anchors still load exactly
 as before, and a malformed or unverifiable signature fails the
 load rather than degrading to unsigned acceptance.
 
+### Enum-typed struct fields under composite TV (mumei #1143)
+
+[mumei#1143](https://github.com/mumei-lang/mumei/pull/1143) admits
+`struct S { e: E }` — a declared enum nested inside a struct — as
+`mumei.pure-i64-composite/v17` and `module|multifile/v20`. The enum
+field flattens into the same `EnumTag` + `EnumField` leaves an enum
+parameter carries, so the linear `signature_domain` enum protocol
+needs no changes: `b.e` reads produce a whole `SourceValue::Enum`
+consumable by `match`, equality and pass-through, and `b.e = e2`
+writes the whole slot while `b.e.p = v` / `b.e.tag = 1` /
+mismatched-enum writes fail closed. The general translator seeds
+enum-typed fields as the enum's Z3 datatype — the same encoding an
+enum parameter uses — so both layers verify `match b.e` and
+whole-field writes. Struct literals may carry enum values, and the
+v20 record validation allowlists were added alongside the profile.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
