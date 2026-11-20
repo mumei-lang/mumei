@@ -5145,6 +5145,13 @@ fn match_arm_envs<'a>(
                                     }
                                     ValueKind::Struct(type_name) => {
                                         arm_env.bind_composite(name, type_name)?;
+                                        // A bound composite shadows any
+                                        // scalar of the same name in this
+                                        // arm (`f(p, e) { E::V(p) => p.x }`):
+                                        // `composite_name` prefers `scope`,
+                                        // so a stale scalar entry would
+                                        // make `p.x` an unbound leaf read.
+                                        arm_scope.remove(name);
                                     }
                                     ValueKind::Enum(_) => {
                                         unreachable!("enum-typed payloads are never admitted")
@@ -12371,6 +12378,24 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
             )
             .is_err(),
             "a >16-leaf declaration must stay outside v18"
+        );
+    }
+
+    #[test]
+    fn composite_enum_payload_binder_shadows_scalar() {
+        // `E::Move(p)` binds a composite `p` that shadows the scalar
+        // parameter `p`: inside the arm `p.x` resolves to the composite,
+        // outside it `p` is still the plain parameter.
+        let decls = "struct Pos { x: i64 }\nenum Event { Move(p: Pos) }\n";
+        let report = extract_pure_i64_module_contracts(
+            &format!("{decls}atom f(p: i64, e: Event) -> i64 requires: p >= 0; ensures: result >= 0; body: {{ match e {{ Event::Move(p) => if p.x >= 0 {{ p.x }} else {{ 0 }}, _ => p }} }};\n{MAIN0}"),
+            "m.mm",
+            None,
+            RefinedAdmission::CompositeV18,
+        );
+        assert!(
+            report.as_ref().is_ok_and(|contracts| !contracts.is_empty()),
+            "bound composite must shadow the scalar param: {report:?}"
         );
     }
 }
