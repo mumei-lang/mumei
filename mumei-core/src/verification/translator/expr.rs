@@ -1198,7 +1198,7 @@ pub(crate) fn discharge_bv_div_obligations<'a>(
 }
 
 /// Name and range of a fixed-width integer type, or `None` for other types.
-fn fixed_width_int(type_name: &str) -> Option<(&'static str, i128, i128)> {
+pub(crate) fn fixed_width_int(type_name: &str) -> Option<(&'static str, i128, i128)> {
     Some(match type_name {
         "i8" => ("i8", i8::MIN.into(), i8::MAX.into()),
         "i16" => ("i16", i16::MIN.into(), i16::MAX.into()),

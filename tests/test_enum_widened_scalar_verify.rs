@@ -65,3 +65,22 @@ fn widened_leaf_domain_stops_at_declared_width() {
         "the counterexample should name the in-domain boundary value:\n{stdout}"
     );
 }
+
+#[test]
+fn widened_leaf_mixing_with_declared_i64_rejects() {
+    let out = run_verify(&fixture("test_enum_widened_scalar_mix_negative.mm"), "mix");
+    assert!(
+        !out.status.success(),
+        "`x + y` with `x: u64` and `y: i64` must reject — a match-bound \
+         leaf carries its declared unsigned type into the mixing rule"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("u64"),
+        "the rejection should name the u64 side of the mixing rule:\n{combined}"
+    );
+}

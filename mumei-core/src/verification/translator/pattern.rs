@@ -474,6 +474,23 @@ pub(crate) fn pattern_bind_variables<'a>(
                             match field_pattern {
                                 Pattern::Variable(fname) => {
                                     env.insert(fname.clone(), field_sym.clone());
+                                    // A payload leaf keeps its declared
+                                    // width — `u64`/`u32`/`i32` — so later
+                                    // `x < y` / `x - 1` pick the unsigned
+                                    // op semantics the LLVM side emits.
+                                    // Enum-typed slots resolve to a name
+                                    // `fixed_width_int` rejects — skipped.
+                                    if let Some((ty, _, _)) = enum_def
+                                        .and_then(|ed| ed.variants[variant_idx].field_types.get(i))
+                                        .map(|ft| vc.module_env.resolve_base_type(&ft.name))
+                                        .and_then(|base| {
+                                            crate::verification::translator::expr::fixed_width_int(
+                                                &base,
+                                            )
+                                        })
+                                    {
+                                        vc.local_int_types.borrow_mut().insert(fname.clone(), ty);
+                                    }
                                 }
                                 Pattern::Variant { .. } => {
                                     pattern_bind_variables(
@@ -521,6 +538,29 @@ pub(crate) fn pattern_bind_variables<'a>(
                         match field_pattern {
                             Pattern::Variable(fname) => {
                                 env.insert(fname.clone(), field_sym.clone());
+                                // Same declared-width registration as the
+                                // Datatype path — an unregistered `u64`
+                                // leaf would compare and subtract as
+                                // signed `i64`, diverging from LLVM's
+                                // unsigned ops on high-bit values.
+                                if let Some((ty, _, _)) = variant_def
+                                    .field_types
+                                    .get(i)
+                                    .map(|ft| {
+                                        if ft.name == enum_def.name {
+                                            "i64".to_string()
+                                        } else {
+                                            module_env.resolve_base_type(ft.name.as_str())
+                                        }
+                                    })
+                                    .and_then(|base| {
+                                        crate::verification::translator::expr::fixed_width_int(
+                                            &base,
+                                        )
+                                    })
+                                {
+                                    vc.local_int_types.borrow_mut().insert(fname.clone(), ty);
+                                }
                             }
                             Pattern::Variant { .. } => {
                                 // ネストした Variant: フィールドの宣言型
