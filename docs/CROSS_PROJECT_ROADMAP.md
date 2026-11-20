@@ -5797,16 +5797,18 @@ than satisfiable. `Pattern::Variable` payload bindings register the
 declared fixed-width type into `local_int_types`, and every binding
 site the coverage pass walks snapshots and restores the map — a
 guarded arm's `x:u64` no longer leaks past its `match` onto an outer
-`x:i64`. Declared-width leaf-domain asserts apply where Int-mode
-enum values are seeded — params, bound struct fields and the `result`
-handle — not at constructor sites (`0 <= v` for unsigned leaves, plus
-the declared ceiling for narrower widths), and the `enum:`-leaf walk
+`x:i64`. Declared-width leaf-domain asserts run on the enum-typed
+constants a solver env is seeded with — function params and the
+enum-typed fields of struct call results (the `result` handle),
+never at constructor sites (`0 <= v` for unsigned leaves, plus the
+declared ceiling for narrower widths), and the `enum:`-leaf walk
 from
 #1158 is charged a shared descent budget
 (`MAX_ENUM_DOMAIN_NODES = 1024`): once spent, deeper inner-enum
 descent is skipped and only the dropped conjuncts weaken proofs.
-Mixing a widened `u64` leaf with a declared `i64` operand still
-rejects, matching the composite-path rule.
+The binary-op check still rejects a `u64` operand — widened leaf or
+plain declaration — paired with a declared non-`u64` integer;
+`i32`/`u32` leaves keep the ordinary promotions.
 
 ## No-`.mm` front door and V1 order
 
