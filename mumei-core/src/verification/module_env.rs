@@ -329,7 +329,7 @@ impl ModuleEnv {
                     });
                     let instances =
                         crate::verification::support::datatype::generic_instances(self, qual, leaf);
-                    match hinted.or_else(|| (instances.len() == 1).then_some(instances[0])) {
+                    match hinted.or_else(|| (instances.len() == 1).then(|| instances[0])) {
                         Some(e) => e,
                         None if instances.is_empty() => qual_enum,
                         None => {
