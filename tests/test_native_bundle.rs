@@ -2925,6 +2925,79 @@ fn module_bundle_with_enum_struct_fields_builds_as_v20_and_rechecks() {
 }
 
 #[test]
+fn module_bundle_with_composite_enum_payloads_builds_as_v21_and_rechecks() {
+    // `step` matches on an enum carrying a struct payload (`Move(pos:
+    // Point)`): the build, the source recheck and the LLVM snapshot
+    // recheck all carry the composite-typed payload slot under
+    // composite v18.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "struct Point { x: i64, y: i64 }\nenum Event { Ping, Move(pos: Point) }\n\
+         atom step(e: Event) -> i64 requires: true; ensures: result >= 0; body: { match e { Event::Ping => 0, Event::Move(p) => if p.x + p.y >= 0 { p.x + p.y } else { 0 }, _ => 0 } };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V21);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V18
+    );
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A v21 record re-pinned as v20 is refused: v20 keeps
+    // composite-typed enum payloads out of the composite shape.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V20.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
+fn multifile_bundle_with_composite_enum_payloads_builds_as_v21() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        root.path().join("events.mm"),
+        "struct Point { x: i64, y: i64 }\nenum Event { Ping, Move(pos: Point) }\n\
+         atom step(e: Event) -> i64 requires: true; ensures: result >= 0; body: { match e { Event::Ping => 0, Event::Move(p) => if p.x + p.y >= 0 { p.x + p.y } else { 0 }, _ => 0 } };\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"events\" as ev;\n\natom main() -> i64 requires: true; ensures: true; body: { 0 };\n",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MULTIFILE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V21);
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // Under a v20 pin the member's composite payload stays refused.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MULTIFILE_PROFILE_V20.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn multifile_bundle_with_nested_field_writes_builds_as_v18() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("app.mm");

@@ -204,12 +204,14 @@ pub(crate) fn compile_pattern_test<'a>(
 /// パターンから変数バインドを variables に登録する（再帰的）。
 /// - Variable(name) → target の値を name にバインド
 /// - Variant の fields 内の Variable → payload から extract_value で取得
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn bind_pattern_variables<'a>(
     context: &'a Context,
     builder: &Builder<'a>,
     pattern: &HirPattern,
     target: BasicValueEnum<'a>,
     variables: &mut HashMap<String, BasicValueEnum<'a>>,
+    var_types: &mut HashMap<String, String>,
     module_env: &ModuleEnv,
     enum_hint: Option<&str>,
 ) -> MumeiResult<()> {
@@ -239,6 +241,17 @@ pub(crate) fn bind_pattern_variables<'a>(
                             enum_hint,
                         )?;
                         variables.insert(fname.clone(), field_val);
+                        // Record the declared payload type so a bound
+                        // composite (`E::V(p)`) resolves `p.f` to its
+                        // declared struct — including leaf signedness,
+                        // e.g. a `u64` field keeps unsigned compares —
+                        // and a scalar payload keeps its own type.
+                        if let Some(field_ty) = resolved_enum
+                            .and_then(|e| e.variants.iter().find(|v| v.name == variant_name))
+                            .and_then(|v| v.field_types.get(field_idx))
+                        {
+                            var_types.insert(fname.clone(), field_ty.name.clone());
+                        }
                     }
                     HirPattern::Variant { .. } => {
                         let nested_val = extract_variant_field_value(
@@ -256,6 +269,7 @@ pub(crate) fn bind_pattern_variables<'a>(
                             field_pat,
                             nested_val,
                             variables,
+                            var_types,
                             module_env,
                             nested_hint.as_deref(),
                         )?;
