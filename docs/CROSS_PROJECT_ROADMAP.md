@@ -5887,6 +5887,15 @@ the byte payload piped to the attempt process's standard input through
 without it. Scheduled attempts never inherit the parent's stdin: no
 declared feed means a closed pipe (deterministic EOF).
 
+### Manifest-declared attempt memory bound (mumei-agent #993)
+
+[mumei-agent#993](https://github.com/mumei-lang/mumei-agent/pull/993)
+makes a manifest's `max_memory_mb` the scheduled attempt's ceiling when
+the host declares no bound of its own — the adapter's declared budget,
+enforced as an ordinary observed outcome. The host's `memory_bound_mb`
+still wins; on platforms with no POSIX bound mechanism the manifest
+fallback stays unenforced rather than breaking the schedule.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
