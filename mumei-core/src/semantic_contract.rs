@@ -2290,9 +2290,11 @@ impl<'ctx> CallShapes<'ctx> {
         }
     }
 
-    /// The leaf kinds payload slot `i` expands to: one for a scalar
-    /// slot, the struct's flattened leaves for a composite slot
-    /// (`pure-i64-composite/v18`).
+    /// The leaf kinds payload slot `i` expands to, one entry per
+    /// 64-bit ABI slot: a scalar slot contributes one entry — two for
+    /// a 128-bit leaf, the same convention `flattened_kinds` uses —
+    /// and a composite slot contributes its struct's flattened leaves
+    /// (`pure-i64-composite/v18`, `/v22`).
     fn enum_slot_leaf_kinds(
         &self,
         variants: &[(String, Vec<PayloadSlotKind>)],
@@ -2304,6 +2306,9 @@ impl<'ctx> CallShapes<'ctx> {
                 .get(struct_name)
                 .map(|fields| self.flattened_kinds(fields))
                 .unwrap_or_default(),
+            Some(PayloadSlotKind::Scalar(kind @ (ScalarKind::I128 | ScalarKind::U128))) => {
+                vec![*kind, *kind]
+            }
             Some(PayloadSlotKind::Scalar(kind)) => vec![*kind],
             None => vec![ScalarKind::I64],
         }
@@ -2325,17 +2330,11 @@ impl<'ctx> CallShapes<'ctx> {
             .collect()
     }
 
-    /// The payload leaf count an enum lowers to — the sum of every
-    /// slot's leaf width (`pure-i64-composite/v18`): a wide leaf
-    /// contributes two 64-bit slots (`pure-i64-composite/v22`).
+    /// The payload leaf count an enum lowers to — the 64-bit ABI slot
+    /// count `enum_layout_leaf_kinds` already lists per slot
+    /// (`pure-i64-composite/v18`, `/v22`).
     fn enum_layout_leaf_count(&self, variants: &[(String, Vec<PayloadSlotKind>)]) -> usize {
-        self.enum_layout_leaf_kinds(variants)
-            .iter()
-            .map(|kind| match kind {
-                ScalarKind::I128 | ScalarKind::U128 => 2,
-                _ => 1,
-            })
-            .sum()
+        self.enum_layout_leaf_kinds(variants).len()
     }
 
     /// The declared struct name payload slot `i` carries, when it is a
