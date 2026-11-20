@@ -3075,11 +3075,20 @@ fn struct_is_scalar_leaved(structs: &StructEnv, fields: &[ResolvedField]) -> boo
             ValueKind::Scalar(_) => true,
             ValueKind::Enum(_) => false,
             ValueKind::Struct(child) => {
-                visited.insert(child.clone())
-                    && structs
+                // `visited` is a DFS path guard, not a done-set: a shared
+                // child (`Pair { left: Point, right: Point }`) revisits a
+                // type on a sibling branch and is still scalar-leaved, so
+                // the name must leave the set when the subtree returns.
+                if !visited.insert(child.clone()) {
+                    false
+                } else {
+                    let ok = structs
                         .get(child)
                         .map(|inner| visit(structs, inner, visited))
-                        .unwrap_or(false)
+                        .unwrap_or(false);
+                    visited.remove(child);
+                    ok
+                }
             }
         })
     }
@@ -12303,6 +12312,23 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
             RefinedAdmission::CompositeV18
         )
         .is_err());
+    }
+
+    #[test]
+    fn composite_enum_payloads_admit_shared_child_structs() {
+        // `Pair` names `Point` twice — a shared child is a DAG, not a
+        // cycle, and stays scalar-leaved (`pure-i64-composite/v18`).
+        let decls = "struct Point { x: i64, y: i64 }\nstruct Pair { left: Point, right: Point }\nenum Ev { V(p: Pair) }\n";
+        assert!(
+            extract_pure_i64_module_contracts(
+                &format!("{decls}atom step(e: Ev) -> i64 requires: true; ensures: result >= 0; body: {{ match e {{ Ev::V(p) => p.left.x, _ => 0 }} }};\n{MAIN0}"),
+                "m.mm",
+                None,
+                RefinedAdmission::CompositeV18
+            )
+            .is_ok(),
+            "a shared child struct must admit like a scalar-leaved one"
+        );
     }
 }
 
