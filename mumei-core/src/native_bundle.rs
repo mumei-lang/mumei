@@ -1441,11 +1441,17 @@ fn check_leaf_widths(
         profile,
         MODULE_PROFILE_V24 | MODULE_PROFILE_V25 | MULTIFILE_PROFILE_V24 | MULTIFILE_PROFILE_V25
     );
+    // v24 pins only when a wide leaf is actually declared in an atom
+    // signature, so a v24 record must show a 128 somewhere. v25 pins on
+    // the *declaration* of a wide enum payload — a module may declare
+    // `enum F { A(i128) }` without any atom consuming it, in which case
+    // every re-derived width is 64 and only the pairing equality binds.
+    let is_v24_only = matches!(profile, MODULE_PROFILE_V24 | MULTIFILE_PROFILE_V24);
     let expected = semantic_contract::module_leaf_widths(source, admission)
         .map_err(|_| BundleError("source outside bounded module profile"))?;
     let has_wide = expected.values().flatten().any(|width| *width == 128);
     if is_v24 {
-        if pinned != &expected || !has_wide {
+        if pinned != &expected || (is_v24_only && !has_wide) {
             return Err(BundleError("leaf-width pairing mismatch"));
         }
     } else if !pinned.is_empty() || has_wide {
