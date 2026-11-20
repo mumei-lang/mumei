@@ -586,6 +586,7 @@ mod tests {
                 expected_stderr_sha256: None,
             },
             settings: BuildSettings::default(),
+            leaf_widths: BTreeMap::new(),
             files,
         }
     }

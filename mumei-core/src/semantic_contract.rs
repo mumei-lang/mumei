@@ -758,6 +758,34 @@ type AdmittedModule = (
     bool,
 );
 
+/// Every atom's declared leaf widths in signature order — `64` per
+/// scalar or enum leaf, `128` per `i128`/`u128` leaf
+/// (`pure-i64-composite/v21`). A v24 bundle record pins this pairing
+/// (`leaf_widths`) so a rechecker re-derives it under the record's own
+/// admission instead of trusting the producer.
+pub fn module_leaf_widths(
+    source: &str,
+    admission: RefinedAdmission,
+) -> Result<std::collections::BTreeMap<String, Vec<u64>>, SemanticContractError> {
+    let (items, _refined, structs, enums, ..) = admit_pure_i64_atoms(source, true, admission)?;
+    let mut widths = std::collections::BTreeMap::new();
+    for item in items {
+        if let Item::Atom(atom) = item {
+            widths.insert(
+                atom.name.clone(),
+                signature_slots(&atom.params, &structs, &enums)
+                    .iter()
+                    .map(|slot| match slot {
+                        SignatureSlot::WideScalar(_) => 128,
+                        _ => 64,
+                    })
+                    .collect::<Vec<u64>>(),
+            );
+        }
+    }
+    Ok(widths)
+}
+
 fn admit_pure_i64_atoms(
     source: &str,
     allow_wrapping_arithmetic: bool,
@@ -893,6 +921,7 @@ fn admit_pure_i64_atoms(
             admission.admits_struct_values(),
             admission.admits_enum_values(),
             admission.admits_str_bound(),
+            admission.admits_wide_leaves(),
         )?;
         // Every atom's contract is checked against the complete callee map,
         // not only the tail's: module validation compares each atom
@@ -1839,6 +1868,7 @@ fn declared_param_kind(
     admit_widened: bool,
     admit_u64: bool,
     admit_f64: bool,
+    admit_wide: bool,
     refined: &RefinedEnv,
 ) -> Option<ScalarKind> {
     let name = param.type_name.as_deref()?;
@@ -1850,6 +1880,8 @@ fn declared_param_kind(
         "u64" | "usize" if admit_u64 => ScalarKind::U64,
         "isize" if admit_u64 => ScalarKind::I64,
         "f64" if admit_f64 => ScalarKind::F64,
+        "i128" if admit_wide => ScalarKind::I128,
+        "u128" if admit_wide => ScalarKind::U128,
         "bool" if admit_widened => ScalarKind::Bool,
         "i8" | "i16" | "i32" | "u8" | "u16" | "u32" if admit_widened => ScalarKind::I64,
         // A bool-leaf alias gives the parameter a boolean signature —
@@ -1885,11 +1917,13 @@ fn plain_param(param: &crate::parser::ast::Param, name: &str) -> bool {
 /// `declared_param_kind` widened by the module's struct map: a parameter
 /// typed by an admitted struct carries that struct's shape. Struct
 /// names never overlap the scalar or refined names (`build_struct_env`).
+#[allow(clippy::too_many_arguments)]
 fn declared_param_shape(
     param: &crate::parser::ast::Param,
     admit_widened: bool,
     admit_u64: bool,
     admit_f64: bool,
+    admit_wide: bool,
     refined: &RefinedEnv,
     structs: &StructEnv,
     enums: &EnumEnv,
@@ -1901,8 +1935,15 @@ fn declared_param_shape(
         Some(name) if enums.contains_key(name) => {
             plain_param(param, name).then(|| ValueKind::Enum(name.to_owned()))
         }
-        _ => declared_param_kind(param, admit_widened, admit_u64, admit_f64, refined)
-            .map(ValueKind::Scalar),
+        _ => declared_param_kind(
+            param,
+            admit_widened,
+            admit_u64,
+            admit_f64,
+            admit_wide,
+            refined,
+        )
+        .map(ValueKind::Scalar),
     }
 }
 
@@ -1945,6 +1986,10 @@ fn param_kind(param: &crate::parser::ast::Param, refined: &RefinedEnv) -> Scalar
         // `f64` likewise only reaches here under v12 admission; the
         // leaf is pass-through — no operator arm ever reads it.
         Some("f64") => ScalarKind::F64,
+        // `i128`/`u128` only reach the kind checker under v21
+        // admission (`validate_atom` gates the leaf below it).
+        Some("i128") => ScalarKind::I128,
+        Some("u128") => ScalarKind::U128,
         Some(name) => refined
             .get(name)
             .map(|alias| alias.kind)
@@ -1962,6 +2007,8 @@ fn return_kind(atom: &Atom, refined: &RefinedEnv) -> ScalarKind {
         Some("u64" | "usize") => ScalarKind::U64,
         Some("isize") => ScalarKind::I64,
         Some("f64") => ScalarKind::F64,
+        Some("i128") => ScalarKind::I128,
+        Some("u128") => ScalarKind::U128,
         Some(name) => refined
             .get(name)
             .map(|alias| alias.kind)
@@ -2143,6 +2190,22 @@ impl<'ctx> CallShapes<'ctx> {
         )
     }
 
+    /// The callee's result is a 128-bit leaf (`i128`/`u128`,
+    /// `pure-i64-composite/v21`) — two 64-bit slots on the record ABI.
+    fn returns_wide(&self, name: &str) -> bool {
+        matches!(
+            self.returns.get(name),
+            Some(ValueKind::Scalar(ScalarKind::I128 | ScalarKind::U128))
+        )
+    }
+
+    fn returns_u128(&self, name: &str) -> bool {
+        matches!(
+            self.returns.get(name),
+            Some(ValueKind::Scalar(ScalarKind::U128))
+        )
+    }
+
     /// The field layout of a struct-returning callee's result, in
     /// declaration order — nested fields carry their struct name.
     fn result_fields(&self, name: &str) -> Option<&[(String, ValueKind)]> {
@@ -2159,6 +2222,12 @@ impl<'ctx> CallShapes<'ctx> {
         fields
             .iter()
             .flat_map(|(_, shape)| match shape {
+                // A 128-bit leaf occupies two consecutive 64-bit ABI
+                // slots (`pure-i64-composite/v21`) — the kinds list is
+                // per-64-bit-slot, so it contributes its kind twice.
+                ValueKind::Scalar(kind @ (ScalarKind::I128 | ScalarKind::U128)) => {
+                    vec![*kind, *kind]
+                }
                 ValueKind::Scalar(kind) => vec![*kind],
                 ValueKind::Struct(child) => self
                     .structs
@@ -2664,6 +2733,7 @@ fn validate_atom(
     admit_struct_values: bool,
     admit_enum_values: bool,
     admit_str_bound: bool,
+    admit_wide: bool,
 ) -> Result<(), SemanticContractError> {
     // A declared subrange integer result lowers to an i64 return like
     // the parameters — the emitter emits no truncation, so the checked
@@ -2676,6 +2746,7 @@ fn validate_atom(
         Some("i64") => true,
         Some("u64" | "usize" | "isize") => admit_u64,
         Some("f64") => admit_f64,
+        Some("i128" | "u128") => admit_wide,
         Some("bool") | Some("i8" | "i16" | "i32" | "u8" | "u16" | "u32") => admit_widened,
         // An admitted struct result (`pure-i64-composite/v3`) returns
         // the struct's field slots. An admitted enum result
@@ -2694,6 +2765,7 @@ fn validate_atom(
                 admit_widened,
                 admit_u64,
                 admit_f64,
+                admit_wide,
                 refined,
                 structs,
                 enums,
@@ -2772,6 +2844,13 @@ enum ScalarKind {
     /// (`pure-i64-composite/v13`). Not unifiable with `ArrayI64` or
     /// `ArrayU64`: it is immutable and its cells carry bytes.
     Str,
+    /// An `i128` leaf — two consecutive 64-bit ABI slots carrying one
+    /// signed 128-bit value (`pure-i64-composite/v21`). Literals adapt
+    /// to it like any integer kind.
+    I128,
+    /// A `u128` leaf — the unsigned counterpart of `I128`: unsigned
+    /// comparisons and `udiv`/`urem`/`lshr`, two ABI slots.
+    U128,
 }
 
 fn expect_kind(actual: ScalarKind, expected: ScalarKind) -> Result<(), SemanticContractError> {
@@ -2780,8 +2859,16 @@ fn expect_kind(actual: ScalarKind, expected: ScalarKind) -> Result<(), SemanticC
     // `i64`/`u64` write or use pins it, and that write itself must
     // check (`s = s + n` with `s: Num` accepts an `I64` value).
     if actual == expected
-        || (actual == ScalarKind::Num && matches!(expected, ScalarKind::I64 | ScalarKind::U64))
-        || (expected == ScalarKind::Num && matches!(actual, ScalarKind::I64 | ScalarKind::U64))
+        || (actual == ScalarKind::Num
+            && matches!(
+                expected,
+                ScalarKind::I64 | ScalarKind::U64 | ScalarKind::I128 | ScalarKind::U128
+            ))
+        || (expected == ScalarKind::Num
+            && matches!(
+                actual,
+                ScalarKind::I64 | ScalarKind::U64 | ScalarKind::I128 | ScalarKind::U128
+            ))
     {
         Ok(())
     } else {
@@ -2897,6 +2984,10 @@ fn flatten_fields<'a>(
                     }
                 }
             }
+            _ if matches!(field.type_name.as_str(), "i128" | "u128") => out.push((
+                path,
+                SignatureSlot::WideScalar(Some(field.type_name.as_str())),
+            )),
             _ => out.push((path, SignatureSlot::Scalar(Some(field.type_name.as_str())))),
         }
     }
@@ -2978,7 +3069,9 @@ fn enum_path_map(enums: &EnumEnv, structs: &StructEnv) -> BTreeMap<String, Vec<S
 /// the binder layer reports like an enum parameter's own tag.
 fn slot_type_name<'a>(slot: &SignatureSlot<'a>) -> Option<&'a str> {
     match slot {
-        SignatureSlot::Scalar(type_name) | SignatureSlot::EnumField { type_name, .. } => *type_name,
+        SignatureSlot::Scalar(type_name)
+        | SignatureSlot::WideScalar(type_name)
+        | SignatureSlot::EnumField { type_name, .. } => *type_name,
         SignatureSlot::EnumTag { .. } => None,
     }
 }
@@ -3031,7 +3124,10 @@ fn leaf_count_exceeds(
                     }
                 }
                 _ => {
-                    *count += 1;
+                    *count += match field.leaf_kind() {
+                        Some(ScalarKind::I128 | ScalarKind::U128) => 2,
+                        _ => 1,
+                    };
                     if *count > limit {
                         return true;
                     }
@@ -3100,19 +3196,37 @@ fn seed_struct_composite<'ctx>(
                     slots: payload,
                 }
             }
-            _ => {
-                let Some(v) = slots.next() else {
-                    return Err(SemanticContractError::Unsupported("source signature arity"));
-                };
-                match field.leaf_kind() {
-                    Some(ScalarKind::Bool) => {
-                        SourceValue::Boolean(v._eq(&BV::from_u64(ctx, 0, 64)).not())
+            _ => match field.leaf_kind() {
+                Some(kind @ (ScalarKind::I128 | ScalarKind::U128)) => {
+                    let lo = slots.next();
+                    let hi = slots.next();
+                    let (Some(lo), Some(hi)) = (lo, hi) else {
+                        return Err(SemanticContractError::Unsupported("source signature arity"));
+                    };
+                    let agg = hi.concat(lo);
+                    if kind == ScalarKind::U128 {
+                        SourceValue::UWide(agg)
+                    } else {
+                        SourceValue::Wide(agg)
                     }
-                    Some(ScalarKind::U64) => SourceValue::Unsigned(v.clone()),
-                    Some(ScalarKind::F64) => SourceValue::Float64(v.clone()),
-                    _ => SourceValue::Integer(v.clone()),
                 }
-            }
+                Some(ScalarKind::Bool) => {
+                    let Some(v) = slots.next() else {
+                        return Err(SemanticContractError::Unsupported("source signature arity"));
+                    };
+                    SourceValue::Boolean(v._eq(&BV::from_u64(ctx, 0, 64)).not())
+                }
+                _ => {
+                    let Some(v) = slots.next() else {
+                        return Err(SemanticContractError::Unsupported("source signature arity"));
+                    };
+                    match field.leaf_kind() {
+                        Some(ScalarKind::U64) => SourceValue::Unsigned(v.clone()),
+                        Some(ScalarKind::F64) => SourceValue::Float64(v.clone()),
+                        _ => SourceValue::Integer(v.clone()),
+                    }
+                }
+            },
         };
         values.push((field.name.clone(), value));
     }
@@ -3141,6 +3255,15 @@ fn lower_composite<'ctx>(
             for slot in slots {
                 lower_composite(slot, ctx, out)?;
             }
+            Ok(())
+        }
+        wide @ (SourceValue::Wide(_) | SourceValue::UWide(_)) => {
+            // A 128-bit leaf lowers as two consecutive 64-bit slots —
+            // lo half then hi half — the record's `leaf_widths`
+            // pairing (`pure-i64-composite/v21`).
+            let v = lower_scalar(wide, ctx)?;
+            out.push(v.extract(63, 0));
+            out.push(v.extract(127, 64));
             Ok(())
         }
         scalar => {
@@ -3318,7 +3441,9 @@ fn enum_slot_leaf_names<'a>(
         Some(fields) => flattened_struct_fields(structs, enums, fields)
             .iter()
             .map(|(_, slot)| match slot {
-                SignatureSlot::Scalar(type_name) => *type_name,
+                SignatureSlot::Scalar(type_name) | SignatureSlot::WideScalar(type_name) => {
+                    *type_name
+                }
                 _ => None,
             })
             .collect(),
@@ -3833,6 +3958,12 @@ fn build_struct_env(
                     Some(ValueKind::Scalar(ScalarKind::I64))
                 }
                 "f64" if admission.admits_f64_leaves() => Some(ValueKind::Scalar(ScalarKind::F64)),
+                "i128" if admission.admits_wide_leaves() => {
+                    Some(ValueKind::Scalar(ScalarKind::I128))
+                }
+                "u128" if admission.admits_wide_leaves() => {
+                    Some(ValueKind::Scalar(ScalarKind::U128))
+                }
                 "bool" => Some(ValueKind::Scalar(ScalarKind::Bool)),
                 name if nested_allowed && declared_names.contains(name) => {
                     Some(ValueKind::Struct(name.to_owned()))
@@ -5588,14 +5719,26 @@ fn expression_kind(
                 Op::Eq | Op::Neq
                     if matches!(
                         unified,
-                        ScalarKind::I64 | ScalarKind::U64 | ScalarKind::Num | ScalarKind::Bool
+                        ScalarKind::I64
+                            | ScalarKind::U64
+                            | ScalarKind::I128
+                            | ScalarKind::U128
+                            | ScalarKind::Num
+                            | ScalarKind::Bool
                     ) && (left != ScalarKind::Bool || right == left)
                         && (right != ScalarKind::Bool || left == right) =>
                 {
                     Ok(ScalarKind::Bool)
                 }
                 Op::Lt | Op::Le | Op::Gt | Op::Ge
-                    if matches!(unified, ScalarKind::I64 | ScalarKind::U64 | ScalarKind::Num) =>
+                    if matches!(
+                        unified,
+                        ScalarKind::I64
+                            | ScalarKind::U64
+                            | ScalarKind::I128
+                            | ScalarKind::U128
+                            | ScalarKind::Num
+                    ) =>
                 {
                     Ok(ScalarKind::Bool)
                 }
@@ -5610,6 +5753,10 @@ fn expression_kind(
                 // operand unifies the pair to unsigned: the encoder
                 // selects `bvudiv`/`bvurem`/`bvlshr` for it and drops the
                 // `i64::MIN / -1` exclusion, which cannot occur unsigned.
+                // `i128`/`u128` pairs (`pure-i64-composite/v21`) run the
+                // same BV ops one width up — `u128` unsigned, `i128`
+                // signed, with the `i128::MIN / -1` exclusion at the
+                // 128-bit constants.
                 Op::Add
                 | Op::Sub
                 | Op::Mul
@@ -5623,7 +5770,11 @@ fn expression_kind(
                     if allow_wrapping_arithmetic
                         && matches!(
                             unified,
-                            ScalarKind::I64 | ScalarKind::U64 | ScalarKind::Num
+                            ScalarKind::I64
+                                | ScalarKind::U64
+                                | ScalarKind::I128
+                                | ScalarKind::U128
+                                | ScalarKind::Num
                         ) =>
                 {
                     Ok(unified)
@@ -6170,7 +6321,16 @@ fn encode_atom_body<'ctx>(
     }
     let body =
         parse_body_expr_checked(&atom.body_expr).map_err(|_| SemanticContractError::Parse)?;
-    let inputs: Vec<_> = (0..slots.len())
+    // A wide leaf consumes two consecutive 64-bit inputs — the same
+    // weighted arity `param_env` counts.
+    let input_slots: usize = slots
+        .iter()
+        .map(|slot| match slot {
+            SignatureSlot::WideScalar(_) => 2,
+            _ => 1,
+        })
+        .sum();
+    let inputs: Vec<_> = (0..input_slots)
         .map(|i| BV::new_const(context, format!("input_{i}"), 64))
         .collect();
     let env: HashMap<String, SourceValue> =
@@ -6215,6 +6375,8 @@ fn encode_atom_body<'ctx>(
         SourceValue::Integer(value)
         | SourceValue::Unsigned(value)
         | SourceValue::Number(value)
+        | SourceValue::Wide(value)
+        | SourceValue::UWide(value)
         | SourceValue::Float64(value) => value,
         SourceValue::Boolean(value) => {
             value.ite(&BV::from_u64(context, 1, 64), &BV::from_u64(context, 0, 64))
@@ -6252,7 +6414,7 @@ fn encode_atom_body<'ctx>(
     });
     let refined_signature = slots.iter().any(|slot| {
         let name = match slot {
-            SignatureSlot::Scalar(name) => *name,
+            SignatureSlot::Scalar(name) | SignatureSlot::WideScalar(name) => *name,
             SignatureSlot::EnumField { type_name, .. } => *type_name,
             SignatureSlot::EnumTag { .. } => None,
         };
@@ -6320,7 +6482,15 @@ fn encode_atom_body<'ctx>(
             .iter()
             .map(|p| {
                 struct_fields(p, structs)
-                    .map(|fields| flattened_struct_fields(structs, enums, fields).len())
+                    .map(|fields| {
+                        flattened_struct_fields(structs, enums, fields)
+                            .iter()
+                            .map(|(_, slot)| match slot {
+                                SignatureSlot::WideScalar(_) => 2,
+                                _ => 1,
+                            })
+                            .sum::<usize>()
+                    })
                     .or_else(|| {
                         enum_variants(p, enums).map(|v| 1 + enum_leaf_count(v, structs, enums))
                     })
@@ -6329,7 +6499,15 @@ fn encode_atom_body<'ctx>(
         result_shape: atom.return_type.as_deref().and_then(|name| {
             structs
                 .get(name)
-                .map(|fields| flattened_struct_fields(structs, enums, fields).len())
+                .map(|fields| {
+                    flattened_struct_fields(structs, enums, fields)
+                        .iter()
+                        .map(|(_, slot)| match slot {
+                            SignatureSlot::WideScalar(_) => 2,
+                            _ => 1,
+                        })
+                        .sum::<usize>()
+                })
                 .or_else(|| {
                     enums
                         .get(name)
@@ -6344,7 +6522,15 @@ fn encode_atom_body<'ctx>(
                     .map(|fields| {
                         flattened_struct_fields(structs, enums, fields)
                             .iter()
-                            .map(|(_, slot)| slot_type_name(slot) == Some("f64"))
+                            .flat_map(|(_, slot)| {
+                                // A 128-bit leaf is two 64-bit ABI slots
+                                // (`pure-i64-composite/v21`) — never a
+                                // `double` either way.
+                                match slot {
+                                    SignatureSlot::WideScalar(_) => vec![false, false],
+                                    _ => vec![slot_type_name(slot) == Some("f64")],
+                                }
+                            })
                             .collect()
                     })
                     .or_else(|| {
@@ -6358,7 +6544,15 @@ fn encode_atom_body<'ctx>(
                             kinds
                         })
                     })
-                    .unwrap_or_else(|| vec![p.type_name.as_deref() == Some("f64")])
+                    .unwrap_or_else(|| {
+                        // A scalar 128-bit leaf pairs two 64-bit ABI
+                        // slots — neither is a `double`.
+                        if matches!(p.type_name.as_deref(), Some("i128") | Some("u128")) {
+                            vec![false, false]
+                        } else {
+                            vec![p.type_name.as_deref() == Some("f64")]
+                        }
+                    })
             })
             .collect(),
         result_leaf_doubles: atom
@@ -6370,7 +6564,10 @@ fn encode_atom_body<'ctx>(
                     .map(|fields| {
                         flattened_struct_fields(structs, enums, fields)
                             .iter()
-                            .map(|(_, slot)| slot_type_name(slot) == Some("f64"))
+                            .flat_map(|(_, slot)| match slot {
+                                SignatureSlot::WideScalar(_) => vec![false, false],
+                                _ => vec![slot_type_name(slot) == Some("f64")],
+                            })
                             .collect()
                     })
                     .or_else(|| {
@@ -6384,7 +6581,13 @@ fn encode_atom_body<'ctx>(
                             kinds
                         })
                     })
-                    .unwrap_or_else(|| vec![name == "f64"])
+                    .unwrap_or_else(|| {
+                        if matches!(name, "i128" | "u128") {
+                            vec![false, false]
+                        } else {
+                            vec![name == "f64"]
+                        }
+                    })
             })
             .unwrap_or_default(),
         loop_bound_exits,
@@ -6407,6 +6610,12 @@ fn encode_atom_body<'ctx>(
 #[derive(Clone)]
 enum SignatureSlot<'a> {
     Scalar(Option<&'a str>),
+    /// A 128-bit leaf (`i128`/`u128`): one declared leaf occupying TWO
+    /// consecutive 64-bit input slots (`pure-i64-composite/v21`). The
+    /// variant keeps the pairing explicit — consumers that do not know
+    /// about wide leaves fail closed instead of silently reading one
+    /// half.
+    WideScalar(Option<&'a str>),
     EnumTag {
         variants: u64,
     },
@@ -6460,7 +6669,12 @@ fn signature_slots<'a>(
                     }));
                     slots
                 }
-                None => vec![SignatureSlot::Scalar(p.type_name.as_deref())],
+                None => match p.type_name.as_deref() {
+                    Some("i128" | "u128") => {
+                        vec![SignatureSlot::WideScalar(p.type_name.as_deref())]
+                    }
+                    _ => vec![SignatureSlot::Scalar(p.type_name.as_deref())],
+                },
             },
         })
         .collect()
@@ -6484,7 +6698,17 @@ fn signature_domain<'ctx>(
     // A struct field's declared scalar type bounds its flattened slot
     // the same way it would bound a scalar parameter of that type.
     let slots = signature_slots(params, structs, enums);
-    if slots.len() != inputs.len() {
+    // A wide leaf consumes two consecutive 64-bit inputs — the same
+    // weighted arity `param_env` counts.
+    if slots
+        .iter()
+        .map(|slot| match slot {
+            SignatureSlot::WideScalar(_) => 2usize,
+            _ => 1,
+        })
+        .sum::<usize>()
+        != inputs.len()
+    {
         return Err(SemanticContractError::Unsupported("source signature arity"));
     }
     // The tag slot of the enum parameter currently being walked — an
@@ -6492,7 +6716,20 @@ fn signature_domain<'ctx>(
     // declares a field at that index; under every other tag the slot is
     // padding and unconstrained.
     let mut enum_tag: Option<&BV> = None;
-    for (slot, v) in slots.into_iter().zip(inputs) {
+    let mut inputs = inputs.iter();
+    for slot in slots {
+        if let SignatureSlot::WideScalar(_) = slot {
+            // A wide leaf occupies two consecutive 64-bit input slots,
+            // each a full-width carrier — no range domain applies.
+            enum_tag = None;
+            if inputs.next().is_none() || inputs.next().is_none() {
+                return Err(SemanticContractError::Unsupported("source signature arity"));
+            }
+            continue;
+        }
+        let Some(v) = inputs.next() else {
+            return Err(SemanticContractError::Unsupported("source signature arity"));
+        };
         match slot {
             SignatureSlot::EnumTag { variants } => {
                 enum_tag = Some(v);
@@ -6533,6 +6770,8 @@ fn signature_domain<'ctx>(
                 enum_tag = None;
                 domain.extend(declared_slot_domain(type_name, v, context, refined)?);
             }
+            // Consumed above — a wide leaf takes two input slots.
+            SignatureSlot::WideScalar(_) => unreachable!(),
         }
     }
     Ok(domain)
@@ -7216,6 +7455,14 @@ fn atom_obligation<'ctx>(
 #[derive(Clone)]
 enum SourceValue<'ctx> {
     Integer(BV<'ctx>),
+    /// An `i128` leaf (`pure-i64-composite/v21`): one `BV128` built
+    /// `hi.concat(lo)` from the leaf's two 64-bit ABI slots — signed
+    /// arithmetic and comparisons read the full width and every
+    /// slot-boundary helper splits it back to two halves.
+    Wide(BV<'ctx>),
+    /// A `u128` leaf — the unsigned counterpart of `Wide`:
+    /// `bvult`-family comparisons and `bvudiv`/`bvurem`/`bvlshr`.
+    UWide(BV<'ctx>),
     /// A `u64` leaf — unsigned comparisons and `udiv`/`urem`/`lshr`
     /// (`pure-i64-composite/v10`). Mixing it with a declared `i64`
     /// operand in one binary operation fails closed; literals adapt.
@@ -7267,12 +7514,49 @@ enum SourceValue<'ctx> {
 /// Instantiate a callee-side [`SourceValue`] (expressed over the
 /// callee's input consts) at a call site by substituting each formal
 /// input bitvector with the site's actual argument.
+/// Widen a `Num` literal to the 128-bit carrier when the other operand
+/// is `i128`/`u128` (`pure-i64-composite/v21`) — its nonnegative `u64`
+/// value zero-extends to the same bits, signed or unsigned.
+fn widen_literal_operands<'ctx>(
+    a: SourceValue<'ctx>,
+    b: SourceValue<'ctx>,
+) -> (SourceValue<'ctx>, SourceValue<'ctx>) {
+    fn to_wide<'ctx>(v: &BV<'ctx>, like: &SourceValue<'ctx>) -> SourceValue<'ctx> {
+        // Signed `i128` literals sign-extend (`-1` stays `-1`); unsigned
+        // `u128` zero-extends — the same extension LLVM's `sext`/`zext`
+        // apply at the boundary.
+        let widened = if matches!(like, SourceValue::UWide(_)) {
+            v.zero_ext(64)
+        } else {
+            v.sign_ext(64)
+        };
+        if matches!(like, SourceValue::UWide(_)) {
+            SourceValue::UWide(widened)
+        } else {
+            SourceValue::Wide(widened)
+        }
+    }
+    match (&a, &b) {
+        (SourceValue::Wide(_) | SourceValue::UWide(_), SourceValue::Number(v)) => {
+            let widened = to_wide(v, &a);
+            (a, widened)
+        }
+        (SourceValue::Number(v), SourceValue::Wide(_) | SourceValue::UWide(_)) => {
+            let widened = to_wide(v, &b);
+            (widened, b)
+        }
+        _ => (a, b),
+    }
+}
+
 fn substitute_source_value<'ctx>(
     value: &SourceValue<'ctx>,
     substitutions: &[(&BV<'ctx>, &BV<'ctx>)],
 ) -> SourceValue<'ctx> {
     match value {
         SourceValue::Integer(v) => SourceValue::Integer(v.substitute(substitutions)),
+        SourceValue::Wide(v) => SourceValue::Wide(v.substitute(substitutions)),
+        SourceValue::UWide(v) => SourceValue::UWide(v.substitute(substitutions)),
         SourceValue::Unsigned(v) => SourceValue::Unsigned(v.substitute(substitutions)),
         SourceValue::Float64(v) => SourceValue::Float64(v.substitute(substitutions)),
         SourceValue::Number(v) => SourceValue::Number(v.substitute(substitutions)),
@@ -7318,7 +7602,14 @@ fn param_env<'ctx>(
     structs: &StructEnv,
     enums: &EnumEnv,
 ) -> BodyResult<HashMap<String, SourceValue<'ctx>>> {
-    if signature_slots(params, structs, enums).len() != inputs.len() {
+    let arity: usize = signature_slots(params, structs, enums)
+        .iter()
+        .map(|slot| match slot {
+            SignatureSlot::WideScalar(_) => 2,
+            _ => 1,
+        })
+        .sum();
+    if arity != inputs.len() {
         return Err(SemanticContractError::Unsupported("source signature arity"));
     }
     let scalar = |kind: ScalarKind, v: &BV<'ctx>| match kind {
@@ -7376,10 +7667,29 @@ fn param_env<'ctx>(
                     }
                 }
                 None => {
-                    let Some(v) = slots.next() else {
-                        return Err(SemanticContractError::Unsupported("source signature arity"));
-                    };
-                    scalar(param_kind(p, refined), v)
+                    let kind = param_kind(p, refined);
+                    if matches!(kind, ScalarKind::I128 | ScalarKind::U128) {
+                        let lo = slots.next();
+                        let hi = slots.next();
+                        let (Some(lo), Some(hi)) = (lo, hi) else {
+                            return Err(SemanticContractError::Unsupported(
+                                "source signature arity",
+                            ));
+                        };
+                        let agg = hi.concat(lo);
+                        if kind == ScalarKind::U128 {
+                            SourceValue::UWide(agg)
+                        } else {
+                            SourceValue::Wide(agg)
+                        }
+                    } else {
+                        let Some(v) = slots.next() else {
+                            return Err(SemanticContractError::Unsupported(
+                                "source signature arity",
+                            ));
+                        };
+                        scalar(kind, v)
+                    }
                 }
             },
         };
@@ -7655,7 +7965,10 @@ fn merge_source_values<'ctx>(
     b: SourceValue<'ctx>,
     call_returns: &CallShapes<'ctx>,
 ) -> BodyResult<SourceValue<'ctx>> {
-    use SourceValue::{Boolean as B, Float64 as F, Integer as I, Number as N, Unsigned as U};
+    use SourceValue::{
+        Boolean as B, Float64 as F, Integer as I, Number as N, UWide as UW, Unsigned as U,
+        Wide as W,
+    };
     let merged_composites = call_returns.merged_composites;
     match (a, b) {
         (N(a), N(b)) => Ok(N(cond.ite(&a, &b))),
@@ -7664,6 +7977,14 @@ fn merge_source_values<'ctx>(
         (B(a), B(b)) => Ok(B(cond.ite(&a, &b))),
         // Pass-through `f64`: the bit pattern merges like any leaf.
         (F(a), F(b)) => Ok(F(cond.ite(&a, &b))),
+        // 128-bit leaves merge as one vector; a literal branch value
+        // zero-extends into the carrier (`pure-i64-composite/v21`).
+        (W(a), W(b)) => Ok(W(cond.ite(&a, &b))),
+        (W(a), N(b)) => Ok(W(cond.ite(&a, &b.zero_ext(64)))),
+        (N(a), W(b)) => Ok(W(cond.ite(&a.zero_ext(64), &b))),
+        (UW(a), UW(b)) => Ok(UW(cond.ite(&a, &b))),
+        (UW(a), N(b)) => Ok(UW(cond.ite(&a, &b.zero_ext(64)))),
+        (N(a), UW(b)) => Ok(UW(cond.ite(&a.zero_ext(64), &b))),
         (SourceValue::Composite(a), SourceValue::Composite(b)) if merged_composites => {
             if a.len() != b.len() || a.iter().zip(b.iter()).any(|((an, _), (bn, _))| an != bn) {
                 return Err(SemanticContractError::Unsupported("branch composite kinds"));
@@ -8127,7 +8448,10 @@ fn source_while<'ctx>(
     call_returns: &CallShapes<'ctx>,
     enums: &EnumEnv,
 ) -> BodyResult<()> {
-    use SourceValue::{Boolean as B, Float64 as F, Integer as I, Number as N, Unsigned as U};
+    use SourceValue::{
+        Boolean as B, Float64 as F, Integer as I, Number as N, UWide as UW, Unsigned as U,
+        Wide as W,
+    };
     let mut cur = env.clone();
     let mut exited = Bool::from_bool(ctx, false);
     let mut merged: BTreeMap<String, SourceValue> = BTreeMap::new();
@@ -8200,6 +8524,14 @@ fn source_while<'ctx>(
                 (Some(I(old) | N(old)), I(new) | N(new)) => I(body_guard.ite(new, old)),
                 (Some(B(old)), B(new)) => B(body_guard.ite(new, old)),
                 (Some(F(old)), F(new)) => F(body_guard.ite(new, old)),
+                // 128-bit leaves phi-merge as one vector; literal
+                // writes zero-extend (`pure-i64-composite/v21`).
+                (Some(W(old)), W(new)) => W(body_guard.ite(new, old)),
+                (Some(W(old)), N(new)) => W(body_guard.ite(new, &old.zero_ext(64))),
+                (Some(N(old)), W(new)) => W(body_guard.ite(new, &old.zero_ext(64))),
+                (Some(UW(old)), UW(new)) => UW(body_guard.ite(new, old)),
+                (Some(UW(old)), N(new)) => UW(body_guard.ite(new, &old.zero_ext(64))),
+                (Some(N(old)), UW(new)) => UW(body_guard.ite(new, &old.zero_ext(64))),
                 // A loop-carried `a[i] = v` keeps the merged array: the
                 // body's write applies only where the loop actually ran.
                 // A body rebinding `a = [...]` mints a fresh `alloc`,
@@ -8295,6 +8627,35 @@ fn shift_defined<'ctx>(amount: &BV<'ctx>, ctx: &'ctx Context) -> Bool<'ctx> {
     amount.bvult(&BV::from_i64(ctx, 64, 64))
 }
 
+fn int128_min<'ctx>(ctx: &'ctx Context) -> BV<'ctx> {
+    // `i128::MIN` = 1 << 127 — `BV::from_i64` cannot express it, so it
+    // is built as a literal shift.
+    BV::from_u64(ctx, 1, 128).bvshl(&BV::from_u64(ctx, 127, 128))
+}
+
+/// The `i128` counterpart of `div_defined`: nonzero divisor, and
+/// `i128::MIN / -1` excluded — the only signed-division overflow.
+fn div_defined_wide<'ctx>(a: &BV<'ctx>, b: &BV<'ctx>, ctx: &'ctx Context) -> Bool<'ctx> {
+    let zero = BV::from_i64(ctx, 0, 128);
+    let minus_one = BV::from_i64(ctx, -1, 128);
+    Bool::and(
+        ctx,
+        &[
+            &b._eq(&zero).not(),
+            &Bool::and(ctx, &[&a._eq(&int128_min(ctx)), &b._eq(&minus_one)]).not(),
+        ],
+    )
+}
+
+fn udiv_defined_wide<'ctx>(b: &BV<'ctx>, ctx: &'ctx Context) -> Bool<'ctx> {
+    b._eq(&BV::from_i64(ctx, 0, 128)).not()
+}
+
+/// The `i128`/`u128` counterpart of `shift_defined`: amount in 0..128.
+fn shift_defined_wide<'ctx>(amount: &BV<'ctx>, ctx: &'ctx Context) -> Bool<'ctx> {
+    amount.bvult(&BV::from_u64(ctx, 128, 128))
+}
+
 /// Uninterpreted function modelling a source-level call site: the LLVM
 /// encoder maps `call @name(...)` to the declaration of the same name
 /// and arity, so a call result compares only against the same callee's
@@ -8380,6 +8741,19 @@ fn composite_from_slots<'ctx>(
                             }
                             ScalarKind::U64 => SourceValue::Unsigned(slot),
                             ScalarKind::F64 => SourceValue::Float64(slot),
+                            ScalarKind::I128 | ScalarKind::U128 => {
+                                let hi = slots.next().cloned().unwrap_or_else(|| {
+                                    unreachable!(
+                                        "admitted structs always match their lowered arity"
+                                    )
+                                });
+                                let agg = hi.concat(&slot);
+                                if *kind == ScalarKind::U128 {
+                                    SourceValue::UWide(agg)
+                                } else {
+                                    SourceValue::Wide(agg)
+                                }
+                            }
                             _ => SourceValue::Integer(slot),
                         }
                     }
@@ -8418,6 +8792,8 @@ fn lower_scalar<'ctx>(value: SourceValue<'ctx>, ctx: &'ctx Context) -> BodyResul
         SourceValue::Integer(v)
         | SourceValue::Unsigned(v)
         | SourceValue::Number(v)
+        | SourceValue::Wide(v)
+        | SourceValue::UWide(v)
         | SourceValue::Float64(v) => Ok(v),
         SourceValue::Boolean(b) => Ok(b.ite(&BV::from_u64(ctx, 1, 64), &BV::from_u64(ctx, 0, 64))),
         SourceValue::Composite(_) => Err(SemanticContractError::Unsupported(
@@ -8576,6 +8952,12 @@ fn result_value<'ctx>(
             tag: flat[0].clone(),
             slots: call_returns.seed_enum_slots(variants, &mut flat[1..].iter(), ctx),
         }
+    } else if call_returns.returns_wide(atom) {
+        if call_returns.returns_u128(atom) {
+            SourceValue::UWide(value.clone())
+        } else {
+            SourceValue::Wide(value.clone())
+        }
     } else if call_returns.returns_u64(atom) {
         SourceValue::Unsigned(value.clone())
     } else if call_returns.returns_f64(atom) {
@@ -8602,7 +8984,10 @@ fn source_expr<'ctx>(
     call_returns: &CallShapes<'ctx>,
     enums: &EnumEnv,
 ) -> BodyResult<SourceValue<'ctx>> {
-    use SourceValue::{Boolean as B, Float64 as F, Integer as I, Number as N, Unsigned as U};
+    use SourceValue::{
+        Boolean as B, Float64 as F, Integer as I, Number as N, UWide as UW, Unsigned as U,
+        Wide as W,
+    };
     if depth > MAX_DEPTH {
         return Err(SemanticContractError::Unsupported("source depth limit"));
     }
@@ -8803,6 +9188,10 @@ fn source_expr<'ctx>(
                 call_returns,
                 enums,
             )?;
+            // A literal against a 128-bit operand zero-extends into
+            // the wide carrier — its nonnegative `u64` value is the
+            // same bits in both widths (`pure-i64-composite/v21`).
+            let (a, b) = widen_literal_operands(a, b);
             match (a, op, b) {
                 (I(a) | N(a), Op::Eq, I(b) | N(b))
                 | (U(a), Op::Eq, U(b) | N(b))
@@ -8903,6 +9292,69 @@ fn source_expr<'ctx>(
                 (U(a), Op::Shr, U(b) | N(b)) | (N(a), Op::Shr, U(b)) => {
                     definedness.push(guard.implies(&shift_defined(&b, ctx)));
                     U(a.bvlshr(&b))
+                }
+                // `i128` (`pure-i64-composite/v21`): the signed ops of
+                // `i64` on the full 128-bit vector — literals arrive
+                // already widened by `widen_literal_operands`, so a
+                // surviving `Num` on the other side fails closed.
+                (W(a), Op::Eq, W(b)) => B(a._eq(&b)),
+                (W(a), Op::Neq, W(b)) => B(a._eq(&b).not()),
+                (W(a), Op::Lt, W(b)) => B(a.bvslt(&b)),
+                (W(a), Op::Le, W(b)) => B(a.bvsle(&b)),
+                (W(a), Op::Gt, W(b)) => B(a.bvsgt(&b)),
+                (W(a), Op::Ge, W(b)) => B(a.bvsge(&b)),
+                (W(a), Op::Add, W(b)) => W(a.bvadd(&b)),
+                (W(a), Op::Sub, W(b)) => W(a.bvsub(&b)),
+                (W(a), Op::Mul, W(b)) => W(a.bvmul(&b)),
+                (W(a), Op::BitAnd, W(b)) => W(a.bvand(&b)),
+                (W(a), Op::BitOr, W(b)) => W(a.bvor(&b)),
+                (W(a), Op::BitXor, W(b)) => W(a.bvxor(&b)),
+                (W(a), Op::Div, W(b)) => {
+                    definedness.push(guard.implies(&div_defined_wide(&a, &b, ctx)));
+                    W(a.bvsdiv(&b))
+                }
+                (W(a), Op::Rem, W(b)) => {
+                    definedness.push(guard.implies(&div_defined_wide(&a, &b, ctx)));
+                    W(a.bvsrem(&b))
+                }
+                (W(a), Op::Shl, W(b)) => {
+                    definedness.push(guard.implies(&shift_defined_wide(&b, ctx)));
+                    W(a.bvshl(&b))
+                }
+                (W(a), Op::Shr, W(b)) => {
+                    definedness.push(guard.implies(&shift_defined_wide(&b, ctx)));
+                    W(a.bvashr(&b))
+                }
+                // `u128`: the unsigned counterparts — `bvult`-family
+                // comparisons, `bvudiv`/`bvurem`/`bvlshr`, with only a
+                // nonzero-divisor / in-range-amount domain bound.
+                (UW(a), Op::Eq, UW(b)) => B(a._eq(&b)),
+                (UW(a), Op::Neq, UW(b)) => B(a._eq(&b).not()),
+                (UW(a), Op::Lt, UW(b)) => B(a.bvult(&b)),
+                (UW(a), Op::Le, UW(b)) => B(a.bvule(&b)),
+                (UW(a), Op::Gt, UW(b)) => B(a.bvugt(&b)),
+                (UW(a), Op::Ge, UW(b)) => B(a.bvuge(&b)),
+                (UW(a), Op::Add, UW(b)) => UW(a.bvadd(&b)),
+                (UW(a), Op::Sub, UW(b)) => UW(a.bvsub(&b)),
+                (UW(a), Op::Mul, UW(b)) => UW(a.bvmul(&b)),
+                (UW(a), Op::BitAnd, UW(b)) => UW(a.bvand(&b)),
+                (UW(a), Op::BitOr, UW(b)) => UW(a.bvor(&b)),
+                (UW(a), Op::BitXor, UW(b)) => UW(a.bvxor(&b)),
+                (UW(a), Op::Div, UW(b)) => {
+                    definedness.push(guard.implies(&udiv_defined_wide(&b, ctx)));
+                    UW(a.bvudiv(&b))
+                }
+                (UW(a), Op::Rem, UW(b)) => {
+                    definedness.push(guard.implies(&udiv_defined_wide(&b, ctx)));
+                    UW(a.bvurem(&b))
+                }
+                (UW(a), Op::Shl, UW(b)) => {
+                    definedness.push(guard.implies(&shift_defined_wide(&b, ctx)));
+                    UW(a.bvshl(&b))
+                }
+                (UW(a), Op::Shr, UW(b)) => {
+                    definedness.push(guard.implies(&shift_defined_wide(&b, ctx)));
+                    UW(a.bvlshr(&b))
                 }
                 (B(a), Op::And, B(b)) => B(Bool::and(ctx, &[&a, &b])),
                 (B(a), Op::Or, B(b)) => B(Bool::or(ctx, &[&a, &b])),
@@ -9605,7 +10057,15 @@ fn source_expr<'ctx>(
                             lower_composite(slot, ctx, &mut applied)?;
                         }
                     }
-                    scalar => applied.push(lower(scalar)?),
+                    scalar => {
+                        let lowered = lower(scalar)?;
+                        if lowered.get_size() == 128 {
+                            applied.push(lowered.extract(63, 0));
+                            applied.push(lowered.extract(127, 64));
+                        } else {
+                            applied.push(lowered);
+                        }
+                    }
                 }
             }
             let refs: Vec<&dyn Ast> = applied.iter().map(|v| v as &dyn Ast).collect();
@@ -9660,6 +10120,33 @@ fn source_expr<'ctx>(
                     name: enum_name.to_owned(),
                     tag: slots[0].clone(),
                     slots: call_returns.seed_enum_slots(variants, &mut slots[1..].iter(), ctx),
+                });
+            }
+            // A wide scalar result is two consecutive 64-bit slots —
+            // the same per-slot uninterpreted applications a composite
+            // result gets (`pure-i64-composite/v21`).
+            if call_returns.returns_wide(name) {
+                let slots = (0..2)
+                    .map(|i| {
+                        call_field_decl(ctx, name, applied.len(), i)
+                            .apply(&refs)
+                            .as_bv()
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or(SemanticContractError::Unsupported(
+                        "source call result kind",
+                    ))?;
+                call_sites.push(CallSite {
+                    callee: name.clone(),
+                    args: applied.clone(),
+                    result: aggregate_value(&slots),
+                    guard: guard.clone(),
+                });
+                let agg = aggregate_value(&slots);
+                return Ok(if call_returns.returns_u128(name) {
+                    UW(agg)
+                } else {
+                    W(agg)
                 });
             }
             let Some(value) = call_decl(ctx, name, applied.len()).apply(&refs).as_bv() else {
@@ -12958,6 +13445,145 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
             RefinedAdmission::CompositeV20
         )
         .is_err());
+    }
+
+    #[test]
+    fn composite_v21_admits_i128_u128_leaves() {
+        let v21 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV21)
+        };
+        let outcomes = |source: &str| {
+            refined_module_outcomes_admission(source, RefinedAdmission::CompositeV21)
+        };
+        let module = |piece: &str| format!("{piece}\n{MAIN0}");
+        for (piece, profile) in [
+            // Signed and unsigned leaves: arithmetic, comparisons and
+            // a sign-extended literal fold.
+            (
+                "atom add(x: i128, y: i128) -> i128 requires: true; ensures: result == x + y; body: { x + y };",
+                PURE_I64_COMPOSITE_PROFILE_V21,
+            ),
+            (
+                "atom uadd(x: u128, y: u128) -> u128 requires: true; ensures: result == x + y; body: { x + y };",
+                PURE_I64_COMPOSITE_PROFILE_V21,
+            ),
+            (
+                "atom neg(x: i128) -> i128 requires: true; ensures: result == x - 1; body: { x + -1 };",
+                PURE_I64_COMPOSITE_PROFILE_V21,
+            ),
+            (
+                "atom eq(x: i128, y: i128) -> bool requires: true; ensures: result == (x == y); body: { x == y };",
+                PURE_I64_COMPOSITE_PROFILE_V21,
+            ),
+            (
+                "atom ult(x: u128, y: u128) -> bool requires: true; ensures: result == (x < y); body: { x < y };",
+                PURE_I64_COMPOSITE_PROFILE_V21,
+            ),
+            (
+                "atom slt(x: i128, y: i128) -> bool requires: true; ensures: result == (x < y); body: { x < y };",
+                PURE_I64_COMPOSITE_PROFILE_V21,
+            ),
+            // A struct leaf carrying a 128-bit field and an i128 call
+            // round trip ride the same two-slot pairing.
+            (
+                "struct S { a: i64, b: i128 }\natom get(s: S) -> i128 requires: true; ensures: result == s.b; body: { s.b };",
+                PURE_I64_COMPOSITE_PROFILE_V21,
+            ),
+            (
+                "atom id(x: i128) -> i128 requires: true; ensures: result == x; body: { x };\natom call(y: i128) -> i128 requires: true; ensures: result == y; body: { id(y) };",
+                PURE_I64_COMPOSITE_PROFILE_V21,
+            ),
+        ] {
+            let source = module(piece);
+            match v21(&source) {
+                Ok(cs) => assert!(
+                    cs.iter().all(|c| c.profile == profile),
+                    "{piece}"
+                ),
+                Err(e) => panic!("{piece}: {e:?}"),
+            }
+            match std::panic::catch_unwind(|| outcomes(&source)) {
+                Ok(res) => assert!(
+                    res.iter().all(|r| *r == z3::SatResult::Unsat),
+                    "{piece}"
+                ),
+                Err(_) => panic!("outcomes failed for: {piece}"),
+            }
+        }
+        // Declaring a wide leaf pins v21 even when the body only
+        // passes it through — the declaration-presence convention.
+        let pass =
+            module("atom copy(a: i128) -> i128 requires: true; ensures: result == a; body: { a };");
+        assert_eq!(
+            module_source_profile(&pass, RefinedAdmission::CompositeV21).unwrap(),
+            PURE_I64_COMPOSITE_PROFILE_V21
+        );
+        // No wide leaf keeps the narrower profile.
+        assert_eq!(
+            module_source_profile(
+                &module("atom m() -> i64 requires: true; ensures: true; body: { 0 };"),
+                RefinedAdmission::CompositeV21
+            )
+            .unwrap(),
+            PURE_I64_WRAPPING_PROFILE
+        );
+    }
+
+    #[test]
+    fn composite_v21_keeps_wide_leaves_fail_closed_elsewhere() {
+        let v21 = |source: &str| {
+            extract_pure_i64_module_contracts(source, "m.mm", None, RefinedAdmission::CompositeV21)
+        };
+        let module = |piece: &str| format!("{piece}\n{MAIN0}");
+        // An `i128`/`u128` declaration under a narrower admission is
+        // refused — the v20 ladder top included.
+        let decl = module(
+            "atom add(x: i128, y: i128) -> i128 requires: true; ensures: true; body: { x + y };",
+        );
+        for admission in [
+            RefinedAdmission::Reject,
+            RefinedAdmission::Composite,
+            RefinedAdmission::CompositeV20,
+        ] {
+            assert!(
+                extract_pure_i64_module_contracts(&decl, "m.mm", None, admission).is_err(),
+                "{admission:?}"
+            );
+        }
+        for (piece, why) in [
+            // Signed/unsigned leaves never mix in one operand pair.
+            (
+                "atom mix(x: i128, y: u128) -> i128 requires: true; ensures: true; body: { x + y };",
+                "i128/u128 mixing",
+            ),
+            // A 64-bit leaf never coerces into a wide operand.
+            (
+                "atom mix(x: i128, y: i64) -> i128 requires: true; ensures: true; body: { x + y };",
+                "i64/i128 mixing",
+            ),
+            // Enum payloads stay 64-bit — no wide payload variant.
+            (
+                "enum E { V(i128) }\natom f(e: E) -> i128 requires: true; ensures: true; body: { 0 };",
+                "wide enum payload",
+            ),
+        ] {
+            assert!(v21(&module(piece)).is_err(), "admitted: {why}");
+        }
+    }
+
+    #[test]
+    fn module_leaf_widths_pairs_wide_slots() {
+        let module = |piece: &str| format!("{piece}\n{MAIN0}");
+        let source = module(
+            "struct S { a: i64, b: i128 }\natom f(x: i64, s: S, u: u128) -> i64 requires: true; ensures: true; body: { x };\natom g() -> i128 requires: true; ensures: true; body: { 0 };",
+        );
+        let widths = module_leaf_widths(&source, RefinedAdmission::CompositeV21).unwrap();
+        assert_eq!(widths["f"], vec![64, 64, 128, 128]);
+        assert_eq!(widths["g"], Vec::<u64>::new());
+        assert_eq!(widths["main"], Vec::<u64>::new());
+        // Under a narrower admission the module does not parse as the
+        // composite fragment at all.
+        assert!(module_leaf_widths(&source, RefinedAdmission::CompositeV20).is_err());
     }
 }
 

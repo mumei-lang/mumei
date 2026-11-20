@@ -1,7 +1,7 @@
 use crate::codegen::lowering::{
     array_struct_type, bitpreserve_cast, box_payload_to_i64, declare_chan_send_owned,
     enum_llvm_type, payload_needs_box, release_boxed_payload, resolve_param_type,
-    resolve_return_type, unbox_payload_from_i64, ArrayPtr,
+    resolve_return_type, unbox_payload_from_i64, wide_int_cast, ArrayPtr,
 };
 use crate::codegen::pattern_emit::{
     bind_pattern_variables, compile_pattern_test, find_field_index, find_field_index_by_name,
@@ -1082,7 +1082,7 @@ pub(crate) fn chan_payload_type_name(
 pub(crate) fn is_fixed_int_type_name(base: &str) -> bool {
     matches!(
         base,
-        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
+        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "i128" | "u128"
     )
 }
 
@@ -1166,7 +1166,8 @@ fn binop_unsigned_operands<'a>(
 ) -> Result<bool, MumeiError> {
     let lt = operand_int_type_name(left, var_types, array_ptrs, module_env);
     let rt = operand_int_type_name(right, var_types, array_ptrs, module_env);
-    let (lu, ru) = (lt.as_deref() == Some("u64"), rt.as_deref() == Some("u64"));
+    let unsigned_name = |t: Option<&str>| matches!(t, Some("u64") | Some("u128"));
+    let (lu, ru) = (unsigned_name(lt.as_deref()), unsigned_name(rt.as_deref()));
     if (lu && rt.is_some() && !ru) || (ru && lt.is_some() && !lu) {
         return Err(MumeiError::codegen(
             "Cannot mix a u64 operand with a declared non-u64 integer operand".to_string(),
@@ -1904,6 +1905,21 @@ pub(crate) fn compile_hir_expr<'a>(
                             context, builder, module, function, arg, variables, var_types,
                             array_ptrs, module_env,
                         )?;
+                        // A 128-bit parameter consumes a native `i128`
+                        // (`pure-i64-composite/v21`): a literal or
+                        // narrower operand extends into the slot.
+                        let val = match callee_fn.get_nth_param(i as u32) {
+                            Some(param) => {
+                                let signed = resolved_callee
+                                    .and_then(|c| c.params.get(i))
+                                    .and_then(|p| p.type_name.as_deref())
+                                    .map(|tn| module_env.resolve_base_type(tn))
+                                    .as_deref()
+                                    == Some("i128");
+                                wide_int_cast(builder, val, param.get_type(), signed)?
+                            }
+                            None => val,
+                        };
                         arg_vals.push(val.into());
                     }
 
@@ -2273,10 +2289,47 @@ pub(crate) fn compile_hir_expr<'a>(
                         op
                     )));
                 }
-                let l = lhs.into_int_value();
-                let r = rhs.into_int_value();
+                // A 128-bit operand (`pure-i64-composite/v21`) widens the
+                // pair: a literal or narrower operand extends to the
+                // full width — the same `widen_literal_operands` the
+                // verifier applies (`sext` for `i128`, `zext` for
+                // `u128`), so `a + -1` keeps `-1` on `i128`.
                 let unsigned =
                     binop_unsigned_operands(left, right, var_types, array_ptrs, module_env)?;
+                let (lhs, rhs) = match (lhs, rhs) {
+                    (BasicValueEnum::IntValue(lv), BasicValueEnum::IntValue(rv)) => {
+                        let (lw, rw) =
+                            (lv.get_type().get_bit_width(), rv.get_type().get_bit_width());
+                        if lw < rw {
+                            (
+                                if unsigned {
+                                    llvm!(builder.build_int_z_extend(lv, rv.get_type(), "w_lhs"))
+                                        .into()
+                                } else {
+                                    llvm!(builder.build_int_s_extend(lv, rv.get_type(), "w_lhs"))
+                                        .into()
+                                },
+                                rv.into(),
+                            )
+                        } else if rw < lw {
+                            (
+                                lv.into(),
+                                if unsigned {
+                                    llvm!(builder.build_int_z_extend(rv, lv.get_type(), "w_rhs"))
+                                        .into()
+                                } else {
+                                    llvm!(builder.build_int_s_extend(rv, lv.get_type(), "w_rhs"))
+                                        .into()
+                                },
+                            )
+                        } else {
+                            (lv.into(), rv.into())
+                        }
+                    }
+                    other => other,
+                };
+                let l = lhs.into_int_value();
+                let r = rhs.into_int_value();
                 match op {
                     HirBinOp::Add => Ok(llvm!(builder.build_int_add(l, r, "add_tmp")).into()),
                     HirBinOp::Sub => Ok(llvm!(builder.build_int_sub(l, r, "sub_tmp")).into()),
@@ -2537,9 +2590,18 @@ pub(crate) fn compile_hir_expr<'a>(
                                     field_name, type_name
                                 ))
                             })?;
+                        // A 128-bit field (`pure-i64-composite/v21`)
+                        // takes a native `i128` leaf — a literal or
+                        // narrower stored value extends into it.
+                        let coerced = wide_int_cast(
+                            builder,
+                            *val,
+                            field_types[def_idx],
+                            module_env.resolve_base_type(&sdef.fields[def_idx].type_name) == "i128",
+                        )?;
                         struct_val = llvm!(builder.build_insert_value(
                             struct_val,
-                            *val,
+                            coerced,
                             def_idx as u32,
                             &format!("struct_{}", field_name)
                         ))

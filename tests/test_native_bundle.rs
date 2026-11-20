@@ -3173,6 +3173,107 @@ fn multifile_bundle_with_str_bound_builds_as_v23() {
 }
 
 #[test]
+fn module_bundle_with_i128_leaves_builds_as_v24_and_rechecks() {
+    // An `i128`/`u128` leaf rides the two-slot pairing
+    // (`pure-i64-composite/v21`); the record pins bundle v24 and the
+    // declared `leaf_widths` so a rechecker re-derives the slot split.
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, id) = build_source(
+        root.path(),
+        "atom add(x: i128, y: i128) -> i128 requires: true; ensures: result == x + y; body: { x + y };\n\
+         atom lt(a: u128, b: u128) -> bool requires: true; ensures: result == (a < b); body: { a < b };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    let record = module_record(&bundle);
+    assert_eq!(record["profile"], native_bundle::MODULE_PROFILE_V24);
+    assert_eq!(
+        record["source"]["source_profile"],
+        mumei_core::semantic_contract::PURE_I64_COMPOSITE_PROFILE_V21
+    );
+    // The pinned pairing names every atom's declared leaf widths.
+    assert_eq!(record["leaf_widths"]["add"], serde_json::json!([128, 128]));
+    assert_eq!(record["leaf_widths"]["lt"], serde_json::json!([128, 128]));
+    assert_eq!(record["leaf_widths"]["main"], serde_json::json!([]));
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // A v24 record re-pinned as v23 is refused — v23 keeps the wide
+    // leaf out of the composite shape.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MODULE_PROFILE_V23.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
+fn module_bundle_v24_rejects_a_tampered_leaf_widths_pin() {
+    let root = tempfile::tempdir().unwrap();
+    let (source, bundle, _id) = build_source(
+        root.path(),
+        "atom add(x: i128, y: i128) -> i128 requires: true; ensures: result == x + y; body: { x + y };\n\
+         atom main() -> i64 requires: true; ensures: true; body: { 0 };",
+    );
+    // Dropping the wide marker declares a single 64-bit leaf — the
+    // re-derived pairing no longer matches.
+    let mut record = module_record(&bundle);
+    record["leaf_widths"]["add"] = serde_json::json!([64, 64]);
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+    // Rebuild so the next assertion starts from a valid record.
+    let mut record = module_record(&bundle);
+    record["leaf_widths"]["add"] = serde_json::json!([128, 128]);
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert_success(&check(&source, &bundle, &native_bundle::sha256(&bytes)));
+}
+
+#[test]
+fn multifile_bundle_with_i128_leaves_builds_as_v24() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("app.mm");
+    let bundle = root.path().join("bundle");
+    fs::write(
+        root.path().join("text.mm"),
+        "atom double(x: i128) -> i128 requires: true; ensures: result == x + x; body: { x + x };\n",
+    )
+    .unwrap();
+    fs::write(
+        &source,
+        "import \"text\" as t;\n\natom main() -> i64 requires: true; ensures: true; body: { 0 };\n",
+    )
+    .unwrap();
+    assert_success(&cli(&[
+        "native-bundle",
+        "build",
+        source.to_str().unwrap(),
+        "-o",
+        bundle.to_str().unwrap(),
+    ]));
+    let id = native_bundle::sha256(&fs::read(bundle.join(RECORD_FILE)).unwrap());
+    let record = module_record(&bundle);
+    assert_eq!(record["schema"], native_bundle::MULTIFILE_SCHEMA);
+    assert_eq!(record["profile"], native_bundle::MULTIFILE_PROFILE_V24);
+    assert_eq!(record["leaf_widths"]["double"], serde_json::json!([128]));
+    assert_success(&check(&source, &bundle, &id));
+    assert_success(&recheck(&source, &bundle, &id));
+    assert_success(&recheck_llvm(&source, &bundle, &id));
+    // Under a v23 pin the member's `i128` leaf stays refused.
+    let mut record = module_record(&bundle);
+    record["profile"] = serde_json::Value::String(native_bundle::MULTIFILE_PROFILE_V23.into());
+    let bytes = serde_json::to_vec_pretty(&record).unwrap();
+    fs::write(bundle.join(RECORD_FILE), &bytes).unwrap();
+    assert!(!check(&source, &bundle, &native_bundle::sha256(&bytes))
+        .status
+        .success());
+}
+
+#[test]
 fn multifile_bundle_with_f64_arithmetic_builds_as_v22() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("app.mm");

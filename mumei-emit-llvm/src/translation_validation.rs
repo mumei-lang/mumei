@@ -805,6 +805,15 @@ unsafe fn compare_function<'ctx>(
         .map(|(path, defined)| path.implies(defined))
         .collect();
     let ir_dom = Bool::and(context, &ir_terms.iter().collect::<Vec<_>>());
+    // A hostile module could return a width the source signature does
+    // not declare — compare same-width values only, never let z3 panic
+    // on a size mismatch.
+    if returns
+        .iter()
+        .any(|(_, value)| value.get_size() != model.value.get_size())
+    {
+        return Err(ValidationError("LLVM return width mismatch"));
+    }
     let mismatches: Vec<_> = returns
         .iter()
         .map(|(guard, value)| {
@@ -946,7 +955,7 @@ unsafe fn width(ty: LLVMTypeRef) -> Result<u32> {
         return Err(ValidationError("non-integer LLVM value"));
     }
     match LLVMGetIntTypeWidth(ty) {
-        n @ (1 | 64) => Ok(n),
+        n @ (1 | 64 | 128) => Ok(n),
         _ => Err(ValidationError("unsupported LLVM width")),
     }
 }
@@ -978,6 +987,13 @@ unsafe fn aggregate_fields(ty: LLVMTypeRef) -> Option<u32> {
                 && LLVMGetIntTypeWidth(element) == 64 =>
             {
                 1
+            }
+            // An `i128` element is one 128-bit leaf — two consecutive
+            // 64-bit ABI slots (`pure-i64-composite/v21`).
+            None if LLVMGetTypeKind(element) == LLVMTypeKind::LLVMIntegerTypeKind
+                && LLVMGetIntTypeWidth(element) == 128 =>
+            {
+                2
             }
             // A `double` element is one pass-through `f64` leaf slot
             // (`pure-i64-composite/v11`).
@@ -1017,11 +1033,33 @@ unsafe fn aggregate_leaf_range(ty: LLVMTypeRef, index: u32) -> Option<(usize, us
     None
 }
 
+/// A constant `i128` as a `BV` — the C API's `LLVMConstIntGet*Value`
+/// accessors truncate at 64 bits, so parse the printed `i128 N` token
+/// (`pure-i64-composite/v21`).
+unsafe fn const_i128<'ctx>(ctx: &'ctx Context, value: LLVMValueRef) -> Result<BV<'ctx>> {
+    let printed = LLVMPrintValueToString(value);
+    let text = std::ffi::CStr::from_ptr(printed)
+        .to_string_lossy()
+        .into_owned();
+    LLVMDisposeMessage(printed);
+    let parsed = text
+        .split_whitespace()
+        .next_back()
+        .and_then(|token| token.parse::<i128>().ok())
+        .ok_or(ValidationError("unsupported LLVM constant"))?;
+    let lo = BV::from_u64(ctx, parsed as u64, 64);
+    let hi = BV::from_u64(ctx, (parsed >> 64) as u64, 64);
+    Ok(hi.concat(&lo))
+}
+
 /// `true` for a `double` leaf (the pass-through `f64` lowering),
 /// `false` for an `i64` leaf, `None` for anything else — the type
 /// check `width` alone cannot make, which an i64/f64 ABI confusion
 /// needs (`pure-i64-composite/v11`).
 unsafe fn leaf_is_double(ty: LLVMTypeRef) -> Option<bool> {
+    if LLVMGetTypeKind(ty) == LLVMTypeKind::LLVMIntegerTypeKind && LLVMGetIntTypeWidth(ty) == 128 {
+        return Some(false);
+    }
     match LLVMGetTypeKind(ty) {
         LLVMTypeKind::LLVMDoubleTypeKind => Some(true),
         LLVMTypeKind::LLVMIntegerTypeKind if LLVMGetIntTypeWidth(ty) == 64 => Some(false),
@@ -1042,6 +1080,13 @@ unsafe fn aggregate_leaf_doubles(ty: LLVMTypeRef) -> Option<Vec<bool>> {
         let element = LLVMStructGetTypeAtIndex(ty, i);
         if let Some(mut inner) = aggregate_leaf_doubles(element) {
             kinds.append(&mut inner);
+        } else if LLVMGetTypeKind(element) == LLVMTypeKind::LLVMIntegerTypeKind
+            && LLVMGetIntTypeWidth(element) == 128
+        {
+            // Two 64-bit ABI slots per 128-bit leaf — neither is a
+            // `double`.
+            kinds.push(false);
+            kinds.push(false);
         } else {
             kinds.push(leaf_is_double(element)?);
         }
@@ -1284,7 +1329,7 @@ unsafe fn check_call(call: LLVMValueRef, optimized: bool) -> Result<()> {
     {
         return check_intrinsic_signature(signature, decl_name.as_deref());
     }
-    if (aggregate_fields(ret).is_none() && width(ret)? != 64)
+    if (aggregate_fields(ret).is_none() && !matches!(width(ret)?, 64 | 128))
         || LLVMCountParamTypes(signature) != LLVMGetNumArgOperands(call)
         || LLVMIsFunctionVarArg(signature) != 0
     {
@@ -1298,7 +1343,7 @@ unsafe fn check_call(call: LLVMValueRef, optimized: bool) -> Result<()> {
     // An admitted aggregate parameter passes a struct formal through;
     // the operand gate in `check_function` keeps its argument a formal.
     for param in params {
-        if aggregate_fields(param).is_none() && width(param)? != 64 {
+        if aggregate_fields(param).is_none() && !matches!(width(param)?, 64 | 128) {
             return Err(ValidationError("unsupported LLVM call signature"));
         }
     }
@@ -1554,7 +1599,9 @@ unsafe fn check_function(
             // `double` for a pass-through `f64` result — the declared
             // kind decides which, so an i64/f64 swap fails here.
             let expected = leaf_kinds.and_then(|k| k.first()).copied();
-            if expected.is_some() && leaf_is_double(ret) != expected || width(ret)? != 64 {
+            if expected.is_some() && leaf_is_double(ret) != expected
+                || !matches!(width(ret)?, 64 | 128)
+            {
                 return Err(ValidationError("unsupported LLVM signature"));
             }
         }
@@ -1783,8 +1830,8 @@ unsafe fn check_function(
                 | LLVMOpcode::LLVMLShr
                 | LLVMOpcode::LLVMAShr => {
                     unflagged_arithmetic(inst)?;
-                    if width(LLVMTypeOf(inst))? != 64 {
-                        return Err(ValidationError("non-i64 division or shift"));
+                    if !matches!(width(LLVMTypeOf(inst))?, 64 | 128) {
+                        return Err(ValidationError("non-i64/i128 division or shift"));
                     }
                 }
                 LLVMOpcode::LLVMCall => {
@@ -1801,7 +1848,7 @@ unsafe fn check_function(
                     // The `i1` flag leaf of a `{i64, i1}`
                     // `with.overflow` result reads under opt-o2.
                     if aggregate_fields(result).is_none()
-                        && width(result)? != 64
+                        && !matches!(width(result)?, 64 | 128)
                         && !(gates.optimized
                             && width(result)? == 1
                             && overflow_pair(LLVMTypeOf(LLVMGetOperand(inst, 0))))
@@ -1888,6 +1935,7 @@ unsafe fn check_function(
                 }
                 LLVMOpcode::LLVMICmp
                 | LLVMOpcode::LLVMZExt
+                | LLVMOpcode::LLVMSExt
                 | LLVMOpcode::LLVMTrunc
                 | LLVMOpcode::LLVMSelect
                 | LLVMOpcode::LLVMPHI => {
@@ -2192,6 +2240,9 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             return Err(ValidationError("undef or poison unsupported"));
         }
         if !LLVMIsAConstantInt(value).is_null() {
+            if bits == 128 {
+                return const_i128(self.ctx, value);
+            }
             return Ok(BV::from_u64(
                 self.ctx,
                 LLVMConstIntGetZExtValue(value),
@@ -2293,6 +2344,19 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 self.constant_leaves(element, out);
             } else if LLVMIsUndef(element) != 0 || LLVMIsPoison(element) != 0 {
                 out.push(None);
+            } else if !LLVMIsAConstantInt(element).is_null()
+                && LLVMGetIntTypeWidth(LLVMTypeOf(element)) == 128
+            {
+                // An `i128` element flattens to its two ABI slots
+                // (`lo`, `hi`); an unparsable form stays undefined and
+                // fails closed on read.
+                match const_i128(self.ctx, element) {
+                    Ok(v) => {
+                        out.push(Some(v.extract(63, 0)));
+                        out.push(Some(v.extract(127, 64)));
+                    }
+                    Err(_) => out.extend([None, None]),
+                }
             } else if !LLVMIsAConstantFP(element).is_null() {
                 let mut loses = 0;
                 out.push(Some(BV::from_u64(
@@ -2415,7 +2479,16 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             if aggregate_fields(LLVMTypeOf(arg)).is_some() {
                 args.extend(self.aggregate_slots(arg)?);
             } else {
-                args.push(self.value(arg, values)?);
+                let v = self.value(arg, values)?;
+                if v.get_size() == 128 {
+                    // A 128-bit argument applies as its two ABI slots
+                    // (`lo`, `hi`) — the source encoder's `applied`
+                    // expansion order (`pure-i64-composite/v21`).
+                    args.push(v.extract(63, 0));
+                    args.push(v.extract(127, 64));
+                } else {
+                    args.push(v);
+                }
             }
         }
         Ok(Some((name, args)))
@@ -2517,8 +2590,24 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             match shape {
                 // A parameter's LLVM width must match the source signature:
                 // i64 for every parameter; a declared `bool` carries 0/1 and
-                // is further bounded by `model.param_domain`.
+                // is further bounded by `model.param_domain`. A declared
+                // `i128`/`u128` (`pure-i64-composite/v21`) carries a native
+                // `i128` bound to two consecutive 64-bit source slots
+                // (`lo`, then `hi` — the order `param_env` binds them).
                 None => {
+                    if width(LLVMTypeOf(param))? == 128 {
+                        let lo = slots
+                            .next()
+                            .ok_or(ValidationError("LLVM parameter shape mismatch"))?;
+                        let hi = slots
+                            .next()
+                            .ok_or(ValidationError("LLVM parameter shape mismatch"))?;
+                        if leaf_doubles.get(i).map(Vec::as_slice) != Some(&[false, false]) {
+                            return Err(ValidationError("LLVM parameter type mismatch"));
+                        }
+                        values.insert(param as usize, hi.concat(lo));
+                        continue;
+                    }
                     let input = slots
                         .next()
                         .ok_or(ValidationError("LLVM parameter shape mismatch"))?;
@@ -2680,13 +2769,26 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     .filter(|(offset, span)| offset + span <= slots.len())
                     .ok_or(ValidationError("unsupported LLVM aggregate value"))?;
                 if span > 1 {
-                    // An aggregate operand (writing a nested struct
-                    // field whole) splices its leaf slots in.
-                    let inserted = self.aggregate(LLVMGetOperand(inst, 1))?;
-                    if inserted.len() != span {
-                        return Err(ValidationError("unsupported LLVM aggregate value"));
+                    let inserted_ty = LLVMTypeOf(LLVMGetOperand(inst, 1));
+                    if LLVMGetTypeKind(inserted_ty) == LLVMTypeKind::LLVMIntegerTypeKind
+                        && LLVMGetIntTypeWidth(inserted_ty) == 128
+                    {
+                        // Writing a 128-bit leaf splits into its two
+                        // ABI slots (`lo`, `hi`).
+                        let field = self.value(LLVMGetOperand(inst, 1), &values)?;
+                        slots.splice(
+                            offset..offset + span,
+                            vec![Some(field.extract(63, 0)), Some(field.extract(127, 64))],
+                        );
+                    } else {
+                        // An aggregate operand (writing a nested struct
+                        // field whole) splices its leaf slots in.
+                        let inserted = self.aggregate(LLVMGetOperand(inst, 1))?;
+                        if inserted.len() != span {
+                            return Err(ValidationError("unsupported LLVM aggregate value"));
+                        }
+                        slots.splice(offset..offset + span, inserted);
                     }
-                    slots.splice(offset..offset + span, inserted);
                 } else {
                     let field = self.value(LLVMGetOperand(inst, 1), &values)?;
                     slots[offset] = Some(field);
@@ -2863,6 +2965,25 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     .filter(|(offset, span)| offset + span <= fields.len())
                     .ok_or(ValidationError("unsupported LLVM aggregate value"))?;
                 let slots: Vec<Option<BV>> = fields.drain(offset..offset + span).collect();
+                // A 128-bit leaf reassembles its two ABI slots
+                // (`lo`, `hi` — the order `param_env` binds them) into
+                // a scalar `i128` (`pure-i64-composite/v21`).
+                if LLVMGetTypeKind(LLVMTypeOf(inst)) == LLVMTypeKind::LLVMIntegerTypeKind
+                    && LLVMGetIntTypeWidth(LLVMTypeOf(inst)) == 128
+                {
+                    if slots.len() != 2 {
+                        return Err(ValidationError("unsupported LLVM aggregate value"));
+                    }
+                    let lo = slots[0]
+                        .clone()
+                        .ok_or(ValidationError("undefined LLVM aggregate slot"))?;
+                    let hi = slots[1]
+                        .clone()
+                        .ok_or(ValidationError("undefined LLVM aggregate slot"))?;
+                    values.insert(inst as usize, hi.concat(&lo));
+                    inst = LLVMGetNextInstruction(inst);
+                    continue;
+                }
                 if span > 1 {
                     self.aggregates.insert(inst as usize, slots);
                     inst = LLVMGetNextInstruction(inst);
@@ -2912,10 +3033,23 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                 let a = self.value(LLVMGetOperand(inst, 0), &values)?;
                 match op {
                     LLVMOpcode::LLVMZExt => {
-                        if a.get_size() != 1 || width(LLVMTypeOf(inst))? != 64 {
+                        let dest = width(LLVMTypeOf(inst))?;
+                        // `i1 → i64` (comparisons and bools) and
+                        // `i64 → i128` (`u128` widening,
+                        // `pure-i64-composite/v21`).
+                        if !matches!((a.get_size(), dest), (1, 64) | (64, 128)) {
                             return Err(ValidationError("unsupported LLVM cast"));
                         }
-                        a.zero_ext(63)
+                        a.zero_ext(dest - a.get_size())
+                    }
+                    LLVMOpcode::LLVMSExt => {
+                        let dest = width(LLVMTypeOf(inst))?;
+                        // `i64 → i128` (`i128` widening — a `-1` literal
+                        // stays `-1`).
+                        if (a.get_size(), dest) != (64, 128) {
+                            return Err(ValidationError("unsupported LLVM cast"));
+                        }
+                        a.sign_ext(64)
                     }
                     // `freeze` pins a poison operand to an arbitrary
                     // defined value — rescuing the operand's poison
@@ -2946,7 +3080,7 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                                 // `udiv`/`urem` by a zero divisor is
                                 // immediate UB, not poison — `freeze`
                                 // cannot rescue it.
-                                let zero = BV::from_i64(self.ctx, 0, 64);
+                                let zero = BV::from_i64(self.ctx, 0, b.get_size());
                                 self.definedness.push((
                                     guard.clone(),
                                     b._eq(&zero).not(),
@@ -2965,9 +3099,17 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                                 // `freeze` cannot rescue the obligation; the
                                 // source side records the same partial
                                 // domain.
-                                let zero = BV::from_i64(self.ctx, 0, 64);
-                                let min = BV::from_i64(self.ctx, i64::MIN, 64);
-                                let minus_one = BV::from_i64(self.ctx, -1, 64);
+                                let zero = BV::from_i64(self.ctx, 0, b.get_size());
+                                // `iN::MIN` = the single sign bit set,
+                                // at whichever width the operands carry
+                                // (`i64` or `i128` under composite v21).
+                                let size = b.get_size();
+                                let min = BV::from_u64(self.ctx, 1, size).bvshl(&BV::from_u64(
+                                    self.ctx,
+                                    (size - 1) as u64,
+                                    size,
+                                ));
+                                let minus_one = BV::from_i64(self.ctx, -1, size);
                                 let defined = Bool::and(
                                     self.ctx,
                                     &[
@@ -2989,9 +3131,11 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                                 }
                             }
                             LLVMOpcode::LLVMShl | LLVMOpcode::LLVMAShr | LLVMOpcode::LLVMLShr => {
-                                // `shl`/`ashr`/`lshr` are poison for amounts >= 64
+                                // `shl`/`ashr`/`lshr` are poison for amounts
+                                // at or over the operand's bit width
                                 // (unsigned comparison covers negatives).
-                                let max = BV::from_i64(self.ctx, 64, 64);
+                                let size = b.get_size();
+                                let max = BV::from_u64(self.ctx, size as u64, size);
                                 self.definedness.push((
                                     guard.clone(),
                                     b.bvult(&max),

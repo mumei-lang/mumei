@@ -83,7 +83,11 @@ pub fn compile_atom_into_module<'ctx>(
                 || module_env.get_enum(&base).is_some()
                 // `u64` params are recorded so the emitted comparison/divide
                 // ops switch to their unsigned forms like the verifier does.
+                // `i128`/`u128` params are recorded too — `u128` selects the
+                // unsigned predicates (`pure-i64-composite/v21`).
                 || base == "u64"
+                || base == "u128"
+                || base == "i128"
             {
                 var_types.insert(param.name.clone(), base);
             }
@@ -207,6 +211,21 @@ pub fn compile_atom_into_module<'ctx>(
         return Ok(());
     }
 
+    // A declared `i128`/`u128` result (`pure-i64-composite/v21`) returns
+    // a native `i128` — a literal or narrower tail extends into it
+    // (`sext` for `i128`, `zext` for `u128`).
+    let result_val = match function.get_type().get_return_type() {
+        Some(BasicTypeEnum::IntType(ret_int)) if result_val.is_int_value() => {
+            let signed = signature
+                .return_type
+                .as_deref()
+                .map(|n| module_env.resolve_base_type(n))
+                .as_deref()
+                == Some("i128");
+            super::lowering::wide_int_cast(&builder, result_val, ret_int.into(), signed)?
+        }
+        _ => result_val,
+    };
     llvm!(builder.build_return(Some(&result_val)));
 
     Ok(())
