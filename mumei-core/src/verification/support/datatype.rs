@@ -1029,19 +1029,46 @@ pub(crate) fn resolve_variant_owner<'a>(
 pub(crate) fn infer_expr_enum_name(vc: &VCtx, expr: &Expr) -> Option<String> {
     match expr {
         Expr::Variable(v) => binding_declared_type(vc, v)
-            .map(|t| type_name_base(&t).to_string())
+            .map(|t| {
+                if vc.module_env.get_enum(&t).is_some() {
+                    t
+                } else {
+                    type_name_base(&t).to_string()
+                }
+            })
             .filter(|t| vc.module_env.get_enum(t).is_some()),
         Expr::Call(name, _) => {
             if let Some((enum_name, variant)) = name.split_once("::") {
-                vc.module_env
+                let edef = vc
+                    .module_env
                     .get_enum(enum_name)
-                    .filter(|e| e.variants.iter().any(|v| v.name == variant))
-                    .map(|e| e.name.clone())
+                    .filter(|e| e.variants.iter().any(|v| v.name == variant))?;
+                // A generic declaration names its instances at use sites:
+                // record the sole registered instance so `e.tag` reads the
+                // concrete tag domain instead of an unconstrained int.
+                if edef.type_params.is_empty() {
+                    Some(edef.name.clone())
+                } else {
+                    let inst = generic_instances(vc.module_env, enum_name, variant);
+                    Some(if inst.len() == 1 {
+                        inst[0].name.clone()
+                    } else {
+                        edef.name.clone()
+                    })
+                }
             } else {
                 vc.module_env
                     .get_atom(name)
                     .and_then(|a| a.return_type.as_deref())
-                    .map(|t| type_name_base(t).to_string())
+                    .map(|t| {
+                        // Keep `Wrap<i64>` whole when that instance is
+                        // registered; strip to the base otherwise.
+                        if vc.module_env.get_enum(t).is_some() {
+                            t.to_string()
+                        } else {
+                            type_name_base(t).to_string()
+                        }
+                    })
                     .filter(|t| vc.module_env.get_enum(t).is_some())
             }
         }

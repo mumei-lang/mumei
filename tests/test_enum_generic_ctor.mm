@@ -24,3 +24,13 @@ atom pick() -> i64
             _ => 0
         }
     }
+
+// `let e = Wrap::W(3)` must record e as Wrap<i64>, not the bare generic
+// name — otherwise `e.tag` is an unconstrained int and this fails.
+atom pick_tag() -> i64
+    requires: true;
+    ensures: result == 0;
+    body: {
+        let e = Wrap::W(3);
+        e.tag
+    }

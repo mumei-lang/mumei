@@ -349,3 +349,31 @@ fn enum_nested_payload_alias_empty_struct_does_not_panic() {
         "an alias to an empty struct flattens to zero leaves — the bound handle must not index an empty slice:\n{combined}"
     );
 }
+
+#[test]
+fn enum_generic_binding_tag_reads_instance_domain() {
+    let output = mumei_verify("tests/test_enum_generic_ctor.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "`let e = Wrap::W(3)` must bind `e` to the sole instance `Wrap<i64>` so `e.tag == 0` verifies:\n{combined}"
+    );
+}
+
+#[test]
+fn enum_generic_ctor_with_no_instance_does_not_panic() {
+    let output = mumei_verify("tests/test_enum_generic_no_instance.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !combined.contains("panicked") && !combined.contains("internal error"),
+        "a generic ctor with zero registered instances must fail closed, not panic:\n{combined}"
+    );
+}
