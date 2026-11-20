@@ -5831,6 +5831,32 @@ attempt cycle without production effects. The lane is exercised by
 dedicated tests against the stub only; no adapter-facing semantics
 change.
 
+### Type-switch alternatives in the normal-flow CFG (mumei-agent #988)
+
+[mumei-agent#988](https://github.com/mumei-lang/mumei-agent/pull/988)
+models `switch v := x.(type)` alternatives as explicit edges in the
+normal-flow CFG instead of a single collapsed branch: each `case T`
+binds the narrowed type for its own body, and the default/other-cases
+path keeps the declared type. The accompanying dataflow fixes keep
+self-reslices (`s = s[:0]`), different-name reslices (`x := s[lo:hi]`)
+and channel direction casts (`chan<- int(ch)`) from losing nil or
+closed state — a reslice keeps the same backing and a direction cast
+is the same runtime channel — while map indexes whose keys contain a
+colon (`m["a:b"]`) are no longer misread as reslices.
+
+### Goto/label edges in the normal-flow CFG (mumei-agent #989)
+
+[mumei-agent#989](https://github.com/mumei-lang/mumei-agent/pull/989)
+turns `goto`/`label` into real normal-flow CFG edges: forward and
+backward jumps are wired to their label targets, `break`/`continue`
+keep working inside labelled loops, and labels that Tree-sitter
+returns without a child statement (`L:` before `}`) or stacked
+(`L1: L2: stmt`) still register as `goto` targets. Unreachable
+predecessors no longer leak into unassigned-use pre-states, so a use
+reached only through a jumped-over assignment reports definite rather
+than possible, and the synthetic stacked-label wrapper stays
+transparent to dataflow scope.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
