@@ -12851,26 +12851,56 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
             "atom big(x: i64) -> i64 requires: true; ensures: len({lit}) == 100 || result == x; str_bound: 128; body: {{ x }};\n\
              atom main() -> i64 requires: true; ensures: result == 0; body: {{ 0 }};"
         );
-        for source in [requires_case, ensures_case] {
-            assert!(
-                extract_pure_i64_module_contracts(
-                    &source,
-                    "m.mm",
-                    None,
-                    RefinedAdmission::CompositeV20
-                )
-                .is_ok(),
-                "{source}"
+        // Contract expressions are encoded inside
+        // `module_atom_obligations`, which reads the shared cell —
+        // declaration extraction alone never exercises the bug, so
+        // these cases go through the full obligation encode. A `Str`
+        // literal inside a clause is always rejected downstream
+        // ("array value in a scalar position"); the bound check runs
+        // first, so which error fires tells us which bound the cell
+        // held: honoring the clause atom's bound 128 reaches the
+        // scalar-position rejection, while a stale 64 (the bug)
+        // stops earlier at "str literal bound".
+        let encode_err = |source: &String| {
+            let mut config = z3::Config::new();
+            config.set_timeout_msec(crate::verification::VerificationConfig::default().timeout_ms);
+            let context = z3::Context::new(&config);
+            let result = encode_pure_i64_module_obligations(
+                source,
+                &context,
+                RefinedAdmission::CompositeV20,
             );
+            match result {
+                Ok(_) => String::new(),
+                Err(e) => format!("{e}"),
+            }
+        };
+        for source in [requires_case, ensures_case] {
+            let err = encode_err(&source);
+            assert!(err.contains("scalar position"), "{source}: {err}");
         }
-        // A caller's bound never leaks into a callee's clause either:
-        // the callee keeps the default `STR_BOUND`.
-        let callee_case = format!(
+        // Same cell through the call-site path: the callee's own
+        // clause must be encoded under the callee's declared 128,
+        // not the caller's default 64 — a leaked 64 trips the bound
+        // check before the scalar-position rejection can fire.
+        let callee_bound_case = format!(
+            "atom callee() -> i64 requires: len({lit}) == 100; ensures: result == 0; str_bound: 128; body: {{ 0 }};\n\
+             atom main() -> i64 requires: true; ensures: result == 0; body: {{ callee() }};"
+        );
+        let err = encode_err(&callee_bound_case);
+        assert!(
+            err.contains("scalar position"),
+            "{callee_bound_case}: {err}"
+        );
+        // And the inverse still fails closed at extraction: a callee
+        // with no declared bound cannot use the 100-byte literal, no
+        // matter what the caller declares.
+        let callee_default_case = format!(
             "atom callee() -> i64 requires: len({lit}) == 100; ensures: result == 0; body: {{ 0 }};\n\
              atom main() -> i64 requires: true; ensures: result == 0; str_bound: 128; body: {{ callee() }};"
         );
         assert!(extract_pure_i64_module_contracts(
-            &callee_case,
+            &callee_default_case,
             "m.mm",
             None,
             RefinedAdmission::CompositeV20
