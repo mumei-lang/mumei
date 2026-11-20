@@ -3282,6 +3282,7 @@ fn module_bundle_with_wide_enum_literals_and_merges_rechecks() {
          atom match_lit(f: F) -> i128 requires: true; ensures: result >= 3; body: { match f { F::A(_) => 4, _ => 3 } };\n\
          atom match_wide(f: F) -> i128 requires: true; ensures: true; body: { match f { F::A(x) => x, _ => 3 } };\n\
          atom umerge(g: G) -> u128 requires: true; ensures: true; body: { match g { G::C(x) => x, _ => 7 } };\n\
+         atom if_umerge(b: bool, w: u128) -> u128 requires: true; ensures: result == w || result == 0 - 1; body: { if b { w } else { 0 - 1 } };\n\
          atom main() -> i64 requires: true; ensures: true; body: { 0 };",
     );
     let record = module_record(&bundle);

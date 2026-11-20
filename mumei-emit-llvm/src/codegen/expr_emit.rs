@@ -1135,8 +1135,9 @@ pub(crate) fn hir_int_type_name(
 }
 
 /// The declared int type name of a statement's produced value —
-/// `HirStmt::Expr` delegates to `hir_int_type_name`; any other shape
-/// has no scalar name (`pure-i64-composite/v22` merge widening).
+/// `HirStmt::Expr` delegates to `hir_int_type_name`, a `Block`'s
+/// `tail_expr` is its produced value; any other shape has no scalar
+/// name (`pure-i64-composite/v22` merge widening).
 fn stmt_int_type_name(
     stmt: &HirStmt,
     var_types: &HashMap<String, String>,
@@ -1144,6 +1145,9 @@ fn stmt_int_type_name(
 ) -> Option<String> {
     match stmt {
         HirStmt::Expr(expr) => hir_int_type_name(expr, var_types, module_env),
+        HirStmt::Block { tail_expr, .. } => tail_expr
+            .as_deref()
+            .and_then(|expr| hir_int_type_name(expr, var_types, module_env)),
         _ => None,
     }
 }
