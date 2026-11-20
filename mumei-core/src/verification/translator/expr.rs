@@ -5618,6 +5618,45 @@ pub(crate) fn expr_to_z3<'a>(
                 }
             }
 
+            // `.tag` on a value declared as an enum reads the variant index.
+            // On the finite-ADT encoding it folds the variant testers into a
+            // nested ite; on the Int-tag encoding (recursive / generic /
+            // non-scalar payload / empty) the value already *is* the tag, so
+            // the read returns it unchanged. Runs before the struct-field
+            // path so a struct field literally named `tag` still wins on
+            // struct-typed receivers (infer_expr_enum_name yields None).
+            if field_name == "tag" {
+                if let Some(enum_name) = datatype::infer_expr_enum_name(vc, inner_expr) {
+                    if let Some(enum_def) = vc.module_env.get_enum(&enum_name) {
+                        let base = expr_to_z3(vc, inner_expr, env, solver_opt)?;
+                        let Some(sort) = datatype::enum_datatype_sort(vc, enum_def) else {
+                            // Int-tag encoding: the value already is the tag.
+                            return Ok(base);
+                        };
+                        if let Some(dt) = base.as_datatype() {
+                            let n = enum_def.variants.len();
+                            let mut tag = Int::from_i64(ctx, (n - 1) as i64);
+                            for idx in (0..n - 1).rev() {
+                                let is_v = sort.variants[idx]
+                                    .tester
+                                    .apply(&[&dt])
+                                    .as_bool()
+                                    .ok_or_else(|| {
+                                        MumeiError::verification(format!(
+                                            "enum '{enum_name}' tester is not boolean"
+                                        ))
+                                    })?;
+                                tag = is_v.ite(&Int::from_i64(ctx, idx as i64), &tag);
+                            }
+                            return Ok(tag.into());
+                        }
+                        // Finite-ADT enum whose env value is not a datatype
+                        // (unmodeled source): fall through to the generic
+                        // field resolution rather than returning it as a tag.
+                    }
+                }
+            }
+
             // ネスト構造体のフィールドアクセスを再帰的に解決する。
             //
             // 1段階: v.x → env["__struct_v_x"] or env["v_x"]

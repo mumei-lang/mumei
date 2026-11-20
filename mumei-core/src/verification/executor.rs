@@ -2034,6 +2034,30 @@ fn verify_inner_impl(
         }
     }
 
+    // 2c''. Int-tag enum params carry the variant-index domain: the Int
+    // encoding admits every integer, but only tag values denote a value of
+    // the declared enum — assert `0 <= v < n_variants`, the same domain
+    // fact match injects for the same target. Finite-ADT params are
+    // datatype constants and need no bound.
+    for param in &atom.params {
+        let Some(type_name) = param.type_name.as_deref() else {
+            continue;
+        };
+        let base = module_env.resolve_base_type(type_name);
+        let Some(enum_def) = module_env.get_enum(&base) else {
+            continue;
+        };
+        if datatype::is_finite_adt(enum_def, module_env) {
+            continue;
+        }
+        let Some(v) = env.get(&param.name).and_then(|d| d.as_int()) else {
+            continue;
+        };
+        let n = enum_def.variants.len() as i64;
+        solver.assert(&v.ge(&z3::ast::Int::from_i64(&ctx, 0)));
+        solver.assert(&v.lt(&z3::ast::Int::from_i64(&ctx, n)));
+    }
+
     // 2d. `u64` params: under the `Int` encoding the symbol is unbounded —
     // assert `0 <= v <= u64::MAX` so `a >= 0` and `a < 0` are decided
     // correctly. The `BV(64)` encoding needs no bound (every value is valid;

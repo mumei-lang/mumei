@@ -189,6 +189,20 @@ fn enum_ctor_violation_inside_reachable_match_arm_is_rejected() {
 }
 
 #[test]
+fn enum_tag_reads_verify_on_datatype_and_int_tag_paths() {
+    let output = mumei_verify("tests/test_enum_tag_read.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        ".tag on a bound enum value must read the variant index (datatype) or the tag int (Int-tag):\n{combined}"
+    );
+}
+
+#[test]
 fn enum_ctor_payload_satisfying_field_type_verifies() {
     let output = mumei_verify("tests/test_enum_ctor_refined.mm");
     let combined = format!(
