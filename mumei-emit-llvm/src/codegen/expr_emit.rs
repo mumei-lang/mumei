@@ -2634,6 +2634,7 @@ pub(crate) fn compile_hir_expr<'a>(
                         &arm.pattern,
                         target_val,
                         &mut guard_vars,
+                        &mut guard_var_types,
                         module_env,
                         enum_hint.as_deref(),
                     )?;
@@ -2674,6 +2675,7 @@ pub(crate) fn compile_hir_expr<'a>(
                     &arm.pattern,
                     target_val,
                     &mut arm_vars,
+                    &mut arm_var_types,
                     module_env,
                     enum_hint.as_deref(),
                 )?;

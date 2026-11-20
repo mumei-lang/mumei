@@ -136,3 +136,14 @@ fn composite_payload_leaf_reads_lower_to_extractvalue() {
         "expected composite leaf reads as extractvalue\n{ir}"
     );
 }
+
+#[test]
+fn composite_payload_u64_leaf_compares_unsigned() {
+    // The match-bound `p` records `UPoint` in `var_types`, so `p.x > 0`
+    // on a `u64` leaf lowers to an unsigned compare.
+    let ir = emit_atom_ir(&fixture("test_enum_composite_payload.mm"), "uread", "u");
+    assert!(
+        ir.contains("icmp ugt"),
+        "expected an unsigned compare on the u64 leaf\n{ir}"
+    );
+}

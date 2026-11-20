@@ -53,3 +53,25 @@ body: {
         _ => 0
     }
 };
+
+struct UPoint {
+    x: u64,
+    y: u64
+}
+
+enum UEvent {
+    UPing,
+    UMove(pos: UPoint)
+}
+
+// A `u64` payload leaf compares unsigned — `p.x > 0` must not lower
+// to a signed `icmp sgt`.
+atom uread(e: UEvent) -> i64
+requires: true;
+ensures: result == result;
+body: {
+    match e {
+        UEvent::UMove(p) => if p.x > 0 { 1 } else { 0 },
+        _ => 0
+    }
+};
