@@ -509,6 +509,123 @@ fn requirement_list_empty_or_oversized_is_a_static_failure() {
     assert!(!output.status.success());
 }
 
+fn accept_requirement_list_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let (dir, record, requirement, _source) = fixture();
+    let saved: Value = serde_json::from_slice(&fs::read(&requirement).unwrap()).unwrap();
+    let requirement_list = dir.path().join("FAKE_PRIVATE_REQUIREMENT_LIST.json");
+    fs::write(
+        &requirement_list,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": "mumei.evidence-requirement-list/v1",
+            "requirements": [saved],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    (dir, record, requirement_list)
+}
+
+fn accept_requirement_list_command(record: &Path, requirement_list: &Path, json: bool) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mumei"));
+    cmd.args(["evidence", "accept"])
+        .arg(record)
+        .arg("--requirement-list")
+        .arg(requirement_list);
+    if json {
+        cmd.arg("--json");
+    }
+    cmd
+}
+
+#[test]
+fn accept_requirement_list_all_accepted_emits_accepted() {
+    let (_dir, record, requirement_list) = accept_requirement_list_fixture();
+    let output = accept_requirement_list_command(&record, &requirement_list, true)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let doc: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        doc["schema_version"],
+        "mumei.evidence-requirement-list-acceptance/v1"
+    );
+    assert_eq!(doc["verdict"], "accepted");
+    assert_eq!(doc["requirements_evaluated"], 1);
+    assert_eq!(doc["records_evaluated"], 1);
+    assert_eq!(doc["consistent"], true);
+    assert_eq!(doc["conflict_count"], 0);
+    // A single record pins as evidence_fingerprint with the record schema,
+    // never as a list envelope.
+    assert_eq!(
+        doc["evidence_schema_version"],
+        "mumei.verification-evidence/v1"
+    );
+    assert_eq!(
+        doc["evidence_fingerprint"],
+        json!(format!("{:x}", Sha256::digest(fs::read(&record).unwrap())))
+    );
+    assert!(doc["list_fingerprint"].is_null());
+    assert!(doc["checks_performed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c == "conjunctive_requirement_fold"));
+}
+
+#[test]
+fn accept_requirement_list_one_rejected_requirement_rejects() {
+    let (_dir, record, requirement_list) = accept_requirement_list_fixture();
+    rewrite_list(&requirement_list, |doc| {
+        let mut bad = doc["requirements"][0].clone();
+        bad["subject_sha256"] = json!("0".repeat(64));
+        doc["requirements"].as_array_mut().unwrap().push(bad);
+    });
+    let output = accept_requirement_list_command(&record, &requirement_list, true)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let doc: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doc["verdict"], "rejected");
+}
+
+#[test]
+fn accept_requires_a_requirement_declaration() {
+    let (_dir, record, _requirement, _source) = fixture();
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args(["evidence", "accept"])
+        .arg(&record)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("FAKE_PRIVATE"), "{stderr}");
+}
+
+#[test]
+fn accept_requirement_and_requirement_list_are_exclusive() {
+    let (_dir, record, requirement, _source) = fixture();
+    let requirement_list = _dir.path().join("FAKE_PRIVATE_REQUIREMENT_LIST.json");
+    fs::write(
+        &requirement_list,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": "mumei.evidence-requirement-list/v1",
+            "requirements": [serde_json::from_slice::<Value>(&fs::read(&requirement).unwrap()).unwrap()],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mumei"))
+        .args(["evidence", "accept"])
+        .arg(&record)
+        .arg("--requirement")
+        .arg(&requirement)
+        .arg("--requirement-list")
+        .arg(&requirement_list)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
 #[test]
 fn requirement_and_requirement_list_are_exclusive() {
     let (_dir, list, requirement) = list_fixture();

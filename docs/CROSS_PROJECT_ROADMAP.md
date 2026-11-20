@@ -5969,7 +5969,16 @@ inconclusive — and cross-record inconsistency still demotes accepted
 verdicts. Emitted as
 `mumei.evidence-requirement-list-acceptance/v1` with per-requirement
 verdicts, per-requirement fingerprints and per-record verdicts, under
-an added `conjunctive_requirement_fold` performed check. This is the
+an added `conjunctive_requirement_fold` performed check.
+
+`accept` accepts the same `--requirement-list` declaration against a
+single Evidence record: every requirement evaluates against that record
+and folds conjunctively the same way; a single record can never be
+self-inconsistent, so the descriptor still reports `consistent: true`
+with zero conflicts. The emitted descriptor pins the input under
+`evidence_fingerprint` with `evidence_schema_version`
+`mumei.verification-evidence/v1` — the record pin is not relabelled as
+a list envelope. This is the
 requirement-list substrate a grade promotion gate would consume;
 promotion itself remains open (mumei#1168).
 
