@@ -44,15 +44,67 @@ pub(crate) fn pattern_to_z3_condition<'a>(
             // selectors — so a `Str` field binds as a Z3 `String` and a field
             // pattern like `"x"` can actually constrain it.
             if target.as_datatype().is_some() {
-                if let Some((sort, is_v, variant_idx)) =
+                if let Some((sort, is_v, variant_idx, enum_def)) =
                     datatype::variant_tester_condition(vc, target, variant_name)
                 {
                     let mut field_conditions: Vec<Bool> = vec![is_v];
                     // arity comes from the matched sort's accessors — the sort
                     // already disambiguates same-named variants across enums.
+                    let enum_def = Some(enum_def);
                     for (i, field_pattern) in fields.iter().enumerate() {
+                        // A struct-typed payload flattens into `width`
+                        // consecutive accessor leaves; the bound symbol is a
+                        // fresh struct handle over the selector applies.
+                        let (off, width) = enum_def
+                            .and_then(|edef| {
+                                datatype::payload_leaf_range(edef, vc.module_env, variant_idx, i)
+                            })
+                            .unwrap_or((i, 1));
+                        let sdef = enum_def.and_then(|edef| {
+                            let ft = &edef.variants[variant_idx].field_types[i].name;
+                            vc.module_env
+                                .structs
+                                .get(&vc.module_env.resolve_base_type(ft))
+                        });
+                        if let Some(sdef) = sdef {
+                            let mut leaves: Vec<(String, Dynamic)> = Vec::with_capacity(width);
+                            for j in off..off + width {
+                                let leaf =
+                                    datatype::variant_selector_apply(&sort, variant_idx, j, target)
+                                        .unwrap_or_else(|| {
+                                            Int::new_const(
+                                                ctx,
+                                                format!("__proj_{}_{}_{}", variant_leaf, i, j)
+                                                    .as_str(),
+                                            )
+                                            .into()
+                                        });
+                                leaves.push((sdef.fields[j - off].name.clone(), leaf));
+                            }
+                            let handle = crate::verification::translator::fresh_struct_handle(
+                                ctx, &sdef.name,
+                            );
+                            let handle_name = handle.decl().name();
+                            crate::verification::translator::bind_struct_fields(
+                                env,
+                                &handle_name,
+                                &leaves,
+                            );
+                            env.insert(format!("__proj_{}_{}", variant_leaf, i), handle.clone());
+                            match field_pattern {
+                                Pattern::Variable(_) | Pattern::Wildcard => {
+                                    field_conditions.push(Bool::from_bool(ctx, true));
+                                }
+                                _ => {
+                                    return Err(MumeiError::verification(format!(
+                                        "match pattern on composite payload field '{variant_name}.{i}' must be a variable or '_'"
+                                    )));
+                                }
+                            }
+                            continue;
+                        }
                         let field_sym: Dynamic =
-                            datatype::variant_selector_apply(&sort, variant_idx, i, target)
+                            datatype::variant_selector_apply(&sort, variant_idx, off, target)
                                 .unwrap_or_else(|| {
                                     Int::new_const(
                                         ctx,
@@ -203,16 +255,71 @@ pub(crate) fn pattern_bind_variables<'a>(
             // selectors so the bound symbol carries the payload's real sort
             // (String/Real/Bool), not an unconstrained Int projector.
             if target.as_datatype().is_some() {
-                if let Some((sort, _is_v, variant_idx)) =
+                if let Some((sort, _is_v, variant_idx, enum_def)) =
                     datatype::variant_tester_condition(vc, target, variant_name)
                 {
                     {
+                        let enum_def = Some(enum_def);
                         for (i, field_pattern) in fields.iter().enumerate() {
-                            if i >= sort.variants[variant_idx].accessors.len() {
+                            let (off, width) = enum_def
+                                .and_then(|edef| {
+                                    datatype::payload_leaf_range(
+                                        edef,
+                                        vc.module_env,
+                                        variant_idx,
+                                        i,
+                                    )
+                                })
+                                .unwrap_or((i, 1));
+                            let sdef = enum_def.and_then(|edef| {
+                                let ft = &edef.variants[variant_idx].field_types[i].name;
+                                vc.module_env
+                                    .structs
+                                    .get(&vc.module_env.resolve_base_type(ft))
+                            });
+                            if let Some(sdef) = sdef {
+                                // Composite payload: bind a fresh struct
+                                // handle whose leaves are the selector
+                                // applies, under both the handle's decl
+                                // name and any bound variable name.
+                                let mut leaves: Vec<(String, Dynamic)> = Vec::with_capacity(width);
+                                for j in off..off + width {
+                                    let Some(leaf) = datatype::variant_selector_apply(
+                                        &sort,
+                                        variant_idx,
+                                        j,
+                                        target,
+                                    ) else {
+                                        continue;
+                                    };
+                                    leaves.push((sdef.fields[j - off].name.clone(), leaf));
+                                }
+                                if leaves.len() != width {
+                                    continue;
+                                }
+                                let handle = crate::verification::translator::fresh_struct_handle(
+                                    ctx, &sdef.name,
+                                );
+                                let handle_name = handle.decl().name();
+                                crate::verification::translator::bind_struct_fields(
+                                    env,
+                                    &handle_name,
+                                    &leaves,
+                                );
+                                env.insert(
+                                    format!("__proj_{}_{}", variant_leaf, i),
+                                    handle.clone(),
+                                );
+                                if let Pattern::Variable(fname) = field_pattern {
+                                    crate::verification::translator::bind_struct_fields(
+                                        env, fname, &leaves,
+                                    );
+                                    env.insert(fname.clone(), handle.clone());
+                                }
                                 continue;
                             }
                             let Some(field_sym) =
-                                datatype::variant_selector_apply(&sort, variant_idx, i, target)
+                                datatype::variant_selector_apply(&sort, variant_idx, off, target)
                             else {
                                 continue;
                             };

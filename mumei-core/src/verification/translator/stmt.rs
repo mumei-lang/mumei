@@ -916,7 +916,7 @@ fn enum_field_assign<'a>(
         return Ok(None);
     };
     let variant_name = edef.variants[vidx].name.clone();
-    let Some((sort, is_v, _)) = datatype::variant_tester_condition(vc, &target, &variant_name)
+    let Some((sort, is_v, _, _)) = datatype::variant_tester_condition(vc, &target, &variant_name)
     else {
         return Ok(None);
     };
@@ -936,14 +936,43 @@ fn enum_field_assign<'a>(
         }
     }
     let val = expr_to_z3(vc, value, env, solver_opt)?;
-    // The written value must agree with the accessor's sort.
-    if let Some(sel) = datatype::variant_selector_apply(&sort, vidx, fidx, &target) {
-        if val.get_sort() != sel.get_sort() {
-            return Err(MumeiError::type_error(format!(
-                "enum field '{var}' has type {} but value has type {}",
-                sel.get_sort(),
-                val.get_sort()
-            )));
+    // A struct-typed payload slot flattens into `width` consecutive
+    // accessor leaves; the write consumes the value's projected leaves
+    // one-for-one. Scalar slots keep the single-accessor check.
+    let (leaf_off, leaf_width) =
+        datatype::payload_leaf_range(edef, vc.module_env, vidx, fidx).unwrap_or((fidx, 1));
+    let composite_sdef = vc.module_env.structs.get(
+        &vc.module_env
+            .resolve_base_type(&edef.variants[vidx].field_types[fidx].name),
+    );
+    let val_leaves: Vec<Dynamic> = if let Some(sdef) = composite_sdef {
+        match crate::verification::translator::struct_fields_of_value(env, &val, sdef) {
+            Some(fields) => fields.into_iter().map(|(_, v)| v).collect(),
+            None => {
+                return Err(MumeiError::type_error(format!(
+                    "enum field '{var}' expects a struct value"
+                )))
+            }
+        }
+    } else {
+        vec![val.clone()]
+    };
+    if val_leaves.len() != leaf_width {
+        return Err(MumeiError::type_error(format!(
+            "enum field '{var}' has {} payload leaves but the value supplies {}",
+            leaf_width,
+            val_leaves.len()
+        )));
+    }
+    for (j, leaf) in val_leaves.iter().enumerate() {
+        if let Some(sel) = datatype::variant_selector_apply(&sort, vidx, leaf_off + j, &target) {
+            if leaf.get_sort() != sel.get_sort() {
+                return Err(MumeiError::type_error(format!(
+                    "enum field '{var}' leaf {j} has type {} but value has type {}",
+                    sel.get_sort(),
+                    leaf.get_sort()
+                )));
+            }
         }
     }
     // A payload declared with a refined-alias type must satisfy the
@@ -984,23 +1013,36 @@ fn enum_field_assign<'a>(
             }
         }
     }
-    // Rebuild `e = V(sel_0(e),…,v,…)` so every accessor agrees with
-    // the written slot and the untouched payload bits.
-    let field_count = edef.variants[vidx].fields.len();
-    let mut args: Vec<Dynamic> = Vec::with_capacity(field_count);
-    for i in 0..field_count {
+    // Rebuild `e = V(sel_0(e),…,v,…)` at the flattened leaf arity so
+    // every accessor agrees with the written slot and the untouched
+    // payload bits — composite fields contribute their selector leaves.
+    let variant = &edef.variants[vidx];
+    let total_leaves: usize = variant
+        .field_types
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            datatype::payload_leaf_range(edef, vc.module_env, vidx, i)
+                .map(|(_, w)| w)
+                .unwrap_or(1)
+        })
+        .sum();
+    let mut leaf_args: Vec<Dynamic> = Vec::with_capacity(total_leaves);
+    for i in 0..variant.field_types.len() {
+        let (off, width) =
+            datatype::payload_leaf_range(edef, vc.module_env, vidx, i).unwrap_or((i, 1));
         if i == fidx {
-            args.push(val.clone());
+            leaf_args.extend(val_leaves.iter().cloned());
         } else {
-            let Some(sel) = datatype::variant_selector_apply(&sort, vidx, i, &target) else {
-                return Ok(None);
-            };
-            args.push(sel);
+            for j in off..off + width {
+                let Some(sel) = datatype::variant_selector_apply(&sort, vidx, j, &target) else {
+                    return Ok(None);
+                };
+                leaf_args.push(sel);
+            }
         }
     }
-    let Some(rebuilt) =
-        datatype::enum_ctor_apply(vc, &format!("{type_name}::{variant_name}"), &args)?
-    else {
+    let Some(rebuilt) = datatype::enum_ctor_apply_leaves(vc, edef, vidx, &leaf_args) else {
         return Ok(None);
     };
     env.insert(base.to_string(), rebuilt);

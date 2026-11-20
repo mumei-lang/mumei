@@ -1938,7 +1938,7 @@ pub(crate) fn expr_to_z3<'a>(
             // finite ADT (e.g. `Red` for `enum Color { Red, Green, Blue }`)
             // constructs the datatype value.
             if name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                if let Some(value) = datatype::enum_ctor_apply(vc, name, &[])? {
+                if let Some(value) = datatype::enum_ctor_apply(vc, env, name, &[])? {
                     return Ok(value);
                 }
             }
@@ -3350,7 +3350,9 @@ pub(crate) fn expr_to_z3<'a>(
                                     }
                                 }
                             }
-                            if let Some(value) = datatype::enum_ctor_apply(vc, name, &ctor_args)? {
+                            if let Some(value) =
+                                datatype::enum_ctor_apply(vc, env, name, &ctor_args)?
+                            {
                                 return Ok(value);
                             }
                             // A resolved enum+variant whose construction still
@@ -5583,9 +5585,12 @@ pub(crate) fn expr_to_z3<'a>(
                     && vc.module_env.enums.contains_key(name)
                     && datatype::is_finite_adt(vc.module_env.get_enum(name).unwrap(), vc.module_env)
                 {
-                    if let Some(value) =
-                        datatype::enum_ctor_apply(vc, &format!("{}::{}", name, field_name), &[])?
-                    {
+                    if let Some(value) = datatype::enum_ctor_apply(
+                        vc,
+                        env,
+                        &format!("{}::{}", name, field_name),
+                        &[],
+                    )? {
                         return Ok(value);
                     }
                 }
