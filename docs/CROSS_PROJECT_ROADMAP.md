@@ -6140,6 +6140,32 @@ reasons and the fallback origin — mirroring the `verify-plan` CLI
 and redacted errors. Planning only: nothing is spawned, dispatched or
 accepted.
 
+### Forward goto in the Go dataflow walker (mumei-agent #1004)
+
+[mumei-agent#1004](https://github.com/mumei-lang/mumei-agent/pull/1004)
+admits a forward `goto` inside `dataflow_facts` walks: an env carried at
+the goto site is recorded per label and merged into the facts env where
+the label lands, so may-assignments still union across the skipped
+region instead of dropping the label-side state. A backward `goto`
+(re-creating the loop the CFG model cannot see) stays unsupported, as
+does a label the walker never reaches.
+
+### Labelled jumps and goto in summary bodies (mumei-agent #1005)
+
+[mumei-agent#1005](https://github.com/mumei-lang/mumei-agent/pull/1005)
+admits `break L`/`continue L` and `goto` in `go_interprocedural` summary
+bodies under the existing may-assignment over-approximation: a label
+pushed by `labeled_statement` is consumed only by the `for`/`switch`/
+`select` frame directly underneath, a labelled `break`/`continue` marks
+every frame from its named target inward `exited`, and `goto` marks all
+open frames exited plus a function-level flag — the walker does not
+resolve targets, so statements between a jump and its label are covered
+by the conservative may-write model either way. A goto to an already-
+seen label (a backward jump, i.e. a loop the frame model cannot
+represent) stays closed, per-pass label state resets before every loop
+fixed-point re-walk and fallthrough double walk, and `defer`/`go` or an
+unresolvable target remain outside the fragment.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
