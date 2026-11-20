@@ -214,6 +214,11 @@ fn enum_tag_in_callee_contract_uses_callee_enum() {
         !output.status.success() && combined.contains("caller"),
         "a callee's `.tag` must resolve the callee's enum, not a same-named caller binding — `caller`'s `result == 0` must be rejected:\n{combined}"
     );
+    assert!(
+        combined.contains("'caller_struct': verified")
+            || combined.contains("'caller_struct': skipped"),
+        "a callee's struct param must shadow a caller's same-named enum binding — `caller_struct`'s `h.v.tag` must resolve `Holder.v: Ev` and verify:\n{combined}"
+    );
 }
 
 #[test]

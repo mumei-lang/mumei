@@ -266,6 +266,12 @@ pub(crate) struct VCtx<'a> {
     /// unconstrained result instead of instantiating the contract again, which
     /// only drops assumptions and keeps call lowering finite.
     pub(crate) contracts_in_instantiation: std::cell::RefCell<Vec<String>>,
+    /// `(name, declared type)` of the params of each atom whose contract is
+    /// being instantiated, innermost last. While a callee's contract is
+    /// lowered, its parameter names must resolve to the callee's declared
+    /// types — `binding_declared_type` consults this before
+    /// `current_atom.params`, which still names the caller.
+    pub(crate) instantiation_params: std::cell::RefCell<Vec<(String, Option<String>)>>,
     /// Congruent recursive-contract state (see `RecursionCtx`). Disabled
     /// everywhere except `verify_inner`'s main VCtx.
     pub(crate) recursion: RecursionCtx<'a>,
@@ -432,42 +438,76 @@ impl<'a> VCtx<'a> {
             .borrow_mut()
             .push(atom.name.clone());
         // The callee's contract re-resolves its parameter names — seed its
-        // enum-typed params over the caller's same-named bindings so
-        // `.tag`/match owner resolution uses the callee's declared enum,
-        // not whatever the caller happened to name `e`.
+        // params over the caller's same-named bindings so `.tag`/match owner
+        // resolution and field-chain typing use the callee's declared types,
+        // not whatever the caller happened to name `h`. Every param shadows:
+        // a non-enum callee param must still clear a caller enum entry of the
+        // same name, and likewise for structs.
         let mut saved = Vec::new();
         {
-            let mut locals = self.local_enum_types.borrow_mut();
+            let mut enums = self.local_enum_types.borrow_mut();
+            let mut structs = self.local_struct_types.borrow_mut();
+            let mut params = self.instantiation_params.borrow_mut();
             for param in &atom.params {
-                let Some(type_name) = param.type_name.as_deref() else {
-                    continue;
+                params.push((param.name.clone(), param.type_name.clone()));
+                let base = param
+                    .type_name
+                    .as_deref()
+                    .map(|t| self.module_env.resolve_base_type(t));
+                let prev_enum = match base.as_deref() {
+                    Some(b) if self.module_env.get_enum(b).is_some() => {
+                        enums.insert(param.name.clone(), b.to_string())
+                    }
+                    _ => enums.remove(&param.name),
                 };
-                let base = self.module_env.resolve_base_type(type_name);
-                if self.module_env.get_enum(&base).is_some() {
-                    saved.push((param.name.clone(), locals.insert(param.name.clone(), base)));
-                }
+                let prev_struct = match base.as_deref() {
+                    Some(b) if self.module_env.get_struct(b).is_some() => {
+                        structs.insert(param.name.clone(), b.to_string())
+                    }
+                    _ => structs.remove(&param.name),
+                };
+                saved.push((param.name.clone(), prev_enum, prev_struct));
             }
         }
-        ContractInstantiationGuard { vc: self, saved }
+        ContractInstantiationGuard {
+            vc: self,
+            saved,
+            params_pushed: atom.params.len(),
+        }
     }
 }
 
 pub(crate) struct ContractInstantiationGuard<'v, 'a> {
     vc: &'v VCtx<'a>,
-    saved: Vec<(String, Option<String>)>,
+    saved: Vec<(String, Option<String>, Option<String>)>,
+    params_pushed: usize,
 }
 
 impl Drop for ContractInstantiationGuard<'_, '_> {
     fn drop(&mut self) {
         let _ = self.vc.contracts_in_instantiation.borrow_mut().pop();
-        let mut locals = self.vc.local_enum_types.borrow_mut();
-        for (name, old) in self.saved.drain(..) {
-            match old {
+        {
+            let mut params = self.vc.instantiation_params.borrow_mut();
+            let keep = params.len().saturating_sub(self.params_pushed);
+            params.truncate(keep);
+        }
+        let mut enums = self.vc.local_enum_types.borrow_mut();
+        let mut structs = self.vc.local_struct_types.borrow_mut();
+        for (name, old_enum, old_struct) in self.saved.drain(..) {
+            match old_enum {
                 Some(prev) => {
-                    locals.insert(name, prev);
+                    enums.insert(name.clone(), prev);
                 }
                 None => {
-                    locals.remove(&name);
+                    enums.remove(&name);
+                }
+            }
+            match old_struct {
+                Some(prev) => {
+                    structs.insert(name, prev);
+                }
+                None => {
+                    structs.remove(&name);
                 }
             }
         }

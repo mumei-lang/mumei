@@ -525,10 +525,22 @@ fn target_param_enum_name(vc: &VCtx, target: &Dynamic) -> Option<String> {
     for (pos, _) in sym.match_indices('_') {
         let (binding, path) = sym.split_at(pos);
         let path = &path[1..];
-        let Some(param) = atom.params.iter().find(|p| p.name == binding) else {
-            continue;
-        };
-        let Some(struct_name) = param.type_name.as_deref().map(type_name_base) else {
+        // A callee param being instantiated shadows the current atom's
+        // same-named parameter for the field-path walk as well.
+        let param_ty = vc
+            .instantiation_params
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(n, _)| n == binding)
+            .and_then(|(_, ty)| ty.clone())
+            .or_else(|| {
+                atom.params
+                    .iter()
+                    .find(|p| p.name == binding)
+                    .and_then(|p| p.type_name.clone())
+            });
+        let Some(struct_name) = param_ty.as_deref().map(type_name_base) else {
             continue;
         };
         if let Some(field_ty) = field_type_at_path(vc.module_env, struct_name, path) {
@@ -573,6 +585,17 @@ pub(crate) fn binding_declared_type(vc: &VCtx, name: &str) -> Option<String> {
         .get(name)
         .cloned()
         .or_else(|| vc.local_struct_types.borrow().get(name).cloned())
+        .or_else(|| {
+            // A name a callee declares wins over a same-named parameter of
+            // the current atom while that callee's contract is instantiated
+            // (`current_atom.params` still belongs to the caller).
+            vc.instantiation_params
+                .borrow()
+                .iter()
+                .rev()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, ty)| ty.clone())
+        })
         .or_else(|| {
             atom.and_then(|a| {
                 a.params

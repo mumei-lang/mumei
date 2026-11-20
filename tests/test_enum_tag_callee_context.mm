@@ -23,3 +23,19 @@ atom main() -> i64
     body: {
         0
     }
+enum Ev { A, B }
+struct Holder {
+    v: Ev
+}
+atom callee_struct_tag(h: Holder) -> i64
+    requires: true;
+    ensures: result == h.v.tag;
+    body: {
+        h.v.tag
+    }
+atom caller_struct(h: Ev, s: Holder) -> i64
+    requires: s.v.tag == 1;
+    ensures: result == 1;
+    body: {
+        callee_struct_tag(s)
+    }

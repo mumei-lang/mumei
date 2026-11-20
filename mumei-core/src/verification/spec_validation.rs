@@ -551,6 +551,7 @@ pub(crate) fn validation_ctx<'a>(
         call_result_lens: std::cell::RefCell::new(std::collections::HashMap::new()),
         call_result_fields: Default::default(),
         contracts_in_instantiation: std::cell::RefCell::new(Vec::new()),
+        instantiation_params: std::cell::RefCell::new(Vec::new()),
         recursion: Default::default(),
         quantifier_binders: Default::default(),
         call_result_symbols: Default::default(),
