@@ -981,25 +981,7 @@ unsafe fn aggregate_fields(ty: LLVMTypeRef) -> Option<u32> {
     let mut leaves = 0u32;
     for i in 0..count {
         let element = LLVMStructGetTypeAtIndex(ty, i);
-        leaves = leaves.checked_add(match aggregate_fields(element) {
-            Some(inner) => inner,
-            None if LLVMGetTypeKind(element) == LLVMTypeKind::LLVMIntegerTypeKind
-                && LLVMGetIntTypeWidth(element) == 64 =>
-            {
-                1
-            }
-            // An `i128` element is one 128-bit leaf — two consecutive
-            // 64-bit ABI slots (`pure-i64-composite/v21`).
-            None if LLVMGetTypeKind(element) == LLVMTypeKind::LLVMIntegerTypeKind
-                && LLVMGetIntTypeWidth(element) == 128 =>
-            {
-                2
-            }
-            // A `double` element is one pass-through `f64` leaf slot
-            // (`pure-i64-composite/v11`).
-            None if LLVMGetTypeKind(element) == LLVMTypeKind::LLVMDoubleTypeKind => 1,
-            None => return None,
-        })?;
+        leaves = leaves.checked_add(element_leaf_span(element)?)?;
         // Leaf-first flattening bounds the shape the same way the
         // fragment's flattened signatures bound a composite param: at
         // most 16 leaf slots.
@@ -1010,10 +992,33 @@ unsafe fn aggregate_fields(ty: LLVMTypeRef) -> Option<u32> {
     Some(leaves)
 }
 
+/// The leaf span one struct element contributes — the same per-element
+/// count `aggregate_fields` sums: a nested aggregate flattens to its
+/// own leaf count, an `i128` element is one 128-bit leaf (two
+/// consecutive 64-bit ABI slots, `pure-i64-composite/v21`), a
+/// `double` or `i64` element one slot. `aggregate_leaf_range` walks
+/// these spans so an `insertvalue` targets the same leaves the
+/// signature flattens to.
+unsafe fn element_leaf_span(element: LLVMTypeRef) -> Option<u32> {
+    if let Some(inner) = aggregate_fields(element) {
+        return Some(inner);
+    }
+    match LLVMGetTypeKind(element) {
+        LLVMTypeKind::LLVMIntegerTypeKind => match LLVMGetIntTypeWidth(element) {
+            64 => Some(1),
+            128 => Some(2),
+            _ => None,
+        },
+        LLVMTypeKind::LLVMDoubleTypeKind => Some(1),
+        _ => None,
+    }
+}
+
 /// The leaf range struct element `index` of an admitted aggregate
 /// spans: `aggregate_fields` flattens `{inner: {a, b}, c}` to
-/// `[a, b, c]`, so element 0 covers leaves 0..2. A non-admitted type
-/// or an out-of-range index fails closed.
+/// `[a, b, c]`, so element 0 covers leaves 0..2, and `{a: i64, b: i128}`
+/// puts element 1 at leaves 1..3. A non-admitted type or an
+/// out-of-range index fails closed.
 unsafe fn aggregate_leaf_range(ty: LLVMTypeRef, index: u32) -> Option<(usize, usize)> {
     // A `{i64, i1}` `with.overflow` result: leaf `index` spans itself.
     if overflow_pair(ty) {
@@ -1024,7 +1029,7 @@ unsafe fn aggregate_leaf_range(ty: LLVMTypeRef, index: u32) -> Option<(usize, us
     }
     let mut offset = 0usize;
     for i in 0..=index {
-        let span = aggregate_fields(LLVMStructGetTypeAtIndex(ty, i)).unwrap_or(1) as usize;
+        let span = element_leaf_span(LLVMStructGetTypeAtIndex(ty, i))? as usize;
         if i == index {
             return Some((offset, span));
         }
@@ -1873,6 +1878,16 @@ unsafe fn check_function(
                     let ok = match (kinds.as_deref(), range) {
                         (Some(kinds), Some((offset, span))) if offset + span <= kinds.len() => {
                             match leaf_is_double(inserted) {
+                                // A 128-bit leaf inserts across its two
+                                // ABI slots — both non-`double`
+                                // (`pure-i64-composite/v21`).
+                                Some(_)
+                                    if LLVMGetTypeKind(inserted)
+                                        == LLVMTypeKind::LLVMIntegerTypeKind
+                                        && LLVMGetIntTypeWidth(inserted) == 128 =>
+                                {
+                                    span == 2 && kinds[offset..offset + span] == [false, false]
+                                }
                                 Some(d) => span == 1 && kinds[offset] == d,
                                 None => aggregate_leaf_doubles(inserted)
                                     .map(|inner| inner == kinds[offset..offset + span])
@@ -2342,21 +2357,26 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
             let element = LLVMGetOperand(value, i);
             if aggregate_fields(LLVMTypeOf(element)).is_some() {
                 self.constant_leaves(element, out);
-            } else if LLVMIsUndef(element) != 0 || LLVMIsPoison(element) != 0 {
-                out.push(None);
-            } else if !LLVMIsAConstantInt(element).is_null()
+            } else if LLVMGetTypeKind(LLVMTypeOf(element)) == LLVMTypeKind::LLVMIntegerTypeKind
                 && LLVMGetIntTypeWidth(LLVMTypeOf(element)) == 128
             {
                 // An `i128` element flattens to its two ABI slots
-                // (`lo`, `hi`); an unparsable form stays undefined and
-                // fails closed on read.
-                match const_i128(self.ctx, element) {
-                    Ok(v) => {
-                        out.push(Some(v.extract(63, 0)));
-                        out.push(Some(v.extract(127, 64)));
+                // (`lo`, `hi`); undef/poison and an unparsable form
+                // stay undefined and fail closed on read
+                // (`pure-i64-composite/v21`).
+                if LLVMIsUndef(element) != 0 || LLVMIsPoison(element) != 0 {
+                    out.extend([None, None]);
+                } else {
+                    match const_i128(self.ctx, element) {
+                        Ok(v) => {
+                            out.push(Some(v.extract(63, 0)));
+                            out.push(Some(v.extract(127, 64)));
+                        }
+                        Err(_) => out.extend([None, None]),
                     }
-                    Err(_) => out.extend([None, None]),
                 }
+            } else if LLVMIsUndef(element) != 0 || LLVMIsPoison(element) != 0 {
+                out.push(None);
             } else if !LLVMIsAConstantFP(element).is_null() {
                 let mut loses = 0;
                 out.push(Some(BV::from_u64(
@@ -3023,10 +3043,26 @@ impl<'ctx, 'renames> IrEncoder<'ctx, 'renames> {
                     Some((name, args)) => {
                         let refs: Vec<&dyn z3::ast::Ast> =
                             args.iter().map(|v| v as &dyn z3::ast::Ast).collect();
-                        mumei_core::semantic_contract::call_decl(self.ctx, &name, args.len())
-                            .apply(&refs)
-                            .as_bv()
-                            .ok_or(ValidationError("unsupported LLVM call result"))?
+                        if width(LLVMTypeOf(inst))? == 128 {
+                            // A 128-bit call result is two field slots —
+                            // the same uninterpreted applications the
+                            // source encoder makes for a wide result
+                            // (`pure-i64-composite/v21`).
+                            let slots = (0..2)
+                                .map(|i| {
+                                    call_field_decl(self.ctx, &name, args.len(), i)
+                                        .apply(&refs)
+                                        .as_bv()
+                                        .ok_or(ValidationError("unsupported LLVM call result"))
+                                })
+                                .collect::<Result<Vec<_>>>()?;
+                            aggregate_value(&slots)
+                        } else {
+                            mumei_core::semantic_contract::call_decl(self.ctx, &name, args.len())
+                                .apply(&refs)
+                                .as_bv()
+                                .ok_or(ValidationError("unsupported LLVM call result"))?
+                        }
                     }
                 }
             } else {
