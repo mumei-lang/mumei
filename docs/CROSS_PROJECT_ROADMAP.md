@@ -6244,6 +6244,24 @@ the root's group with the appended elements' own tokens unioned in.
 A deep array argument (`[1][1][]int64`) shares caller memory through
 the same path.
 
+### Scalar-element container parameters (mumei-agent #1013)
+
+[mumei-agent#1013](https://github.com/mumei-lang/mumei-agent/pull/1013)
+admits scalar-element container *parameters* and results: a `[]T`,
+`map[K]T`, `[N]T` (and nested) signature slot no longer closes the
+function's summary at the signature gate. Every such param seeds a
+backing at entry; params that can share caller memory (slice, map,
+pointer-element array) join ONE share group (`G(a, a)` is honest),
+while a pure `[N]int64` keeps a solo group. `a[i] = x` on a
+shared-group param accumulates into the param's dep set, and a set
+grown past its seed records a `/caller-backing` write so the callee's
+`effects` reports unknown and the caller folds the stored deps into
+the argument's sharers — `func G(s []int64, v int64) { s[0] = v }
+func F(a []int64, x int64) int64 { G(a, x); return a[0] }` →
+`{0, 1}`. A `[]int64` result seeds the callee's own group, and a
+direct-local call result aliases the declared `return_dependencies`
+slots — `t := G(a)` joins `a`'s group.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
