@@ -222,6 +222,43 @@ fn enum_tag_in_callee_contract_uses_callee_enum() {
 }
 
 #[test]
+fn enum_nested_composite_payload_leaves_verify() {
+    let output = mumei_verify("tests/test_enum_nested_payload.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "a payload whose declared type is itself a struct must flatten into per-leaf bindings (b.inner.x) on ctor, match binding and field-assign paths:\n{combined}"
+    );
+}
+
+#[test]
+fn enum_nested_payload_dag_stays_bounded() {
+    // A 30-level payload where every struct has two identical children
+    // would take 2^30 leaf-walk visits — and all leaves are empty
+    // structs, so the leaf cap alone never trips. The visit budget must
+    // fail the flattening closed instead of hanging verification.
+    let output = mumei_verify("tests/test_enum_nested_dag.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("leaf-walk visit budget"),
+        "the visit-budget rejection must be observable — otherwise the test cannot tell the bounded walk ran:\n{combined}"
+    );
+    assert!(
+        combined.contains("'dag_probe': verified")
+            || combined.contains("'dag_probe': skipped"),
+        "a deep shared-subtree payload must fail the flattening closed (scalar fallback), not hang or error:\n{combined}"
+    );
+}
+
+#[test]
 fn enum_ctor_payload_satisfying_field_type_verifies() {
     let output = mumei_verify("tests/test_enum_ctor_refined.mm");
     let combined = format!(
@@ -235,6 +272,7 @@ fn enum_ctor_payload_satisfying_field_type_verifies() {
     );
 }
 
+
 #[test]
 fn match_target_field_const_prefers_caller_binding() {
     let output = mumei_verify("tests/test_enum_match_arg_field_shadowed.mm");
@@ -246,5 +284,19 @@ fn match_target_field_const_prefers_caller_binding() {
     assert!(
         output.status.success() && combined.contains("Verification passed"),
         "`s_v` projects the caller's `s: HolderA` — the callee's same-named `s: HolderB` param must not shadow it:\n{combined}"
+    );
+}
+
+#[test]
+fn enum_nested_payload_alias_empty_struct_does_not_panic() {
+    let output = mumei_verify("tests/test_enum_nested_alias_empty.mm");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && combined.contains("Verification passed"),
+        "an alias to an empty struct flattens to zero leaves — the bound handle must not index an empty slice:\n{combined}"
     );
 }

@@ -48,29 +48,133 @@ pub(crate) fn is_finite_adt(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool 
 
 /// The `(leaf_name, leaf_base_type)` pairs a payload field contributes to
 /// the Z3 constructor: a scalar field is a single unnamed leaf; a declared
-/// struct expands to its direct fields when every leaf is scalar. Enum,
-/// array and nested-composite payloads return `None` and keep the enum on
-/// the Int-tag encoding.
-fn field_leaf_types(field_type: &str, module_env: &ModuleEnv) -> Option<Vec<(String, String)>> {
+/// struct expands to its scalar leaves, with a struct-typed field recursing
+/// under a `{field}_{leaf}` name (`b.inner.x` → leaf `inner_x`, matching the
+/// `<binding>_<path>` env-key convention). Enum and array leaves, a
+/// recursive struct on the flattening path, a leaf-name collision
+/// (`inner_x` scalar beside `inner: {x}`), or more than
+/// `MAX_PAYLOAD_LEAVES` leaves return `None` and keep the enum on the
+/// Int-tag encoding.
+pub(crate) fn field_leaf_types(
+    field_type: &str,
+    module_env: &ModuleEnv,
+) -> Option<Vec<(String, String)>> {
+    let mut leaves = Vec::new();
+    let mut visiting = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut work = 0usize;
+    if collect_field_leaves(
+        field_type,
+        module_env,
+        String::new(),
+        &mut leaves,
+        &mut visiting,
+        &mut seen,
+        &mut work,
+    )
+    .is_none()
+    {
+        // A bounded rejection is silent to callers (`None` falls back to
+        // the scalar path), so surface *which* budget tripped — otherwise
+        // an exponential shared-subtree walk is indistinguishable from a
+        // structural reject (recursion, enum/array leaf, name collision).
+        if work > MAX_LEAF_FIELD_VISITS {
+            eprintln!(
+                "warning: enum payload flattening exceeded the leaf-walk visit budget ({MAX_LEAF_FIELD_VISITS}); the payload binds as a scalar projection"
+            );
+        } else if leaves.len() >= MAX_PAYLOAD_LEAVES {
+            eprintln!(
+                "warning: enum payload exceeds {MAX_PAYLOAD_LEAVES} leaves; the payload binds as a scalar projection"
+            );
+        }
+        return None;
+    }
+    Some(leaves)
+}
+
+/// Widest leaf set one payload field may flatten to — the same budget the
+/// composite fragment allows a bound struct. Exponential blowup from shared
+/// nested declarations is rejected as a whole rather than truncated.
+const MAX_PAYLOAD_LEAVES: usize = 16;
+
+/// Total nodes `collect_field_leaves` may visit per call. The leaf cap
+/// alone does not bound the walk: shared subtrees of empty structs produce
+/// no leaves, so a deep DAG re-visits them exponentially. A legitimate
+/// flattening visits one node per field on every path — 16 times the leaf
+/// cap leaves headroom for long linear nestings while rejecting a 2^n
+/// shared-subtree walk outright.
+const MAX_LEAF_FIELD_VISITS: usize = 16 * MAX_PAYLOAD_LEAVES;
+
+fn collect_field_leaves(
+    field_type: &str,
+    module_env: &ModuleEnv,
+    name: String,
+    leaves: &mut Vec<(String, String)>,
+    visiting: &mut std::collections::HashSet<String>,
+    seen: &mut std::collections::HashSet<String>,
+    work: &mut usize,
+) -> Option<()> {
+    *work += 1;
+    if *work > MAX_LEAF_FIELD_VISITS {
+        return None;
+    }
     if field_is_scalar(field_type, module_env) {
-        return Some(vec![(
-            String::new(),
-            module_env.resolve_base_type(field_type),
-        )]);
+        if !seen.insert(name.clone()) || leaves.len() >= MAX_PAYLOAD_LEAVES {
+            return None;
+        }
+        leaves.push((name, module_env.resolve_base_type(field_type)));
+        return Some(());
     }
     let base = module_env.resolve_base_type(field_type);
     let sdef = module_env.structs.get(&base)?;
-    let mut leaves = Vec::with_capacity(sdef.fields.len());
-    for leaf in &sdef.fields {
-        if !field_is_scalar(&leaf.type_name, module_env) {
-            return None;
-        }
-        leaves.push((
-            leaf.name.clone(),
-            module_env.resolve_base_type(&leaf.type_name),
-        ));
+    // A recursive struct declaration (`Node { n: Node }`) cannot flatten —
+    // path-level guard, not a done-set: the same struct may still appear
+    // under a sibling field.
+    if !visiting.insert(base.clone()) {
+        return None;
     }
-    Some(leaves)
+    for leaf in &sdef.fields {
+        let leaf_name = if name.is_empty() {
+            leaf.name.clone()
+        } else {
+            format!("{name}_{}", leaf.name)
+        };
+        collect_field_leaves(
+            &leaf.type_name,
+            module_env,
+            leaf_name,
+            leaves,
+            visiting,
+            seen,
+            work,
+        )?;
+    }
+    visiting.remove(&base);
+    Some(())
+}
+
+/// The declared leaf values of a struct-typed payload value, in
+/// `field_leaf_types` order. The value's flat env bindings
+/// (`__struct_<handle>_<path>` entries, incl. deeper `<field>_<leaf>`
+/// re-homes) are keyed exactly like the leaf names, so a match-bound
+/// composite (`b` for `V(b: Box{inner: Point})` → `inner_x`) and a
+/// `StructInit` literal answer identically.
+pub(crate) fn flattened_value_leaves<'a>(
+    env: &crate::verification::types::Env<'a>,
+    value: &Dynamic<'a>,
+    leaf_types: &[(String, String)],
+) -> Option<Vec<Dynamic<'a>>> {
+    if leaf_types.len() == 1 && leaf_types[0].0.is_empty() {
+        return Some(vec![value.clone()]);
+    }
+    let flat: std::collections::HashMap<String, Dynamic> =
+        crate::verification::translator::nested_field_bindings(env, value)
+            .into_iter()
+            .collect();
+    leaf_types
+        .iter()
+        .map(|(name, _)| flat.get(name).cloned())
+        .collect()
 }
 
 /// `(accessor_name, sort)` pairs one declared payload field contributes to
@@ -259,15 +363,18 @@ fn expand_ctor_args<'a>(
     for (i, arg) in args.iter().enumerate() {
         let field_type = &variant.field_types[i].name;
         let base = vc.module_env.resolve_base_type(field_type);
-        if let Some(sdef) = vc.module_env.structs.get(&base) {
-            let Some(fields) =
-                crate::verification::translator::struct_fields_of_value(env, arg, sdef)
-            else {
+        if vc.module_env.structs.contains_key(&base) {
+            let Some(leaf_types) = field_leaf_types(field_type, vc.module_env) else {
+                return Err(MumeiError::type_error(format!(
+                    "enum constructor payload '{field_type}' has no flattened leaves"
+                )));
+            };
+            let Some(fields) = flattened_value_leaves(env, arg, &leaf_types) else {
                 return Err(MumeiError::type_error(format!(
                     "enum constructor payload '{field_type}' expects a '{base}' struct value"
                 )));
             };
-            leaves.extend(fields.into_iter().map(|(_, value)| value));
+            leaves.extend(fields);
         } else {
             leaves.push(arg.clone());
         }
