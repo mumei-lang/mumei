@@ -6864,6 +6864,11 @@ fn module_atom_obligations<'ctx>(
     let top = Bool::from_bool(context, true);
     let mut sink = Vec::new();
     let mut requires_exits = Vec::new();
+    // Contract literals belong to this atom's clause — the shared
+    // `str_bound` cell still holds whatever the last encoded body left.
+    call_returns
+        .str_bound
+        .set(atom.str_bound.unwrap_or(STR_BOUND));
     let requires = source_expr(
         &requires,
         context,
@@ -6936,6 +6941,11 @@ fn module_atom_obligations<'ctx>(
         let site_env = param_env(&callee.params, &site.args, context, refined, structs, enums)?;
         let callee_requires =
             parse_expression_checked(&callee.requires).map_err(|_| SemanticContractError::Parse)?;
+        // The clause belongs to the callee — its declared bound, not
+        // the caller's.
+        call_returns
+            .str_bound
+            .set(callee.str_bound.unwrap_or(STR_BOUND));
         let mut site_exits = Vec::new();
         let callee_requires = source_expr(
             &callee_requires,
@@ -7013,6 +7023,9 @@ fn module_atom_obligations<'ctx>(
         );
         let callee_ensures =
             parse_expression_checked(&callee.ensures).map_err(|_| SemanticContractError::Parse)?;
+        call_returns
+            .str_bound
+            .set(callee.str_bound.unwrap_or(STR_BOUND));
         let mut ensures_site_exits = Vec::new();
         let callee_ensures = source_expr(
             &callee_ensures,
@@ -7091,6 +7104,11 @@ fn atom_obligation<'ctx>(
         parse_expression_checked(&atom.requires).map_err(|_| SemanticContractError::Parse)?;
     let top = Bool::from_bool(context, true);
     let mut sink = Vec::new();
+    // Same shared-cell convention as `module_atom_obligations`: the
+    // clause literals read this atom's declared bound.
+    call_returns
+        .str_bound
+        .set(atom.str_bound.unwrap_or(STR_BOUND));
     // A `while` inside a requires/ensures block keeps its bound: an
     // input whose contract loop never exits within `LOOP_BOUND` falls
     // outside the checked domain instead of comparing a stale value.
@@ -12814,6 +12832,50 @@ atom mk(x: i64) -> E requires: true; ensures: true; body: { E::A(x) };",
             .unwrap(),
             PURE_I64_WRAPPING_PROFILE
         );
+    }
+
+    #[test]
+    fn composite_v20_contract_literals_use_the_clause_atom_bound() {
+        // A `requires`/`ensures` literal belongs to the atom that
+        // declares the clause: with a later atom leaving `str_bound`
+        // unset the shared cell would otherwise hold the default
+        // `STR_BOUND` when the first atom's contract is checked —
+        // a declared 100-byte clause literal must not be measured
+        // against 64.
+        let lit = format!("\"{}\"", "a".repeat(100));
+        let requires_case = format!(
+            "atom big(x: i64) -> i64 requires: len({lit}) == 100; ensures: result == x; str_bound: 128; body: {{ x }};\n\
+             atom main() -> i64 requires: true; ensures: result == 0; body: {{ 0 }};"
+        );
+        let ensures_case = format!(
+            "atom big(x: i64) -> i64 requires: true; ensures: len({lit}) == 100 || result == x; str_bound: 128; body: {{ x }};\n\
+             atom main() -> i64 requires: true; ensures: result == 0; body: {{ 0 }};"
+        );
+        for source in [requires_case, ensures_case] {
+            assert!(
+                extract_pure_i64_module_contracts(
+                    &source,
+                    "m.mm",
+                    None,
+                    RefinedAdmission::CompositeV20
+                )
+                .is_ok(),
+                "{source}"
+            );
+        }
+        // A caller's bound never leaks into a callee's clause either:
+        // the callee keeps the default `STR_BOUND`.
+        let callee_case = format!(
+            "atom callee() -> i64 requires: len({lit}) == 100; ensures: result == 0; body: {{ 0 }};\n\
+             atom main() -> i64 requires: true; ensures: result == 0; str_bound: 128; body: {{ callee() }};"
+        );
+        assert!(extract_pure_i64_module_contracts(
+            &callee_case,
+            "m.mm",
+            None,
+            RefinedAdmission::CompositeV20
+        )
+        .is_err());
     }
 }
 
