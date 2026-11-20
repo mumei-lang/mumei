@@ -6227,6 +6227,23 @@ backing (literal/call sources mint a backing like a local; conditional
 stores union instead of replacing). `[][][]T` members and deeper stayed
 closed at this step.
 
+### Arbitrary-depth nested containers (mumei-agent #1012)
+
+[mumei-agent#1012](https://github.com/mumei-lang/mumei-agent/pull/1012)
+lifts the two-level cap: `_scalar_elem_nested_collection` is recursive,
+so `[][][]T` and deeper bind like the two-level forms, and a field
+member that itself nests a scalar container (`struct { F [][][]T }`)
+shares at any depth. `_opaque_container_index_target` unwinds the full
+operand chain — `a := s.F` on a member whose type is a pure array
+(`[N]int64`) mints a fresh value copy instead of joining the group,
+while a member embedding a collection shares the copied header.
+Element writes at any depth land on the root's share group, a
+deep index READ (`a[i][j][k]`) descends one `elem` per level like the
+two-level form, and `append(a[i][j], v)` joins the appended slice to
+the root's group with the appended elements' own tokens unioned in.
+A deep array argument (`[1][1][]int64`) shares caller memory through
+the same path.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
