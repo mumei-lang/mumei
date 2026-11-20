@@ -5973,6 +5973,49 @@ an added `conjunctive_requirement_fold` performed check. This is the
 requirement-list substrate a grade promotion gate would consume;
 promotion itself remains open (mumei#1168).
 
+### Scheduled-attempt evidence acceptance (mumei-agent #997)
+
+[mumei-agent#997](https://github.com/mumei-lang/mumei-agent/pull/997)
+adds `verify-schedule --core-requirement PATH` (requires `--core`): the
+declared `mumei.evidence-requirement/v1` document is passed to the
+selected attempt's captured output as `core evidence accept --stdin
+--json --requirement PATH`, and Core's declared verdict
+(`accepted`/`rejected`/`inconclusive`/`failed`/`cancelled`) lands on
+`mumei.attempt-schedule/v1` alongside the `requirement_fingerprint`
+Core itself emitted — the host never re-reads the requirement bytes,
+so the pinned fingerprint always covers exactly what Core evaluated.
+The acceptance descriptor is validated strictly (top-level object,
+no duplicate keys, `evidence_fingerprint` bound to the evidence
+Core checked), and the path joins the declared inputs and is
+redacted from error text. C11 stays partial — Evidence acceptance
+remains a recorded dispatch observation, never a grade promotion.
+
+### Directory-audit scheduled-attempt evidence acceptance (mumei-agent #998)
+
+[mumei-agent#998](https://github.com/mumei-lang/mumei-agent/pull/998)
+ports the same requirement check to directory audit:
+`audit --schedule-core-requirement PATH` (requires `--schedule-core`)
+runs `core evidence accept --stdin --json --requirement PATH` on the
+selected attempt's captured output inside a scheduled audit, recording
+Core's declared verdict and the `requirement_fingerprint` it emitted on
+the per-unit `mumei.attempt-schedule/v1` record. The requirement path
+is a declared input — it must be an absolute path to a regular file
+and is redacted from per-unit failure text. Acceptance stays a recorded
+observation, never a grade promotion.
+
+### MCP scheduled-attempt evidence acceptance (mumei-agent #999)
+
+[mumei-agent#999](https://github.com/mumei-lang/mumei-agent/pull/999)
+exposes the same check on the MCP surface: `verify_schedule` gains
+`core_requirement_path` (requires `core_path`), which declares a
+`mumei.evidence-requirement/v1` document; the selected attempt's
+captured output is evaluated by `core evidence accept --stdin --json
+--requirement PATH` and the schedule record carries Core's declared
+verdict plus the `requirement_fingerprint` Core emitted. The tool
+listing and the canonical contract table document the argument;
+acceptance remains a recorded dispatch observation, never a grade
+promotion.
+
 ## No-`.mm` front door and V1 order
 
 Claim Book's opt-in `--require-complete` gate complements grade requirements:
