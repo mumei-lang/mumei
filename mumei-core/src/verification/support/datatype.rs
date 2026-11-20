@@ -39,23 +39,45 @@ const MAX_ENUM_PAYLOAD_NEST: u8 = 8;
 /// enum's datatype sort — `pure-i64-composite/v23`). Array and deeper-
 /// than-`MAX_ENUM_PAYLOAD_NEST` composite payloads keep the Int-tag path.
 pub(crate) fn is_finite_adt(enum_def: &EnumDef, module_env: &ModuleEnv) -> bool {
-    is_finite_adt_fueled(enum_def, module_env, MAX_ENUM_PAYLOAD_NEST)
+    is_finite_adt_fueled(
+        enum_def,
+        module_env,
+        MAX_ENUM_PAYLOAD_NEST,
+        &mut FiniteFuelMemo::default(),
+    )
 }
 
-fn is_finite_adt_fueled(enum_def: &EnumDef, module_env: &ModuleEnv, fuel: u8) -> bool {
+/// Memoized `is_finite_adt_fueled` answers keyed by `(enum_name, fuel)`.
+/// A shared inner enum on every field of every level used to re-walk its
+/// subtree per field — `16 fields × 8 levels` was ~4 billion leaf walks.
+/// `fuel` strictly decreases on each enum edge, so a `(name, fuel)` key
+/// cannot re-enter while in progress and no cycle marker is needed.
+type FiniteFuelMemo = HashMap<(String, u8), bool>;
+
+fn is_finite_adt_fueled(
+    enum_def: &EnumDef,
+    module_env: &ModuleEnv,
+    fuel: u8,
+    memo: &mut FiniteFuelMemo,
+) -> bool {
+    let key = (enum_def.name.clone(), fuel);
+    if let Some(&finite) = memo.get(&key) {
+        return finite;
+    }
     // Empty enums cannot form a Z3 datatype (`DatatypeBuilder::finish`
     // asserts at least one variant) and never have a constructible value, so
     // they keep the Int-tag encoding — the vacuous `all()` below would
     // otherwise claim them.
-    if enum_def.is_recursive || !enum_def.type_params.is_empty() || enum_def.variants.is_empty() {
-        return false;
-    }
-    enum_def.variants.iter().all(|variant| {
-        variant
-            .field_types
-            .iter()
-            .all(|field| field_leaf_types_fueled(field.name.as_str(), module_env, fuel).is_some())
-    })
+    let finite = !enum_def.is_recursive
+        && enum_def.type_params.is_empty()
+        && !enum_def.variants.is_empty()
+        && enum_def.variants.iter().all(|variant| {
+            variant.field_types.iter().all(|field| {
+                field_leaf_types_fueled(field.name.as_str(), module_env, fuel, memo).is_some()
+            })
+        });
+    memo.insert(key, finite);
+    finite
 }
 
 /// The `(leaf_name, leaf_base_type)` pairs a payload field contributes to
@@ -71,13 +93,19 @@ pub(crate) fn field_leaf_types(
     field_type: &str,
     module_env: &ModuleEnv,
 ) -> Option<Vec<(String, String)>> {
-    field_leaf_types_fueled(field_type, module_env, MAX_ENUM_PAYLOAD_NEST)
+    field_leaf_types_fueled(
+        field_type,
+        module_env,
+        MAX_ENUM_PAYLOAD_NEST,
+        &mut FiniteFuelMemo::default(),
+    )
 }
 
 fn field_leaf_types_fueled(
     field_type: &str,
     module_env: &ModuleEnv,
     fuel: u8,
+    memo: &mut FiniteFuelMemo,
 ) -> Option<Vec<(String, String)>> {
     let mut leaves = Vec::new();
     let mut visiting = std::collections::HashSet::new();
@@ -92,6 +120,7 @@ fn field_leaf_types_fueled(
         &mut seen,
         &mut work,
         fuel,
+        memo,
     )
     .is_none()
     {
@@ -136,6 +165,7 @@ fn collect_field_leaves(
     seen: &mut std::collections::HashSet<String>,
     work: &mut usize,
     fuel: u8,
+    memo: &mut FiniteFuelMemo,
 ) -> Option<()> {
     *work += 1;
     if *work > MAX_LEAF_FIELD_VISITS {
@@ -156,7 +186,7 @@ fn collect_field_leaves(
     // `A(B)`/`B(A)` declaration cycle cannot diverge.
     if let Some(inner) = module_env.enums.get(&base) {
         let fuel = fuel.checked_sub(1)?;
-        if !is_finite_adt_fueled(inner, module_env, fuel) {
+        if !is_finite_adt_fueled(inner, module_env, fuel, memo) {
             return None;
         }
         if !seen.insert(name.clone()) || leaves.len() >= MAX_PAYLOAD_LEAVES {
@@ -187,6 +217,7 @@ fn collect_field_leaves(
             seen,
             work,
             fuel,
+            memo,
         )?;
     }
     visiting.remove(&base);
