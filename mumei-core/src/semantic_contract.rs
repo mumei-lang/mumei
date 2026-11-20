@@ -6600,6 +6600,22 @@ fn encode_atom_body<'ctx>(
             aggregate_value(&leaves)
         }
     };
+    // A body that flattens narrower than the atom's declared `i128`/`u128`
+    // return (e.g. a match merging only 64-bit literal arms) still
+    // materializes the declared width at the call boundary: the emitter
+    // sign/zero-extends the returned SSA value, and the `result` binding
+    // applies the same coercion. Align the model value so translation
+    // validation compares same-width values
+    // (`pure-i64-composite/v22`).
+    let value = if call_returns.returns_wide(&atom.name) && value.get_size() < 128 {
+        if call_returns.returns_u128(&atom.name) {
+            value.zero_ext(128 - value.get_size())
+        } else {
+            value.sign_ext(128 - value.get_size())
+        }
+    } else {
+        value
+    };
     let param_domain = signature_domain(&atom.params, &inputs, context, refined, structs, enums)?;
     let subrange_params = slots.iter().any(|slot| {
         matches!(
@@ -9140,10 +9156,24 @@ fn result_value<'ctx>(
             slots: call_returns.seed_enum_slots(variants, &mut flat[1..].iter(), ctx),
         }
     } else if call_returns.returns_wide(atom) {
-        if call_returns.returns_u128(atom) {
-            SourceValue::UWide(value.clone())
+        // A literal-only body (`match f { _ => 3, … }`) flattens to a
+        // 64-bit aggregate — extend it into the declared 128-bit
+        // carrier the same way `widen_literal_operands` treats a `Num`
+        // operand: signed for `i128`, unsigned for `u128`
+        // (`pure-i64-composite/v21`, `/v22`).
+        let widened = if value.get_size() < 128 {
+            if call_returns.returns_u128(atom) {
+                value.zero_ext(128 - value.get_size())
+            } else {
+                value.sign_ext(128 - value.get_size())
+            }
         } else {
-            SourceValue::Wide(value.clone())
+            value.clone()
+        };
+        if call_returns.returns_u128(atom) {
+            SourceValue::UWide(widened)
+        } else {
+            SourceValue::Wide(widened)
         }
     } else if call_returns.returns_u64(atom) {
         SourceValue::Unsigned(value.clone())
