@@ -99,6 +99,10 @@ fn field_leaf_sorts<'a>(
                     LoweredType::F64 => Sort::real(vc.ctx),
                     LoweredType::Str => Sort::string(vc.ctx),
                     LoweredType::Bool => Sort::bool(vc.ctx),
+                    // `--bitvec-i64` encodes integer values as BV(64) — the
+                    // accessor sorts must match the args callers pass (a
+                    // struct param's fields are seeded BV too).
+                    _ if vc.bitvec_i64 => Sort::bitvector(vc.ctx, 64),
                     _ => Sort::int(vc.ctx),
                 };
                 (name, sort)
@@ -271,6 +275,37 @@ fn expand_ctor_args<'a>(
     Ok(leaves)
 }
 
+/// The accessor domain sorts of `enum_def.variants[idx]`'s constructor,
+/// recomputed from `field_leaf_sorts` (the same source the datatype was
+/// built with). Returned in leaf order so callers can bridge arg sorts —
+/// under `--bitvec-i64` an integer literal stays `Int` while the accessor
+/// expects `BV(64)`, and applying it raw panics inside Z3.
+fn ctor_leaf_sorts<'a>(vc: &VCtx<'a>, enum_def: &EnumDef, idx: usize) -> Option<Vec<Sort<'a>>> {
+    let variant = enum_def.variants.get(idx)?;
+    let mut sorts = Vec::new();
+    for (i, ft) in variant.field_types.iter().enumerate() {
+        sorts.extend(
+            field_leaf_sorts(vc, &variant.name, i, &ft.name)?
+                .into_iter()
+                .map(|(_, s)| s),
+        );
+    }
+    Some(sorts)
+}
+
+/// Bridge `arg` to the accessor domain sort `want`: `Int` ↔ `BV(64)`
+/// through the standard conversion points; any other mismatch fails.
+fn coerce_ctor_leaf<'a>(arg: &Dynamic<'a>, want: &Sort<'a>) -> Option<Dynamic<'a>> {
+    if arg.get_sort() == *want {
+        return Some(arg.clone());
+    }
+    match want.kind() {
+        z3::SortKind::BV => crate::verification::translator::as_bv_i64(arg).map(Into::into),
+        z3::SortKind::Int => crate::verification::translator::as_int_like(arg).map(Into::into),
+        _ => None,
+    }
+}
+
 /// Applies the constructor of `enum_def.variants[idx]` to `leaf_args`,
 /// already at the flattened leaf arity (one entry per accessor).
 pub(crate) fn enum_ctor_apply_leaves<'a>(
@@ -283,7 +318,16 @@ pub(crate) fn enum_ctor_apply_leaves<'a>(
     if sort.variants[idx].accessors.len() != leaf_args.len() {
         return None;
     }
-    let arg_refs: Vec<&dyn Ast> = leaf_args.iter().map(|d| d as &dyn Ast).collect();
+    let want = ctor_leaf_sorts(vc, enum_def, idx)?;
+    if want.len() != leaf_args.len() {
+        return None;
+    }
+    let coerced: Vec<Dynamic> = leaf_args
+        .iter()
+        .zip(&want)
+        .map(|(arg, s)| coerce_ctor_leaf(arg, s))
+        .collect::<Option<Vec<_>>>()?;
+    let arg_refs: Vec<&dyn Ast> = coerced.iter().map(|d| d as &dyn Ast).collect();
     Some(sort.variants[idx].constructor.apply(&arg_refs))
 }
 

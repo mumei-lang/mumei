@@ -10,6 +10,10 @@ use std::path::Path;
 use std::process::Command;
 
 fn run_verify(fixture: &Path, tag: &str) -> std::process::Output {
+    run_verify_args(fixture, tag, &[])
+}
+
+fn run_verify_args(fixture: &Path, tag: &str, extra: &[&str]) -> std::process::Output {
     let dir = std::env::temp_dir().join(format!(
         "mumei_enum_composite_{}_{}",
         std::process::id(),
@@ -24,6 +28,7 @@ fn run_verify(fixture: &Path, tag: &str) -> std::process::Output {
     let bin = env!("CARGO_BIN_EXE_mumei");
     let out = Command::new(bin)
         .arg("verify")
+        .args(extra)
         .arg("--report-dir")
         .arg(&dir)
         .arg(&copied)
@@ -70,6 +75,21 @@ fn payload_binding_shadows_outer_struct_without_polluting_it() {
         "a match-bound 'p' is arm-local — the outer struct's fields must survive the merge:\n{}\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn composite_payloads_verify_under_bitvec_i64() {
+    let out = run_verify_args(
+        &fixture("test_enum_composite_payload_bitvec.mm"),
+        "bv",
+        &["--bitvec-i64"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && !stderr.contains("panicked"),
+        "composite payloads must verify in bitvec mode without a sort mismatch:\n{}\n{stderr}",
+        String::from_utf8_lossy(&out.stdout)
     );
 }
 
